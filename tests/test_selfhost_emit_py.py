@@ -215,6 +215,30 @@ def test_selfhosted_emitter_output_is_executable_python(emitted, reference):
     )
 
 
+def test_selfhosted_emitter_optional_chains_run(emitted):
+    """Item 436's category-(i) hole, closed: `optionals.rvl` used to prove
+    byte-agreement on `s?.length()` while NOTHING executed it, and both sides
+    were emitting `(s).length()`, which raises `AttributeError` on a str. The
+    corpus case now RUNS. It also pins the single-evaluation contract: a `??`
+    left operand and a `?.` receiver are evaluated once, and the temp a nested
+    chain in an ARGUMENT binds does not clobber the one above it."""
+    ir = compile_files([str(CORPUS_DIR / "optionals.rvl")])
+    src = emitted["emit_py_src"](ir)
+    ns: dict = {}
+    exec(compile(src, "optionals_emitted.py", "exec"), ns)
+    assert ns["call_chain"]("abc") == 3
+    assert ns["call_chain"](None) is None
+    assert ns["call_chain2"]("ab") == "ab!"
+    assert ns["call_chain2"](None) is None
+    assert ns["defaulted"]({"k": "hit"}, "k", "fallback") == "hit"
+    assert ns["defaulted"]({}, "k", "fallback") == "fallback"
+    # `join` renders its argument before the receiver, so a shared temp here
+    # would read the argument's value as the receiver
+    assert ns["joined"]({"k": ["a", "b"]}, "k", "+") == "a+b"
+    assert ns["joined"]({"k": ["a", "b"]}, "k", None) == "a-b"
+    assert ns["joined"]({}, "k", "+") is None
+
+
 def test_selfhosted_emitter_lowers_components_and_services(emitted):
     """Beyond byte-identity: a component/service document actually drives the
     slice-2 path — the emitted module populates SERVICES and COMPONENTS and its
