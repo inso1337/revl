@@ -486,6 +486,21 @@ Filed as a strict-xfail reproducer in
 `tests/test_207_checkable_extern_body.py::test_f1_a_register_floor_must_be_worst_wins_over_a_token`,
 so it turns green loudly when fixed. It belongs on its own issue, not on 207.
 
+**FIXED.** The fold is now `<` and the docstring says WEAKEST. The reproducer is
+a passing assertion, and a second test drives the same fold through the refusal
+end to end. Driving it there turned up one more fact worth recording next to
+this one: a `capability <token> requires register` rule selects a token only when
+that token is in the component's REACH, and a directly emitted extern
+contributes its own NAME to the reach set as host code, not its capability
+token — `__main__._boundary` fills the per-component `capabilities` map from
+SERVICE-method emissions only. So the map-level reproducer above shows the wrong
+fold, but the rule never selected `db` in that composition at all; the
+end-to-end test declares `db` on one keyed extern and one bare-`idempotent`
+service method so the token is both doubly declared and reached. Whether the
+reach set should carry a directly emitted extern's capability token is a
+separate question about enumeration, not about this fold, and is not decided
+here.
+
 ---
 
 ## 9. Slices
