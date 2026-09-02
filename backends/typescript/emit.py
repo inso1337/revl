@@ -214,6 +214,28 @@ EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
 EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
 
 
+def _refuse_stream_host(fn: str) -> None:
+    """Refuse a `Stream.*` host builtin on this tier (roadmap item 419e).
+
+    `subscribe` already refuses honestly above, but the ACQUISITION that opens
+    the stream (`let src = effect Stream.source() undo src.close()`) did not:
+    `Stream` is not in `_HOST_ROOTS` and `runtime.ts`'s `host` exports only
+    `Pool`, `Map` and `Job`, so the emitter rendered `host.Stream.source()`, a
+    reference to a primitive this tier does not have, and the program failed at
+    RUN time, on the tier the README calls the portability reference. wasm
+    refuses the same shape at emit time; match it, because a compile-time
+    refusal that names the tiers which do lower streams is the honest answer and
+    a dead emit is not."""
+    if fn.split(".", 1)[0] == "Stream":
+        raise EmitError(
+            f"`{fn}` opens a stream; a stream subscription suspends a fiber "
+            "and the ts lowering (the same queue-vs-cancel race the py "
+            "reference runs) is not implemented, so this tier has no `Stream` "
+            "runtime primitive; streams run on py, go and rust "
+            "(item 130 §4.6); try `--backend py`"
+        )
+
+
 def _mangle(name: str) -> str:
     """Rename a syntactically-valid identifier that collides with a *JS/TS*
     reserved word, so a valid revl identifier that happens to be a JS keyword
@@ -704,6 +726,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             fn = node.get("fn")
             if not isinstance(fn, str) or not all(IDENT_RE.match(p) for p in fn.split(".")):
                 raise EmitError(f"invalid host builtin: {fn!r}")
+            _refuse_stream_host(fn)
             args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
             return f"host.{fn}({args})"
         # kind == "format"

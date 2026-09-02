@@ -210,7 +210,7 @@ primitive each remaining tier needed:
   parent-chain fallback). The emitter lowers a routed require into a selector +
   strict dispatch that consume it. Round-robin, failover, re-entry and G2 are
   proven by running on the real Python + wasmtime host
-  (`backends/wasm/test_router_exec.py`).
+  (`backends/wasm/test_router_exec_wasm.py`).
 - **go — routes via an emitted router struct + upstream fork.** stc-go's plain
   resolve walks the realm chain to the root (where the Router provides the key,
   G2), so a withdrawn worker's read fell back to the Router instead of dropping
@@ -219,7 +219,7 @@ primitive each remaining tier needed:
   in its `REVL-FORK.md`). The emitter lowers a routed require into a
   `revlRouter<Comp><Key>` struct that re-resolves live per-realm handles every
   call. Built and passing at runtime against the fork with go1.26.5
-  (`backends/go/test_router_exec.py`); the upstream PR is pending, after which
+  (`backends/go/test_router_exec_go.py`); the upstream PR is pending, after which
   the pin drops the local `replace`.
 - **java — emitter routes; runtime primitive pending upstream.** The cordis4j
   emitter lowers a routed require into a `RevlRouter<Comp><Key>` class that

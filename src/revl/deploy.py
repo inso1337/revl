@@ -1172,36 +1172,74 @@ def reached_emissions(ir: dict) -> list[dict]:
     crosses an irreversible effect during its local commit. `witnessed` and
     `acquire` externs are absent from this list by construction: their
     reversibility is a registered inverse or an effect bracket.
+
+    Read off `query.Composition`'s per-scope facts: the SAME surface `revl
+    audit` prints and `erase_report._crossings` folds, so this gate can never
+    disagree with the boundary the audit shows. Roadmap item 419b: the earlier
+    walk keyed on an `emit` STEP wrapper carrying a `kind: "fn"` expression,
+    and missed two shapes that are ordinary revl.
+
+    * A provide-method whose body IS the emit (`fn put(k, v) = emit host(v)`)
+      lowers to a `return` step (the `emit` marker does not survive), so a
+      provider that necessarily crosses an irreversible emission was admitted.
+      The scope facts key on the CALLED NAME instead, which is sound because
+      `emit` is the only spelling that may reach an emission extern, and they
+      also carry what a pure fn reaches transitively.
+    * An emission mediated through a required service's capability-scoped
+      operation (`emit store.put(..)` against `emission[host_put] fn put`) was
+      not enumerated at all. It is now, tagged with `via` (`"<key>.<method>"`).
+
+    A mediated crossing is counted only when the key resolves to NO local
+    provider: an external/federated provider, item 151's shape. When the
+    provider is a component of this same composition its provide-method scope
+    is walked in its own right, with the extern's TRUE deferrability, so
+    counting the consumer's call again would double-count and, worse, would
+    downgrade a genuinely `deferred` extern to class (c) and refuse a plan that
+    is fine. An unresolved key is class (c) by item 245 Decision 2, which
+    `erase_report._crossings` already applies verbatim: deferral is a property
+    of an extern DECLARATION and is not spellable on a service method, so the
+    operation fires at the call and this composition cannot prove the far side
+    holds it.
+
+    Each row is `{component, extern, deferrable, idempotency_key, via}`; `via`
+    is `None` for a direct call site. `extern` is the capability the service
+    method declares (`emission[host_put]`); it is `None` for an `emission`
+    method that names no capability, and `via` is then the only name available.
     """
-    externs = {e["name"]: e for e in ir.get("externs") or []
-               if e.get("class") == "emission"}
-    if not externs:
-        return []
+    from .query import Composition  # noqa: PLC0415 - lazy, avoids a cycle
+
+    index = Composition(ir)
     found: list[dict] = []
     seen: set = set()
 
-    def walk(node, component: str) -> None:
-        if isinstance(node, dict):
-            if node.get("step") == "emit":
-                expr = node.get("expr") or {}
-                name = expr.get("name")
-                if expr.get("kind") == "fn" and name in externs:
-                    mark = (component, name)
-                    if mark not in seen:
-                        seen.add(mark)
-                        found.append({
-                            "component": component, "extern": name,
-                            "deferrable": bool(externs[name].get("deferred")),
-                            "idempotency_key": externs[name].get("idempotency_key"),
-                        })
-            for value in node.values():
-                walk(value, component)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item, component)
+    def add(component: str, extern, deferrable: bool, via) -> None:
+        mark = (component, extern, via)
+        if mark in seen:
+            return
+        seen.add(mark)
+        decl = index.externs.get(extern) or {}
+        found.append({
+            "component": component, "extern": extern,
+            "deferrable": deferrable,
+            "idempotency_key": decl.get("idempotency_key"),
+            "via": via,
+        })
 
     for comp in ir.get("components") or []:
-        walk(comp, comp.get("name") or "?")
+        component = comp.get("name") or "?"
+        for scope_id in index.scopes_of.get(component) or []:
+            facts = index.scopes[scope_id]["facts"]
+            for fact in facts["externs"]:
+                if fact.get("emission"):
+                    add(component, fact["name"], bool(fact.get("deferred")), None)
+            for fact in facts["emissions"]:
+                key, method = fact["key"], fact["method"]
+                if index.method_scope(component, key, method) is not None:
+                    continue
+                spec = (((index.services.get(fact.get("service")) or {})
+                         .get("methods") or {}).get(method) or {})
+                for capability in spec.get("capabilities") or [None]:
+                    add(component, capability, False, f"{key}.{method}")
     return found
 
 
@@ -1236,19 +1274,33 @@ def federation_admission(plans: Mapping[str, dict], *,
             if crossing["deferrable"]:
                 deferred.append(row)
                 continue
+            # a mediated crossing names the service operation it goes through;
+            # the author cannot find `host_put` by reading their own component,
+            # they wrote `emit store.put(..)` (item 274's standard: a refusal
+            # names something the author can act on).
+            what = f"emission `{crossing['extern']}`" if crossing["extern"] \
+                else "emission"
+            where = (f"through `{crossing['via']}` in `{crossing['component']}`"
+                     if crossing["via"] else f"in `{crossing['component']}`")
+            fix = ("declare the extern `deferred` (item 245 class (b)) so "
+                   "PREPARE can hold it")
+            if crossing["via"]:
+                fix = ("deferral is a property of an extern DECLARATION and is "
+                       "not spellable on a service method, so this crossing "
+                       "cannot be held: provide the key inside this composition "
+                       "so its declaration is in scope, or split the operation "
+                       "out of the federated update")
             refusals.append({
                 "kind": REFUSE_IRREVERSIBLE,
                 **row,
                 "reason": (
                     f"`{composition_id}` necessarily crosses the irreversible "
-                    f"emission `{crossing['extern']}` in `{crossing['component']}` "
+                    f"{what} {where} "
                     "during its local commit. PREPARE cannot hold a class-(c) "
                     "crossing, so this composition could cross before a durable "
                     f"`{FEDERATION_APPROVED}` record exists and be stranded with "
                     "residue while its peers revert. Refused rather than "
-                    "silently degrading the federation's atomicity — declare the "
-                    "extern `deferred` (item 245 class (b)) so PREPARE can hold "
-                    "it."),
+                    f"silently degrading the federation's atomicity; {fix}."),
             })
     for consumer_doc, provider_id in (contracts or ()):
         provider_ir = plans.get(provider_id)

@@ -696,6 +696,28 @@ def test_unimplemented_tiers_refuse_honestly(tier):
     assert "py, go and rust" in msg
 
 
+@pytest.mark.parametrize("tier", ["java", "typescript"])
+def test_unimplemented_tiers_refuse_the_stream_acquisition_too(tier):
+    """Roadmap 419e. `subscribe` refused honestly on both tiers, but the
+    acquisition that OPENS the stream did not: `Stream` is in neither tier's
+    `_HOST_ROOTS`, so ts rendered `host.Stream.source()` against a `host` that
+    exports only Pool/Map/Job, and java rendered `Stream src = Stream.source();`
+    against a class it never emits. Both produced a file, so the program failed
+    at run time (ts) or did not compile (java) instead of being refused. wasm
+    refuses this exact shape; a tier without the primitive must say so."""
+    emit = _tier_emit(tier)
+    ir = compile_source(
+        "component C {\n"
+        "  let src = effect Stream.source() undo src.close()\n"
+        "}\n", "s.rvl")
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(ir)
+    msg = str(excinfo.value)
+    assert "Stream.source" in msg
+    assert "unsupported" not in msg
+    assert "py, go and rust" in msg
+
+
 def test_wasm_still_refuses_the_fan_in():
     emit = _tier_emit("wasm")
     with pytest.raises(emit.EmitError) as excinfo:

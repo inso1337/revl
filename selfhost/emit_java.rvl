@@ -57,6 +57,13 @@
 // each is a real reference surface this slice does not reach (its fixtures avoid
 // it), NOT an approximation. Where a covered fixture could plausibly reach one, a
 // loud `<<DEFER-*>>` marker keeps a byte diff from silently passing (item 207):
+//   * the reference's `Stream.*` TIER-LIMIT refusal (roadmap 419e): the
+//     reference `_expr` now refuses a `Stream.*` host builtin, since this tier
+//     has no `Stream` runtime class and `Stream src = Stream.source();` was a
+//     dead emit. Deliberately NOT ported: this emitter has no refusal channel
+//     (its out-of-surface answer is a `<<DEFER-*>>` marker, which is the wrong
+//     shape for a tier limit the reference REFUSES), and no fixture reaches a
+//     `Stream.*` host builtin, so the oracle cannot see it;
 //   * the MODERN component path (`_emit_component_modern`), REMAINING surface —
 //     method-body `let`/`assign`/`await`/arrow bindings, `setup` blocks on effect
 //     steps, and body-level `while`/`for`/`let_pattern`. (config, required-service
