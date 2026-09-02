@@ -86,8 +86,8 @@
 //     excluded, since it also pulls in the `_emit_ftoa_helper` block);
 //   * java-specific NUANCES — the `_reject_fn_type` refusal of a declared function
 //     type, local `let`-bound arrows and their `_inline_arrow` beta-reduction, and
-//     `let_pattern` (its temp name is `__revl_destructure_{id(node)}`, a host
-//     identity no port reproduces).
+//     `let_pattern` (the reference threads a per-`_V3Ctx` emission-order index
+//     through its temp name, which this port does not carry yet).
 //
 // ------------------------------------------------------ the erased-IR boundary
 // Navigation of the IR is PURE revl through stdlib/value.rvl's `value_*` (items

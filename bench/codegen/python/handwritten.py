@@ -108,6 +108,23 @@ def list_sort(xs):
     return out
 
 
+def deduped(xs):
+    # Same algorithm as stdlib/list.rvl's `list_dedup`: a linear membership
+    # scan, so the comparison isolates the EMITTER's copying and not the
+    # algorithm. The revl source is O(n^2) in comparisons by construction; the
+    # emitted `out = out + [x]` made it O(n^2) in element copies as well.
+    out = []
+    for x in xs:
+        found = False
+        for e in out:
+            if e == x:
+                found = True
+                break
+        if not found:
+            out.append(x)
+    return out
+
+
 # -------------------------------------------------------------------- arith
 def sum_squares(n):
     total = 0
