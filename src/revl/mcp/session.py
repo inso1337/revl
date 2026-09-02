@@ -1962,6 +1962,71 @@ class Session:
         return any(r.get("record") in ("flushed", "commit-approved")
                    for r in doc["records"])
 
+    #: item 250, Slice 2: the provenance the item asks a branch to preserve that
+    #: this runtime does NOT record, each with the reason. The branch report and
+    #: the durable `fork-branch` record carry it verbatim, so a consumer reading
+    #: either is told what does not carry over instead of inferring from silence
+    #: that everything did. Removing an entry from here is a claim: it means the
+    #: WAL now records that axis and a branch really can reproduce it.
+    _BRANCH_NOT_PRESERVED = (
+        {"axis": "providerVersions",
+         "why": "the WAL records no provider or runtime version per step, so the "
+                "branch cannot claim the parent's provider set was pinned"},
+        {"axis": "seedsAndClock",
+         "why": "no RNG seed or clock reading is recorded, so a branch is a "
+                "divergent continuation, not a bit-reproducible replay"},
+        {"axis": "modelDecisions",
+         "why": "the LLM-aware WAL (item 250's deferred replay-modes slice, "
+                "overlapping item 121) is not written, so the model and tool "
+                "calls above the fork point are not on the branch's record and "
+                "no counterfactual replay mode can be honest yet"},
+    )
+
+    def _branch_provenance(self, at: int) -> dict:
+        """What a branch minted at step `at` actually inherits, and what it does
+        not (item 250, Slice 2).
+
+        The roadmap item asks the branch to preserve component generation, source
+        hash, provider versions, capability surface, LLM/tool calls, seeds and
+        clock state, WAL position and inverse witnesses. Four of those are
+        recorded today and are stated as facts; the rest are not recorded at all,
+        and are enumerated in `notPreserved` rather than quietly omitted — the
+        same honest-partition discipline the fork report itself follows."""
+        import json  # noqa: PLC0415 — stdlib
+        ir = self.ir or {}
+        caps = sorted({token
+                       for extern in ir.get("externs") or []
+                       for token in extern.get("capabilities") or []})
+        digest = hashlib.sha256(
+            json.dumps(ir, sort_keys=True).encode("utf-8")).hexdigest()
+        source = (self.origin or {}).get("source")
+        preserved = {
+            "at": at,
+            "composition": sorted(self._component_names(ir)),
+            "generation": self._generation,
+            "irDigest": digest,
+            "capabilities": caps,
+            "walPosition": self._wal_position(),
+        }
+        if isinstance(source, str):
+            preserved["sourceDigest"] = hashlib.sha256(
+                source.encode("utf-8")).hexdigest()
+        return {"preserved": preserved,
+                "notPreserved": [dict(e) for e in self._BRANCH_NOT_PRESERVED]}
+
+    def _wal_position(self) -> int | None:
+        """How many records this session's WAL held when the branch diverged — the
+        durable position the branch's history continues from. `None` when no WAL
+        is open (nothing durable to position against)."""
+        wal = self.recorder.wal if self.recorder is not None else None
+        if wal is None:
+            return None
+        from ..wal import read_wal  # noqa: PLC0415 — tier-agnostic core, lazy
+        try:
+            return len(read_wal(wal.path)["records"])
+        except OSError:
+            return None
+
     def _ensure_wal_open(self) -> None:
         """Open this session's durable WAL if none is open (item 250): the fork
         bracket (`fork-begin`/`fork-complete`/`fork-frozen`) must be durable, the
@@ -2060,6 +2125,24 @@ class Session:
         branch._ensure_wal_open()          # a distinct branch WAL
         branch_id = branch._session_id
 
+        # 6b. the branch side of the lineage (item 250, Slice 2). Slice 1 wrote
+        # the edge only on the parent (`fork-complete {branch}`), so a branch WAL
+        # read on its own — the artifact a post-mortem tool is handed first —
+        # could not say it was a branch, name its parent, or name the step it
+        # diverged at. It carries what the branch inherits AND, explicitly, what
+        # it does not.
+        import os.path  # noqa: PLC0415 — stdlib
+        provenance = self._branch_provenance(at)
+        branch_wal = branch.recorder.wal if branch.recorder is not None else None
+        if branch_wal is not None:
+            branch_wal.record_fork_branch(
+                branch=branch_id, parent=parent_id, at=at,
+                parent_wal=(os.path.abspath(self._wal_path)
+                            if self._wal_path else None),
+                preserved=provenance["preserved"],
+                not_preserved=provenance["notPreserved"],
+                crossed=crossed, would_cross=would)
+
         # 7. close the bracket on the parent WAL and retire the parent.
         if wal is not None:
             wal.record_fork_frozen(parent=parent_id, at=at)
@@ -2074,6 +2157,7 @@ class Session:
             "forked": True,
             "parent": parent_id,
             "branch": branch_id,
+            "lineage": provenance,
             "rewound": {
                 "inversesRan": rewind["inversesRan"],
                 "provisionsWithdrawn": rewind["provisionsWithdrawn"],
