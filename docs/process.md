@@ -41,6 +41,12 @@ belongs.
    gh pr create --repo inso1337/revl --fill --body "Closes #<issue>"
    ```
 
+   Use `Closes #<issue>` ONLY when the PR closes the whole issue. GitHub
+   auto-closes on merge, so a partial fix written that way silently closes an
+   issue whose remaining findings nobody is now tracking, which is the exact
+   failure this process exists to stop. For a partial fix write
+   `Part of #<issue>` and say in the body which findings remain open.
+
 6. Report what you changed, what you ran, and the PR number. Then stop.
    **Do not wait for CI.** The orchestrator watches it.
 
