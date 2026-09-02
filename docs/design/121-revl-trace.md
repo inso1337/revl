@@ -440,6 +440,29 @@ This is the CRITICAL, and it forces the capture rule:
      tracked and thus always suppresses, even when the derived-sink strict mode is
      off. And even when emitted, the digest is salted and coarse-bucketed (attack
      4b), so a hash of a short secret is not itself a brute-forceable leak.
+   - **The compile-to-runtime taint-origin channel (item 444).** Slice 1 shipped
+     the gate with nothing feeding it: `run.py` passed `taint_engaged=False`
+     unconditionally, so the digest was suppressed on every real run and the
+     surface was inert. The channel is now the IR document the driver already
+     holds, read back by `taint.OriginIndex`; no new IR key exists, so every
+     golden document is unchanged. It answers the gate's two questions
+     separately. `arg_origins` is the checker's own record of the origins that
+     reach an emission crossing in that component (`comp["taint"]["reaches"]`,
+     item 249 Decision 5), a union over the component's crossings and therefore
+     an over-approximation of any one of them, which can only over-suppress.
+     `taint_engaged` is a WHOLE-PROGRAM certificate: true only when the
+     composition declares no surface that can mint `secret` or `confidential`
+     anywhere (no bound secret, no `Secret[T]` parameter or return on any
+     extern, service operation or top-level fn, no `Secret[T]` config field),
+     which `extract_and_normalize` shows are the only places either origin
+     enters the value graph. It is deliberately not a per-crossing judgment: in
+     the refusal pass an unqualified parameter is seeded CLEAN, so a
+     per-crossing origin set under-approximates across a call boundary, and a
+     fail-closed gate must not rest on an under-approximation. A composition
+     that declares any confidentiality surface certifies false and keeps every
+     one of its crossings suppressed, exactly as before. Both halves must hold,
+     so `revl_prompt_digest`'s own origin check still runs on real checker
+     output rather than a constant.
 3. **PII in a non-secret prompt is a policy choice, not a safety property.** A
    prompt may hold user PII that carries no `confidential` qualifier. The salted
    digest (keyed HMAC + coarse bucket) discloses neither content nor a reversible
