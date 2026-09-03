@@ -102,7 +102,7 @@ was corrected by hand and had drifted back within a day.
 | component-leases.md | needs-work | 26 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |
-| composition-rows.md | needs-work | 13 |  |
+| composition-rows.md | needs-work | 15 |  |
 | conformance.md | needs-work | 5 |  |
 | contract-errata.md | needs-work | 0 | yes |
 | crash-recovery.md | needs-work | 44 |  |
@@ -131,7 +131,7 @@ was corrected by hand and had drifted back within a day.
 | guide-humans.md | stale-fixed | 0 | yes |
 | harness-gate-guide.md | needs-work | 2 |  |
 | holes.md | needs-work | 29 |  |
-| import-a2a.md | current | 6 |  |
+| import-a2a.md | current | 11 |  |
 | import-cordis.md | needs-work | 58 |  |
 | import-openapi.md | needs-work | 45 |  |
 | import-wit.md | needs-work | 29 |  |
@@ -187,6 +187,7 @@ was corrected by hand and had drifted back within a day.
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
 | truc.md | needs-work | 47 |  |
+| ts-runtime-contract.md | current | 0 | yes |
 | verified-canary.md | needs-work | 22 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |

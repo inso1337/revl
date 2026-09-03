@@ -188,6 +188,9 @@ composition Shop {
 }
 ```
 
+The address is the address: the synthesized crossing refuses a redirect rather
+than following one off it (see [`redirect`](#redirect) below).
+
 This is roadmap item 424 gap (c), slice C2; the design note is
 [design/424-dsh-language-gaps.md](design/424-dsh-language-gaps.md) §3.2.
 
@@ -288,6 +291,33 @@ which is a seam-client mechanism a synthesized row does not join. Wiring it is
 the next step, and `tests/test_424_remote_row.py` pins the declaration so the
 day it lands, something says so.
 
+### `redirect`
+
+| clause | meaning |
+|---|---|
+| `redirect(refuse)` | the default. A 3xx from the peer is a FAULT naming the rule. |
+| `redirect(same_origin)` | a 307 or 308 that stays on the declared origin is followed, method and body intact, at most five hops. |
+
+The peer address on the row is what a reader of the composition is entitled to
+believe the crossing reaches, and the reach bound `net.<host>` is folded out of
+it. `urllib` follows a redirect by default and re-issues a 301/302/303 `POST` as
+a `GET` with the body dropped, so a peer that answers `302` could move the
+crossing to another host, turn the declared emission into a read, and take every
+header on the request — a credential, a `Secret[T]` — along with it. The row
+would then be false about all three. So a redirect is a REFUSAL CONDITION, not a
+transport detail.
+
+`redirect(same_origin)` is the declared opt-in and is still bounded on both
+axes. A 301, 302 or 303 is refused whatever the clause says, because it changes
+the method; a cross-origin hop is refused because the address on the row is the
+bound. The refusal stays a FAULT even under `on_failure(result)`: `on_failure`
+says what happens when the DECLARED crossing fails, and a redirect is the peer
+declining to be the declared endpoint at all.
+
+The same policy, and the per-tier defaults behind it, are in
+`src/revl/crossing_redirect.py`; `revl import a2a` carries it too, under
+`--follow-redirects`.
+
 ### Two peers of one service are two realms
 
 ```revl
@@ -356,7 +386,8 @@ in the artifact itself.
 
 ### The one thing `remote` costs the lexer: nothing
 
-`remote`, `at`, `host`, `through` and `on_failure` are CONTEXTUAL keywords,
+`remote`, `at`, `host`, `through`, `on_failure` and `redirect` are CONTEXTUAL
+keywords,
 recognised only in this one position inside a `composition` block. The lexer's
 `KEYWORDS` set is untouched, so the self-host lexer needs no sync and a program
 using any of those words as a provision key, a require alias or a config field
@@ -409,6 +440,7 @@ A `remote` row carries the admission facts the wiring deliberately does not:
     "serviceSource": "services.rvl",
     "capability": "net.billing_internal",
     "onFailure": "withdraw",
+    "redirect": "refuse",
     "inverse": null
   }
 }
