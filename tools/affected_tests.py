@@ -72,6 +72,23 @@ DOCUMENTED_CORE = (
     "holes", "admit_profile", "admission", "emission_analysis", "why", "fmt",
 )
 
+# Test modules that read a committed `bench/` artifact or pin a bench-side
+# constant. A change under `bench/` selects exactly these instead of the FULL
+# gate. Kept honest by tests/test_affected_tests.py, which recomputes the set
+# from the tree and fails if this tuple has drifted.
+BENCH_DEPENDENT_TESTS = (
+    # The guard below is itself bench-dependent: it validates this very
+    # mapping, so a bench change must re-run it.
+    "tests/test_affected_tests.py",
+    "tests/test_admission_latency.py",
+    "tests/test_demand_ranking.py",
+    "tests/test_inprocess_gate.py",
+    "tests/test_inprocess_gate_rust.py",
+    "tests/test_mcp_edit.py",
+    "tests/test_mcp_ship.py",
+    "tests/test_tokens_to_green.py",
+)
+
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
 _SHARED_TEST_FILES = {
     "tests/conftest.py",
@@ -372,6 +389,25 @@ def select(changed, root) -> dict:
             # (conformance --check-readme). Nothing else is affected.
             gates.add("conformance")
             reasons.append(f"{f} (generated-matrix check)")
+            continue
+
+        # --- bench/ measurement harnesses ---------------------------------- #
+        if f.startswith("bench/"):
+            # A benchmark harness is measurement, not shipped compiler code:
+            # nothing under src/revl imports it, and no CI job runs it. The only
+            # things a bench change can break are the tests that read a
+            # committed bench artifact or pin a bench constant, which is
+            # BENCH_DEPENDENT_TESTS. Before this rule every perf-audit branch
+            # fell through to the fail-safe below and ran the FULL gate for a
+            # file the compiler cannot even see, which is why perf work kept
+            # stalling on whole-suite runs.
+            #
+            # tests/test_affected_tests.py asserts BENCH_DEPENDENT_TESTS still
+            # equals the set of test modules mentioning `bench/`, so a new
+            # dependant cannot silently escape this selection.
+            for t in BENCH_DEPENDENT_TESTS:
+                pytest_nodes.add(t)
+            reasons.append(f"{f} (bench harness -> bench-dependent tests)")
             continue
 
         # --- anything else: fail safe -------------------------------------- #
