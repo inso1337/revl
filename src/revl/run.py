@@ -1630,7 +1630,13 @@ def run_command(args) -> int:
                   "--backend, or run without --placement", file=sys.stderr)
             return 2
         from .placement import run_placement  # noqa: PLC0415 — lazy: no cordis needed to orchestrate
-        return run_placement(args.files, args.placement, once=getattr(args, "once", False))
+        # item 443: `--estop-latch` means the same thing for a placement as for
+        # a single process — an operator in another terminal halts it — but the
+        # conductor has to carry the halt across the process boundary, since
+        # only the py tier honors the latch at its own seams.
+        return run_placement(args.files, args.placement,
+                             once=getattr(args, "once", False),
+                             estop_latch=getattr(args, "estop_latch", None))
 
     backend = getattr(args, "backend", "py")
     if backend not in KNOWN_BACKENDS:

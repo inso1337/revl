@@ -98,7 +98,7 @@ was corrected by hand and had drifted back within a day.
 | capability-realm-placement.md | needs-work | 11 |  |
 | closures.md | needs-work | 3 |  |
 | collections.md | needs-work | 34 | yes |
-| commands-reference.md | current | 3 |  |
+| commands-reference.md | current | 5 |  |
 | component-leases.md | needs-work | 26 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |
@@ -181,7 +181,7 @@ was corrected by hand and had drifted back within a day.
 | stdlib-value.md | current | 25 |  |
 | stdlib-version.md | needs-work | 11 |  |
 | strings.md | needs-work | 39 |  |
-| swap.md | needs-work | 19 |  |
+| swap.md | needs-work | 20 |  |
 | syntax-2.0.md | needs-work | 104 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
