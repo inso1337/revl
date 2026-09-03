@@ -14,10 +14,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { Context, FiberState } from 'cordis'
+import { Context } from 'cordis'
 
 import { makeProxy, serve } from './bridge.ts'
-import { assertNoResidue, snapshotRuntime } from './runtime.ts'
+import { assertNoResidue, fiberStateName, snapshotRuntime } from './runtime.ts'
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const name: string = spec.name
@@ -55,15 +55,6 @@ for (const ref of (spec.refs || []) as Array<{ extern: string; path: string; sha
       `file pinned at compile: expected sha256 ${ref.sha256} for ${ref.path}, ` +
       `but ${abs} hashes ${got} (item 396 option B / 410 deploy contract)`,
     )
-}
-
-const STATE: Record<number, string> = {
-  [FiberState.PENDING]: 'PENDING',
-  [FiberState.LOADING]: 'LOADING',
-  [FiberState.ACTIVE]: 'ACTIVE',
-  [FiberState.FAILED]: 'FAILED',
-  [FiberState.DISPOSED]: 'DISPOSED',
-  [FiberState.UNLOADING]: 'UNLOADING',
 }
 
 function log(channel: string, subject: string, detail = ''): void {
@@ -129,7 +120,7 @@ function evalProbe(expr: string, scope: Record<string, unknown>): unknown {
 const mod = await import(pathToFileURL(path.resolve(spec.module)).href)
 const ctx = new Context()
 ctx.on('internal/status', (fiber: any, oldState: number) =>
-  log('fiber', fiber.name, `${STATE[oldState]} -> ${STATE[fiber.state]}`),
+  log('fiber', fiber.name, `${fiberStateName(oldState)} -> ${fiberStateName(fiber.state)}`),
 )
 
 // once mode: `revl run --backend ts --once` drives the boot -> LIFO teardown
@@ -164,7 +155,7 @@ for (const cname of spec.components as string[]) {
   const fiber = config ? ctx.plugin(mod[cname], config) : ctx.plugin(mod[cname])
   await fiber
   fibers.push([cname, fiber])
-  log('load', cname, `state=${STATE[fiber.state]}`)
+  log('load', cname, `state=${fiberStateName(fiber.state)}`)
 }
 
 // 3. serve keys other processes need

@@ -3,7 +3,11 @@
 Every verb the `revl mcp serve` server advertises, its inputs, and what it
 returns. This is the complete set, verified against `src/revl/mcp/server.py`
 (the `TOOLS` registry and its handlers) and `src/revl/mcp/query_tools.py` (the
-query verbs appended to it). The advertised list is exactly the 36 verbs below.
+query verbs appended to it).
+
+<!-- docgen:mcp-verb-count begin -->
+The advertised list is exactly the 51 verbs below, one section each.
+<!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
 for its flags). The protocol is JSON over stdio; `tools/list` returns these
@@ -40,10 +44,11 @@ the transition, so the running system keeps serving.
 
 ## The verb set at a glance
 
+<!-- docgen:mcp-verbs begin -->
 | verb | read-only | destructive | required inputs |
 |---|---|---|---|
 | `revl_check` | yes | no | - (source) |
-| `revl_admit` | yes | no | `manifest` |
+| `revl_admit` | yes | no | `manifest` (source) |
 | `revl_plan` | yes | no | - (source) |
 | `revl_ship` | no | yes | - (source) |
 | `revl_audit` | yes | no | - (source) |
@@ -61,6 +66,15 @@ the transition, so the running system keeps serving.
 | `revl_commit` | yes | no | - |
 | `revl_commit_confirm` | no | yes | `hash` |
 | `revl_abort` | no | yes | - |
+| `revl_estop` | no | yes | - |
+| `revl_estop_report` | yes | no | - |
+| `revl_fork` | yes | no | `at` |
+| `revl_fork_confirm` | no | yes | `hash` |
+| `revl_approve` | no | no | - |
+| `revl_revoke` | no | no | - |
+| `revl_distillation_offers` | yes | no | - |
+| `revl_apply_distillation` | no | no | `offerId` |
+| `revl_revoke_distillation` | no | no | `rule` |
 | `revl_state` | yes | no | - |
 | `revl_lease` | no | no | `component` |
 | `revl_snapshot` | yes | no | - |
@@ -71,6 +85,9 @@ the transition, so the running system keeps serving.
 | `revl_replay_bisect` | yes | no | `assert` |
 | `revl_replay_forward` | no | yes | `from` |
 | `revl_grammar` | yes | no | - |
+| `revl_scaffold` | yes | no | `service` |
+| `revl_fmt` | yes | no | `source` |
+| `revl_explain` | yes | no | `code` |
 | `revl_resolve` | yes | no | `need` |
 | `revl_canary` | yes | no | `realm` |
 | `revl_query_emitters` | yes | no | `target` (source) |
@@ -81,6 +98,7 @@ the transition, so the running system keeps serving.
 | `revl_live_query` | yes | no | `verb` |
 | `revl_history_emitted_between` | yes | no | `from`, `to` |
 | `revl_history_lifetime` | yes | no | `component` |
+<!-- docgen:mcp-verbs end -->
 
 ---
 
@@ -154,6 +172,38 @@ The revl surface syntax and the rules that reject code - small enough to keep in
 context while generating. No inputs.
 
 ---
+
+### `revl_scaffold`
+
+Generate a typed, holed component skeleton from a spec and return it WITH every
+open hole's `fillSpec` in one call: expected type, capability bound, in-scope
+bindings, reachable services (the same shape `revl_check` adds to `holes`). The
+scaffold-first flow is `revl_scaffold` then fill each hole then
+`revl_check`/`revl_admit`, instead of generating a whole component and
+repairing structural errors after the fact ([scaffold.md](scaffold.md)).
+
+- Inputs: `service` (required); `provides`, `component`, `requires`,
+  `capabilities`, `methods`, `emits`, `config`, `resource`, `effect`,
+  `filename`.
+
+### `revl_fmt`
+
+Canonically format inline source, or with `migrate: true` rewrite 1.x `$`
+interpolation to 2.0 backtick templates. The MCP twin of `revl fmt`: text in,
+text out, nothing touches disk. The rewrite is proven against the same
+IR-equivalence gate the CLI runs, so `admitted: false` means the rewrite would
+change what the compiler sees and `formatted` is NOT returned ([fmt.md](fmt.md)).
+
+- Inputs: `source` (required); `filename`; `migrate`.
+
+### `revl_explain`
+
+What a diagnostic code means and how to fix it, the MCP twin of `revl explain`.
+The other half of a structured `revl_check` / `revl_admit` rejection, which
+already carries the code. An unknown code answers with the roster of known ones
+rather than with nothing.
+
+- Inputs: `code` (required; a diagnostic code such as `G4`, case-insensitive).
 
 ## Drive a live session
 
@@ -325,6 +375,128 @@ runs, never rehydrated from the stored manifest. A component the current checker
 rejects fails the restore loudly with its diagnostic. Requires nothing loaded.
 
 - Inputs: `snapshot` (a `revl_snapshot` document, required).
+
+---
+
+## Approve, halt and fork
+
+### `revl_approve`
+
+Say YES to an outstanding class-(c) crossing. When the approval policy is on, a
+`revl_call` (or a load/swap whose activation body emits) that reaches an
+IRREVERSIBLE emission with no checked inverse does not fire: it returns
+`approvalRequired` with a `ticket`. Relay that ticket to a human, then call this
+with the ticket's `hash` to mint a standing, single-use, hash-bound approval;
+the IDENTICAL re-issue then fires once and consumes it. A hash the server never
+issued is refused, and a swap or edit that changes the call's reach closure
+invalidates a standing approval. For a repeat-shaped session, pass `capability`
+and/or `uses`/`ttlMs` INSTEAD of a bare hash to mint a session-scoped standing
+grant, so n prompts become one. Gated by the `approve` operator verb: who may
+say yes is scoped in the same profile grammar as who may commit. Class (a)
+(witnessed-revertible) and class (b) (deferred) crossings never reach here.
+
+- Inputs: `hash`; `capability`; `uses`; `ttlMs`.
+
+### `revl_revoke`
+
+Retire a session-scoped standing grant early, the symmetric partner of
+`revl_approve`'s standing grant. Effective immediately and mid-session: the
+NEXT class-(c) crossing the grant would have covered prompts again
+(fail-closed). Target the SAME key the grant was minted against: `capability`
+revokes every live grant for it, `requestId` revokes one. Revoking a key with no
+live grant is a clean no-op (`count: 0`), never an error, so a double revoke or
+a stale id is harmless. Gated by the `approve` operator verb: withdrawing
+consent is the same authority as granting it.
+
+- Inputs: `capability`; `requestId`.
+
+### `revl_distillation_offers`
+
+Fold this session's approval ledger to candidate distilled auto-approve rules.
+Distillation notices that the same operator keeps saying yes to the same SHAPE
+of crossing (resource-scoped capability, realm, taint origins) and writes down
+the `AutoApproveRule` that would have said yes for them, a rule an operator
+could have typed and that is checked on the same runtime path. Read-only and
+PROPOSE-ONLY: it applies no policy, and it is scoped to the caller's own
+attributed grants. Each offer carries its rule text, its blast radius (the past
+prompts it would have covered, the destinations seen, and the taint origins it
+can NEVER admit), the attributed operator, and the sessions it came from. No
+inputs.
+
+### `revl_apply_distillation`
+
+Install a distilled offer as a live `AutoApproveRule`. Writes the rule into the
+bound policy and records a `distillation-applied` WAL fact with its attribution
+(who the repeated yeses came from, who reviewed it, the ledger window, the
+time). The rule is bound to the component set it was reviewed against: a
+component later ENTERING its glob that was not in that set suspends the rule and
+re-offers, fail-closed. Gated by the `approve` operator verb.
+
+- Inputs: `offerId` (required; from `revl_distillation_offers`).
+
+### `revl_revoke_distillation`
+
+Retire an applied distilled rule from the live policy, the symmetric partner of
+`revl_apply_distillation`. Removes the rule (matched by its canonical DSL text),
+records a `distillation-revoked` WAL fact, and the NEXT matching crossing
+prompts again. Consume-before-fire already covers an in-flight crossing, so
+there is no orphaned auto-approval mid-revoke. Revoking a rule with no live
+match is a clean no-op (`count: 0`). Gated by the `approve` operator verb.
+
+- Inputs: `rule` (required; the rule text or its canonical DSL).
+
+### `revl_estop`
+
+The operator's emergency halt. STOP DISPATCHING new boundary crossings
+immediately, run NOTHING, and report what was in flight. This is NOT
+`revl_abort`: abort is a verdict on the work and pays for a full two-phase LIFO
+unwind, while an e-stop pays for a latch flip. The price is stated, not hidden.
+Every registered entry is left STRANDED (owed, never discharged) and every
+acquired handle stays held, so the report says what was NOT unwound. The
+instance is dead afterwards: there is no resume, and the way back is `revl
+recover --wal FILE`. Held as an operator authority (verb `estop`) precisely so a
+composition or an agent cannot invoke it on itself.
+
+- Inputs: `reason`; `operator` (defaults to the session's bound operator).
+
+### `revl_estop_report`
+
+Read the e-stop inventory back WITHOUT touching the world: what was in flight
+and therefore AMBIGUOUS (at most one crossing, outcome unknown), and what was
+stranded, meaning registered, never unwound, still owed. Read-only, and never
+`clean`: an e-stop leaves residue by design. No inputs.
+
+### `revl_fork`
+
+Step 1 of the two-step session fork: ENUMERATE what forking at step k would
+rewind and what it cannot. Walks the whole tail above k into an honest, total
+partition: the host-confined witnessed effects and provisions that WILL be
+rewound, the held deferred sends that WILL be dropped, the emissions that
+already CROSSED the boundary and cannot be undone, the outbound-scoped inverses
+that WOULD cross on rewind (enumerated, never fired), and any step the recorder
+cannot restore. Returns a `hash` binding the rewound span. Nothing is rewound
+yet. Refuses a fork whose tail carries an opaque step, a non-idempotent inverse,
+or a committed boundary below k.
+
+- Inputs: `at` (required; the step k, `-1` rewinds the whole tail);
+  `component`.
+
+### `revl_fork_confirm`
+
+Step 2 of the session fork: PERFORM the fork the hash from `revl_fork` bound.
+Re-derives the hash and refuses on any drift, returning a fresh report rather
+than an error. On match it runs the scope-gated, non-emitting rewind to k
+(host-confined inverses only), drops the parent deferral queue, FREEZES the
+parent (retired at k, non-callable), snapshots the step-k state, and mints the
+branch (fresh session id and WAL, no approval carry). The branch is then the
+only live continuation over the shared workspace. The result carries `lineage`:
+what the branch inherited (composition, generation, IR and source digests,
+capability surface, WAL position) and, listed explicitly, what it did NOT
+(provider versions, seeds and clock, model decisions). The same lineage is
+written durably into the branch's own WAL, so `revl branch` and `revl compare`
+read the branch tree back after the process is gone.
+
+- Inputs: `hash` (required; from `revl_fork`).
 
 ---
 
