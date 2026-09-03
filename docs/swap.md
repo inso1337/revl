@@ -62,6 +62,14 @@ for the one component the successor hosts:
   slice and read off the running composition's IR, which is the same document
   the successor's tier artifact is emitted from, so they describe the bytes the
   process is about to load;
+- the **operator E-Stop latch** (`estopLatch`), so the button that armed the
+  predecessor still halts the successor. A composition that were haltable only
+  until its first swap would not be haltable: an operator would press the
+  button, read a report, and still have a live process running. Carried only
+  onto a tier that has an E-Stop seam, the same rule the boot path applies —
+  a successor on a seamless tier is not silently un-haltable, it simply joins
+  the population the conductor SIGKILLs outright and the halt report names as
+  residue UNKNOWN, exactly as it would had the placement booted it there;
 - the **§46 intra-process dependency edges** (`depends`), computed for the
   successor's component set.
 
