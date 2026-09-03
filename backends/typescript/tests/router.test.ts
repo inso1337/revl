@@ -9,7 +9,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { Context, FiberState } from 'cordis'
 import { W1, W2, W3, Router } from './generated/router.ts'
-import { plug, resetHost } from '../runtime.ts'
+import { fiberStateName, plug, resetHost } from '../runtime.ts'
 
 beforeEach(() => resetHost())
 
@@ -29,7 +29,7 @@ describe('item 167 routed require', () => {
       Router: await plug(ctx, Router),
     }
     for (const [name, fiber] of Object.entries(fibers)) {
-      expect(fiber.state, `${name} is ${FiberState[fiber.state]}`).toBe(FiberState.ACTIVE)
+      expect(fiber.state, `${name} is ${fiberStateName(fiber.state)}`).toBe(FiberState.ACTIVE)
     }
 
     const worker = router(ctx)

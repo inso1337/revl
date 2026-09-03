@@ -166,3 +166,32 @@ def test_machine_emit_is_parseable():
     assert "test_json_stdlib.py" in lines["PYTEST"]
     full = at._emit(sel("src/revl/parser.py"), "abc123", "machine")
     assert "FULL 1" in full
+
+
+def test_bench_dependent_tests_is_the_actual_set_of_bench_readers():
+    """`bench/` selects BENCH_DEPENDENT_TESTS instead of the FULL gate, so that
+    tuple has to BE the set of test modules that depend on a bench artifact.
+
+    Recomputed from the tree rather than trusted: if someone adds a test that
+    reads `bench/results/...` and does not extend the tuple, a bench change
+    would stop selecting it and the regression it guards would ship green.
+    That is the whole failure class this selector exists to avoid, so the list
+    is checked rather than maintained by hand.
+    """
+    from tools.affected_tests import BENCH_DEPENDENT_TESTS
+
+    root = Path(__file__).resolve().parent.parent
+    actual = {
+        f"tests/{p.name}"
+        for p in sorted((root / "tests").glob("test_*.py"))
+        if "bench/" in p.read_text(encoding="utf-8")
+    }
+    declared = set(BENCH_DEPENDENT_TESTS)
+
+    assert declared == actual, (
+        "BENCH_DEPENDENT_TESTS has drifted from the tree.\n"
+        f"  missing from the tuple (a bench change would NOT select these): "
+        f"{sorted(actual - declared)}\n"
+        f"  stale entries (no longer mention bench/): {sorted(declared - actual)}\n"
+        "Update tools/affected_tests.py::BENCH_DEPENDENT_TESTS."
+    )

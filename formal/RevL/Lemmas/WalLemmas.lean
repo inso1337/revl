@@ -21,7 +21,7 @@ that carry no decision content:
 | reference record | constructor | what it decides |
 |---|---|---|
 | `discharge-descriptor` | `Rec.descriptor` | a re-issuable named inverse (`transactional`) or compensation, with item 309's `undo_idempotent` flag |
-| `effect` | `Rec.effect` | the legacy boundary record: whether the referent outlives the process, and whether its inverse is reconstructible or closure-only |
+| `effect` | `Rec.effect` | the legacy boundary record: whether the referent outlives the process, whether its inverse is reconstructible or closure-only, and item 309's `undo_idempotent` flag |
 | `discharge` | `Rec.discharge` | the commit-path proof for a set of seqs |
 | `replay-fence` | `Rec.replayFence` | item 309 §3a's durable at-most-once fence |
 | `deferred-emission` | `Rec.deferredEmission` | a class-(b) emission queued but not fired |
@@ -59,8 +59,11 @@ return _roll_back(...)
 `_roll_back`'s two families, `dispose` per record:
 
 * legacy `effect`: no durable referent ⇒ **moot** (its memory died with
-  the process); reconstructible ⇒ re-issued; closure-only ⇒ **residue**
-  ("never pretending a dead lambda ran");
+  the process); closure-only ⇒ **residue** ("never pretending a dead
+  lambda ran"); reconstructible-but-undeclared and already fenced ⇒
+  **fenced residue**, its single at-most-once attempt spent (item 309 §3a,
+  extended to this family by `_roll_back`; the differential oracle's `O`
+  row is what caught this branch missing here); otherwise re-issued;
 * `discharge-descriptor`, Phase 1 (transactional), in the reference's own
   branch order — durable `discharge` ⇒ **committed, skipped, retained**
   ("a COMMITTED transaction is NOT rolled back"); undeclared-and-fenced
@@ -149,8 +152,11 @@ inductive Rec where
   | descriptor (seq : Seq) (entry : Entry) (undoIdempotent : Bool)
   /-- The legacy per-step `effect` record. `boundary` is whether the
   referent outlives the process; `reconstructible` is whether the inverse
-  is a named call rather than a dead closure. -/
+  is a named call rather than a dead closure; `undoIdempotent` is item
+  309's declared-idempotent flag, read here off `inverse.undo_idempotent`
+  exactly as `_roll_back` reads it for this family. -/
   | effect (seq : Seq) (boundary : Bool) (reconstructible : Bool)
+      (undoIdempotent : Bool)
   /-- `discharge`: the commit-path proof for these seqs. -/
   | discharge (seqs : List Seq)
   /-- `replay-fence`: item 309 §3a's at-most-once fence. -/
@@ -295,10 +301,11 @@ def dispose (L : Log) (ok : Seq → Bool) : Rec → Option (Seq × Disp)
   | .descriptor s .compensation _ =>
       some (s, if memSeq s (dischargedSeqs L) then .committed
                else .residue .compensationUnconfirmed)
-  | .effect s b rc =>
+  | .effect s b rc idem =>
       some (s, if b = false then .moot
-               else if rc then .discharged
-               else .residue .unreconstructible)
+               else if rc = false then .residue .unreconstructible
+               else if idem = false && memSeq s (fencedSeqs L) then .residue .fenced
+               else .discharged)
   | .deferredEmission s => some (s, .dropped)
   | _ => none
 
@@ -323,7 +330,8 @@ def reissued (L : Log) : Rec → List Seq
       else [s]
   | .descriptor s .compensation _ =>
       if memSeq s (dischargedSeqs L) then [] else [s]
-  | .effect s b rc => if b && rc then [s] else []
+  | .effect s b rc idem =>
+      if b && rc && !(!idem && memSeq s (fencedSeqs L)) then [s] else []
   | _ => []
 
 /-- The roll-back path's replay set. -/
@@ -360,12 +368,15 @@ inductive Owed (L : Log) (ok : Seq → Bool) : Rec → Prop where
   | compensation : ∀ {s idem}, s ∉ dischargedSeqs L →
       Owed L ok (.descriptor s .compensation idem)
   /-- A boundary referent whose inverse was closure-only. -/
-  | unreconstructible : ∀ {s}, Owed L ok (.effect s true false)
+  | unreconstructible : ∀ {s i}, Owed L ok (.effect s true false i)
+  /-- item 309 §3a, extended to this family: an UNDECLARED legacy boundary
+  inverse whose single at-most-once attempt is already spent. -/
+  | effectFenced : ∀ {s}, s ∈ fencedSeqs L → Owed L ok (.effect s true true false)
 
 /-- The seq a disposable record names. -/
 def recSeq : Rec → Option Seq
   | .descriptor s _ _ => some s
-  | .effect s _ _ => some s
+  | .effect s _ _ _ => some s
   | .deferredEmission s => some s
   | _ => none
 
@@ -729,7 +740,7 @@ inductive SemStep : Config → Config → Prop where
       SemStep ⟨.witnessed s i b, w, L⟩
               ⟨b, s :: w, L ++ [.descriptor s .transactional i]⟩
   | emit : ∀ {s b w L},
-      SemStep ⟨.emit s b, w, L⟩ ⟨b, s :: w, L ++ [.effect s true false]⟩
+      SemStep ⟨.emit s b, w, L⟩ ⟨b, s :: w, L ++ [.effect s true false false]⟩
 
 /-- Reflexive-transitive closure: a run. -/
 inductive SemSteps : Config → Config → Prop where
@@ -742,7 +753,7 @@ inductive SemSteps : Config → Config → Prop where
 def logSeqs : Log → List Seq
   | [] => []
   | .descriptor s _ _ :: rest => s :: logSeqs rest
-  | .effect s _ _ :: rest => s :: logSeqs rest
+  | .effect s _ _ _ :: rest => s :: logSeqs rest
   | _ :: rest => logSeqs rest
 
 /-- The witnessed mutations: the ones with a re-issuable inverse. -/
@@ -753,7 +764,7 @@ def witnessedSeqs : Log → List Seq
 
 /-- The boundary crossings: one-way, no inverse. -/
 def emittedSeqs : Log → List Seq
-  | .effect s true false :: rest => s :: emittedSeqs rest
+  | .effect s true false _ :: rest => s :: emittedSeqs rest
   | _ :: rest => emittedSeqs rest
   | [] => []
 
@@ -764,7 +775,7 @@ one-way boundary records, nothing else. Recovery bookkeeping records
 inductive SemLog : Log → Prop where
   | nil : SemLog []
   | descriptor : ∀ {s i L}, SemLog L → SemLog (.descriptor s .transactional i :: L)
-  | emitted : ∀ {s L}, SemLog L → SemLog (.effect s true false :: L)
+  | emitted : ∀ {s L}, SemLog L → SemLog (.effect s true false false :: L)
 
 /-- **The log is the trace.** A run ends with exactly the records its
 effect steps appended, and in exactly the world those steps created on
@@ -784,7 +795,7 @@ theorem steps_trace : ∀ {c d : Config}, SemSteps c d →
       · rw [hL]; simp
       · rw [hw]; simp [logSeqs]
     | @emit s b0 w L =>
-      refine ⟨.effect s true false :: M, ?_, ?_, .emitted hM⟩
+      refine ⟨.effect s true false false :: M, ?_, ?_, .emitted hM⟩
       · rw [hL]; simp
       · rw [hw]; simp [logSeqs]
 
@@ -838,7 +849,7 @@ theorem dispose_txn_clean {L : Log} {ok : Seq → Bool} {s : Seq} {i : Bool}
 
 /-- A one-way crossing is always residue: it has no inverse to re-issue. -/
 theorem dispose_emit {L : Log} {ok : Seq → Bool} {s : Seq} :
-    dispose L ok (.effect s true false) = some (s, .residue .unreconstructible) := rfl
+    dispose L ok (.effect s true false false) = some (s, .residue .unreconstructible) := rfl
 
 /-- **The residue surface of an abort is exactly the boundary
 crossings.** On a trace, with every re-issued inverse succeeding, the

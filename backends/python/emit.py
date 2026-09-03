@@ -79,6 +79,7 @@ _IMPORT_ALIAS = {
     "validate_response": "_revl_validate",
     "validate_retry": "_revl_validate_retry",
     "validate_retry_async": "_revl_validate_retry_async",
+    "produced_emit": "_revl_produced_emit",
     "Clock": "_revl_Clock",
     "SessionOwner": "_revl_SessionOwner",
     "set_session_owner": "_revl_set_session_owner",
@@ -1020,6 +1021,17 @@ class _ComponentEmitter:
         # body (`id(leader step) -> [member steps]`). Empty for every body with no
         # provable parallelism, so its emission is byte-identical to before.
         self._parallel_leaders = self._build_parallel_leaders(plan_groups)
+        # item 121 Slice 2 (docs/design/121-revl-trace.md §2.2): the static
+        # value-flow facts of the model hop, keyed by `id(call node)` the same
+        # way `_parallel_leaders` keys its groups. `_completion_sites` names each
+        # `validated ... retry` completion CROSSING with a stable static site id;
+        # `_derived_crossings` names each later crossing whose ARGUMENTS the
+        # emitter proved read that completion's binding. Both empty for every
+        # body with no validated-retry completion, so their emission is
+        # byte-identical.
+        self._completion_sites: dict = {}
+        self._derived_crossings: dict = {}
+        self._site_counter = 0
 
     def _build_parallel_leaders(self, plan_groups: list | None) -> dict:
         """Map each fan-out group's LEADER step to its member steps, keeping only
@@ -1223,6 +1235,19 @@ class _ComponentEmitter:
                     raise EmitError(f"{where}: bad method name {method!r}")
                 args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
                 rendered = f"{target}.{method}({args})"
+                # item 121 Slice 2: a crossing whose arguments the analysis
+                # proved read completion `site`'s binding fires THROUGH the
+                # marker helper, so the recorder can stamp `producedBy` on this
+                # crossing's step. The bound method and the arguments are
+                # evaluated BEFORE the helper is entered, so a crossing nested
+                # inside the arguments records first and cannot consume the
+                # marker. Emitted only for a marked crossing; every other one is
+                # byte-identical.
+                site = self._derived_crossings.get(id(expr))
+                if site is not None:
+                    self.uses.add("produced_emit")
+                    marked = f"{_runtime_ref('produced_emit')}({site!r}, {target}.{method}"
+                    rendered = f"{marked}, {args})" if args else f"{marked})"
             else:
                 # `Some(x)` is the identity on this tier (item 436 F8) — the
                 # same special case the module-fn `_expr` makes, so a component
@@ -1265,14 +1290,21 @@ class _ComponentEmitter:
                     # `emit`/witnessed effect exists to double (§5.3). Passing the
                     # call as a thunk (not the already-`settled` value) is what
                     # lets the loop re-issue the completion and nothing else.
+                    # item 121 Slice 2: the completion's static SITE id rides the
+                    # seam, so a validated response mints the fiber-local
+                    # value-flow token under it. Trailing and optional: a call
+                    # site the flow analysis did not reach passes none and the
+                    # produced edge honest-degrades to absent.
+                    comp_site = self._completion_sites.get(id(expr))
+                    tail = f", {comp_site!r}" if comp_site is not None else ""
                     if awaited:
                         self.uses.add("validate_retry_async")
                         return (f"(await _revl_validate_retry_async("
                                 f"lambda: {rendered}, {retry}, {schema!r}, "
-                                f"{where!r}, {ctors}))")
+                                f"{where!r}, {ctors}{tail}))")
                     self.uses.add("validate_retry")
                     return (f"_revl_validate_retry(lambda: {rendered}, {retry}, "
-                            f"{schema!r}, {where!r}, {ctors})")
+                            f"{schema!r}, {where!r}, {ctors}{tail})")
                 self.uses.add("validate_response")
                 return (f"_revl_validate({settled}, {schema!r}, {where!r}, "
                         f"{ctors})")
@@ -1673,6 +1705,171 @@ class _ComponentEmitter:
                 self._ctor_map(spec.get("response_schema")),
                 spec.get("retry") or 0)
 
+    # -- item 121 Slice 2: the model hop's static value-flow analysis ---------
+    #
+    # `producedSeq` claims "the model said this, and THAT crossing happened
+    # because of it". Nothing at runtime can prove it: the fiber-local register
+    # only knows "a completion validated in this fiber", which is adjacency, and
+    # attributing the next crossing to it is precisely the guess §4 attack 3
+    # forbids. The emitter is the only place that can see the downstream
+    # crossing's ARGUMENTS read the completion's binding, so the static half of
+    # the proof is computed here and the runtime supplies only the dynamic half
+    # (which execution of that static site produced the value).
+    #
+    # The analysis is deliberately a MUST-derive under-approximation. Anything it
+    # cannot prove — a name reassigned inside a branch or a loop, an arm whose
+    # binding comes from two different completions, a crossing reached from a
+    # closure body — yields no mark, and `producedSeq` honest-degrades to absent.
+    # A missing edge is a gap in the trace; a wrong one is exported to a
+    # third-party backend as a proven cause.
+
+    def _emission_call(self, expr: dict) -> bool:
+        """Whether this `call` node is an `emit` through a req key on a method
+        the IR flags `emission` — i.e. a crossing the recorder records."""
+        target = expr.get("target")
+        if not (isinstance(target, dict) and target.get("kind") == "req"):
+            return False
+        svc_name = self.requires.get(target.get("name"))
+        spec = (((self.services.get(svc_name) or {}).get("methods") or {})
+                .get(expr.get("method")) or {})
+        return bool(spec.get("emission"))
+
+    def _mint_site(self, where: str) -> str:
+        self._site_counter += 1
+        return f"{where}#c{self._site_counter}"
+
+    def analyze_model_flow(self, steps, where: str) -> None:
+        """Walk one body's steps and record, for every crossing in it, whether
+        it is a validated-retry completion (minting a site id) or reads exactly
+        one completion's binding (marking it derived)."""
+        self._flow_steps(steps or [], {}, where)
+
+    def _flow_steps(self, steps, env: dict, where: str) -> None:
+        for step in steps:
+            if isinstance(step, dict) and "step" in step:
+                self._flow_step(step, env, where)
+
+    @staticmethod
+    def _is_step_list(value) -> bool:
+        return (isinstance(value, list) and bool(value)
+                and all(isinstance(s, dict) and "step" in s for s in value))
+
+    @classmethod
+    def _assigned_in(cls, node, out: set) -> set:
+        """Every name a nested body binds or assigns, at any depth."""
+        if isinstance(node, list):
+            for item in node:
+                cls._assigned_in(item, out)
+        elif isinstance(node, dict):
+            if "step" in node:
+                for key in ("name", "bind"):
+                    if isinstance(node.get(key), str):
+                        out.add(node[key])
+            for value in node.values():
+                if isinstance(value, (list, dict)):
+                    cls._assigned_in(value, out)
+        return out
+
+    def _flow_step(self, step: dict, env: dict, where: str) -> None:
+        nested = [v for k, v in step.items()
+                  if k != "setup" and self._is_step_list(v)]
+        if self._is_step_list(step.get("setup")):
+            self._flow_steps(step["setup"], env, where)
+        # KILL first: a name a nested body assigns is no longer provably derived
+        # after it, and (for a loop) is not provably derived inside it either on
+        # the back edge. Sound in both directions, at the cost of a missing edge.
+        for body in nested:
+            for name in self._assigned_in(body, set()):
+                env.pop(name, None)
+        bound = frozenset()
+        for key, value in step.items():
+            if key == "setup" or self._is_step_list(value):
+                continue
+            sites = self._flow_value(value, env, where)
+            if key in ("value", "acquire"):
+                bound |= sites
+        name = step.get("bind") or step.get("name")
+        if isinstance(name, str):
+            if bound:
+                env[name] = bound
+            else:
+                env.pop(name, None)
+        for body in nested:
+            self._flow_steps(body, dict(env), where)
+
+    def _flow_value(self, node, env: dict, where: str) -> frozenset:
+        """The completion sites this expression's value provably derives from,
+        marking every crossing it contains along the way."""
+        if isinstance(node, list):
+            sites: set = set()
+            for item in node:
+                sites |= self._flow_value(item, env, where)
+            return frozenset(sites)
+        if not isinstance(node, dict) or "kind" not in node:
+            return frozenset()
+        kind = node["kind"]
+        if kind in ("name", "var"):
+            key = node.get("id") if kind == "name" else node.get("name")
+            return env.get(key) or frozenset()
+        if kind in ("arrow", "fn"):
+            # a closure body runs at an unknown later time, in an unknown fiber:
+            # nothing inside is attributed (under-approximate, never wrong).
+            return frozenset()
+        if kind == "match":
+            scrutinee = self._flow_value(node.get("scrutinee"), env, where)
+            sites = set()
+            for arm in node.get("arms") or []:
+                arm_env = dict(env)
+                bind = arm.get("bind")
+                if isinstance(bind, str):
+                    # the payload of a matched completion IS the completion's
+                    # value — this is the design's own `ToolCalls(c) => emit …`
+                    if scrutinee:
+                        arm_env[bind] = scrutinee
+                    else:
+                        arm_env.pop(bind, None)
+                sites |= self._flow_value(arm.get("body"), arm_env, where)
+            return frozenset(sites)
+        if kind == "do":
+            block = dict(env)
+            for stmt in node.get("stmts") or []:
+                value = self._flow_value(stmt.get("value"), block, where)
+                bind = stmt.get("name")
+                if isinstance(bind, str):
+                    if value:
+                        block[bind] = value
+                    else:
+                        block.pop(bind, None)
+            return self._flow_value(node.get("tail"), block, where)
+        if kind == "call":
+            args = set()
+            for arg in node.get("args") or []:
+                args |= self._flow_value(arg, env, where)
+            reached = set(args)
+            for key in ("target", "callee"):
+                if key in node:
+                    reached |= self._flow_value(node[key], env, where)
+            if not self._emission_call(node):
+                return frozenset(reached)
+            # a crossing. Mark it derived only when its arguments read EXACTLY
+            # one completion's binding: two candidate completions and the driver
+            # would have to pick, which is the guess this design forbids.
+            if len(args) == 1:
+                self._derived_crossings[id(node)] = next(iter(args))
+            validated = self._validated_call(node)
+            if validated is not None and (validated[2] or 0) > 0:
+                site = self._mint_site(where)
+                self._completion_sites[id(node)] = site
+                return frozenset({site})
+            # a non-completion crossing's RETURN is not a completion's value
+            return frozenset()
+        sites = set()
+        for key, value in node.items():
+            if key == "kind" or not isinstance(value, (list, dict)):
+                continue
+            sites |= self._flow_value(value, env, where)
+        return frozenset(sites)
+
     def _ctor_map(self, schema) -> str:
         """The tag -> ADT-case-class dict literal for a discriminated-union
         response schema, or `"None"` when the schema is not a tagged union."""
@@ -1903,15 +2100,58 @@ class _ComponentEmitter:
           subscription active" obligation, and it is delivered by not catching
           anything here.
 
-        A `fail` in the body raises the same way, for the same reason."""
+        A `fail` in the body raises the same way, for the same reason.
+
+        Slice 5's typed-event handler (`on <Event> as <x> in <sub>`) is THIS
+        loop with one gate added between the terminal test and the body:
+
+            <c> = Stream.contract(<event>, <schema>, <key>, <window>)
+            while True:
+                <x> = await <sub>.next()
+                yield None            # iteration boundary (A1)
+                if Stream.is_closed(<x>):
+                    break
+                if not <c>.admit(<x>):
+                    continue
+                <body>
+
+        Where each line sits is the argument that the contract costs the
+        guarantee nothing. The contract is built ONCE, above the loop, so the
+        dedup memory is constant in the length of the stream rather than one
+        entry per item (§4.7). The gate sits AFTER the await and its yield, so
+        the iteration boundary — the property a divert-while-parked depends on —
+        is in exactly the place Slice 4 put it. It sits after the terminal test,
+        so a `Closed` still ends the loop without being validated as an item. And
+        a schema violation RAISES `StreamFaulted` out of `admit`, which is the
+        same terminal a provider abort delivers and takes the same uncaught path:
+        the activation fails and the prefix reverts LIFO with the subscription
+        bracket on it (§6, A8). Nothing here catches anything."""
         self.uses.add("Stream")
         item = _mangle(_ident(step.get("bind"), f"{where}: stream item"))
         subject = self._expr(step.get("subject"), where)
+        contract = step.get("event")
+        gate = None
+        if contract:
+            self._counter += 1
+            gate = f"_revl_event{self._counter}"
+            name = _ident(contract.get("name"), f"{where}: event name")
+            key = _ident(contract.get("key"), f"{where}: event key")
+            window = contract.get("window")
+            if not isinstance(window, int) or window < 1:
+                raise EmitError(
+                    f"{where}: event `{name}` has a non-positive dedup window "
+                    f"{window!r} — the window is bounded by construction")
+            out.add(indent, f"{gate} = Stream.contract({name!r}, "
+                            f"{contract.get('schema')!r}, {key!r}, {window})")
         out.add(indent, "while True:")
         out.add(indent + 1, f"{item} = await {subject}.next()")
         out.add(indent + 1, "yield None  # iteration boundary (A1)")
         out.add(indent + 1, f"if Stream.is_closed({item}):")
         out.add(indent + 2, "break")
+        if gate is not None:
+            out.add(indent + 1,
+                    f"if not {gate}.admit({item}, {f'{where}: on {name}'!r}):")
+            out.add(indent + 2, "continue")
         body = step.get("body") or []
         if not body:  # pragma: no cover — the parser rejects an empty body
             raise EmitError(f"{where}: an `every … in` body is empty")
@@ -2065,6 +2305,9 @@ class _ComponentEmitter:
             if not secret_params:
                 out.add(indent + 1, "pass")
             return
+        # item 121 Slice 2: the model-hop value-flow analysis over THIS body,
+        # before a line of it renders — `_expr` reads the marks it leaves.
+        self.analyze_model_flow(body, mwhere)
         prev_async = self._in_async
         self._in_async = method_is_async
         try:
@@ -2232,6 +2475,9 @@ class _ComponentEmitter:
         # proved independent fires concurrently (`_emit_parallel_group`); every
         # other step, and every un-grouped emit, renders exactly as before.
         steps = self.ir.get("body") or []
+        # item 121 Slice 2: the model-hop value-flow analysis over the activation
+        # body, before a line of it renders (see `analyze_model_flow`).
+        self.analyze_model_flow(steps, where)
         i = 0
         while i < len(steps):
             step = steps[i]
