@@ -211,3 +211,106 @@ def test_payload_bind_scope_executes(tier):
     if status == "skip":
         pytest.skip(f"{tier}: {message}")
     assert status == "pass", f"{tier} failed: {message}"
+
+
+# --------------------------------------------------------------------------
+# roadmap item 436 F3, the other half of this decision: the two arm shapes
+# that need NO binder, and the guard that keeps every shape above on one.
+#
+# These live here rather than in a file of their own because they are the SAME
+# decision the three cases above pin: a binder-free arm is safe exactly when
+# there is no name to shadow, clobber or share a cell with. `shadow`, `nested`
+# and `arrow` are the arms that must NOT lose their binder, and the tests above
+# already run them for their value.
+
+_UNBOUND_HDR = 'fn wrap2(n: Int) -> Opt[Int] { return Some(n) }\n'
+
+
+def _emit_fn(src: str) -> str:
+    return _py_emit(compile_source(src, "item436f3.rvl"))
+
+
+def _body_line(out: str, prefix: str) -> str:
+    return next(ln for ln in out.splitlines() if ln.strip().startswith(prefix))
+
+
+def test_body_that_is_the_bind_needs_no_binder():
+    """`Some(v) => v` and `Ok(v) => v` — the unwrap `match` mostly exists for.
+    The bind IS the body, so the arm is the payload expression and no function
+    object is built or called (item 436 F3)."""
+    out = _emit_fn(
+        _UNBOUND_HDR
+        + 'fn unwrap_or(n: Int, d: Int) -> Int {\n'
+          '  return match wrap2(n) { Some(v) => v, None => d }\n'
+          '}\n')
+    line = _body_line(out, "return (match")
+    assert "lambda" not in line, line
+    assert line.strip().startswith("return (match if (match := "), line
+    namespace: dict = {}
+    exec(compile(out, "<436f3>", "exec"), namespace)  # noqa: S102
+    assert namespace["unwrap_or"](7, 0) == 7
+
+
+def test_bind_the_body_never_reads_needs_no_binder():
+    """`Err(e) => -1` binds a payload nothing reads. The binder goes, and so
+    does the payload read: `match.value` is a `__slots__` load on a case the
+    `isinstance` already matched, so not performing it is not observable."""
+    out = _emit_fn(
+        'type Res = Good(Int) | Bad(Int)\n'
+        'fn code(r: Res) -> Int { return match r { Good(v) => v, Bad(e) => 0 } }\n')
+    line = _body_line(out, "return (match")
+    assert "lambda" not in line, line
+    assert "(0 if isinstance(match, Bad)" in line, line
+    namespace: dict = {}
+    exec(compile(out, "<436f3>", "exec"), namespace)  # noqa: S102
+    assert namespace["code"](namespace["Good"](5)) == 5
+    assert namespace["code"](namespace["Bad"](5)) == 0
+
+
+def test_a_bind_read_inside_a_larger_body_keeps_its_binder():
+    """The guard. `Some(v) => v + 1` reads the bind from inside an expression,
+    so the arm keeps its one-shot lambda: dropping it would leave `v` free, and
+    binding it with a walrus would write through to the enclosing frame, which
+    is the item-163 bug the three cases above pin."""
+    out = _emit_fn(
+        _UNBOUND_HDR
+        + 'fn classify(n: Int) -> Int {\n'
+          '  return match wrap2(n) { Some(v) => v + 1, _ => 0 }\n'
+          '}\n')
+    line = _body_line(out, "return (")
+    assert "(lambda v:" in line, line
+    namespace: dict = {}
+    exec(compile(out, "<436f3>", "exec"), namespace)  # noqa: S102
+    assert namespace["classify"](7) == 8
+
+
+@pytest.mark.parametrize("name", sorted(_SYNC_CASES))
+def test_the_three_shadowing_shapes_keep_their_binder(name):
+    """Structural, so the guard is caught at emit and not only by a value:
+    each shape reads its bind from inside a larger body, so each keeps the
+    lambda that gives the bind a scope."""
+    body, _ = _SYNC_CASES[name]
+    out = _py_emit(compile_source(_source(name, body), "item163.rvl"))
+    line = _body_line(out, "r =" if name != "shadow" else "r =")
+    assert "(lambda v:" in line, line
+
+
+def test_a_component_body_match_decides_the_binder_the_same_way():
+    """`_ComponentEmitter` renders arm bodies BEFORE `_match_expr` sees them,
+    so the binder decision reads the node the text came from. Without that the
+    rendered body is opaque, every arm reads as "never mentions the bind", and
+    a live bind is deleted — which is what this pins."""
+    out = _emit_fn(
+        'type Step = Final(Int) | NeedTool(Int)\n'
+        'service R { fn label(s: Step) -> Int\n  fn bump(s: Step) -> Int }\n'
+        'component C provides r: R {\n'
+        '  provide r {\n'
+        '    fn label(s) = match s { Final(n) => n, NeedTool(t) => 0 }\n'
+        '    fn bump(s) = match s { Final(n) => n + 1, NeedTool(t) => t }\n'
+        '  }\n'
+        '}\n')
+    lines = [ln for ln in out.splitlines() if "isinstance((match := s), Final)" in ln]
+    assert len(lines) == 2, out
+    label, bump = lines
+    assert "lambda" not in label, label
+    assert "(lambda n: (n + 1))(match.value)" in bump, bump

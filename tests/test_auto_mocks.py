@@ -386,20 +386,40 @@ def test_gen_value_generator_miss_falls_back_never_raises():
     assert mocks_mod.gen_value("Result[UndeclaredRecord, Str]", {}, namespace, _rng()) is None
 
 
-def test_gen_value_record_is_constructed():
-    """A record return type produces an instance of the emitted record class."""
-    class Row:
-        def __init__(self, id, name):
-            self.id = id
-            self.name = name
+def test_gen_value_record_is_the_dict_the_emitted_module_reads():
+    """A record return type produces a record VALUE, which is a dict.
+
+    A mocked response is handed straight to emitted code, so it has to be in
+    the representation emitted code reads: a plain dict keyed by the revl field
+    name (`backends/python/emit.py::_emit_types`, docs/records.md §7). This
+    asserted `isinstance(value, Row)` instead, so the mock fed the composition
+    a shape no emitted module produces — and one the emitter cannot even read
+    when a field name collides with a Python keyword, since the class attribute
+    is `_mangle`d (`from` -> `from_`) while the read is `v['from']`.
+    """
+    class Row:                      # the emitted SHAPE class: annotations only
+        id: int
+        name: str
 
     types = {"Row": {"kind": "record", "fields": {"id": "Int", "name": "Str"}}}
     module = _types.SimpleNamespace(Row=Row)
     for _ in range(5):
         value = mocks_mod.gen_value("Row", types, module, _rng())
-        assert isinstance(value, Row)
-        assert isinstance(value.id, int)
-        assert isinstance(value.name, str)
+        assert isinstance(value, dict)
+        assert set(value) == {"id", "name"}
+        assert isinstance(value["id"], int)
+        assert isinstance(value["name"], str)
+
+
+def test_gen_value_record_reads_back_through_the_emitted_field_read():
+    """The generated record answers the exact expression the emitter writes,
+    keyword-named fields included — the property `isinstance` could not state."""
+    types = {"Q": {"kind": "record", "fields": {"from": "Str", "class": "Int"}}}
+    module = _types.SimpleNamespace()
+    value = mocks_mod.gen_value("Q", types, module, _rng())
+    # verbatim `_field_read(target, name)` with the walrus temp inlined
+    assert (value["from"] if isinstance(value, dict) else getattr(value, "from")) == value["from"]
+    assert isinstance(value["from"], str) and isinstance(value["class"], int)
 
 
 def _op_spec(**overrides):
