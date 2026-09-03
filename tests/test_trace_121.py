@@ -902,16 +902,6 @@ def test_the_recorder_marks_the_crossing_at_record_time():
         crossing=("AgentLoop", model_step)) is not None
 
 
-def test_the_crossing_key_is_wired_into_the_emissions_arm():
-    """The key must be fed BY the `emissionsCrossed` arm, not merely accepted by
-    `_model_crossing_payload` — this is what fails if run.py goes back to the
-    unkeyed take."""
-    import inspect
-    src = inspect.getsource(run._Driver)
-    arm = src[src.index('for step in report["emissionsCrossed"]'):]
-    assert 'crossing=(timeline.component, step.get("index"))' in arm
-
-
 # ---------------------------------------------------------------------------
 # 5. the driver actually performs the reset it documents (item 416d)
 # ---------------------------------------------------------------------------
@@ -1182,28 +1172,36 @@ def test_the_gate_fails_closed_on_every_unproven_path():
 
 class _StubTimeline:
     """The one `Timeline` surface `_replay("back")` touches: a component name and
-    a step-back report carrying a single model-completion crossing."""
+    a step-back report carrying the crossings it reports.
+
+    Defaults to a single model-completion crossing at `_CROSSING_STEP`;
+    `crossings` overrides it so a test can report the crossing the completion
+    was NOT bound to."""
 
     component = "Agent"
 
-    def __init__(self, args):
+    def __init__(self, args, crossings=None):
         self._args = args
+        self._crossings = crossings
 
     async def step_back(self, at, force=False):
-        return {
-            "inversesRan": [], "compensationsRan": [], "failed": [],
-            "emissionsCrossed": [{
+        crossed = self._crossings
+        if crossed is None:
+            crossed = [{
                 "kind": "emission", "label": "Model.complete",
                 "index": _CROSSING_STEP,
                 "detail": {"service": "model", "args": self._args},
-            }],
+            }]
+        return {
+            "inversesRan": [], "compensationsRan": [], "failed": [],
+            "emissionsCrossed": crossed,
             "guarantee": "a crossed emission has no inverse",
         }
 
 
 class _StubRecorder:
-    def __init__(self, args):
-        self._timeline = _StubTimeline(args)
+    def __init__(self, args, crossings=None):
+        self._timeline = _StubTimeline(args, crossings)
         self.timelines = {"Agent": self._timeline}
 
     def timeline(self, component=None):
@@ -1213,16 +1211,16 @@ class _StubRecorder:
 _CROSSING_STEP = 7
 
 
-def _step_back_record(src: str, filename: str, args):
+def _step_back_records(src: str, filename: str, args, crossings=None) -> list:
     """Drive the SHIPPED `emissionsCrossed` arm — `_Driver._replay("back")`
-    itself, not a re-implementation of it — over one model-completion crossing,
-    and return the `emit` record it appended.
+    itself, not a re-implementation of it — and return every `emit` record it
+    appended, in the order the arm wrote them.
 
     This is the wiring assertion with teeth: a driver that stops consulting
     `_crossing_taint`, or feeds the gate anything it cannot prove, changes the
     RECORD, which is what a consumer of `revl trace` actually reads."""
     driver = _driver_for(src, filename)
-    driver.recorder = _StubRecorder(args)
+    driver.recorder = _StubRecorder(args, crossings)
     driver._log = lambda *a, **k: None
     driver._flush = lambda: asyncio.sleep(0)
     # the item-242 seam: bind the completion observation to the crossing the
@@ -1231,7 +1229,12 @@ def _step_back_record(src: str, filename: str, args):
     rt.validate_retry(lambda: {"tag": "ok"}, budget=0,
                       schema={"type": "object"}, where="Agent")
     asyncio.run(driver._replay("back", 0, False, "Agent"))
-    return driver._events[-1]
+    return list(driver._events)
+
+
+def _step_back_record(src: str, filename: str, args):
+    """The single-crossing case: the one `emit` record the arm appended."""
+    return _step_back_records(src, filename, args)[-1]
 
 
 def test_the_channel_is_wired_into_the_crossing_record():
@@ -1278,6 +1281,64 @@ def test_a_secret_composition_is_suppressed_in_the_crossing_record():
     assert ev["llm"] is not None
     assert "promptDigest" not in ev["llm"]
     assert ev["llm"]["attempts"] == 1 and ev["llm"]["attemptCeiling"] == 1
+
+
+_LATER_STEP = _CROSSING_STEP + 3
+_GEN = 1          # the generation `_driver_for` builds its driver at
+
+
+def _model_then_write(args) -> list:
+    """A step-back report for an activation that crossed a MODEL completion and
+    THEN wrote a file, reported NEWEST FIRST — the order `Timeline.step_back`
+    really uses, and the order the item-242 defect fed on. Only the completion
+    at `_CROSSING_STEP` is the one the seam bound its observation to."""
+    return [
+        {"kind": "emission", "label": "Report.write", "index": _LATER_STEP,
+         "detail": {"service": "fs", "args": ["/tmp/out.txt"]}},
+        {"kind": "emission", "label": "Model.complete", "index": _CROSSING_STEP,
+         "detail": {"service": "model", "args": args}},
+    ]
+
+
+def test_the_crossing_key_is_wired_into_the_emissions_arm():
+    """The item-242 key must be fed BY the `emissionsCrossed` arm, and fed the
+    crossing identity the arm is recording — driven through the arm, asserted on
+    the records it emits.
+
+    Deliberately NOT a source grep. The assertion this replaced matched
+    `'crossing=(timeline.component, step.get("index"))'` in run.py's text, and
+    it was the only guard left on the key: dropping that argument reddened that
+    grep and nothing else in this file, because the helpers elsewhere here
+    RE-IMPLEMENT the arm rather than run it.
+
+    Seeing a digest proves nothing on its own — with the key dropped, the
+    unkeyed `revl_take_model_call()` hands the observation back to whichever
+    crossing asks first, so a payload still appears. The key is asserted by
+    WHERE the payload lands: the walk is newest-first, so the later filesystem
+    write is offered the completion before the completion is, and it must be
+    refused it. That is the regression exactly (docs/design/121-revl-trace.md)."""
+    args = ["summarise this", "context"]
+    records = _step_back_records(_CLEAN_MODEL_SRC, "clean.rvl", args,
+                                 crossings=_model_then_write(args))
+    by_key = {ev["key"]: ev for ev in records}
+    assert set(by_key) == {"Report.write", "Model.complete"}
+    # the arm really walked newest-first — the ordering the defect fed on,
+    # asserted rather than assumed
+    assert [ev["key"] for ev in records] == ["Report.write", "Model.complete"]
+
+    hop = by_key["Model.complete"]
+    assert hop["llm"] is not None
+    # the activation id's exact spelling is item 121 slice 2's business; what
+    # matters here is that it is the completion's record that carries one.
+    assert hop["activationId"].startswith(f"Agent#g{_GEN}")
+    assert hop["llm"]["attempts"] == 1 and hop["llm"]["attemptCeiling"] == 1
+    assert hop["llm"]["promptDigest"]["salted"].startswith("hmac-sha256:")
+
+    # the write is not a model hop and inherits none of it: byte-identical to a
+    # pre-121 v2 emit, no prompt text anywhere near it.
+    write = by_key["Report.write"]
+    assert "llm" not in write and "activationId" not in write
+    assert "summarise this" not in json.dumps(write)
 
 
 def test_a_new_generation_rebuilds_the_origin_index():
