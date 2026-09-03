@@ -762,6 +762,14 @@ README_START = "<!-- CONFORMANCE-MATRIX:START -->"
 README_END = "<!-- CONFORMANCE-MATRIX:END -->"
 _README_ANCHOR = "## The toolchain is the developer surface"
 
+# The per-tier emit-sweep summary (issue #233). It was authored by hand from a
+# one-off run and then rotted: rust read 3 refusals against a measured 0 and
+# java 3 against a measured 1, for months, while the tool that answers the
+# question exactly sat in this file. Same fix as the matrix above — generate it
+# and let the staleness gate diff it — so the counts cannot outlive their run.
+SWEEP_START = "<!-- CONFORMANCE-SWEEP:START -->"
+SWEEP_END = "<!-- CONFORMANCE-SWEEP:END -->"
+
 
 def _short(tier: str) -> str:
     return _SHORT.get(tier, tier)
@@ -883,10 +891,131 @@ def _markdown(report: dict, selfhost: dict[str, str] | None) -> str:
         out.append(f"**Performance.** In-memory admission round-trip "
                    f"(compile + gate) median **{perf}** per candidate component "
                    f"([bench/results/admission-latency.md]"
-                   f"(bench/results/admission-latency.md)). This is the "
+                   # The block is spliced into docs/conformance.md, so the href
+                   # is relative to docs/ — without the `../` it resolved to a
+                   # docs/bench/ that has never existed.
+                   f"(../bench/results/admission-latency.md)). This is the "
                    f"per-candidate cost an agent loop pays at the v3.0 gate.")
 
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# the per-tier emit sweep (issue #233)
+# --------------------------------------------------------------------------
+
+# Why a refusal happened, in the words of the emitter that raised it. Each rule
+# is (matcher, label); the first that matches wins, so order is significance
+# order. A refusal no rule recognises falls back to its case label rather than
+# to a bucket named "other" — an unnamed cause should read as conspicuous in
+# the committed table, not as a tidy count.
+_REFUSAL_RULES: tuple[tuple[str, str], ...] = (
+    ("config block", "config block"),
+    ("host builtin", "host builtin"),
+    ("arrow values are not lowerable", "function-typed signature"),
+    ("declared function type", "function-typed signature"),
+)
+
+_EXTERN_BODY = "has no @"
+_TYPE_REFUSAL = " is not lowerable"
+
+
+def refusal_reason(message: str) -> str:
+    """Classify one emitter refusal into the cause the summary table names.
+
+    Keyed on the emitter's own message, which is the only place the cause is
+    stated. A type refusal names the type (`Float`, `Map[Str, Int]`) and an
+    extern refusal names the missing body tag (`@rs`), so both are read back
+    out rather than hard-coded per tier — a new refusing type or tier needs no
+    edit here.
+    """
+    for needle, label in _REFUSAL_RULES:
+        if needle in message:
+            return label
+
+    if _EXTERN_BODY in message:
+        tag = message.split(_EXTERN_BODY, 1)[1].split()[0]
+        return f"extern with no `@{tag}` body"
+
+    if "type '" in message and _TYPE_REFUSAL in message:
+        named = message.split("type '", 1)[1].split("'", 1)[0]
+        base = named.split("[", 1)[0]
+        return f"`{base}` signature"
+
+    return message
+
+
+def _deliberate_cell(items: list[dict]) -> str:
+    """The `deliberate` column: each cause with how many cases hit it.
+
+    Ordered by count then label so two runs of the same tree render the same
+    string — the staleness gate diffs this text byte for byte.
+    """
+    if not items:
+        return "—"
+    counts: dict[str, int] = {}
+    for item in items:
+        reason = refusal_reason(item["message"])
+        counts[reason] = counts.get(reason, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{reason} ({count})" for reason, count in ordered)
+
+
+def _sweep_markdown(report: dict) -> str:
+    """The per-tier refusal summary, generated from the same walk as the matrix.
+
+    Emit-only and therefore deterministic, exactly like `_markdown`. The three
+    columns answer three different questions and must not be collapsed: how
+    many constructs the tier refused, how many of those are *gaps* (an emitter
+    with no case for a construct it should express), and what the deliberate
+    ones are.
+
+    Scope, deliberately: every cell here is about *emit*, and `--validate`'s
+    second question (does the emitted code survive its real compiler?) is
+    still only a compile. Issue #244 is that the validators never *execute*
+    what they compile, so a row that reads clean proves compilation and not
+    behaviour. When that lands, this table wants a fourth column separating
+    executed rows from compile-only ones — a count that means "ran and agreed"
+    must not render the same as one that means "parsed". The gate is already
+    shaped for it: add the column here and the staleness diff carries it.
+    """
+    out: list[str] = []
+    out.append("_Generated by `python3 tools/conformance.py --write-readme`. "
+               "Do not edit by hand._")
+    out.append("")
+    out.append("| tier | refusals | real gaps | deliberate |")
+    out.append("|---|---|---|---|")
+    for tier in TIERS:
+        items = report["gaps"].get(tier) or []
+        gaps = [item for item in items if not item["deliberate"]]
+        deliberate = [item for item in items if item["deliberate"]]
+        gap_cell = f"**{len(gaps)}**" if gaps else "0"
+        out.append(f"| {_short(tier)} | {len(items)} | {gap_cell} | "
+                   f"{_deliberate_cell(deliberate)} |")
+
+    clean = [_short(t) for t in TIERS if not (report["gaps"].get(t) or [])]
+    refusing = [_short(t) for t in TIERS if (report["gaps"].get(t) or [])]
+    any_gap = any(not item["deliberate"]
+                  for items in report["gaps"].values() for item in items)
+    if clean:
+        out.append("")
+        out.append(f"**{_and_list(clean)} are at zero"
+                   + ("" if not refusing else
+                      f"; every remaining refusal on {_and_list(refusing)} is "
+                      + ("a deliberate tier limit" if not any_gap
+                         else "listed above, and the bold count is a real gap"))
+                   + ".**")
+    return "\n".join(out)
+
+
+def _and_list(names: list[str]) -> str:
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def sweep_block(report: dict) -> str:
+    return f"{SWEEP_START}\n{_sweep_markdown(report)}\n{SWEEP_END}"
 
 
 def _print_emit_timings(report: dict) -> None:
@@ -941,12 +1070,36 @@ def _splice_readme(text: str, block: str) -> str:
     return text.rstrip("\n") + "\n\n" + section
 
 
-def _write_readme(*, check_only: bool) -> int:
-    """Regenerate the README matrix block. `check_only` gates staleness for CI.
+def _splice_marked(text: str, start: str, end: str, block: str) -> str:
+    """Replace an already-marked block. The markers must exist.
 
-    Returns 0 when the committed block already matches a fresh generation (or
-    was written), 1 when `check_only` finds it stale — the same shape as the
-    generated-artifact gates the rest of the tree uses.
+    Unlike `_splice_readme` there is no fallback that invents a section: this
+    block replaces prose that was there before it, so a missing marker means
+    someone deleted the generated table rather than that it has yet to land,
+    and inventing a new section elsewhere in the file would hide that.
+    """
+    if start not in text or end not in text:
+        raise SystemExit(
+            f"docs/conformance.md is missing the {start}/{end} markers — the "
+            "generated block cannot be spliced. Restore them.")
+    pre = text[:text.index(start)]
+    post = text[text.index(end) + len(end):]
+    return pre + block + post
+
+
+def _write_readme(*, check_only: bool) -> int:
+    """Regenerate the generated blocks in docs/conformance.md.
+
+    `check_only` gates staleness for CI. Returns 0 when the committed blocks
+    already match a fresh generation (or were written), 1 when `check_only`
+    finds either stale — the same shape as the generated-artifact gates the
+    rest of the tree uses.
+
+    Two blocks, one walk: the construct x tier matrix and the per-tier emit
+    sweep are two views of the same `run()`, so generating them together costs
+    nothing extra and, more to the point, makes it impossible for one to be
+    regenerated while the other rots (issue #233 — that is exactly what had
+    happened to the sweep, which had been authored by hand).
     """
     report = run()
     selfhost = selfhost_column()
@@ -957,21 +1110,22 @@ def _write_readme(*, check_only: bool) -> int:
     doc = ROOT / "docs" / "conformance.md"
     text = doc.read_text(encoding="utf-8")
     updated = _splice_readme(text, block)
+    updated = _splice_marked(updated, SWEEP_START, SWEEP_END, sweep_block(report))
 
     if check_only:
         if updated == text:
-            print("docs/conformance.md matrix is up to date.")
+            print("docs/conformance.md matrix and emit sweep are up to date.")
             return 0
-        print("docs/conformance.md matrix is STALE — regenerate it with "
-              "`python3 tools/conformance.py --write-readme` (or `make matrix`) "
-              "and commit the result.", file=sys.stderr)
+        print("docs/conformance.md matrix or emit sweep is STALE — regenerate "
+              "it with `python3 tools/conformance.py --write-readme` (or "
+              "`make matrix`) and commit the result.", file=sys.stderr)
         return 1
 
     if updated == text:
-        print("docs/conformance.md matrix already up to date.")
+        print("docs/conformance.md matrix and emit sweep already up to date.")
     else:
         doc.write_text(updated, encoding="utf-8")
-        print("docs/conformance.md matrix regenerated.")
+        print("docs/conformance.md matrix and emit sweep regenerated.")
     return 0
 
 
@@ -1061,11 +1215,13 @@ def main() -> int:
                              "column and a live per-tier emit-timing readout")
     parser.add_argument("--write-readme", action="store_true",
                         help="regenerate the matrix block between the "
-                             "CONFORMANCE-MATRIX markers in README.md in place")
+                             "CONFORMANCE-MATRIX and CONFORMANCE-SWEEP "
+                             "markers in docs/conformance.md in place")
     parser.add_argument("--check-readme", action="store_true",
-                        help="exit non-zero if README.md's committed matrix "
-                             "block differs from a fresh generation — the CI "
-                             "staleness gate")
+                        help="exit non-zero if either committed block in "
+                             "docs/conformance.md (the matrix or the per-tier "
+                             "emit sweep) differs from a fresh generation — "
+                             "the CI staleness gate")
     args = parser.parse_args()
 
     if args.check_toolchains:
@@ -1082,6 +1238,8 @@ def main() -> int:
         report = run()
         selfhost = selfhost_column()
         print(_markdown(report, selfhost))
+        print()
+        print(_sweep_markdown(report))
         _print_emit_timings(report)
         return 0
 
