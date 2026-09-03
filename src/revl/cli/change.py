@@ -14,6 +14,7 @@ from pathlib import Path
 from .._paths import backends_root
 from ..compiler import compile_files
 from ..errors import RevlError
+from ..estop import latch_path as _latch_path, read_latch as _read_latch
 
 
 def _run_plan(args) -> int:
@@ -292,14 +293,11 @@ def _print_undo(result: dict, args) -> None:
 def _estop_latch_path(args) -> str | None:
     """The latch file `revl estop` acts on: `--latch`, else `<wal>.estop`.
 
-    Deriving it from the WAL is not a convenience: the WAL is the durable
-    rendezvous the reconciliation path already uses (`revl recover --wal`), so
-    a halt and its reconciliation name the same session with one argument."""
-    if getattr(args, "latch", None):
-        return args.latch
-    if getattr(args, "wal", None):
-        return f"{args.wal}.estop"
-    return None
+    The ambient `REVL_ESTOP_LATCH` is deliberately NOT consulted here: arming
+    a halt is an explicit act and must name its target, even though a running
+    process reads the same variable to find the latch it watches."""
+    return _latch_path(getattr(args, "latch", None),
+                       getattr(args, "wal", None), env=False)
 
 
 def _run_estop(args) -> int:
@@ -400,22 +398,11 @@ def _run_estop(args) -> int:
 def _read_estop_latch(path: str) -> dict | None:
     """The halt an operator armed at `path`, or None when the latch is absent.
 
-    A latch that exists but does not parse still reads as HALTED. Failing open
-    on a malformed emergency stop is the one failure mode this feature exists
-    to prevent, and it is the same rule the runtime seam applies."""
-    try:
-        with open(path, encoding="utf-8") as handle:
-            record = json.load(handle)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return None
-    except (ValueError, TypeError):
-        return {"halted": True, "reason": "operator halt (unreadable latch)",
-                "operator": "unknown"}
-    return record if isinstance(record, dict) else {
-        "halted": True, "reason": "operator halt (unreadable latch)",
-        "operator": "unknown"}
+    One reader, shared with the conductor and mirrored by the runtime seam
+    (`revl.estop.read_latch`): a latch that exists but does not parse still
+    reads as HALTED everywhere, because failing open on a malformed emergency
+    stop is the one failure mode this feature exists to prevent."""
+    return _read_latch(path)
 
 
 def _estop_outstanding(wal_path: str | None) -> dict:
