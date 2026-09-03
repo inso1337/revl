@@ -1,10 +1,10 @@
-# Network placement — from processes to machines
+# Network placement: from processes to machines
 
 Roadmap item 56. Placement (`docs/interop-bridge.md` §5, `src/revl/placement.py`)
 already splits one composition across host **processes**: a service provided in
 one process, required in another, wired by a generated proxy/stub over a
-transport. Until now that transport was a Unix-domain socket — one host by
-construction. This item lets a seam name a **machine**: point it at `host:port`
+transport. Until now that transport was a Unix-domain socket. That is one host
+by construction. This item lets a seam name a **machine**: point it at `host:port`
 in the placement map and the same seam crosses TCP instead of a local socket.
 
 The delta is deliberately small. Everything partial failure already paid for is
@@ -13,22 +13,22 @@ reused unchanged:
 - the **async contract + reactive withdrawal** on peer death (the monitor
   connection's EOF; `bridge._Client`, `tests/test_swap.py`),
 - **canonical value encoding** (records/ADTs cross by copy),
-- **seam deadlines** (item 54, `docs/seam-deadlines.md`) — a wedged *remote*
+- **seam deadlines** (item 54, `docs/seam-deadlines.md`): a wedged *remote*
   provider must not block its consumer any more than a wedged local one.
 
 Two things are added on top, and only two: a **TCP + mutual-TLS** transport, and
 **identity per process** (issued by the operator model, item 55). A network seam
-without both is *refused* — that is why this item is sequenced behind 54 and 55.
+without both is *refused*. That is why this item is sequenced behind 54 and 55.
 
 ## Non-goals
 
 This is a **static map**, nothing more. Explicitly **not** in scope, and not
 built:
 
-- **service discovery** — you write the address; nothing resolves it for you;
-- **orchestration** — nothing launches the remote process for you (the provider
+- **service discovery**: you write the address; nothing resolves it for you;
+- **orchestration**: nothing launches the remote process for you (the provider
   runs its own placement on its own machine);
-- **placement scheduling** — nothing decides *where* a seam should live.
+- **placement scheduling**: nothing decides *where* a seam should live.
 
 Pointing a seam at a machine is the whole feature.
 
@@ -38,7 +38,7 @@ A seam becomes a network seam when the **provider process** declares an
 `address`. Give that process a TLS `identity`, and give every process that
 consumes one of its keys an identity too. Everything else in the placement file
 is unchanged, and any process **without** an address keeps the local UDS
-transport — no certificate, full back-compat.
+transport, with no certificate and full back-compat.
 
 ```toml
 # mint self-signed *loopback test* certs for every declared identity (openssl).
@@ -66,7 +66,7 @@ proxies to that address. A local seam in the same file (a process with no
 
 ### Real certificates
 
-`generate_test_certs = true` is a **loopback convenience** — it shells out to
+`generate_test_certs = true` is a **loopback convenience**. It shells out to
 `openssl` to mint a throwaway CA and one short-lived leaf per identity, for
 tests and local dogfooding. It never touches real keys. For a real deployment,
 drop it and give each network process explicit material:
@@ -89,7 +89,7 @@ string still means "local UDS", so the existing callers are untouched.
 
 **Mutual TLS.** Both ends present a certificate. The provider's `serve` sets
 `verify_mode = CERT_REQUIRED`, so a caller that reaches the port with **no**
-client certificate is refused — a network seam is "the two processes holding
+client certificate is refused. A network seam is "the two processes holding
 CA-signed certs", not "whoever can reach the socket". The consumer verifies the
 provider's certificate against the same CA, hostname-checked. Identity per
 process is the certificate's subject: reused from item 55's operator model, so a
@@ -99,9 +99,9 @@ operator token, or the placement is refused.
 
 **Who may call: the `peers` allowlist.** Mutual TLS proves *which* identity is
 calling; on its own it has no opinion about whether that one *may*. A shared CA
-is a shared CA, so `CERT_REQUIRED` alone answers every identity it ever signed —
-including a composition you did not mean to serve. Declare the closed set on the
-provider:
+is a shared CA, so `CERT_REQUIRED` alone answers every identity it ever signed.
+That includes a composition you did not mean to serve. Declare the closed set on
+the provider:
 
 ```toml
 [processes.provider]
@@ -128,10 +128,11 @@ does not do that, and does not claim to.
 **Replays are refused, with no shared secret.** A network provider also runs
 `deploy.TransportReplayGuard` (installed by the conductor on every network seam,
 allowlist or not). It scopes duplicate detection by the identity the **mTLS
-handshake proved** — read off the peer certificate, never off the request body —
-so a captured request re-delivered to the provider is refused and never
-dispatched. A cross-composition consumer needs no key it cannot hold: it stamps
-an unsealed envelope from its own certificate and is deduplicated the same way. A
+handshake proved**. That identity is read off the peer certificate, never off the
+request body, so a captured request re-delivered to the provider is refused and
+never dispatched. A cross-composition consumer needs no key it cannot hold: it
+stamps an unsealed envelope from its own certificate and is deduplicated the
+same way. A
 crossing that declares no `idempotency_key` is dispatched as before, and the
 ledger is bounded (docs/deploy.md §2b-ii has the window and what eviction costs).
 
@@ -143,7 +144,7 @@ there; with the replay guard it also refuses the crossing as
 `peer-identity-mismatch` rather than dispatching it. Minted test certs
 (`generate_test_certs`) always agree by construction.
 
-So each seam reports the level it actually achieved — `sealed`, `peer-bound`,
+So each seam reports the level it actually achieved: `sealed`, `peer-bound`,
 `peer-pinned`, or `UNVERIFIED` when nothing closes the set (see docs/deploy.md
 §2b/§2c):
 
@@ -152,7 +153,7 @@ So each seam reports the level it actually achieved — `sealed`, `peer-bound`,
 ```
 
 **Deadlines and withdrawal, unchanged.** The deadline machinery bounds the reply
-read over TCP exactly as over the UDS — a wedged remote provider raises
+read over TCP exactly as over the UDS. A wedged remote provider raises
 `SeamDeadline`, not a hang (`tests/test_network_placement.py`). The monitor
 connection still turns a dropped remote peer into a reactive withdrawal. The
 canonical codec is transport-agnostic: the same JSON-line request/reply crosses.
@@ -163,7 +164,7 @@ The distributability audit (`docs/interop-bridge.md` §4) called a chatty seam
 "latency-bound" in the abstract. Once a seam points at a machine, that becomes a
 real figure: `placement.seam_latency_ms(host, port)` measures the median TCP
 connect round-trip, and the conductor prints it per network seam once the
-provider is up —
+provider is up:
 
 ```
   seam consumer.cache -> tcp://10.0.0.5:9443  RTT ~0.4 ms (measured)
@@ -177,16 +178,16 @@ reachable.
 A network seam is malpractice without identity and a deadline, so the conductor
 refuses to build one that lacks either, naming the missing half:
 
-- a network process with **no `identity`** — a seam that crosses machines must
+- a network process with **no `identity`**: a seam that crosses machines must
   present a per-process identity (mTLS);
-- a network process whose **`seam_deadline` is null** — an unbounded round-trip
+- a network process whose **`seam_deadline` is null**: an unbounded round-trip
   against a wedged remote provider would block its consumer forever;
 - an identity that is **not a declared operator** when an `operator_profile` is
   configured;
-- a network **provider** on a **non-py backend** — the TCP+mTLS *listener*
+- a network **provider** on a **non-py backend**: the TCP+mTLS *listener*
   (`asyncio.start_server` + mTLS) ships on the py runner in this cut, so the
   process that declares an `address` and serves its keys must be py;
-- a network **consumer** on a **rust/go/java backend** — the TCP+mTLS *client*
+- a network **consumer** on a **rust/go/java backend**: the TCP+mTLS *client*
   ships only on the py and node/ts runners (the node client was added in item
   149, `docs/network-path.md`); rust/go/java runners read only the local
   `socket` form, so a network consumer on those tiers is refused. A **node/ts**

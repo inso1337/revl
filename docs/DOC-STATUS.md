@@ -103,12 +103,12 @@ was corrected by hand and had drifted back within a day.
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |
 | composition-rows.md | needs-work | 13 |  |
-| conformance.md | needs-work | 38 |  |
-| contract-errata.md | needs-work | 93 | yes |
+| conformance.md | needs-work | 5 |  |
+| contract-errata.md | needs-work | 0 | yes |
 | crash-recovery.md | needs-work | 44 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
-| deploy.md | needs-work | 37 |  |
+| deploy.md | needs-work | 3 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 69 |  |
 | design-v2-realms.md | needs-work | 17 |  |
@@ -143,7 +143,7 @@ was corrected by hand and had drifted back within a day.
 | mcp-reference.md | current | 3 |  |
 | namespacing.md | needs-work | 8 |  |
 | network-path.md | needs-work | 25 |  |
-| network-placement.md | needs-work | 21 |  |
+| network-placement.md | needs-work | 1 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
 | operator-capabilities.md | needs-work | 26 |  |
 | parallel-activation.md | needs-work | 17 |  |
@@ -174,7 +174,7 @@ was corrected by hand and had drifted back within a day.
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 17 |  |
 | state-handoff.md | needs-work | 22 |  |
-| stdlib-2.0.md | current | 83 | yes |
+| stdlib-2.0.md | current | 0 | yes |
 | stdlib-json.md | needs-work | 41 |  |
 | stdlib-list.md | current | 14 |  |
 | stdlib-str.md | current | 16 |  |
@@ -182,7 +182,7 @@ was corrected by hand and had drifted back within a day.
 | stdlib-version.md | needs-work | 11 |  |
 | strings.md | needs-work | 39 |  |
 | swap.md | needs-work | 19 |  |
-| syntax-2.0.md | needs-work | 104 |  |
+| syntax-2.0.md | needs-work | 6 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
@@ -194,5 +194,5 @@ was corrected by hand and had drifted back within a day.
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |
-| witnessed-fs.md | needs-work | 6 |  |
+| witnessed-fs.md | needs-work | 0 |  |
 <!-- docgen:doc-status end -->
