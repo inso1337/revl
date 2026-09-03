@@ -1,7 +1,8 @@
 # `revl import a2a`: an A2A 1.0.0 Agent Card as a checked revl surface
 
     revl import a2a agent-card.json [--backend ts|py] [--service NAME]
-                                    [--allow-plaintext] [-o out.rvl]
+                                    [--allow-plaintext] [--follow-redirects]
+                                    [-o out.rvl]
 
 The fifth member of the import codegen family, after `revl mcp import`,
 `revl import wit`, `revl import openapi` and `revl import cordis`. It reads an
@@ -181,6 +182,45 @@ a suspension that never happens.
 
 ---
 
+## 3a. The endpoint is the endpoint: a redirect is refused
+
+The card's `url` is where the reach bound comes from — `net.<host>`, folded
+from the host alone (D-424c.10) — so the endpoint is part of what the generated
+file declares and what the composition admits.
+
+Both tiers' HTTP clients follow a redirect by default, and both change the
+method on the way: `urllib.request.urlopen` re-issues a 301/302/303 `POST` as a
+`GET` with the body dropped, and `fetch` defaults to `redirect: "follow"` with
+the same rule in the Fetch standard. A peer that answered `302` could therefore
+move the crossing to a host the card never named, over plain `http` even when
+`https` was what admitted it, turn a declared **emission** into a read, and
+carry every header on the request — a credential, a `Secret[T]` — to that host.
+The generated `net.<host>` token would still say otherwise.
+
+So the generated body refuses instead:
+
+| status | what the crossing does |
+|---|---|
+| 301, 302, 303 | **refused, always.** They re-issue the `POST` as a `GET` and drop the body. |
+| 307, 308, another origin | **refused, always.** The declared endpoint is the reach bound. |
+| 307, 308, the declared origin | refused unless `--follow-redirects` was passed; followed with the method and the body intact, at most five hops, when it was. |
+
+The refusal names the rule and reports only the target's **origin** — never the
+raw `Location`, which is peer-supplied text whose userinfo would be a live
+credential, the same discipline the card's own `url` gets. The generated header
+records which policy the file was generated under, the way it records
+`--allow-plaintext`.
+
+The crossing is also bounded in time (30s, written into the generated source).
+A peer that accepts the connection and then says nothing is a fault, not a wait.
+
+The policy, and the per-tier defaults behind it, live in
+`src/revl/crossing_redirect.py`; the composition `remote` row carries the same
+one under its `redirect(refuse | same_origin)` clause
+([composition-rows.md](composition-rows.md#redirect)).
+
+---
+
 ## 4. What this slice does *not* do
 
 | not projected | why, and where it goes instead |
@@ -211,6 +251,7 @@ Nothing is guessed. The importer refuses, naming the JSON pointer:
 | a `preferredTransport` other than `JSONRPC` | slice 1 speaks JSON-RPC 2.0 only |
 | a missing `url`, or one outside a strict absolute-http(s) character class | the endpoint is interpolated into a generated comment **and** a generated host body, so it is validated up front rather than escaped afterwards. Quotes, braces, backslashes, whitespace and control characters are refused, never repaired. This is the same class of hole as item 416f in the sibling importer, closed by refusing. |
 | a plaintext `http` endpoint | an A2A peer sits outside the trust boundary and everything crossing to it is authority leaving the process. `--allow-plaintext` imports it anyway (a loopback development agent) and the generated header records that you did. |
+| a redirect, at run time rather than at import time | the endpoint is part of what was declared and admitted; see §3a. `--follow-redirects` allows a same-origin 307/308 and nothing else. |
 | a card with no `skills` | there is no callable surface to generate and none to invent |
 | a skill with no `id`, or an `id` that does not fold to `[a-z][a-z0-9_]*` | an operation silently renamed is a boundary nobody can match back to the card |
 | two skills folding onto one operation name | both cannot be called |
