@@ -12,6 +12,14 @@
 // `fsUnmove`/`fsRmdirIfEmpty`), returning the `{ kind, value }` Result / Unit the
 // witnessed frame reads.
 //
+// Three more entry points carry the OBSERVATION half of the surface
+// (`fsResolveWithin`/`fsLexists`/`fsIsDir`, near the bottom of this file). They
+// are what lets a CONSUMER's own `@ts` body reach the jail without importing
+// this module at all: `stdlib/fs.rvl` re-exposes them as `pure` revl externs, so
+// a consumer asks revl for a confined path and then reads it with plain
+// `node:fs`. Observation only — the write primitives an earlier seam exported
+// are item 422 F1 itself and stay gone.
+//
 // Historically these helpers were reached through `globalThis.__revlFs`: a
 // verbatim `@ts` body cannot carry its own `import`, and these helpers need
 // `node:fs` (real filesystem), which the deliberately environment-neutral
@@ -191,8 +199,15 @@ export const PATH_FAMILIES: Record<string, readonly string[]> = {
 /** Read-only helpers an entry point may call. They observe and mutate nothing,
  * so they belong to no family; listing them here is what lets the family scan
  * refuse EVERYTHING else instead of maintaining a hand-kept exception list.
- * Peer of py `READ_HELPERS`. */
-export const READ_HELPERS: readonly string[] = ['lexistsConfined']
+ *
+ * They are also what the OBSERVATION entry points (`fsResolveWithin`,
+ * `fsLexists`, `fsIsDir`) are built from. Observation is the half of this module
+ * a consumer's own `@ts` body legitimately needs, and before those entry points
+ * existed the only way to reach it from a user-origin body was to guess a
+ * relative specifier into the install tree. Widening this list is still a
+ * deliberate edit: a read helper is a new way to LOOK at the filesystem through
+ * the jail. Peer of py `READ_HELPERS`. */
+export const READ_HELPERS: readonly string[] = ['lexistsConfined', 'isDirConfined']
 
 /** Which positional arguments of a `syscall-time` entry point are PATHS (and so
  * must have come from a family 1-3 guard). The rest are handles or data. Peer
@@ -1009,6 +1024,27 @@ function rawLexistsConfined(real: string): boolean {
   return nameIdentity(real) !== null
 }
 
+/** Is `real` a directory? A READ, the peer of `rawLexistsConfined`, and the only
+ * observation `stdlib/fs.rvl`'s `is_dir` needs beyond it.
+ *
+ * `real` is a path a family 1-3 guard already resolved, so this follows no
+ * symlink the membership test has not already seen: `resolveWithin` realpaths
+ * every existing component INCLUDING the leaf, so what arrives here is
+ * symlink-canonical and inside the root. Like `rawLexistsConfined` it decides
+ * nothing about confinement, and a lost race costs a stale answer, never an
+ * escape.
+ *
+ * `statSync(...).isDirectory()` follows symlinks, which is what py's
+ * `os.path.isdir` does; the two tiers must answer the same question. Total on
+ * its own (a stat error answers false) and total again through `makeTotal`. */
+function rawIsDirConfined(real: string): boolean {
+  try {
+    return fs.statSync(real).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 // ---------------------------------------------------------------------------
 // apply totality over the enumeration, then export the wrapped entry points
 // ---------------------------------------------------------------------------
@@ -1037,6 +1073,7 @@ const RAW: Record<string, (...a: never[]) => unknown> = {
   closeHandle: rawCloseHandle as (...a: never[]) => unknown,
   discardWrite: rawDiscardWrite as (...a: never[]) => unknown,
   lexistsConfined: rawLexistsConfined as (...a: never[]) => unknown,
+  isDirConfined: rawIsDirConfined as (...a: never[]) => unknown,
 }
 
 const GUARD: Record<string, (...a: never[]) => unknown> = {}
@@ -1089,6 +1126,8 @@ export const closeHandle = GUARD.closeHandle as typeof rawCloseHandle
 export const discardWrite = GUARD.discardWrite as typeof rawDiscardWrite
 /** read helper, see `rawLexistsConfined`. */
 export const lexistsConfined = GUARD.lexistsConfined as typeof rawLexistsConfined
+/** read helper, see `rawIsDirConfined`. */
+export const isDirConfined = GUARD.isDirConfined as typeof rawIsDirConfined
 
 // -------------------------------------------------------- per-extern entry points
 // item 410 stage 5: the entry points a `stdlib/fs.rvl` `= @ts ref` thunk imports
@@ -1270,6 +1309,73 @@ export function fsRmdirIfEmpty(w: MkdirWitness): void {
   // activation (or a concurrent writer) populated. idempotent + total: a
   // missing or non-empty dir is left as-is, no throw.
   rmdirConfined(target)
+}
+
+// ------------------------------------------------- the observation entry points
+// The OTHER half of this module, and the one a consumer's own host body needs.
+//
+// The four mutations above are witnessed and revertible; these three only LOOK.
+// They exist because "may I touch this path, and what is there?" had no
+// supported door for a USER-origin `@ts` body: 396(B) jails a user ref to the
+// user compile tree, item 410's `__REVL_STDLIB_REF_ROOT__` is stdlib-origin
+// only, and item 422 F1 removed the unconfined primitives the deprecated
+// `globalThis.__revlFs` seam published. What was left was a guessed relative
+// specifier into the install tree, which breaks whenever revl moves.
+//
+// So the door is a revl one: `stdlib/fs.rvl` exposes `resolve_within`, `lexists`
+// and `is_dir` as ordinary `pure` externs a consumer `use`s, and these are their
+// ts bodies. A consumer's own body never imports this module — it receives an
+// already-CONFINED absolute path from `resolve_within` and reads it with plain
+// `node:fs`, exactly as its `@py` peer would with `os`.
+//
+// OBSERVATION ONLY, and that is the point rather than an omission. The write
+// primitives an earlier seam exported are item 422 F1 itself; they stay gone. A
+// consumer that appears to need one needs a witnessed op from the catalog above,
+// or a finding filed — never a new primitive here.
+
+/** Realpath `p` and refuse it unless it lands inside the session workspace root,
+ * handing the resolved absolute path back as `Ok`. The whole confinement
+ * decision, and nothing else: the SAME family-1 guard every mutation routes
+ * through, so a path this refuses is a path no op on this surface would touch,
+ * and a path it admits is symlink-canonical and inside the root.
+ *
+ * `Err` carries the guard's own refusal verbatim — `EWORKSPACE` (no root
+ * configured), `EOUTSIDE` (the boundary refusal), `EINVAL` (a name no filesystem
+ * can hold) — so a caller distinguishes an operator mistake from a security
+ * refusal without a second vocabulary. */
+export function fsResolveWithin(p: string): FsResult<string> {
+  try {
+    return { kind: 'Ok', value: resolveWithin(p) }
+  } catch (e) {
+    if (e instanceof FsOpError) return { kind: 'Err', value: e.asError() }
+    throw e
+  }
+}
+
+/** Does `p` name something, once confined? `Ok(true)`/`Ok(false)` for a path
+ * inside the root, `Err` with the same code `fsResolveWithin` gives for one that
+ * is not — a path outside the boundary answers with a refusal, never with a
+ * fact about what is out there. */
+export function fsLexists(p: string): FsResult<boolean> {
+  try {
+    const target = resolveWithin(p)
+    return { kind: 'Ok', value: lexistsConfined(target) }
+  } catch (e) {
+    if (e instanceof FsOpError) return { kind: 'Err', value: e.asError() }
+    throw e
+  }
+}
+
+/** Is `p` a directory, once confined? Same shape and same refusals as
+ * `fsLexists`. */
+export function fsIsDir(p: string): FsResult<boolean> {
+  try {
+    const target = resolveWithin(p)
+    return { kind: 'Ok', value: isDirConfined(target) }
+  } catch (e) {
+    if (e instanceof FsOpError) return { kind: 'Err', value: e.asError() }
+    throw e
+  }
 }
 
 /** The helper surface the DEPRECATED `globalThis.__revlFs` seam publishes.

@@ -1130,6 +1130,95 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
     return types
 
 
+# item 130 Slice 5: the typed-event contract table, keyed like `FNS_KEY` /
+# `CASES_KEY` so it rides the shared `types` dict without a second parameter on
+# every lowering seam. `__`-prefixed, so `_lower_program` filters it out of the
+# emitted IR's `types` map and a program that declares no event is byte-
+# identical (an event's contract reaches the emitters on the ONE step that uses
+# it, the `stream-iter` handler, not as a global table).
+EVENTS_KEY = "__events__"
+
+# item 130 §6: the default bounded dedup window — how many recently admitted
+# keys a handler remembers. Bounded by construction and CONSTANT per handler,
+# never one entry per delivered item (the unbounded shape §4.7 refuses). A
+# redelivery further apart than the window than this runs the handler again, so
+# the window is a collapse of redeliveries, NOT a durable exactly-once claim;
+# that needs the §4.5 durable cursor, which is a later slice.
+_EVENT_DEDUP_WINDOW = 64
+
+
+def _lower_event_decls(program: Program, types: dict, filename: str) -> dict:
+    """Check every `event` declaration and build the contract table (item 130
+    Slice 5, docs/design/130-stream-reactive-types.md §6).
+
+    An event is a `Stream[T]` element with a contract, so its RECORD half is
+    already done by the time this runs: the parser contributed a `TypeDecl`, and
+    `_lower_type_decls` type-checked it like any other record (duplicate name,
+    duplicate field, field types). This function checks only what events ADD:
+
+    * the key names a declared FIELD of the event, and its type is scalar-
+      serializable (`Str`/`Int`) — item 309's rule for `idempotent(key: p)`,
+      applied on the consumer side of the same idea. A key that is a record, a
+      list or a host handle has no stable identity to dedup on;
+    * the event's schema is derivable EXACTLY. The handler validates every
+      delivered item against it at the boundary (§6, "schema compatibility"), and
+      item 257 §3.3 already settled what an inexact schema is worth there: an
+      unconstrained schema validates nothing while reading as safe, so it is
+      refused at compile time rather than shipped as a vacuous guarantee.
+    """
+    events: dict[str, dict] = {}
+    for decl in getattr(program, "event_decls", ()):
+        spec = types.get(decl.name) or {}
+        fields = spec.get("fields") or {}
+        if decl.key not in fields:
+            listed = ", ".join(sorted(fields)) or "(none)"
+            raise RevlError(
+                filename, decl.line,
+                f"`event {decl.name}` declares `key: {decl.key}`, but "
+                f"`{decl.key}` is not one of its fields ({listed})",
+                hint="the key names the FIELD carrying the event's identity — the "
+                     "value a duplicate delivery repeats — so it must resolve "
+                     "against the event's own record (item 130 §6; the role is "
+                     "item 309's idempotency key)",
+                code="G4", category="idempotent")
+        key_type = fields[decl.key]
+        if key_type not in ("Str", "Int"):
+            raise RevlError(
+                filename, decl.line,
+                f"`event {decl.name}` key `{decl.key}` has type `{key_type}`, "
+                f"which is not scalar-serializable",
+                hint="a duplicate is recognised by comparing key VALUES across "
+                     "deliveries, so the key must be a serializable scalar "
+                     "(`Str` or `Int`), not a compound type or a host handle "
+                     "(item 130 §6, item 309 §1b)",
+                code="G4", category="idempotent")
+        if not fully_expressible(decl.name, types):
+            reason = expressibility_reason(decl.name, types) or "is not expressible"
+            raise RevlError(
+                filename, decl.line,
+                f"`event {decl.name}` {reason}, so its delivered items cannot be "
+                f"checked against a schema",
+                hint="an event's handler validates every item at the boundary "
+                     "before the body runs, and an unconstrained schema validates "
+                     "nothing while reading as safe — so an inexact event shape is "
+                     "refused at compile time rather than shipped as a vacuous "
+                     "guarantee (item 130 §6, item 257 §3.3)",
+                code="G4", category="validated")
+        schema = json_schema_for(decl.name, types, validated=True)
+        if has_revl_stub(schema):  # pragma: no cover — predicate/renderer drift
+            raise RevlError(
+                filename, decl.line,
+                f"internal: `event {decl.name}` derived an unconstrained schema "
+                f"despite passing the expressibility gate (item 130 §6)")
+        events[decl.name] = {
+            "key": decl.key,
+            "window": decl.window if decl.window is not None
+            else _EVENT_DEDUP_WINDOW,
+            "schema": schema,
+        }
+    return events
+
+
 def _fn_call_graph(program: Program) -> dict[str, set[str]]:
     """Direct-call graph over the file's functions.
 
@@ -5735,6 +5824,13 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     types = _lower_type_decls(program, program.filename)
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
+    # item 130 Slice 5: the typed-event contracts. Built after the record table
+    # (an event IS a record, §6) and stashed under a `__`-prefixed key, so a
+    # program with no event declaration reaches every downstream section — and
+    # the emitted IR — byte-identically.
+    events = _lower_event_decls(program, types, program.filename)
+    if events:
+        types[EVENTS_KEY] = events
     _refuse_callable_shadowing(program, program.filename)
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename, types, fns)
@@ -10027,12 +10123,22 @@ def _lower_stream_iter_step(stmt: "StreamIterStmt", env: Env, filename: str,
                  "consumer (item 130 §4.1)",
             code="lifecycle", category="lifecycle")
     env.iterated_subs.add(safe)
+    contract = _event_contract(stmt, env, filename)
     # The item is bound for the BODY only. A saved/restored `locals`+`_taken`
     # keeps the loop variable out of scope after the loop (it names one delivered
     # item, and there is no last item once the terminal arrived) while still
     # reserving its safe name against a later collision.
     saved_locals = dict(env.locals)
+    saved_type_env = dict(env.type_env)
     item = env.bind_local(stmt.bind, stmt.line)
+    if contract is not None:
+        # Slice 5: under `on <Event> as <x>`, the item has a TYPE — the event's
+        # record — for the length of the body. That is the whole "schema
+        # compatibility" row of §6 on the checked side: `<x>.<field>` resolves
+        # through the ordinary record rules, so a field the event does not
+        # declare and a field used at the wrong type are both compile errors,
+        # where a plain `every`'s untyped item admits either.
+        env.type_env[item] = stmt.event
     body: list = []
     for inner in stmt.body:
         if isinstance(inner, FailStmt):
@@ -10046,14 +10152,97 @@ def _lower_stream_iter_step(stmt: "StreamIterStmt", env: Env, filename: str,
             continue
         emit_step = _lower_emit_step(inner, env)
         _admit_emit_async(inner, emit_step, env, filename)
+        if contract is not None:
+            _check_event_field_reads(emit_step.get("expr"), item, stmt.event,
+                                     contract, env, filename, inner.line)
         body.append(emit_step)
     env.locals = saved_locals
-    return {
+    env.type_env = saved_type_env
+    step = {
         "step": "stream-iter",
         "bind": item,
         "subject": {"kind": "name", "id": safe},
         "body": body,
     }
+    if contract is not None:
+        # Additive, and present only under an `on … as` handler, so a Slice 4
+        # iteration lowers byte-identically (§5's additive-key discipline).
+        step["event"] = {
+            "name": stmt.event,
+            "key": contract["key"],
+            "window": contract["window"],
+            "schema": contract["schema"],
+        }
+    return step
+
+
+def _event_contract(stmt: "StreamIterStmt", env: Env, filename: str):
+    """Resolve the `on <Event> as …` handler's event contract, or None for a
+    plain `every … in` (item 130 Slice 5, §6).
+
+    Refuses a name that is not a declared `event`, and says which of the two
+    near misses it is — an undeclared name, or a `type` that was never given the
+    contract an event carries. A record cannot stand in for an event: the two
+    things §6 assigns to events beyond a plain stream (the identity key and the
+    dedup that key makes possible) live in the `event` declaration, so `on` over
+    a bare record would be `every` with extra syntax."""
+    name = getattr(stmt, "event", None)
+    if name is None:
+        return None
+    events = env.types.get(EVENTS_KEY) or {}
+    contract = events.get(name)
+    if contract is None:
+        known = ", ".join(sorted(events)) or "(none declared)"
+        declared_type = name in env.types
+        raise RevlError(
+            filename, stmt.line,
+            f"`on {name} as …` names no declared event"
+            + (f" — `{name}` is a `type`, not an `event`" if declared_type else ""),
+            hint=(f"declare it: `event {name}(key: <field>) {{ … }}`. An event is a "
+                  "record with a contract (item 130 §6) — the identity key its "
+                  "handler dedups on is what a plain `type` does not carry"
+                  if declared_type else
+                  f"declare it: `event {name}(key: <field>) {{ … }}`. Declared "
+                  f"events: {known} (item 130 §6)"),
+            code="lifecycle", category="lifecycle")
+    return contract
+
+
+def _check_event_field_reads(node, item: str, event: str, contract: dict,
+                             env: Env, filename: str, line: int) -> None:
+    """Refuse a read of a field the event does not declare (item 130 Slice 5).
+
+    Scoped deliberately to reads rooted at the handler's ITEM. The emit-argument
+    typing already compares an inferred field's type against the emission's
+    parameter, but an UNKNOWN field infers to `None`, which that comparison
+    treats as "no information" and admits — so the misspelling the event
+    contract exists to catch would compile clean and fail at the host. This walk
+    is the one that names it, and it names it against the event, which is the
+    diagnostic an author of an `on` handler wants."""
+    fields = (env.types.get(event) or {}).get("fields") or {}
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, list):
+            stack.extend(cur)
+            continue
+        if not isinstance(cur, dict):
+            continue
+        target = cur.get("target")
+        if cur.get("kind") in ("field", "optfield") \
+                and isinstance(target, dict) and target.get("kind") == "name" \
+                and target.get("id") == item and cur.get("name") not in fields:
+            listed = ", ".join(sorted(fields)) or "none"
+            raise RevlError(
+                filename, line,
+                f"`event {event}` has no field `{cur.get('name')}` "
+                f"(fields: {listed})",
+                hint="an event's items are validated against the schema derived "
+                     "from its declared fields before the body runs, so a field "
+                     "the declaration does not carry can never arrive "
+                     "(item 130 §6)",
+                code="T1", category="type-mismatch")
+        stack.extend(cur.values())
 
 
 def _lower_timer_step(stmt: TimerStmt, env: Env) -> dict:

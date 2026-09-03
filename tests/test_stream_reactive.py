@@ -1052,3 +1052,516 @@ def test_the_unlowered_tiers_still_refuse_the_iteration_program(tier):
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_ITER, "s.rvl"))
     assert "suspends a fiber" in str(excinfo.value)
+
+
+# ===========================================================================
+# Slice 5 — typed EVENTS: `event E(key: f)` + `on E as e in sub { … }` (§6)
+# ===========================================================================
+#
+# §6's call is that events are a `Stream[T]` SPECIALIZATION, not a second
+# surface: `on … as` desugars to Slice 4's `every … in`, and everything the
+# guarantee rests on — the subscription bracket, the cancellation-first `next`,
+# the iteration boundary, the uncaught `Faulted` — is that slice's, unchanged.
+# So this suite pins the two things events ADD and the one thing they must not
+# move.
+#
+#   ADD (1): a SCHEMA. `event E { … }` is a record, so `e.<field>` is checked by
+#   the ordinary record rules, and every delivered item is validated against the
+#   derived schema at the boundary before the body runs.
+#   ADD (2): an identity KEY and the bounded dedup window it enables, so a
+#   redelivery is collapsed instead of running the handler twice.
+#   MUST NOT MOVE: the emitted loop. The contract is built ONCE above it, and the
+#   gate sits after the await, after its `yield`, and after the terminal test.
+#
+# The runtime proof (an item validated before the body, a duplicate collapsed, a
+# schema violation closing the subscription) is the py suite at
+# backends/python/tests/test_stream_runtime.py.
+
+_EVENT = """
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+component Fulfiller requires ship: Ship {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub {
+    emit ship.dispatch(e.order_id)
+  }
+}
+"""
+
+
+def _event_step(src: str = _EVENT) -> dict:
+    body = compile_source(src, "s.rvl")["components"][0]["body"]
+    return next(s for s in body if s.get("step") == "stream-iter")
+
+
+# ---------------------------------------------------------------------------
+# The specialization: one node, one step, one loop (§6)
+# ---------------------------------------------------------------------------
+
+def test_a_handler_lowers_to_the_slice_4_step_with_an_additive_contract():
+    """§6: `on … as` DESUGARS to `every … in`. The handler is the same
+    `stream-iter` step — same bind, same subject, same body — plus the contract
+    the event adds. If these ever became two steps, the two forms could drift
+    apart on the properties that carry the guarantee."""
+    step = _event_step()
+    assert step["step"] == "stream-iter"
+    assert step["bind"] == "e"
+    assert step["subject"] == {"kind": "name", "id": "sub"}
+    assert [inner["step"] for inner in step["body"]] == ["emit"]
+    contract = step["event"]
+    assert contract["name"] == "OrderCreated"
+    assert contract["key"] == "order_id"
+    assert contract["window"] == 64, "the documented default dedup window"
+    assert contract["schema"] == {
+        "type": "object",
+        "properties": {"order_id": {"type": "string"},
+                       "quantity": {"type": "integer"}},
+        "required": ["order_id", "quantity"],
+    }
+
+
+def test_a_plain_iteration_carries_no_contract_key():
+    """The contract is ADDITIVE: a Slice 4 `every … in` lowers exactly as it did
+    before Slice 5 existed."""
+    assert "event" not in _iter_step()
+
+
+def test_an_event_is_an_ordinary_record_type():
+    """§6, "schema compatibility": the event's record half is an ordinary record
+    type-check on `T` — the declaration contributes a normal record to the type
+    table, with no event-specific case anywhere in the type machinery."""
+    ir = compile_source(_EVENT, "s.rvl")
+    assert ir["types"]["OrderCreated"] == {
+        "params": [], "kind": "record",
+        "fields": {"order_id": "Str", "quantity": "Int"},
+    }
+
+
+def test_a_declared_window_overrides_the_default():
+    step = _event_step("""
+    event E(key: id, window: 8) { id: Str }
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub { emit sink.write(e.id) }
+    }
+    """)
+    assert step["event"]["window"] == 8
+
+
+def test_an_event_declaration_alone_changes_no_component():
+    """An event that nothing handles is a record and nothing more: it adds no
+    step, no capability and no runtime. The contract reaches the emitters on the
+    ONE step that uses it, never as a global table."""
+    ir = compile_source("""
+    event E(key: id) { id: Str }
+    component C {
+      let pool = effect Pool.open("u", 4) undo pool.close()
+    }
+    """, "s.rvl")
+    assert ir["types"]["E"]["kind"] == "record"
+    assert all("event" not in step for step in ir["components"][0]["body"])
+
+
+# ---------------------------------------------------------------------------
+# `event` and `on` are CONTEXTUAL — no keyword, no lexer sync
+# ---------------------------------------------------------------------------
+
+def test_event_and_on_stay_ordinary_identifiers_elsewhere():
+    """Both words are recognised only in their own shape (`event IDENT (`/`{`,
+    `on IDENT as`), the `boot`/`fault`/`secret` discipline. The corpus really
+    does use `event` as a parameter name, so promoting it to a lexer keyword
+    would have broken shipped programs — and the self-hosted lexer's KEYWORDS
+    table (and the gate crate's frontier derived from it) needs no sync."""
+    ir = compile_source("""
+    service Audit { emission fn log(event: Str) }
+    component C requires audit: Audit {
+      config { on: Str = "yes" }
+      emit audit.log(config.on)
+    }
+    """, "s.rvl")
+    assert ir["components"][0]["body"][0]["step"] == "emit"
+
+
+def test_a_handler_and_a_timer_and_an_iteration_coexist():
+    ir = compile_source("""
+    event E(key: id) { id: Str }
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let a = effect Stream.source() undo a.close()
+      let b = effect Stream.source() undo b.close()
+      let sa = subscribe a undo sa.close()
+      let sb = subscribe b undo sb.close()
+      every 30s { emit sink.write("tick") }
+      every o in sa { emit sink.write(o) }
+      on E as e in sb { emit sink.write(e.id) }
+    }
+    """, "s.rvl")
+    steps = ir["components"][0]["body"]
+    kinds = [s.get("step") for s in steps]
+    assert kinds.count("stream-iter") == 2 and "timer" in kinds
+    contracts = [s.get("event") for s in steps if s.get("step") == "stream-iter"]
+    assert [c is None for c in contracts] == [False, True] or \
+           [c is None for c in contracts] == [True, False]
+
+
+# ---------------------------------------------------------------------------
+# The contract's refusals (§6)
+# ---------------------------------------------------------------------------
+
+def test_an_event_needs_a_key():
+    """The key is REQUIRED: it is what makes the two obligations §6 assigns to
+    events beyond a plain stream — handler idempotency and duplicate handling —
+    checkable at all."""
+    msg = _refusal("""
+    event E { id: Str }
+    component C { }
+    """)
+    assert "needs a key" in msg and "key: <field>" in msg
+
+
+def test_the_key_must_name_a_field_of_the_event():
+    msg = _refusal("""
+    event E(key: nope) { id: Str }
+    component C { }
+    """)
+    assert "is not one of its fields (id)" in msg
+
+
+def test_the_key_must_be_scalar_serializable():
+    """A duplicate is recognised by comparing key VALUES across deliveries, so a
+    compound key has no stable identity to dedup on (item 309 §1b's rule, on the
+    consumer side of the same idea)."""
+    msg = _refusal("""
+    type P = { a: Str }
+    event E(key: p) { id: Str, p: P }
+    component C { }
+    """)
+    assert "not scalar-serializable" in msg
+
+
+def test_the_dedup_window_is_bounded_and_positive():
+    msg = _refusal("""
+    event E(key: id, window: 0) { id: Str }
+    component C { }
+    """)
+    assert "positive whole count" in msg
+    assert "never one entry per delivered item" in msg
+
+
+def test_an_event_with_no_fields_is_refused():
+    assert "declares no fields" in _refusal("""
+    event E(key: id) { }
+    component C { }
+    """)
+
+
+def test_a_handler_over_an_undeclared_event_is_refused():
+    msg = _refusal("""
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on Nope as e in sub { fail "x" }
+    }
+    """)
+    assert "names no declared event" in msg
+
+
+def test_a_plain_record_cannot_stand_in_for_an_event():
+    """A `type` carries no identity key, so `on` over one would be `every` with
+    extra syntax — and the two rows §6 assigns to events would be a claim
+    nothing backs."""
+    msg = _refusal("""
+    type E = { id: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub { fail "x" }
+    }
+    """)
+    assert "is a `type`, not an `event`" in msg
+
+
+def test_a_handler_needs_the_subscription_it_pulls():
+    """The `in <sub>` clause is where this surface departs from §6's sketch: the
+    sketch resolves the event's stream through the provide/inject graph, which
+    needs a REQUIRED `Stream[T]` capability that is a later slice."""
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e { fail "x" }
+    }
+    """)
+    assert "needs the subscription it handles" in msg
+
+
+def test_a_handler_over_something_that_is_not_a_subscription_is_refused():
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      on E as e in src { fail "x" }
+    }
+    """)
+    assert "needs a live subscription" in msg
+
+
+def test_a_second_handler_on_one_subscription_is_refused_rule_3_1():
+    """Rule 3.1 on the handle is Slice 4's, inherited: an event handler consumes
+    its subscription to the terminal exactly as a plain iteration does."""
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub { emit sink.write(e.id) }
+      on E as f in sub { emit sink.write(f.id) }
+    }
+    """)
+    assert "already iterated" in msg and "single-consumer" in msg
+
+
+# ---------------------------------------------------------------------------
+# The typed item: what an event buys the checker over a plain iteration
+# ---------------------------------------------------------------------------
+
+def test_the_item_is_typed_so_an_undeclared_field_is_a_compile_error():
+    """The checked half of "schema compatibility": under `on`, the item has the
+    event's record type for the length of the body, where a plain `every`'s item
+    is untyped and admits any field read."""
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub { emit sink.write(e.nope) }
+    }
+    """)
+    assert "`event E` has no field `nope`" in msg
+
+
+def test_the_item_type_reaches_the_emission_signature():
+    msg = _refusal("""
+    event E(key: id) { id: Str, quantity: Int }
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub { emit sink.write(e.quantity) }
+    }
+    """)
+    assert "expects `Str`" in msg and "got `Int`" in msg
+
+
+def test_the_item_does_not_outlive_the_handler_body():
+    """The bind is the body's, exactly as Slice 4's is: it names ONE delivered
+    item and there is no last item once the terminal arrived."""
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub { emit sink.write(e.id) }
+      emit sink.write(e.id)
+    }
+    """)
+    assert "e" in msg
+
+
+# ---------------------------------------------------------------------------
+# The body is Slice 4's body — including the acquisition refusal, unchanged
+# ---------------------------------------------------------------------------
+
+def test_an_acquisition_in_a_handler_body_is_still_refused():
+    """Slice 5 does not change the §4.7 calculus and does not lift the refusal.
+    An event's dedup memory is a FIXED-SIZE window per handler, constant in the
+    length of the stream; an `effect … undo …` per delivered item is still one
+    accumulator entry per item, and the per-iteration discharge that would bound
+    it still does not exist."""
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub {
+        let p = effect Pool.open("u", 1) undo p.close()
+      }
+    }
+    """)
+    assert "records emissions (and `fail`) only" in msg
+    assert "unbounded in the length of the stream" in msg
+
+
+def test_a_per_item_compensation_in_a_handler_is_refused():
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    service Sink { emission fn write(v: Str) }
+    component C requires sink: Sink {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub { emit sink.write(e.id) compensate sink.write("undo") }
+    }
+    """)
+    assert "cannot declare `compensate`" in msg
+
+
+def test_a_nested_await_in_a_handler_is_refused():
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub { await sub.next() }
+    }
+    """)
+    assert "cannot `await`" in msg and "second consumer" in msg
+
+
+def test_an_empty_handler_body_is_refused():
+    assert "is empty" in _refusal("""
+    event E(key: id) { id: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub { }
+    }
+    """)
+
+
+def test_a_handler_in_a_provide_method_is_refused():
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    service Sink { emission fn write(v: Str) }
+    service Q { fn v() -> Int }
+    component C requires sink: Sink provides q: Q {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      provide q {
+        fn v() -> Int {
+          on E as e in sub { emit sink.write(e.id) }
+          return 1
+        }
+      }
+    }
+    """)
+    assert "activation body" in msg
+
+
+def test_a_handler_after_provide_is_refused():
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    service Sink { emission fn write(v: Str) }
+    service Q { fn v() -> Int }
+    component C requires sink: Sink provides q: Q {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      provide q { fn v() -> Int { return 1 } }
+      on E as e in sub { emit sink.write(e.id) }
+    }
+    """)
+    assert "after `provide`" in msg
+
+
+def test_the_handler_body_emission_is_enumerated_on_the_boundary():
+    """§4.7, inherited: the body is a setup-mode effect context, so its
+    emissions are capability-checked (G1) and reach the G8 audit as component
+    reach — because they lower through the same `_lower_emit_step` and the same
+    `env` an activation-body `emit` does."""
+    step = _event_step()
+    assert step["body"][0]["expr"]["target"] == {"kind": "req", "name": "ship"}
+
+
+def test_an_undeclared_requirement_in_a_handler_body_is_refused_g1():
+    msg = _refusal("""
+    event E(key: id) { id: Str }
+    service Sink { emission fn write(v: Str) }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      on E as e in sub { emit sink.write(e.id) }
+    }
+    """)
+    assert "sink" in msg
+
+
+# ---------------------------------------------------------------------------
+# Emission: py renders the gate; every other tier REFUSES by name (§4.6)
+# ---------------------------------------------------------------------------
+
+def test_python_emits_the_contract_above_the_loop_and_the_gate_below_the_yield():
+    """Where each line sits is the argument that the contract costs the
+    guarantee nothing: the contract is built ONCE above the loop (constant dedup
+    memory, not one entry per item), and the gate sits AFTER the await, after
+    its `yield` (the iteration boundary a divert-while-parked depends on), and
+    after the terminal test (a `Closed` is not an item to validate)."""
+    emit = _tier_emit("python")
+    code = emit.emit(compile_source(_EVENT, "s.rvl"))
+    contract = next(line for line in code.splitlines()
+                    if "Stream.contract(" in line)
+    assert "'OrderCreated'" in contract and "'order_id'" in contract
+    assert contract.rstrip().endswith(", 64)"), "the bounded window is emitted"
+    gate = next(line for line in code.splitlines() if ".admit(e," in line)
+    assert gate.strip().startswith("if not ")
+    order = [code.index(contract), code.index("while True:"),
+             code.index("e = await sub.next()"),
+             code.index("yield None  # iteration boundary (A1)"),
+             code.index("if Stream.is_closed(e):"),
+             code.index(gate),
+             code.index("_revl_ctx.ship.dispatch(")]
+    assert order == sorted(order), "the contract is above the loop, the gate below the yield"
+    # a duplicate skips THIS item and pulls the next one; it never leaves the loop
+    assert "continue" in code
+    # a `Faulted` — including a schema violation — is still not caught (A8)
+    assert "StreamFaulted" not in code and "except" not in code
+
+
+def test_the_emitted_gate_runs_before_the_body_not_after():
+    emit = _tier_emit("python")
+    code = emit.emit(compile_source(_EVENT, "s.rvl"))
+    assert code.index(".admit(e,") < code.index("_revl_ctx.ship.dispatch(")
+
+
+@pytest.mark.parametrize("tier", ["go", "rust"])
+def test_the_blocking_tiers_refuse_the_handler_by_name(tier):
+    """go and rust lower the Slice 1/3 protocol but neither iteration form. On
+    go the refusal is doubly load-bearing: an event program always declares a
+    record, and a document with top-level declarations routes to that tier's
+    pure typed-core path, which would DROP the component — emitting a program
+    that silently never subscribes."""
+    emit = _tier_emit(tier)
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_EVENT, "s.rvl"))
+    msg = str(excinfo.value)
+    assert "unsupported component step" not in msg
+    assert "`on … as`" in msg and "backend py" in msg
+
+
+def test_go_refuses_a_dropped_stream_component_rather_than_emitting_a_stub():
+    """The same hole reached without an event: a plain subscription in a
+    document that also declares a record would route past the component too."""
+    emit = _tier_emit("go")
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source("""
+        type Foo = { a: Str }
+        component C {
+          let src = effect Stream.source() undo src.close()
+          let sub = subscribe src undo sub.close()
+          await sub.next()
+        }
+        """, "s.rvl"))
+    assert "drop the component" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("tier", ["java", "typescript", "wasm"])
+def test_the_unlowered_tiers_still_refuse_a_handler_program(tier):
+    emit = _tier_emit(tier)
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_EVENT, "s.rvl"))
+    assert "suspends a fiber" in str(excinfo.value)

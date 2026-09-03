@@ -1,4 +1,5 @@
-// Typecheck every EMITTED module under `tests/generated/` (issue #198).
+// Typecheck every EMITTED module — `tests/generated/` and `golden/` (issues
+// #198, #223).
 //
 // `tsconfig.json` covered `runtime.ts`, `demo.ts` and `golden/**` — so the
 // modules the vitest suites import and execute were compiled by nobody. This
@@ -11,7 +12,10 @@
 // service named `db` cannot share a program without TypeScript merging their
 // augmentations and resolving `ctx.db` to the wrong interface. `emit.py`
 // produces a standalone program per IR module; this checks each one the way it
-// is produced.
+// is produced. `golden/**` moved under this script for the same reason (issue
+// #223): as a group it passed only because no two golden fixtures happened to
+// collide on a service name, and the first one that did would have redded
+// `tsc --noEmit` with a TS2717 that says nothing about the emitter.
 //
 // Requires `tests/generated/` to be populated (it is gitignored, and written
 // by `scripts/emit-fixtures.ts` at vitest config-load time). It does not
@@ -19,22 +23,22 @@
 // checking zero files and reporting success. Silent-nothing is the failure
 // mode this whole file exists to remove.
 
-import { createRequire } from 'node:module'
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const require = createRequire(import.meta.url)
-const ts = require('typescript')
+import {
+  checkEachAsItsOwnProgram,
+  die as sharedDie,
+  loadConfig,
+} from './typecheck-lib.mjs'
+
+const GATE = 'typecheck-generated'
+const die = (message) => sharedDie(GATE, message)
 
 const backend = dirname(dirname(fileURLToPath(import.meta.url)))
 const generatedDir = join(backend, 'tests', 'generated')
 const configPath = join(backend, 'tsconfig.generated.json')
-
-function die(message) {
-  console.error(`typecheck-generated: ${message}`)
-  process.exit(1)
-}
 
 /** The output filenames `scripts/emit-fixtures.ts` writes, read out of that
  * source. This is the anti-vacuity guard: it is what makes "0 files checked,
@@ -56,19 +60,7 @@ function expectedModules() {
   return [...new Set(calls)].sort()
 }
 
-const config = ts.getParsedCommandLineOfConfigFile(configPath, {}, {
-  ...ts.sys,
-  onUnRecoverableConfigFileDiagnostic: (d) =>
-    die(ts.flattenDiagnosticMessageText(d.messageText, '\n')),
-})
-if (!config) die(`could not read ${relative(backend, configPath)}`)
-if (config.errors.length > 0) {
-  die(
-    config.errors
-      .map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\n'))
-      .join('\n'),
-  )
-}
+const config = loadConfig(GATE, configPath, backend)
 
 const expected = expectedModules()
 const missing = expected.filter((name) => !existsSync(join(generatedDir, name)))
@@ -96,42 +88,19 @@ if (uncovered.length > 0) {
   )
 }
 
-const host = ts.createCompilerHost(config.options, true)
-const formatHost = {
-  getCanonicalFileName: (f) => f,
-  getCurrentDirectory: () => backend,
-  getNewLine: () => ts.sys.newLine,
-}
-
-let failed = 0
-for (const root of roots) {
-  const program = ts.createProgram({
-    rootNames: [root],
-    options: config.options,
-    host,
-  })
-  const diagnostics = [
-    ...program.getSyntacticDiagnostics(),
-    ...program.getSemanticDiagnostics(),
-    ...program.getGlobalDiagnostics(),
-  ]
-  if (diagnostics.length > 0) {
-    failed += 1
-    process.stderr.write(
-      ts.formatDiagnosticsWithColorAndContext(diagnostics, formatHost),
-    )
-  }
-}
+const { failed, programs } = checkEachAsItsOwnProgram(
+  roots, config.options, backend)
 
 if (failed > 0) {
   die(
-    `${failed} of ${roots.length} emitted module(s) do not typecheck. These are ` +
+    `${failed} of ${programs} emitted module(s) do not typecheck. These are ` +
       'emitter defects unless proven otherwise — fix the emitter or the ' +
       'runtime, not this gate.',
   )
 }
 
 console.log(
-  `typecheck-generated: ${roots.length} emitted modules typecheck ` +
-    `(${expected.length} from the fixture list, one program each).`,
+  `typecheck-generated: ${programs} emitted modules typecheck ` +
+    `(${expected.length} from the fixture list, the rest checked-in under ` +
+    'golden/, one program each).',
 )

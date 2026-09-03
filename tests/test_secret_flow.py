@@ -322,3 +322,115 @@ def test_a_secret_free_confidential_free_program_is_byte_identical():
     ir = compile_source(src, "free.rvl")
     comp = {c["name"]: c for c in ir["components"]}["A"]
     assert "taint" not in comp  # no taint surface touched
+
+
+# ===========================================================================
+# 7. The THIRD mint of `confidential`: a component config field declared
+#    `Secret[T]` (§7a).
+#
+#    An operator-supplied credential — an API key, a DSN password — is declared
+#    on the component, not on an extern return or a parameter:
+#
+#        component Keeper provides vault: Vault {
+#          config { api_key: Secret[Str] }
+#          ...
+#        }
+#
+#    The marking already reached the EMITTERS (each tier reads
+#    `config[i]["secret"]` to keep the value out of its run log and its
+#    `revl_load` MCP response). It did not reach the ORIGIN LATTICE: a
+#    `config.<field>` read was seeded CLEAN alongside a literal, so the declared
+#    credential was invisible to every §7 rule above — the disclosure sinks, the
+#    emission crossing and the provide-method return alike.
+#
+#    Seeding it is what makes the declaration mean the same thing in the checker
+#    that it already meant in the emitters. The rules themselves are unchanged.
+# ===========================================================================
+
+_KEEPER_HEAD = (
+    "service Vault {\n  fn lookup(name: Str) -> Result[Str, Str]\n}\n"
+    "component Keeper provides vault: Vault {\n"
+    "  config { url: Str = \"pg://x\", api_key: Secret[Str] = \"k\" }\n"
+)
+
+
+def _keeper(method_body: str, head: str = _KEEPER_HEAD) -> str:
+    return head + "  provide vault {\n" + method_body + "\n  }\n}\n"
+
+
+def test_secret_config_field_is_refused_at_the_provide_method_return():
+    """The provide-method return is a crossing whichever half of a `Result` the
+    value rides in. The `Err` half is the one authors overlook: it reads like an
+    error, but it is marshalled BY VALUE exactly like the `Ok` half."""
+    err = _refuses(_keeper(
+        "    fn lookup(name) = Err(`no entry ${name} under ${config.api_key}`)"))
+    # the diagnostic has to name the FIELD, the SEAM and the FIX
+    assert "config.api_key" in err.message + err.hint
+    assert "placement-seam reply" in err.message
+    assert "provide-method return" in err.message
+    assert "endorse[confidential]" in err.hint
+
+
+def test_secret_config_field_is_refused_on_the_ok_half_too():
+    """Not an `Err`-payload rule: the `Ok` half crosses the same seam."""
+    _refuses(_keeper("    fn lookup(name) = Ok(config.api_key)"))
+
+
+def test_secret_config_field_is_refused_at_a_disclosure_sink():
+    """Every §7b sink sees it now, not only the return — the seed is on the
+    ORIGIN, so the existing rules apply unchanged."""
+    src = (_PRELUDE
+           + "service Vault {\n  emission fn lookup(name: Str) -> Int\n}\n"
+           "component Keeper provides vault: Vault {\n"
+           "  config { api_key: Secret[Str] = \"k\" }\n"
+           "  provide vault {\n"
+           "    fn lookup(name) {\n      let x = logit(config.api_key)\n"
+           "      return x\n    }\n  }\n}\n")
+    _refuses(src)
+
+
+def test_an_unmarked_config_field_is_still_clean():
+    """The false-positive control. An ordinary config field is trusted by
+    construction exactly as before — a diagnostic that quotes the DSN it could
+    not reach is still worth reading."""
+    assert _code_of(_keeper(
+        "    fn lookup(name) = Err(`no entry ${name} at ${config.url}`)")) is None
+
+
+def test_a_secret_config_field_reaching_its_own_host_binding_is_admitted():
+    """The whole POINT of the declaration: the operator hands the component a
+    credential so it can open something with it. The activation body is not a
+    disclosure crossing, so the intended use compiles unchanged."""
+    src = (_KEEPER_HEAD
+           + "  let pool = effect Pool.open(config.api_key, 2) undo pool.close()\n"
+           + "  provide vault {\n    fn lookup(name) = Err(`no entry ${name}`)\n"
+             "  }\n}\n")
+    assert _code_of(src) is None
+
+
+def test_a_secret_config_field_downgrades_at_a_declared_endorse():
+    """§7c is intact: the declared, audited slot is the one way out, and it is
+    the same slot every other `confidential` value uses."""
+    head = (
+        "service Vault {\n"
+        "  endorse[confidential] fn lookup(name: Str) -> Result[Str, Str]\n}\n"
+        "component Keeper provides vault: Vault {\n"
+        "  config { api_key: Secret[Str] = \"k\" }\n")
+    src = _keeper(
+        "    fn lookup(name) = Err(endorse[confidential](config.api_key, "
+        "reason = \"the operator asked for it back\"))", head=head)
+    assert _code_of(src) is None
+
+
+def test_a_config_free_program_keeps_an_inert_walk():
+    """A component whose config declares no `Secret[T]` engages nothing: the
+    model stays inactive and the IR keeps no taint surface."""
+    src = (
+        "service Vault {\n  fn lookup(name: Str) -> Result[Str, Str]\n}\n"
+        "component Keeper provides vault: Vault {\n"
+        "  config { url: Str = \"pg://x\" }\n  provide vault {\n"
+        "    fn lookup(name) = Err(`no entry ${name} at ${config.url}`)\n"
+        "  }\n}\n")
+    ir = compile_source(src, "plain.rvl")
+    comp = {c["name"]: c for c in ir["components"]}["Keeper"]
+    assert "taint" not in comp

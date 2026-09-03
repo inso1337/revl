@@ -62,9 +62,12 @@ with no component has no composition to model and is named in the
 
 import dataclasses
 import itertools
+import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
@@ -79,9 +82,11 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "backends" / "python"))
 
 from revl import cap_order
+from revl import recovery
 from revl.compiler import compile_source
 from revl.diagnostics import classify
 from revl.errors import RevlError
+from revl.wal import WAL_GUARANTEE, WAL_VERSION
 import runtime as _rt  # backends/python/runtime.py — the reference teardown
 from revl.parser import (
     EffectStmt,
@@ -177,19 +182,25 @@ def cap_decomposition_rows(caps: "set[str]") -> list[str]:
     return rows
 
 
-def attenuates(held: "set[str]", reach: "set[str]") -> bool:
-    """`RevL.CapCeilings.Attenuates`, computed with the checker's own
-    algebra: the resource fold over ceiling-stripped capabilities
-    (`covers_set` empty), AND the ceiling budget check — wherever the
-    parent declares a budget for the child's token and parameter, the child
-    must declare one too and no larger (a dropped ceiling is `+inf`, hence
-    a widening)."""
+def attenuation_halves(held: "set[str]", reach: "set[str]") -> "tuple[bool, bool]":
+    """`RevL.CapCeilings.Attenuates` as its two halves, computed with the
+    checker's own algebra: the RESOURCE fold over ceiling-stripped
+    capabilities (`covers_set` empty), and the CEILING budget check —
+    wherever the parent declares a budget for the child's token and
+    parameter, the child must declare one too and no larger (a dropped
+    ceiling is `+inf`, hence a widening).
+
+    The halves are returned separately, not because the verdict needs them
+    apart (it is their conjunction) but because `attenuation_coverage` has to
+    know which half decided an edge: the formal-layer audit found the ceiling
+    half agreeing VACUOUSLY over a corpus that bound no integer parameter, so
+    "the W row agrees" said nothing about it (issue 210)."""
     hcaps = [parse_cap(h) for h in held]
     rcaps = [parse_cap(c) for c in reach]
     hsplit = [cap_order.split_ceilings(h) for h in hcaps]
     rsplit = [cap_order.split_ceilings(c) for c in rcaps]
-    if cap_order.covers_set([h for h, _ in hsplit], [c for c, _ in rsplit]):
-        return False
+    resource = not cap_order.covers_set([h for h, _ in hsplit],
+                                        [c for c, _ in rsplit])
     for cap, (_stripped, ceilings) in zip(rcaps, rsplit):
         # budgetOf: the MOST GENEROUS declaration the parent holds under
         # this token for this parameter (RevL.Lemmas.budgetOf).
@@ -201,8 +212,62 @@ def attenuates(held: "set[str]", reach: "set[str]") -> bool:
                 budgets[name] = max(budgets.get(name, bound), bound)
         for name, bound in budgets.items():
             if name not in ceilings or ceilings[name] > bound:
-                return False
-    return True
+                return resource, False
+    return resource, True
+
+
+def attenuates(held: "set[str]", reach: "set[str]") -> bool:
+    """`RevL.CapCeilings.Attenuates`: both halves must hold."""
+    resource, ceiling = attenuation_halves(held, reach)
+    return resource and ceiling
+
+
+#: Which half decided each spawn edge, for `attenuation_coverage`. Filled by
+#: `reference_from_tsv`; never compared.
+_ATTENUATION_HALVES: dict = {}
+
+
+def attenuation_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `W` row's CEILING half (issue 210).
+
+    The formal-layer audit's finding, verbatim: the capability-ceiling half of
+    the oracle agreed **vacuously**, because no corpus file declared an integer
+    parameter, so `ceilingOKB` / `RevL.Lemmas.budgetOf` — the whole `budgetOf`
+    development the `attenuatesB_iff` bridge rests on — was never entered. An
+    agreeing row over an unexercised shape is the same defect class as a
+    byte-agreement over a corpus that never reaches the logic (item 429).
+
+    So the corpus must EXERCISE the branch, and this says so and enforces it:
+
+      * some edge's capabilities bind a ceiling parameter at all;
+      * some edge is ADMITTED with the resource half satisfied and a real
+        budget compared (`examples/budget_attenuation.rvl`, 50 <= 100);
+      * some edge is REFUSED BY THE CEILING HALF ALONE — the resource fold
+        finds nothing uncovered and only the budget check flags it
+        (`examples/rejections/g4_spawn_widens_budget.rvl`, 1000 > 100). This
+        is the clause the pre-210 corpus could not satisfy.
+    """
+    bound = admitted = refused = None
+    for key, (resource, ceiling, has_ceiling) in _ATTENUATION_HALVES.items():
+        if not has_ceiling:
+            continue
+        bound = bound or key
+        if resource and ceiling:
+            admitted = admitted or key
+        if resource and not ceiling:
+            refused = refused or key
+    findings: list[str] = []
+    for label, witness in (("any edge binds a ceiling parameter", bound),
+                           ("a budget is compared and ADMITTED", admitted),
+                           ("a budget is REFUSED by the ceiling half alone",
+                            refused)):
+        if witness is None:
+            findings.append(f"attenuation coverage: NO witness that {label} — "
+                            "the W row's ceiling half would agree vacuously")
+    if not findings:
+        print(f"attenuation coverage: {len(_ATTENUATION_HALVES)} spawn edges, "
+              f"ceiling half entered; admitted={admitted[0]} refused={refused[0]}")
+    return findings
 
 
 def _canon_cap(root: str, declared: str) -> str:
@@ -645,7 +710,8 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     # disposition is a property of a RUN, not of a manifest, so the facts are
     # the shape of one activation's stack and the verdict it unwound under
     # (`teardown_scenario_rows`). Both sides read them from this same TSV.
-    return (cap_decomposition_rows(caps_seen) + tsv + teardown_scenario_rows(),
+    return (cap_decomposition_rows(caps_seen) + tsv + teardown_scenario_rows()
+            + recovery_scenario_rows(),
             file_facts, {
         "files": files, "components": comps, "statements": stmts,
         "refusals": refusals, "componentless": componentless,
@@ -921,6 +987,371 @@ def teardown_coverage(observed: dict) -> list[str]:
     return findings
 
 
+# ------------------------------------------- A8/R4 crash-recovery dispositions
+#
+# The G7 rows above are about a teardown that RUNS in one process. These are
+# about what a FRESH process concludes from a durable log after the old one
+# died: A8's commit/abort discharge across a crash cut, and R4's residue
+# surface. Both had real Lean theorems and no oracle row until item 210, so
+# both were checked against the design documents rather than against
+# `src/revl` (`formal/STATUS.md`).
+#
+# The corpus is therefore not extracted from `.rvl` text either. A recovery
+# verdict is a property of a durable LOG, so the facts are the records of one
+# WAL — the constructors of `RevL.Lemmas.Rec`, one row each, in append order —
+# plus the re-issue oracle 243 rule 6 makes fallible. The reference side
+# WRITES those records as a real JSON-Lines WAL and calls
+# `revl.recovery.recover` over it; nothing here decides anything.
+
+#: One content record shape, as (code, builder). `dx` differs from `dT` only in
+#: that its re-issue FAILS, which is what puts `Disp.residue .restoreFailed`
+#: under the row (243 rule 6: the inverse is fallible, and the model carries
+#: that as the `ok` oracle rather than assuming success).
+_WAL_SHAPES: tuple = (
+    ("dt", ("descriptor", "transactional", False)),   # undeclared inverse
+    ("dT", ("descriptor", "transactional", True)),    # declared idempotent
+    ("dx", ("descriptor", "transactional", True)),    # ... whose re-issue fails
+    ("dc", ("descriptor", "compensation", False)),    # 247: never confirmed
+    ("em", ("effect", False, False, False)),          # in-process: moot
+    ("er", ("effect", True, True, False)),            # reconstructible, undeclared
+    ("eR", ("effect", True, True, True)),             # reconstructible, declared
+    ("eu", ("effect", True, False, False)),           # closure-only: residue
+    ("dq", ("deferred",)),                            # 245 class-(b) queue entry
+)
+
+#: The seqs whose inverse fails on re-issue are exactly the `dx` ones. Only the
+#: transactional Phase-1 path in `_roll_back` guards the apply with a `try`
+#: (243 rule 6), so a failing inverse in any other family would crash recover
+#: rather than be reported — which is itself the reference's answer, and not
+#: the branch this row is about.
+_WAL_FAILING_SHAPE = "dx"
+
+#: Longest log the scenario corpus enumerates. Two content records is the
+#: shortest length at which one seq can be committed while another is rolled
+#: back in the same run (`RevL.A8.mixed_disposition_admitted`).
+_WAL_DEPTH = 2
+
+#: The trailing decision record, if any. `recover`'s if-chain reads them in
+#: this order: fork-frozen, then the terminal marker, then commit-approved,
+#: then roll back. `aborted` is not a decision — it is the in-process abort's
+#: COMPLETION record, which is what tells a completed abort from a crashed one
+#: for a fenced inverse (item 309 follow-up).
+_WAL_TRAILERS = ("none", "aborted", "complete", "approved", "forkfrozen")
+
+
+def _wal_logs() -> list:
+    """Every log the corpus enumerates: `(name, records, failing seqs)`.
+
+    Enumerated, not hand-picked, for the reason `_g7_stacks` is: an oracle row
+    over cases someone chose is an oracle row over the cases they thought of.
+    The content records come first (a body's own records), then the recovery
+    bookkeeping a runtime writes over them — a durable `discharge` set, the
+    at-most-once fences, and the trailing decision record. That IS the append
+    order a real run produces, and every prefix of it is a crash cut, which is
+    what `RevL.A8.crash_cut_converges` quantifies over.
+    """
+    out: list = []
+    for depth in range(1, _WAL_DEPTH + 1):
+        for content in itertools.combinations_with_replacement(_WAL_SHAPES, depth):
+            seqs = list(range(1, depth + 1))
+            base = [(shape[1], seq) for shape, seq in zip(content, seqs)]
+            failing = [seq for shape, seq in zip(content, seqs)
+                       if shape[0] == _WAL_FAILING_SHAPE]
+            code = "".join(shape[0] for shape in content)
+            for dis_name, dis in (("d0", ()), ("d1", (seqs[:1],)), ("dA", (seqs,))):
+                for fen_name, fen in (("f0", ()), ("fA", tuple(seqs))):
+                    for trailer in _WAL_TRAILERS:
+                        records = list(base)
+                        records += [(("discharge", tuple(d)), None) for d in dis]
+                        records += [(("fence",), s) for s in fen]
+                        if trailer != "none":
+                            records.append((("marker", trailer), None))
+                        name = f"a8r4/{code}/{dis_name}/{fen_name}/{trailer}"
+                        out.append((name, records, failing))
+    return out
+
+
+def recovery_scenario_rows() -> list:
+    """The A8/R4 fact rows: the WAL's records and the re-issue oracle, in
+    append order. Nothing decided."""
+    rows: list = []
+    for name, records, failing in _wal_logs():
+        for spec, seq in records:
+            kind = spec[0]
+            if kind == "descriptor":
+                rows.append(f"L\t{name}\tdescriptor\t{seq}\t{spec[1]}\t"
+                            f"{int(spec[2])}")
+            elif kind == "effect":
+                rows.append(f"L\t{name}\teffect\t{seq}\t{int(spec[1])}\t"
+                            f"{int(spec[2])}\t{int(spec[3])}")
+            elif kind == "deferred":
+                rows.append(f"L\t{name}\tdeferred\t{seq}")
+            elif kind == "discharge":
+                rows.append(f"L\t{name}\tdischarge\t"
+                            + ",".join(str(s) for s in spec[1]))
+            elif kind == "fence":
+                rows.append(f"L\t{name}\tfence\t{seq}")
+            elif kind == "marker":
+                rows.append(f"L\t{name}\tmarker\t{spec[1]}")
+            else:  # pragma: no cover — the shape table is closed
+                raise SystemExit(f"differential oracle: unknown WAL record {spec}")
+        for seq in failing:
+            rows.append(f"L\t{name}\tfails\t{seq}")
+        rows.append(f"L\t{name}\trun")
+    return rows
+
+
+class _ProbeWorld(recovery.DictWorld):
+    """`recovery.DictWorld`, watching what recover actually APPLIES.
+
+    The report names what recover DECIDED; this names what it DID. The
+    distinction is load-bearing exactly once: a fenced inverse resolved by a
+    durable `aborted` record lands on `transactionalRolledBack` and is NOT
+    applied (re-applying a completed abort's Phase 1 would be the double-apply
+    the fence exists to prevent), so reading the applied set off the report
+    would report an apply that never happened.
+
+    A seq in `failing` raises on re-issue — 243 rule 6's fallible inverse, the
+    `ok` oracle the model carries as a parameter. The attempt is recorded
+    BEFORE the raise, because the attempt is what happened.
+    """
+
+    def __init__(self, failing) -> None:
+        super().__init__()
+        self.failing = set(failing)
+        self.applied: list = []
+
+    @staticmethod
+    def _seq(op: dict) -> int:
+        # The seq rides in the receiver the corpus built the call from, so it
+        # is transported by the reference's own descriptor rather than by a
+        # parallel bookkeeping list.
+        return int(str(op.get("receiver"))[1:])
+
+    def apply_inverse(self, op: dict) -> None:
+        seq = self._seq(op)
+        self.applied.append(seq)
+        if seq in self.failing:
+            raise RuntimeError(f"the re-issued inverse for seq {seq} failed")
+        super().apply_inverse(op)
+
+    def apply_compensation(self, op: dict) -> None:
+        self.applied.append(self._seq(op))
+        super().apply_compensation(op)
+
+
+def _wal_record_json(spec: tuple, seq) -> dict:
+    """One `RevL.Lemmas.Rec` as the JSON-Lines record `revl.wal.read_wal`
+    reads. The seq rides in three places the reference itself carries through:
+    the call's `receiver` (so `World.key` names it), the record's
+    `origin.method` (so the residue schema's `crossing.method` names it), and
+    the `label`. Nothing else about these records is load-bearing."""
+    kind = spec[0]
+    if kind == "descriptor":
+        return {"record": "discharge-descriptor", "seq": seq, "entry": spec[1],
+                "call": {"receiver": f"r{seq}", "method": "undo", "args": []},
+                "origin": {"key": f"k{seq}", "method": str(seq), "args": []},
+                "undo_idempotent": spec[2]}
+    if kind == "effect":
+        _k, boundary, reconstructible, idem = spec
+        out = {
+            "record": "effect", "seq": seq, "component": "Probe",
+            "label": str(seq), "kind": "boundary",
+            "boundary": {"class": "b",
+                         "referent": "process-crossing" if boundary
+                                     else "in-process",
+                         "detail": {"key": f"k{seq}", "method": str(seq),
+                                    "args": []}},
+            "origin": {"key": f"k{seq}", "method": str(seq), "args": []},
+        }
+        out["inverse"] = (
+            {"reconstructible": True, "undo_idempotent": idem,
+             "op": {"receiver": f"r{seq}", "method": "undo", "args": []}}
+            if reconstructible else
+            {"reconstructible": False, "reason": "closure-only inverse"})
+        return out
+    if kind == "deferred":
+        return {"record": "deferred-emission", "seq": seq,
+                "call": {"receiver": f"r{seq}", "method": "fire", "args": []},
+                "origin": {"key": f"k{seq}", "method": str(seq), "args": []}}
+    if kind == "discharge":
+        return {"record": "discharge", "discharged": list(spec[1])}
+    if kind == "fence":
+        return {"record": "replay-fence", "seq": seq}
+    if kind == "marker":
+        return {"record": {"approved": "commit-approved", "aborted": "aborted",
+                           "forkfrozen": "fork-frozen",
+                           "complete": "activation-complete"}[spec[1]]}
+    raise SystemExit(f"differential oracle: unknown WAL record {spec}")   # pragma: no cover
+
+
+#: `recover`'s verdict string -> the model's `RevL.Lemmas.Outcome` name. Only
+#: these three; a fourth verdict (`roll-forward-refused`,
+#: `roll-forward-needs-approval`) needs a session and a snapshot, which this
+#: corpus never supplies, and is outside the model.
+_WAL_VERDICTS = {"rolled-back": "rolledBack", "rolled-forward": "rolledForward",
+                 "fork-retired": "forkRetired"}
+
+#: What the REFERENCE was seen to do, per scenario, for the non-vacuity
+#: ratchet. Filled by `recovery_observation`; read by `recovery_coverage`.
+#: Kept beside the compared verdicts rather than inside them because these are
+#: evidence the row BITES, not claims either side makes.
+_RECOVERY_MARKS: dict = {}
+
+
+def recovery_observation(name: str, records: list, failing: list) -> tuple:
+    """Write one scenario's records as a real WAL and run `revl.recovery`
+    over it; report `(outcome, applied seqs, residue seqs)`.
+
+    Nothing here decides anything. The outcome is recover's own verdict, the
+    applied set is what it actually put through `World.apply_inverse` /
+    `apply_compensation`, and the residue is the seq of every record in
+    `residue.outstanding` — read off the merged residue schema's own
+    `crossing.method`.
+
+    The residue column is `None` for a verdict other than `rolled-back`:
+    `RevL.Lemmas.reported` models the ROLL-BACK path's surface and R4 is
+    stated under `outcome L = .rolledBack`, so the roll-forward window's
+    `flush-residue` is a surface neither side claims and is not compared.
+    """
+    handle, path = tempfile.mkstemp(suffix=".wal", prefix="revl-oracle-")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(json.dumps({"record": "header", "walVersion": WAL_VERSION,
+                                  "generation": 1,
+                                  "guarantee": WAL_GUARANTEE}) + "\n")
+            for spec, seq in records:
+                out.write(json.dumps(_wal_record_json(spec, seq)) + "\n")
+        world = _ProbeWorld(failing)
+        report = recovery.recover(path, world=world)
+    finally:
+        os.unlink(path)
+
+    verdict = _WAL_VERDICTS.get(report["verdict"])
+    if verdict is None:  # pragma: no cover — the corpus supplies no session
+        raise SystemExit(
+            f"differential oracle: recover returned {report['verdict']!r} for "
+            f"{name}, which is outside the model's three outcomes")
+    residue = None
+    if verdict == "rolledBack":
+        residue = []
+        for rec in report["residue"]["outstanding"]:
+            seq = (rec.get("crossing") or {}).get("method")
+            if seq is None:  # pragma: no cover — every record carries a crossing
+                raise SystemExit(
+                    f"differential oracle: unnamed residue record in {name}")
+            residue.append(int(seq))
+    _RECOVERY_MARKS[name] = _recovery_marks(report, world, records)
+    return verdict, sorted(world.applied), (None if residue is None
+                                            else sorted(residue))
+
+
+def _recovery_marks(report: dict, world: "_ProbeWorld", records: list) -> frozenset:
+    """The behaviours this scenario was SEEN to exercise, off the reference's
+    own report. Evidence for `recovery_coverage`, never a compared verdict."""
+    marks = set()
+    outstanding = report.get("residue", {}).get("outstanding") or []
+    kinds = {rec.get("kind") for rec in outstanding}
+    if world.applied:
+        marks.add("applied")
+    if report.get("fencedDeferred"):
+        marks.add("fenced-refusal")
+    if any(d.get("retained") for d in report.get("dischargedSkipped") or []):
+        marks.add("committed-retained")
+    if any(d.get("replay") == "free"
+           for d in (report.get("ran") or [])
+           + (report.get("transactionalRolledBack") or [])):
+        marks.add("free-replay")
+    if any(d.get("replay") == "abort-phase1"
+           for d in report.get("transactionalRolledBack") or []):
+        marks.add("abort-resolved")
+    if report.get("moot"):
+        marks.add("moot")
+    if report.get("droppedDeferred"):
+        marks.add("dropped")
+    if report.get("compensationsReissued"):
+        marks.add("compensation-reissued")
+    marks |= {f"residue:{k}" for k in kinds if k}
+    if report["verdict"] == "rolled-back" and not outstanding and records:
+        marks.add("clean-abort")
+    return frozenset(marks)
+
+
+def recovery_coverage(observed: dict) -> list[str]:
+    """The non-vacuity ratchet for the A8/R4 row (roadmap items 429 / 210).
+
+    Same discipline as `teardown_coverage`, and for the same reason: the
+    formal-layer audit found the `W` row's capability-ceiling half agreeing
+    VACUOUSLY over a corpus that declared no integer parameter, and a new row
+    is worth nothing until it is known to bite. Each clause below is a
+    behaviour of the REFERENCE — never of the model, which would otherwise
+    satisfy its own coverage claim by computing nothing — that some plausible
+    defect would remove:
+
+      * all three outcomes reached, and both roll-forward routes (the terminal
+        marker and item 245's approved window), so `outcome`'s if-chain is
+        exercised rather than assumed;
+      * a run that APPLIED an inverse and a roll-back that applied NONE, so
+        "replays the abort" is distinguishable from "replays nothing";
+      * a committed seq RETAINED (`A8.committed_transaction_is_retained`) and
+        a fenced undeclared inverse REFUSED (item 309 §3a's at-most-once),
+        which are the two ways the applied set shrinks below the log;
+      * a declared-idempotent inverse applied FREELY over a durable fence,
+        which is the other half of 309 and the only thing that tells the
+        `idem` field apart from a constant;
+      * a fenced inverse RESOLVED by a durable `aborted` record, the branch
+        that tells a completed abort from a crashed one;
+      * every residue kind the model can produce — unreconstructible,
+        compensation, fenced, restore-failed — inhabited, and a CLEAN abort
+        over a non-empty log, which is R4's headline
+        (`abort_leaves_no_residue`) and the one shape a model that reported
+        everything would fail.
+
+    Returns findings, which the caller treats as gate failures.
+    """
+    want_outcomes = {"rolledBack", "rolledForward", "forkRetired"}
+    seen_outcomes: set = set()
+    seen_marks: set = set()
+    forward_routes: set = set()
+    empty_rollback = None
+    for name, records, _failing in _wal_logs():
+        row = observed.get(name)
+        if row is None:
+            return [f"recovery coverage: no observation for {name}"]
+        outcome, applied, _residue = row
+        seen_outcomes.add(outcome)
+        seen_marks |= _RECOVERY_MARKS.get(name, frozenset())
+        if outcome == "rolledForward":
+            forward_routes.add(name.rsplit("/", 1)[1])
+        if outcome == "rolledBack" and not applied and records:
+            empty_rollback = empty_rollback or name
+
+    findings: list[str] = []
+    if seen_outcomes != want_outcomes:
+        findings.append(f"recovery coverage: outcomes {sorted(seen_outcomes)} "
+                        f"!= {sorted(want_outcomes)}")
+    if forward_routes != {"complete", "approved"}:
+        findings.append("recovery coverage: roll-forward routes "
+                        f"{sorted(forward_routes)} != ['approved', 'complete']")
+    if empty_rollback is None:
+        findings.append("recovery coverage: NO roll-back that applied nothing "
+                        "over a non-empty log — the row would agree vacuously")
+    want_marks = {
+        "applied", "fenced-refusal", "committed-retained", "free-replay",
+        "abort-resolved", "moot", "dropped", "compensation-reissued",
+        "clean-abort", "residue:unreconstructible", "residue:fenced-residue",
+        "residue:restore-residue", "residue:compensation-residue",
+    }
+    for mark in sorted(want_marks - seen_marks):
+        findings.append(f"recovery coverage: NO witness of `{mark}` — the row "
+                        "would agree over a branch the corpus never reaches")
+    if not findings:
+        print(f"recovery coverage: {len(observed)} WAL scenarios, all 3 outcomes "
+              f"x 2 roll-forward routes x {len(want_marks)} reference "
+              f"behaviours; empty-rollback={empty_rollback}")
+    return findings
+
+
 def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
     """Run the Lean oracle over the corpus TSV; None if lake is absent."""
     if shutil.which("lake") is None:
@@ -941,18 +1372,20 @@ def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
 class Verdicts(NamedTuple):
     """One side's verdicts. `files` are V rows (disjoint, closed, link),
     `comps` G rows, `providers` P rows, `spawns` W rows, `refused` X rows,
-    `dispositions` D rows (G7 teardown: replayed / discharged / stranded)."""
+    `dispositions` D rows (G7 teardown: replayed / discharged / stranded),
+    `recoveries` O rows (A8/R4 crash recovery: outcome / applied / residue)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
     spawns: dict[tuple[str, str, str], str]
     refused: dict[str, str]
     dispositions: dict[str, tuple[tuple, tuple, tuple]]
+    recoveries: dict[str, tuple]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
                 + len(self.spawns) + len(self.refused)
-                + len(self.dispositions))
+                + len(self.dispositions) + len(self.recoveries))
 
 
 def _cols(field: str) -> list[str]:
@@ -969,6 +1402,7 @@ def parse_verdicts(text: str) -> Verdicts:
     spawns: dict[tuple[str, str, str], str] = {}
     refused: dict[str, str] = {}
     dispositions: dict[str, tuple[tuple, tuple, tuple]] = {}
+    recoveries: dict[str, tuple] = {}
     for line in text.splitlines():
         parts = line.split("\t")
         if parts[0] == "V" and len(parts) == 5:
@@ -994,9 +1428,23 @@ def parse_verdicts(text: str) -> Verdicts:
                 tuple(sorted(_cols(parts[3]))),
                 tuple(sorted(_cols(parts[4]))),
             )
+        elif parts[0] == "O" and len(parts) == 5:
+            # `replayed` is compared as a SET: the model walks the log in
+            # append order and `_roll_back` walks each record family
+            # newest-first, and neither order is a claim the other makes (the
+            # ordered LIFO claim is G7's, checked by the D row). `residue` is
+            # `n/a` outside a roll-back, which is the model's own scope.
+            body = parts[4].split("=", 1)[1]
+            recoveries[parts[1]] = (
+                parts[2].split("=", 1)[1],
+                tuple(sorted(int(x) for x in _cols(parts[3]))),
+                None if body == "n/a" else tuple(sorted(int(x)
+                                                        for x in _cols(parts[4]))),
+            )
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
-    return Verdicts(files, comps, providers, spawns, refused, dispositions)
+    return Verdicts(files, comps, providers, spawns, refused, dispositions,
+                    recoveries)
 
 
 def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
@@ -1147,11 +1595,21 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
                 if len(closed[(rel, parent)]) != before:
                     changed = True
     spawns: dict[tuple[str, str, str], str] = {}
+    _ATTENUATION_HALVES.clear()
     for r in srows:
         rel, parent, child = r[1], r[2], r[3]
-        ok = attenuates(held.get((rel, parent), set()),
-                        closed.get((rel, child), set()))
-        spawns[(rel, parent, child)] = "ok" if ok else "fail"
+        hset = held.get((rel, parent), set())
+        rset = closed.get((rel, child), set())
+        resource, ceiling = attenuation_halves(hset, rset)
+        spawns[(rel, parent, child)] = "ok" if resource and ceiling else "fail"
+        # Whether this edge binds a ceiling parameter AT ALL is what tells an
+        # agreeing row from an unexercised one (`attenuation_coverage`).
+        has_ceiling = any(
+            cap_order.is_ceiling(name)
+            for cap in (parse_cap(c) for c in hset | rset)
+            for name, _v in cap.params)
+        _ATTENUATION_HALVES[(rel, parent, child)] = (resource, ceiling,
+                                                     has_ceiling)
 
     refused = {r[1]: r[2] for r in xrows}
 
@@ -1170,7 +1628,18 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         dispositions[r[1]] = (tuple(ran), tuple(sorted(discharged)),
                               tuple(sorted(stranded)))
 
-    return Verdicts(files, comps, providers, spawns, refused, dispositions)
+    # O rows: the A8/R4 crash-recovery disposition, OBSERVED. The records come
+    # off the same TSV the Lean side read; what recover DID with them comes
+    # from actually running `src/revl/recovery.py` over a WAL carrying them.
+    _RECOVERY_MARKS.clear()
+    recoveries: dict[str, tuple] = {}
+    for name, records, failing in _wal_logs():
+        outcome, applied, residue = recovery_observation(name, records, failing)
+        recoveries[name] = (outcome, tuple(applied),
+                            None if residue is None else tuple(residue))
+
+    return Verdicts(files, comps, providers, spawns, refused, dispositions,
+                    recoveries)
 
 
 # The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
@@ -1312,7 +1781,8 @@ def main() -> int:
             ("provider", ref.providers, formal.providers),
             ("spawn", ref.spawns, formal.spawns),
             ("refusal", ref.refused, formal.refused),
-            ("teardown", ref.dispositions, formal.dispositions)):
+            ("teardown", ref.dispositions, formal.dispositions),
+            ("recovery", ref.recoveries, formal.recoveries)):
         for key, want in refmap.items():
             got = gotmap.get(key)
             if got is None:
@@ -1325,10 +1795,13 @@ def main() -> int:
         f"({len(ref.files)} files + {len(ref.comps)} comps + "
         f"{len(ref.providers)} methods + {len(ref.spawns)} spawns + "
         f"{len(ref.refused)} parse refusals + "
-        f"{len(ref.dispositions)} teardowns) — "
+        f"{len(ref.dispositions)} teardowns + "
+        f"{len(ref.recoveries)} recoveries) — "
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))
+    mismatches.extend(recovery_coverage(ref.recoveries))
+    mismatches.extend(attenuation_coverage())
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
     if len(mismatches) > 10:
