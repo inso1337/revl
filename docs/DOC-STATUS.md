@@ -120,7 +120,7 @@ was corrected by hand and had drifted back within a day.
 | fault-tests.md | needs-work | 70 |  |
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
-| fmt.md | needs-work | 13 |  |
+| fmt.md | needs-work | 16 |  |
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | needs-work | 28 |  |
