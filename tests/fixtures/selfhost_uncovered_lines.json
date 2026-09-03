@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 3999,
+      "statements": 4015,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_Env.__init__": 7,
@@ -54,15 +54,16 @@
           "_emit_component": 85,
           "_emit_component_step": 124,
           "_emit_config_struct": 18,
-          "_emit_effect_step": 10,
+          "_emit_effect_step": 11,
           "_emit_go_dispatch": 18,
           "_emit_go_dispatch_encode": 30,
           "_emit_go_proxy_decode": 49,
           "_emit_go_proxy_method": 15,
           "_emit_host_stubs": 12,
           "_emit_keys": 10,
-          "_emit_method_body": 46,
+          "_emit_method_body": 56,
           "_emit_method_witnessed_step": 45,
+          "_emit_pins": 4,
           "_emit_provide_impl": 37,
           "_emit_return": 26,
           "_emit_services": 16,
@@ -199,10 +200,10 @@
           "_teardown_preamble": 8
         }
       },
-      "uncovered_statements": 2989
+      "uncovered_statements": 3004
     },
     "java": {
-      "statements": 2463,
+      "statements": 2477,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_V3Ctx.next_gensym": 2,
@@ -251,6 +252,7 @@
           "_emit_component_stmts": 20,
           "_emit_host_stubs": 1,
           "_emit_host_stubs.walk": 1,
+          "_emit_inverse_pins": 8,
           "_emit_service_interfaces": 1,
           "_emit_v3": 14,
           "_emit_v3_functions": 1,
@@ -273,7 +275,7 @@
           "_map_value_surface_type": 1,
           "_metadata_lit": 4,
           "_method_body": 6,
-          "_method_body_lines": 36,
+          "_method_body_lines": 37,
           "_param_type": 1,
           "_pin_value_map_locals": 6,
           "_refuse_deferred_emissions": 10,
@@ -331,10 +333,10 @@
           "_emit_v2": 27
         }
       },
-      "uncovered_statements": 1093
+      "uncovered_statements": 1102
     },
     "py": {
-      "statements": 2329,
+      "statements": 2337,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_ComponentEmitter._approval_step": 3,
@@ -380,7 +382,7 @@
           "_ComponentEmitter._flow_step": 3,
           "_ComponentEmitter._flow_value": 15,
           "_ComponentEmitter._method": 3,
-          "_ComponentEmitter._method_step": 27,
+          "_ComponentEmitter._method_step": 28,
           "_ComponentEmitter._provide": 4,
           "_ComponentEmitter._timer": 19,
           "_ComponentEmitter._validated_call": 2,
@@ -438,7 +440,7 @@
           "_emit_memo_wrapper": 17
         }
       },
-      "uncovered_statements": 975
+      "uncovered_statements": 976
     },
     "rust": {
       "statements": 3155,
@@ -458,7 +460,7 @@
           "_emit_setup_value": 1,
           "_emit_teardown_begin": 3,
           "_emit_teardown_commit": 2,
-          "_emit_v3_externs": 22,
+          "_emit_v3_externs": 3,
           "_emit_v3_tests": 25,
           "_emit_witnessed_step": 26,
           "_escape_format_braces": 1,
@@ -482,7 +484,7 @@
           "_refuse_unlowered_stream_surface": 7,
           "_result_ok_err": 2,
           "_result_to_json": 1,
-          "_rust_extern_config_bind": 12,
+          "_rust_extern_config_bind": 9,
           "_split_result": 12,
           "_str_param_escapes": 3,
           "_str_param_escapes.walk": 38,
@@ -500,7 +502,7 @@
         },
         "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
           "<module>": 1,
-          "_V3Ctx.__init__": 2,
+          "_V3Ctx.__init__": 1,
           "_V3Ctx._disambiguate_record": 7,
           "_V3Ctx.constructor": 10,
           "_V3Ctx.field_is_boxed": 4,
@@ -521,7 +523,7 @@
           "_compute_char_views": 54,
           "_compute_str_param_borrows": 23,
           "_config_default_lit": 6,
-          "_dedup_colour_erased_poly_externs": 14,
+          "_dedup_colour_erased_poly_externs": 11,
           "_emit_component": 4,
           "_emit_component_new": 25,
           "_emit_components": 8,
@@ -530,13 +532,12 @@
           "_emit_req_bindings": 2,
           "_emit_service_traits": 1,
           "_emit_step": 95,
-          "_emit_v3": 8,
+          "_emit_v3": 7,
           "_emit_v3_functions": 9,
           "_emit_v3_types": 6,
           "_guard_frame_neutral_loop": 1,
           "_ident": 1,
           "_is_fn_type": 1,
-          "_mangle": 1,
           "_method_bodies_have_compensation": 2,
           "_method_bodies_have_witnessed": 2,
           "_method_body_lines": 37,
@@ -618,10 +619,10 @@
           "_emit_v2": 6
         }
       },
-      "uncovered_statements": 1584
+      "uncovered_statements": 1556
     },
     "ts": {
-      "statements": 1955,
+      "statements": 1967,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_emit_temporal": 14,
@@ -632,6 +633,7 @@
           "_float_literal": 3,
           "_main": 17,
           "_method_witnessed_step": 19,
+          "_pinned_arrow": 5,
           "_ts_extern_config_scaffold": 1,
           "_v3_do_expr": 22,
           "_witnessed_step": 19
@@ -661,7 +663,7 @@
           "_literal": 5,
           "_mangle": 2,
           "_member": 2,
-          "_method_body": 53,
+          "_method_body": 54,
           "_method_body_needs_frame": 2,
           "_needs_frame.walk": 3,
           "_prop_key": 1,
@@ -711,7 +713,7 @@
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 658
+      "uncovered_statements": 664
     },
     "wasm": {
       "statements": 2657,
@@ -1062,7 +1064,7 @@
       "uncovered_statements": 269
     },
     "rust": {
-      "statements": 1848,
+      "statements": 2094,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "default_for_rust_type": 15,
@@ -1073,6 +1075,7 @@
           "is_fn_type": 1,
           "is_scalar_option": 1,
           "resolved": 1,
+          "rstrip": 5,
           "set_vts": 1
         },
         "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
@@ -1087,9 +1090,13 @@
           "emit_component_new": 5,
           "emit_provide_construction": 1,
           "emit_service_traits": 1,
+          "emit_v3_externs": 4,
           "emit_v3_functions": 2,
           "emit_v3_types": 1,
+          "extern_body_defer": 2,
+          "has_extra_linebreak": 1,
           "is_atomic": 11,
+          "is_extra_linebreak": 3,
           "match_pattern": 3,
           "mentions_name": 6,
           "method_body_lines": 5,
@@ -1121,7 +1128,7 @@
           "split_fn_params": 2,
           "split_fn_ret": 2,
           "strip_spaces": 1,
-          "type_map": 2,
+          "type_map": 1,
           "v3_bin_ops": 3,
           "v3_infer_type": 5,
           "v3_is_float": 3,
@@ -1143,10 +1150,10 @@
           "checked_method": 5
         }
       },
-      "uncovered_statements": 196
+      "uncovered_statements": 210
     },
     "ts": {
-      "statements": 2252,
+      "statements": 2261,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "expected_missing_adt": 1,
