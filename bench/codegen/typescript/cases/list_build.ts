@@ -1,15 +1,20 @@
 // CASE: building a list in a loop.
 //
-// Emitter site: backends/typescript/emit.py, the builtin-method table:
-//     if method == "push":
-//         return f"[...{target}, {args[0]}]"
+// Emitter site: backends/typescript/emit.py, `_ts_inplace_write` /
+// `_ts_inplace_stmt` in `_v3_stmt`, on the frontend's `unique` marker
+// (src/revl/ownership.py, roadmap item 445).
 //
-// revl's `push` has value semantics, so a copy is the honest default. But the
-// shape the emitter actually produces for the overwhelmingly common
-// `xs = xs.push(e)` is a whole-array spread whose source binding is dead the
-// instant the assignment lands, so the copy is never observed. A competent TS
-// developer writes `xs.push(e)`. Over a loop of n pushes that is the difference
-// between n(n-1)/2 element copies and n.
+// revl's `push` has value semantics, so the builtin table's `[...xs, e]` is the
+// honest default and stays the default. But in the overwhelmingly common
+// `xs = xs.push(e)` the receiver is dead the instant the assignment lands, so
+// the copy is never observed — and item 445 proves exactly that, in the
+// frontend, per write. Where the proof holds the marker rides the IR and this
+// tier emits `xs.push(e)`, which is what a competent TS developer writes. Over
+// a loop of n pushes that is the difference between n(n-1)/2 element copies and
+// none. Where it does not hold the marker is absent and the spread stays.
+//
+// Before item 445 was lowered here the emitted arm read `xs = [...xs, i]` and
+// copied 1,225 / 4,950 / 19,900 / 79,800 elements at n = 50 / 100 / 200 / 400.
 
 import { build as emittedBuild } from '../emitted/list_build.ts'
 
@@ -32,11 +37,12 @@ export function handBuild (n: bigint): bigint[] {
 
 export const name = 'list-build-spread'
 export const summary =
-  '`xs = xs.push(e)` lowers to a whole-array spread copy per iteration, so ' +
-  'building an n-element list copies n(n-1)/2 elements instead of n'
+  '`xs = xs.push(e)` on a uniquely-owned local lowers to a destructive ' +
+  '`xs.push(e)`, so building an n-element list copies no elements at all ' +
+  '(item 445\'s `unique` marker; the unproven case keeps the spread copy)'
 
 export const provenance = [
-  { file: 'list_build.ts', snippet: 'xs = [...xs, i]' },
+  { file: 'list_build.ts', snippet: 'xs.push(i)' },
 ]
 
 const N = 400n
