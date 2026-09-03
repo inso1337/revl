@@ -520,6 +520,23 @@ def test_the_guard_says_which_verdict_it_reached():
         False, deploy.REJECT_MALFORMED)
 
 
+def test_an_unhashable_idempotency_key_is_malformed_not_a_crash():
+    """The dedup scope is a dict key, so a peer-supplied list or object would
+    raise `unhashable type` inside the ledger — past every caller written to
+    read an `(ok, reason)` verdict, which takes the seam down rather than
+    refusing one envelope (roadmap 428 F10's class). It has no scope, so it is
+    malformed. Both guards read the same parse, so both refuse it."""
+    wire = _envelope("c")
+    wire["idempotency_key"] = ["not", "a", "key"]
+    assert deploy.TransportReplayGuard().admit(wire, transport_identity="c") == (
+        False, deploy.REJECT_MALFORMED)
+    secret = b"s" * 32
+    sealed = deploy.seal(deploy.Correlation.from_wire(_envelope("c")), secret)
+    sealed["idempotency_key"] = {"nested": "object"}
+    ok, reason = deploy.CorrelationGuard({"c": secret}).admit(sealed)
+    assert (ok, reason) == (False, deploy.REJECT_MALFORMED)
+
+
 # ---------------------------------------------------------------------------
 # 4. the conductor: what it wires, and what it says it achieved
 # ---------------------------------------------------------------------------
