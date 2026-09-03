@@ -469,6 +469,33 @@ def check_stdlib_version(prober: Prober) -> Check:
                  f"{drift} (loaded {loaded} from {loaded_dir})")
 
 
+def check_approval_wal(prober: Prober) -> Check:
+    """Where the approval WAL will actually be written, and whether it is
+    DURABLE (issue #289).
+
+    The gate's authority is recorded in the WAL, and the WAL directory resolves
+    at runtime from the environment (``REVL_WAL_DIR`` / ``XDG_STATE_HOME`` /
+    HOME). When no durable candidate can be created — a read-only or absent HOME
+    — it falls back to the process tempdir, which the OS may clear at any time.
+    That used to happen silently; it is a warning at the call site now, and this
+    is the same fact where an operator goes to ask "is this set up correctly".
+
+    ``prober`` is unused (this reads the environment and the filesystem, not a
+    tool) but keeps the uniform signature. Resolving CREATES the directory, the
+    same one the next session would create — the honest probe of "can this be
+    written" is to write it.
+    """
+    from .wal import resolve_wal_dir  # noqa: PLC0415 — lazy, no import-time cost
+
+    try:
+        resolution = resolve_wal_dir()
+    except Exception as exc:  # noqa: BLE001 — a probe never crashes the report
+        return Check("approval WAL durability", WARN, None,
+                     f"could not resolve the WAL directory: {exc}")
+    return Check("approval WAL durability",
+                 OK if resolution.durable else WARN, None, resolution.summary())
+
+
 # --------------------------------------------------------------- diagnose
 
 
@@ -495,6 +522,7 @@ def diagnose(prober: Prober | None = None,
         check_mtls(prober),
         check_otel(prober),
         check_stdlib_version(prober),
+        check_approval_wal(prober),
     ]
     return Report(version, checks)
 

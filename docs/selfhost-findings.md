@@ -1645,3 +1645,51 @@ defines them — a NameError at the first call rather than a byte divergence.
 Fixed in #234 as its own commit. `secrets_nested.rvl` is the first corpus
 document with a Result-returning extern, which is the whole reason this was
 reachable.
+
+## `selfhost/emit_rust.rvl` — the missing externs section (issue 275)
+
+Filed as an unverified, low-confidence drive-by observation: the rust self-host
+emitter "may silently drop an extern the reference emits". It reproduces, and the
+interesting half is not the drop.
+
+**What was wrong.** `emit_rust_src` assembled the module as header + types +
+functions + components. The reference `_emit_v3` assembles header + types +
+**externs** + functions + tests + components. There was no `emit_v3_externs` in
+the file at all — not a marker, not a refusal, nothing. A document with one
+`extern pure fn shout(s: Str) -> Str = @rs { .. }` and one `fn` calling it
+emitted a module containing `return shout(who.clone());` and no `fn shout`
+anywhere: a `cannot find function` build error handed to rustc for a line revl
+wrote, produced silently.
+
+The second half is worse than the first. `_V3Ctx.fn_returns` seeds from the free
+functions and then `setdefault`s **the externs**, so a `let` bound to an extern
+call carries the extern's declared return type and a later by-value use of that
+binding knows to clone. The self-host built its `fr` map from the functions only,
+so it emitted `tag(p)` where the reference emits `tag(p.clone())` — item 270's
+E0382 shape, in a document that emits without a single marker.
+
+**The oracle was GREEN over both.** `tests/test_selfhost_emit_rust.py` passed
+19/19 the whole time, because not one of its nineteen fixtures declared an
+`extern` — the file's own docstring listed externs under "deliberately OUT". That
+is item 429 exactly: an oracle catches DIVERGENCE, and two implementations that
+both never reach a construct agree on it trivially. The green run was evidence
+about the corpus, not about the emitter. It is the third instance of the shape
+this cycle, after `EXTERN_DECL_GAP` (`lower_to_ir` dropping the whole `externs`
+section for an `undo`/capability-tagged extern) and `NATIVE_GATE_GAPS`.
+
+**Fixed** by porting `_emit_v3_externs` (the section, in the reference's position
+between the types and the functions) and the extern half of the `fn_returns`
+seeding. Two reference shapes stay out and take a LOUD marker instead of a
+guess — the same treatment `selfhost/emit_go.rvl` gives them: an extern with no
+`@rs` body (`<<EXTERN-NO-RS-BODY:name>>`; the reference RAISES, a portability
+boundary) and an extern carrying a `config` schema
+(`<<DEFER-EXTERN-config:name>>`; item 378 Stage 5's `_revl_extern_config`
+scaffold). The body splice is LF-only, so a body carrying one of the code points
+Python `splitlines()` breaks on that `split("\n")` does not takes
+`<<DEFER-EXTERN-linebreak:name>>` rather than splitting differently.
+
+**`tests/fixtures/emit_rust_corpus/externs.rvl` is the new fixture**, and it is
+the part that keeps this closed: the verbatim `@rs` splice, a Rust-keyword extern
+name through `_mangle`, a multi-line body, an empty body, `Unit`, generic and
+user-record param/return positions, and two free functions whose `let`s are typed
+only by the extern returns. It reds on the pre-fix emitter and passes after.
