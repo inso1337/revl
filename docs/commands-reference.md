@@ -969,6 +969,12 @@ subcommands.
 - `--service NAME` - generated service name (default: from the card's `name`).
 - `--allow-plaintext` - import a card whose `url` is plaintext `http`; refused
   without it, and the generated header records that the flag was used.
+- `--follow-redirects` - let the generated crossing follow a **same-origin**
+  307 or 308. Off by default: the endpoint is part of what the file declares
+  and what the composition admits, so a redirect is refused rather than
+  followed. A 301, 302 or 303 stays refused even with the flag, because it
+  re-issues the `POST` as a `GET` and drops the body
+  ([import-a2a.md](import-a2a.md) §3a).
 - `-o`, `--output PATH` - output path (default: stdout).
 - `--json-diagnostics` - structured diagnostic on rejection.
 

@@ -114,10 +114,25 @@ public final class PlacementRunner {
             }
         }
 
-        System.out.println("[" + name + "] UP");
-        System.out.flush();
-
-        // 5. hold until SIGTERM/SIGINT, then tear down consumers-first
+        // 5. THE SHUTDOWN HOOK GOES UP BEFORE THE `UP` LINE, and that ordering
+        //    is the whole contract (the java half of the fix py got in #226;
+        //    issue 290). `[name] UP` is what the conductor waits on:
+        //    `run_placement`'s `--once` path blocks on every child's UP and then
+        //    calls `stop_all` immediately, so the SIGTERM can land microseconds
+        //    after the print. Printing first left a window in which the JVM's
+        //    DEFAULT SIGTERM disposition was still in force — no hook registered
+        //    means the JVM dies without running one — so a signal arriving
+        //    inside it killed this process outright: no LIFO unwind, no inverses
+        //    replayed, no residue proof, no `DOWN` (G7 and R4, both violated).
+        //    The window belongs to the LAST process to boot — every earlier one
+        //    is still being waited on — which is why it lands on the process
+        //    most likely to still owe an inverse and a residue proof.
+        //
+        //    The restructure the reorder needed: the hook body reads `stubRef`,
+        //    so the effectively-final capture of `stub` has to be established
+        //    before the hook is built, not where the hold used to start. Both it
+        //    and the latch therefore move up with the registration, and only the
+        //    blocking `latch.await()` stays below the print.
         CountDownLatch latch = new CountDownLatch(1);
         final Stub stubRef = stub;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -128,6 +143,11 @@ public final class PlacementRunner {
             System.out.println("[" + name + "] DOWN");
             System.out.flush();
         }));
+
+        System.out.println("[" + name + "] UP");
+        System.out.flush();
+
+        // hold until SIGTERM/SIGINT; the hook above tears down consumers-first
         latch.await();
     }
 
