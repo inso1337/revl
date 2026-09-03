@@ -10,10 +10,10 @@ The organizing fact: **the six tiers are disjoint by directory** (`backends/{pyt
 | cordis-ts | upstream | 10 test files, `tsc` + executed | thinner realm runtime coverage than py |
 | cordis-rs | upstream crate (0.3.0) | 1 scenario file (8 tests), `cargo check`/`cargo test` | none blocking — reactive isolate-linking fixed (plug-time isolation, emitter-side); realm labels fixed |
 | cordis4j | upstream (github/1na-ko) | 1 scenario file, real-jar scenarios | global-realm divergence (errata'd, xfail) |
-| cordis-wasm | **user wrote it** (first-party) | 1 test file, wasmtime exec | i64 ✅; rich-type boundary ✅ (**19→7 gaps**, 7 genuine); **`spawn` ✅ lowered + executed** via B3 (per-instance realms in the cordis-wasm runtime; B3 pushed to the cordis-wasm repo, `f5c0562`) |
+| cordis-wasm | **user wrote it** (first-party) | 1 test file, wasmtime exec | i64 ✅; rich-type boundary ✅ (**19→10 refusals**, all deliberate); **`spawn` ✅ lowered + executed** via B3 (per-instance realms in the cordis-wasm runtime; B3 pushed to the cordis-wasm repo, `f5c0562`) |
 | cordis-go | third-party `0xdenny218/stc-go` (pinned `b3d6788`) | scenarios + v3 fixtures executed; **0 gaps in the conformance matrix**, CI-gated (`go build`) | v1/v2/v3 all emit & build; teardown-ordering divergence from cordis-rs (errata); no spawn yet |
 
-**Conformance matrix status:** all five *language* tiers — python, typescript, rust, java, **go** — are at **0 gaps**, each validated by its real compiler. Only cordis-wasm has gaps — 7, all genuine tier boundaries (Float, Map, config, host `Map.new`) after both the i64 port and the rich-type service boundary landed.
+**Conformance matrix status:** every tier is at **0 real gaps**. The numbers here are not restated — the per-tier counts live in the generated emit sweep in [conformance.md](conformance.md#emit-sweep), which is measured and staleness-gated; this paragraph used to carry its own copy (`7 gaps` against a measured 10 deliberate refusals) and drifted, issue #233. java and wasm are the only tiers that refuse anything, and every refusal is a declared tier limit rather than a missing emitter case.
 
 The through-line across every past wave: **a claim with no gate behind it** — emitters marked correct with nothing executing their output (the `Map.new()` that shipped in a golden; realm semantics asserted at runtime nowhere). The runtime-truth theme below exists to close that class for good.
 
