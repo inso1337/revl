@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 3995,
+      "statements": 3999,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_Env.__init__": 7,
@@ -195,11 +195,11 @@
         },
         "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
           "_comp_checked_div_expr": 9,
-          "_emit_load_helpers": 23,
+          "_emit_load_helpers": 27,
           "_teardown_preamble": 8
         }
       },
-      "uncovered_statements": 2985
+      "uncovered_statements": 2989
     },
     "java": {
       "statements": 2403,
@@ -616,7 +616,7 @@
       "uncovered_statements": 1584
     },
     "ts": {
-      "statements": 1841,
+      "statements": 1843,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_emit_temporal": 14,
@@ -1137,7 +1137,7 @@
       "uncovered_statements": 196
     },
     "ts": {
-      "statements": 2114,
+      "statements": 2121,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "expected_missing_adt": 1,
