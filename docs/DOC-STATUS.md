@@ -81,7 +81,7 @@ was corrected by hand and had drifted back within a day.
 |---|---|---|---|
 | README.md | needs-work | 48 |  |
 | apply.md | needs-work | 19 |  |
-| arithmetic.md | needs-work | 68 |  |
+| arithmetic.md | needs-work | 69 |  |
 | audit-diff.md | needs-work | 14 |  |
 | authoring-for-agents.md | needs-work | 0 |  |
 | auto-mocks.md | needs-work | 16 |  |
@@ -182,7 +182,7 @@ was corrected by hand and had drifted back within a day.
 | stdlib-version.md | needs-work | 11 |  |
 | strings.md | needs-work | 39 |  |
 | swap.md | needs-work | 20 |  |
-| syntax-2.0.md | needs-work | 6 |  |
+| syntax-2.0.md | needs-work | 10 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
