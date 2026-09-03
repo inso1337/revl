@@ -11,8 +11,9 @@ first catalog of such effects: the point where "the agent works, fs ops stop
 prompting because they are revertible, and the residue is exactly enumerable"
 becomes a thing you can run. This is the H1 north-star demo.
 
-This is the py reference tier. The other five tiers (ts, rust, go, java, wasm)
-land their `@py`-equivalent bodies in Slice 2b; the language form, the runtime
+This is the py reference tier. The ts tier carries the same catalog and the
+same confinement pass (item 369 + item 422); the other four (rust, go, java,
+wasm) land their `@py`-equivalent bodies in Slice 2b; the language form, the runtime
 seam, and the WAL/recover foundation are already tier-shared (item 243,
 docs/design/243-witnessed-externs.md, docs/design/teardown-contract.md).
 
@@ -101,6 +102,72 @@ through a directory fd walked down from the root one component at a time with
 `tests/test_fs_confinement_families.py` scans the `@py` bodies of
 `stdlib/fs.rvl` and fails if any path reaches a mutation by another route, so
 the enumeration cannot quietly grow a fifth member.
+
+## Observation: the read half, and the door it opens
+
+The four ops above mutate. A consumer also needs to *look*: read a workspace
+file, check that a write took, decide whether a path is a directory before
+telling a model to create one. That question — "may I touch this path, and what
+is there?" — is the confinement decision, and a consumer must not answer it for
+itself. A body that calls `os.path.exists` on a raw path has skipped the guard,
+and the case it gets wrong is a symlink inside the root pointing out of it.
+
+Three `pure` externs expose that half:
+
+| observation | answers |
+|---|---|
+| `resolve_within(path) -> Result[Str, FsError]` | the confinement decision alone: the resolved absolute path, or the guard's own refusal |
+| `lexists(path) -> Result[Bool, FsError]` | does it name something, once confined |
+| `is_dir(path) -> Result[Bool, FsError]` | is it a directory, once confined |
+
+They go through the same family-1 `resolve_within` guard every mutation and
+every inverse uses, so the jail is unchanged: a path these refuse is a path no
+op in the catalog would touch, and the refusal codes are the same ones
+(`EOUTSIDE` for the boundary, `EWORKSPACE` for an unconfigured root, `EINVAL`
+for a name no filesystem can hold). A path outside the root answers with a
+refusal, never with a fact about what lives out there.
+
+**Why they had to exist at the revl level.** A consumer's *host body* had no
+supported door to the guard. Item 396(B) jails a user-origin `= @ts ref` to the
+user compile-root tree, and `backends/typescript/revl_fs_ts.ts` lives in the
+install tree. Item 410's second root (`__REVL_STDLIB_REF_ROOT__`) is reserved
+for install-origin modules, which a consumer's file is not. And item 422 F1
+removed the unconfined primitives the deprecated `globalThis.__revlFs` seam
+published — correctly, since an exported unconfined rename *is* that finding.
+What was left was a relative path guess into the install tree
+(`require("../../revl_fs_ts.ts")`, three candidates deep), which breaks whenever
+revl moves; revl-harness hit that three times.
+
+So the door is a revl one. The consumer asks revl for the decision and does its
+own reading with the plain host filesystem module:
+
+```revl sketch
+// Elided host bodies, so this block is a sketch. The same consumer, whole and
+// compiled, runs on both tiers in tests/test_fs_observation.py (`_CONSUMER`).
+use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }
+
+extern pure fn read_confined(real: Str) -> Str
+  = @py { ... open(real) ... }
+  = @ts { ... process.getBuiltinModule("node:fs").readFileSync(real, "utf8") ... }
+
+pub fn read_workspace_file(path: Str) -> Str {
+  return match resolve_within(path) {
+    Ok(real) => read_confined(real),
+    Err(e) => "refused: " + e.code
+  }
+}
+```
+
+No import of any revl module on either tier, so there is nothing to guess and
+nothing to break when the install moves.
+
+**Observation only, deliberately.** The write primitives are not here and are
+not coming back: their absence is the item 422 F1 fix. A caller that appears to
+need one needs a witnessed op from the catalog above — revertible by
+construction, enumerated by the WAL — or a filed finding. `tests/
+test_fs_observation.py` pins all of this, including a live py-vs-ts diff of one
+case corpus run through the real emitted bodies on both tiers, and an end-to-end
+consumer that reaches the jail on py and on ts importing nothing.
 
 ## Honest caveats
 
