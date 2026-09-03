@@ -2116,7 +2116,19 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
   if (is_async) { apply_kw = "async apply" }
   let fields = value_list(value_field(comp, "config"))
   if (fields.length() > 0) {
-    out = out.push(`  ${apply_kw}(ctx: Context, rawConfig: ${name}Config) {`)
+    // issue #223 (ported, the ts end): cordis derives the arity of
+    // `ctx.plugin(C)` from this parameter — `Spread<T> = undefined extends T ?
+    // [config?: T] : [config: T]` — so a required `rawConfig` makes the config
+    // argument MANDATORY at every call site. That is only true when some field
+    // has no default: `host.applyConfigDefaults` takes `object | undefined` and
+    // throws only for a `required` field. Optional here iff optional there.
+    var all_defaulted = true
+    for (field of fields) {
+      if (value_is_null(value_field(field, "default"))) { all_defaulted = false }
+    }
+    var config_param = `rawConfig: ${name}Config`
+    if (all_defaulted) { config_param = `rawConfig?: ${name}Config` }
+    out = out.push(`  ${apply_kw}(ctx: Context, ${config_param}) {`)
     var spec_parts = []
     for (field of fields) {
       let fname = value_str(value_field(field, "name"))

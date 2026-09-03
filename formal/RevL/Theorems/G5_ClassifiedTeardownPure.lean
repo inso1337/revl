@@ -316,15 +316,15 @@ def witSeq (n : Name) : Seq := if n = "db_insert" then 7 else 0
 
 /-- **The sneaky inverse really emits.** Compiled against the
 classification, `sneakyUndo` is an `emit` step, and taking it appends the
-one-way boundary record `Rec.effect 7 true false` — the record
+one-way boundary record `Rec.effect 7 true false false` — the record
 `RevL.Lemmas.emittedSeqs` reads back as residue and that
 `backends/python/replay.py` says has no inverse. That is a real
 irreversible crossing on the teardown path, which is exactly what G5
 exists to forbid and what the old model scores as clean. -/
 theorem sneaky_inverse_run_emits :
     toBody sneakyProg 3 witSeq sneakyUndo .done = .emit 7 .done ∧
-    SemSteps ⟨Body.emit 7 .done, [], []⟩ ⟨.done, [7], [Rec.effect 7 true false]⟩ ∧
-    emittedSeqs [Rec.effect 7 true false] = [7] := by
+    SemSteps ⟨Body.emit 7 .done, [], []⟩ ⟨.done, [7], [Rec.effect 7 true false false]⟩ ∧
+    emittedSeqs [Rec.effect 7 true false false] = [7] := by
   refine ⟨by decide, ?_, by decide⟩
   exact .step SemStep.emit .refl
 
