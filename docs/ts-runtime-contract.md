@@ -139,11 +139,28 @@ A tier verdict is `pass` only when both agree. If node cannot run an emitted
 module at all (too old), the tier reports **skip with the reason** rather than
 passing on vitest's word.
 
-Where this runs in CI: `tests/test_cross_tier_execution.py` drives
-`RUNNERS["ts"]` in the `conformance` job, which is the one job that installs
-`backends/typescript/node_modules`. `ci/placement_smoke.sh` remains the gate
-for a composition booted across real node processes; it covers the run shape,
-this covers the test shape.
+Two gates in CI, one per shape.
+
+**The test shape.** `tests/test_cross_tier_execution.py` drives `RUNNERS["ts"]`
+in the `conformance` job, which is the one job that installs
+`backends/typescript/node_modules`, so the double execution above runs there on
+every commit. Cost is about 0.11s per tier verdict.
+
+**The run shape.** `ci/placement_smoke.sh` boots a composition across real
+`node` processes and was already the right place, but its five entries all ran
+`examples/user_cache.rvl`, which contains no `@ts` at all: no hand-written
+TypeScript had ever executed on a node process in CI, which is how the
+divergence survived. A sixth entry, `ts-host-body`, runs
+`examples/ts_host_body.rvl` over the same py to node seam. That document is
+`user_cache.rvl` plus one verbatim `@ts` extern body and one method that calls
+it, on the node-placed component. The probe `cache.module_scope()` executes
+that body on the node process and reports the module scope it was given, and
+the script requires `TS-MODULE-SCOPE ESM` **in the trace**.
+
+The trace, not the exit code, on purpose: `revl run --placement --once` exits 0
+even when every probe errors (that is the incident the script's own header
+records), so a case that proved only that the process came `UP` would reproduce
+this issue's failure in a new place.
 
 ## If you are extending the emitter
 
