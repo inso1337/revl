@@ -58,6 +58,7 @@
    "stdlib/str.rvl",
    "stdlib/value.rvl",
    "stdlib/version.rvl",
+   "tests/fixtures/emit_py_corpus/witnessed.rvl",
    "tests/fixtures/query_mesh.rvl",
    "tests/fixtures/v2_math_lib.rvl"
   ],
@@ -761,6 +762,18 @@
     "code": "BAD",
     "kind": "refused",
     "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "tests/fixtures/emit_py_corpus/witnessed.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
    },
    "reference": {
     "message": "",
