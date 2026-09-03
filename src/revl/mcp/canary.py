@@ -51,7 +51,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..compiler import compile_files, compile_source
 from ..errors import RevlError
 from ..placement import slice_partition, swap_admission
 from .session import replay_module
@@ -304,13 +303,19 @@ def run_canary(running_ir: dict, candidate_files=None, candidate_source=None,
                 "providers": slice_.providers}
 
     # admit the candidate against the running composition (promote gate's twin)
+    if candidate_source is None and not candidate_files:
+        return {"ok": False, "kind": CANARY_KIND, "schema_version": CANARY_VERSION,
+                "realm": realm, "provider": provider, "admitted": False,
+                "error": "provide the candidate generation as `candidate` "
+                         "(inline source) or `candidateFiles` (paths)"}
     try:
-        if candidate_source is not None:
-            candidate_ir = compile_source(candidate_source, "<canary-candidate>.rvl",
-                                          manifest=running_ir, replacing=(provider,))
-        else:
-            candidate_ir = compile_files(list(candidate_files or []),
-                                         manifest=running_ir, replacing=(provider,))
+        # through the one compiler door for agent-supplied source, so a
+        # candidate the authoring trust refuses is refused here too rather
+        # than admitted-and-compared by a sibling verb
+        from .server import compile_under_authoring  # noqa: PLC0415 — cycle
+        candidate_ir = compile_under_authoring(
+            candidate_source, list(candidate_files or []),
+            manifest=running_ir, replacing=(provider,))
     except RevlError as error:
         return {"ok": False, "kind": CANARY_KIND, "schema_version": CANARY_VERSION,
                 "realm": realm, "provider": provider,

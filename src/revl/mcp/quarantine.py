@@ -458,17 +458,22 @@ def run(session, arguments: dict) -> dict:
 def _standalone_ir(arguments: dict) -> dict:
     """Compile the candidate as a standalone composition — what the substrate
     lowers and boots (independent of the live composition it was admitted
-    against). Mirrors the gauntlet's ``boot_ir`` compile."""
-    from ..compiler import compile_files, compile_source  # noqa: PLC0415
+    against). Mirrors the gauntlet's ``boot_ir`` compile.
+
+    Through `server.compile_under_authoring`, the one compiler door for
+    agent-supplied source: a candidate the admission gate refuses is not
+    lowered here either. `run` reaches this only after `_gauntlet.run` has
+    already graded the same source under the same trust, so in practice the
+    refusal fires there first; this keeps the door closed if the order ever
+    changes. Lazy import: `server` imports this module."""
+    from .server import compile_under_authoring  # noqa: PLC0415 — cycle
 
     source = arguments.get("source")
-    if source is not None:
-        return compile_source(source, "<candidate>.rvl",
-                              modules=arguments.get("modules"))
     files = arguments.get("files")
-    if not files:
+    if source is None and not files:
         raise ValueError("provide `source` or `files`")
-    return compile_files(list(files))
+    return compile_under_authoring(source, files,
+                                   modules=arguments.get("modules"))
 
 
 def _verdict_note(verdict: str) -> str:
