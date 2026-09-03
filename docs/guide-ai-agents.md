@@ -280,13 +280,18 @@ returns nothing).
 
 `python -m revl mcp serve` exposes the compiler over MCP, and the loop it
 enables is the point: a draft component never has to touch the filesystem. This
-is your primary interface. The complete advertised verb set (36 verbs, from
-`src/revl/mcp/server.py` and `query_tools.py`) is grouped below by what you
-reach for; each verb's exact inputs and outputs are in
+is your primary interface.
+
+<!-- docgen:agents-mcp-count begin -->
+The complete advertised verb set is 51 verbs, from
+`src/revl/mcp/server.py` and `query_tools.py`. It is grouped below by what
+you reach for; each verb's exact inputs and outputs are in
 [mcp-reference.md](mcp-reference.md).
+<!-- docgen:agents-mcp-count end -->
 
 | verb(s) | use | detail |
 |---|---|---|
+| `revl_scaffold` | start from a typed, holed skeleton instead of a whole invented component; every hole comes back with its `fillSpec` | [scaffold.md](scaffold.md) |
 | `revl_check` | does this compile? structured diagnostics — code, guarantee, and the `fix` rewrite — **and open holes' `fillSpec`** if not | [mcp-reference.md](mcp-reference.md#revl_check) |
 | `revl_admit` | may it enter **this running composition**? | [mcp-reference.md](mcp-reference.md#revl_admit) |
 | `revl_plan` | and then what? the delta a swap would produce, without applying it | [plan.md](plan.md) |
@@ -301,6 +306,12 @@ reach for; each verb's exact inputs and outputs are in
 | `revl_lease` | claim/renew/release a TTL-bound lease on a component so co-agents do not replace it under you | [component-leases.md](component-leases.md) |
 | `revl_snapshot` · `revl_restore` | capture / re-admit your evolved composition across a restart | [persistence.md](persistence.md) |
 | `revl_timeline` · `revl_inspect_step` · `revl_step_back` · `revl_replay_bisect` · `revl_replay_forward` | walk, inspect, unwind, binary-search and re-run a recorded accumulator | [replay.md](replay.md) |
+| `revl_explain` · `revl_fmt` | what a diagnostic code guarantees and how to satisfy it; canonical formatting of inline source, IR-equivalence gated | [mcp-reference.md](mcp-reference.md#revl_explain) · [fmt.md](fmt.md) |
+| `revl_commit` · `revl_commit_confirm` · `revl_abort` | the session commit protocol: enumerate the irreversible residue, confirm it by hash, or abort and replay the inverses | [mcp-reference.md](mcp-reference.md) |
+| `revl_approve` · `revl_revoke` | say yes to one outstanding class-(c) crossing, or mint and later withdraw a session-scoped standing grant | [mcp-reference.md](mcp-reference.md#revl_approve) |
+| `revl_distillation_offers` · `revl_apply_distillation` · `revl_revoke_distillation` | fold repeated yeses into a proposed auto-approve rule, install it, retire it | [mcp-reference.md](mcp-reference.md#revl_distillation_offers) |
+| `revl_estop` · `revl_estop_report` | the operator's emergency halt (a latch flip, not an unwind), and reading back what it stranded | [mcp-reference.md](mcp-reference.md#revl_estop) |
+| `revl_fork` · `revl_fork_confirm` | enumerate what forking the session at step k would rewind and what it cannot, then perform it and mint the branch | [mcp-reference.md](mcp-reference.md#revl_fork) |
 | `revl_query_{emitters,withdraw,dependents,reach,drift}` · `revl_live_query` | who emits to X? what breaks if I withdraw C? over source, or against the live session | [queries.md](queries.md) |
 | `revl_history_emitted_between` · `revl_history_lifetime` | the same query envelope over a recorded run | [queries.md](queries.md) |
 

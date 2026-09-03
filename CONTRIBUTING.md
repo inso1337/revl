@@ -225,6 +225,7 @@ command, in order, reporting each step:
 | backend-ts | `tools/regen_goldens.py --check typescript` (golden drift) |
 | conformance matrix + emit sweep | `tools/conformance.py --check-readme` |
 | site wheel | `tools/check_site_wheel.py` (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
+| docs drift | `tools/docgen.py --check` (the source-derived doc blocks; `make docs-gen` regenerates) |
 | lint | `ruff check` (pinned `ruff==0.16.4` via `uvx` if not on `PATH`) |
 | formal | `formal/scripts/run_gate.sh` (lake build + axioms gate) |
 

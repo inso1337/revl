@@ -67,6 +67,13 @@ python3 tools/build_gate_crate.py --check || fail=1
 echo "== gate wasm crate drift =="
 python3 tools/build_gate_wasm.py --check || fail=1
 
+# issue #255: five docs carried source-derived content with no drift check, and
+# the one marker-based mechanism rotted back within a day of being introduced.
+# Those blocks are generated now and byte-compared here and in the frontend job.
+# A stale block: `make docs-gen`. A coverage failure: write the missing section.
+echo "== docs drift =="
+python3 tools/docgen.py --check || fail=1
+
 # The site wheel is deliberately NOT checked here. It vendors the whole of
 # src/revl, so a per-push gate reddened CI on every source change to a bundled
 # module (an outage class, not a defect). It is a deploy artifact checked at
