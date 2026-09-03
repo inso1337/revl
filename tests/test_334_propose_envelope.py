@@ -230,19 +230,30 @@ def test_self_extension_profile_refuses_a_named_realm(source, spelling):
     assert refs == {"shared-realm", "operator-swap"}
 
 
-def test_untrusted_author_profile_is_unchanged():
-    """Item 330's per-turn profile is BYTE-IDENTICAL: the new refusal is opt-in
-    (`no_realm_placement`), and only `self_extension` opts in. A per-turn admit
-    is additive and torn down with the turn; a proposal replaces the composition
-    and keeps serving, which is why only the second one is bounded here. The
-    per-turn case is the same question with a shorter blast radius — named, not
-    solved."""
+def test_the_refusal_reaches_every_untrusted_author():
+    """Slice 2 shipped `no_realm_placement` as an OPT-IN that only
+    `self_extension` set, on the argument that a per-turn `admit` is additive
+    and torn down with the turn while a proposal replaces the composition and
+    keeps serving. The blast radii do differ — that is why `propose` was closed
+    first — but the AUTHORITY is the same at both doors, and the opt-in left two
+    others open: `mcp.server.AuthoringTrust.profile()` (the `revl_load` /
+    `revl_swap` verbs with inline source, which are not per-turn either) and
+    `Session.admit`. The refusal is now a property of the untrusted author, so
+    the per-turn profile carries it too.
+
+    `tests/test_realm_placement_over_the_transport.py` holds the doors; this
+    holds the profile they share."""
     from revl.admit_profile import AdmissionProfile
     from revl.compiler import compile_source
+    from revl.errors import RevlError
 
     profile = AdmissionProfile.untrusted_author(["Ops"])
-    assert profile.no_realm_placement is False
-    compile_source(_AGENT_REALM, "<turn>.rvl", profile=profile)  # admits
+    assert profile.no_realm_placement is True
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_AGENT_REALM, "<turn>.rvl", profile=profile)
+    assert excinfo.value.code == "G9"
+    # the same source without the realm line still admits under it.
+    compile_source(_AGENT_V2, "<turn>.rvl", profile=profile)
 
 
 def test_the_refusal_is_root_scoped():
@@ -300,7 +311,7 @@ def _decision_only_gate():
     return gate
 
 
-def test_propose_admits_under_self_extension_not_untrusted_author():
+def test_propose_admits_under_an_untrusted_author_profile():
     """The wiring at the seam, DRIVEN rather than read off `propose`'s source.
 
     Deliberately not a source grep. The assertion this replaced matched
@@ -311,11 +322,11 @@ def test_propose_admits_under_self_extension_not_untrusted_author():
     the authority-address grab straight back. Here the realm-grabbing candidate
     goes through `propose` itself and the refusal it returns is the evidence.
 
-    The refusal is attributable to the `self_extension` DELTA specifically: the
-    same source under `untrusted_author` admits (asserted below), so a `propose`
-    that built the per-turn profile would have carried this candidate on to the
-    swap."""
-    from revl.admit_profile import AdmissionProfile
+    The control is the SAME one line under a TRUSTED author, which admits — so
+    the verdict below is the untrusted-author profile and nothing else. It used
+    to be the same line under `untrusted_author`, back when `self_extension` was
+    the only profile carrying the refusal; that door is closed now and the delta
+    it measured no longer exists."""
     from revl.compiler import compile_source
 
     result = _decision_only_gate().propose(_AGENT_REALM, granted=["Ops"],
@@ -324,10 +335,9 @@ def test_propose_admits_under_self_extension_not_untrusted_author():
     assert result.code == "G9"
     assert 'realm("billing")' in result.message
 
-    # the same one line, under the per-turn profile: admitted. So the verdict
-    # above is the delta and nothing else.
-    compile_source(_AGENT_REALM, "<turn>.rvl",
-                   profile=AdmissionProfile.untrusted_author(["Ops"]))
+    # the same one line, with no profile at all: admitted. The realm clause is
+    # legal revl; it is the AUTHOR that may not write it.
+    compile_source(_AGENT_REALM, "<reviewed>.rvl")
 
 
 def test_propose_keeps_the_untrusted_author_base_at_the_seam():

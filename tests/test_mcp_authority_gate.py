@@ -79,6 +79,15 @@ RENAMED = TWO_REALM.replace("component TenantBCache", "component TenantBCache2")
 # component
 PATCHED = "fn size() = 1".join(TWO_REALM.rsplit("fn size() = 0", 1))
 
+# the same composition with the realm placements dropped — a candidate an AGENT
+# may author. `TWO_REALM` is the OPERATOR's composition, and a realm is an
+# authority address, so transport-carried source naming one is refused at
+# admission (G9, item 334). A test that sends a candidate over the transport to
+# measure something else has to send one an agent could have written, or it
+# measures the admission refusal instead.
+AGENT_AUTHORED = "\n".join(line for line in TWO_REALM.splitlines()
+                           if "isolate" not in line) + "\n"
+
 
 class _EnforcingPolicy:
     leases_enforced = True
@@ -340,7 +349,7 @@ def test_revl_repair_respects_an_enforced_lease(live, monkeypatch):
     monkeypatch.setattr(server, "SESSION", session)
 
     payload = _call("revl_repair", {"component": "TenantBCache",
-                                    "candidate": {"source": TWO_REALM}})
+                                    "candidate": {"source": AGENT_AUTHORED}})
     assert payload["ok"] is False
     assert payload.get("swapped") is False
     assert payload["lease"] == {"component": "TenantBCache", "heldBy": "alice",
