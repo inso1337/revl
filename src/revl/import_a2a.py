@@ -142,6 +142,7 @@ from __future__ import annotations
 import json
 import re
 
+from .crossing_redirect import CROSSING_TIMEOUT, py_policy, ts_policy
 from .errors import RevlError
 from .lexer import KEYWORDS
 # The OpenAPI importer's authority helpers are the audited ones (items 416f and
@@ -472,37 +473,50 @@ class _Card:
 
 # ---------------------------------------------------------------- host bodies
 
-def _ts_body(endpoint: str, skill_id: str) -> str:
+def _ts_body(endpoint: str, skill_id: str, *, follow_redirects: bool) -> str:
     """The JSON-RPC 2.0 `message/send` crossing, TypeScript.
 
     Both interpolations are JSON-encoded, and both have already been validated
     (`_URL_RE`) or folded (`_snake`) upstream: the endpoint cannot contain a
     quote, a brace or a newline, and the skill id is re-encoded here anyway so
     the encoding is right even if the caller changes.
+
+    `follow_redirects` is the `--follow-redirects` opt-in and is same-origin
+    even when it is on (`revl.crossing_redirect`). The request is bound as a
+    reusable `a2aSend` rather than written inline because a declared follow
+    re-issues it, and re-issuing has to send the SAME method and the SAME body
+    — which is exactly what the default `fetch` does not do.
     """
     url = json.dumps(endpoint)
     sid = json.dumps(skill_id)
     terminal = json.dumps(list(_TERMINAL_STATES))
+    policy = ts_policy("a2a", follow=follow_redirects, url_expr=url,
+                       send="a2aSend")
     return f"""
       // A2A {A2A_VERSION}, JSON-RPC 2.0 `message/send`. ONE crossing.
-      const res = await fetch({url}, {{
-        method: "POST",
-        headers: {{ "content-type": "application/json" }},
-        body: JSON.stringify({{
-          jsonrpc: "2.0",
-          id: crypto.randomUUID(),
-          method: "message/send",
-          params: {{
-            message: {{
-              role: "user",
-              messageId: crypto.randomUUID(),
-              parts: [{{ kind: "text", text: message }}],
-              metadata: {{ "revl.skill": {sid} }},
-            }},
+      const a2aPayload = JSON.stringify({{
+        jsonrpc: "2.0",
+        id: crypto.randomUUID(),
+        method: "message/send",
+        params: {{
+          message: {{
+            role: "user",
+            messageId: crypto.randomUUID(),
+            parts: [{{ kind: "text", text: message }}],
+            metadata: {{ "revl.skill": {sid} }},
           }},
-        }}),
+        }},
       }});
-      if (!res.ok) {{
+      const a2aSend = (u: string) => fetch(u, {{
+        method: "POST",
+        // Nothing is followed by the runtime; see the policy below.
+        redirect: "manual",
+        // A crossing that never returns is not a crossing.
+        signal: AbortSignal.timeout({CROSSING_TIMEOUT} * 1000),
+        headers: {{ "content-type": "application/json" }},
+        body: a2aPayload,
+      }});
+{policy}      if (!res.ok) {{
         // A transport failure is a FAULT, never a quietly-empty result.
         throw new Error(`a2a: transport failure (HTTP ${{res.status}})`);
       }}
@@ -556,13 +570,19 @@ crosses once and does not poll`);
     """
 
 
-def _py_body(endpoint: str, skill_id: str) -> str:
-    """The same crossing, Python. Same interpolation discipline."""
+def _py_body(endpoint: str, skill_id: str, *, follow_redirects: bool) -> str:
+    """The same crossing, Python. Same interpolation discipline.
+
+    `follow_redirects` is the `--follow-redirects` opt-in and is same-origin
+    even when it is on (`revl.crossing_redirect`).
+    """
     url = json.dumps(endpoint)
     sid = json.dumps(skill_id)
     terminal = json.dumps(list(_TERMINAL_STATES))
+    policy = py_policy("a2a", follow=follow_redirects)
     return f"""
-    import json as _json, urllib.request as _req, uuid as _uuid
+    import json as _json, urllib.request as _req, urllib.parse as _urlp
+    import uuid as _uuid
     # A2A {A2A_VERSION}, JSON-RPC 2.0 `message/send`. ONE crossing.
     _payload = _json.dumps({{
         "jsonrpc": "2.0",
@@ -577,9 +597,14 @@ def _py_body(endpoint: str, skill_id: str) -> str:
     }}).encode()
     _r = _req.Request({url}, data=_payload,
                       headers={{"content-type": "application/json"}})
-    try:
-        with _req.urlopen(_r) as _resp:
+{policy}    try:
+        # A crossing that never returns is not a crossing.
+        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) as _resp:
             _rpc = _json.loads(_resp.read())
+    except _RedirectRefused:
+        # The refusal names the rule. It is NOT a transport failure and must
+        # not be flattened into one.
+        raise
     except Exception as _exc:
         # A transport failure is a FAULT, never a quietly-empty result.
         raise RuntimeError("a2a: transport failure") from _exc
@@ -668,10 +693,15 @@ _ASYNC_BACKENDS = frozenset({"ts"})
 
 class _Generator:
     def __init__(self, card: _Card, filename: str, backend: str,
-                 service: str | None):
+                 service: str | None, *, follow_redirects: bool = False):
         self.card = card
         self.filename = filename
         self.backend = backend
+        # `--follow-redirects`, off unless the operator declared it, and
+        # same-origin even then (`revl.crossing_redirect`). Recorded in the
+        # header the way `--allow-plaintext` is: a generated file states the
+        # policy it was generated under.
+        self.follow_redirects = follow_redirects
         # issue #251: the crossing's colour, from the one host body this file
         # ships (`_ASYNC_BACKENDS`). Rendered into all three declarations at
         # once — the service operation, the extern and the provide method — so
@@ -709,7 +739,8 @@ class _Generator:
         lines.append(f"  emission {self.async_kw}fn {op}(message: Str) -> Untrusted[Str]")
 
         extern = f"a2a_{self.key}_{op}"
-        body = _BODIES[self.backend](self.card.endpoint, skill_id)
+        body = _BODIES[self.backend](self.card.endpoint, skill_id,
+                                     follow_redirects=self.follow_redirects)
         extern_decl = (
             f"extern emission[{self.card.net_cap}] {self.async_kw}fn "
             f"{extern}(message: Str) -> Untrusted[Str]\n"
@@ -813,6 +844,35 @@ class _Generator:
             "// know which remote operation undoes which. The card does not say, and",
             "// this importer will not guess.",
             "//",
+            "// THE ENDPOINT ABOVE IS THE ENDPOINT. A REDIRECT IS REFUSED.",
+            "//",
+            "// The reach bound is derived from the endpoint's host, so a",
+            "// transport that followed a `Location` to another host would make",
+            "// that bound stop describing where this crossing can reach — and a",
+            "// 301/302/303 re-issues the POST as a GET with the body dropped, so",
+            "// the declared emission would become a read. Both tiers' clients do",
+            "// that by DEFAULT (`urllib` follows; `fetch` defaults to",
+            "// `redirect: \"follow\"`), so the generated body installs a policy",
+            "// that refuses instead, naming the rule and reporting only the",
+            "// target's ORIGIN (a `Location`'s userinfo would be a live",
+            "// credential). Nothing on the original request — no header, no",
+            "// credential, no `Secret[T]` — travels to an origin this file did",
+            "// not name.",
+            "//",
+            ("// FOLLOWING IS DECLARED HERE (`--follow-redirects`), and is still "
+             "bounded:"
+             if self.follow_redirects else
+             "// Following is NOT declared here. Pass `--follow-redirects` to "
+             "allow it, bounded to:"),
+            "//   a SAME-ORIGIN 307 or 308, at most five hops. A 301, 302 or 303",
+            "//   is refused whatever the flag says, because it changes the",
+            "//   method; a cross-origin hop is refused because the endpoint is",
+            "//   the reach bound.",
+            "//",
+            f"// The crossing is bounded in time at {CROSSING_TIMEOUT}s. A peer that "
+            "accepts the",
+            "// connection and then says nothing is a fault, not a wait.",
+            "//",
             "// A transport failure is a FAULT raised out of the host body, never a",
             "// quietly-empty result. Turning it into provider WITHDRAWAL, and the",
             "// `on_failure(result)` opt-in, arrive with item 424(c)'s `remote` row",
@@ -871,7 +931,8 @@ class _Generator:
 
 def import_a2a(document: object, *, filename: str = "<agent-card>",
                backend: str = "ts", service: str | None = None,
-               allow_plaintext: bool = False, source: str = "") -> str:
+               allow_plaintext: bool = False, source: str = "",
+               follow_redirects: bool = False) -> str:
     """An A2A 1.0.0 Agent Card (already parsed) -> revl source.
 
     `source` is the card's raw text when the caller has it, used only to put a
@@ -884,7 +945,8 @@ def import_a2a(document: object, *, filename: str = "<agent-card>",
                         hint=f"pick one of: {', '.join(sorted(_BODIES))}")
     card = _Card(document, filename, allow_plaintext=allow_plaintext,
                  source=source)
-    return _Generator(card, filename, backend, service).emit()
+    return _Generator(card, filename, backend, service,
+                      follow_redirects=follow_redirects).emit()
 
 
 def load_card(text: str, *, filename: str = "<agent-card>") -> object:
@@ -897,9 +959,11 @@ def load_card(text: str, *, filename: str = "<agent-card>") -> object:
 
 def import_a2a_file(path: str, *, backend: str = "ts",
                     service: str | None = None,
-                    allow_plaintext: bool = False) -> str:
+                    allow_plaintext: bool = False,
+                    follow_redirects: bool = False) -> str:
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
     return import_a2a(load_card(text, filename=path), filename=path,
                       backend=backend, service=service,
-                      allow_plaintext=allow_plaintext, source=text)
+                      allow_plaintext=allow_plaintext, source=text,
+                      follow_redirects=follow_redirects)
