@@ -39,6 +39,7 @@ CLI: `python3 emit.py <ir.json> [> out.ts]`.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 import textwrap
@@ -198,6 +199,22 @@ def _ts_type(name: object, known_types: "frozenset[str]" = frozenset()) -> str:
 
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
+
+
+def _finite_float(value):
+    """The literal's value, refused when a `Float` is not finite (issue #312).
+
+    A non-finite `Float` has no literal spelling in revl and no uniform one
+    across the tiers — the host repr renders `inf`, which is an UNBOUND NAME
+    in this target's source, not a number. The frontend refuses such a literal
+    at the checker (`typecheck._reject_float_literal_range`), so this is the
+    backend's own belt: an IR handed straight to the emitter still cannot make
+    it print a name nothing binds.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EmitError(
+            f"non-finite Float literal {value!r} has no representation in this tier")
+    return value
 
 
 # Dispatcher conformance (roadmap item 76a). This tier converged to ONE
@@ -399,7 +416,7 @@ def _literal(value: object) -> str:
         # A `Float` literal stays IEEE 754 binary64. `json.dumps` keeps the
         # decimal point (`2.0`, not `2`), which is what stops a whole-valued
         # Float literal from being read back as an integer.
-        return json.dumps(value)
+        return json.dumps(_finite_float(value))
     if isinstance(value, str):
         return _string(value)
     raise EmitError(f"unsupported literal: {value!r}")
