@@ -1507,10 +1507,26 @@ _FOREIGN_STMT_KEYWORDS = {
 
 # ---------------------------------------------------------------- parser
 
+def _found(tok) -> str:
+    """How a token reads in an `expected ..., found ...` message.
+
+    The eof token carries `None` as its value, and `repr(None)` renders as
+    `found None` — which reads as a literal in the source rather than as the
+    input running out. `expect()` has always spelled this "end of file"; the
+    expression path did not (issue #313), and an interpolation that ran out
+    mid-expression is exactly where a reader meets it.
+    """
+    return repr(tok.value) if tok.value is not None else "end of file"
+
+
 class Parser:
-    def __init__(self, source: str, filename: str):
+    def __init__(self, source: str, filename: str, line_offset: int = 0):
         self.filename = filename
-        self.toks = lex(source, filename)
+        # `line_offset` is non-zero only for a sub-parse of a fragment — the
+        # body of a `${...}` interpolation — so its tokens, its AST nodes and
+        # every checker diagnostic on them carry the line the fragment occupies
+        # in the real file instead of line 1 (issue #313).
+        self.toks = lex(source, filename, line_offset=line_offset)
         self.pos = 0
         # When set, the next `_bor` call does not consume a top-level `|` — it
         # is the functional-record-update separator `{base | f = e}`, not the
@@ -5339,19 +5355,35 @@ class Parser:
 
     # pure expressions — precedence climbing (§3.2)
 
-    def _parse_template_parts(self, raw_parts, line: int):
+    def _parse_template_parts(self, raw_parts, line: int, interp_lines=None):
         """Turn lexer template parts into ("text", str) / ("expr", ast): each
-        `${...}` body is re-parsed as a full pure expression (§3.2)."""
+        `${...}` body is re-parsed as a full pure expression (§3.2).
+
+        `interp_lines` is the lexer's side-band list of absolute start lines,
+        one per `${...}`, and becomes the sub-parser's line offset. Without it
+        every sub-parse started at line 1, so a fault inside an interpolation —
+        a parse error here, or a checker refusal later on the AST this builds —
+        was reported at line 1 of the file no matter where the template sat
+        (issue #313). It is read defensively: a `template` token minted by
+        something other than `lex` (the formatter, a test) has no such list, and
+        the template's own line is the honest fallback.
+        """
         parts = []
+        expr_index = 0
         for kind, value in raw_parts:
             if kind == "text":
                 parts.append(("text", value))
                 continue
-            sub = Parser(value, self.filename)
+            if interp_lines and expr_index < len(interp_lines):
+                interp_line = interp_lines[expr_index]
+            else:
+                interp_line = line
+            expr_index += 1
+            sub = Parser(value, self.filename, line_offset=interp_line - 1)
             expr = sub.pure_expr()
             if not sub.at("eof"):
                 extra = sub.peek()
-                raise self.err(line,
+                raise self.err(interp_line,
                                f"unexpected {extra.value!r} in `${{...}}` interpolation",
                                hint="an interpolation holds one expression")
             parts.append(("expr", expr))
@@ -5849,7 +5881,8 @@ class Parser:
             return ExprLit(tok.value, tok.line)
         if tok.kind == "template":
             self.next()
-            return Interp(self._parse_template_parts(tok.value, tok.line), tok.line)
+            return Interp(self._parse_template_parts(
+                tok.value, tok.line, getattr(tok, "interp_lines", None)), tok.line)
         if tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             return ExprLit({"true": True, "false": False, "null": None}[tok.value], tok.line)
@@ -6017,7 +6050,7 @@ class Parser:
         if tok.kind == "kw" and tok.value == "if":
             return self._if_expr()
         self._reject_incr_decr(tok)  # item 384 / syntax-2.0 §3.3
-        raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
+        raise self.err(tok.line, f"expected an expression, found {_found(tok)}")
 
     def _reject_foreign_keyword(self, tok) -> None:
         """item 384: a known-foreign statement/declaration keyword (`def`,
@@ -6232,7 +6265,8 @@ class Parser:
             base = Lit(tok.value, tok.line)
         elif tok.kind == "template":
             self.next()
-            base = Interp(self._parse_template_parts(tok.value, tok.line), tok.line)
+            base = Interp(self._parse_template_parts(
+                tok.value, tok.line, getattr(tok, "interp_lines", None)), tok.line)
         elif tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             base = Lit({"true": True, "false": False, "null": None}[tok.value], tok.line)
@@ -6242,7 +6276,7 @@ class Parser:
             self.next()
             base = Postfix(tok.value, [], tok.line)
         else:
-            raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
+            raise self.err(tok.line, f"expected an expression, found {_found(tok)}")
 
         while self.at("."):
             self.next()

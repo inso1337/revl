@@ -45,13 +45,45 @@ def compute_diagnostics(text: str, filename: str = "<lsp>.rvl") -> list[dict]:
     `.errors` holds every collected refusal, so the editor shows every squiggle
     at once; a single `RevlError` still yields a one-element list. On a clean
     compile the list is empty, which is how the client clears stale squiggles.
+
+    A compiler CRASH — anything that is not a `RevlError` — becomes a
+    diagnostic too (issue #314). The editor calls this on every keystroke, so
+    half-typed source reaches inputs the compiler was never asked to survive
+    (deep nesting exhausts the parser's stack, an over-long integer literal
+    raises out of the lexer). Letting those propagate took the whole language
+    server down; reporting them squiggles the document and keeps the session
+    alive. The crash is deliberately shown rather than swallowed: a silent
+    empty list would read as "your file is clean".
     """
     try:
         compile_source(text, filename)
     except RevlError as error:
         errors = getattr(error, "errors", None) or [error]
         return [_diagnostic_from(text, one) for one in errors]
+    except RecursionError:
+        return [_crash_diagnostic(
+            "this document nests too deeply for the compiler to analyse; the "
+            "rest of the file was not checked")]
+    except Exception as exc:  # noqa: BLE001 — a crash must not end the session
+        return [_crash_diagnostic(
+            f"the compiler failed on this document: {type(exc).__name__}: {exc}")]
     return []
+
+
+def _crash_diagnostic(message: str) -> dict:
+    """A diagnostic standing in for a compiler crash.
+
+    Anchored at the start of the document because a crash has no line to point
+    at: the failure happened instead of producing a location.
+    """
+    return {
+        "range": {"start": {"line": 0, "character": 0},
+                  "end": {"line": 0, "character": 0}},
+        "severity": _SEVERITY["error"],
+        "code": "REVL-INTERNAL",
+        "source": "revl",
+        "message": message,
+    }
 
 
 def _diagnostic_from(text: str, error: RevlError) -> dict:
