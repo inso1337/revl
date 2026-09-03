@@ -44,6 +44,7 @@ byte-compare) lives in `tests/test_gate_crate_drift.py` and needs no toolchain.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import socket
@@ -437,3 +438,54 @@ def test_the_crate_ships_its_own_cargo_tests(consumer):
     assert tested.returncode == 0, (
         "cargo test failed inside crates/revl-gate:\n"
         + (tested.stderr or tested.stdout or "")[-4000:])
+
+
+# ------------------------------------------------- the census's fast engine
+
+
+def test_the_census_fast_engine_answers_what_the_crate_answers(consumer):
+    """`tools/gate_reference_census.py` runs on every PR through the frontend
+    job, where there is no cargo. It gets its verdicts from the self-host
+    emitted to PYTHON behind a python mirror of the crate's frontier guard —
+    cheap, and worth nothing if it can disagree with the crate it stands in for.
+
+    So the two engines are driven over the census corpus here, in the one job
+    that has a rust toolchain, and every verdict must match: same arm, same
+    code, same message. A divergence means the cheap gate on every PR is
+    measuring something other than the artifact that ships.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "gate_reference_census", ROOT / "tools" / "gate_reference_census.py")
+    census = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = census
+    spec.loader.exec_module(census)
+
+    cases = census.load_corpus(oracle)
+    sources = [src for _, src in cases]
+    fast = list(census.SelfhostEngine().verdicts(sources))
+    crate = _crate_verdicts(consumer, sources)
+
+    mismatches = []
+    for (case_id, _src), got, want in zip(cases, fast, crate):
+        kind, payload = got
+        if kind == "refused":
+            mine = ("refused", payload[0], payload[1])
+        elif kind == "no_objection":
+            mine = ("no_objection", "", "")
+        elif kind == "frontier":
+            mine = ("outside_frontier", None, None)
+        else:
+            # a python-only outcome (`RecursionError`, a wrapped index): the
+            # emitted rust does not share python's recursion limit, so these are
+            # not comparable and the census does not baseline them either
+            continue
+        theirs = (want["verdict"], want.get("code", ""), want.get("message", ""))
+        if mine[0] != theirs[0]:
+            mismatches.append(f"{case_id}: census {mine[0]}, crate {theirs[0]}")
+        elif mine[0] == "refused" and mine[1:] != theirs[1:]:
+            mismatches.append(
+                f"{case_id}: census {mine[1:]!r}, crate {theirs[1:]!r}")
+    assert not mismatches, (
+        f"the census's fast engine and the crate disagree on "
+        f"{len(mismatches)} of {len(cases)} programs:\n  "
+        + "\n  ".join(mismatches[:20]))

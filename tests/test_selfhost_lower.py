@@ -647,6 +647,29 @@ component C provides s: S {
   provide s { fn go(y) { let r = emit h(y)   return r } }
 }
 """),
+    # The other side of the bare-Upper-cased-call-head fix below: the call heads
+    # that legitimately ARE Upper-cased must still resolve, or the fix would buy
+    # its bypass back with a false rejection.
+    ("a declared ADT case is a callable head", """
+type Found = Hit(Str) | Missing
+service Kv { fn get(k: Str) -> Found }
+component Store provides kv: Kv {
+  provide kv { fn get(k) { return Hit(k) } }
+}
+"""),
+    ("a built-in Result constructor is a callable head", """
+service Kv { fn get(k: Str) -> Result[Str, Str] }
+component Store provides kv: Kv {
+  provide kv { fn get(k) { return Ok(k) } }
+}
+"""),
+    ("an Upper-cased host acquisition is a callable head", """
+service Kv { fn get(k: Str) -> Str }
+component Store provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+  provide kv { fn get(k) { return k } }
+}
+"""),
 ]
 
 
@@ -1071,6 +1094,48 @@ component C requires kv: Kv {
   isolate kv in realms("r1", "r2")
 }
 """, "PRELUDE"),
+    # A bare Upper-cased CALL head is not a host acquisition. The reference's
+    # host branch is `head[:1].isupper() and ops and ops[0].args is not None`
+    # (lower.py `_lower_postfix`) — it needs a `.method(...)` after the head, so
+    # `Map.new()` takes it and `Row(k)` does not. The gate resolved every
+    # Upper-cased head and admitted the whole family; both positions are pinned
+    # here, a provide method and an activation body, because the two reach the
+    # check down different paths.
+    ("a bare Upper-cased call head in a method is undeclared (G1)", """
+service Cache { fn put(k: Str, v: Str) }
+component MemCache provides cache: Cache {
+  provide cache {
+    fn put(k, v) {
+      let row = Row(k)
+    }
+  }
+}
+""", "G1"),
+    ("a bare Upper-cased call head in an activation body is undeclared (G1)", """
+service Log { fn note(m: Str) }
+component Chatty requires log: Log provides out: Log {
+  effect Audit()
+  provide out { fn note(m) { let x = m } }
+}
+""", "G1"),
+    # The G4 evidence list is DEDUPED, first-seen order — the reference collects
+    # it through `_method_emissions`'s `note`, which carries a `seen` set. A
+    # body crossing the same seam twice used to draw
+    # "reaches `db.run`, `db.run`" from the gate and "reaches `db.run`" from the
+    # reference: the same refusal, spelled differently, which is exactly what
+    # `crates/revl-gate`'s byte-agreement promise forbids.
+    ("G4 evidence names a repeated emission once", """
+service Db { emission fn run(sql: Str) -> Int }
+service Cache { fn put(k: Str) }
+component Twice requires db: Db provides cache: Cache {
+  provide cache {
+    fn put(k) {
+      emit db.run(k)
+      emit db.run(k)
+    }
+  }
+}
+""", "G4"),
 ]
 
 

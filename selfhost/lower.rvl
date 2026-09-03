@@ -375,6 +375,67 @@ fn boot_names(ts: List[Token]) -> List[Str] {
   return out
 }
 
+// Whether a token starts a TOP-LEVEL declaration — where a `type` declaration's
+// token span ends. Kept next to `type_ctors`, its only reader.
+fn at_top_decl(ts: List[Token], i: Int) -> Bool {
+  return atw(ts, i, "type") || atw(ts, i, "fn") || atw(ts, i, "extern")
+      || atw(ts, i, "service") || atw(ts, i, "component") || atw(ts, i, "use")
+      || atw(ts, i, "test") || at_boot(ts, i)
+}
+
+// Every Upper-cased name a `type` declaration mentions — the ADT CONSTRUCTORS a
+// bare call head may legitimately be (`type Step = Final(Str) | NeedTool(T)`
+// makes `Final(...)` and `NeedTool(...)` callable heads in a component body).
+//
+// `p_top` steps over `type` declarations structurally: they are a checker-stage
+// concern and admission reads nothing else out of them. This scan is the one
+// thing admission does need from them, so it runs beside the parse rather than
+// inside it, the way `boot_names` does.
+//
+// A case sits in CONSTRUCTOR POSITION: an Upper-cased ident right after the
+// declaration's `=` or one of its `|` separators, at nesting depth 0. That
+// keeps a record's field types out (`type Row = { id: Int }` declares no `Int`
+// constructor) while covering every arm of `type Step = Final(Str) |
+// NeedTool(ToolCall)`, multi-line arms included — the span runs to the next
+// top-level declaration, not to the end of the line.
+//
+// It still OVER-approximates in one direction: a union of TYPES rather than
+// cases (`type Payload = List[Row] | Str`) contributes its arms too. That is
+// the safe side — over-collecting only ever keeps admitting a program the
+// reference admits, while under-collecting would refuse one, and refusing what
+// the reference admits is the direction this gate may not invent. Iterative for
+// the same reason `boot_names` is.
+fn type_ctors(ts: List[Token]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atw(ts, i, "type")) {
+      var j = i + 1
+      var depth = 0
+      var ctor = false
+      while (j < ts.length() && !atk(ts, j, "eof")
+             && (depth > 0 || !at_top_decl(ts, j))) {
+        let t = tkc(ts, j)
+        if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
+        if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
+        if (depth == 0 && (t.kind == "=" || t.kind == "|")) {
+          ctor = true
+        } else {
+          if (ctor && t.kind == "ident" && is_upper_head(t.text)) {
+            out = union_into(out, [t.text])
+          }
+          ctor = false
+        }
+        j += 1
+      }
+      i = j
+    } else {
+      i += 1
+    }
+  }
+  return out
+}
+
 fn join_comma(xs: List[Str], i: Int, acc: Str) -> Str {
   if (i >= xs.length()) { return acc }
   return join_comma(xs, i + 1, acc == "" ? xs[i] : acc.concat(", ").concat(xs[i]))
@@ -2008,6 +2069,35 @@ fn head_declared(cx: Ctx, name: Str) -> Bool {
       || name == "config" || is_upper_head(name)
 }
 
+// The head of a BARE call `f(...)` — no member access follows it.
+//
+// `head_declared` above is the RECEIVER rule and keeps `is_upper_head`, because
+// the reference's host-acquisition branch is
+// `head[:1].isupper() and ops and ops[0].args is not None` (lower.py
+// `_lower_postfix`): an Upper-cased head is a host constructor only when a
+// `.method(...)` follows it. `Map.new()` takes that branch; `Nope(1)`, `P()`
+// and `Int("1")` do not — they fall through to the same
+// "`X` is not a declared requirement of C" G1 refusal `nope()` draws.
+//
+// This gate applied `is_upper_head` in BOTH positions, so every bare
+// Upper-cased call head resolved and the whole family was admitted. That is the
+// residual PR #228 left behind: the statement-position G1 cases it closed all
+// went through lower-cased heads.
+//
+// The legitimate bare Upper-cased calls are the ADT constructors: the built-in
+// `Some`/`None`/`Ok`/`Err` (seeded into `fnNames` by `fn_names_of`) and the
+// program's own `type T = A | B(Int)` cases, which `type_ctors` collects. That
+// collection is deliberately an OVER-approximation — it takes every Upper-cased
+// name appearing in a `type` declaration, field types included — because
+// over-collecting only ever keeps admitting a program the reference admits,
+// while under-collecting would refuse one. A residual `Int("1")` admitted in a
+// program that happens to declare a type with an `Int` field is the price, and
+// it is the safe side of the asymmetry this crate is built on.
+fn call_head_declared(cx: Ctx, name: Str) -> Bool {
+  return contains(cx.scopeNames, name) || contains(cx.fnNames, name)
+      || name == "config"
+}
+
 fn g1_refuse(cx: Ctx, name: Str, a: Ac) -> Ac {
   return ac_refuse(a, "G1", "`".concat(name)
     .concat("` is not a declared requirement of ").concat(cx.compName))
@@ -2038,7 +2128,15 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
   }
   var na = a
   if (decl.isEm && marked) {
-    na = { msg: "", tag: "", labels: na.labels.push(root.concat(".").concat(meth)),
+    // `union_into`, not `push`: the reference's `_method_emissions` accumulates
+    // its evidence through `note`, which is first-seen-order and DEDUPED by its
+    // `seen` set. A body that emits through the same op twice
+    // (`emit db.execute(a)  emit db.execute(b)`) therefore draws
+    // "reaches `db.execute`" from the reference and used to draw
+    // "reaches `db.execute`, `db.execute`" from this gate — the same refusal,
+    // spelled differently, which breaks the crate's byte-agreement promise.
+    na = { msg: "", tag: "",
+           labels: union_into(na.labels, [root.concat(".").concat(meth)]),
            ecaps: union_into(na.ecaps, [root]), areach: na.areach, aops: na.aops,
            avals: na.avals }
   }
@@ -2059,10 +2157,11 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
 // reaching an emitting name labels `f()` with its caps. A1: reaching an
 // async-colored name records it for the reach verdict.
 fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
-  if (!head_declared(cx, name)) { return g1_refuse(cx, name, a) }
+  if (!call_head_declared(cx, name)) { return g1_refuse(cx, name, a) }
   var na = a
   if (contains(cx.emittingNames, name)) {
-    na = { msg: "", tag: "", labels: na.labels.push(name.concat("()")),
+    // deduped, as `_method_emissions`'s `note` is — see `req_call`
+    na = { msg: "", tag: "", labels: union_into(na.labels, [name.concat("()")]),
            ecaps: union_into(na.ecaps, caps_of(cx.caps, name)),
            areach: na.areach, aops: na.aops, avals: na.avals }
   }
@@ -2096,7 +2195,8 @@ fn var_check(name: Str, cx: Ctx, a: Ac) -> Ac {
   var na = a
   if (contains(cx.emittingNames, name)) {
     na = { msg: "", tag: "",
-           labels: na.labels.push(name.concat(" (passed as a function value)")),
+           labels: union_into(na.labels,
+                              [name.concat(" (passed as a function value)")]),
            ecaps: union_into(na.ecaps, union_into(caps_of(cx.caps, name), ["*"])),
            areach: na.areach, aops: na.aops, avals: na.avals }
   }
@@ -2306,6 +2406,18 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks }
+}
+
+// The same context with extra callable names — the program's own ADT
+// constructors (`type_ctors`), which resolve a bare Upper-cased call head the
+// same way the built-in `Ok`/`Err`/`Some`/`None` seeded by `fn_names_of` do.
+fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
+  return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: union_into(cx.fnNames, names),
+           compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
+           underArrow: cx.underArrow, handles: cx.handles,
+           provKeySvc: cx.provKeySvc }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -3809,7 +3921,11 @@ pub fn admit_src(src: Str) -> Str {
   if (fgn != "") { return tagged("FOREIGN", fgn) }
   let pg = parse_prog(src)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
-  let base = build_maps(pg)
+  // the ADT constructors the program declares join the callable universe a bare
+  // call head resolves against (`call_head_declared`). Read off the token
+  // stream rather than out of `Prog`, because `p_top` steps over `type`
+  // declarations structurally — see `type_ctors`.
+  let base = ctx_with_callables(build_maps(pg), type_ctors(lex_src(src)))
   // the module-fn A1 twins (first-class async value, leaky pure arrow) are
   // decided over the lowered fns BEFORE any component is lowered, so they are
   // surfaced first, in declaration order (lower.py's fn loop precedes the

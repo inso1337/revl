@@ -529,6 +529,44 @@ fn boot_names(ts: Vec<Token>) -> Vec<String> {
     return out;
 }
 
+fn at_top_decl(ts: Vec<Token>, i: i64) -> bool {
+    return (((((((atw(ts.clone(), i, "type") || atw(ts.clone(), i, "fn")) || atw(ts.clone(), i, "extern")) || atw(ts.clone(), i, "service")) || atw(ts.clone(), i, "component")) || atw(ts.clone(), i, "use")) || atw(ts.clone(), i, "test")) || at_boot(ts.clone(), i));
+}
+
+fn type_ctors(ts: Vec<Token>) -> Vec<String> {
+    let mut out = vec![];
+    let mut i = 0i64;
+    while ((i < ts.revl_length()) && (!atk(ts.clone(), i, "eof"))) {
+        if atw(ts.clone(), i, "type") {
+            let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
+            let mut depth = 0i64;
+            let mut ctor = false;
+            while (((j < ts.revl_length()) && (!atk(ts.clone(), j.clone(), "eof"))) && ((depth > 0i64) || (!at_top_decl(ts.clone(), j.clone())))) {
+                let t = tkc(ts.clone(), j.clone());
+                if (((t.kind == "{") || (t.kind == "[")) || (t.kind == "(")) {
+                    depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+                }
+                if (((t.kind == "}") || (t.kind == "]")) || (t.kind == ")")) {
+                    depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+                }
+                if ((depth == 0i64) && ((t.kind == "=") || (t.kind == "|"))) {
+                    ctor = true;
+                } else {
+                    if ((ctor && (t.kind == "ident")) && is_upper_head(&t.text)) {
+                        out = union_into(out.clone(), vec![t.text.clone()]);
+                    }
+                    ctor = false;
+                }
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+            i = j.clone();
+        } else {
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+    }
+    return out;
+}
+
 fn join_comma(xs: Vec<String>, i: i64, acc: String) -> String {
     if (i >= xs.revl_length()) {
         return acc;
@@ -1909,6 +1947,10 @@ fn head_declared(cx: Ctx, name: &str) -> bool {
     return (((contains(cx.scopeNames.clone(), name) || contains(cx.fnNames.clone(), name)) || (name == "config")) || is_upper_head(name));
 }
 
+fn call_head_declared(cx: Ctx, name: &str) -> bool {
+    return ((contains(cx.scopeNames.clone(), name) || contains(cx.fnNames.clone(), name)) || (name == "config"));
+}
+
 fn g1_refuse(cx: Ctx, name: &str, a: Ac) -> Ac {
     return ac_refuse(a.clone(), String::from("G1"), ((String::from("`").revl_concat(&name)).revl_concat("` is not a declared requirement of ")).revl_concat(&cx.compName));
 }
@@ -1934,7 +1976,7 @@ fn req_call(root_: String, meth: &str, args: Vec<Expr>, marked: bool, cx: Ctx, a
     }
     let mut na = a.clone();
     if (decl.isEm && marked) {
-        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.revl_push((root_.revl_concat(".")).revl_concat(&meth)), ecaps: union_into(na.ecaps.clone(), vec![root_.clone()]), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: union_into(na.labels.clone(), vec![(root_.revl_concat(".")).revl_concat(&meth)]), ecaps: union_into(na.ecaps.clone(), vec![root_.clone()]), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
     }
     if (decl.isAsync && (!cx.underArrow)) {
         na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: union_into(na.aops.clone(), vec![(root_.revl_concat(".")).revl_concat(&meth)]), avals: na.avals.clone() };
@@ -1943,12 +1985,12 @@ fn req_call(root_: String, meth: &str, args: Vec<Expr>, marked: bool, cx: Ctx, a
 }
 
 fn fn_call(name: String, args: Vec<Expr>, marked: bool, cx: Ctx, a: Ac) -> Ac {
-    if (!head_declared(cx.clone(), &name)) {
+    if (!call_head_declared(cx.clone(), &name)) {
         return g1_refuse(cx.clone(), &name, a.clone());
     }
     let mut na = a.clone();
     if contains(cx.emittingNames.clone(), &name) {
-        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.revl_push(name.revl_concat("()")), ecaps: union_into(na.ecaps.clone(), caps_of(cx.caps.clone(), name.clone())), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: union_into(na.labels.clone(), vec![name.revl_concat("()")]), ecaps: union_into(na.ecaps.clone(), caps_of(cx.caps.clone(), name.clone())), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
     }
     if contains(cx.colored.clone(), &name) {
         na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: union_into(na.areach.clone(), vec![name.clone()]), aops: na.aops.clone(), avals: na.avals.clone() };
@@ -1959,7 +2001,7 @@ fn fn_call(name: String, args: Vec<Expr>, marked: bool, cx: Ctx, a: Ac) -> Ac {
 fn var_check(name: String, cx: Ctx, a: Ac) -> Ac {
     let mut na = a;
     if contains(cx.emittingNames.clone(), &name) {
-        na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.revl_push(name.revl_concat(" (passed as a function value)")), ecaps: union_into(na.ecaps.clone(), union_into(caps_of(cx.caps.clone(), name.clone()), vec![String::from("*")])), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
+        na = Ac { msg: String::from(""), tag: String::from(""), labels: union_into(na.labels.clone(), vec![name.revl_concat(" (passed as a function value)")]), ecaps: union_into(na.ecaps.clone(), union_into(caps_of(cx.caps.clone(), name.clone()), vec![String::from("*")])), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
     }
     if contains(cx.colored.clone(), &name) {
         na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: na.aops.clone(), avals: union_into(na.avals.clone(), vec![name.clone()]) };
@@ -2116,6 +2158,10 @@ fn prov_key_svc(pg: Prog) -> std::collections::HashMap<String, String> {
 
 fn mk_ctx(svcs: std::collections::HashMap<String, SvcD>, rm: std::collections::HashMap<String, String>, caps: std::collections::HashMap<String, Vec<String>>, colored: Vec<String>, emitting: Vec<String>, ai: Vec<String>, scope: Vec<String>, fnn: Vec<String>, cnm: String, slots: std::collections::HashMap<String, Vec<i64>>, pks: std::collections::HashMap<String, String>) -> Ctx {
     return Ctx { svcs: svcs.clone(), reqMap: rm.clone(), caps: caps.clone(), colored: colored.clone(), emittingNames: emitting.clone(), asyncExterns: ai.clone(), scopeNames: scope.clone(), fnNames: fnn.clone(), compName: cnm.clone(), fnAsyncSlots: slots.clone(), underArrow: false, handles: std::collections::HashMap::new(), provKeySvc: pks.clone() };
+}
+
+fn ctx_with_callables(cx: Ctx, names: Vec<String>) -> Ctx {
+    return Ctx { svcs: cx.svcs.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: union_into(cx.fnNames.clone(), names.clone()), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone() };
 }
 
 fn req_map_of(reqs: Vec<Bind>) -> std::collections::HashMap<String, String> {
@@ -3499,7 +3545,7 @@ pub fn admit_src(src: String) -> String {
     if (pg.bad != "") {
         return tagged("BAD", &pg.bad);
     }
-    let base = build_maps(pg.clone());
+    let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(lex_src(src.clone())));
     let fnv = check_module_fns(pg.fns.clone(), 0i64, base.clone());
     if (fnv != "") {
         return fnv;
