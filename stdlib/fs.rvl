@@ -81,10 +81,28 @@
 // the item-422 confinement pass (F1-F4), the ts one with the residual named in
 // its module docstring. rs / go / java / wasm bodies remain Slice 2b.
 //
+// ----------------------------------------------------- the observation half
+// Three `pure` externs that only LOOK, and never mutate:
+//   resolve_within(path) -> Result[Str, FsError]
+//       The confinement decision alone: the resolved absolute path, or the
+//       guard's own refusal. Hand the Ok path to your own host body to read.
+//   lexists(path)        -> Result[Bool, FsError]
+//   is_dir(path)         -> Result[Bool, FsError]
+//
+// These are the door a CONSUMER's host body uses to reach the jail. Every other
+// door is shut on purpose (396(B) jails a user ref to the user compile tree,
+// 410's stdlib ref root is install-origin only, and 422 F1 removed the
+// unconfined `globalThis.__revlFs` primitives), so without them the only option
+// left was guessing a relative specifier into the revl install tree. See "the
+// observations" below for the full argument, including why the WRITE primitives
+// are not here and are not coming back.
+//
 // Import the mutations with a named `use` (the inverses are auto-registered by
-// the accumulator — a consumer never names them):
+// the accumulator — a consumer never names them); import the observations the
+// same way:
 //
 //     use "stdlib/fs.rvl" { write, rm, move, mkdir }
+//     use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }
 
 // ------------------------------------------------------------------------ types
 // The per-op witnesses. Each is a flat record of WAL-serializable data — no
@@ -117,6 +135,87 @@ pub type MkdirWitness = { path: Str }
 // every failure reaches these bodies as an `Err(FsError)` and the declared
 // `Result` really is the whole result (roadmap 422 F6).
 pub type FsError = { code: Str, message: Str, path: Str }
+
+// ------------------------------------------------------------- the observations
+// The OTHER half of this module: three `pure` externs that only LOOK.
+//
+// They exist because a CONSUMER's own host body had no supported door to the
+// confinement guard. All three that might have served it are shut, by design:
+// item 396(B) jails a user-origin `= @ts ref` to the user COMPILE root, and
+// `backends/typescript/revl_fs_ts.ts` lives in the install tree; item 410's
+// second root (`__REVL_STDLIB_REF_ROOT__`) is reserved for install-origin
+// modules, which a consumer's file is not; and item 422 F1 removed the
+// unconfined primitives the deprecated `globalThis.__revlFs` seam published,
+// correctly — an exported unconfined rename IS that finding. What was left was
+// a relative path-GUESS into the install tree, which breaks whenever revl moves
+// (revl-harness hit it three times: F-H47.5, F-H58.11, F-H71.2).
+//
+// So the door is a revl one rather than a host one. A consumer writes
+//
+//     use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }
+//
+// asks revl for the confinement decision, and reads the CONFINED absolute path
+// it gets back with plain `os` / `node:fs` in its own body — no import of any
+// revl module on either tier, so nothing to guess and nothing to break when the
+// install moves.
+//
+// OBSERVATION ONLY, deliberately. The write primitives are not here and are not
+// coming back: their absence is the item 422 F1 fix. A consumer that appears to
+// need one needs a witnessed op from the catalog below (revertible by
+// construction, enumerated by the WAL) or a filed finding — never a new
+// primitive on this surface.
+//
+// The jail is UNCHANGED. `resolve_within` is the same family-1 guard every
+// mutation and every inverse routes through (`must #1`, realpath BEFORE the
+// membership check), reached through the same entry point, so a path these
+// refuse is a path no op in the catalog would touch. Widening the jail to make
+// observation convenient would recreate exactly what 422 F1 removed.
+//
+// Each returns `Result` for the same reason the mutations do: a path outside the
+// boundary answers with the guard's own refusal (`EOUTSIDE`), never with a fact
+// about what lives out there, and an unconfigured root (`EWORKSPACE`) stays
+// distinguishable from it. `Err` is the guard's verbatim `FsError`, so there is
+// one refusal vocabulary on this module rather than two.
+
+// Realpath `path` and refuse it unless it lands inside the session workspace
+// root; `Ok` carries the resolved absolute path. The whole confinement decision
+// and nothing else — hand the result to your own host body to read.
+pub extern pure fn resolve_within(path: Str) -> Result[Str, FsError] = @py {
+    import revl_fs_workspace as _ws
+    try:
+        target = _ws.resolve_within(path)
+    except _ws.FsOpError as e:
+        # total by construction (item 422 F6): the guard raises `FsOpError` or
+        # nothing, and `ConfinementError` is a subclass, so one `except` covers
+        # EWORKSPACE / EOUTSIDE / EINVAL and the declared Result is the whole
+        # result.
+        return Err(e.as_error())
+    return Ok(target)
+} = @ts ref fsResolveWithin from "../backends/typescript/revl_fs_ts.ts"
+
+// Does `path` name something (a dangling symlink included), once confined?
+// `Err` for a path outside the root, with the same code `resolve_within` gives.
+pub extern pure fn lexists(path: Str) -> Result[Bool, FsError] = @py {
+    import revl_fs_workspace as _ws
+    try:
+        target = _ws.resolve_within(path)
+        found = _ws.lexists_confined(target)
+    except _ws.FsOpError as e:
+        return Err(e.as_error())
+    return Ok(found)
+} = @ts ref fsLexists from "../backends/typescript/revl_fs_ts.ts"
+
+// Is `path` a directory, once confined? Same shape and same refusals as
+// `lexists`.
+pub extern pure fn is_dir(path: Str) -> Result[Bool, FsError] = @py {
+    import revl_fs_workspace as _ws
+    try:
+        target = _ws.resolve_within(path)
+        found = _ws.is_dir_confined(target)
+    except _ws.FsOpError as e:
+        return Err(e.as_error())
+    return Ok(found)
+} = @ts ref fsIsDir from "../backends/typescript/revl_fs_ts.ts"
 
 // ----------------------------------------------------------------- the inverses
 // Each inverse is a `pure` extern (host-LOCAL restore/rename, non-emission and

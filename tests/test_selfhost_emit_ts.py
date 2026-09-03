@@ -177,6 +177,13 @@ CORPUS = [
     # the oracle and `selfhost/emit_ts.rvl` emitted none of it while the suite was
     # green — item 429's trap, and a live security divergence.
     "secrets.rvl",
+    # item 435 (d) — the self-rebind (unique-ownership) lowering on item 445's
+    # frontend marker. `transforms.rvl` covers `push` only; this one adds `set`,
+    # `remove` and the record update (`Object.assign`), plus the NEGATIVE — a
+    # receiver retained by an earlier `out.push(m)`, whose write keeps the
+    # persistent `new Map(…)` IIFE. Without it three of the four in-place shapes
+    # would be invisible to the oracle (item 429's trap).
+    "unique_writes.rvl",
 ]
 
 def _load_reference_emit():

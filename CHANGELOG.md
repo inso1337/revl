@@ -113,6 +113,22 @@ but not seen. Every instance was closed. Representative fixes:
 - The distribution seam refuses a resource crossing on same-tier as well as
   cross-tier process boundaries, and the wire encoder fails closed on any value
   that is not scalar, list, dict, or a declared record or ADT.
+- A network (TCP+mTLS) seam refuses replays. The peer allowlist pinned who may
+  call and deliberately did not dedup, so an admitted peer's request could be
+  captured and re-delivered and the provider dispatched it again. The reason
+  recorded for that — a replay ledger needs the per-boot secret a
+  cross-composition caller can never hold — was wrong: dedup needs an identity
+  to scope the key by, and mutual TLS has already proved one. Freshness is now
+  keyed on the identity the handshake proved, read off the peer certificate and
+  never off the payload a replayer controls, so it needs no shared secret, and a
+  consumer under another conductor is admitted exactly as before. The ledger is
+  bounded per identity, and what an eviction costs is stated rather than hidden.
+  Seams report `peer-bound` where they earned it.
+- The node bridge seals a correlation envelope. It had no `correlation`
+  parameter at all, so a placement disarmed a provider's guard entirely rather
+  than refuse a caller that could not satisfy it — one node consumer left a py
+  provider unguarded. The ts bridge now seals the same HMAC over the same
+  canonical bytes, proven against the real guard over a real seam.
 - A boundary policy rule now selects a directly emitted extern by the capability
   token it declares. `extern emission[db] fn pg_write` put `pg_write` in a component's
   reach while the register floor, the approval gate and a bound secret all keyed the

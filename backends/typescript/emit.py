@@ -1971,7 +1971,20 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     apply_kw = "async apply" if is_async else "apply"
 
     if fields:
-        lines.append(f"  {apply_kw}(ctx: Context, rawConfig: {name}Config) {{")
+        # issue #223: cordis derives the arity of `ctx.plugin(C)` from this
+        # parameter — `Spread<T> = undefined extends T ? [config?: T] : [config: T]`
+        # — so a required `rawConfig` makes the config argument MANDATORY at
+        # every call site. That is only true when some field has no default:
+        # `host.applyConfigDefaults` takes `object | undefined` and throws only
+        # for a `required` field, so a component whose every field defaults is
+        # loadable as `ctx.plugin(C)` and ran that way in the suite while the
+        # emitted signature said it could not. Optional here iff optional there.
+        all_defaulted = all(f.get("default") is not None for f in fields)
+        config_param = (
+            f"rawConfig?: {name}Config" if all_defaulted
+            else f"rawConfig: {name}Config"
+        )
+        lines.append(f"  {apply_kw}(ctx: Context, {config_param}) {{")
         spec_parts = []
         for field in fields:
             fname = field["name"]
@@ -2660,10 +2673,101 @@ def _guard_frame_neutral_loop(body) -> None:
                 "while/for body (docs/design/379-break-continue.md)")
 
 
+# ---------------------------------------------------------------------------
+# The self-rebind (unique-ownership) lowering, roadmap item 435 (d), on item
+# 445's frontend marker.
+#
+# `xs = xs.push(e)` lowers through the builtin table to `[...xs, e]`, and
+# `m = m.set(k, v)` to a `new Map(m)` inside an IIFE: the correct rendering of a
+# PERSISTENT write, and a quadratic for the loop idiom, where the receiver is
+# dead the instant the assignment lands. Item 435 (d) measured the list case
+# exactly, by intercepting the array iterator so every copied element is
+# observable: building n elements copies n(n-1)/2 of them, 79,800 at n=400,
+# where a hand-written `xs.push(e)` copies none.
+#
+# A destructive lowering is only sound where nothing else can observe the write.
+# Item 435 (d) proposed re-deriving that proof here ("`x` is a `var` local, not
+# passed as an argument, returned, or captured anywhere in the loop body") and
+# the audit declined to act on it for exactly that reason: the go and python
+# tiers had each already written that rule, independently, and a further
+# derivation is a further chance at a silent value-semantics bug. Item 445
+# lifted the single answer into the frontend (`src/revl/ownership.py`), where it
+# is also flow-sensitive, and it now rides the IR — so this tier reads a FACT
+# instead of proving one.
+#
+# What arrives is `"unique": True` on the `assign` step: the binding owns its
+# object outright at this write, so the copy is unobservable and the in-place
+# call is the faithful lowering. ABSENCE MEANS "NOT PROVEN", which keeps the
+# copying form the tier had before, and that form is always correct.
+#
+# `"unique": "copy"` is DELIBERATELY NOT HONOURED here. It marks a local born
+# off another name (`var out = m`), owned only if the tier materialises a
+# defensive copy at the `let` the frontend stamps `unique_birth` on — and that
+# marker's two values are `"List"` and `"Map"`, where `"Map"` covers BOTH a revl
+# `Map` and a record update. The python tier honours it because both are a
+# `dict` there; on this tier a `Map` is a JS `Map` and a record is a plain
+# object, so the birth copy would be `new Map(x)` for one and `{ ...x }` for the
+# other and the marker does not say which. Guessing is not on the table for an
+# aliasing fact, so those writes keep the copying form.
+#
+# Nothing here is `Str`: `concat` is never marked (its receiver type is not
+# known at that node and a JS string cannot be mutated at all), and `push` is
+# List-only (docs/stdlib-2.0.md).
+
+# The persistent methods with an in-place JS statement, and their arity.
+_TS_INPLACE_METHODS = {"push": 1, "set": 2, "remove": 1}
+
+
+def _ts_inplace_write(node: dict) -> dict | None:
+    """The `out = out.push(v)` value this tier may render destructively, else
+    None. The frontend has already decided that the binding uniquely owns its
+    object at THIS write; the receiver is its own name by construction."""
+    if node.get("step") != "assign" or node.get("unique") is not True:
+        return None
+    value = node.get("value")
+    if not isinstance(value, dict):
+        return None
+    if value.get("kind") == "record_update":
+        return value
+    if value.get("kind") != "builtin":
+        return None
+    arity = _TS_INPLACE_METHODS.get(value.get("method"))
+    if arity is None or len(value.get("args") or []) != arity:
+        return None
+    return value
+
+
+def _ts_inplace_stmt(name: str, value: dict, ctx: "_Ctx") -> str:
+    """The in-place statement replacing a proven-unique persistent copy.
+    Operand evaluation order matches the copying form it replaces."""
+    if value.get("kind") == "record_update":
+        # `Object.assign` builds the whole override object BEFORE writing any
+        # of it, so a swap (`{ p | x = p.y, y = p.x }`) stays simultaneous
+        # exactly as the `{ ...p, .. }` spread was
+        overrides = ", ".join(
+            f"{_prop_key(k, 'record field')}: {_expr(v, ctx)}"
+            for k, v in value.get("updates") or []
+        )
+        return f"Object.assign({name}, {{ {overrides} }})"
+    args = [_expr(a, ctx) for a in value.get("args") or []]
+    method = value["method"]
+    if method == "push":
+        return f"{name}.push({args[0]})"
+    if method == "set":
+        return f"{name}.set({args[0]}, {args[1]})"
+    # `Map.remove` is TOTAL (an absent key is not an error) and `Map.delete`
+    # answers a discarded boolean rather than throwing, so it is exact.
+    return f"{name}.delete({args[0]})"
+
+
 def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: bool) -> None:
     step = node.get("step")
     if step in ("let", "assign"):
         name = _ident(node.get("name"), "binding")
+        write = _ts_inplace_write(node)
+        if write is not None:
+            out.append(f"{'  ' * indent}{_ts_inplace_stmt(name, write, ctx)}")
+            return
         value = _expr(node.get("value"), ctx)
         if step == "let":
             keyword = "let" if node.get("mutable") else "const"

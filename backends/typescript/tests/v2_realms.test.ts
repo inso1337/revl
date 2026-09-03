@@ -9,7 +9,7 @@ import {
   TenantBApp,
   TenantBStore,
 } from './generated/tenants.ts'
-import { plug, realmLabel, resetHost } from '../runtime.ts'
+import { fiberStateName, plug, realmLabel, resetHost } from '../runtime.ts'
 
 beforeEach(() => resetHost())
 
@@ -23,7 +23,7 @@ describe('v2 realms', () => {
       TenantBApp: await plug(ctx, TenantBApp),
     }
     for (const [name, fiber] of Object.entries(fibers)) {
-      expect(fiber.state, `${name} is ${FiberState[fiber.state]}`).toBe(FiberState.ACTIVE)
+      expect(fiber.state, `${name} is ${fiberStateName(fiber.state)}`).toBe(FiberState.ACTIVE)
     }
 
     // Each app wrote through ITS realm's provider: the stores disagree.

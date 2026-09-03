@@ -555,17 +555,28 @@ async def run(spec: dict, spec_path=None) -> None:
             correlation = None
             if corr:
                 from revl.deploy import Correlation, seal  # noqa: PLC0415
-                secret = bytes.fromhex(corr["secret"])
+                # A LOCAL (UDS) entry carries a `secret` and the envelope is
+                # SEALED with it. A NETWORK entry carries none by design (item
+                # 118 §1.4b): the receiver scopes dedup by the identity the mTLS
+                # handshake proved, so the envelope needs no HMAC — and a secret
+                # is exactly what a cross-composition caller could never hold.
+                # Both stamp a fresh idempotency key per call, so a captured
+                # request replayed against the provider collides with the
+                # crossing already admitted and is refused.
+                secret = (bytes.fromhex(corr["secret"])
+                          if corr.get("secret") else None)
                 composition_id = corr["composition_id"]
                 peer_identity = corr["peer_identity"]
 
                 def correlation(k, method, _secret=secret, _cid=composition_id,
                                 _peer=peer_identity):
-                    return seal(Correlation(composition_id=_cid, generation=0,
-                                            peer_identity=_peer,
-                                            effect_id=f"{k}.{method}",
-                                            idempotency_key=uuid.uuid4().hex),
-                               _secret)
+                    envelope = Correlation(composition_id=_cid, generation=0,
+                                           peer_identity=_peer,
+                                           effect_id=f"{k}.{method}",
+                                           idempotency_key=uuid.uuid4().hex)
+                    if _secret is None:
+                        return envelope.to_wire()
+                    return seal(envelope, _secret)
             proxy = bridge.proxy_component(key, info["methods"], target, module,
                                            deadline=info.get("deadline"),
                                            deadlines=info.get("deadlines"),
@@ -655,14 +666,32 @@ async def run(spec: dict, spec_path=None) -> None:
         if serve.get("peers"):
             from revl.deploy import PeerAllowlist  # noqa: PLC0415
             allow = PeerAllowlist(serve["peers"])
+        # item 118 §1.4b: the freshness gate a network seam CAN carry. It holds
+        # no secret — dedup is scoped by the identity the mTLS handshake proved
+        # — so placement.py installs it on every network `serve` block, whether
+        # or not an allowlist was declared, and it refuses no caller that used
+        # to be answered (a crossing with no idempotency key is dispatched as
+        # before). Absent (a UDS seam, or a spec predating this) it stays None.
+        replay = None
+        rspec = serve.get("replay")
+        if rspec:
+            from revl.deploy import TransportReplayGuard  # noqa: PLC0415
+            replay = TransportReplayGuard(
+                per_peer=int(rspec.get("per_peer") or 1024),
+                max_peers=int(rspec.get("max_peers") or 64))
         server = await bridge.serve(root, serve.get("methods") or serve["keys"], serve_target,
-                                    module=module, correlation=guard, peers=allow)
+                                    module=module, correlation=guard, peers=allow,
+                                    replay=replay)
         # The level this seam achieved, named on the seam's own log line so it is
         # readable where the seam is, not only in the conductor's audit block.
+        fresh = " + replay-checked" if replay is not None else ""
         if guard is not None:
             level = " (correlation-guarded)"
         elif allow is not None:
-            level = f" (peer-pinned: {len(allow)} declared peer(s))"
+            level = f" (peer-pinned: {len(allow)} declared peer(s){fresh})"
+        elif replay is not None:
+            level = (" (UNVERIFIED: no peer admission — any caller that reaches "
+                     "it; replays refused)")
         else:
             level = " (UNVERIFIED: no peer admission — any caller that reaches it)"
         log("serve", ", ".join(serve["keys"]),
@@ -682,9 +711,26 @@ async def run(spec: dict, spec_path=None) -> None:
         except Exception as exc:  # noqa: BLE001
             log("probe", expr, f"ERROR {type(exc).__name__}: {exc}")
 
-    print(f"[{name}] UP", flush=True)
-
     # 5. hold until the conductor stops us, then tear down consumers first.
+    #
+    # THE HANDLERS GO UP BEFORE THE `UP` LINE, and that ordering is the whole
+    # contract. `[name] UP` is what the conductor waits on: `run_placement`'s
+    # `--once` path blocks on `len(up) == len(children)` and then calls
+    # `stop_all` immediately, so the SIGTERM can land microseconds after this
+    # print. Printing first left a window in which the default SIGTERM
+    # disposition was still installed, and a signal arriving inside it killed
+    # the process outright — no LIFO unwind, no inverses replayed, no residue
+    # proof, no `DOWN`. Worse, that death is SILENT: the child has exited by the
+    # time `_stop_all` looks, so `proc.poll()` is not None, the kill path that
+    # records a stranded child is never reached, and a placement that tore down
+    # nothing reports rc 0.
+    #
+    # The window belongs to the LAST process to boot — every earlier one is
+    # still being waited on — which is why it was the consumer, the one process
+    # with an inverse (`store.remove`) and a residue proof to run, that lost it.
+    # Installed here, a signal arriving in the same window merely sets the event
+    # and `await stop.wait()` returns at once: the unwind runs either way, and
+    # `UP` means what it says — loaded, serving, AND able to be stopped.
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -692,6 +738,8 @@ async def run(spec: dict, spec_path=None) -> None:
             loop.add_signal_handler(sig, stop.set)
         except (NotImplementedError, RuntimeError):  # pragma: no cover (non-unix)
             pass
+
+    print(f"[{name}] UP", flush=True)
 
     # A control channel on stdin: the conductor pushes `repoint` commands here
     # to migrate a proxy to a successor provider (`revl swap`). Runs on a
