@@ -1,0 +1,39 @@
+// item 435 (d) / item 445: the four in-place shapes the `unique` marker turns
+// on for this tier, and the shape it deliberately does not.
+//
+// `transforms.rvl` already covers `push`; without this fixture `set`, `remove`
+// and the record update would be invisible to the byte-agreement oracle and the
+// self-host port could emit the spread while the suite stayed green — item
+// 429's trap. `held` is the negative: `out.push(m)` retains `m`, so the write
+// after it is NOT owned and the persistent `new Map(...)` IIFE must survive.
+type Pt = { x: Int, y: Int }
+
+fn counted(keys: List[Str]) -> Map[Str, Int] {
+  var m = Map.empty()
+  for (k of keys) { m = m.set(k, 1) }
+  return m
+}
+fn dropped(keys: List[Str], drop: Str) -> Map[Str, Int] {
+  var m = Map.empty()
+  for (k of keys) { m = m.set(k, 1) }
+  m = m.remove(drop)
+  return m
+}
+fn moved(n: Int) -> Pt {
+  var p = { x: 0, y: n }
+  var i = 0
+  while (i < n) {
+    p = { p | x = p.y, y = p.x }
+    i = i + 1
+  }
+  return p
+}
+fn held(keys: List[Str]) -> List[Map[Str, Int]] {
+  var m = Map.empty()
+  var out = []
+  for (k of keys) {
+    out = out.push(m)
+    m = m.set(k, 1)
+  }
+  return out
+}
