@@ -2399,8 +2399,25 @@ def _typing_imports(types: dict) -> list:
 
 def _emit_types(types: dict) -> "_Lines":
     out = _Lines()
-    # A record VALUE is a plain dict (`{'id': 0}`), so the class below is a
-    # SHAPE, never a constructor: nothing in an emitted module instantiates it.
+    # THE EXTERNAL CONTRACT OF AN EMITTED RECORD (docs/records.md §7).
+    #
+    # A record VALUE is a plain dict keyed by the revl field name, spelled
+    # exactly as the source spells it: `{'id': 0, 'from': 'a'}`. That holds for
+    # every producer and every consumer, INSIDE the module and OUT: a record
+    # literal, a `record_update` spread, a field read, a destructure, a value a
+    # host hands in across a service boundary, and a value `src/revl/fault.py`
+    # generates for a `prop test` or an auto-mock. There is one representation,
+    # and the class below is not it.
+    #
+    # The class is a SHAPE DECLARATION — annotations only, no constructor. It
+    # cannot be the value carrier even in principle: a field's CLASS ATTRIBUTE
+    # is `_mangle`d for Python keyword collisions while its RUNTIME KEY is the
+    # raw revl name, so `type Q = { from: Str }` emits `class Q: from_: str`
+    # against a read of `q['from']`. An instance of `Q` therefore answers no
+    # field read the emitter writes. Constructing it is always wrong, and the
+    # `getattr` fallback in `_field_read` is for ADT payloads (real objects),
+    # not for records.
+    #
     # It used to carry `@dataclass`, which built an `__init__`, `__repr__` and
     # `__eq__` for that never-constructed class at every module load: executing
     # `tests/fixtures/emit_py_corpus/types.rvl`'s three record declarations was
@@ -2962,9 +2979,14 @@ def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
     out.add(indent, f"{tmp} = {_expr(node['value'])}")
     if node["pattern"] == "record":
         for name in node["names"]:
-            # the binding is a fresh local, so mangle its keyword collisions;
-            # the attribute-read spelling is preserved byte-for-byte
-            out.add(indent, f"{_mangle(name)} = {tmp}.{name}")
+            # the binding is a fresh local, so mangle its keyword collisions.
+            # The READ is `_field_read`, exactly as `row.name` is: a record
+            # value is a dict (see `_emit_types`), so the plain `{tmp}.{name}`
+            # this used to emit raised `AttributeError` on every record value
+            # an emitted module actually produces. Nothing caught it because
+            # the only destructure test constructed the record CLASS, which no
+            # emitted module ever does. `rereadable`: `tmp` is already a name.
+            out.add(indent, f"{_mangle(name)} = {_field_read(tmp, name, rereadable=True)}")
     elif node["pattern"] == "list":
         names = [_mangle(n) for n in node["names"]]
         rest = node.get("rest")
