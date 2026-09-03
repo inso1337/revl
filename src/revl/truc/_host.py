@@ -557,7 +557,11 @@ def gauntlet_evidence(source: str) -> str:
     # otherwise asyncio refuses ("another loop is running"). One worker thread,
     # joined synchronously: the extern stays a plain call from revl's view.
     def _grade() -> dict:
-        return gauntlet.run(Session(), {"source": source})
+        # truc runs on the operator's own machine over the package it is
+        # shipping: the human is the author, so no MCP authoring trust applies
+        # (see `server.compile_under_authoring`).
+        return gauntlet.run(Session(), {"source": source},
+                            over_the_transport=False)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         dossier = pool.submit(_grade).result()

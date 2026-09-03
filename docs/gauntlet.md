@@ -122,6 +122,22 @@ leaves residue, or cannot even boot changes nothing the operator can see —
 loads a live composition, grades a *different* candidate against it, and
 asserts the live one still answers with its original provider afterward.
 
+### Isolation is not a licence to run what the gate refuses
+
+The scratch session isolates the candidate from the **live composition**. It
+does not isolate it from the **host**: booting a candidate runs its activation
+body, and a host-body extern the candidate reaches is host code in the server's
+own process (item 24 — the gate does not sandbox host code; that is what
+[`revl_quarantine`](quarantine-tier.md)'s wasm substrate is for).
+
+So the gauntlet's admission compile carries the session's **authoring trust**,
+through `server.compile_under_authoring` — the same door `revl_check`,
+`revl_admit` and `revl_swap` compile through. A candidate the admission gate
+refuses is graded `rejected` on that refusal and is never lowered, never
+booted. Grading a candidate is not permission to run one the gate would not
+admit. `revl_quarantine` and `revl_repair`, which run this battery, compile
+through the same door for the same reason.
+
 ## Graceful degradation
 
 Every branch grades rather than raises:
