@@ -368,7 +368,6 @@
       ],
       "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the `len`/`maplit`/`optfield` expression kinds and the `assert`/bare-`expr` statement steps - the same five the py corpus misses, in a corpus of 31 documents.": [
         "kind=len",
-        "kind=maplit",
         "kind=optfield",
         "step=assert",
         "step=expr"
@@ -477,7 +476,6 @@
         "step=effect",
         "step=emit",
         "step=let-effect",
-        "step=name",
         "step=provide",
         "subscribe=<true>",
         "witness=Str"

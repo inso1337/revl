@@ -329,7 +329,7 @@
       "uncovered_statements": 1065
     },
     "py": {
-      "statements": 2151,
+      "statements": 2277,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_ComponentEmitter._approval_step": 3,
@@ -342,6 +342,7 @@
           "_ComponentEmitter._emit_parallel_group": 11,
           "_ComponentEmitter._group_eligible": 18,
           "_ComponentEmitter._method_witnessed_step": 8,
+          "_ComponentEmitter._mint_site": 2,
           "_ComponentEmitter._setup_step": 20,
           "_ComponentEmitter._stream_head": 4,
           "_ComponentEmitter._stream_iter": 11,
@@ -365,11 +366,15 @@
         "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
           "<module>": 4,
           "_ComponentEmitter.__init__": 6,
+          "_ComponentEmitter._assigned_in": 1,
           "_ComponentEmitter._body_step": 20,
           "_ComponentEmitter._build_parallel_leaders": 8,
           "_ComponentEmitter._deferred_extern": 3,
+          "_ComponentEmitter._emission_call": 1,
           "_ComponentEmitter._emit_fire": 3,
-          "_ComponentEmitter._expr": 156,
+          "_ComponentEmitter._expr": 161,
+          "_ComponentEmitter._flow_step": 3,
+          "_ComponentEmitter._flow_value": 25,
           "_ComponentEmitter._method": 3,
           "_ComponentEmitter._method_step": 27,
           "_ComponentEmitter._provide": 4,
@@ -427,7 +432,7 @@
           "_emit_memo_wrapper": 17
         }
       },
-      "uncovered_statements": 936
+      "uncovered_statements": 973
     },
     "rust": {
       "statements": 3154,
@@ -610,7 +615,7 @@
       "uncovered_statements": 1583
     },
     "ts": {
-      "statements": 1811,
+      "statements": 1841,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_emit_temporal": 14,
@@ -640,7 +645,7 @@
           "_emit_ts_functions": 1,
           "_emit_ts_types": 19,
           "_emit_v3": 16,
-          "_expr": 52,
+          "_expr": 51,
           "_float_operand": 3,
           "_fn_call": 4,
           "_guard_frame_neutral_loop": 1,
@@ -664,10 +669,11 @@
           "_runtime_imports": 2,
           "_split_fn_type": 2,
           "_split_ts_types": 2,
-          "_ts_builtin": 14,
+          "_ts_builtin": 13,
           "_ts_extern_config_bind": 4,
+          "_ts_inplace_write": 3,
           "_ts_type": 2,
-          "_ts_v3_type": 4,
+          "_ts_v3_type": 3,
           "_uses_assert": 1,
           "_uses_bounded_int": 1,
           "_uses_bounded_int32": 2,
@@ -700,7 +706,7 @@
       "uncovered_statements": 618
     },
     "wasm": {
-      "statements": 2534,
+      "statements": 2657,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_ComponentEmitter.__init__": 60,
@@ -729,7 +735,7 @@
           "_ComponentEmitter._scalar_operator": 24,
           "_ComponentEmitter._scoped_key": 2,
           "_ComponentEmitter._statement": 2,
-          "_ComponentEmitter._tail": 15,
+          "_ComponentEmitter._tail": 17,
           "_ComponentEmitter._teardown_section": 7,
           "_ComponentEmitter._to_v3": 37,
           "_ComponentEmitter._wal_undo_name": 3,
@@ -740,7 +746,7 @@
           "_V3Emitter._call_type": 18,
           "_V3Emitter._if_expr": 11,
           "_V3Emitter._inline_arrow": 17,
-          "_V3Emitter._interp_expr": 19,
+          "_V3Emitter._interp_expr": 20,
           "_V3Emitter._match_expr": 16,
           "_V3Emitter._match_expr.arm_body": 13,
           "_V3Emitter._match_expr.arm_scope": 15,
@@ -780,7 +786,7 @@
           "_V3Emitter._fresh_tmp": 2,
           "_V3Emitter._guard_frame_neutral_loop": 1,
           "_V3Emitter._index_expr": 4,
-          "_V3Emitter._infer_type": 59,
+          "_V3Emitter._infer_type": 54,
           "_V3Emitter._len_expr": 1,
           "_V3Emitter._list_expr": 1,
           "_V3Emitter._list_type": 4,
@@ -791,19 +797,22 @@
           "_V3Emitter._str_ptr": 1,
           "_V3Emitter._tag_of": 1,
           "_V3Emitter._tagged_layout": 2,
-          "_V3Emitter._un_expr": 6,
+          "_V3Emitter._un_expr": 5,
           "_V3Emitter._unsupported_comments": 2,
-          "_V3Emitter.emit": 12,
+          "_V3Emitter.emit": 13,
           "_bin_instr": 2,
           "_dedup_colour_erased_poly_externs": 14,
           "_emit_v3": 6,
+          "_fold_int_const": 1,
           "_ident": 1,
           "_is_fn_type": 10,
           "_refuse_deferred_emissions": 10,
           "_refuse_float_operands": 1,
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1,
+          "_top_level_funcs": 4,
           "emit": 3,
+          "prune_unreachable_funcs": 2,
           "test_export_names": 10
         },
         "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
@@ -818,6 +827,7 @@
         "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
           "_ComponentEmitter._route_helpers": 35,
           "_V3Emitter._helper_f64_to_str": 1,
+          "_V3Emitter._helper_str_concat_n": 18,
           "_V3Emitter._helper_str_index_of": 1,
           "_V3Emitter._helper_str_join": 1,
           "_V3Emitter._helper_str_split": 1
@@ -826,7 +836,7 @@
           "_emit_v1": 14
         }
       },
-      "uncovered_statements": 1450
+      "uncovered_statements": 1473
     }
   },
   "selfhost": {
@@ -1126,7 +1136,7 @@
       "uncovered_statements": 196
     },
     "ts": {
-      "statements": 2073,
+      "statements": 2114,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "expected_missing_adt": 1,
@@ -1150,11 +1160,12 @@
           "emit_functions": 1,
           "emit_ts_types": 1,
           "expr": 4,
-          "expr_inner": 7,
+          "expr_inner": 6,
           "float_operand": 5,
           "fn_type_arrow_index": 2,
           "is_digit": 1,
           "is_float_expr": 5,
+          "is_inplace_write": 3,
           "is_js_reserved": 1,
           "is_word": 2,
           "is_word_ch": 4,
@@ -1166,7 +1177,7 @@
           "optcall_arg_is_int": 4,
           "render_arrow": 8,
           "render_bin": 6,
-          "render_builtin": 12,
+          "render_builtin": 11,
           "render_call": 2,
           "render_format": 5,
           "render_optcall": 3,
@@ -1177,7 +1188,7 @@
           "ts_bin_op": 6,
           "ts_return_type": 1,
           "ts_scalar_type": 4,
-          "ts_type": 6,
+          "ts_type": 5,
           "type_map": 3,
           "uses_assert": 2,
           "uses_bounded_int": 1,
@@ -1205,11 +1216,14 @@
       "uncovered_statements": 290
     },
     "wasm": {
-      "statements": 1329,
+      "statements": 1478,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "align4": 1,
           "align8": 1,
+          "i64_hi": 1,
+          "i64_lo": 1,
+          "iabs": 1,
           "is_bool_op": 1,
           "is_list_type": 1,
           "list_elem": 1,
@@ -1222,12 +1236,15 @@
           "bin_instr": 3,
           "builtin_type": 22,
           "cmp_suffix": 2,
+          "const_numeral": 3,
           "diverges": 3,
           "emit_function": 2,
           "emit_src": 1,
           "emit_stmt": 2,
           "expr_max_depth": 2,
-          "infer_ty": 16,
+          "fold_const": 3,
+          "fold_numeral": 6,
+          "infer_ty": 9,
           "infer_val_ty": 14,
           "is_record_type": 1,
           "list_type_of": 1,
@@ -1252,7 +1269,7 @@
           "helper_preamble": 1
         }
       },
-      "uncovered_statements": 111
+      "uncovered_statements": 119
     }
   }
 }
