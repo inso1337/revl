@@ -13,7 +13,8 @@ value-flow token proves it), and which G-rule verified the value.
 This module is pure — it imports no runtime and reads only the JSONL trace
 vocabulary from :mod:`revl.why_runtime`. It widens nothing: the ``llm`` payload
 and ``activationId`` are written at record time (the item-257 ``validate_retry``
-seam, ``backends/python/runtime.py``); this reader only projects them.
+seam, ``backends/python/runtime.py``, and the driver's crossing arm, which
+back-patches ``producedSeq``); this reader only projects them.
 
 Two safety invariants are visible in the output shape, and are the whole point
 of §4 of the design:
@@ -22,9 +23,11 @@ of §4 of the design:
   ``host-reported`` (unverifiable, §4 attack 2); the ONE number revl can stand
   behind — the attempt count against the static ceiling — is marked
   ``revl-controlled`` and is the one the oracle (§3.2) cross-checks.
-* ``produced`` prints ONLY when a fiber-local value-flow token tied a completion
-  to a later emission AND the activation ids matched; it is OMITTED whenever two
-  activations of the component are live, never adjacency-guessed (§4 attack 3).
+* ``produced`` prints ONLY when the edge was PROVED: the emitter saw the later
+  emission's arguments read the completion's binding, the fiber-local token said
+  which execution of that completion site produced the value, and the driver
+  resolved it inside one activation. Anything short of all three OMITS it, never
+  adjacency-guesses it (§4 attack 3).
   There is no ``prompt`` or ``response`` TEXT field anywhere — capturing the text
   is the exfiltration channel (§4 attack 1); only a salted, content-free digest
   may appear.

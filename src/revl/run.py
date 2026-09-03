@@ -845,8 +845,7 @@ class _Driver:
             ts=time.monotonic(), llm=llm, activation_id=activation_id))
         self._seq += 1
 
-    def _model_crossing_payload(self, *, activation_id: str | None = None,
-                                args=None, arg_origins=None,
+    def _model_crossing_payload(self, *, args=None, arg_origins=None,
                                 taint_engaged: bool = False,
                                 verified_by=None, crossing=None) -> dict | None:
         """Item 121: assemble the `llm` payload for a model-completion crossing,
@@ -877,12 +876,15 @@ class _Driver:
         bracket, the attempt count against the item-257 static ``N + 1`` ceiling)
         straight through; the HOST-reported model/tokens/cost are a best-effort
         passthrough off the return (:func:`_host_usage`). The salted, suppressible
-        `promptDigest` is computed over the crossing's revl-typed `args` (never
-        the host string) and the `producedSeq` value-flow edge is resolved via
-        the fiber-local token — present ONLY when the token's activation id
-        matches (`revl_produced_seq`), OMITTED (never adjacency-guessed) else.
-        Digest/token/host-usage all honest-degrade to absent; the assembly and
-        every provenance tag live in `revl_model_hop`."""
+        `promptDigest` is computed over the crossing's revl-typed `args`, never
+        the host string. Digest and host usage both honest-degrade to absent; the
+        assembly and every provenance tag live in `revl_model_hop`.
+
+        `producedSeq` is deliberately NOT set here. The hop names the DOWNSTREAM
+        emission it produced, and that emission has not been recorded yet at this
+        point — its trace seq does not exist. The edge is back-patched by
+        :meth:`_link_produced` once the emission it names crosses (item 121
+        Slice 2); a hop nothing derives from keeps the field absent."""
         take = getattr(self.runtime, "revl_take_model_call", None)
         if take is None:
             obs = None
@@ -896,12 +898,36 @@ class _Driver:
         if args is not None:
             digest = self.runtime.revl_prompt_digest(
                 args, arg_origins, taint_engaged)
-        produced = self.runtime.revl_produced_seq(activation_id)
         return self.runtime.revl_model_hop(
             model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost=cost,
             latency_seconds=latency, attempts=attempts, attempt_ceiling=ceiling,
-            verified_by=verified_by or [], produced_seq=produced,
-            prompt_digest=digest)
+            verified_by=verified_by or [], prompt_digest=digest)
+
+    @staticmethod
+    def _link_produced(crossing: dict, hop_event: dict | None,
+                       activation_id: str | None) -> bool:
+        """Back-patch one `produced` edge (item 121 Slice 2): the model hop at
+        `hop_event` produced the emission recorded as `crossing`.
+
+        The recorder stamped the crossing's step with `producedBy` — the STEP
+        INDEX of the validated completion whose binding the emitter proved this
+        crossing's arguments read (`replay.Timeline.record_emission`). The driver
+        owns the other half of the bridge: it maps step index -> trace seq as it
+        records the crossings, so the hop can be named by the seq the reader and
+        the OTel exporter both key on (`otel.py`'s `model-produced` SpanLink).
+
+        The edge is drawn ONLY when the completion resolves to a hop recorded in
+        THIS activation: `hop_event` is None whenever the `producedBy` names a
+        step outside the activation being recorded, and the activation ids must
+        match. Anything else OMITS the edge rather than guessing it (§4 attack
+        3). Returns whether an edge was drawn."""
+        if hop_event is None or hop_event.get("activationId") != activation_id:
+            return False
+        llm = hop_event.get("llm")
+        if not isinstance(llm, dict):
+            return False
+        llm.setdefault("producedSeq", []).append(crossing["seq"])
+        return True
 
     def _crossing_taint(self, component) -> tuple:
         """Item 444: the compile-side taint facts a crossing in `component`
@@ -1371,6 +1397,16 @@ class _Driver:
                 report = await timeline.step_back(at, force=force)
                 for step in report["inversesRan"] + report["compensationsRan"]:
                     self._log("undo", step["kind"], step["label"])
+                # item 121 Slice 2: the driver's half of the value-flow bridge.
+                # `Step.index` is the identity the runtime token holds, so map
+                # step index -> the emit event recorded for it, and resolve every
+                # `producedBy` against that map AFTER the walk — crossings are
+                # reported newest-first, so the hop a crossing names may not be
+                # recorded yet when the crossing is.
+                by_step: dict[int, dict] = {}
+                pending: list[tuple[dict, int]] = []
+                activation_id = (f"{timeline.component}#g{self.generation}"
+                                 f"#a{getattr(timeline, 'activation', 0)}")
                 for step in report["emissionsCrossed"]:
                     self._log("CROSSED", step["kind"], f"{step['label']} — irreversible")
                     # v2 emit event: one per crossing. The emission is scoped to
@@ -1391,11 +1427,9 @@ class _Driver:
                     # unproven path still fails closed (§4, the fail-closed
                     # default): the hop is recorded either way, only the digest
                     # is suppressed.
-                    activation_id = f"{timeline.component}#g{self.generation}"
                     arg_origins, taint_engaged = self._crossing_taint(
                         timeline.component)
                     llm = self._model_crossing_payload(
-                        activation_id=activation_id,
                         args=detail.get("args"),
                         arg_origins=arg_origins,
                         taint_engaged=taint_engaged,
@@ -1410,6 +1444,18 @@ class _Driver:
                         llm=llm,
                         activation_id=(activation_id if llm is not None
                                        else None))
+                    recorded = self._events[-1]
+                    if isinstance(step.get("index"), int):
+                        by_step[step["index"]] = recorded
+                    if isinstance(detail.get("producedBy"), int):
+                        pending.append((recorded, detail["producedBy"]))
+                for crossing, produced_by in pending:
+                    self._link_produced(crossing, by_step.get(produced_by),
+                                        activation_id)
+                for hop in by_step.values():
+                    edges = (hop.get("llm") or {}).get("producedSeq")
+                    if edges:
+                        edges.sort()
                 for step in report["failed"]:
                     self._log("FAIL", step["label"], step["error"] or "")
                 await self._flush()
