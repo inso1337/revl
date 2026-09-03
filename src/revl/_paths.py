@@ -2,8 +2,8 @@
 
 The `backends/` tree (per-tier emitters, runtimes, harnesses and their golden
 data) lives beside `src/revl` in a source checkout, but is *shipped inside* the
-`revl` package when installed from a wheel (see the ``force-include`` in
-``pyproject.toml``). A single resolver keeps every call site agnostic to which
+`revl` package when installed from a wheel (see ``only-include`` /
+``sources`` under ``[tool.hatch.build.targets.wheel]`` in ``pyproject.toml``). A single resolver keeps every call site agnostic to which
 layout it is running under.
 """
 
@@ -48,9 +48,9 @@ def stdlib_root() -> Path:
 
     1. **Source checkout** — `<repo>/stdlib`, the sibling of `src/revl`.
     2. **Installed wheel** — `stdlib/` packaged under the module itself as
-       ``site-packages/revl/stdlib`` (see the wheel force-include in
-       ``pyproject.toml``, which ships it the same way it already ships
-       ``backends/``).
+       ``site-packages/revl/stdlib`` (see the wheel target's ``sources``
+       table in ``pyproject.toml``, which ships it the same way it already
+       ships ``backends/``).
     """
     checkout = _PKG_DIR.parents[1] / "stdlib"  # <repo>/stdlib
     if checkout.is_dir():

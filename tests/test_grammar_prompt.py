@@ -3,8 +3,8 @@
 `docs/syntax-2.0.prompt.txt` is meant for direct injection into an LLM
 authoring system prompt: dense, complete, and small (roughly a hundred
 lines). The content is duplicated as `grammar_summary.PROMPT_GRAMMAR` because
-`docs/` is not packaged into the wheel (pyproject.toml only force-includes
-`backends/` and `stdlib/`) — this test is the drift guard between the two
+`docs/` is not packaged into the wheel (pyproject.toml's wheel target only
+maps in `src/revl`, `backends/` and `stdlib/`) — this test is the drift guard between the two
 copies, and the CLI (`revl grammar --prompt`) reads the Python constant, never
 the file, so it works identically from a checkout or an installed package.
 """

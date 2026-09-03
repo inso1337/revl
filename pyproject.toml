@@ -39,24 +39,144 @@ truc = "revl.truc:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/revl"]
-
+# WHAT THE DISTRIBUTIONS SHIP, and why it is computed rather than copied.
+#
 # The per-tier emitters, runtimes and their golden data live in `backends/`, a
 # sibling of `src/revl` in a checkout. They must ride *inside* the wheel or every
 # backend-touching command (`revl run`, cross-tier `revl test`, placement, fault
 # tests) breaks once installed — the checkout path does not exist under
-# site-packages. Ship the tree as `revl/backends`; `revl._backends_root()`
-# prefers the checkout location and falls back to this packaged copy.
+# site-packages. They ship as `revl/backends`; `revl._backends_root()` prefers
+# the checkout location and falls back to that packaged copy. `stdlib/` ships
+# the same way (roadmap 319), for `revl._paths.stdlib_root()`.
 #
-# `stdlib/` ships the same way (roadmap 319): a `use "stdlib/..."` import
-# needs a real directory to fall back to when it does not resolve relative to
-# the importing file, and `site-packages` is exactly where an installed
-# consumer (the harness, say) runs from. `revl._paths.stdlib_root()` prefers
-# the checkout location and falls back to this packaged copy.
-[tool.hatch.build.targets.wheel.force-include]
-"backends" = "revl/backends"
-"stdlib" = "revl/stdlib"
+# Both used to arrive through a plain `force-include` of the two directories.
+# hatchling applies `force-include` AFTER file selection and exempts it from
+# every exclude rule and from the ignore files, so it copied the two trees
+# VERBATIM off the builder's disk. The wheel therefore contained whatever
+# happened to be lying around rather than what the commit says
+# (GHSA-gj88-cx6q-38r2), which is the wrong property for a published artifact
+# in two ways:
+#
+#   * size and correctness — a developer build shipped `node_modules`, cargo
+#     `target/debug`, a cloned `.cordis-py`, compiled runner binaries and stray
+#     `*.log` scratch files: 2933 members / 250 MB unpacked against the 523 the
+#     commit actually describes;
+#   * non-determinism — two builds of the SAME commit on two machines produced
+#     different wheels, so nothing about the artifact could be derived from the
+#     revision. Anything sitting under `backends/` at build time rode along,
+#     `.gitignore`d or not, and `.gitignore` routes machine-generated secrets
+#     there on purpose (`backends/typescript/test-secret-store/`).
+#
+# `hatch_build.py` replaces the directory-level force-include with a PER-FILE
+# one it computes: from `git ls-files` in a checkout, and from the deny-list
+# below when there is no git (a wheel built out of an unpacked sdist). The
+# wheel target keeps `packages = ["src/revl"]` — remapping `backends` with a
+# `sources` entry would have been the tidier spelling, but a `sources` rewrite
+# that CHANGES a prefix rather than removing one makes editable installs
+# impossible, and `pip install -e ".[test]"` is how eleven CI jobs and every
+# contributor set up (README.md, CONTRIBUTING.md).
+#
+# `tools/check_wheel_manifest.py` is the gate: it asserts the built wheel's
+# member list EQUALS `git ls-files` of those trees plus the `.dist-info`, and
+# that the sdist carries no untracked file. It runs in `lint`, in the release
+# dry run, and immediately before the PyPI upload.
+[tool.hatch.build.targets.wheel]
+packages = ["src/revl"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+# The sdist has the same shape of problem, one step milder: hatchling reads the
+# ROOT `.gitignore` and none of the sixteen nested ones, so a plain build swept
+# in `backends/rust/*/target/` (909 files) and the compiled
+# `backends/go/placement_runner/revl_placement_runner`. These excludes state the
+# artifact classes in the packaging file itself, root-anchored, mirroring the
+# nested ignore files. They also feed `hatch_build.py`'s no-git fallback.
+#
+# Redundancy with `.gitignore` is the point: this is packaging's own statement
+# of what may never ship, and it does not move when an ignore rule is relaxed
+# somewhere else for an unrelated reason.
+[tool.hatch.build]
+exclude = [
+  # dependency, build and vendored-clone trees (npm, cargo, go, java, python)
+  "**/node_modules",
+  "**/target",
+  "**/.cordis-py",
+  "**/.cordis4j*",
+  "**/.venv",
+  "**/__pycache__",
+  "**/*.py[cod]",
+  "**/*.class",
+  "**/Cargo.lock",
+  # generated and scratch output written by the harnesses and by test runs
+  "**/.pytest_cache",
+  "**/.conformance-*",
+  "**/*.log",
+  "**/*-note.txt",
+  "backends/typescript/_gen",
+  "backends/go/placement_runner/emitted/*.go",
+  "backends/go/placement_runner/revl_placement_runner",
+  "backends/java/placement/out",
+  "backends/java/placement/gen",
+  "backends/java/placement/real_out",
+  "backends/java/placement/real_gen",
+  "backends/java/placement/adt_out",
+  "backends/java/placement/adt_gen",
+  "backends/java/placement/*spec.json",
+  "backends/java/placement/adt_prov.json",
+  "backends/java/placement/adt_cons.json",
+  # machine-generated secrets: `.gitignore` routes them here on purpose, and a
+  # distribution is the last place on earth they may appear
+  "backends/typescript/test-secret-store",
+  # credential-shaped files, by name. Nothing tracked matches any of these, so
+  # they cost nothing; they exist for the one path that cannot consult git --
+  # `hatch_build.py`'s fallback, building a wheel out of an unpacked sdist --
+  # where the rule is necessarily a deny-list rather than an allow-list.
+  "**/.env",
+  "**/.env.*",
+  "**/.npmrc",
+  "**/.netrc",
+  "**/credentials",
+  "**/*.pem",
+  "**/*.key",
+  "**/*.p12",
+  "**/*.pfx",
+  "**/id_rsa*",
+  "**/id_ed25519*",
+]
+
+# The one place tracked content sits UNDER an ignore rule. `.gitignore:36` is
+# `backends/typescript/tests/generated/` — the TS harness writes throwaway
+# modules there — but seventeen fixtures in that directory were force-added and
+# ARE tracked. Without this, hatchling's ignore handling drops them from the
+# sdist, and a wheel built out of that sdist (`pip install revl-2.0.0.tar.gz`)
+# comes out seventeen files short of one built in a checkout.
+#
+# `artifacts` is hatchling's "include even though VCS ignores it" hook. It lists
+# the seventeen by exact path ON PURPOSE rather than as `*.ts`: a glob would
+# also sweep up whatever the harness last wrote there, which is the
+# non-determinism this whole section exists to remove. Add a tracked fixture to
+# that directory and `tools/check_wheel_manifest.py` reds until the path is
+# added here too — loud rot beats a silently short distribution.
+artifacts = [
+  "backends/typescript/tests/generated/conformance.ts",
+  "backends/typescript/tests/generated/dynamic_reserved_key.ts",
+  "backends/typescript/tests/generated/fr1_loop.ts",
+  "backends/typescript/tests/generated/fr3_json_int.ts",
+  "backends/typescript/tests/generated/instance_get.ts",
+  "backends/typescript/tests/generated/r3_migrator.ts",
+  "backends/typescript/tests/generated/reserved_words.ts",
+  "backends/typescript/tests/generated/spawn.ts",
+  "backends/typescript/tests/generated/str_scan.ts",
+  "backends/typescript/tests/generated/tenants.ts",
+  "backends/typescript/tests/generated/unique_writes.ts",
+  "backends/typescript/tests/generated/user_cache.ts",
+  "backends/typescript/tests/generated/v3_map.ts",
+  "backends/typescript/tests/generated/v3_stdlib.ts",
+  "backends/typescript/tests/generated/v3_tests.test.ts",
+  "backends/typescript/tests/generated/v3_types_functions.ts",
+  "backends/typescript/tests/generated/witnessed_teardown.ts",
+]
 
 # Lint gate (roadmap 110d). The repo already carries a `# noqa` discipline whose
 # codes are overwhelmingly Pyflakes (F): unused imports/locals, undefined names,
