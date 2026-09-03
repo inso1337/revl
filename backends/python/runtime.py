@@ -86,7 +86,7 @@ __all__ = [
     "trace_observers",
     # item 443: the operator E-Stop (docs/design/443-estop.md)
     "arm_estop_latch", "clear_estop", "estop", "estop_engaged",
-    "estop_latch_path", "estop_residue", "estop_state",
+    "estop_from_latch", "estop_latch_path", "estop_residue", "estop_state",
 ]
 
 
@@ -2054,6 +2054,27 @@ def estop(reason: str = "operator halt", *, operator: Optional[str] = None,
     }
     _record(f"estop {reason}")
     return dict(_ESTOP)
+
+
+def estop_from_latch() -> Optional[dict]:
+    """Engage the halt IF an operator has armed the latch; return the halt
+    record, or None when no latch is armed.
+
+    `_estop_check` engages the latch LAZILY, at the next crossing, which is
+    exactly right for a busy process: it costs nothing until something is
+    about to cross. But a process parked on its stop event crosses nothing, so
+    it would notice the emergency stop only when work next arrived — which is
+    the moment it is too late. A watcher (`revl._process_runner`) calls this on
+    a timer so an idle process halts on the BUTTON rather than on its next
+    request. It is the same halt either way: idempotent, and still refusing to
+    run without the operator authority the latch carries."""
+    if _ESTOP is not None:
+        return dict(_ESTOP)
+    record = _latch_record()
+    if record is None:
+        return None
+    return estop(record.get("reason") or "operator halt",
+                 operator=record.get("operator") or "unknown", _from_latch=True)
 
 
 def estop_residue() -> list:

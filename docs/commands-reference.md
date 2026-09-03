@@ -409,7 +409,12 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
 - `--estop-latch FILE` - watch FILE for an operator E-Stop, so `revl estop
   --latch FILE` from another terminal halts this run immediately
   ([443-estop.md](design/443-estop.md)). Unarmed by default; an unarmed run
-  checks nothing.
+  checks nothing. With `--placement` the CONDUCTOR watches the latch too and
+  halts every process: a py child reads the latch itself, names its in-flight
+  inventory and dies without unwinding; a child on any other tier is SIGKILLed,
+  because that tier has no E-Stop seam. The halt report names every component
+  left un-torn-down, one line each, and marks the residue it cannot enumerate
+  UNKNOWN rather than omitting it.
 - `--trace FILE` - write a causal lifecycle trace (JSONL); every transition
   carries the cause chain, queryable with `revl why` ([why-runtime.md](why-runtime.md)).
 - `--withdraw COMPONENT` - one-shot: boot, withdraw this live component while
@@ -485,6 +490,25 @@ resume, and the way back is `revl recover --wal FILE`.
 Exit status follows the residue, as `revl recover` does: 0 when nothing is
 outstanding, 1 when a halt is engaged and entries are owed. An E-Stop is never
 clean.
+
+**Across a placement.** `revl run --placement P --estop-latch FILE` arms the
+same latch for a composition split across processes, and `revl estop --latch
+FILE` halts all of them. The two populations are different and the report says
+which one each component got:
+
+- a process on a tier that HONORS the latch (today: `py`) refuses new crossings
+  at its own seams from the instant the latch appears, prints its inventory —
+  the entries it stranded and the at-most-one crossing that was already
+  dispatched — and dies where it stands, running no teardown;
+- a process on any other tier (`node`, `rust`, `go`, `java`, `wasm`) has no
+  E-Stop seam, so the only halt available for it is a SIGKILL. It may have
+  dispatched a crossing microseconds before it died and nothing recorded that,
+  so its residue is **UNKNOWN** and the report says so by name.
+
+`REVL_ESTOP_HALT_WINDOW` (default 2 seconds) bounds how long a latch-honoring
+child gets to name its inventory before it is killed anyway. It is not a
+teardown grace and must never grow into one: by the time it starts the child is
+already refusing crossings, so it buys the inventory and nothing else.
 ### `revl branch`
 
 Session branch lineage over durable write-ahead logs (roadmap item 250): what a
