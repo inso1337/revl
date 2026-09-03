@@ -1,0 +1,22 @@
+// REJECTED — G4, the same rule at the provide-method position: a host
+// acquisition bound by a plain `let` registers no release.
+//
+// `effect Pool.open(...)` with no `undo` in an ACTIVATION body was already
+// refused (`g4_missing_undo.rvl`); dropping the `effect` keyword and binding
+// the call in a method body was not, so the pool leaked per request. The rule
+// is one rule at every position an expression can occupy.
+//
+// expected error:
+//   host acquisition `Pool.open` cannot be called in this position — nothing
+//     registers its `close()`, so the resource is acquired irreversibly (G4)
+
+service S { fn go(u: Str) -> Int }
+
+component C provides s: S {
+  provide s {
+    fn go(u) {
+      let p = Pool.open(u, 1)
+      return 1
+    }
+  }
+}

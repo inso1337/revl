@@ -61,6 +61,30 @@
 // know which remote operation undoes which. The card does not say, and
 // this importer will not guess.
 //
+// THE ENDPOINT ABOVE IS THE ENDPOINT. A REDIRECT IS REFUSED.
+//
+// The reach bound is derived from the endpoint's host, so a
+// transport that followed a `Location` to another host would make
+// that bound stop describing where this crossing can reach — and a
+// 301/302/303 re-issues the POST as a GET with the body dropped, so
+// the declared emission would become a read. Both tiers' clients do
+// that by DEFAULT (`urllib` follows; `fetch` defaults to
+// `redirect: "follow"`), so the generated body installs a policy
+// that refuses instead, naming the rule and reporting only the
+// target's ORIGIN (a `Location`'s userinfo would be a live
+// credential). Nothing on the original request — no header, no
+// credential, no `Secret[T]` — travels to an origin this file did
+// not name.
+//
+// Following is NOT declared here. Pass `--follow-redirects` to allow it, bounded to:
+//   a SAME-ORIGIN 307 or 308, at most five hops. A 301, 302 or 303
+//   is refused whatever the flag says, because it changes the
+//   method; a cross-origin hop is refused because the endpoint is
+//   the reach bound.
+//
+// The crossing is bounded in time at 30s. A peer that accepts the
+// connection and then says nothing is a fault, not a wait.
+//
 // A transport failure is a FAULT raised out of the host body, never a
 // quietly-empty result. Turning it into provider WITHDRAWAL, and the
 // `on_failure(result)` opt-in, arrive with item 424(c)'s `remote` row
@@ -120,23 +144,70 @@ service InvoiceAgent {
 extern emission[net.billing_internal] async fn a2a_invoice_agent_invoice_lookup(message: Str) -> Untrusted[Str]
   = @ts {
       // A2A 1.0.0, JSON-RPC 2.0 `message/send`. ONE crossing.
-      const res = await fetch("https://billing.internal:8443/a2a", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: crypto.randomUUID(),
-          method: "message/send",
-          params: {
-            message: {
-              role: "user",
-              messageId: crypto.randomUUID(),
-              parts: [{ kind: "text", text: message }],
-              metadata: { "revl.skill": "invoice-lookup" },
-            },
+      const a2aPayload = JSON.stringify({
+        jsonrpc: "2.0",
+        id: crypto.randomUUID(),
+        method: "message/send",
+        params: {
+          message: {
+            role: "user",
+            messageId: crypto.randomUUID(),
+            parts: [{ kind: "text", text: message }],
+            metadata: { "revl.skill": "invoice-lookup" },
           },
-        }),
+        },
       });
+      const a2aSend = (u: string) => fetch(u, {
+        method: "POST",
+        // Nothing is followed by the runtime; see the policy below.
+        redirect: "manual",
+        // A crossing that never returns is not a crossing.
+        signal: AbortSignal.timeout(30 * 1000),
+        headers: { "content-type": "application/json" },
+        body: a2aPayload,
+      });
+
+      // -- redirect policy (revl.crossing_redirect) --------------------
+      // `redirect: "manual"` above: nothing is followed by the runtime. A
+      // 3xx is a REFUSAL — the endpoint is part of what was declared and
+      // admitted, and the Fetch standard re-issues a 301/302/303 POST as a
+      // GET with the body dropped, to whatever origin `Location` names.
+      const a2aFollowRedirects = false;
+      const a2aOriginOf = (u: string) => {
+        const p = new URL(u);
+        return `${p.protocol}//${p.host}`;
+      };
+      let a2aUrl: string = "https://billing.internal:8443/a2a";
+      let res = await a2aSend(a2aUrl);
+      for (let hop = 0; ; hop++) {
+        const moved = res.type === "opaqueredirect"
+          || (res.status >= 300 && res.status < 400);
+        if (!moved) break;
+        // An opaque redirect exposes no headers, so `location` reads null
+        // and the refusal below is the only reachable answer for it.
+        const loc = res.headers.get("location");
+        if (!a2aFollowRedirects || loc === null) {
+          throw new Error(
+            `a2a: redirect refused — HTTP ${res.status}. Following a redirect is not declared on this crossing, and the endpoint is part of what was declared and admitted.`);
+        }
+        // Reported as an ORIGIN, never as the raw `Location`: that is
+        // peer-supplied text and its userinfo would be a live credential.
+        const next = new URL(loc, a2aUrl).toString();
+        if (a2aOriginOf(next) !== a2aOriginOf(a2aUrl)) {
+          throw new Error(
+            `a2a: redirect refused — HTTP ${res.status} to ${a2aOriginOf(next)}. A declared follow is SAME-ORIGIN only; the declared endpoint is the reach bound.`);
+        }
+        if (res.status !== 307 && res.status !== 308) {
+          throw new Error(
+            `a2a: redirect refused — HTTP ${res.status} re-issues a POST as a GET and drops the body, so the declared emission would become a read. Only 307 and 308 preserve the method.`);
+        }
+        if (hop >= 4) {
+          throw new Error(
+            "a2a: redirect refused — too many same-origin hops; a declared follow does not chase a loop.");
+        }
+        a2aUrl = next;
+        res = await a2aSend(a2aUrl);
+      }
       if (!res.ok) {
         // A transport failure is a FAULT, never a quietly-empty result.
         throw new Error(`a2a: transport failure (HTTP ${res.status})`);
@@ -192,23 +263,70 @@ extern emission[net.billing_internal] async fn a2a_invoice_agent_invoice_lookup(
 extern emission[net.billing_internal] async fn a2a_invoice_agent_draft_reminder(message: Str) -> Untrusted[Str]
   = @ts {
       // A2A 1.0.0, JSON-RPC 2.0 `message/send`. ONE crossing.
-      const res = await fetch("https://billing.internal:8443/a2a", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: crypto.randomUUID(),
-          method: "message/send",
-          params: {
-            message: {
-              role: "user",
-              messageId: crypto.randomUUID(),
-              parts: [{ kind: "text", text: message }],
-              metadata: { "revl.skill": "draft-reminder" },
-            },
+      const a2aPayload = JSON.stringify({
+        jsonrpc: "2.0",
+        id: crypto.randomUUID(),
+        method: "message/send",
+        params: {
+          message: {
+            role: "user",
+            messageId: crypto.randomUUID(),
+            parts: [{ kind: "text", text: message }],
+            metadata: { "revl.skill": "draft-reminder" },
           },
-        }),
+        },
       });
+      const a2aSend = (u: string) => fetch(u, {
+        method: "POST",
+        // Nothing is followed by the runtime; see the policy below.
+        redirect: "manual",
+        // A crossing that never returns is not a crossing.
+        signal: AbortSignal.timeout(30 * 1000),
+        headers: { "content-type": "application/json" },
+        body: a2aPayload,
+      });
+
+      // -- redirect policy (revl.crossing_redirect) --------------------
+      // `redirect: "manual"` above: nothing is followed by the runtime. A
+      // 3xx is a REFUSAL — the endpoint is part of what was declared and
+      // admitted, and the Fetch standard re-issues a 301/302/303 POST as a
+      // GET with the body dropped, to whatever origin `Location` names.
+      const a2aFollowRedirects = false;
+      const a2aOriginOf = (u: string) => {
+        const p = new URL(u);
+        return `${p.protocol}//${p.host}`;
+      };
+      let a2aUrl: string = "https://billing.internal:8443/a2a";
+      let res = await a2aSend(a2aUrl);
+      for (let hop = 0; ; hop++) {
+        const moved = res.type === "opaqueredirect"
+          || (res.status >= 300 && res.status < 400);
+        if (!moved) break;
+        // An opaque redirect exposes no headers, so `location` reads null
+        // and the refusal below is the only reachable answer for it.
+        const loc = res.headers.get("location");
+        if (!a2aFollowRedirects || loc === null) {
+          throw new Error(
+            `a2a: redirect refused — HTTP ${res.status}. Following a redirect is not declared on this crossing, and the endpoint is part of what was declared and admitted.`);
+        }
+        // Reported as an ORIGIN, never as the raw `Location`: that is
+        // peer-supplied text and its userinfo would be a live credential.
+        const next = new URL(loc, a2aUrl).toString();
+        if (a2aOriginOf(next) !== a2aOriginOf(a2aUrl)) {
+          throw new Error(
+            `a2a: redirect refused — HTTP ${res.status} to ${a2aOriginOf(next)}. A declared follow is SAME-ORIGIN only; the declared endpoint is the reach bound.`);
+        }
+        if (res.status !== 307 && res.status !== 308) {
+          throw new Error(
+            `a2a: redirect refused — HTTP ${res.status} re-issues a POST as a GET and drops the body, so the declared emission would become a read. Only 307 and 308 preserve the method.`);
+        }
+        if (hop >= 4) {
+          throw new Error(
+            "a2a: redirect refused — too many same-origin hops; a declared follow does not chase a loop.");
+        }
+        a2aUrl = next;
+        res = await a2aSend(a2aUrl);
+      }
       if (!res.ok) {
         // A transport failure is a FAULT, never a quietly-empty result.
         throw new Error(`a2a: transport failure (HTTP ${res.status})`);

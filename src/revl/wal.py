@@ -46,6 +46,8 @@ import json
 import os
 import sys
 import tempfile
+import warnings
+from dataclasses import dataclass
 
 #: The on-disk WAL format version. Bump only on a breaking schema change; the
 #: header carries it so a reader can refuse a version it does not understand.
@@ -209,6 +211,133 @@ def _check_version(header: dict, path: str) -> None:
         )
 
 
+class NonDurableWALWarning(UserWarning):
+    """The approval WAL is being written somewhere the OS may clear (item 413,
+    issue #289).
+
+    Raised as a warning, not an error, and the reasoning is deliberate. Refusing
+    to start was considered and rejected:
+
+    * the WAL is the gate's *record*, not its *enforcement*. The gate still
+      refuses everything it would refuse with a durable WAL; what is lost is the
+      ability to replay or audit a decision after a crash. Turning a degraded
+      record into a dead session takes a host that works (read-only HOME,
+      immutable container image, locked-down CI runner) and stops it working;
+    * the load path is already fail-closed where it matters — ``session.load``
+      refuses a policy load with no recording at all. A WAL that exists but sits
+      on volatile storage is strictly more recoverable than no WAL;
+    * a refusal is trivially worked around by setting ``REVL_WAL_DIR`` to a
+      tempdir, which reintroduces the silent non-durability this warning exists
+      to end, except now it is invisible again *and* looks deliberate.
+
+    So the fallback stays, and the loss of the property becomes loud instead:
+    named durable candidates, the reason each failed, where the WAL actually
+    landed, and what it costs. `revl doctor` reports the same fact as a WARN.
+    """
+
+
+@dataclass(frozen=True)
+class WALDirResolution:
+    """Where the approval WAL directory resolved to, and whether it is durable.
+
+    ``attempts`` is the ordered ``(candidate, reason)`` list of durable locations
+    that could NOT be created — empty when the first candidate worked. It is the
+    evidence half of the warning: an operator needs the *why* (a read-only HOME
+    reads very differently from a HOME that does not exist) far more than the
+    bare fact that the fallback happened.
+    """
+
+    directory: str
+    durable: bool
+    attempts: tuple[tuple[str, str], ...] = ()
+
+    def summary(self) -> str:
+        """One line, for a table row (`revl doctor`)."""
+        if self.durable:
+            return f"durable approval-WAL directory {self.directory}"
+        tried = "; ".join(f"{path} ({reason})" for path, reason in self.attempts)
+        return ("NOT durable — the approval WAL falls back to the process "
+                f"tempdir {self.directory}, which the OS may clear at any time. "
+                f"Durable locations tried: {tried or 'none'}. "
+                "Set $REVL_WAL_DIR to a writable durable directory.")
+
+    def describe(self) -> str:
+        """The full operator-facing explanation used for the warning text."""
+        if self.durable:
+            return self.summary()
+        lines = [
+            "the revl approval WAL is NOT DURABLE: no per-user state directory "
+            "could be created, so it falls back to the process temporary "
+            f"directory {self.directory}, which the operating system may clear "
+            "at any time (a reboot, a tmp reaper).",
+            "",
+            "The WAL is the record of what the approval gate authorised. On "
+            "volatile storage that record can vanish before it is read, so "
+            "`revl recover` may find nothing to replay after a crash and an "
+            "audit of what was approved has no source. The gate still refuses "
+            "everything it would otherwise refuse — what is lost is the "
+            "durability of the record, silently, until now.",
+            "",
+            "Durable locations tried, and why each failed:",
+        ]
+        if self.attempts:
+            lines += [f"  - {path}: {reason}" for path, reason in self.attempts]
+        else:
+            lines.append("  - (none: no durable candidate was even attempted)")
+        lines += [
+            "",
+            "To restore durability, point $REVL_WAL_DIR (or $XDG_STATE_HOME) at "
+            "a writable directory on durable storage. `revl doctor` reports this "
+            "same check.",
+        ]
+        return "\n".join(lines)
+
+
+def wal_dir_candidates() -> list[str]:
+    """The ordered durable candidates :func:`resolve_wal_dir` will try.
+
+    Split out so `revl doctor` and the warning can NAME what was tried without
+    re-deriving the precedence, and so the precedence itself has one definition.
+    """
+    override = os.environ.get("REVL_WAL_DIR")
+    if override:
+        return [override]
+    candidates = []
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    if xdg_state:
+        candidates.append(os.path.join(xdg_state, "revl", "approval-wal"))
+    elif sys.platform == "darwin":
+        candidates.append(os.path.expanduser(
+            "~/Library/Application Support/revl/approval-wal"))
+    # Always keep the XDG state default as a final durable candidate so a
+    # macOS host with an unwritable Application Support still lands durable.
+    candidates.append(os.path.expanduser("~/.local/state/revl/approval-wal"))
+    return candidates
+
+
+def resolve_wal_dir() -> WALDirResolution:
+    """Resolve the approval-WAL directory, reporting HOW it resolved.
+
+    The durability logic is :func:`default_wal_dir`'s, unchanged; this is the
+    same walk with the outcome kept instead of discarded, so a caller that wants
+    to *report* on the setup (`revl doctor`) can do so without triggering the
+    warning, and :func:`default_wal_dir` can warn off the same evidence.
+
+    It creates the directory it returns — resolving is the probe. That is the
+    only honest answer to "where will the WAL go": a candidate is durable
+    exactly when it can be created ``0o700``.
+    """
+    attempts: list[tuple[str, str]] = []
+    for directory in wal_dir_candidates():
+        try:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+        except OSError as exc:
+            attempts.append((directory, f"{type(exc).__name__}: {exc}"))
+            continue
+        return WALDirResolution(directory, True, tuple(attempts))
+    return WALDirResolution(tempfile.gettempdir(), False, tuple(attempts))
+
+
 def default_wal_dir() -> str:
     """The durable, per-user directory the approval WAL defaults into (item 413).
 
@@ -229,28 +358,18 @@ def default_wal_dir() -> str:
     tempdir: a reboot-wiped WAL is worse than a durable one, but a gate that
     cannot open a WAL at all is worse than either, and the fail-closed load path
     (``session.load`` refuses a policy load with no recording) still holds.
+
+    That fallback used to be SILENT, which is the whole of issue #289: the WAL
+    quietly stopped providing the one property it exists for and nothing said
+    so. It now raises :class:`NonDurableWALWarning` naming every durable
+    candidate tried, why each failed, where the WAL actually landed, and what
+    that costs. Nothing is emitted on the normal (durable) path — see
+    :class:`NonDurableWALWarning` for why this warns rather than refuses.
     """
-    override = os.environ.get("REVL_WAL_DIR")
-    if override:
-        candidates = [override]
-    else:
-        candidates = []
-        xdg_state = os.environ.get("XDG_STATE_HOME")
-        if xdg_state:
-            candidates.append(os.path.join(xdg_state, "revl", "approval-wal"))
-        elif sys.platform == "darwin":
-            candidates.append(os.path.expanduser(
-                "~/Library/Application Support/revl/approval-wal"))
-        # Always keep the XDG state default as a final durable candidate so a
-        # macOS host with an unwritable Application Support still lands durable.
-        candidates.append(os.path.expanduser("~/.local/state/revl/approval-wal"))
-    for directory in candidates:
-        try:
-            os.makedirs(directory, mode=0o700, exist_ok=True)
-            return directory
-        except OSError:
-            continue
-    return tempfile.gettempdir()
+    resolution = resolve_wal_dir()
+    if not resolution.durable:
+        warnings.warn(resolution.describe(), NonDurableWALWarning, stacklevel=2)
+    return resolution.directory
 
 
 def default_wal_path(session_id: str) -> str:
