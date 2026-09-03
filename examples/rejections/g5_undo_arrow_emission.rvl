@@ -1,0 +1,27 @@
+// REJECTED — G5: a bracket inverse may not cross a boundary, and reaching the
+// crossing through a FIRST-CLASS FUNCTION VALUE does not exempt it.
+//
+// `f` is bound to an arrow whose body calls the `emission` extern `send`, so
+// `undo f(key)` runs that emission during teardown. The callee at the slot is
+// neither an extern name nor a top-level fn, so no name-based test could see
+// it; the arrow's body is followed instead, which is exact — a teardown
+// calling a PURE local arrow still compiles.
+//
+// expected error:
+//   the `undo` of this bracket calls `send`, which is an emission — a bracket
+//     inverse runs in teardown and may not cross a boundary (G5)
+
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+
+service Cache { emission fn set(key: Str) }
+
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      let f = (x: Str) => send(x)
+      effect store.insert(key, "v")
+      undo   f(key)
+    }
+  }
+}

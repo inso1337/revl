@@ -52,11 +52,55 @@ import os
 import signal
 import sys
 import threading
+import time
 import types
 import uuid
 from pathlib import Path
 
 from ._paths import backends_root
+
+
+# item 443: how often an ARMED process re-reads the latch, and the status it
+# dies with. Nothing polls when no latch is armed, which is the default.
+_ESTOP_POLL = 0.05
+_ESTOP_EXIT = 75
+
+
+def _estop_watch(name: str, runtime_mod, poll: float = _ESTOP_POLL) -> None:
+    """The child half of the operator E-Stop (docs/design/443-estop.md).
+
+    A crossing seam already refuses the moment the latch is armed, so an
+    ACTIVE process halts by itself. An IDLE one — parked waiting to be stopped
+    — crosses nothing, and would sit there through the emergency. This watcher
+    closes that gap: it engages the halt on the button, prints the in-flight
+    inventory the conductor merges into its report, and then dies where it
+    stands.
+
+    `os._exit` is the point, not a shortcut. A normal exit would run the LIFO
+    teardown — replaying inverses, flushing deferred emissions, printing a
+    residue proof — which is exactly the graceful unwind an E-Stop exists to
+    NOT do. The entries stay stranded, their WAL descriptors stay on disk with
+    no discharge behind them, and `revl recover` reads them back, because an
+    E-Stop is deliberately shaped to look like a crash to the recovery path."""
+    while True:
+        record = runtime_mod.estop_from_latch()
+        if record is not None:
+            inventory = {
+                "process": name,
+                "verdict": "halted",
+                "reason": record.get("reason"),
+                "operator": record.get("operator"),
+                "activations": record.get("activations") or [],
+                # the at-most-one dispatched-and-unconfirmed crossing per
+                # activation, and every entry registered but never attempted
+                "inFlight": record.get("inFlight") or [],
+                "stranded": record.get("stranded") or [],
+                "resumable": False,
+            }
+            print(f"[{name}] HALTED {json.dumps(inventory)}", flush=True)
+            sys.stdout.flush()
+            os._exit(_ESTOP_EXIT)  # noqa: SLF001 — no teardown, by design
+        time.sleep(poll)
 
 
 def _eval_probe(expr: str, namespace: dict):
@@ -498,6 +542,17 @@ async def run(spec: dict, spec_path=None) -> None:
     import runtime as runtime_mod  # noqa: PLC0415
     from cordis import Context  # noqa: PLC0415
     from cordis.fiber import FiberState  # noqa: PLC0415
+
+    # item 443: arm the operator E-Stop BEFORE the composition is compiled, let
+    # alone activated. Armed here, every crossing this process ever makes is
+    # behind the latch, including the ones it makes while booting; the watcher
+    # covers the idle case, where nothing crosses at all. Unarmed is the
+    # default, and an unarmed process reads no latch and starts no thread.
+    estop_latch = spec.get("estopLatch") or os.environ.get("REVL_ESTOP_LATCH")
+    if estop_latch:
+        runtime_mod.arm_estop_latch(estop_latch)
+        threading.Thread(target=_estop_watch, args=(name, runtime_mod),
+                         name="revl-estop", daemon=True).start()
 
     def log(channel: str, subject: str, detail: str = "") -> None:
         print(f"[{name}] {channel:<6}| {subject:<16}| {detail}".rstrip(), flush=True)

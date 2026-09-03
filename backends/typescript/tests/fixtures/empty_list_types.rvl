@@ -1,0 +1,62 @@
+// Issue #273 — a local born as `[]` must reach TypeScript with a DETERMINED
+// element type.
+//
+// `let xs = []` alone tells `tsc` nothing. TypeScript's "evolving array"
+// analysis rescues the easy case (a binding whose only writes are
+// `xs.push(v)`), which is why `unique_writes.ts` typechecked by luck: item
+// 445's marker turns the persistent append into an in-place push. It gives up
+// the moment the binding is READ before its type is settled, and then reports
+// TS7034 at the declaration plus a TS7005 per read — and the emitted modules
+// are exactly what `scripts/typecheck-generated.mjs` compiles.
+//
+// Every function below is one of the shapes where the evolving analysis does
+// NOT fire. Emitted WITHOUT the annotation this module is red under
+// `typecheck-generated`; that is the non-vacuity proof for the fix. It is a
+// TYPECHECK fixture — nothing here needs executing, which is why no
+// tests/*.test.ts imports it.
+//
+// Regenerate with:
+//   python3 -c "import json,sys; sys.path.insert(0,'src'); from revl import compile_source; \
+//     print(json.dumps(compile_source(open('backends/typescript/tests/fixtures/empty_list_types.rvl').read()), indent=2))" \
+//     > backends/typescript/tests/fixtures/empty_list_types.ir.json
+
+// read with no write at all: `return acc` is the only mention, so nothing
+// downstream can settle the element type — it comes from the declared return
+fn nothing() -> List[Str] {
+  var acc = []
+  return acc
+}
+
+// read by `.length()` BEFORE the first write
+fn width_before_write() -> Int {
+  var acc = []
+  let n = acc.length()
+  acc = acc.push(1)
+  return n
+}
+
+// read by ITERATION, never written; the element type is only in the local's own
+// declared annotation, which the IR carries as the literal's `expected`
+fn sum_of_empty() -> Int {
+  var acc: List[Int] = []
+  var t = 0
+  for (v of acc) { t = t + v }
+  return t
+}
+
+// the persistent-append shape: `row` escapes into `out`, so the frontend does
+// NOT mark its writes unique and they lower to `row = [...row, i]` — a spread
+// that READS `row`, which is what makes the evolving analysis give up. This is
+// the shape behind the "ten errors with the markers stripped" measurement in
+// the issue.
+fn windows(n: Int) -> List[List[Int]] {
+  var out = []
+  var row = []
+  var i = 0
+  while (i < n) {
+    row = row.push(i)
+    out = out.push(row)
+    i = i + 1
+  }
+  return out
+}
