@@ -1,0 +1,30 @@
+// REJECTED — G4: a host acquisition in a `fn` body a component reaches.
+//
+// `Pool.open` opens a host resource whose release is a separate verb, and only
+// an acquisition bracket (`effect <acquire> undo <release>`) registers that
+// release with the activation's teardown accumulator. A `fn` body has no
+// bracket, so the pool is opened per call and never closed — the runtime
+// reports `pool#1 (open() with no close())` (R1) on a program the checker
+// admitted.
+//
+// The reach qualifier is the invariant: residue is defined against an
+// ACTIVATION, which promises that teardown releases everything it acquired. A
+// helper the activation calls acquires inside that promise while contributing
+// nothing to it. A `pub fn` no component reaches is a library entry point whose
+// lifecycle belongs to the foreign caller, and revl promises nothing about it.
+//
+// expected error:
+//   host acquisition `Pool.open` cannot be called in `fn open_it`, which a
+//     component body reaches — nothing registers its `close()`, so the
+//     resource is acquired irreversibly (G4)
+
+fn open_it(u: Str) -> Int {
+  let p = Pool.open(u, 1)
+  return 1
+}
+
+service S { fn go(u: Str) -> Int }
+
+component C provides s: S {
+  provide s { fn go(u) = open_it(u) }
+}
