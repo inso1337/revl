@@ -356,17 +356,186 @@ def test_admit_artifact_declines_and_names_the_gap(component):
     assert "289" in payload
 
 
+# ------------------------------------------------------------- the frontier
+#
+# The wrapped crate's frontier has three triggers: two GENERATED lexical rows —
+# the reference keywords, and the reference stdlib builtins, that the self-host
+# gate does not cover — and the always-live source-size bound.
+#
+# Both lexical rows are EMPTY at this generation. That is a measured closure,
+# not a broken derivation: item 391 ported the last eight builtins
+# (`is_digit`/`is_alpha`/`is_alnum`/`is_space`, `codepoint_at`, `field`, `list`,
+# `str`) into `selfhost/lower.rvl`, so `revl.lexer.KEYWORDS` and
+# `revl.typecheck._BUILTIN_SIG` are now both subsets of what the self-host
+# sources declare, and the difference the generator takes is empty.
+#
+# An empty row is a real and expected state. What it must never become is a
+# SKIPPED test: a skip cannot tell "we checked and there is nothing" apart from
+# "we did not check", and the two are the whole point of this gate. So the
+# frontier is asserted here as a PARTITION over the reference builtin table,
+# and the partition is total — every name is on exactly one side of it:
+#
+#   * a name the table EXCLUDES must be DECLINED — `FRONTIER_PROBES` below,
+#     one probe per generated entry, nothing hand-picked (empty today);
+#   * a name the table COVERS must be DECIDED, never `outside_frontier` —
+#     `test_the_gate_decides_every_builtin_inside_its_frontier`, which runs the
+#     whole covered set through the component and therefore always has work;
+#   * and the rows themselves are RE-MEASURED from both compilers by
+#     `test_the_empty_frontier_row_is_a_measurement_not_a_missing_check`, so an
+#     empty row is a measurement taken in this run rather than a stale artifact
+#     read back off the thing it generated.
+#
+# Deriving the probes from the table is also what keeps them honest in the other
+# direction: this test used to hand-pick `.is_digit()`, item 391 closed that gap,
+# and the probe would have gone on asserting a gap that no longer existed. A
+# probe derived from the table cannot outlive the gap it probes.
+#
+# The size bound is deliberately NOT probed through this door: `wasmtime run
+# --invoke` passes the source as a single argv element and Linux caps one
+# argument at 128 KiB, half the 256 KiB bound, so the probe could not be
+# delivered. `tests/test_gate_crate_admit.py` and the crate's own
+# `frontier::tests::an_oversized_source_is_a_gap` hold that arm in-process
+# against the very same `frontier.rs` this component is built from.
+
+GENERATED_CRATE = json.loads(
+    (ROOT / "crates" / "revl-gate" / "GENERATED.json").read_text(encoding="utf-8"))
+EXCLUDED_KEYWORDS: list[str] = GENERATED_CRATE["frontier_excluded_keywords"]
+EXCLUDED_BUILTINS: list[str] = GENERATED_CRATE["frontier_excluded_builtins"]
+
+
+def _crate_generator():
+    """`tools/build_gate_crate.py`, loaded the way `_generator()` loads the wasm
+    one: the frontier derivation ITSELF, so the tables can be re-measured here
+    instead of only read back off the artifact they produced."""
+    path = ROOT / "tools" / "build_gate_crate.py"
+    spec = importlib.util.spec_from_file_location("revl_build_gate_crate_probe", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["revl_build_gate_crate_probe"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _frontier_probes() -> list[tuple[str, str]]:
+    """One probe per entry in the two generated lexical rows, and nothing
+    hand-picked. Empty rows yield an empty list — which is exactly why the other
+    half of the partition has to be total."""
+    return (
+        [(f"excluded builtin .{name}()",
+          f"fn f(s: Str) -> Str {{ let v = s.{name}() return s }}")
+         for name in EXCLUDED_BUILTINS]
+        + [(f"excluded keyword {word}", f"fn f() -> Int {{ {word} }}")
+           for word in EXCLUDED_KEYWORDS]
+    )
+
+
+FRONTIER_PROBES = _frontier_probes()
+
+
+def test_the_empty_frontier_row_is_a_measurement_not_a_missing_check():
+    """The emptiness, ASSERTED. "We checked and there is nothing" is a claim
+    with content; a skip is not.
+
+    Three things are held here, none of which an empty row can satisfy by
+    accident:
+
+    1. the reference side of the derivation is non-empty. A reference table that
+       came back empty would empty the DIFFERENCE too, and the generator calls
+       that the one intolerable failure direction (a silently-empty self-host
+       side WIDENS the excluded table, which is safe; a silently-empty reference
+       side EMPTIES it, which is not);
+    2. the committed rows equal a fresh `frontier_tables()` run over both
+       compilers — the reference tables imported from `revl`, the self-host sets
+       re-extracted from `selfhost/lexer.rvl` and `selfhost/lower.rvl` with
+       anchored regexes that raise rather than return an empty set. So the
+       emptiness is measured in THIS run, on the tree the component was built
+       from;
+    3. the probe list is one-to-one with the rows. A row that becomes non-empty
+       therefore CANNOT arrive without probes: `FRONTIER_PROBES` grows with it
+       and `test_an_out_of_frontier_construct_declines_rather_than_deciding`
+       starts exercising the declining arm.
+    """
+    from revl.lexer import KEYWORDS
+    from revl.typecheck import _BUILTIN_SIG
+
+    assert len(KEYWORDS) >= 20, (
+        "the reference keyword table came back with almost nothing in it; an "
+        "empty frontier row derived from that would be an artifact of the "
+        f"measurement, not a closure: {sorted(KEYWORDS)}")
+    assert len(_BUILTIN_SIG) >= 15, (
+        "the reference builtin table came back with almost nothing in it; see "
+        f"above: {sorted(_BUILTIN_SIG)}")
+
+    tables = _crate_generator().frontier_tables()
+    assert tables["keywords"] == EXCLUDED_KEYWORDS, (
+        "the committed keyword row is not what the two compilers measure now",
+        tables["keywords"], EXCLUDED_KEYWORDS)
+    assert tables["builtins"] == EXCLUDED_BUILTINS, (
+        "the committed builtin row is not what the two compilers measure now",
+        tables["builtins"], EXCLUDED_BUILTINS)
+
+    assert len(FRONTIER_PROBES) == len(EXCLUDED_KEYWORDS) + len(EXCLUDED_BUILTINS), (
+        "the frontier probes are no longer one-to-one with the generated rows, "
+        "so a gap could open without anything probing it",
+        FRONTIER_PROBES, EXCLUDED_KEYWORDS, EXCLUDED_BUILTINS)
+
+
 def test_an_out_of_frontier_construct_declines_rather_than_deciding(component):
     """Fail closed at the frontier: a construct the self-host gate does not
-    cover is declined with a control verdict, never decided."""
-    excluded = json.loads(
-        (ROOT / "crates" / "revl-gate" / "GENERATED.json").read_text(encoding="utf-8")
-    )["frontier_excluded_builtins"]
-    if not excluded:
-        pytest.skip("the frontier table is empty today: the two lexers/builtin "
-                    "tables agree, so there is no out-of-surface construct to probe")
-    source = f'fn f(s: Str) -> Str {{ return s.{excluded[0]}() }}'
+    cover is declined with a control verdict, never decided.
+
+    Runs one probe per generated frontier entry. Both rows are empty at this
+    generation, so this test has no probe to run today — and that is covered
+    work rather than skipped work only because the two tests either side of it
+    assert why: the rows were re-measured, and the whole covered set is put
+    through the component below.
+    """
+    for label, source in FRONTIER_PROBES:
+        verdict = _verdict(component, source)
+        assert verdict["verdict"] == "outside_frontier", (label, verdict)
+        assert verdict["admitted"] is False, (label, verdict)
+        assert verdict["code"] == "FRONTIER", (label, verdict)
+
+
+def test_the_gate_decides_every_builtin_inside_its_frontier(component):
+    """The other half of the partition, and the half that carries the load while
+    the excluded rows are empty.
+
+    Every reference stdlib builtin the frontier does NOT exclude must be
+    DECIDED by the component — refused or not objected to, but never declined.
+    That is the property "the frontier row is empty" actually asserts, measured
+    against the artifact instead of against the table that describes it: if a
+    builtin the table calls covered were in fact outside the self-host surface,
+    the component would decline it here and this reds.
+
+    One program carrying every covered name, so the whole set costs a single
+    wasmtime instantiation. Arities come from `_BUILTIN_SIG` so the calls are
+    structurally right; the RECEIVER type is deliberately not, because this gate
+    covers the composition/guarantee layer and not the reference type layer
+    (`COVERED_LAYER`), so a type mismatch is not a verdict it can reach. What
+    matters is that each name lands in member position, the only position
+    `frontier::scan` looks at.
+    """
+    from revl.typecheck import _BUILTIN_SIG
+
+    covered = sorted(set(_BUILTIN_SIG) - set(EXCLUDED_BUILTINS))
+    assert covered, (
+        "no reference builtin is inside the gate's frontier at all — the "
+        "covered surface cannot be empty and the gate still be useful")
+
+    def arity(name: str) -> int:
+        sig = _BUILTIN_SIG[name]
+        if isinstance(sig, dict):  # a name overloaded on receiver type
+            sig = next(iter(sig.values()))
+        return len(sig[1])
+
+    body = "\n".join(
+        f"  let v{i} = s.{name}({', '.join(['0'] * arity(name))})"
+        for i, name in enumerate(covered))
+    source = f"fn f(s: Str) -> Str {{\n{body}\n  return s\n}}"
     verdict = _verdict(component, source)
-    assert verdict["verdict"] == "outside_frontier", verdict
-    assert verdict["admitted"] is False
-    assert verdict["code"] == "FRONTIER"
+    assert verdict["verdict"] != "TRAPPED", verdict
+    assert verdict["verdict"] != "outside_frontier", (
+        "the gate DECLINED a program built only from builtins its own frontier "
+        f"table calls covered ({len(covered)} names: {covered}); the table and "
+        f"the artifact disagree: {verdict}")
+    assert verdict["verdict"] in ("refused", "no_objection"), verdict
