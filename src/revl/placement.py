@@ -2350,7 +2350,7 @@ def _halt_all(children: dict, backends: dict, has_inventory,
     return disposition
 
 
-def _estop_halt_report(record: dict, latch: str, processes: dict,
+def _estop_halt_report(record: dict, latch: str, roster: dict,
                        backends: dict, disposition: dict,
                        inventories: dict) -> str:
     """What the operator is owed after hitting the button.
@@ -2358,7 +2358,17 @@ def _estop_halt_report(record: dict, latch: str, processes: dict,
     A halt that leaves silent residue is worse than no halt, so this names
     every component left un-torn-down and every outstanding obligation,
     including the ones it CANNOT name — a tier with no E-Stop seam reports
-    `UNKNOWN` here rather than being quietly omitted."""
+    `UNKNOWN` here rather than being quietly omitted.
+
+    `roster` is the LIVE composition at halt time — `pname -> {"components":
+    [...]}` for exactly the processes `_halt_all` acted on — and NOT the
+    placement file's `[processes]` table. The two differ after a `revl swap`,
+    and in both directions: the file does not name the synthesized successor
+    (`<component>__t<n>`) this halt just killed, and it still names the
+    predecessor that unwound cleanly on the cutover, minutes earlier and with
+    a no-residue proof. Reporting off the file would therefore omit the one
+    process that holds residue and invent residue for one that holds none.
+    """
     lines = ["", "E-STOP ENGAGED — the placement is HALTED, not torn down",
              f"  latch     {latch}",
              f"  reason    {record.get('reason') or 'operator halt'}",
@@ -2372,7 +2382,7 @@ def _estop_halt_report(record: dict, latch: str, processes: dict,
              "  reported here.", ""]
 
     rows: list[tuple[str, str, str, str]] = []
-    for pname in processes:
+    for pname in roster:
         tier = _canonical_backend(backends.get(pname, "py"))
         tag = disposition.get(pname, "killed-silent")
         inv = inventories.get(pname) or {}
@@ -2393,7 +2403,7 @@ def _estop_halt_report(record: dict, latch: str, processes: dict,
         else:
             note = (f"SIGKILLed after {_estop_halt_window():g}s without naming an "
                     f"inventory — residue UNKNOWN")
-        for cname in (processes[pname].get("components") or []) or ["(no components)"]:
+        for cname in (roster[pname].get("components") or []) or ["(no components)"]:
             rows.append((cname, pname, tier, note))
     lines.append(f"  components left UN-TORN-DOWN ({len(rows)}):")
     width = max((len(r[0]) for r in rows), default=1)
@@ -2403,7 +2413,7 @@ def _estop_halt_report(record: dict, latch: str, processes: dict,
 
     residue: list[str] = []
     unknown: list[str] = []
-    for pname in processes:
+    for pname in roster:
         tier = _canonical_backend(backends.get(pname, "py"))
         tag = disposition.get(pname, "killed-silent")
         if tag == "exited":
@@ -3454,7 +3464,20 @@ def run_placement(files, placement_path: str, once: bool = False,
               f"process(es) now, NO unwind", flush=True)
         disposition = _halt_all(children, backends, lambda n: n in inventories)
         halted["disposition"] = disposition
-        print(_estop_halt_report(record, estop_latch, processes, backends,
+        # The roster the report enumerates is the composition that is actually
+        # RUNNING, taken from the children `_halt_all` just acted on and the
+        # live `placed` map — never the placement file's `[processes]` table.
+        # After a `revl swap` the file is wrong in both directions: it does not
+        # name the successor this halt just killed, and it still names the
+        # predecessor that unwound with a no-residue proof on the cutover. So a
+        # file-driven report would omit the process that holds residue and
+        # attribute residue to one that holds none, which is the one failure
+        # mode this whole verb exists to avoid.
+        roster: dict[str, dict] = {pname: {"components": []} for pname in children}
+        for cname, host in placed.items():
+            if host in roster:
+                roster[host]["components"].append(cname)
+        print(_estop_halt_report(record, estop_latch, roster, backends,
                                  disposition, inventories),
               file=sys.stderr, flush=True)
         watch_stop.set()
@@ -3696,6 +3719,29 @@ def run_placement(files, placement_path: str, once: bool = False,
                 "composition_id": _old_corr["composition_id"],
                 "peers": dict(_old_corr["peers"]),
             }
+        # item 443: carry the operator's E-Stop latch onto the successor, for
+        # the same reason and by the same rule as the correlation guard above.
+        # The latch is HOW AN OPERATOR HALTS A RUNNING PLACEMENT, and `revl
+        # swap` is ordinary use: a successor that quietly booted without it
+        # could not be stopped by the button that armed its predecessor, so the
+        # composition would be haltable only until the first swap — which is
+        # not haltable. The environment alone is not enough to rely on here,
+        # which is the whole reason the boot path sets this key as well: a
+        # sandboxed process (item 411) is wrapped by a driver that need not
+        # forward the conductor's environment, and `_process_runner` reads
+        # `spec["estopLatch"]` first and the ambient variable only as a
+        # fallback.
+        #
+        # Gated on the TARGET tier exactly as the boot path gates it: only a
+        # tier with an E-Stop seam can read a latch. A swap onto a seamless
+        # tier is not a silent loss of the halt — the successor simply joins
+        # the population `_halt_all` SIGKILLs outright and the report names as
+        # residue UNKNOWN, the same disposition it would have had if the
+        # placement had booted it on that tier in the first place. So the
+        # composition stays haltable across every swap; only the QUALITY of the
+        # halt follows the tier, and the report says which one it got.
+        if estop_latch and _canonical_backend(to_backend) in TIERS_WITH_ESTOP:
+            succ_spec["estopLatch"] = estop_latch
         adapt_spec(succ_spec, to_backend)
         print(f"swap: booting {component} on the {to_backend} tier ({succ}) ...", flush=True)
         spawn(succ, to_backend, succ_spec)

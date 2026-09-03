@@ -368,6 +368,26 @@ The UNKNOWN lines are the point. They are counted in the residue total, so an
 operator reads "3 lines, 1 of them UNKNOWN" and knows the inventory is
 incomplete BY EXACTLY ONE PROCESS rather than being told a comfortable number.
 
+### The report is about the RUNNING composition, not the placement file
+
+The roster the report enumerates is the set of children the halt actually acted
+on, with each one's components read off the live `placed` map. It is not the
+`[processes]` table, and after a `revl swap` the two disagree in both
+directions: the file does not name the synthesized successor
+(`<component>__t<n>`) the halt just killed, and it still names the predecessor
+that unwound with a no-residue proof on the cutover, before the button was ever
+pressed. A report driven off the file therefore omits the one process holding
+residue and attributes residue to one holding none — both of them the exact
+failure this verb exists to prevent, since the reporting is the deliverable and
+the stop is not.
+
+The successor is haltable in the first place because `do_swap` carries
+`estopLatch` onto its spec, under the same rule and for the same reason as the
+correlation guard and the host-module pins (docs/swap.md). Gated on the target
+tier, as the boot path gates it: a swap onto a seamless tier does not lose the
+halt, it just moves the successor into the SIGKILL population the report names
+UNKNOWN.
+
 ## Per-tier status
 
 The halt itself is landed on the **py reference tier only**, and the conductor

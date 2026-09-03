@@ -120,6 +120,7 @@ class _StubProc:
         self.stdin = self
         self.returncode = 0
         self._silent = silent
+        self.written: list[str] = []
         if honors_latch and latch:
             threading.Thread(target=self._watch, args=(latch,),
                              daemon=True).start()
@@ -152,8 +153,21 @@ class _StubProc:
                 raise StopIteration
             time.sleep(0.005)
 
-    def write(self, _text):
-        pass
+    def write(self, text):
+        # The control channel. The real `_process_runner` answers a `repoint`
+        # with a `REPOINTED` line on its own stdout, and `do_swap` waits for
+        # that acknowledgement before it cuts the seam over; a stub that stayed
+        # mute would make every swap here stall for the full 30s timeout rather
+        # than complete. Same shape as `tests/test_swap.py::_Stdin`.
+        self.written.append(text)
+        for line in text.splitlines():
+            try:
+                cmd = json.loads(line)
+            except ValueError:
+                continue
+            if cmd.get("op") == "repoint":
+                self._lines.append(
+                    f"[{self.name}] REPOINTED {cmd['key']} -> {cmd['socket']}")
 
     def flush(self):
         pass
@@ -187,7 +201,8 @@ class _StubProc:
 
 def _run(tmp_path, monkeypatch, *, latch: str | None, placement: str = PLACEMENT,
          arm_after: float | None = 0.2, arm_body: str | None = None,
-         silent: set[str] | None = None, live: float = 8.0):
+         silent: set[str] | None = None, live: float = 8.0,
+         commands: list[str] | None = None, arm_when=None):
     """Boot the composition through the real conductor and, optionally, hit the
     button from `another terminal` while it is live."""
     silent = silent or set()
@@ -215,7 +230,16 @@ def _run(tmp_path, monkeypatch, *, latch: str | None, placement: str = PLACEMENT
     # operator, so the halt has to interrupt it rather than be polled for
     monkeypatch.setattr(_placement, "_interactive", lambda: True)
 
+    feed = iter(commands or [])
+
     def blocking_input(_prompt=""):
+        # Scripted operator commands first (`swap ...`), then the REPL parks
+        # exactly as it does for a real operator, so the halt still has to
+        # interrupt a live conductor rather than be polled for.
+        try:
+            return next(feed)
+        except StopIteration:
+            pass
         deadline = time.monotonic() + live
         while time.monotonic() < deadline:
             time.sleep(0.02)
@@ -224,8 +248,10 @@ def _run(tmp_path, monkeypatch, *, latch: str | None, placement: str = PLACEMENT
     monkeypatch.setattr(_placement, "input", blocking_input, raising=False)
 
     if latch and arm_after is not None:
+        ready = arm_when or (lambda p: len(p) >= 2)
+
         def press_the_button() -> None:
-            while len(procs) < 2:
+            while not ready(dict(procs)):
                 time.sleep(0.01)
             time.sleep(arm_after)
             Path(latch).write_text(
@@ -385,6 +411,86 @@ def test_the_latch_is_handed_only_to_tiers_that_can_honor_it(
     capsys.readouterr()
     assert procs["provider"].spec.get("estopLatch") == latch
     assert "estopLatch" not in procs["edge"].spec
+
+
+# ---------------------------------------------------------------------------
+# ... and it must still be handed to a process the OPERATOR created after boot.
+#
+# `revl swap` replaces a running provider with a synthesized successor whose
+# spec `do_swap` builds fresh. Every key it forgot there has been a security
+# property that held until the first swap and then silently stopped holding:
+# the host-module pins (item 410) and the correlation guard (421 F8) both went
+# that way. The latch is the same kind of key and the worst one to lose — a
+# successor booted without it is un-haltable by the button that armed its
+# predecessor, so an operator would press it, see a report, and still have a
+# live process running.
+# ---------------------------------------------------------------------------
+
+
+def _swap_is_complete(procs: dict) -> bool:
+    """The cutover is DONE: the successor exists and the old provider has
+    finished its graceful unwind. The button is pressed after this so the
+    question under test is `is the successor haltable`, not the separate (and
+    racy) one of what a halt lands on mid-swap."""
+    return (any(n.startswith("HotWorker__t") for n in procs)
+            and "provider" in procs and procs["provider"].poll() is not None)
+
+
+def test_a_swapped_successor_is_still_haltable_by_the_same_button(
+        tmp_path, monkeypatch, capsys):
+    """An operator swaps `HotWorker` onto a fresh process and THEN hits the
+    button. The successor must halt at its own seams and be accounted for by
+    name, and the report must be about the composition that is actually
+    running rather than the one the placement file describes.
+
+    Driven entirely through operator-facing output. The stub child honors the
+    latch only when its SPEC carries it — which is precisely the population the
+    spec key exists for, a sandboxed child (item 411) that never inherited the
+    conductor's environment — so a successor that lost the key shows up here as
+    a silent process killed after the window with residue UNKNOWN, not as a
+    halted one naming its books.
+    """
+    latch = str(tmp_path / "halt.estop")
+    rc, procs, elapsed = _run(
+        tmp_path, monkeypatch, latch=latch,
+        commands=["swap HotWorker --to py"],
+        arm_when=_swap_is_complete, live=8.0)
+    err = capsys.readouterr().err
+
+    succ = next(n for n in procs if n.startswith("HotWorker__t"))
+
+    # the halt still interrupts a live conductor, and a halt is never clean
+    assert elapsed < 8.0, f"the halt did not interrupt the placement ({elapsed:.1f}s)"
+    assert rc != 0
+    assert "E-STOP ENGAGED" in err
+
+    # 1. the successor HALTED at its own crossing seams. It was never asked to
+    #    unwind, and it named its own in-flight books — which it can only do
+    #    if it was ever told where the latch is.
+    assert procs[succ].terminated is False, \
+        "the E-Stop asked the successor to unwind — that is the graceful path"
+    assert "HALTED at its own crossing seams" in err
+    assert "without naming an inventory" not in err
+
+    # 2. it is named as the process it actually is, with its component and tier
+    assert f"process {succ}" in err
+    assert "HotWorker" in err and "tier py" in err
+
+    # 3. its residue is attributed to it BY NAME, not to the process the
+    #    placement file happens to call the host of `HotWorker`.
+    assert f"{succ}/HotWorker  estop-stranded" in err
+    assert f"{succ}/HotWorker  estop-ambiguous" in err
+
+    # 4. the predecessor is NOT in the report. It unwound with a no-residue
+    #    proof on the cutover, before the button was ever pressed, so listing
+    #    it would be inventing residue that nobody holds.
+    assert "process provider" not in err
+    assert "provider  UNKNOWN" not in err
+
+    # 5. and the property the whole verb is for is unchanged by the swap: the
+    #    seamless tier is still named as un-nameable, and counted.
+    assert "Edge" in err and "process edge" in err and "NO E-Stop seam" in err
+    assert "1 of them UNKNOWN" in err
 
 
 # ---------------------------------------------------------------------------
