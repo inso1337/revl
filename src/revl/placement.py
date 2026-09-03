@@ -1270,13 +1270,27 @@ def _cordis_py_installed() -> bool:
 
 
 def _rerun_hint(files, placement_path: str, once: bool) -> str:
-    """The same command, under the backend venv — copy-pasteable verbatim."""
+    """The same command, under the backend venv — copy-pasteable verbatim.
+
+    The first form (`revl run …`) is the documented happy path: the
+    `backends/python/setup.sh` install puts the `revl` console script on
+    PATH for the venv, and the script entry point is window-free (issue
+    #317 / #336). The second is the absolute-interpreter fallback for
+    callers that always run a venv's `python` by its full path; it still
+    works because `drop_cwd_entry` scrubs the `-m`-injected working
+    directory at entry. Both lines are copy-pasteable as-is.
+    """
     venv = _BACKENDS_DIR / "python" / ".venv" / "bin" / "python"
-    parts = [str(venv), "-m", "revl", "run", *[str(f) for f in files],
+    parts = ["revl", "run", *[str(f) for f in files],
              "--placement", placement_path]
     if once:
         parts.append("--once")
-    return " ".join(parts)
+    head = " ".join(parts)
+    parts_venv = [str(venv), "-m", "revl", "run", *[str(f) for f in files],
+                  "--placement", placement_path]
+    if once:
+        parts_venv.append("--once")
+    return f"{head}   # or, with the venv's interpreter explicitly:  {' '.join(parts_venv)}"
 
 
 def _preflight(backends_used: set[str], files, placement_path: str, once: bool) -> str | None:
