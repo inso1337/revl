@@ -7,12 +7,17 @@ emitter therefore quotes exactly those annotations that reference a
 not-yet-emitted type.
 
 The rejected alternative — `from __future__ import annotations` (PEP 563) in
-the emitted header — breaks consumers that exec() the module without
-registering it in sys.modules: @dataclass's InitVar/ClassVar detection calls
-sys.modules.get(cls.__module__).__dict__ on every string annotation and
-crashes with AttributeError when the module is anonymous. These tests exec
-the emitted module in a bare namespace with no sys.modules registration,
-which is precisely the case PEP 563 cannot support.
+the emitted header — makes EVERY annotation a string, which pushes resolution
+onto whatever consumer asks for it and, for a module exec'd anonymously,
+leaves it with nothing to resolve against. These tests exec the emitted module
+in a bare namespace with no sys.modules registration, which is precisely that
+case.
+
+A record's class is a SHAPE, never a constructor: a record VALUE is a plain
+dict (roadmap item 436 F9 dropped the `@dataclass` that made it look
+otherwise), so what is asserted here is the annotation text, the class-body
+evaluation succeeding, and the dict the emitted function actually returns. The
+ADT cases ARE constructed, because those classes are real.
 """
 
 import importlib.util
@@ -44,19 +49,21 @@ def _compile_and_exec(src: str):
     return code, namespace
 
 
-def test_record_to_adt_forward_ref_is_quoted_and_constructs():
+def test_record_to_adt_forward_ref_is_quoted_and_execs():
     # `Tree` references `Forest`, which is declared later: the annotation must
-    # be quoted, and the module must still exec and construct without
-    # sys.modules registration.
+    # be quoted, and the module must still exec without sys.modules
+    # registration. A bare `list[Forest]` here is a NameError at class-body
+    # evaluation, which is what the quoting exists to prevent.
     code, ns = _compile_and_exec(
         "type Tree = { kids: List[Forest] }\n"
         "type Forest = Grove(Tree) | Empty\n"
+        "fn mk() -> Tree { return { kids: [] } }\n"
     )
     assert "kids: 'list[Forest]'" in code
-
-    tree = ns["Tree"](kids=[ns["Grove"](ns["Tree"](kids=[]))])
-    assert isinstance(tree.kids[0], ns["Grove"])
-    assert isinstance(tree.kids[0].value, ns["Tree"])
+    assert ns["Tree"].__annotations__ == {"kids": "list[Forest]"}
+    # the record VALUE is a dict; the ADT cases are real classes
+    assert ns["mk"]() == {"kids": []}
+    assert isinstance(ns["Grove"]({"kids": []}), ns["Forest"])
     assert isinstance(ns["Empty"](), ns["Forest"])
 
 
@@ -67,8 +74,8 @@ def test_adt_to_record_backward_ref_stays_bare():
         "type LeafData = { n: Int }\n"
         "type Thing = Leaf(LeafData) | Hole\n"
     )
-    leaf = ns["Leaf"](ns["LeafData"](n=7))
-    assert leaf.value.n == 7
+    leaf = ns["Leaf"]({"n": 7})
+    assert leaf.value["n"] == 7
     assert isinstance(ns["Hole"](), ns["Thing"])
     # backward refs must NOT be quoted
     assert "'LeafData'" not in code
@@ -77,19 +84,37 @@ def test_adt_to_record_backward_ref_stays_bare():
 def test_self_recursive_record_is_quoted():
     code, ns = _compile_and_exec(
         "type Node = { val: Int, next: Opt[Node] }\n"
+        "fn mk() -> Node { return { val: 1, next: None } }\n"
     )
     assert "next: 'Optional[Node]'" in code
-    assert ns["Node"](val=1, next=None).next is None
-    assert ns["Node"](val=2, next=ns["Node"](val=1, next=None)).next.val == 1
+    assert ns["Node"].__annotations__["next"] == "Optional[Node]"
+    assert ns["mk"]() == {"val": 1, "next": None}
 
 
 def test_generic_containing_forward_ref_is_quoted_whole():
     # Map/List wrappers around a forward ref: quoting the whole rendered
-    # string is fine — dataclasses treat any string annotation as lazy.
+    # string is fine, because a string annotation is inert.
     code, ns = _compile_and_exec(
         "type Env = { scopes: Map[Str, Vals] }\n"
         "type Vals = { items: List[Int] }\n"
+        "fn mk() -> Vals { return { items: [1] } }\n"
     )
     assert "scopes: 'dict[str, Vals]'" in code
-    env = ns["Env"](scopes={"x": ns["Vals"](items=[1])})
-    assert env.scopes["x"].items == [1]
+    assert ns["Env"].__annotations__ == {"scopes": "dict[str, Vals]"}
+    assert ns["mk"]() == {"items": [1]}
+
+
+def test_no_record_type_imports_nothing():
+    """item 436 F9: a module whose only declaration is a variant used to pay
+    `from dataclasses import dataclass` and a four-name `typing` import for
+    annotations it could not contain."""
+    code, _ = _compile_and_exec("type Thing = Yes | No\n")
+    assert "import dataclass" not in code
+    assert "from typing import" not in code
+
+
+def test_typing_import_is_only_what_the_annotations_mention():
+    """`Union` was imported into every module with a type declaration and is
+    not a name `_py_type` can render (item 436 F9)."""
+    code, _ = _compile_and_exec("type Node = { val: Int, next: Opt[Node] }\n")
+    assert "from typing import Optional\n" in code
