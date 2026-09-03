@@ -135,6 +135,14 @@ an unsealed envelope from its own certificate and is deduplicated the same way. 
 crossing that declares no `idempotency_key` is dispatched as before, and the
 ledger is bounded (docs/deploy.md §2b-ii has the window and what eviction costs).
 
+One operator-facing consequence: a process's declared `[tls] identity` must be
+the **commonName its certificate carries**, because that is what the handshake
+proves and what both the allowlist and the replay guard read. `peers` already
+compared declared names against certificate CNs, so a mismatch could admit nobody
+there; with the replay guard it also refuses the crossing as
+`peer-identity-mismatch` rather than dispatching it. Minted test certs
+(`generate_test_certs`) always agree by construction.
+
 So each seam reports the level it actually achieved — `sealed`, `peer-bound`,
 `peer-pinned`, or `UNVERIFIED` when nothing closes the set (see docs/deploy.md
 §2b/§2c):
