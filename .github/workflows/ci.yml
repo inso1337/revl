@@ -4,6 +4,20 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Merge queue. GitHub builds each queued candidate on top of the queue's tip
+  # and asks THIS workflow for the same 13 required checks before it lands.
+  #
+  # Without this trigger a queued PR waits forever for checks that never run,
+  # so the trigger must be on main BEFORE the queue is enabled.
+  #
+  # Why the queue exists: three defects reached main in one day from merges git
+  # reported as clean -- two branches independently defining the same function
+  # with incompatible signatures, an assertion pinning a literal another branch
+  # extended, and a shared `continue` belonging to both arms of a merged
+  # conditional. Every one was green in isolation and broken only in the union,
+  # because no branch's CI ever ran against the merged result. The queue closes
+  # that class by construction: what CI tests IS what lands (issue #292).
+  merge_group:
   # Exposed as a reusable workflow so the release job can gate the PyPI publish
   # on the *same* suite that gates main (see .github/workflows/publish.yml).
   # A version on PyPI must be a claim this whole matrix passed. No job below
