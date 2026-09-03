@@ -18,13 +18,22 @@ on:
 # Runs on main are NOT cancelled: main's history is the signal, and dropping a
 # run there would leave a landed commit with no verdict.
 concurrency:
-  # The group carries the SHA on push, so a push to main is unique per commit
-  # and has nothing to cancel. A pull_request keeps a stable per-ref group, so a
-  # new push to the PR cancels the superseded run. Encoding the distinction in
-  # the GROUP rather than in cancel-in-progress is deliberate: the expression
-  # form cancelled main's runs anyway, which cost three merge commits their
-  # verdict.
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  # One stable group per ref, for pushes and pull_requests alike: a newer run on
+  # the same ref supersedes the older one.
+  #
+  # This deliberately reverts an earlier attempt that put github.sha in the group
+  # for push events, so that no main run could ever be cancelled. That protected
+  # each commit's verdict in principle and destroyed all of them in practice:
+  # every merge opened its own group, the runs stacked instead of superseding,
+  # and with a busy merge queue main went 12 consecutive commits with every run
+  # QUEUED and none completed. Preserving every main run means none of them runs.
+  #
+  # The trade, stated: an intermediate main commit can be superseded before it
+  # reports. That is acceptable because every commit reaching main was already
+  # green on all 13 required checks as a PR, and main's job here is to catch
+  # MERGE INTERACTIONS at the tip. A green tip is the signal that matters, and
+  # under this group the tip actually gets one as soon as merging pauses.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 # Least privilege for GITHUB_TOKEN, workflow-wide. Every job below only checks
