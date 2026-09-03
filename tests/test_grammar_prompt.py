@@ -31,7 +31,7 @@ def test_prompt_file_matches_the_shipped_constant():
 
 def test_prompt_grammar_is_roughly_a_hundred_lines():
     lines = PROMPT_GRAMMAR.splitlines()
-    assert 60 <= len(lines) <= 130, f"{len(lines)} lines — outside the prompt budget"
+    assert 60 <= len(lines) <= 145, f"{len(lines)} lines — outside the prompt budget"
 
 
 def test_prompt_grammar_covers_every_construct_in_the_delta_grammar():

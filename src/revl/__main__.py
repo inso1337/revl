@@ -246,6 +246,19 @@ def _boundary(ir: dict) -> dict:
                  "backends": sorted(
                      set(extern_class.get(name, {}).get("bodies") or {})
                      | set(extern_class.get(name, {}).get("refs") or {})),
+                 # item 247: the DECLARED capability scope of a scoped extern
+                 # (`emission[db]`, `witnessed[fs]`). That token — not the
+                 # extern NAME — is what a scoped crossing is keyed on across
+                 # every other authority surface: item 343 made the approval
+                 # `ClassMap` read it, `audit_diff._capability_registers` keys
+                 # the register floor by it, and `_lower_secrets` binds by it.
+                 # Carrying it here is what lets `policy.component_reach` grade
+                 # a DIRECTLY EMITTED extern in the same namespace as the rule
+                 # that names it. Absent for an unscoped extern, whose token IS
+                 # its name, so every pre-247 audit entry is byte-identical.
+                 **({"capabilities": sorted(
+                     extern_class.get(name, {}).get("capabilities") or ())}
+                    if extern_class.get(name, {}).get("capabilities") else {}),
                  **({"refs": {tier: _ref_provenance(r) for tier, r in
                               (extern_class.get(name, {}).get("refs") or {}).items()}}
                     if extern_class.get(name, {}).get("refs") else {})}
@@ -588,7 +601,14 @@ def _run_audit(args, ir: dict) -> int:
                         return (f"{e['name']} (reached through first-class "
                                 "function dispatch — what runs is not statically "
                                 "boundable)")
-                    base = (f"{e['name']} ({e['class']}, "
+                    # item 247: a scoped extern renders its declared token the
+                    # same way a scoped emission does (`label [db]` above),
+                    # because that token — not the name below it — is what a
+                    # `capability <glob>` policy rule selects on. An unscoped
+                    # extern has no scope to show and renders as before.
+                    scope = (f" [{', '.join(e['capabilities'])}]"
+                             if e.get("capabilities") else "")
+                    base = (f"{e['name']}{scope} ({e['class']}, "
                             f"{'+'.join(e['backends']) or 'no bodies'})")
                     # item 396 option B: name WHERE a ref crossing's host code
                     # lives, so a review sees the implementation moved out of the
@@ -975,6 +995,17 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
             trail = " -> ".join(f"{op} by `{layer}` (L{level})"
                                 for level, layer, op in row.provenance)
             print(f"  {'':<24}   {trail}")
+        if row.remote is not None:
+            # item 424 C2. The peer, the reach and the failure mode are the
+            # ADMISSION facts a remote row adds; the WIRING panel below prints
+            # nothing different for it, which is D-424c.1 visible in the output.
+            info = row.remote
+            print(f"  {'':<24}   REMOTE peer {info['peer']}  "
+                  f"reach `{info['capability']}`  "
+                  f"on_failure {info['onFailure']}")
+            print(f"  {'':<24}   synthesized from service "
+                  f"`{info['service']}` ({info['serviceSource']}); "
+                  "NO inverse — a remote effect survives unwind")
     print()
     print("WIRING")
     for label, edges in table.wiring().items():

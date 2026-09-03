@@ -172,6 +172,200 @@ per row is the confinement slice, and it waits on the trust decision recorded in
 roadmap 425 F1. Until then the clause and its subset check are enforced and the
 profile is not, which is exactly the split roadmap item 424 slice A1 states.
 
+## `remote`: a row whose provider is synthesized
+
+A `remote` row places a provider that runs somewhere else. It names no file,
+because its provider does not exist as source until the resolver synthesizes it
+from the service declaration and the peer address.
+
+```revl
+composition Shop {
+  use "services.rvl"
+
+  row @checkout from "consumer.rvl" provides checkout
+  remote @billing provides billing: Billing
+    at host("billing.internal:8443")
+}
+```
+
+This is roadmap item 424 gap (c), slice C2; the design note is
+[design/424-dsh-language-gaps.md](design/424-dsh-language-gaps.md) §3.2.
+
+**The wiring is local, and that is the whole point.** `CheckoutSvc` still says
+`requires billing: Billing` and does not change by one character between a local
+provider and a remote one. G2, G3 and G4 are unchanged. Remoteness is an
+ADMISSION fact — a reach, a capability, a failure mode — and never a wiring fact,
+so bringing the provider back in-process is a one-line edit to the composition
+rather than an edit to every consumer. That is the rule
+[interop-bridge.md](interop-bridge.md) §3 already states for a placement seam
+("manifest data, not source text"), applied to a callee that is in no manifest
+at all. The `revl composition` WIRING panel prints the same line for both, and
+the diff between the two compositions is empty there.
+
+### What the row can promise, and what it refuses to
+
+A remote provider is outside the composition's trust boundary by construction,
+so the surface is written to refuse rather than to pretend.
+
+**No inverse is synthesized, and a remote effect survives unwind.** revl's
+teardown stack has three entry kinds. `bracket` needs an INFALLIBLE inverse
+(G5), and an inverse that travels over a network is fallible by construction:
+the peer may be unreachable, restarted or gone by teardown time.
+`transactional` (item 243) needs a HOST-LOCAL inverse and a witness captured on
+the `Ok` branch, and the peer's own claim that it undid something is not a
+witness — it is one more assertion from the same peer. So every synthesized
+operation is `emission` with no `undo` and no `compensate`: G4's other branch,
+DECLARED IRREVERSIBLE.
+
+This leaves **G7 intact rather than strained**. G7 is LIFO-complete over
+REGISTERED entries, and a synthesized remote operation registers none, so there
+is nothing for G7 to walk and nothing it can fail to walk. A `compensation`
+(item 247, audit-grade, best-effort) is the only kind such a call could ever
+carry, and it stays the composing engineer's to write by hand: only they know
+which remote operation undoes which. The synthesizer will not guess.
+
+**Withdrawal costs nothing, precisely because there is nothing to undo.**
+Item 426 §5.3 files activation of `replace`/`remove` as blocked, and the reason
+is teardown: withdrawing a wired row means disposing a fiber and replaying its
+teardown in the correct LIFO position. A `remote` row does have a local fiber —
+its synthesized provider is an ordinary component, plugged like one — but that
+fiber holds no acquired resource and registers no teardown entry, so disposing
+it is a pure unwiring: the provision is withdrawn, consumers re-resolve and
+deactivate reactively, and the LIFO replay that blocks the general case is
+vacuous. The expensive half of that residual is exactly the half a remote row
+does not have.
+
+**It re-admits nothing.** A remote row does not admit, verify or re-admit the
+callee, and there is no "verified remote" badge to be had: item 337 requires the
+RECEIVER to re-compile from its own independently held source, and a client is
+the sender. What is bounded is local and only local — the reach, the capability
+and the failure mode. If both sides are revl and both want a mutual guarantee,
+that is `revl contract export` / `revl contract check`, or 337's seam.
+
+The generated source carries all of this in its header, so the statement travels
+with the artifact rather than living only here.
+
+### Remotable means "declares an emission bound"
+
+Every method of a remotable service must declare an emission bound. A plain `fn`
+service is not remotable and the refusal names the method:
+
+```text
+service `Metrics` is not remotable: method `tick` is a plain `fn`
+(remote row `@m`)
+```
+
+This is not a new rule. It is G4 read at the client: a network call IS a
+boundary crossing, and a provider may be purer than it declares but never less
+pure.
+
+### `on_failure`
+
+| clause | meaning |
+|---|---|
+| `on_failure(withdraw)` | the default. A transport failure is a FAULT. |
+| `on_failure(result)` | the failure comes back in band as `Err`. Admitted only if every method returns `Result[T, Str]`. |
+
+There is no third option: silently swallowing a transport failure has no
+spelling. `withdraw` is the default because revl already has a settled answer
+for a remote peer that goes away — peer death is provider withdrawal, the
+consumer deactivates reactively, and a breached deadline withdraws too, because
+a wedged remote provider is indistinguishable from a dead one
+([network-path.md](network-path.md)). A second failure channel would put two
+answers to one question in the language.
+
+`on_failure(result)` has a real cost, which is why it is the opt-in and not the
+default: the provider is not withdrawn, so a wedged peer stays wired and every
+call keeps paying for the round trip.
+
+**What this slice lands, and what it does not.** `on_failure` is parsed, checked
+against the service's return types, carried into the IR and the manifest, and
+the generated body raises a fault rather than returning a quietly-empty result.
+The RUNTIME half — turning that fault into a provider withdrawal that cascades
+through the reactive path — is armed today by the placement bridge's monitor
+connection (`backends/python/bridge.py`, `watch(on_lost)` fired on monitor EOF),
+which is a seam-client mechanism a synthesized row does not join. Wiring it is
+the next step, and `tests/test_424_remote_row.py` pins the declaration so the
+day it lands, something says so.
+
+### Two peers of one service are two realms
+
+```revl
+composition Tenants {
+  use "services.rvl"
+
+  remote @billing_a provides billing: Billing
+    in realm("tenant_a") at host("a.billing.internal:8443")
+  remote @billing_b provides billing: Billing
+    in realm("tenant_b") at host("b.billing.internal:8443")
+}
+```
+
+Two rows, two `(key, realm)` addresses, no collision and no new rule — the same
+mechanism a per-tenant local store already uses. Two peers in the SAME realm
+collide with the ordinary row-level G2 refusal naming both rows.
+
+### The peer address
+
+`at host("...")` takes a bare authority: `host` or `host:port`. A URL is
+refused, and an address carrying userinfo is refused outright:
+
+```text
+the peer address of remote row `@a` carries userinfo
+```
+
+The reach token (`net.billing_internal`) is folded from the HOST alone, never
+the port and never userinfo, so two credentials against two hosts cannot
+collapse onto one token and a credential can never become part of a capability
+spelling. Refusing the address is the fail-closed reading: accepting it and
+quietly dropping the credential would leave a live secret written in a
+composition document, which is a worse place for it than a URL.
+
+An address is a static string literal. It is exactly the class of value roadmap
+item 350 binds through a `boot` component, and when 350 lands a peer address
+should arrive that way rather than through a second mechanism.
+
+### What it projects, and what it refuses
+
+The wire is the canonical one, not a second encoding: the request envelope is
+`{"key", "method", "args"}` and the reply `{"ok", "value" | "error"}`, which is
+the placement bridge's own envelope carried over HTTPS.
+
+Two limits, both refusals rather than approximations:
+
+- **The JSON-transparent subset only.** Scalars, and `Opt`/`List` of them. A
+  record or an ADT needs the tagged half of the canonical encoding
+  (`{"$kind", "$value"}`), which lives in the bridge and is not reachable from a
+  generated host body. `revl export client` (slice C1, buildable today over the
+  same encoding) builds that projection, and a remote row will use it rather
+  than grow a second copy. A method it cannot project is refused naming the
+  method and the type.
+- **The `py` tier only.** An `emission` method emits a SYNCHRONOUS function on
+  the TypeScript tier, and a network round trip is not synchronous, so a
+  `fetch`-based body would be `await` inside a non-`async` function. The ts
+  projection waits on the async crossing rather than shipping a body that does
+  not typecheck.
+
+### Values are not tainted yet
+
+Item 424 D-424c.9 requires every value a remote provider returns to be
+`Untrusted[T]`, and that is slice C3, not this one. Until it lands, a value that
+crossed this boundary is indistinguishable at a call site from a local one —
+which is exactly the hole D-424c.9 exists to close. The generated header says so
+in the artifact itself.
+
+### The one thing `remote` costs the lexer: nothing
+
+`remote`, `at`, `host`, `through` and `on_failure` are CONTEXTUAL keywords,
+recognised only in this one position inside a `composition` block. The lexer's
+`KEYWORDS` set is untouched, so the self-host lexer needs no sync and a program
+using any of those words as a provision key, a require alias or a config field
+keeps working. `in` and `realm` are reused verbatim from `isolate`. Promoting
+`remote` to a real keyword would break those programs, force a matching edit in
+the self-host lexer, and put a second copy of the reserved-word set on every
+backend that re-derives it — for no gain, since the parse position is
+unambiguous.
+
 ## What lands in the IR
 
 `revl composition --admit` (and `revl.composition.compile_composition`) put the
@@ -198,6 +392,34 @@ two machines resolving the same composition produce a byte-identical table.
   ]
 }
 ```
+
+A `remote` row carries the admission facts the wiring deliberately does not:
+
+```json
+{
+  "label": "billing",
+  "qualified": ".::@billing",
+  "source": ".revl/synthesized/_project/billing.remote.rvl",
+  "component": "RemoteBillingProvider",
+  "claims": [{"key": "billing"}],
+  "requires": [],
+  "remote": {
+    "peer": "billing.internal:8443",
+    "service": "Billing",
+    "serviceSource": "services.rvl",
+    "capability": "net.billing_internal",
+    "onFailure": "withdraw",
+    "inverse": null
+  }
+}
+```
+
+`source` names no file on disk. The synthesized provider is handed to the
+compiler through the in-memory source map `compile_files` already takes, so
+`_link` runs G2, G3 and G4 over it exactly as over a file row — which is why
+the synthesizer is no more on the trusted path than the resolver is. The path
+is derived from the origin and the label alone, so two machines resolving the
+same composition still produce byte-identical rows.
 
 A declared composition is compiled and READ: its rows are already in the IR. The
 bootstrap that today compiles a manifest document, emits it to Python, execs it,

@@ -1,0 +1,11 @@
+// item 432(g): constant `+ - *` are evaluated by the emitter instead of going
+// through the checked helpers, and a fold that would overflow is declined so
+// the helper -- and its runtime trap -- stays exactly where it was.
+fn folded(n: Int) -> Int { return n * 1000 + 7 * 6 }
+fn nested() -> Int { return 2 * 3 * 4 + 5 - 6 }
+fn negative() -> Int { return 0 - 5 }
+fn unary(n: Int) -> Int { return -7 + n }
+fn mixed(a: Int, b: Int) -> Int { return a * 3 + b * (4 + 4) }
+fn overflows() -> Int { return 9223372036854775807 + 1 }
+fn overflow_mul() -> Int { return 4611686018427387904 * 2 }
+fn exact_min() -> Int { return 4611686018427387904 * (0 - 2) }

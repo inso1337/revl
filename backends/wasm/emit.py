@@ -45,6 +45,7 @@ are still rejected with a precise reason.
 from __future__ import annotations
 
 import json
+import operator
 import re
 from typing import Any
 
@@ -2163,6 +2164,10 @@ class _ComponentEmitter:
                 lines.append(self.v3._helper_str_split())
             if "$str_join" in rendered:
                 lines.append(self.v3._helper_str_join())
+            # item 432(d): one `$str_concat<k>` per template arity actually
+            # rendered, on the same demand-driven rule.
+            for k in _concat_arities(rendered):
+                lines.append(self.v3._helper_str_concat_n(k))
         elif needs_arith:
             lines.extend(self.v3._arith_helper_funcs())
         lines.extend(fn_defs)
@@ -2177,6 +2182,60 @@ _MEMORY_TOKENS = (
     "$alloc", "$str_", "$list_", "$int_to_str",
     "i32.load", "i32.store", "i64.load", "i64.store", "memory.copy",
 )
+
+#: item 432(g): a fully-evaluated integer operand, exactly as this tier emits
+#: one. Matching the emitted WAT (rather than the IR node) is what makes the
+#: fold compositional for free: the left operand of `2 * 3 * 4` has already
+#: become `(i64.const 6)` by the time the outer `*` is lowered.
+_CONST_OPERAND = re.compile(r"^\((i64|i32)\.const (-?\d+)\)$")
+
+#: The three operators that go through a CHECKED helper (`$int_add` and
+#: friends), which is the whole reason folding pays here: each folded site
+#: removes a call plus its overflow test. `/` and `%` are single native
+#: instructions whose trap-on-zero (and `MIN / -1`) semantics this tier
+#: deliberately leaves to wasm, so they are not folded.
+_FOLDABLE_INT_OPS = {"+": operator.add, "-": operator.sub, "*": operator.mul}
+
+
+def _fold_int_const(op: str, operand_ty: str, left: str, right: str) -> str | None:
+    """item 432(g): `7 * 6` as `(i64.const 42)` instead of two constants and a
+    call to the checked multiply.
+
+    Returns the folded operand, or None to emit the call unchanged. It returns
+    None for an operand that is not a literal constant of the right width, and
+    -- deliberately -- for a constant expression that OVERFLOWS. Refusing an
+    overflowing constant at compile time was the shape the audit proposed, but
+    it would make this tier reject a program every other tier compiles and
+    traps in at run time (docs/arithmetic.md pins the trap, not a refusal), so
+    an overflowing fold is declined instead and the checked helper stays, which
+    keeps the trap exactly where it was.
+    """
+    fold = _FOLDABLE_INT_OPS.get(op)
+    if fold is None or operand_ty not in ("Int", "Int32"):
+        return None
+    width = "i64" if operand_ty == "Int" else "i32"
+    lhs = _CONST_OPERAND.match(left.strip())
+    rhs = _CONST_OPERAND.match(right.strip())
+    if lhs is None or rhs is None:
+        return None
+    if lhs.group(1) != width or rhs.group(1) != width:
+        return None
+    value = fold(int(lhs.group(2)), int(rhs.group(2)))
+    bits = 64 if width == "i64" else 32
+    if not -(1 << (bits - 1)) <= value <= (1 << (bits - 1)) - 1:
+        return None                       # keep the checked helper, and its trap
+    return f"({width}.const {value})"
+
+
+#: item 432(d): which k-ary `$str_concat<k>` helpers a rendered body actually
+#: calls. Ascending so the emitted preamble order is a function of the module,
+#: not of rendering order.
+_CONCAT_N_CALL = re.compile(r"\(call \$str_concat(\d+)\)")
+
+
+def _concat_arities(rendered: str) -> list[int]:
+    return sorted({int(k) for k in _CONCAT_N_CALL.findall(rendered)})
+
 
 #: The arithmetic helpers, which need no memory. All six travel together
 #: because they call each other ($int_div_euclid -> $int_div_floor).
@@ -2984,6 +3043,50 @@ class _V3Emitter:
       (i32.add (local.get $b) (i32.const 4))
       (local.get $lb))
     (local.get $p))"""
+
+    @staticmethod
+    def _helper_str_concat_n(k: int) -> str:
+        """item 432(d): the k-ary form of `$str_concat`, for k >= 3.
+
+        One length pass, one `$alloc_str`, one `memory.copy` per part — the
+        shape a competent wasm author writes for a k-part template literal.
+        The pairwise left-fold this replaces allocated k-1 buffers and recopied
+        the accumulated prefix at every step, so it moved O(k * n) bytes for a
+        k-part template of total length n; this moves n.
+
+        The length sum is a plain i32 add, exactly as the pairwise chain's was:
+        a total that overflows i32 needs more than 4 GiB of parts, and the
+        undersized `$alloc_str` that follows makes the first `memory.copy` run
+        off the end of memory, which traps. The chain trapped on the same input
+        (in `$alloc`), so the fence has not moved — an oversized concat is a
+        trap either way, never a short string.
+        """
+        if k < 3:
+            raise EmitError(f"internal: $str_concat{k} is $str_concat")
+        params = " ".join(f"(param $a{i} i32)" for i in range(k))
+        lines = [
+            "  ;; item 432(d): one concat per template literal — one length",
+            "  ;; pass, one allocation, one copy per part.",
+            f"  (func $str_concat{k} {params} (result i32)",
+        ]
+        lines += [f"    (local $l{i} i32)" for i in range(k)]
+        lines += ["    (local $p i32)", "    (local $o i32)"]
+        lines += [f"    (local.set $l{i} (i32.load (local.get $a{i})))"
+                  for i in range(k)]
+        total = "(local.get $l0)"
+        for i in range(1, k):
+            total = f"(i32.add {total} (local.get $l{i}))"
+        lines.append(f"    (local.set $p (call $alloc_str {total}))")
+        lines.append("    (local.set $o (i32.add (local.get $p) (i32.const 4)))")
+        for i in range(k):
+            lines.append(
+                f"    (memory.copy (local.get $o) "
+                f"(i32.add (local.get $a{i}) (i32.const 4)) (local.get $l{i}))")
+            if i < k - 1:
+                lines.append(
+                    f"    (local.set $o (i32.add (local.get $o) (local.get $l{i})))")
+        lines.append("    (local.get $p))")
+        return "\n".join(lines)
 
     def _helper_str_eq(self) -> str:
         return """  (func $str_eq (param $a i32) (param $b i32) (result i32)
@@ -4154,6 +4257,9 @@ class _V3Emitter:
             raise EmitError(
                 f"{where}: {op!r} is not lowerable over {operand_ty} on this tier")
         result_ty = "Bool" if op in _COMPARISON_OPS else operand_ty
+        folded = _fold_int_const(op, operand_ty, left.wat, right.wat)
+        if folded is not None:
+            return _E(folded, result_ty)
         return _E(f"{left.wat}\n      {right.wat}\n      ({instruction})", result_ty)
 
     def _un_expr(self, node: dict, scope: _Scope, where: str) -> _E:
@@ -4172,6 +4278,13 @@ class _V3Emitter:
             # negation is a subtraction from zero, and `0 - MIN` overflows: it
             # goes through the checked helper like any other subtraction, at the
             # operand's width (docs/arithmetic.md).
+            width = "i32" if operand.ty == "Int32" else "i64"
+            # item 432(g): `-5` is a constant subtraction from zero, so the same
+            # fold applies; `-Int.MIN` overflows and therefore does not fold,
+            # keeping its runtime trap.
+            folded = _fold_int_const("-", operand.ty, f"({width}.const 0)", operand.wat)
+            if folded is not None:
+                return _E(folded, operand.ty)
             if operand.ty == "Int32":
                 return _E(f"(i32.const 0)\n      {operand.wat}\n      (call $int32_sub)", "Int32")
             return _E(f"(i64.const 0)\n      {operand.wat}\n      (call $int_sub)", "Int")
@@ -4774,9 +4887,16 @@ class _V3Emitter:
                     )
         if not rendered:
             return _E(self._str_ptr(""), "Str")
-        wat = rendered[0]
-        for piece in rendered[1:]:
-            wat = f"{wat}\n      {piece}\n      (call $str_concat)"
+        if len(rendered) == 1:
+            return _E(rendered[0], "Str")
+        # item 432(d): a k-part template is ONE concat, not a k-1 deep pairwise
+        # chain. The chain allocated k-1 buffers and recopied the whole growing
+        # prefix at every step, so its byte cost was quadratic in the arity;
+        # `$str_concat<k>` sums the k lengths once, allocates once and does one
+        # `memory.copy` per part. Two parts already are that, so k=2 keeps
+        # calling `$str_concat` and every existing two-part golden is unmoved.
+        helper = "$str_concat" if len(rendered) == 2 else f"$str_concat{len(rendered)}"
+        wat = "\n      ".join(rendered) + f"\n      (call {helper})"
         return _E(wat, "Str")
 
     # -- statements + function emission --------------------------------------
@@ -5268,6 +5388,10 @@ class _V3Emitter:
                 lines.append(self._helper_str_split())
             if uses_join:
                 lines.append(self._helper_str_join())
+            # item 432(d): one `$str_concat<k>` per template arity actually
+            # rendered, on the same demand-driven rule as the readers above.
+            for k in _concat_arities("\n".join(all_blocks)):
+                lines.append(self._helper_str_concat_n(k))
         lines.extend(self._type_comments())
         unsupported = self._unsupported_comments()
         if unsupported:
@@ -5518,7 +5642,124 @@ def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
     return ir
 
 
-def emit(ir: dict, record: bool = False) -> dict[str, str]:
+# --------------------------------------------------------------------------
+# item 432(b): drop the helpers no export can reach
+# --------------------------------------------------------------------------
+#
+# The linear-memory + checked-arithmetic prelude is emitted whenever a module
+# needs a memory at all, so an `Int` doubler used to ship the codepoint
+# walkers, the list helpers and the string readers it can never call: 27 to 30
+# of every 32 to 36 emitted functions were unreachable, and about 85% of the
+# module's bytes. Rather than hand-gate two dozen helpers on two dozen tokens
+# -- which is the shape that has to be kept in step by hand forever, and which
+# cannot see that `$str_cp_slice` is only wanted because `$str_slice` is -- the
+# emitted module is swept once at the end: keep every export, keep everything
+# an export can reach through `(call $…)`, drop the rest.
+#
+# That sweep is only sound while a `(call $…)` scan sees EVERY edge of the call
+# graph, so the constructs that would put an edge somewhere else are CHECKED
+# rather than assumed absent: a function reference (`ref.func`), an indirect
+# call, a table or element segment that could hold one, and a start function.
+# This tier emits none of them today; if one is ever emitted, the sweep
+# declines and the module keeps the whole prelude rather than losing a function
+# that something could still reach.
+
+_UNSWEEPABLE = ("ref.func", "call_indirect", "\n  (table", "\n  (elem",
+                "\n  (start")
+_FUNC_HEAD = re.compile(r'^\s*\(func\s+(?:(\$[\w:.#$-]+)\s*)?(?:\(export\s+"([^"]+)"\))?')
+_CALL_EDGE = re.compile(r"\(call\s+(\$[\w:.#$-]+)")
+
+
+def _top_level_funcs(wat: str) -> list[tuple[str | None, str | None, str, str]]:
+    """Split a module into its top-level ``(func …)`` forms.
+
+    Returns ``(name, export, text, block)`` per function, by paren matching
+    from each top-level ``(func`` -- aware of the `"…"` in an export name and
+    of a `;;` comment, either of which can carry an unbalanced paren. ``text``
+    is the function itself; ``block`` is the function together with the
+    top-level comment lines directly above it, which is the unit to REMOVE, so
+    that dropping `$__canon_lower_str` does not leave the paragraph describing
+    it stranded over the next function.
+    """
+    out: list[tuple[str | None, str | None, str, str]] = []
+    index, size, previous_end = 0, len(wat), 0
+    while True:
+        found = wat.find("\n  (func", index)
+        if found < 0:
+            return out
+        start = found + 1
+        block_start = start
+        while block_start - 1 > previous_end:
+            line_start = wat.rfind("\n", 0, block_start - 1) + 1
+            if line_start < previous_end or not wat.startswith("  ;;", line_start):
+                break
+            block_start = line_start
+        depth, cursor, in_string = 0, start, False
+        while cursor < size:
+            char = wat[cursor]
+            if in_string:
+                if char == "\\":
+                    cursor += 2
+                    continue
+                if char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == ";" and wat[cursor:cursor + 2] == ";;":
+                cursor = wat.find("\n", cursor)
+                if cursor < 0:
+                    cursor = size
+                continue
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    cursor += 1
+                    break
+            cursor += 1
+        text = wat[start:cursor]
+        head = _FUNC_HEAD.match(text)
+        out.append((head.group(1) if head else None,
+                    head.group(2) if head else None, text,
+                    wat[block_start:cursor]))
+        index = previous_end = cursor
+
+
+def prune_unreachable_funcs(wat: str) -> str:
+    """item 432(b): the module with every function no export can reach removed.
+
+    Returns `wat` unchanged when the module carries a construct that could
+    reach a function without a `(call $…)` -- see `_UNSWEEPABLE` -- so an
+    emitter that grows indirect calls degrades to the old always-everything
+    prelude instead of to a broken module.
+    """
+    if any(token in wat for token in _UNSWEEPABLE):
+        return wat
+    funcs = _top_level_funcs(wat)
+    body_of = {name: text for name, _e, text, _b in funcs if name}
+    live: set[str] = set()
+    # An exported function is a root. So is an exported function with no name
+    # of its own (`(func (export "deactivate") …)`), which cannot be removed
+    # and whose callees are therefore live too.
+    pending = [name for name, export, _t, _b in funcs if export and name]
+    for name, export, text, _block in funcs:
+        if export and not name:
+            pending.extend(_CALL_EDGE.findall(text))
+    while pending:
+        current = pending.pop()
+        if current in live or current not in body_of:
+            continue                      # already swept, or an import
+        live.add(current)
+        pending.extend(_CALL_EDGE.findall(body_of[current]))
+    out = wat
+    for name, _export, _text, block in funcs:
+        if name is not None and name not in live:
+            out = out.replace("\n" + block, "", 1)
+    return out
+
+
+def emit(ir: dict, record: bool = False, prune: bool = True) -> dict[str, str]:
     """Lower one IR document to WAT modules (v1 components, v3 types/fns).
 
     ``record`` (item 322 Slice 2, the wasm durable-WAL channel) is OFF by
@@ -5543,10 +5784,19 @@ def emit(ir: dict, record: bool = False) -> dict[str, str]:
     _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
     if version == 1 or version == 2:
-        return _emit_v1(ir, record=record)
-    if version == 3:
-        return _emit_v3(ir, record=record)
-    raise EmitError(f"unsupported ir_version {version!r} (expected 1, 2, or 3)")
+        modules = _emit_v1(ir, record=record)
+    elif version == 3:
+        modules = _emit_v3(ir, record=record)
+    else:
+        raise EmitError(f"unsupported ir_version {version!r} (expected 1, 2, or 3)")
+    # item 432(b). `prune=False` is for a caller that splices more functions in
+    # afterwards -- the canonical boundary does, and its wrappers call helpers
+    # no core export reaches -- and that caller sweeps the assembled module
+    # itself.
+    if prune:
+        modules = {name: prune_unreachable_funcs(wat)
+                   for name, wat in modules.items()}
+    return modules
 
 
 if __name__ == "__main__":

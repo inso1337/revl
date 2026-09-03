@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check demo pre-merge pre-merge-affected formal roadmap-check workflow-permissions
+.PHONY: matrix matrix-check matrix-execute demo pre-merge pre-merge-affected formal roadmap-check workflow-permissions
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -59,6 +59,13 @@ matrix:
 # The staleness gate CI runs: exit non-zero if the committed block is stale.
 matrix-check:
 	python3 tools/conformance.py --check-readme
+
+# The matrix's third question (issue #244): RUN the cases that have an answer
+# and check every tier computes the same one. `--validate` stops at compile
+# depth and cannot see a tier that compiles and then means something else.
+# A tier whose runtime is absent here reports `-`, never agreement.
+matrix-execute:
+	python3 tools/conformance.py --execute
 
 # v3.0 gate E3: the live-systems demo (swap / why / apply) from a clean
 # checkout. Ensures the cordis-py runtime is set up, then runs the scripted
