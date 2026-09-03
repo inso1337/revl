@@ -33,6 +33,7 @@ stay sound while the signed body changes shape.
 """
 
 import copy
+import hmac
 import json
 import subprocess
 import sys
@@ -466,16 +467,151 @@ def test_injected_dropped_and_reordered_members_all_break_the_mac():
     assert attest.verify_attestation(reordered, KEY)[0] is True
 
 
-def test_every_digest_comparison_is_constant_time():
-    """`hmac.compare_digest` throughout — an equality that leaks timing on the
-    MAC, the composition hash or a bound facet would leak it under an oracle."""
-    source = (SRC / "revl" / "attest.py").read_text(encoding="utf-8")
-    deploy_source = (SRC / "revl" / "deploy.py").read_text(encoding="utf-8")
-    for name, text in (("attest.py", source), ("deploy.py", deploy_source)):
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#") or "signature" not in stripped:
-                continue
-            assert not ("==" in stripped and "given" in stripped), \
-                f"{name}: raw == on a signature: {stripped}"
-        assert "compare_digest" in text
+# --- the constant-time property, asserted by behaviour ---------------------
+#
+# This used to be `assert "compare_digest" in text` over attest.py and
+# deploy.py. That certifies nothing about the comparison that AUTHENTICATES:
+# the name is satisfied by an occurrence anywhere in the file — a comment, a
+# docstring, or one of the other comparison sites — while the one an attacker
+# times leaks. What follows drives each authenticating path and observes the
+# comparison it actually performs.
+
+
+class _EqTripwire(str):
+    """A `str` that records every raw `==`/`!=` performed on it.
+
+    `hmac.compare_digest` compares two ASCII `str`s byte-for-byte in C and never
+    reaches `__eq__`. Python's `==` on `str` does, and `==` is the operator that
+    returns on the first differing byte — the leak. So an empty `eq_calls` after
+    a verification is positive evidence that the authenticating comparison did
+    NOT go through the leaky operator, whatever the source text spells."""
+
+    def __new__(cls, value: str) -> "_EqTripwire":
+        obj = super().__new__(cls, value)
+        obj.eq_calls = []
+        return obj
+
+    def __eq__(self, other):
+        self.eq_calls.append(other)
+        return str.__eq__(self, other)
+
+    def __ne__(self, other):
+        self.eq_calls.append(other)
+        return str.__ne__(self, other)
+
+    def __hash__(self):
+        return str.__hash__(self)
+
+
+@pytest.fixture()
+def digest_comparisons(monkeypatch):
+    """Every `hmac.compare_digest` performed while the test runs, as `(a, b)`.
+
+    Patched on the `hmac` module itself, so it catches the call wherever the
+    call lives: the property is that the constant-time comparison HAPPENS on the
+    path that authenticates, not that a name appears in a file."""
+    real = hmac.compare_digest
+    seen: list = []
+
+    def spy(a, b):
+        seen.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(hmac, "compare_digest", spy)
+    return seen
+
+
+def _compared_constant_time(seen, operand) -> bool:
+    """Identity, never `in`/`==` — an equality here would trip the very tripwire
+    the caller is measuring."""
+    return any(a is operand or b is operand for a, b in seen)
+
+
+def test_the_attestation_signature_check_is_constant_time(digest_comparisons):
+    """The presented signature is compared with `hmac.compare_digest`, never
+    `==` — on both the rejecting and the accepting outcome."""
+    att = _att()
+
+    forged = dict(att)
+    forged[attest.SIGNATURE_FIELD] = _EqTripwire("0" * 64)
+    ok, reason = attest.verify_attestation(forged, KEY)
+    assert ok is False and "signature mismatch" in reason
+    tripwire = forged[attest.SIGNATURE_FIELD]
+    assert tripwire.eq_calls == [], \
+        f"the presented signature met a raw ==: {tripwire.eq_calls}"
+    assert _compared_constant_time(digest_comparisons, tripwire)
+
+    good = dict(att)
+    good[attest.SIGNATURE_FIELD] = _EqTripwire(att[attest.SIGNATURE_FIELD])
+    ok, _reason = attest.verify_attestation(good, KEY)
+    assert ok is True
+    assert good[attest.SIGNATURE_FIELD].eq_calls == []
+    assert _compared_constant_time(digest_comparisons,
+                                   good[attest.SIGNATURE_FIELD])
+
+
+def test_the_composition_hash_check_is_constant_time(digest_comparisons):
+    """The second authenticating comparison in `verify_attestation`: the
+    attested composition hash against the hash of the composition PRESENTED."""
+    verdict = _gate()
+    att = _resign(_att(), composition_hash=_EqTripwire(
+        attest.canonical_hash(verdict.ir)))
+    attested = att["composition_hash"]
+
+    ok, _reason = attest.verify_attestation(att, KEY, ir=verdict.ir)
+    assert ok is True
+    assert attested.eq_calls == [], \
+        f"the attested composition hash met a raw ==: {attested.eq_calls}"
+    assert _compared_constant_time(digest_comparisons, attested)
+
+    ok, reason = attest.verify_attestation(att, KEY, ir={"a": 1})
+    assert ok is False and "hash mismatch" in reason
+    assert attested.eq_calls == []
+
+
+def test_the_receipt_signature_check_is_constant_time(staged,
+                                                      digest_comparisons):
+    """`deploy.verify_receipt` authenticates under the host key, and the same
+    property has to hold there: a receipt is what an audit attributes a lie
+    with, so a timing oracle on it forges attribution."""
+    bundle, att = staged
+    receipt = deploy.admit(bundle, trust=_trust(), attestation=att,
+                           host_key=KEY)
+
+    honest = dict(receipt)
+    honest["signature"] = _EqTripwire(receipt["signature"])
+    ok, _reason = deploy.verify_receipt(honest, KEY)
+    assert ok is True
+    assert honest["signature"].eq_calls == []
+    assert _compared_constant_time(digest_comparisons, honest["signature"])
+
+    forged = dict(receipt)
+    forged["signature"] = _EqTripwire("0" * 64)
+    ok, reason = deploy.verify_receipt(forged, KEY)
+    assert ok is False and "signature mismatch" in reason
+    assert forged["signature"].eq_calls == []
+
+
+def test_the_seam_envelope_auth_check_is_constant_time(digest_comparisons):
+    """The remote one: `CorrelationGuard.admit` authenticates a peer-supplied
+    envelope tag. It is the comparison an off-host attacker can actually time,
+    because it is the only one they can drive at will."""
+    correlation = deploy.Correlation(
+        composition_id="c1", generation=1, peer_identity="peer-a",
+        effect_id="e1", idempotency_key="k1")
+    secret = b"seam-secret-for-peer-a"
+    guard = deploy.CorrelationGuard({"peer-a": secret})
+
+    honest = dict(deploy.seal(correlation, secret))
+    honest[deploy.AUTH_FIELD] = _EqTripwire(honest[deploy.AUTH_FIELD])
+    ok, _reason = guard.admit(honest)
+    assert ok is True
+    assert honest[deploy.AUTH_FIELD].eq_calls == []
+    assert _compared_constant_time(digest_comparisons,
+                                   honest[deploy.AUTH_FIELD])
+
+    forged = dict(deploy.seal(correlation, secret))
+    forged[deploy.AUTH_FIELD] = _EqTripwire("0" * 64)
+    ok, reason = deploy.CorrelationGuard({"peer-a": secret}).admit(forged)
+    assert ok is False and reason == deploy.REJECT_FORGED
+    assert forged[deploy.AUTH_FIELD].eq_calls == []

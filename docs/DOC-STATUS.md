@@ -89,7 +89,7 @@ was corrected by hand and had drifted back within a day.
 | backend-ir-v1.md | needs-work | 16 |  |
 | backend-ir-v3.md | needs-work | 18 |  |
 | backend-ir.md | needs-work | 11 |  |
-| backends-roadmap.md | needs-work | 44 |  |
+| backends-roadmap.md | needs-work | 42 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
 | boundary-policy.md | needs-work | 22 |  |
 | bundle.md | needs-work | 0 |  |
@@ -98,17 +98,17 @@ was corrected by hand and had drifted back within a day.
 | capability-realm-placement.md | needs-work | 11 |  |
 | closures.md | needs-work | 3 |  |
 | collections.md | needs-work | 34 | yes |
-| commands-reference.md | current | 3 |  |
-| component-leases.md | needs-work | 24 |  |
+| commands-reference.md | current | 5 |  |
+| component-leases.md | needs-work | 26 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |
 | composition-rows.md | needs-work | 13 |  |
-| conformance.md | needs-work | 36 |  |
+| conformance.md | needs-work | 38 |  |
 | contract-errata.md | needs-work | 93 | yes |
 | crash-recovery.md | needs-work | 44 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
-| deploy.md | needs-work | 33 |  |
+| deploy.md | needs-work | 37 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 69 |  |
 | design-v2-realms.md | needs-work | 17 |  |
@@ -124,7 +124,7 @@ was corrected by hand and had drifted back within a day.
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | needs-work | 28 |  |
-| gauntlet.md | needs-work | 17 |  |
+| gauntlet.md | needs-work | 19 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 10 |  |
 | guide-ai-agents.md | stale-fixed | 2 |  |
@@ -143,9 +143,9 @@ was corrected by hand and had drifted back within a day.
 | mcp-reference.md | current | 3 |  |
 | namespacing.md | needs-work | 8 |  |
 | network-path.md | needs-work | 25 |  |
-| network-placement.md | needs-work | 19 |  |
+| network-placement.md | needs-work | 21 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
-| operator-capabilities.md | needs-work | 26 |  |
+| operator-capabilities.md | needs-work | 30 |  |
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |
@@ -154,7 +154,7 @@ was corrected by hand and had drifted back within a day.
 | prop-test.md | needs-work | 23 |  |
 | quarantine-tier.md | needs-work | 26 |  |
 | queries.md | needs-work | 43 |  |
-| records.md | needs-work | 13 |  |
+| records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 15 |  |
 | registry.md | needs-work | 46 | yes |
 | rejections.md | needs-work | 66 |  |
@@ -181,7 +181,7 @@ was corrected by hand and had drifted back within a day.
 | stdlib-value.md | current | 25 |  |
 | stdlib-version.md | needs-work | 11 |  |
 | strings.md | needs-work | 39 |  |
-| swap.md | needs-work | 19 |  |
+| swap.md | needs-work | 20 |  |
 | syntax-2.0.md | needs-work | 104 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
@@ -195,5 +195,5 @@ was corrected by hand and had drifted back within a day.
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |
-| witnessed-fs.md | needs-work | 1 |  |
+| witnessed-fs.md | needs-work | 6 |  |
 <!-- docgen:doc-status end -->

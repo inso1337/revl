@@ -117,6 +117,14 @@ composition is left **untouched**:
 The refusal is **all-or-nothing**, like admission: the first target held by
 another operator refuses the whole swap.
 
+Enforcement covers **every path that swaps**, not just `revl_swap`:
+`revl_ship --apply` reaches it through the swap handler, and `revl_repair`'s
+remediation step is checked here before the loop runs. And when the swap's
+targets **cannot be derived** — a candidate that will not compile — enforcement
+fails closed and checks the swap against *every* active lease, rather than
+against none of them. A swap that cannot be scoped is exactly the swap a lease
+exists to stop.
+
 The advisory/enforced split is the same shape as the rest of the gate:
 advisory by default (any operator with the `swap` grant can still act), enforced
 where the composition's owner has declared, in policy, that leases are binding.

@@ -38,7 +38,6 @@ can see.
 
 from __future__ import annotations
 
-from ..compiler import compile_files, compile_source
 from ..diagnostics import report
 from ..errors import RevlError
 from .session import Session, SessionError
@@ -50,16 +49,34 @@ _INVERSE_ROUNDTRIP_ITEM = 26
 
 def _compile(source: str | None, files: list[str] | None,
              manifest: dict | None = None, modules: dict | None = None,
-             replacing: tuple = ()) -> dict:
-    """Compile inline source or paths through the same entry points the CLI
-    and the rest of the bridge use — the admission gate is literally the same
-    code path a human `revl compile` takes."""
-    if source is not None:
-        return compile_source(source, "<candidate>.rvl", manifest=manifest,
-                              replacing=replacing, modules=modules)
-    if not files:
+             replacing: tuple = (), over_the_transport: bool = True) -> dict:
+    """Compile inline source or paths through `server.compile_under_authoring`
+    — the one compiler door for agent-supplied source, so the gauntlet grades a
+    candidate under the SAME authoring trust `revl_check` / `revl_admit` /
+    `revl_swap` decide under.
+
+    This used to call `compile_source` / `compile_files` itself, with no
+    profile. That made the gauntlet an admission-gate bypass rather than a
+    sibling of it: a candidate the gate refused (an agent-authored host body,
+    or a `use "stdlib/shell.rvl"` reach into one) compiled here anyway, and
+    `_lifecycle_section` then BOOTED it in a scratch `Session` — running the
+    activation body's host code in the server process. Grading a candidate is
+    not a licence to run what the gate would not admit: an inadmissible
+    candidate must be graded `rejected` on the refusal, never booted.
+
+    `over_the_transport=False` says the source is the OPERATOR'S OWN — the CLI
+    (`revl bundle`, `truc`) reusing this module as a library, where the human
+    running the command is the author, not an agent on the far end of a session.
+    See `server.compile_under_authoring`.
+
+    The import is lazy because `server` imports this module."""
+    from .server import compile_under_authoring  # noqa: PLC0415 — cycle
+
+    if source is None and not files:
         raise ValueError("provide `source` or `files`")
-    return compile_files(list(files), manifest=manifest, replacing=replacing)
+    return compile_under_authoring(source, files, manifest=manifest,
+                                   modules=modules, replacing=replacing,
+                                   over_the_transport=over_the_transport)
 
 
 def _boundary_of(ir: dict) -> dict:
@@ -212,7 +229,8 @@ def _pending_sections() -> dict:
 
 # --------------------------------------------------------------- entry point
 
-def run(session, arguments: dict) -> dict:
+def run(session, arguments: dict, *,
+        over_the_transport: bool = True) -> dict:
     """Grade a candidate against the live `session` and return a dossier.
 
     `session` is the live composition the server holds. It is read for the
@@ -234,7 +252,8 @@ def run(session, arguments: dict) -> dict:
     #    composition. A rejection is a *verdict*, not a crash.
     try:
         admission_ir = _compile(source, files, manifest=live, modules=modules,
-                                replacing=replacing)
+                                replacing=replacing,
+                                over_the_transport=over_the_transport)
     except RevlError as error:
         rejected = report(error)
         return {
@@ -272,7 +291,8 @@ def run(session, arguments: dict) -> dict:
     boot_ir = None
     boot_reason = None
     try:
-        boot_ir = _compile(source, files, modules=modules)
+        boot_ir = _compile(source, files, modules=modules,
+                           over_the_transport=over_the_transport)
     except RevlError:
         boot_reason = ("the candidate is admissible against the live "
                        "composition but is not a complete composition on its "
