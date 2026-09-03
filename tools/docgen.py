@@ -474,6 +474,24 @@ def main() -> int:
         for s in stale:
             print(f"  {s}", file=sys.stderr)
         print(f"  fix: {WRITE_HINT}", file=sys.stderr)
+        # A stale block is very often NOT this branch's doing. The blocks are a
+        # pure function of their sources, so any landing that touches a source
+        # re-stales them for every open PR at once -- and this check runs in the
+        # required `frontend` job, so the author sees a red they did not cause.
+        # Say so here rather than letting each author rediscover it.
+        print("", file=sys.stderr)
+        print("  NOTE: this may be INHERITED from main rather than caused by "
+              "your branch.", file=sys.stderr)
+        print("  These blocks are a pure function of their sources, so any "
+              "merge that touches", file=sys.stderr)
+        print("  a source re-stales them for every open PR. Check main first:",
+              file=sys.stderr)
+        print("      git fetch origin && git worktree add --detach "
+              "/tmp/dg origin/main \\", file=sys.stderr)
+        print("        && (cd /tmp/dg && python3 tools/docgen.py --check) "
+              "; git worktree remove /tmp/dg", file=sys.stderr)
+        print("  If main is stale too, it is main's to fix (a regenerate "
+              "commit), not yours.", file=sys.stderr)
     if failures:
         print("docgen: documentation coverage FAILED. A subcommand or verb exists "
               "in the code with nothing describing it.", file=sys.stderr)
