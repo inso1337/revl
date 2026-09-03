@@ -19,6 +19,18 @@ implied:
 | wasm       | `wasmtime compile`                 | validation (types + locals)  |
 | go         | `go build` against pinned stc-go   | full compilation             |
 
+Every one of those stops at compile or typecheck depth, so the matrix they
+feed proves a construct emits and compiles per tier and never what it
+evaluates to (issue #244). `EXECUTORS` at the bottom of this module is the
+third question — the tiers whose runtime already exists in CI actually RUN the
+program and assert its answer:
+
+| tier       | executor                           | depth                        |
+|------------|------------------------------------|------------------------------|
+| python     | in-process exec of the emitted test| answer asserted              |
+| typescript | vitest over the emitted test       | answer asserted              |
+| go         | `go test` over the emitted test    | answer asserted              |
+
 A validator that cannot run says so (`unavailable`) with the reason. That is
 deliberately distinct from a pass: "no toolchain" must never read as "clean".
 """
@@ -678,6 +690,107 @@ class GoValidator(Validator):
             note = detail[-1] if detail else "go build failed"
             results = {label: (FAIL, f"build-level: {note}") for label in results.values()}
         return results
+
+
+# ---------------------------------------------------------------------------
+# execution — the third question, and the only one about MEANING (issue #244)
+# ---------------------------------------------------------------------------
+#
+# Every validator above stops at compile or typecheck depth. That certifies a
+# construct EMITS and COMPILES per tier; it never certifies what the construct
+# EVALUATES TO, so two tiers can be green on the same case and disagree about
+# the answer. `tsc --noEmit` covered backends/typescript/demo.ts the whole time
+# its runtime assertions were failing, for exactly this reason.
+#
+# The validators below close that for the tiers whose runtime already exists in
+# CI: python (in-process), typescript (vitest) and go (`go test`). Each runs the
+# conformance case augmented with `tools/conformance.py`'s probe and the ONE
+# assertion literal the corpus declares for that case. Because every executed
+# tier asserts the same literal, a pass here is a cross-tier agreement on the
+# ANSWER and not a per-tier "it ran": the only way to fail is to build, run, and
+# compute something else.
+#
+# A case with no probe is not run and not counted; it carries the weaker
+# compile-only claim and the matrix says so per row.
+
+_RUNNER_KEY = {"python": "py", "typescript": "ts", "go": "go"}
+
+# A trivial document, used once per tier to ask whether that runtime is here at
+# all. A runner that answers "skip" is unavailable with its own reason —
+# never a pass, for the same reason the compile validators refuse to conflate
+# the two.
+_LIVENESS = ('pub fn probe() -> Int { return 1 }\n'
+             'test "liveness" { assert probe() == 1 }\n')
+
+
+def _revl():
+    """`(compile_source, RUNNERS)` — imported lazily so a validate-only run
+    never pays for the runtime drivers."""
+    src = str(ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from revl import compile_source  # noqa: PLC0415 — lazy by design
+    from revl.test import RUNNERS  # noqa: PLC0415
+
+    return compile_source, RUNNERS
+
+
+def _run_program(tier: str, source: str) -> tuple[str, str]:
+    """Run one probe program on *tier*. Returns `(outcome, detail)` where
+    outcome is 'pass' / 'skip' / 'fail'. The runners narrate to stdout; that
+    narration is captured and folded into the detail, because a `go test` or
+    vitest failure says what went wrong there and nowhere else."""
+    import contextlib  # noqa: PLC0415 — local to keep the module top lean
+    import io  # noqa: PLC0415
+
+    compile_source, runners = _revl()
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        try:
+            outcome, message = runners[_RUNNER_KEY[tier]](compile_source(source))
+        except Exception as error:  # noqa: BLE001 — a crashed runner is a datum
+            outcome, message = "fail", f"{type(error).__name__}: {error}"
+    narration = " | ".join(line.strip() for line in buffer.getvalue().splitlines()
+                           if line.strip())
+    detail = message if outcome != "fail" else f"{message}: {narration}"
+    return outcome, detail.strip()
+
+
+class ExecutionValidator(Validator):
+    """One executed tier: does the emitted program produce the right ANSWER?
+
+    `items` are `(label, probe program)` from
+    `tools/conformance.py::executable_cases`, not emitted artifacts — the
+    tier's own runner does the emitting, so what executes is the same output
+    the compile validators check.
+    """
+
+    depth = "execution (the program runs and its answer is asserted)"
+
+    def __init__(self, tier: str):
+        self.tier = tier
+
+    def unavailable(self) -> str | None:
+        outcome, detail = _run_program(self.tier, _LIVENESS)
+        if outcome == "pass":
+            return None
+        return detail or f"{self.tier} runtime did not run the liveness probe"
+
+    def check(self, items):
+        results: dict[str, tuple[str, str]] = {}
+        for label, source in items:
+            outcome, detail = _run_program(self.tier, source)
+            if outcome == "skip":
+                # unavailable() cleared this tier, so a skip here means the
+                # runtime went away mid-run. Say so; never record it as ok.
+                raise RuntimeError(f"{self.tier} stopped executing mid-run: {detail}")
+            results[label] = (OK, "") if outcome == "pass" else (FAIL, detail[:400])
+        return results
+
+
+EXECUTORS: dict[str, ExecutionValidator] = {
+    tier: ExecutionValidator(tier) for tier in ("python", "typescript", "go")
+}
 
 
 VALIDATORS: dict[str, Validator] = {
