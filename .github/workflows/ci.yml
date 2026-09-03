@@ -781,6 +781,16 @@ jobs:
       # the baselined gate: new toolchain rejections fail, and a baselined
       # failure that starts passing fails too, so the list can only shrink
       - run: pytest tests/test_conformance_validate.py -q
+      # The matrix's THIRD question (issue #244). Everything above stops at
+      # compile/typecheck depth, so it certifies that a construct emits and
+      # compiles per tier and never what it evaluates to — two tiers could be
+      # green on the same case and disagree about the answer. This runs the
+      # executable half of the corpus on python, typescript and go (the tiers
+      # whose runtime exists in this job: the venv above, the `npm ci` above,
+      # and setup-go) and checks each computes the ONE answer the corpus
+      # declares. --require-execution makes an absent runtime fail the job
+      # rather than quietly demote those rows to compile-only.
+      - run: python3 tools/conformance.py --execute --require-execution
       # Roadmap item 25 — placement across the tier seams, on every commit.
       # The conformance gate above proves each tier's emitted code survives its
       # own compiler; it does NOT boot a composition SPLIT across tiers and run
