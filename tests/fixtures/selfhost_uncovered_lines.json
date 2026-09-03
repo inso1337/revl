@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 3984,
+      "statements": 3995,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_Env.__init__": 7,
@@ -52,7 +52,7 @@
           "_dedup_colour_erased_poly_externs._rewrite": 6,
           "_default_lit": 6,
           "_emit_component": 85,
-          "_emit_component_step": 123,
+          "_emit_component_step": 124,
           "_emit_config_struct": 18,
           "_emit_effect_step": 10,
           "_emit_go_dispatch": 18,
@@ -148,6 +148,7 @@
           "_infer_arrow_param.walk": 3,
           "_infer_arrow_param.walk_any": 2,
           "_refuse_deferred_emissions": 10,
+          "_refuse_dropped_stream_component": 5,
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1,
           "_v3_ident": 3,
@@ -198,7 +199,7 @@
           "_teardown_preamble": 8
         }
       },
-      "uncovered_statements": 2979
+      "uncovered_statements": 2985
     },
     "java": {
       "statements": 2403,
@@ -329,7 +330,7 @@
       "uncovered_statements": 1065
     },
     "py": {
-      "statements": 2277,
+      "statements": 2291,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_ComponentEmitter._approval_step": 3,
@@ -345,7 +346,7 @@
           "_ComponentEmitter._mint_site": 2,
           "_ComponentEmitter._setup_step": 20,
           "_ComponentEmitter._stream_head": 4,
-          "_ComponentEmitter._stream_iter": 11,
+          "_ComponentEmitter._stream_iter": 25,
           "_ComponentEmitter._witnessed_step": 9,
           "_Lines.next_destructure_seq": 2,
           "_RenderedBody.__init__": 1,
@@ -432,10 +433,10 @@
           "_emit_memo_wrapper": 17
         }
       },
-      "uncovered_statements": 973
+      "uncovered_statements": 987
     },
     "rust": {
-      "statements": 3154,
+      "statements": 3155,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_V3Ctx._same_shape": 2,
@@ -523,7 +524,7 @@
           "_emit_host_stubs.walk": 1,
           "_emit_req_bindings": 2,
           "_emit_service_traits": 1,
-          "_emit_step": 94,
+          "_emit_step": 95,
           "_emit_v3": 8,
           "_emit_v3_functions": 9,
           "_emit_v3_types": 6,
@@ -612,7 +613,7 @@
           "_emit_v2": 6
         }
       },
-      "uncovered_statements": 1583
+      "uncovered_statements": 1584
     },
     "ts": {
       "statements": 1841,

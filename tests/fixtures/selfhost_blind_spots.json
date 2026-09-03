@@ -45,6 +45,7 @@
         "components=<true>",
         "config=<true>",
         "else=<true>",
+        "event=<true>",
         "fn=Map.new",
         "has_config=<true>",
         "idempotent=<true>",
@@ -106,6 +107,7 @@
         "step=timer",
         "step=unload",
         "step=var",
+        "subscribe=<true>",
         "value=<true>"
       ],
       "item 421 F6 CROSSED TIERS AND THE PORT DID NOT FOLLOW - a live 429(d) recurrence, verified in source on this branch. backends/typescript/emit.py now mentions `secret` 17 times and backends/go/emit.py 20 times, marking `Secret[T]` at both ends; selfhost/emit_ts.rvl and selfhost/emit_go.rvl mention it ZERO times, and neither tier's corpus contains a single `Secret[`, so both oracles are green over a self-hosted emitter that DOES NOT REDACT. This falsifies the (5) sibling survey in the roadmap, which recorded on 2026-09-02 that the marking was python-tier only. Recorded, not fixed: porting it is 421 F6 cross-tier work, and the corpus family must be added FIRST and seen to fail, per exit (3).": [
@@ -301,6 +303,7 @@
         "body=<true>",
         "class=witnessed",
         "else=<true>",
+        "event=<true>",
         "fn=Job.run",
         "fn=Map.new",
         "intercept=<true>",
