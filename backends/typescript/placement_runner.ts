@@ -188,12 +188,13 @@ for (const expr of (spec.probe || []) as string[]) {
   }
 }
 
-console.log(`[${name}] UP`)
-
 // 5. teardown, consumers first (reverse load order — the same contract the py
 //    driver's _dispose_all and the rust runner's teardown enforce). In once
 //    mode the runner then proves no residue against the pre-load snapshot and
 //    exits; otherwise it holds until the conductor stops us.
+//
+// DEFINED, AND ITS HANDLERS INSTALLED, BEFORE THE `UP` LINE IS PRINTED — see
+// the block above the print below for why the order is the contract.
 let stopping = false
 async function teardown(): Promise<void> {
   if (stopping) return
@@ -227,11 +228,34 @@ async function teardown(): Promise<void> {
   process.exit(0)
 }
 
+// THE HANDLERS GO UP BEFORE THE `UP` LINE, and that ordering is the whole
+// contract (the ts half of the fix py got in #226; issue 290). `[${name}] UP`
+// is what the conductor waits on: `run_placement`'s `--once` path blocks on
+// every child's UP and then calls `stop_all` immediately, so the SIGTERM can
+// land microseconds after the print. Printing first left a window in which
+// node's DEFAULT SIGTERM disposition was still in force, and a signal arriving
+// inside it killed this process outright — no LIFO unwind, no inverses
+// replayed, no residue proof, no `DOWN` (G7 and R4, both violated).
+//
+// The window belongs to the LAST process to boot — every earlier one is still
+// being waited on — which is why it lands on the process most likely to still
+// owe an inverse and a residue proof.
+//
+// They are installed unconditionally, once mode included: `teardown` is
+// idempotent (the `stopping` guard), so a signal arriving while the once-mode
+// teardown is already running is absorbed rather than turned back into a kill.
+// Note `teardown` closes over `stopping`, which is why the whole definition —
+// not just the two `process.on` calls — had to move above the print: reading
+// `stopping` from a handler installed while that `let` was still in its
+// temporal dead zone would throw instead of tearing down.
+process.on('SIGTERM', teardown)
+process.on('SIGINT', teardown)
+
+console.log(`[${name}] UP`)
+
 if (once) {
   await teardown()
 } else {
-  process.on('SIGTERM', teardown)
-  process.on('SIGINT', teardown)
   const keepAlive = setInterval(() => {}, 1 << 30) // hold the event loop
   void keepAlive
 }

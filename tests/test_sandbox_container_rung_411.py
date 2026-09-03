@@ -25,7 +25,6 @@ third-party imports) and a handful of short-lived containers, all labelled
 `revl.sandbox=411` and removed on the way out.
 """
 
-import json
 import os
 import subprocess
 import sys
@@ -48,8 +47,19 @@ from revl import sandbox_runtime as _sb  # noqa: E402
 # absent runtime REDS these tests instead of skipping them.
 _DOCKER_GATE = "REVL_SANDBOX_DOCKER"
 
+def _docker_gate_unset() -> bool:
+    """Whether the container rung SKIPS: true exactly when the gate variable is
+    absent or empty.
+
+    The read is BARE — no default — so nothing but CI (or a developer at a
+    keyboard) can supply a value, and a job that forgets to set it cannot be
+    papered over by a fallback. Named rather than inlined so the property can be
+    driven against each environment state instead of grepped for."""
+    return not os.environ.get(_DOCKER_GATE)
+
+
 _needs_docker = pytest.mark.skipif(
-    not os.environ.get(_DOCKER_GATE),
+    _docker_gate_unset(),
     reason=(f"{_DOCKER_GATE} is unset: the container rung needs a working "
             f"container runtime (a `docker` CLI and a reachable daemon) to "
             f"launch a real boundary. The `sandbox-container` CI job sets it; "
@@ -384,8 +394,40 @@ def test_the_spec_the_confined_process_reads_never_leaves_the_boundary(tmp_path)
 
 
 def test_the_gate_is_read_bare_so_ci_must_set_it():
-    # a guard on the guard: if this ever grows a default, the whole level could
-    # skip in CI with nothing to notice it (item 445).
-    source = Path(__file__).read_text(encoding="utf-8")
-    assert 'os.environ.get(_DOCKER_GATE)' in source
-    assert json.dumps(_DOCKER_GATE) == '"REVL_SANDBOX_DOCKER"'
+    """A guard on the guard (item 445): the whole container rung hangs off one
+    environment variable, so a read that grew a default — or a marker that
+    stopped consulting the read at all — takes the level dark in CI with
+    nothing to notice, because a skip and a pass are the same colour.
+
+    Driven, not grepped. The assertion this replaced was
+    `'os.environ.get(_DOCKER_GATE)' in source`, which is satisfied by the
+    spelling appearing anywhere in the file — including in a helper the skip
+    marker no longer calls. Here the predicate is evaluated against each
+    environment state, and the marker the rung tests actually carry is checked
+    to BE that predicate's verdict.
+
+    `mock.patch.dict` rather than `monkeypatch.setenv`, deliberately:
+    tests/test_env_gated_skips_run_somewhere.py reads a `setenv` of this name as
+    the suite OWNING the switch, which would excuse CI from setting it."""
+    assert _DOCKER_GATE == "REVL_SANDBOX_DOCKER"
+
+    # the marker installed at import is this predicate's verdict, not an
+    # independent expression that can drift away from it. Read before the
+    # environment is touched.
+    assert _needs_docker.mark.name == "skipif"
+    assert _needs_docker.mark.args == (_docker_gate_unset(),)
+    assert _DOCKER_GATE in _needs_docker.mark.kwargs["reason"]
+
+    # and it is the rung tests that carry it — a level whose gate is perfect and
+    # applied to nothing is the same silence by another route.
+    for gated in (test_the_boundary_is_established_and_the_canary_confirms_it,
+                  test_a_component_really_boots_inside_the_container,
+                  test_an_unresolvable_image_refuses_instead_of_launching):
+        assert _needs_docker.mark in gated.pytestmark, gated.__name__
+
+    with mock.patch.dict(os.environ, {}, clear=True):
+        assert _docker_gate_unset() is True, "absent must skip"
+    with mock.patch.dict(os.environ, {_DOCKER_GATE: ""}, clear=True):
+        assert _docker_gate_unset() is True, "empty must skip — the read is bare"
+    with mock.patch.dict(os.environ, {_DOCKER_GATE: "1"}, clear=True):
+        assert _docker_gate_unset() is False, "set must RUN the rung"
