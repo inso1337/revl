@@ -35,7 +35,7 @@ Covered subset (what emits byte-identical):
     the component-body expression dispatcher ``cexpr`` (``req``/``name``/method
     ``call`` and the un-specialized component arithmetic);
   * the MODULE DECLARATION surface (item 192, slice 3): type declarations
-    (``_emit_types`` — record ``@dataclass`` + sealed-variant classes, the
+    (``_emit_types`` — record shape classes + sealed-variant classes, the
     forward-reference annotation quoting, and the ``_py_type`` surface->python
     map incl function types -> ``Callable``); the built-in Result (``Ok``/``Err``)
     classes with user-case shadowing; the canonical Float->Str (``_revl_ftoa``)
@@ -116,8 +116,13 @@ CORPUS = [
     "services_timers.rvl",   # every/after timers -> schedule_* import + cancel inverses
     "services_methods.rvl",  # provide methods: params, un-specialized bin, builtin, ternary
     "services_body.rvl",     # let-effect, if-guard + fail, activation-body saga `emit ... compensate` (Frame.compensation, item 317)
+    # item 436 F3 / item 429 exit (3): the corpus reached the FN-body match
+    # (control/mixed/result) but never the COMPONENT one, so `cmatch_branch`'s
+    # binder decision had no oracle over it. Added FAILING FIRST, and the
+    # component half of F3's binder-free arms was the divergence it caught.
+    "services_match.rvl",    # a match in a provide-method body: the body-IS-the-bind, unread-bind and read-bind arms, over an ADT and an Opt
     # module-level declaration surface (slice 3, item 192)
-    "types.rvl",       # `_emit_types`: record @dataclass + variant classes, forward-ref quoting, `_py_type` (incl fn types)
+    "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     "result.rvl",      # built-in Result (Ok/Err) classes, gated by a match on Ok/Err
     "floats.rvl",      # `_revl_ftoa` canonical Float->Str, gated by a float `${…}` interpolation
     "hostroots.rvl",   # host roots (Map/Pool/Job) in a fn body -> the sorted `from runtime import`
