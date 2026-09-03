@@ -406,7 +406,6 @@
           "_split_types": 2,
           "_uses_bounded_int": 2,
           "_uses_bounded_int32": 2,
-          "_uses_builtin_result": 2,
           "_uses_builtin_result.walk": 2,
           "_uses_opt_to_int": 1,
           "emit": 53
@@ -428,7 +427,7 @@
           "_emit_memo_wrapper": 17
         }
       },
-      "uncovered_statements": 938
+      "uncovered_statements": 936
     },
     "rust": {
       "statements": 3154,
@@ -832,7 +831,7 @@
   },
   "selfhost": {
     "go": {
-      "statements": 1509,
+      "statements": 1492,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "flags_or": 1,
@@ -886,7 +885,7 @@
       "uncovered_statements": 173
     },
     "java": {
-      "statements": 2423,
+      "statements": 2412,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "emit_setup_stmt": 1,
@@ -981,7 +980,7 @@
       "uncovered_statements": 399
     },
     "py": {
-      "statements": 1990,
+      "statements": 1996,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "carrow": 5,
@@ -1031,9 +1030,8 @@
           "runtime_ref": 3,
           "split_fn_type": 2,
           "split_types": 2,
-          "strip_nl": 1,
           "timer_emit": 1,
-          "user_case_names": 4,
+          "user_case_names": 2,
           "uses_bounded_int": 2,
           "uses_bounded_int32": 2,
           "uses_builtin_result": 2,
@@ -1041,10 +1039,10 @@
           "walk_result": 2
         }
       },
-      "uncovered_statements": 298
+      "uncovered_statements": 295
     },
     "rust": {
-      "statements": 1865,
+      "statements": 1853,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "default_for_rust_type": 15,
@@ -1128,7 +1126,7 @@
       "uncovered_statements": 196
     },
     "ts": {
-      "statements": 2084,
+      "statements": 2073,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "expected_missing_adt": 1,
@@ -1207,7 +1205,7 @@
       "uncovered_statements": 290
     },
     "wasm": {
-      "statements": 1346,
+      "statements": 1329,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "align4": 1,
