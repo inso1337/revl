@@ -426,6 +426,38 @@ def _ratio(e, h):
     return f"{e}/{h} = {e / max(h, 1):>7.2f}x"
 
 
+def load_table() -> int:
+    """What EXECUTING the emitted module costs, before any of its functions is
+    called (`--load`).
+
+    Everything else in this file prices the code a program RUNS. A declaration
+    the emitter writes and nothing constructs is invisible there and is paid on
+    every import — roadmap item 436 F9, the `@dataclass` a record type used to
+    carry. For `records.rvl`'s single `type Point` that was 4543 executed
+    bytecode instructions, 142 Python frames and an 88962 B `tracemalloc` peak
+    of generated `__init__` / `__repr__` / `__eq__` for a class the emitter
+    never instantiates; it now reads 78, 3 and 3672. Measured the same
+    deterministic way as everything else: opcodes, frames entered, and
+    `tracemalloc` peak, with no clock anywhere.
+    """
+    print("emitted-module LOAD cost -- exec of the module, no function called")
+    print("Deterministic: opcodes, Python frames entered, tracemalloc peak.\n")
+    print(f"{'program':<14}{'ops':>12}{'frames':>10}{'peak B':>12}")
+    for program in PROGRAM_ORDER:
+        src = _load_emitted(program).__dict__["__source__"]
+        code = compile(src, f"<load {program}.rvl>", "exec")
+
+        def go(code=code, program=program):
+            module = types.ModuleType(f"load_{program}")
+            module.__dict__["CALLS"] = 0
+            sys.modules[module.__name__] = module
+            exec(code, module.__dict__)
+
+        print(f"{program:<14}{count_ops(go):>12}{count_calls(go):>10}"
+              f"{peak_bytes(go):>12}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--time", action="store_true",
@@ -438,11 +470,17 @@ def main() -> int:
                     help="restrict to one program (repeatable)")
     ap.add_argument("--dump", metavar="PROGRAM",
                     help="print the emitted Python for one program and exit")
+    ap.add_argument("--load", action="store_true",
+                    help="measure what EXECUTING each emitted module costs "
+                         "before any of its functions is called")
     args = ap.parse_args()
 
     if args.dump:
         print(_load_emitted(args.dump).__dict__["__source__"])
         return 0
+
+    if args.load:
+        return load_table()
 
     hw = _load_handwritten()
     wanted = set(args.case) if args.case else None
