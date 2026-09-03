@@ -139,16 +139,29 @@ class AuthoringTrust:
     def profile(self) -> AdmissionProfile | None:
         """The admission profile agent-authored source compiles under, or `None`
         when the operator has declared the agent trusted (byte-identical to a
-        human's `revl compile`)."""
+        human's `revl compile`).
+
+        Both arms build `AdmissionProfile.untrusted_author`, which is the whole
+        policy for an untrusted author and not a subset of it — `no_extern`, the
+        transitive reach sweep, `no_declassify`, `taint_strict` AND the item-334
+        `no_realm_placement` refusal. The one field either arm may move is
+        `granted`, below, because the reach allowlist is the one field that needs
+        operator input to be correct. Anything else dropped here is an authority
+        this door hands to the agent on the far end of the transport: while
+        `no_realm_placement` was opt-in and only `Gate.propose` opted in, source
+        sent to `revl_load`/`revl_swap` could place its own components at an
+        operator realm, and a swapped-in successor keeps serving at that address.
+        """
         if self.host_code:
             return None
         if self.granted is not None:
             return AdmissionProfile.untrusted_author(self.granted)
-        # the host-code half of the untrusted-author profile with the reach
-        # allowlist left off: `no_extern` (+ its transitive reach sweep) and
-        # `no_declassify` need no operator input to be correct, the allowlist
-        # does. `taint_strict` rides with them for the same reason it rides in
-        # `untrusted_author`: a model-authored turn annotates nothing.
+        # the untrusted-author profile with the reach allowlist left OFF, and
+        # nothing else off: `no_extern` (+ its transitive reach sweep),
+        # `no_declassify`, `taint_strict` and `no_realm_placement` are all
+        # correct with no operator input. The allowlist is not — there is no
+        # honest default for which of a running system's services this agent may
+        # reach — so the operator declares it with `--grant` or it is inert.
         return replace(AdmissionProfile.untrusted_author(()), granted=None)
 
 

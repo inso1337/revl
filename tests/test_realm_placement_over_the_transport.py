@@ -93,6 +93,16 @@ def _candidate(realm_line: str = "") -> str:
             "}\n")
 
 
+def _turn(realm_line: str = "") -> str:
+    """An item-330 per-turn source: ADDITIVE, providing a key of its own, wired
+    into the running composition and torn down with the turn."""
+    return ("service Turn { fn go() -> Str }\n"
+            "component TurnTool provides turn: Turn {\n"
+            + realm_line
+            + '  provide turn { fn go() = "t" }\n'
+            "}\n")
+
+
 _CLEAN = _candidate()
 _REALM = _candidate('  isolate tool in realm("billing")\n')
 # the item-162 plural route: the same fact with a fan-out attached.
@@ -168,8 +178,8 @@ def test_inline_source_may_not_name_a_realm(transport, verb, source, spelling):
     assert payload["ok"] is False
     assert "G9" in _codes(payload)
     message = _message(payload)
+    assert "forbids naming a realm" in message
     assert spelling in message
-    assert "realm" in message and "authority" in message.lower()
 
 
 def test_a_realm_smuggled_into_an_agent_supplied_module_is_refused(transport):
@@ -281,25 +291,31 @@ def test_the_cli_is_its_own_author():
 # 4. `Session.admit` — item 330's per-turn door, closed on the same rule.
 # =========================================================================== #
 
-def test_a_per_turn_admit_may_not_name_a_realm():
+@needs_cordis
+def test_a_per_turn_admit_may_not_name_a_realm(transport, tmp_path):
     """The verdict is the observable: `admit` returns a refusal as DATA (never
     a raised error), so this reads the `AdmitVerdict` the running composition
-    gets back.
+    gets back through the in-language `admit` crossing.
 
     Additive is not the same as harmless. `_wire_turn` rebuilds the class map
     over the MERGED composition — it has to, skipping it was a total class-(c)
     bypass — so a turn's self-chosen realm is the realm on every ticket the turn
     raises. A shorter blast radius in TIME; the same one in AUTHORITY, and one
     covered crossing is all an exfiltration needs."""
-    from revl.mcp.session import Session
+    base = tmp_path / "base.rvl"
+    base.write_text(_BASE, encoding="utf-8")
+    assert transport("revl_load", {"files": [str(base)]})["ok"] is True
 
-    session = Session()
-    session.ir = {"components": []}
-    session._owner = object()
-    verdict = session.admit(_REALM, granted=["Ops"])
+    verdict = server.SESSION.admit(_turn('  isolate turn in realm("billing")\n'))
     assert verdict.admitted is False
     assert verdict.code == "G9"
     assert 'realm("billing")' in verdict.message
+
+    # ...and a turn that says nothing about realms still admits and wires, so
+    # the refusal above is the realm clause and not the turn shape.
+    clean = server.SESSION.admit(_turn())
+    assert clean.admitted is True, clean.message
+    assert clean.keys == ("turn",)
 
 
 # =========================================================================== #
