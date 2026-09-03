@@ -510,7 +510,8 @@ def peer_identity(writer) -> str | None:
     return None
 
 
-async def serve(ctx, exports, endpoint, module=None, correlation=None, peers=None):
+async def serve(ctx, exports, endpoint, module=None, correlation=None, peers=None,
+                replay=None):
     """Listen on `endpoint` and answer calls against `ctx` for the exported
     surface.
 
@@ -550,6 +551,20 @@ async def serve(ctx, exports, endpoint, module=None, correlation=None, peers=Non
     the pre-existing behaviour and the one `placement.py` reports as
     `unverified`. `correlation` and `peers` compose; neither implies the other.
 
+    `replay` (item 118 §1.4b) is an optional `revl.deploy.TransportReplayGuard`
+    — the freshness gate a NETWORK seam can carry without any shared secret. It
+    is checked per REQUEST (unlike `peers`, which judges the handshake once),
+    and it keys dedup on the identity `peer_identity()` read off the peer
+    CERTIFICATE, never on the `peer_identity` the request asserts: a replayer
+    controls its payload and does not control the mTLS session it speaks in. A
+    request whose correlation envelope repeats an already-seen `(proven
+    identity, composition_id, generation, idempotency_key)` is answered with an
+    error and NEVER dispatched. A request carrying no envelope, or one
+    declaring no idempotency key, is dispatched as before — nothing declares it
+    re-deliverable, and refusing it would refuse the cross-composition caller
+    this gate exists to keep serving. Absent (the default) the wire is
+    unchanged.
+
     Returns the asyncio server; the caller keeps it (and the process) alive."""
     ep = _as_endpoint(endpoint)
     table = _export_table(exports)
@@ -559,7 +574,8 @@ async def serve(ctx, exports, endpoint, module=None, correlation=None, peers=Non
         # change mid-session, and re-reading the peer cert per request would
         # invite a check that drifts from the session it is supposed to bind.
         identity = (peer_identity(writer)
-                    if (correlation is not None or peers is not None) else None)
+                    if (correlation is not None or peers is not None
+                        or replay is not None) else None)
         try:
             if peers is not None:
                 # item 118 §1.4b: the peer plane a network seam CAN carry. The
@@ -591,6 +607,21 @@ async def serve(ctx, exports, endpoint, module=None, correlation=None, peers=Non
                             "ok": False,
                             "error": f"correlation refused: {reason}",
                             "correlation_refused": reason}) + "\n").encode())
+                        await writer.drain()
+                        continue
+                if replay is not None:
+                    # item 118 §1.4b: freshness on a network seam, scoped by the
+                    # identity the HANDSHAKE proved (`identity`), not by the one
+                    # the request claims. Runs after the correlation guard so a
+                    # seam carrying both refuses a forgery as a forgery; on a
+                    # network seam only this one is installed.
+                    ok, reason = replay.admit(req.get("correlation"),
+                                              transport_identity=identity)
+                    if not ok:
+                        writer.write((json.dumps({
+                            "ok": False,
+                            "error": f"replay refused: {reason}",
+                            "replay_refused": reason}) + "\n").encode())
                         await writer.drain()
                         continue
                 reply = await _invoke(ctx, table, req, module)

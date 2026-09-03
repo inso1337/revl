@@ -220,7 +220,16 @@ PATH_FAMILIES: dict[str, tuple[str, ...]] = {
 #: so they belong to no family; listing them here is what lets the family scan
 #: refuse EVERYTHING else, instead of maintaining a hand-kept exception list in
 #: the test.
-READ_HELPERS: tuple[str, ...] = ("lexists_confined",)
+#:
+#: They are also what `stdlib/fs.rvl`'s OBSERVATION externs (`resolve_within`,
+#: `lexists`, `is_dir`) are built from. Observation is the half of this module a
+#: consumer's own host body legitimately needs — "may I look at this path, and
+#: what is there?" — and before those externs existed the only way to reach it
+#: from a user-origin `@ts` body was to guess a relative specifier into the
+#: install tree. Widening this tuple is still a deliberate edit: a read helper
+#: is a new way to LOOK at the filesystem through the jail, and it must be
+#: listed before a body may call it.
+READ_HELPERS: tuple[str, ...] = ("lexists_confined", "is_dir_confined")
 
 #: Which positional arguments of a `syscall-time` entry point are PATHS (and so
 #: must have come from a family 1-3 guard). The rest are handles or data.
@@ -991,6 +1000,24 @@ def lexists_confined(real: str) -> bool:
     follows re-establishes containment through fds regardless of what this said,
     so a lost race here costs an error message, never an escape."""
     return os.path.lexists(real)
+
+
+def is_dir_confined(real: str) -> bool:
+    """Is `real` a directory? A READ, the peer of `lexists_confined`, and the
+    only observation `stdlib/fs.rvl`'s `is_dir` needs beyond it.
+
+    `real` is a path a family 1-3 guard already resolved, so this follows no
+    symlink the membership test has not already seen: `resolve_within` realpaths
+    every existing component INCLUDING the leaf, so what arrives here is
+    symlink-canonical and inside the root. Like `lexists_confined` it decides
+    nothing about confinement, and a lost race costs a stale answer, never an
+    escape.
+
+    `os.path.isdir` is deliberate rather than `stat.S_ISDIR` on an `lstat`: it
+    is what the ts peer's `fs.statSync(real).isDirectory()` does, and the two
+    tiers must answer the same question. Total on its own (it swallows the
+    stat error and answers False), and total again through `_make_total`."""
+    return os.path.isdir(real)
 
 
 # ---------------------------------------------------------------------------

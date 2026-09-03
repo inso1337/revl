@@ -41,5 +41,10 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
-  "include": ["tests/generated/**/*.ts"]
+  // `golden/**` is emitted output too — checked-in rather than regenerated per
+  // run, but produced by the same emitter — and it belongs under the same
+  // one-program-per-module rule (issue #223). It used to ride along in
+  // tsconfig.json's group program, which worked only for as long as no two
+  // golden fixtures provided the same service name.
+  "include": ["tests/generated/**/*.ts", "golden/**/*.ts"]
 }

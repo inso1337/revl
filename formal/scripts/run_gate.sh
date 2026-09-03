@@ -232,6 +232,16 @@ python3 scripts/axioms_gate.py \
   RevLOracle.mem_dischargedLabels_iff \
   RevLOracle.mem_strandedLabels_iff \
   RevLOracle.row_is_total \
-  RevLOracle.replayedLabels_phase_order < .oracle-axioms.out
+  RevLOracle.replayedLabels_phase_order \
+  RevLOracle.outcomeName_inj \
+  RevLOracle.mem_replayed_iff \
+  RevLOracle.mem_reported_iff \
+  RevLOracle.replayedSeqLabels_eq \
+  RevLOracle.reportedSeqLabels_eq \
+  RevLOracle.replayedSeqLabels_nil_of_not_rolledBack \
+  RevLOracle.discharged_not_reissued \
+  RevLOracle.fenced_not_reissued \
+  RevLOracle.declared_idempotent_reissued \
+  RevLOracle.reportedSeqLabels_nil_iff_clean < .oracle-axioms.out
 
 python3 harness/diff_corpus.py

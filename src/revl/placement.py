@@ -69,8 +69,9 @@ from pathlib import Path
 from ._paths import backends_root, stdlib_root
 from .activation import local_prereqs
 from .attest import canonical_hash
-from .deploy import (ADMISSION_PEER_PINNED, ADMISSION_SEALED,
-                     ADMISSION_UNVERIFIED, SeamAdmission,
+from .deploy import (ADMISSION_PEER_BOUND, ADMISSION_SEALED,
+                     ADMISSION_UNVERIFIED, REPLAY_WINDOW_PEERS,
+                     REPLAY_WINDOW_PER_PEER, SeamAdmission,
                      render_seam_admissions)
 from .compiler import compile_files
 from .distribute import distributability
@@ -198,13 +199,18 @@ def _operator_identities(profile_path: str) -> set[str]:
 
     return set(load_profile(profile_path).operators)
 
-# Tiers whose consumer bridge can SEAL an item-118 correlation envelope. Only
-# the python bridge implements it; `typescript/bridge.ts`, the go bridge and
-# `PlacementRunner.java` take no `correlation` parameter at all, so a consumer
-# on those tiers cannot produce one. A provider is only guarded when every one
-# of its local consumers is listed here (roadmap 421 F8). Add a tier here in the
-# same change that teaches its bridge to seal, never before.
-_CORRELATION_SEALING_TIERS = frozenset({"py"})
+# Tiers whose consumer bridge can SEAL an item-118 correlation envelope. The
+# python bridge and `typescript/bridge.ts` implement it (the ts side seals the
+# same HMAC over the same canonical envelope bytes, proven end to end against
+# the real py guard in tests/test_ts_correlation_seal.py); the go bridge and
+# `PlacementRunner.java` still take no `correlation` parameter at all, so a
+# consumer on those tiers cannot produce one. A provider is only guarded when
+# every one of its local consumers is listed here (roadmap 421 F8). Add a tier
+# here in the same change that teaches its bridge to seal, never before.
+#
+# Spelled `node`, not `ts`: `_canonical_backend` folds the `ts` alias to `node`
+# at the manifest edge, and this set is compared against those canonical names.
+_CORRELATION_SEALING_TIERS = frozenset({"py", "node"})
 
 _BACKENDS_DIR = backends_root()
 _TS_DIR = _BACKENDS_DIR / "typescript"
@@ -2090,6 +2096,15 @@ _TEARDOWN_GRACE = 30.0
 # Once a child HAS said DOWN its unwind is complete and proven; all that is
 # outstanding is its own exit (a flush, a socket close), which is bounded.
 _TEARDOWN_EXIT_GRACE = 5.0
+# How long to let the conductor's reader thread catch up after a child has
+# exited, before concluding that no `DOWN` line is coming (issue 265). The
+# child prints `DOWN` and exits microseconds later, but `is_down` is fed by a
+# SEPARATE pump thread, so `proc.poll()` can go non-None while that line is
+# still sitting unread in the pipe. Without this wait, widening the stranded
+# check to "exited without DOWN" would accuse a cleanly-unwound child. It is
+# paid only when `DOWN` has not been seen yet, and it is draining a pipe that
+# is already at EOF, so it is generous rather than tuned.
+_TEARDOWN_DOWN_READ_GRACE = 2.0
 
 
 def _teardown_grace() -> float:
@@ -2122,17 +2137,55 @@ def _stop_all(children: dict, is_down=None, grace: float | None = None) -> list[
     `grace` survives as a HANG BACKSTOP so a wedged child can never hang the
     conductor forever -- the kill exists for a reason. Because it is no longer
     racing an ordinary teardown it is generous, and, the half that matters,
-    tripping it is REPORTED: this returns the name of every child that had to
-    be SIGKILLed before it said DOWN. Such a child is `halted` in item 443's
-    sense -- its entries are stranded (registered, not run, not dropped) and
-    its residue is UNKNOWN -- and the caller must say so. A kill is never a
-    clean exit.
+    tripping it is REPORTED.
+
+    WHAT IS REPORTED IS "IT EXITED WITHOUT EVER SAYING DOWN" (issue 265), not
+    "we had to SIGKILL it". Which signal ended a child says nothing about
+    whether its unwind completed; the `DOWN` line is the only thing that does.
+    A child that dies on the SIGTERM above -- the runner losing the window
+    between `UP` and its own signal handler, a hard crash inside the unwind, an
+    external `kill` -- already has `proc.poll() is not None` by the time this
+    looks, and the old check let it out through the same `continue` as a child
+    that walked every entry and printed its residue proof. That is exactly the
+    silence issue 239 exists to break, arriving through the one door 246 left
+    open: G7 (LIFO teardown completeness) and R4 (no residue) both violated,
+    neither reported, conductor rc 0.
+
+    So: this returns the name of every child that exited before saying DOWN,
+    however it died. Such a child is `halted` in item 443's sense -- its entries
+    are stranded (registered, not run, not dropped) and its residue is UNKNOWN
+    -- and the caller must say so. Neither a kill nor a silent death is a clean
+    exit.
     """
     if grace is None:
         grace = _teardown_grace()
 
     def said_down(name: str) -> bool:
         return is_down is not None and bool(is_down(name))
+
+    def settled_down(name: str) -> bool:
+        """`said_down`, but only after the reader has had its chance.
+
+        Called once a child has EXITED, where a bare `said_down` would race the
+        conductor's pump thread: the runner prints `DOWN` and returns from
+        `main` microseconds later, so the process can be reaped before the line
+        it just wrote has been read. Returns immediately in the common case
+        (the line is already in) and waits a bounded, generous moment
+        otherwise -- the pipe is at EOF, so the reader is not waiting on the
+        child for anything. NOT used on the kill path below, which has already
+        spent the whole of `grace` polling `said_down` and needs no further
+        benefit of the doubt.
+        """
+        if said_down(name):
+            return True
+        if is_down is None:
+            return False
+        limit = time.monotonic() + _TEARDOWN_DOWN_READ_GRACE
+        while time.monotonic() < limit:
+            time.sleep(0.02)
+            if said_down(name):
+                return True
+        return False
 
     for proc, stop_mode in children.values():
         if proc.poll() is not None:
@@ -2159,6 +2212,10 @@ def _stop_all(children: dict, is_down=None, grace: float | None = None) -> list[
                 break
             time.sleep(0.02)
         if proc.poll() is not None:
+            # It is gone without our having to kill it -- which says nothing
+            # about whether it UNWOUND (issue 265). Only `DOWN` says that.
+            if not settled_down(name):
+                stranded.append(name)
             continue
         proc.kill()
         try:
@@ -2173,7 +2230,7 @@ def _stop_all(children: dict, is_down=None, grace: float | None = None) -> list[
 
 
 def _stranded_teardown_report(names: list[str]) -> str:
-    """What the conductor says about a child it had to SIGKILL mid-teardown.
+    """What the conductor says about a child that exited mid-teardown.
 
     Deliberately the E-Stop verdict's vocabulary (`_render_estop` in
     `cli/change.py`), because it is the same epistemic position: the unwind
@@ -2183,8 +2240,8 @@ def _stranded_teardown_report(names: list[str]) -> str:
     listed = ", ".join(names)
     plural = "es" if len(names) > 1 else ""
     return (
-        f"error: teardown HALTED -- {len(names)} process{plural} had to be "
-        f"SIGKILLed before saying DOWN: {listed}\n"
+        f"error: teardown HALTED -- {len(names)} process{plural} exited "
+        f"before saying DOWN: {listed}\n"
         "  The unwind was cut mid-flight. The LIFO walk did not reach every\n"
         "  registered entry (G7) and no no-residue proof printed (R4), so every\n"
         "  entry those processes still held is STRANDED -- registered, not run,\n"
@@ -2579,6 +2636,21 @@ def run_placement(files, placement_path: str, once: bool = False,
     correlation_identity = {pname: identities.get(pname, pname) for pname in processes}
     correlation_secret = {pname: secrets.token_bytes(32) for pname in processes}
     composition_id = canonical_hash(ir)
+
+    def _network_correlation(pname: str) -> dict:
+        """item 118 §1.4b: what a NETWORK consumer stamps on every crossing —
+        its own item-55 identity (the same one its certificate carries) and the
+        composition it is scoped to, and NO SECRET.
+
+        There is nothing to distribute, which is the whole point: the receiving
+        `TransportReplayGuard` scopes dedup by the identity the mTLS handshake
+        proved and only reads `composition_id`/`generation`/`idempotency_key`
+        off this envelope. A consumer in another composition, under another
+        conductor, stamps the same shape from its own certificate and is
+        deduplicated exactly the same way — no key it cannot hold, so no
+        legitimate caller refused."""
+        return {"composition_id": composition_id,
+                "peer_identity": correlation_identity[pname]}
     # provider -> the local (UDS) consumers of its keys, mirroring exactly the
     # branch below that assigns `entry["socket"]` (never a network or remote
     # entry), so the two stay in lockstep by construction.
@@ -2874,6 +2946,7 @@ def run_placement(files, placement_path: str, once: bool = False,
                                              "server_hostname": rs["server_hostname"]}}
                 entry["latency_ms"] = rs["rtt_ms"]
                 entry["remote"] = True
+                entry["correlation"] = _network_correlation(pname)
                 net_seams.append((pname, key, rs["host"], rs["port"], rs["rtt_ms"]))
             elif host in addresses:
                 # a network seam: point the proxy at the machine over TCP+mTLS,
@@ -2889,6 +2962,7 @@ def run_placement(files, placement_path: str, once: bool = False,
                 # source (`spec["files"]`) and can re-admit it at boot.
                 entry["component"] = key_component.get(key)
                 entry["backend"] = backends.get(host)
+                entry["correlation"] = _network_correlation(pname)
             else:
                 entry["socket"] = sockets[host]
                 # item 337 Seam 2: the provider's admissible identity, so the
@@ -2967,25 +3041,40 @@ def run_placement(files, placement_path: str, once: bool = False,
                 # declared one. Names only — no secret crosses a composition
                 # boundary, which is what lets this hold where the correlation
                 # guard cannot.
+                # item 118 §1.4b: freshness, keyed on the identity the mTLS
+                # handshake proved. Installed on EVERY network seam, with or
+                # without an allowlist, because it holds no secret and so
+                # refuses no legitimate caller: a crossing that carries no
+                # idempotency key is dispatched exactly as before, and a
+                # cross-composition consumer under another conductor stamps the
+                # same unsealed envelope from its own certificate.
+                serve_spec["replay"] = {"per_peer": REPLAY_WINDOW_PER_PEER,
+                                        "max_peers": REPLAY_WINDOW_PEERS}
+                window = (f"replays refused per proven identity over a bounded "
+                          f"window ({REPLAY_WINDOW_PER_PEER} keyed crossings x "
+                          f"{REPLAY_WINDOW_PEERS} peers); a crossing declaring no "
+                          "idempotency key is not deduplicated")
                 allow = peer_allowlist.get(pname)
                 if allow:
                     serve_spec["peers"] = list(allow)
                     seam_admissions.append(SeamAdmission(
                         provider=pname, transport="tcp+mtls",
-                        level=ADMISSION_PEER_PINNED,
+                        level=ADMISSION_PEER_BOUND,
                         detail="mTLS peer identity checked against the declared "
-                               "`peers` allowlist; NOT replay-checked (an "
+                               f"`peers` allowlist, and {window}. NOT sealed: an "
                                "off-placement peer cannot hold this boot's "
-                               "correlation secret, so no envelope to dedup)",
+                               "correlation secret, so the envelope is "
+                               "authenticated by the transport, not by an HMAC",
                         peers=allow))
                 else:
                     seam_admissions.append(SeamAdmission(
                         provider=pname, transport="tcp+mtls",
                         level=ADMISSION_UNVERIFIED,
-                        detail="mTLS proves WHICH identity is calling but this "
-                               "placement declares no `peers`, so every identity "
-                               "the shared CA signed is answered — add "
-                               f"[processes.{pname}] peers = [...] to close it"))
+                        detail="mTLS proves WHICH identity is calling and "
+                               f"{window}, but this placement declares no "
+                               "`peers`, so every identity the shared CA signed "
+                               f"is answered — add [processes.{pname}] "
+                               "peers = [...] to close it"))
             else:
                 serve_spec["socket"] = sockets[pname]
                 # item 118 S1 / roadmap 421 F8: the secret table this provider
@@ -3267,11 +3356,13 @@ def run_placement(files, placement_path: str, once: bool = False,
     up: set[str] = set()
     repointed: set[tuple[str, str]] = set()
     down: set[str] = set()
-    # issue 239: children SIGKILLed before they said DOWN. Their unwind was cut
-    # mid-flight, so their residue is UNKNOWN; the conductor must never report
-    # that as a clean exit. Accumulated across EVERY teardown this run performs
-    # (a refused swap successor, a swapped-out provider, the final teardown),
-    # because any one of them can be the one that was cut.
+    # issue 239 / 265: children that exited before they said DOWN -- by
+    # SIGKILL, by the SIGTERM that asked them to stop, or by any other death.
+    # Their unwind was cut mid-flight, so their residue is UNKNOWN; the
+    # conductor must never report that as a clean exit. Accumulated across
+    # EVERY teardown this run performs (a refused swap successor, a swapped-out
+    # provider, the final teardown), because any one of them can be the one
+    # that was cut.
     stranded: list[str] = []
     # item 443: pname -> the halt inventory that child printed for itself, and
     # the conductor-side halt state. `halted` is a one-shot latch: pressing the
@@ -3382,7 +3473,7 @@ def run_placement(files, placement_path: str, once: bool = False,
 
     def stop_all(group: dict) -> None:
         """`_stop_all` with this conductor's DOWN tracker wired in, recording
-        any child that had to be killed before it finished unwinding."""
+        any child that exited before it finished unwinding."""
         for name in _stop_all(group, is_down=lambda n: n in down):
             if name not in stranded:
                 stranded.append(name)
@@ -3667,7 +3758,7 @@ def run_placement(files, placement_path: str, once: bool = False,
             # issue 239: the drain was cut short, so the sentence below would be
             # a lie. Say what is actually known instead.
             print(f"swap: {component} now on {to_backend} ({succ}), but the old "
-                  f"provider {old} was SIGKILLed before it said DOWN: its unwind "
+                  f"provider {old} exited before it said DOWN: its unwind "
                   f"is INCOMPLETE and its residue is UNKNOWN.", flush=True)
         else:
             print(f"swap: {component} now on {to_backend} ({succ}); the old provider "
