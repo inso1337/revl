@@ -995,6 +995,17 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
             trail = " -> ".join(f"{op} by `{layer}` (L{level})"
                                 for level, layer, op in row.provenance)
             print(f"  {'':<24}   {trail}")
+        if row.remote is not None:
+            # item 424 C2. The peer, the reach and the failure mode are the
+            # ADMISSION facts a remote row adds; the WIRING panel below prints
+            # nothing different for it, which is D-424c.1 visible in the output.
+            info = row.remote
+            print(f"  {'':<24}   REMOTE peer {info['peer']}  "
+                  f"reach `{info['capability']}`  "
+                  f"on_failure {info['onFailure']}")
+            print(f"  {'':<24}   synthesized from service "
+                  f"`{info['service']}` ({info['serviceSource']}); "
+                  "NO inverse — a remote effect survives unwind")
     print()
     print("WIRING")
     for label, edges in table.wiring().items():
