@@ -98,8 +98,8 @@ was corrected by hand and had drifted back within a day.
 | capability-realm-placement.md | needs-work | 11 |  |
 | closures.md | needs-work | 3 |  |
 | collections.md | needs-work | 34 | yes |
-| commands-reference.md | current | 3 |  |
-| component-leases.md | needs-work | 24 |  |
+| commands-reference.md | current | 5 |  |
+| component-leases.md | needs-work | 26 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |
 | composition-rows.md | needs-work | 13 |  |
@@ -124,7 +124,7 @@ was corrected by hand and had drifted back within a day.
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | needs-work | 28 |  |
-| gauntlet.md | needs-work | 17 |  |
+| gauntlet.md | needs-work | 19 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 10 |  |
 | guide-ai-agents.md | stale-fixed | 2 |  |
@@ -145,7 +145,7 @@ was corrected by hand and had drifted back within a day.
 | network-path.md | needs-work | 25 |  |
 | network-placement.md | needs-work | 1 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
-| operator-capabilities.md | needs-work | 26 |  |
+| operator-capabilities.md | needs-work | 30 |  |
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |
@@ -181,7 +181,7 @@ was corrected by hand and had drifted back within a day.
 | stdlib-value.md | current | 25 |  |
 | stdlib-version.md | needs-work | 11 |  |
 | strings.md | needs-work | 39 |  |
-| swap.md | needs-work | 19 |  |
+| swap.md | needs-work | 20 |  |
 | syntax-2.0.md | needs-work | 6 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |

@@ -1,0 +1,28 @@
+// REJECTED — a method-local `let` may not shadow an activation-body binding.
+//
+// The activation body already refuses a duplicate binding ("name `store` is
+// already bound in C"); a provide-method body consulted only its own params
+// and locals, so the collision passed. It is not a scoping nicety: a method
+// body lowers into a closure over the activation frame and the safe-name
+// allocator drew from the method's names alone, so the shadowing binding was
+// emitted with the SAME host-safe name as the component local. The component
+// local's declared inverse then ran against the shadow — `store.drop()` on a
+// `Str` — and the host Map it was supposed to release leaked. With the
+// shadowing `let` written AFTER the use, as here, the local is not bound at
+// all and teardown raises.
+//
+// expected error:
+//   `store` is already bound in `set`
+
+service Cache { fn set(key: Str) }
+
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      effect store.insert(key, "v")
+      undo   store.remove(key)
+      let store = key
+    }
+  }
+}
