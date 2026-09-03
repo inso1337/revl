@@ -447,11 +447,24 @@ def _host_bodies(ir: dict) -> list:
     return sorted(out, key=lambda e: str(e["extern"]))
 
 
-def _compile(source: str | None, files: list[str] | None,
-             manifest: dict | None = None, modules: dict | None = None,
-             replacing: tuple = ()) -> dict:
+def compile_under_authoring(source: str | None, files: list[str] | None,
+                            manifest: dict | None = None,
+                            modules: dict | None = None,
+                            replacing: tuple = ()) -> dict:
     """Compile inline source or paths through the same entry points the CLI
     uses, so the admission gate is literally the same code.
+
+    THE ONE COMPILER DOOR FOR AGENT-SUPPLIED SOURCE. Every MCP verb that
+    compiles something the agent sent over the transport goes through here —
+    `revl_check`/`admit`/`plan`/`swap`/`load` via `_compile` below, and
+    `revl_gauntlet`/`quarantine`/`repair`/`canary` through their own modules,
+    which all call this function. A verb that reaches `compile_source` /
+    `compile_files` directly gets NO authoring trust, and a candidate the gate
+    refuses is then compiled — and, for the verbs that boot a scratch session,
+    RUN — by a sibling verb. `tests/test_mcp_authority_gate.py` holds the guard:
+    it reads every compiler call site under `src/revl/mcp/` out of the source
+    and fails on one that neither passes `profile=` nor routes through here, so
+    the NEXT door cannot be added silently.
 
     Inline source never touches the disk: `compile_source` carries the
     ambient manifest and any in-memory `use` modules itself.
@@ -522,9 +535,21 @@ def _compile(source: str | None, files: list[str] | None,
 
     if providers and profile is not None:
         _compile_once(profile, {})              # 1. the decision
-        ir = _compile_once(None, providers)     # 2. what loads
-    else:
-        ir = _compile_once(profile, providers)
+        return _compile_once(None, providers)   # 2. what loads
+    return _compile_once(profile, providers)
+
+
+def _compile(source: str | None, files: list[str] | None,
+             manifest: dict | None = None, modules: dict | None = None,
+             replacing: tuple = ()) -> dict:
+    """`compile_under_authoring` for the verbs THIS module dispatches, plus the
+    one side effect only they want: remembering the host bodies the compile
+    carried, so a class-(c) approval ticket cannot understate what a yes lets
+    run. The sibling modules call `compile_under_authoring` directly — their
+    scratch compiles must not overwrite what the live session authored."""
+    ir = compile_under_authoring(source, files, manifest=manifest,
+                                 modules=modules, replacing=replacing)
+    over_the_transport = source is not None or bool(modules)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = (_host_bodies(ir)
                              if over_the_transport and AUTHORING.host_code
@@ -1187,6 +1212,16 @@ def _tool_repair(arguments: dict) -> dict:
     if not arguments.get("component"):
         return _session_error("`component` is required — the faulting component "
                               "to repair")
+    # component leases (item 61): the loop's remediation step calls
+    # `Session.swap` itself, so it never reached the check `_tool_swap` runs. A
+    # repair is a swap; under a policy that enforces leases it may no more
+    # replace a component another operator holds than `revl_swap` may. Skipped
+    # for the `apply:false` rehearsal, which swaps nothing.
+    if _operator.composed_applies("revl_repair", arguments):
+        refusal = _leases.check_swap(
+            SESSION, _operator.swap_arguments("revl_repair", arguments))
+        if refusal is not None:
+            return _refused_by_lease(refusal)
     return _repair.run_repair(SESSION, arguments)
 
 
