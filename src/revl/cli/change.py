@@ -91,6 +91,8 @@ def _run_canary(args) -> int:
         provider=args.provider,
         promote_to=args.promote_to,
         prove_residue=not getattr(args, "no_residue_proof", False),
+        # the CLI author is the operator, not an agent over a session
+        over_the_transport=False,
     )
     print(json.dumps(report, indent=2) if args.json else render(report))
     if not report.get("ok"):
@@ -698,7 +700,9 @@ def _run_repair(args) -> int:
                   file=sys.stderr)
             return 1
 
-    dossier = _repair.run_repair(session, arguments)
+    # the CLI author is the operator, not an agent over a session
+    dossier = _repair.run_repair(session, arguments,
+                                 over_the_transport=False)
 
     if args.json:
         print(json.dumps(dossier, indent=2))
@@ -739,7 +743,9 @@ def _run_quarantine(args) -> int:
     arguments: dict = {"files": list(args.files)}
     if getattr(args, "service", None):
         arguments["service"] = args.service
-    report = _quarantine.run(session, arguments)
+    # the CLI author is the operator, not an agent over a session
+    report = _quarantine.run(session, arguments,
+                             over_the_transport=False)
 
     if args.json:
         print(json.dumps(report, indent=2))
