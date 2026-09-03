@@ -183,14 +183,14 @@ fn pick(flag: Bool) -> Str { if (flag) { return lambda() } return lambda_() }
     assert module.pick(False) == "SEKRIT-CANARY-416"
 
 
-def test_record_field_pair_stays_two_dataclass_fields():
-    """A record with `from` and `from_` keeps TWO fields on the emitted
-    dataclass. Before the fix both annotations were `from_`, the second
-    overwrote the first, and `dataclasses.fields()` reported one field for a
-    two-field revl record while the record VALUE (a dict) still carried both
-    raw keys."""
-    import dataclasses
-
+def test_record_field_pair_stays_two_shape_fields():
+    """A record with `from` and `from_` keeps TWO fields on the emitted shape
+    class. Before the fix both annotations were `from_`, the second overwrote
+    the first, and the class carried one field for a two-field revl record
+    while the record VALUE (a dict) still carried both raw keys. The class is
+    a shape, not a constructor (item 436 F9 dropped `@dataclass`), so the
+    field list is read off `__annotations__` rather than `dataclasses.fields`
+    — the injectivity being pinned is the same one."""
     src = """
 type Transfer = { from: Str, from_: Str }
 
@@ -200,7 +200,7 @@ fn mk(a: Str, b: Str) -> Transfer {
 """
     source = _emit(src)
     module = load_module(source, "revl_injective_record")
-    names = [f.name for f in dataclasses.fields(module.Transfer)]
+    names = list(module.Transfer.__annotations__)
     assert names == ["from_", "from__"]
     # the runtime value keeps the RAW revl keys, unchanged by the rename
     assert module.mk("a", "b") == {"from": "a", "from_": "b"}
