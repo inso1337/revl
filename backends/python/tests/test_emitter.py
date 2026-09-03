@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 
 import pytest
 
@@ -126,5 +127,11 @@ def test_destructure_temps_are_sequential_and_collision_free():
     assert "__revl_destructure_2 = r" in source
     # no `id(node)`-style large-integer temp leaked through
     assert "__revl_destructure_1" in source and "__revl_destructure_2" in source
-    # record: 1 def + 2 field reads; list: 1 def + 1 unpack read = 5 total
-    assert source.count("__revl_destructure_") == 5
+    # exactly two temps exist and they are 1 and 2 — asserted on the NAMES, not
+    # on a mention count: a record field read mentions its temp twice now that
+    # the read is `_field_read`'s dict/attr dispatch rather than a bare `.a`
+    assert sorted(set(re.findall(r"__revl_destructure_\d+", source))) == [
+        "__revl_destructure_1", "__revl_destructure_2"]
+    # the record arm reads through the dict the record VALUE is (docs/records.md
+    # §7); `.a` on a record value raised AttributeError
+    assert "a = (__revl_destructure_1['a'] if isinstance(__revl_destructure_1, dict)" in source
