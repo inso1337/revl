@@ -4379,7 +4379,8 @@ def _method_body_lines(
             else:
                 lines.append(f"{_expr(stmt['acquire'], v3_ctx, rename, env)};")
                 _emit_bracket_track(
-                    lines, "", stmt["acquire"], stmt["undo"], v3_ctx, env, frame_expr, rename)
+                    lines, "", stmt["acquire"], stmt["undo"], v3_ctx, env, frame_expr,
+                    rename, stmt)
         elif step == "let-effect":
             wit = _witnessed_extern_for(stmt.get("acquire"), v3_ctx.witnessed)
             if wit is not None:
@@ -4396,7 +4397,9 @@ def _method_body_lines(
                 bind = _ident(stmt["bind"], "binding")
                 acquire_expr = _expr(stmt["acquire"], v3_ctx, rename, env)
                 lines.append(f"boolean {bind} = {acquire_expr};")
-                undo_expr = _expr(stmt["undo"], v3_ctx, rename, env)
+                undo_rename = _emit_inverse_pins(
+                    lines, "", stmt, "undo", v3_ctx, env, rename)
+                undo_expr = _expr(stmt["undo"], v3_ctx, undo_rename, env)
                 guarded = f"() -> {{ if ({bind}) {{ {undo_expr}; }} }}"
                 if frame_expr is None:
                     lines.append(f"fx.track(Disposables.of({guarded}));")
@@ -4414,7 +4417,9 @@ def _method_body_lines(
             lines.append(f"{_expr(stmt['expr'], v3_ctx, rename, env)};")
             if stmt.get("compensate") is not None:
                 _emit_compensation_track(
-                    lines, "", stmt["expr"], stmt["compensate"], v3_ctx, env, frame_expr, rename)
+                    lines, "", stmt["expr"], stmt["compensate"], v3_ctx, env, frame_expr,
+                    _emit_inverse_pins(lines, "", stmt, "compensate",
+                                       v3_ctx, env, rename))
         elif step == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
         elif step in ("let", "assign"):
@@ -4498,10 +4503,45 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
         raise EmitError(f"unsupported component setup step {kind!r}")
 
 
+def _emit_inverse_pins(
+    out: list[str], pad: str, step: dict, slot: str,
+    v3_ctx: "_V3Ctx", env: "_Env", rename: dict[str, str] | None,
+) -> dict[str, str] | None:
+    """Snapshot a derived inverse's mutable method-locals BY VALUE, and return the
+    `rename` its expression must be rendered under (docs/closures.md;
+    `<slot>_captures`, computed by `src/revl/lower.py::_pin_inverse_captures`).
+
+    An `undo` runs at teardown, long after the method returned, so it must hold
+    the value its forward effect used -- but a `var` the body reassigns
+    afterwards is not effectively final, and javac REFUSES to let a lambda read
+    it at all. This tier therefore did not silently undo the wrong thing; it
+    emitted a source file that would not compile. Either way the remedy is the
+    same one `_inline_arrow` already uses for an arrow's `captures`: a `final`
+    copy taken where the effect registers, and the inverse rendered against that
+    copy. The copy also restores the effectively-final property, so the shape
+    compiles again.
+
+    Returns `rename` unchanged when the lowering found nothing to pin, so a body
+    without one emits byte-identically."""
+    names = step.get(f"{slot}_captures") or []
+    if not names:
+        return rename
+    inner = dict(rename or {})
+    index = v3_ctx.next_gensym()
+    for name in names:
+        _ident(name, "inverse capture")
+        snapshot = f"__revl_inverse_{index}_{_ident(name, 'inverse capture')}"
+        out.append(f"{pad}final var {snapshot} = "
+                   f"{_expr({'kind': 'var', 'name': name}, v3_ctx, rename, env)};")
+        inner[name] = snapshot
+    return inner
+
+
 def _emit_bracket_track(
     out: list[str], pad: str, acquire: dict, undo: dict,
     v3_ctx: _V3Ctx, env: _Env, frame_expr: str | None,
     rename: dict[str, str] | None = None,
+    step: dict | None = None,
 ) -> None:
     """A plain `acquire`/`undo` bracket entry (docs/design/teardown-
     contract.md): replays on every teardown, unchanged. When the owning
@@ -4511,6 +4551,7 @@ def _emit_bracket_track(
     residue and never stops the remaining Phase-1 replay (mixed-entry LIFO,
     docs/design/teardown-contract.md exit test 3). A component with ONLY
     plain brackets (`frame_expr` is None) keeps emitting exactly as before."""
+    rename = _emit_inverse_pins(out, pad, step or {}, "undo", v3_ctx, env, rename)
     undo_expr = _expr(undo, v3_ctx, rename, env)
     if frame_expr is None:
         out.append(f"{pad}fx.track(Disposables.of(() -> {undo_expr}));")
@@ -4669,7 +4710,8 @@ def _emit_component_stmts(
                 out.append(f"{pad}{decl} {bind} = {_expr(step['acquire'], v3_ctx, None, env)};")
             else:
                 out.append(f"{pad}{_expr(step['acquire'], v3_ctx, None, env)};")
-            _emit_bracket_track(out, pad, step["acquire"], step["undo"], v3_ctx, env, frame_expr)
+            _emit_bracket_track(out, pad, step["acquire"], step["undo"], v3_ctx, env,
+                                frame_expr, None, step)
         elif kind == "emit":
             out.append(f"{pad}{_expr(step['expr'], v3_ctx, None, env)};")
             if step.get("compensate") is not None:
