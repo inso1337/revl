@@ -26,6 +26,7 @@
    "backends/typescript/tests/fixtures/match_sync_arms.rvl",
    "backends/wasm/scenarios/crashproof/crashproof.rvl",
    "examples/async_timer.rvl",
+   "examples/budget_attenuation.rvl",
    "examples/durable_log.rvl",
    "examples/lifecycle_cache.rvl",
    "examples/lifecycle_leak.rvl",
@@ -65,6 +66,9 @@
   ],
   "msg-mismatch/A1": [
    "examples/rejections/a1_async_undo_suspends.rvl"
+  ],
+  "tag-mismatch/G4->BAD": [
+   "examples/rejections/g4_spawn_widens_budget.rvl"
   ]
  },
  "corpus_dirs": [
@@ -264,6 +268,18 @@
     "code": "BAD",
     "kind": "refused",
     "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/budget_attenuation.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "bad provide block in component Child"
    },
    "reference": {
     "message": "",
@@ -568,6 +584,18 @@
    "reference": {
     "message": "`effect await` on an acquisition that reaches nothing async \u2014 an `await` in an activation body is a real divert window (A1)",
     "tag": "A1"
+   }
+  },
+  "examples/rejections/g4_spawn_widens_budget.rvl": {
+   "bucket": "tag-mismatch/G4->BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "bad provide block in component Child"
+   },
+   "reference": {
+    "message": "`Supervisor` spawns `Child` with a wider resource budget than it holds: `net(calls=1000)` widens `calls` to 1000 over the parent's 100. A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)",
+    "tag": "G4"
    }
   },
   "examples/rejections/g4_spawn_widens_parameter.rvl": {
