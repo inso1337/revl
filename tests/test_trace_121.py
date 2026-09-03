@@ -866,16 +866,40 @@ def test_a_completion_never_crosses_a_component_boundary():
 
 
 def test_the_recorder_marks_the_crossing_at_record_time():
-    """The mark is published BY `record_emission`, not inferred later — the
-    assertion that fails if the recorder stops telling the runtime which
-    crossing it is minting."""
-    import inspect
-    src = inspect.getsource(rp.Timeline.record_emission)
-    assert "_note_emission_index" in src
+    """The mark is published BY `record_emission`, and published IN TIME: the
+    completion the `validate_retry` seam measures around that record binds to
+    THAT step, so a later crossing cannot claim it.
+
+    This used to open with `assert "_note_emission_index" in src` over
+    `record_emission`'s text. The name occurring in the method body certifies
+    nothing about whether the mark is in place when the observation arrives,
+    which is the whole item-242 fix — and the assertions below, plus
+    `test_the_model_hop_lands_on_the_completion_not_the_newest_crossing`, red on
+    the call being removed anyway. A source grep beside a behavioural assertion
+    is the one that gets updated when it breaks."""
     timeline = rp.Timeline("AgentLoop")
-    timeline.record_emission("Model", "complete", ("ask",), "model",
-                             ("agent.rvl", 12))
-    assert rt.revl_recorded_crossing() == ("AgentLoop", timeline.steps[-1].index)
+
+    def host_model():
+        timeline.record_emission("Model", "complete", ("ask",), "model",
+                                 ("agent.rvl", 12))
+        return _model_host_return()
+
+    rt.validate_retry(host_model, budget=0, schema={"type": "object"},
+                      where="AgentLoop")
+    model_step = timeline.steps[-1].index
+    assert rt.revl_recorded_crossing() == ("AgentLoop", model_step)
+
+    # a LATER crossing moves the mark on, and does not inherit the completion
+    timeline.record_emission("Report", "write", ("/tmp/out.txt",), "fs",
+                             ("agent.rvl", 19))
+    later = timeline.steps[-1].index
+    assert later != model_step
+    assert rt.revl_recorded_crossing() == ("AgentLoop", later)
+
+    driver = _bare_driver()
+    assert driver._model_crossing_payload(crossing=("AgentLoop", later)) is None
+    assert driver._model_crossing_payload(
+        crossing=("AgentLoop", model_step)) is not None
 
 
 def test_the_crossing_key_is_wired_into_the_emissions_arm():
@@ -893,11 +917,38 @@ def test_the_crossing_key_is_wired_into_the_emissions_arm():
 # ---------------------------------------------------------------------------
 
 
+class _StubEmitter:
+    """The one `emit` surface `_Driver._emit_module` uses — `emit(ir)` returning
+    python source — plus a note of what the per-run trace state looked like AT
+    EMIT TIME.
+
+    That note is how the ORDER the item-416d arm documents ("reset before the
+    emit, so gen N+1's own crossings see the new nonce") is asserted as a fact
+    about the run rather than as a fact about run.py's line numbers. Stubbing
+    the emitter is also what keeps the arm drivable with no cordis: the emitted
+    module is trivial, so `exec` needs no runtime."""
+
+    def __init__(self) -> None:
+        self.calls_at_emit: list = []
+        self.crossing_at_emit: list = []
+
+    def emit(self, ir: dict) -> str:
+        self.calls_at_emit.append(rt._revl_model_calls.get())
+        self.crossing_at_emit.append(rt._revl_recorded_crossing.get())
+        return "REVL_EMITTED = True\n"
+
+
 def _emit_module_driver(generation: int = 0):
-    """A `_Driver` holding only what `_emit_module`'s reset arm reads."""
+    """A `_Driver` holding only what `_emit_module` reads on a bare IR."""
     driver = run._Driver.__new__(run._Driver)
     driver.runtime = rt
     driver.generation = generation
+    driver.emit = _StubEmitter()
+    driver.root_dirs = []
+    driver.config = {}
+    driver.secrets = None
+    driver.recorder = None
+    driver.wal_path = None
     return driver
 
 
@@ -908,43 +959,51 @@ def test_a_new_generation_resets_the_run_trace_state():
     `--watch` reload booted generation N+1, and the FIRST emit crossing of the
     new program consumed it and was recorded as a model hop it never made.
 
-    Driven through `_emit_module`'s reset arm (the one place a generation
-    begins) rather than by calling the runtime seam directly, so the test fails
-    if the wiring is removed."""
-    # gen N leaves an unconsumed completion in the fiber-local store.
+    Driven through `_Driver._emit_module` — the one place a generation begins —
+    and asserted on the state a generation actually boots into.
+
+    This replaces `test_the_reset_is_wired_into_the_generation_boundary`, which
+    asserted `"revl_reset_run_trace_state" in src` plus a source-INDEX ordering
+    against `self.emit.emit`. Both were spelling: the seam can be named and
+    guarded off (`reset = getattr(...)` against a runtime that does not carry
+    it), or called on a value that is not the live runtime, with the grep and
+    the index comparison both green and gen N's stale observation still there
+    for gen N+1's first crossing to inherit. The ordering is asserted here as a
+    fact about the run — the emitter records what the trace state looked like
+    when it was called."""
+    # gen N leaves an unconsumed completion AND a crossing mark in the
+    # fiber-local store — exactly the residue a `--watch` reload used to carry
+    # across the boundary.
+    rt.revl_note_emission_index("Agent", 5)
     rt.validate_retry(lambda: {"tag": "ok"}, budget=0,
                       schema={"type": "object"}, where="Agent")
     assert rt._revl_model_calls.get() != ()
+    assert rt._revl_recorded_crossing.get() == ("Agent", 5)
 
     driver = _emit_module_driver()
-    reset = getattr(driver.runtime, "revl_reset_run_trace_state", None)
-    assert reset is not None, "the driver's reset seam must exist"
-    reset()
+    module = driver._emit_module({"components": [], "manifest": {}})
+    assert module.REVL_EMITTED is True
 
-    # gen N+1 starts clean: the stale observation cannot be mis-attributed.
+    # the ORDER: gen N's registers were already clear when the emit ran, so
+    # gen N+1's own crossings see the new nonce and never gen N's leftovers.
+    assert driver.emit.calls_at_emit == [()]
+    assert driver.emit.crossing_at_emit == [None]
+
+    # and gen N+1 starts clean: the stale observation cannot be mis-attributed.
     assert rt._revl_model_calls.get() == ()
     assert rt._revl_recorded_crossing.get() is None
     assert rt._revl_validated_completions.get() is None
     assert _bare_driver()._model_crossing_payload() is None
 
 
-def test_the_reset_is_wired_into_the_generation_boundary():
-    """The reset must be performed BY `_emit_module`, not merely available."""
-    import inspect
-    src = inspect.getsource(run._Driver._emit_module)
-    assert "revl_reset_run_trace_state" in src
-    # and it must run before the emit, so gen N+1's own crossings see the new
-    # nonce rather than gen N's.
-    assert src.index("revl_reset_run_trace_state") < src.index("self.emit.emit")
-
-
 def test_each_generation_gets_its_own_digest_salt():
     """Two generations of one `--watch` process must not be correlatable by
-    digest equality: the nonce is per generation, not per process."""
+    digest equality: the nonce is per generation, not per process — and the
+    re-salt rides the same generation boundary, so this goes through
+    `_emit_module` too rather than calling the seam by hand."""
     args = ["a", "b"]
     first = rt.revl_prompt_digest(args, arg_origins=set(), taint_engaged=True)
-    driver = _emit_module_driver()
-    driver.runtime.revl_reset_run_trace_state()
+    _emit_module_driver()._emit_module({"components": [], "manifest": {}})
     second = rt.revl_prompt_digest(args, arg_origins=set(), taint_engaged=True)
     assert first["salted"] != second["salted"]
 
