@@ -573,8 +573,13 @@ fn step(source: Str, i: Int, line: Int) -> Step {
       return { i: source.length(), line: line,
                tok: { kind: "error", text: "bad template", line: line } }
     }
+    // The token's line is where the template OPENS. `line + st.nl` is where it
+    // CLOSES, which is right for the lexer's own line cursor but wrong for the
+    // token: a template spanning lines 2-5 reported its errors at line 5
+    // (issue #313). The reference lexer agrees, and the differential oracle in
+    // tests/test_selfhost_lexer.py compares this exact field.
     return { i: st.j, line: line + st.nl,
-             tok: { kind: "template", text: st.out, line: line + st.nl } }
+             tok: { kind: "template", text: st.out, line: line } }
   }
   if (is_alpha(c)) {
     let sw = scan_word(source, i)
