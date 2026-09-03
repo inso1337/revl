@@ -306,7 +306,10 @@ jobs:
       # runner image ever stops shipping Docker, this fails loudly instead of
       # letting the sandbox level quietly go back to skipping.
       - run: docker version
-      - run: backends/python/.venv/bin/python -m pytest tests/test_sandbox_container_rung_411.py -q --junitxml=/tmp/sandbox-junit.xml
+      # item 118 Slice 2a rides the same gate and the same `revl.sandbox=411`
+      # label: `revl deploy`'s container boundary IS item 411's rung, so it is
+      # exercised here rather than in a second job with its own runtime.
+      - run: backends/python/.venv/bin/python -m pytest tests/test_sandbox_container_rung_411.py tests/test_deploy_map_118.py -q --junitxml=/tmp/sandbox-junit.xml
         env:
           # the gate the file reads. With it set, a missing or broken container
           # runtime REDS this job instead of skipping past the boundary tests.
