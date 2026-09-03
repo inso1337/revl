@@ -57,6 +57,12 @@
 // each is a real reference surface this slice does not reach (its fixtures avoid
 // it), NOT an approximation. Where a covered fixture could plausibly reach one, a
 // loud `<<DEFER-*>>` marker keeps a byte diff from silently passing (item 207):
+//   * a local bound to an UNANNOTATED `Map.empty()` (issue #274): the reference
+//     learns the map's value type from the body's `m.set(k, v)` writers and
+//     falls back to the raw `java.util.Map`, both of which need the builtin
+//     surface this slice defers; the annotated `var m: Map[Str, Int] =
+//     Map.empty()` IS covered (its pin rides on the literal), and the
+//     unannotated one surfaces `<<DEFER-map-local-unpinned>>`;
 //   * the reference's `Stream.*` TIER-LIMIT refusal (roadmap 419e): the
 //     reference `_expr` now refuses a `Stream.*` host builtin, since this tier
 //     has no `Stream` runtime class and `Stream src = Stream.source();` was a
@@ -822,13 +828,26 @@ fn render_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
 
 // -------------------------------------------------------------- statements
 // `_let_keyword`: an empty list literal declares as raw `java.util.List` (keeps
-// erasure in play); an ADT-construction binding declares as its sealed interface
+// erasure in play); an empty `maplit` declares as the Map type its `expected`
+// pin names (issue #274 — `var` would freeze the local at `Map.of()`'s
+// `Map<Object, Object>` and neither the writer static nor the `return` would
+// then apply); an ADT-construction binding declares as its sealed interface
 // (`final Owner o`, restoring the type the frontend gave the expression); else
 // the `var` / `final var` inference.
 fn let_keyword(node: Any, ctx: Ctx) -> Str {
   let value = value_field(node, "value")
   if (node_kind(value) == "list" && value_list(value_field(value, "items")).length() == 0) {
     return "java.util.List"
+  }
+  if (node_kind(value) == "maplit" && value_list(value_field(value, "entries")).length() == 0) {
+    let pin = value_field(value, "expected")
+    if (!value_is_null(pin)) { return java_v3_type(pin, false) }
+    // Unpinned (`var m = Map.empty()`): the reference learns the value type
+    // from the body's `m.set(k, v)` writers and otherwise declares the raw
+    // `java.util.Map`. Both need a whole-body walk over the builtin surface
+    // this slice does not cover, so the answer is a loud marker rather than a
+    // guess (item 207). No covered fixture reaches it.
+    return "<<DEFER-map-local-unpinned>>"
   }
   if (node_kind(value) == "adt") {
     let owner = map_get(ctx.ca, value_str(value_field(value, "case")))

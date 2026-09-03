@@ -276,7 +276,12 @@ def _gauntlet_dossier(source: str) -> dict | None:
         sys.path.insert(0, backend_py)
 
     def _grade() -> dict:
-        return gauntlet.run(Session(), {"source": source})
+        # `revl bundle` runs on the operator's own machine over the operator's
+        # own files: the human running the command IS the author, so this
+        # compile carries no MCP authoring trust (the same rule
+        # `server.compile_under_authoring` applies to jailed `files`).
+        return gauntlet.run(Session(), {"source": source},
+                            over_the_transport=False)
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

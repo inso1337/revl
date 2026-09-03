@@ -1,0 +1,39 @@
+// REJECTED — G9: a spawn `with { … }` config is a hand-off across a component
+// boundary, and it carries taint like any other.
+//
+// The parent reads an `Untrusted[Str]` and passes it as `Child`'s `cmd` config
+// field; the child emits `config.cmd` into a `Trusted[Str]` shell sink. The
+// equivalent hand-off through a service OPERATION was already refused by the
+// ordinary signature machinery, but a config field was seeded CLEAN unless it
+// was declared `Secret[T]`, so nothing connected the two ends.
+//
+// A config field is the same hand-off through a different door, so it is given
+// the same treatment rather than a new rule: a component's config fields are
+// inferred as the parameters of a synthetic `<Component>#config` callable, and
+// the spawn site applies that inferred signature exactly as a call site
+// applies a callee's. So this is refused while an untrusted value landing on a
+// field the child does NOT sink still compiles.
+//
+// expected error:
+//   untrusted value (fs) flows into a shell command at argument 1 of `run`
+
+extern emission[fs] fn read_file(p: Str) -> Untrusted[Str] = @py { return "" }
+extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }
+
+service Ops { emission fn go(p: Str) }
+service Kid { emission fn k() }
+
+component Child provides kid: Kid {
+  config { cmd: Str }
+  provide kid { fn k() { emit run(config.cmd) } }
+}
+
+component A provides ops: Ops {
+  provide ops {
+    fn go(p) {
+      let d = emit read_file(p)
+      let w = effect spawn Child with { cmd: d } undo w.dispose()
+      emit w.kid.k()
+    }
+  }
+}
