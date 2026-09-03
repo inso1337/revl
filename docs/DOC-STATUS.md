@@ -139,7 +139,7 @@ was corrected by hand and had drifted back within a day.
 | integer-proposal.md | needs-work | 20 |  |
 | interchange-format.md | needs-work | 8 |  |
 | interop-bridge.md | needs-work | 51 |  |
-| mcp-bridge.md | needs-work | 75 |  |
+| mcp-bridge.md | needs-work | 76 |  |
 | mcp-reference.md | current | 3 |  |
 | namespacing.md | needs-work | 8 |  |
 | network-path.md | needs-work | 25 |  |
