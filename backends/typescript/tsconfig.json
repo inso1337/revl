@@ -9,5 +9,15 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["runtime.ts", "demo.ts", "golden/**/*.ts"]
+  // `golden/**` moved to tsconfig.generated.json (issue #223): it is emitted
+  // output, and as a GROUP it passed only because no two golden fixtures
+  // happened to collide on a service name. The first that reused one would
+  // have redded this config with a TS2717 that is not an emitter bug. It is
+  // now checked one program per module, the shape emit.py produces.
+  //
+  // What is left here is the group that IS a coherent program: the runtime and
+  // the demo that drives it. Everything else in the tier is covered by
+  // tsconfig.generated.json or tsconfig.handwritten.json, and
+  // scripts/typecheck-handwritten.mjs fails if any .ts is covered by none.
+  "include": ["runtime.ts", "demo.ts"]
 }
