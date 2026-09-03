@@ -35,6 +35,11 @@ import (
 // dialAttempts / dialDelay mirror backends/python/bridge.py::_connect: under
 // placement the provider and consumer start concurrently, so the socket may
 // not exist yet; retrying makes start order irrelevant.
+//
+// Only while the PROCESS graph is acyclic. Two processes that each require a
+// key the other provides both block in the dial and neither reaches its
+// listen, so both die once the attempts run out. Nothing rejects that
+// composition today; see docs/design/438-petri-reachability.md §5.2.
 const (
 	dialAttempts = 200
 	dialDelay    = 50 * time.Millisecond

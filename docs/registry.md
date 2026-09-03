@@ -28,8 +28,9 @@ choice below serves that line; anything that doesn't is out of phase 0.
 Why this is safe *now* (the re-scoped §5 stance, roadmap item 49): the
 collision argument gates publishing at scale, not reuse — the reuse loop
 is search → fetch one candidate → admit, and G2 already refuses two
-providers of one key at admission. Namespacing stays where item 9 put it,
-gating phase 2.
+providers of one key at admission. Namespacing has since landed
+(`ns::key`, [namespacing.md](namespacing.md)), so the collision argument that
+gated phase 2 is answered.
 
 ---
 
@@ -368,6 +369,9 @@ adapter's alias so G2 still sees exactly one provider of the key.
   unwritten adapter does not.
 
 ## 3. The reuse hint (phase 0.5) — did-you-mean for existence
+
+**Not built.** This section is the phase-0.5 design; nothing below it ships
+today, `--no-reuse-hints` included. The header note above says the same thing.
 
 When compilation/admission of a **freshly authored** component finds a
 registry entry whose provided surface is §5-compatible with what was just

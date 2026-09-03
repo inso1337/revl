@@ -38,7 +38,7 @@ Each directory under `cases/` holds three files.
 
 | file | role |
 |---|---|
-| `case.rvl` | the revl program, emitted exactly as `revl build --backend java` emits it |
+| `case.rvl` | the revl program, emitted exactly as `revl emit --backend java` emits it |
 | `Hand.java` | the yardstick: same semantics, same class shape, written the way a Java developer would write it |
 | `Drive.java` | a `bench.Drive` exposing `NAME`, `N`, `WARMUP`, `setup()`, `emitted(int)`, `hand(int)` |
 

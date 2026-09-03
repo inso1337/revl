@@ -16,7 +16,8 @@ Every **admitted change** appends a generation snapshot:
 
 * a `revl_load` starts the history at generation 1;
 * every `revl_swap` (and every `revl_undo`) appends the resulting generation;
-* a `revl_apply` appends too — but from a plan *artifact* (an IR, not sources),
+* an apply appends too (`Session.apply`, the `revl apply` CLI; there is no
+  `revl_apply` MCP verb) — but from a plan *artifact* (an IR, not sources),
   so its entry has **no re-admittable snapshot** (see "the honest gaps" below).
 
 Each entry is `{generation, snapshot, ir, origin}`:

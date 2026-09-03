@@ -1,7 +1,12 @@
 # 256: capability-bound secrets, a key confined to one capability's emissions
 
 Design note for roadmap item 256 (`docs/v2.0-roadmap.md`, grep `^256\.`).
-Design only: no compiler code changes land with this note. The companion is
+**Implemented since.** The note itself landed no code, but the design has: the
+`Secret[T]` confidentiality qualifier and the `confidential` origin are in
+`src/revl/taint.py` (Slice 3), plug-time key injection into `_REVL_SECRETS` is in
+`src/revl/lower.py` and `src/revl/run.py`, and per-printer redaction is emitted on
+the python, typescript and go tiers. Read the note as the reasoning, not as the
+current status. The companion is
 item 249 (`docs/design/249-taint-provenance.md`), whose taint machinery this
 note reuses rather than duplicates, and item 379 (extern typed config), whose
 plug-time injection seam this note extends.

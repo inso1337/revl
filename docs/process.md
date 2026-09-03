@@ -31,9 +31,22 @@ belongs.
    ./tools/pre_pr.sh
    ```
 
-   This runs ruff, a Python 3.11 syntax sweep (CI runs 3.11, the dev venv is
-   newer, so 3.12+ syntax passes locally and reds CI) and the roadmap marker
-   gate. It does not run any suite.
+   Seven checks: ruff; a Python 3.11 syntax sweep (CI runs 3.11, the dev venv
+   is newer, so 3.12+ syntax passes locally and reds CI); the workflow
+   permission gate (`tools/check_workflow_permissions.py`, self-test then
+   `--strict`); the roadmap marker gate; drift checks on both generated gate
+   crates, `crates/revl-gate` (`tools/build_gate_crate.py --check`) and
+   `crates/revl-gate-wasm` (`tools/build_gate_wasm.py --check`); and the
+   source-derived doc blocks (`tools/docgen.py --check`). It does not run any
+   suite.
+
+   A red on either gate-crate check is yours to fix before the PR, not the
+   orchestrator's at merge: run the matching builder without `--check` and
+   commit the regenerated crate. A red on the docs check is `make docs-gen`
+   when a generated block is stale, or a missing section to write when a
+   coverage check names an undocumented subcommand or MCP verb — never a hand
+   edit inside a `<!-- docgen:KEY -->` region, which the next generation
+   overwrites.
 
 5. Open a PR that closes the issue:
 
@@ -101,9 +114,20 @@ a correct one.
 
 ## What CI covers
 
-`lint`, `frontend`, `frontend-cordis`, `backend-python`, `backend-typescript`,
-`backend-wasm`, `backend-rust`, `backend-java`, `backend-go`, `conformance`,
-`formal`. `pull_request` carries no branch filter, so every PR gets all of it.
+`lint`, `frontend`, `backend-python`, `frontend-cordis`, `sandbox-container`,
+`backend-typescript`, `backend-wasm`, `backend-rust`, `gate-wasm`,
+`backend-java`, `backend-go`, `backend-roots-combined`, `conformance`,
+`temporal-exit`, `formal`. `pull_request` carries no branch filter, so every PR
+gets all fifteen. `ci.yml` is also exposed as a `workflow_call`, so the PyPI
+publish gates on the same matrix that gates main.
+
+**CodeQL is not part of that.** `codeql.yml` runs on push to main, on a weekly
+schedule, and on `workflow_dispatch`. It deliberately does NOT run on
+`pull_request`: six language lanes per PR made it roughly half the queue on a
+repo whose runner concurrency is the throughput limit, and the required `ci`
+workflow was queuing behind scans of code that had not landed. Everything that
+reaches main is still scanned. What a PR loses is the pre-merge signal; dispatch
+a scan by hand against the branch when a change warrants one.
 
 ## What CI does not cover
 
@@ -181,8 +205,10 @@ on a tag build and cannot be rehearsed without publishing. Run
 
 ## Merging
 
-The orchestrator merges when CI is green, and regenerates the site wheel and the
-gate crate if the change touched them. A branch is never merged on a local
+The orchestrator merges when CI is green, and regenerates the site wheel if the
+change touched it. The gate crates are no longer on that list: `pre_pr.sh` checks
+both, so a drifted crate is the branch author's to fix before the PR opens. A
+branch is never merged on a local
 green alone, because a local green certifies only what actually ran on that
 machine at that moment.
 
@@ -231,13 +257,13 @@ advisories.
 
 ## Goldens
 
-Six backends carry checked-in emitter output, and so does `crates/revl-gate`.
-They are **snapshot tests, not a freeze**: the invariant is "emitter output
+Six backends carry checked-in emitter output, and so do `crates/revl-gate` and
+`crates/revl-gate-wasm`. They are **snapshot tests, not a freeze**: the invariant is "emitter output
 never changes unreviewed", never "output never changes". Regenerating a golden
 and reviewing its diff is always an acceptable resolution. Bending an emitter
 back to keep old bytes is not.
 
-One command covers every tier:
+One command covers the six backends and `crates/revl-gate`:
 
 ```
 python3 tools/regen_goldens.py             # list every target and the files it owns
@@ -245,18 +271,28 @@ python3 tools/regen_goldens.py --check     # which goldens drifted, and the fix 
 python3 tools/regen_goldens.py <target>    # regenerate: python typescript rust java wasm go gate-crate
 ```
 
+Two generated artifacts are not on that list. `crates/revl-gate-wasm` has its
+own builder, `python3 tools/build_gate_wasm.py` (`--check` to test for drift),
+and its own gate, `tests/test_gate_wasm_drift.py`. The source-derived doc blocks
+have `python3 tools/docgen.py --write` (`make docs-gen`), `--check`, and the
+`frontend` job. `./tools/pre_pr.sh` runs all of them, so you do not have to
+remember which tool owns which artifact.
+
 Rules:
 
 1. If you change an emitter, regenerate its goldens **in the same commit** and
    review the diff. A separate follow-up commit means main is red in between.
 2. `crates/revl-gate` embeds emitted rust. Any change to `backends/rust/emit.py`
-   or to `selfhost/*.rvl` rewrites about 1900 lines of it, and a PR that skips
+   or to `selfhost/*.rvl` rewrites about 8000 lines of it (`src/selfhost.rs`
+   alone), and a PR that skips
    the regeneration goes red on drift alone. `python3 tools/regen_goldens.py
    gate-crate` fixes it.
 3. A red golden test names the exact command that resolves it. Run that command,
    read the diff, and keep it only if the new bytes are what you meant.
 4. Adding a golden means adding it to `tools/regen_goldens.py`. A generated file
-   nothing can reproduce is a file nothing can check.
+   nothing can reproduce is a file nothing can check. `crates/revl-gate-wasm`
+   and the docgen blocks are the standing exceptions, and only because each
+   arrived with a builder and a CI gate of its own.
 
 The policy and its two declared exceptions live in
 [conformance.md](conformance.md), "Golden policy: snapshot, not freeze".

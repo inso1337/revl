@@ -119,7 +119,10 @@ test`, which is stronger than compile-only.
 
 ## Not in scope for v3
 
-`spawn` / instance-parametric IR (dynamic realms) stays out, on Go as on every
-tier — it is unimplemented language-wide (roadmap item 10). The Go backend's
-existing refusal for it is correct and should remain until the frontend lands
-instances.
+`spawn` / instance-parametric IR (dynamic realms) was out of scope for the v3
+plan, because it was unimplemented language-wide at the time (roadmap item 10).
+
+**It landed afterwards.** The frontend shipped instances, and Go lowers `spawn`
+through `_spawn_expr` in `backends/go/emit.py` (one `*stc.Realm` per spawn, so
+two instances of one component never collide), executed by
+`backends/go/scenarios/spawn.rvl`. The refusal this section preserved is gone.
