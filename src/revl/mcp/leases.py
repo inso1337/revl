@@ -263,9 +263,9 @@ def _book(session) -> LeaseBook:
 def _swap_targets(session, arguments: dict) -> list[str] | None:
     """The component names a swap with these arguments would *replace*, reusing
     item 55's target derivation (read-only). ``None`` means undecidable — the
-    candidate will not compile, or nothing is loaded — in which case the
-    handler itself refuses and mutates nothing, so leases stay out of the way,
-    exactly as the operator gate does."""
+    candidate will not compile, or nothing is loaded. Enforcement fails CLOSED
+    on it (see :func:`check_swap`); only the advisory path, which never blocks
+    anything, is allowed to shrug."""
     from . import operator as _operator  # noqa: PLC0415 — read-only reuse of item 55
 
     targets = _operator._targets("swap", session, arguments)
@@ -367,19 +367,35 @@ def check_swap(session, arguments: dict,
     by *another* operator; ``None`` otherwise (advisory-only, or clear).
 
     All-or-nothing like admission: the first offending target refuses the whole
-    swap, and the server leaves the running composition untouched."""
+    swap, and the server leaves the running composition untouched.
+
+    An UNDECIDABLE target set fails closed: the swap is checked against EVERY
+    active lease, so a swap whose targets cannot be derived cannot launder past
+    a lease it might be replacing. Deferring instead was the bypass — a
+    candidate that renamed the component it replaced derived no targets and so
+    was refused by nothing, which is exactly the swap an enforced lease exists
+    to stop."""
     if not enforced(session):
         return None
     now = time.time() if now is None else now
+    undecidable = False
     try:
         targets = _swap_targets(session, arguments)
-    except Exception:  # noqa: BLE001 — an undecidable candidate defers to the handler
+    except Exception:  # noqa: BLE001 — a derivation that raised is undecidable
+        targets = None
+    if targets is None:
+        undecidable = True
+    book = _book(session)
+    me = holder_identity(session)
+    active = book.active(now)
+    if undecidable:
+        for lease in active:
+            if lease.holder != me:
+                return _refusal(me, lease, now)
         return None
     if not targets:
         return None
-    book = _book(session)
-    me = holder_identity(session)
-    live = {l.component: l for l in book.active(now)}
+    live = {l.component: l for l in active}
     for name in targets:
         lease = live.get(name)
         if lease is not None and lease.holder != me:

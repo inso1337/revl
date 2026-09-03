@@ -303,6 +303,21 @@ it. A rejection whose message is a bare "error" is not done.
   toolchain, never silently pass. CI installs the toolchain and, for the tiers
   where it matters, makes a missing runtime *fatal* (e.g.
   `REVL_REQUIRE_WASMTIME=1`) so coverage is real and not implied.
+- **A test that drives `revl.test.RUNNERS` must be run by a CI step that sets
+  `REVL_REQUIRE_TIERS`** for every tier it names (issue #266). The switch takes
+  a comma-separated list of tiers (or `all`); on those tiers an *absent
+  toolchain* stops being a skip and becomes a failure, while a tier's by-design
+  refusal of a document still skips. Unset — a laptop, a fresh worktree — keeps
+  the old behaviour, so nothing about local development changes.
+
+  The `conformance` job is where both halves exist (`sh
+  backends/python/setup.sh` for cordis-py, `npm ci` for cordis-ts), and it runs
+  the tier tests with `REVL_REQUIRE_TIERS: "py,ts"`. Add a new tier test to
+  that step's file list;
+  `tests/test_env_gated_skips_run_somewhere.py::test_every_tier_test_is_required_to_actually_run_in_some_ci_job`
+  fails if you do not. Without it, `test_..._executes[ts]` executes nothing and
+  reports green everywhere the toolchain is absent — which is how a live
+  `TypeError: Cannot mix BigInt and other types` sat under a green ts test.
 
 Some Cordis runtime targets are upstream projects (cordis-py, cordis, cordis-rs,
 cordis4j, stc-go) — a genuine *runtime* defect there is fixed upstream
