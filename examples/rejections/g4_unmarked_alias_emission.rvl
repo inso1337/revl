@@ -1,0 +1,51 @@
+// REJECTED — G4: aliasing a spawn-handle provision does not drop the `emit`
+// marker (the twin of `g4_unmarked_handle_emission.rvl`, one binding later).
+//
+// `let t = w.task` names the provision `w.task` reads; `t.run(prompt)` is the
+// SAME crossing `w.task.run(prompt)` is, so it is refused for the same reason
+// and is named for what it is. The binding is not the crossing, so the fix is
+// provenance rather than a new rule: the local resolves back to the provision
+// read, and every consumer that judges a handle call — the marker check, the
+// `revl audit` boundary fold, cardinality — sees the direct form.
+//
+// Before, this compiled clean AND `revl audit` reported the component as
+// "fully revertible", while the marked spelling `emit t.run(prompt)` was
+// refused as "not declared `emission`". Both ends were wrong; both are now
+// the same judgment the unaliased spelling gets.
+//
+// expected error:
+//   call to emission `w.task.run` must be marked `emit` (G4)
+
+service Net {
+  emission[net] fn send(msg: Str) -> Int
+}
+
+service Task {
+  emission[net] fn run(prompt: Str) -> Int
+  fn status() -> Int
+}
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+    fn status() = 0
+  }
+}
+
+service Sup {
+  emission fn go(prompt: Str) -> Int
+}
+
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(prompt: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let t = w.task
+      let r = t.run(prompt)
+      return r
+    }
+  }
+}

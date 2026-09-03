@@ -1,0 +1,30 @@
+// REJECTED — G5, the other first-class shape: the emitting callable is not
+// CALLED in the teardown slot, it is PASSED to a dispatcher.
+//
+// `wrap` reaches the `emission` extern `send`, and `app` dispatches whatever
+// function value it is handed. A bare reference to an emitting callable in
+// value position reaches what it names, one indirection later — the same
+// verdict `_method_emissions` gives this shape for the forward path (G4), now
+// applied to the teardown slot that had no such arm.
+//
+// expected error:
+//   the `undo` of this bracket calls `wrap`, a fn that reaches an emission
+//     `send` (through wrap -> send) — a bracket inverse runs in teardown and
+//     may not cross a boundary (G5)
+
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+
+fn wrap(x: Str) -> Int { return send(x) }
+fn app(f: (Str) -> Int, x: Str) -> Int { return f(x) }
+
+service Cache { emission fn set(key: Str) }
+
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      effect store.insert(key, "v")
+      undo   app(wrap, key)
+    }
+  }
+}

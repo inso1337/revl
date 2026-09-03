@@ -13,6 +13,8 @@ Guarantee enforcement map (DESIGN.md §4):
 
 from __future__ import annotations
 
+import contextlib
+import copy
 import dataclasses
 import keyword
 import os
@@ -39,6 +41,7 @@ from .typecheck import (
     compatible,
     format_type,
     host_check,
+    _HOST_ACQUIRE_VERBS,
     _HOST_FAMILIES,
     _HOST_RESULT_SIG,
     check_ir,
@@ -638,6 +641,28 @@ class Env:
         # a pass-through that only fails at the host runtime (item 401, the
         # item-84 crash shape).
         self.host_locals: dict[str, str] = {}
+        # PROVISION PROVENANCE (GHSA cluster, the aliasing arm). A spawn-handle
+        # provision read (`w.task`) lowers to an `instance-get` node, and every
+        # analysis that judges a crossing through a handle — the G4 marker
+        # check, `revl audit`'s boundary fold, cardinality, parallel — asks for
+        # that node by SHAPE at the call site. Binding the read to a name
+        # (`let t = w.task`) put a `name` node there instead, so `t.run(...)`
+        # was judged as an opaque host call: no `emit` marker demanded, no audit
+        # line, while the emitted code performed the very same crossing. The
+        # binding is not the crossing, so the fix is not a new refusal but
+        # provenance: the safe IR name maps back to the `instance-get` it was
+        # bound to, and every later use resolves to it, making the aliased
+        # spelling lower to exactly the IR the direct spelling lowers to. One
+        # entry, and all four consumers judge the alias without knowing it is one.
+        self.provision_locals: dict[str, dict] = {}
+        # ARROW PROVENANCE, the function-value arm of the same problem. A
+        # teardown slot's reach is judged by resolving its callee, and a callee
+        # that is a locally-bound arrow resolved to nothing at all — so
+        # `let f = (x) => send(x)` then `undo f(key)` ran an emission during
+        # teardown with no diagnostic. Keyed by SURFACE name (the teardown walk
+        # runs on the AST, before the slot is lowered, so the refusal can name
+        # what the author wrote); scoped to the body being lowered.
+        self.local_arrows: dict = {}
         # item 130: stream lifecycle tracking. `terminal_stream_sources` holds
         # the safe names of stream sources (`let s = effect Stream.source() undo
         # s.close()`) whose inverse CLOSES the source — the terminal-delivering
@@ -2482,8 +2507,65 @@ def _service_emission_op(binding: str, method: str, env) -> str | None:
     return None
 
 
+def _handle_provision_op(expr, env) -> tuple[str, object] | None:
+    """`(spelling, MethodDecl)` when the AST expression `expr` is a provision
+    method READ off a spawn handle — `w.<key>.<method>` or, through the alias
+    provenance, `t.<method>` where `let t = w.<key>` — else None.
+
+    The AST twin of `_instance_get_call`, which reads the same
+    `ServiceDecl.methods[...]` bit off the LOWERED node. A teardown slot is
+    walked on the AST (before its undo is lowered, so the refusal can name the
+    callee the author wrote), so the same resolution has to exist here; both
+    readings consult one table, so they cannot disagree."""
+    from .parser import ExprField, ExprVar
+    if env is None or not isinstance(expr, ExprField):
+        return None
+    services = getattr(env, "services", None) or {}
+
+    def _method(service_name, spelling):
+        svc = services.get(service_name)
+        decl = (getattr(svc, "methods", None) or {}).get(expr.name) if svc else None
+        return (spelling, decl) if decl is not None else None
+
+    target = expr.target
+    if not isinstance(target, ExprVar):
+        # `w.<key>.<method>`: the receiver is itself a provision read
+        if isinstance(target, ExprField) and isinstance(target.target, ExprVar):
+            comp = _handle_component_name(target.target.name, env)
+            if comp is None:
+                return None
+            reg = getattr(env, "spawn_reg", None)
+            decl = reg["by_name"].get(comp) if reg else None
+            provides = {k: svc for k, svc, _l in (decl.provides if decl else [])}
+            service = provides.get(target.name)
+            if service is None:
+                return None
+            return _method(service,
+                           f"{target.target.name}.{target.name}.{expr.name}")
+        return None
+    # `t.<method>` where `t` was bound to a provision read
+    safe = (getattr(env, "params", None) or {}).get(target.name) \
+        or (getattr(env, "locals", None) or {}).get(target.name)
+    inst = (getattr(env, "provision_locals", None) or {}).get(safe)
+    if inst is None:
+        return None
+    return _method(inst.get("service"), f"{target.name}.{expr.name}")
+
+
+def _handle_component_name(surface: str, env) -> str | None:
+    """The component a surface name holds a spawn handle to (`Instance[C]`),
+    else None."""
+    safe = (getattr(env, "params", None) or {}).get(surface) \
+        or (getattr(env, "locals", None) or {}).get(surface)
+    if safe is None:
+        return None
+    head, args = parse_type((getattr(env, "type_env", None) or {}).get(safe))
+    return args[0] if head == "Instance" and args else None
+
+
 def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
-                            emitting_witness: dict, *, refuse, env=None) -> None:
+                            emitting_witness: dict, *, refuse, env=None,
+                            refuse_opaque=None) -> None:
     """The ONE teardown-slot emission walk (G5), shared by every inverse.
 
     Two callers, one traversal: `_check_witnessed_inverse` holds a witnessed
@@ -2504,14 +2586,58 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
     * a call to an `emission` service operation off a required binding, when
       an `env` is supplied (`_service_emission_op`).
 
+    THREE MORE reach a boundary through an INDIRECTION, and each was invisible
+    to the shape tests above until the callee was resolved through it:
+
+    * a provision method call off a SPAWN HANDLE (`w.task.run(…)`), or off a
+      local aliasing one (`let t = w.task; t.run(…)`). The service-operation arm
+      matched only `<binding>.<method>`, so the handle form — one `ExprField`
+      deeper — fell into the generic recursion and the emission ran in teardown
+      with no diagnostic at all (`_handle_provision_op`);
+    * a call through a FIRST-CLASS FUNCTION VALUE bound in this scope
+      (`let f = (x) => send(x); undo f(key)`). The callee is not a name in
+      `extern_class` or `emitting_fns`, so nothing matched; the arrow's BODY is
+      walked instead, which follows the indirection precisely rather than
+      refusing every indirect call (`arrows`);
+    * a first-class REFERENCE to an emitting callable passed as an argument
+      (`undo app(wrap, key)`, `fn app(f, x) = f(x)`). The reference is not a
+      call, so no arm saw it; it is judged exactly as
+      `_method_emissions` judges the same shape — the value may be dispatched
+      by whoever receives it, so it counts as reaching what it names.
+
     `refuse(node, name, terminal_class, chain)` is called with the offending
     call, the callee as written, the classification of the boundary actually
-    reached, and the fn path to it; it must raise."""
-    from .parser import ExprCall, ExprField, ExprVar
+    reached, and the fn path to it; it must raise.
 
-    def _walk(e):
+    `refuse_opaque(node, name)`, when supplied, is called for a call through a
+    callee this scope cannot resolve at all — a function-typed parameter, a
+    binding whose arrow is not in view. Nothing can bound what runs there, so a
+    teardown slot refuses it; `_check_witnessed_inverse` supplies no such
+    callback (an extern's declared inverse has no local scope to resolve
+    against, and its callee table is closed).
+
+    `arrows` maps a surface name to the `ExprArrow` it was bound to in the
+    enclosing scope, and `known` is every name a call may legitimately
+    name (declared fns/externs, host roots, ADT cases) — both read off `env`."""
+    from .parser import ExprArrow, ExprCall, ExprField, ExprVar
+
+    arrows = (getattr(env, "local_arrows", None) or {}) if env is not None else {}
+    in_scope = set()
+    if env is not None:
+        in_scope = set(getattr(env, "params", None) or {}) \
+            | set(getattr(env, "locals", None) or {})
+
+    def _walk(e, _seen=()):
         if e is None:
             return
+        if isinstance(e, ExprVar) and e.name in emitting_fns \
+                and e.name not in extern_class:
+            # a first-class reference in VALUE position: the callee it names may
+            # be dispatched by whoever receives it, so it reaches what it names,
+            # one indirection later (the same verdict `_method_emissions` gives
+            # this shape).
+            chain = _emission_chain(e.name, emitting_witness)
+            refuse(e, e.name, extern_class.get(chain[-1]), chain)
         if isinstance(e, ExprCall):
             callee = e.callee
             if isinstance(callee, ExprVar):
@@ -2522,22 +2648,38 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
                 elif bad is None and name in emitting_fns:
                     chain = _emission_chain(name, emitting_witness)
                     refuse(e, name, extern_class.get(chain[-1]), chain)
-            elif env is not None and isinstance(callee, ExprField) \
-                    and isinstance(callee.target, ExprVar):
-                op = _service_emission_op(callee.target.name, callee.name, env)
+                elif name in arrows and name not in _seen:
+                    # follow the arrow: whatever ITS body reaches, this call
+                    # reaches. Resolved, not over-approximated, so a teardown
+                    # calling a host-local arrow still compiles.
+                    _walk(arrows[name].body, _seen + (name,))
+                elif refuse_opaque is not None and bad is None \
+                        and name not in emitting_fns and name in in_scope:
+                    refuse_opaque(e, name)
+            elif env is not None and isinstance(callee, ExprField):
+                op = None
+                if isinstance(callee.target, ExprVar):
+                    op = _service_emission_op(callee.target.name, callee.name, env)
                 if op is not None:
                     refuse(e, op, "emission", [op])
+                else:
+                    found = _handle_provision_op(callee, env)
+                    if found is not None and getattr(found[1], "emission", False):
+                        refuse(e, found[0], "emission", [found[0]])
             for a in e.args:
-                _walk(a)
+                _walk(a, _seen)
+            return
+        if isinstance(e, ExprArrow):
+            _walk(e.body, _seen)
             return
         for f in type(e).__dataclass_fields__:
             v = getattr(e, f)
             if hasattr(v, "__dataclass_fields__"):
-                _walk(v)
+                _walk(v, _seen)
             elif isinstance(v, (list, tuple)):
                 for x in v:
                     if hasattr(x, "__dataclass_fields__"):
-                        _walk(x)
+                        _walk(x, _seen)
 
     _walk(expr)
 
@@ -2590,8 +2732,22 @@ def _check_site_inverse_emission(undo_expr, env, filename: str, line: int,
                  "(docs/design/teardown-contract.md)",
             code="G5", category="teardown")
 
+    def _refuse_opaque(node, name):
+        raise RevlError(
+            filename, getattr(node, "line", 0) or line,
+            f"the `{slot}` of this bracket calls `{name}`, a function VALUE "
+            f"this scope cannot resolve — teardown may not dispatch through an "
+            f"indirection whose reach is unknown (G5)",
+            hint="a bracket inverse must be a host-local release the checker "
+                 "can bound; a call through a function-typed parameter or an "
+                 "out-of-scope binding hides whatever it dispatches to, "
+                 "including a boundary crossing. Name the release directly "
+                 "(`h.close()`), or move the indirection into the forward path "
+                 "(docs/design/teardown-contract.md)",
+            code="G5", category="teardown")
+
     _walk_inverse_emissions(undo_expr, extern_class, emitting, witness,
-                            refuse=_refuse, env=env)
+                            refuse=_refuse, env=env, refuse_opaque=_refuse_opaque)
 
 
 def _check_witnessed_inverse(decl, extern_class: dict, emitting_fns: set,
@@ -2854,6 +3010,84 @@ def _refuse_witnessed_outside_effect_position(program: Program, filename: str) -
     for test in program.tests:
         for stmt in test.body:
             _walk(stmt, f"the body of test `{test.name}`")
+
+
+def _refuse_host_acquire_in_component_reachable_fn(program: Program, filename: str) -> None:
+    """A host acquire verb (`Pool.open`, `Map.new`, `Stream.source`) in a `fn`
+    body a COMPONENT can reach, refused (G4).
+
+    A `fn` body has no acquisition bracket, so the release verb is never
+    registered anywhere. What makes that a soundness break rather than a style
+    question is the caller: a component activation PROMISES no residue — the
+    teardown accumulator runs every registered inverse on unload and on abort,
+    and `assert no_residue` is a proof obligation the runtime checks. A helper
+    the activation calls acquires inside that promise while contributing
+    nothing to it, so the activation tears down clean and the pool stays open
+    (`pool#1 (open() with no close())`, R1) on a program the checker admitted.
+
+    The reach qualifier is the invariant, not a carve-out. Residue is defined
+    against an activation; a `pub fn` no component reaches is a library entry
+    point whose lifecycle belongs to the foreign caller that invoked it (the
+    java scenario corpus drives exactly such functions from a JVM harness),
+    and revl promises nothing about it. So the rule is: inside the promise, a
+    host acquisition must be bracketed; outside it, there is no promise to
+    break.
+
+    The COMPONENT-stratum positions of the same rule (a provide-method `let`,
+    an `undo`/`compensate` slot, an `emit` expression) are refused where they
+    lower, by `_refuse_unbracketed_host_acquire`. This pass exists because a fn
+    body is lowered without knowing who calls it.
+    """
+    from .parser import ExprCall, ExprField, ExprVar
+
+    fns = {fn.name: fn for fn in program.fn_decls}
+    if not fns:
+        return
+
+    def _named_calls(node, out: set) -> None:
+        if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
+            out.add(node.callee.name)
+        if hasattr(node, "__dataclass_fields__"):
+            for f in type(node).__dataclass_fields__:
+                _named_calls(getattr(node, f), out)
+        elif isinstance(node, (list, tuple)):
+            for x in node:
+                _named_calls(x, out)
+
+    # seed: every fn a component body names, directly
+    reached: set = set()
+    frontier: set = set()
+    for comp in program.components:
+        _named_calls(comp.body, frontier)
+    frontier &= set(fns)
+    # ... closed over the fn call graph, so a two-hop helper is reached too
+    while frontier:
+        name = frontier.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        callees: set = set()
+        _named_calls(fns[name].body, callees)
+        frontier |= (callees & set(fns)) - reached
+
+    def _scan(node, fn_name: str) -> None:
+        if isinstance(node, ExprCall) and isinstance(node.callee, ExprField) \
+                and isinstance(node.callee.target, ExprVar):
+            dotted = f"{node.callee.target.name}.{node.callee.name}"
+            if dotted in _HOST_ACQUIRE_VERBS:
+                _refuse_unbracketed_host_acquire(
+                    node.callee.target.name, node.callee.name,
+                    f"`fn {fn_name}`, which a component body reaches",
+                    filename, node.line)
+        if hasattr(node, "__dataclass_fields__"):
+            for f in type(node).__dataclass_fields__:
+                _scan(getattr(node, f), fn_name)
+        elif isinstance(node, (list, tuple)):
+            for x in node:
+                _scan(x, fn_name)
+
+    for name in sorted(reached):
+        _scan(fns[name].body, name)
 
 
 def _refuse_teardown_bound_externs_in_fn_body(program: Program, filename: str) -> None:
@@ -5864,6 +6098,7 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     # session commit, so a bare call would drop the declared `undo` (399) or fire
     # the deferred emission immediately, bypassing the commit queue (400).
     _refuse_teardown_bound_externs_in_fn_body(program, program.filename)
+    _refuse_host_acquire_in_component_reachable_fn(program, program.filename)
     # Slice 2: the set every component's effect-position lowering consults to
     # tell a witnessed acquisition from an ordinary one (docs/design/243-
     # witnessed-externs.md). Computed once — every component shares the same
@@ -6573,7 +6808,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
     if isinstance(expr, ExprVar):
         name = expr.name
         if name in scope:
-            return {"kind": "name", "id": scope[name]}
+            return _resolve_provision_alias({"kind": "name", "id": scope[name]}, env)
         info = _tagged_case(name, env.types)
         if info is not None and info.get("payload") is None \
                 and not str(info.get("adt", "")).startswith(("Result", "Opt")):
@@ -6654,7 +6889,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
     if isinstance(expr, ExprCall):
         args = [_lower_component_pure_expr(a, env, scope, callables, pure_only)
                 for a in expr.args]
-        if isinstance(expr.callee, ExprField) and isinstance(expr.callee.target, ExprVar):
+        # A method call whose receiver is a NAME takes the var-root fast paths
+        # below (host family, required service, stdlib builtin, opaque local) —
+        # except when that name is a spawn-handle provision alias. Those must
+        # take the generic fall-through, where the receiver lowers back to its
+        # `instance-get` and the call is judged as the direct `w.<key>.<method>`
+        # spelling is: `emit`-marked (G4), folded into the audit surface (G8),
+        # counted by cardinality. Skipping the fast paths IS the fix — nothing
+        # below needed to learn about aliases.
+        if isinstance(expr.callee, ExprField) and isinstance(expr.callee.target, ExprVar) \
+                and scope.get(expr.callee.target.name) not in \
+                (getattr(env, "provision_locals", None) or {}):
             root = expr.callee.target.name
             method = expr.callee.name
             if root in _HOST_CALLABLES:
@@ -6677,6 +6922,15 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                         "in pure setup",
                         hint="move the acquisition to the final expression of the effect block (G6)",
                     )
+                # G4: a host ACQUIRE verb only in an acquisition bracket.
+                if f"{root}.{method}" in _HOST_ACQUIRE_VERBS \
+                        and expr is not getattr(env, "_host_acquire_root", None):
+                    mode = getattr(env, "_expr_mode", "setup")
+                    where = ("a teardown slot" if mode == "undo"
+                             else "an `emit` expression" if mode == "emit"
+                             else "this position")
+                    _refuse_unbracketed_host_acquire(root, method, where,
+                                                     filename, line)
                 host_check(f"{root}.{method}",
                            [infer_ir(a, env.type_env, env.types, env.services)
                             for a in args],
@@ -6935,6 +7189,9 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
         inferred = _sweep(value, stmt.line)
         if inferred is not None:
             env.type_env[safe] = inferred
+        _note_provision_alias(safe, value, env)
+        if isinstance(stmt.value, ExprArrow):
+            env.local_arrows[stmt.name] = stmt.value
         out.append({"step": "let", "name": safe, "value": value})
     elif isinstance(stmt, AssignStmt):
         if stmt.name not in scope:
@@ -9027,7 +9284,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 for setup_stmt in stmt.setup:
                     _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
                                                 mutables, setup_steps)
-                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
+                with _acquire_position(env, stmt.acquire):
+                    acquire = _lower_component_pure_expr(stmt.acquire, env, scope,
+                                                         callables or set())
                 env.locals = saved_locals
                 env._taken = saved_taken
                 # setup-let types are block-scoped; drop them so a recycled safe
@@ -9035,7 +9294,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 env.type_env = saved_type_env
             else:
                 setup_steps = []
-                acquire = _lower_expr(stmt.acquire, env, mode="setup")
+                with _acquire_position(env, stmt.acquire):
+                    acquire = _lower_expr(stmt.acquire, env, mode="setup")
             safe = env.bind_local(stmt.bind, stmt.line)
             # host provenance: an effect-acquired HOST object (`Map.new()`)
             # keeps its verb surface verbatim, exempt from the stdlib table —
@@ -9100,13 +9360,16 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 for setup_stmt in stmt.setup:
                     _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
                                                 mutables, setup_steps)
-                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
+                with _acquire_position(env, stmt.acquire):
+                    acquire = _lower_component_pure_expr(stmt.acquire, env, scope,
+                                                         callables or set())
                 env.locals = saved_locals
                 env._taken = saved_taken
                 env.type_env = saved_type_env
             else:
                 setup_steps = []
-                acquire = _lower_expr(stmt.acquire, env, mode="setup")
+                with _acquire_position(env, stmt.acquire):
+                    acquire = _lower_expr(stmt.acquire, env, mode="setup")
             step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
                                       bind=None, raw_acquire=stmt.acquire)
             if setup_steps:
@@ -9443,6 +9706,10 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     decl.returns, method.returns)
 
         saved = env.params
+        # Per-method provenance: a method's own alias / arrow bindings must not
+        # leak into the next method, whose safe names may recycle theirs.
+        saved_provisions = dict(env.provision_locals)
+        saved_arrows = dict(env.local_arrows)
         env.params = env.bind_params(method.params, method.line)
         # method params carry the service's declared types (A6): surface
         # names bind the body, the service contributes the signature
@@ -9450,6 +9717,28 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         method_locals: dict[str, str] = {}
         for surface, (_, ptype) in zip(method.params, decl.params):
             env.type_env[env.params[surface]] = ptype
+
+        def _check_rebind(name: str, line: int) -> None:
+            """A method-body binding may not collide with anything already in
+            scope — params, earlier method locals, OR a component-scope name.
+
+            The component-scope arm is the load-bearing one. `Env.bind_local`
+            refuses a duplicate activation-body binding outright ("name `x` is
+            already bound in C"), but this stratum consulted only `env.params`
+            and `method_locals`, so a method-local `let` could reuse an
+            activation-body name. That is not a scoping nicety: the method body
+            lowers into a closure over the activation frame, and the safe-name
+            allocator below draws from `env.params`/`method_locals` only, so the
+            shadowing binding is emitted with the SAME host-safe name as the
+            component local. Every tier then reads the wrong value — a Str where
+            a host Map handle was expected, so the component local's declared
+            inverse runs against the shadow (or, when the shadowing `let` sits
+            after the use, the local is not bound at all) and the acquisition it
+            was supposed to release leaks. Refusing the collision here gives the
+            two strata one rule and the same diagnostic."""
+            if name in env.params or name in method_locals or name in env.locals:
+                raise RevlError(filename, line,
+                                f"`{name}` is already bound in `{method.name}`")
         mbody = []
         returned = False
 
@@ -9498,7 +9787,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 # a (typed) name. The general method-body acquisition stays
                 # deferred (docs/design/397-insert-if-absent.md §The one grammar
                 # extension).
-                acquire = _lower_expr(mstmt.acquire, env, mode="setup")
+                with _acquire_position(env, mstmt.acquire):
+                    acquire = _lower_expr(mstmt.acquire, env, mode="setup")
                 result_type = _host_result_type(acquire, env)
                 if result_type is None:
                     raise RevlError(
@@ -9509,11 +9799,10 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                              "body (docs/design-v2-instances.md). A result-declared "
                              "host verb (a Bool compare-and-set like "
                              "`insert_if_absent`) may be bound here")
-                if mstmt.bind in env.params or mstmt.bind in method_locals:
-                    raise RevlError(filename, mstmt.line,
-                                    f"`{mstmt.bind}` is already bound in `{method.name}`")
+                _check_rebind(mstmt.bind, mstmt.line)
                 safe = _safe_name(mstmt.bind,
-                                  set(env.params.values()) | set(method_locals.values()))
+                                  set(env.params.values()) | set(method_locals.values())
+                                  | set(env.locals.values()))
                 method_locals[mstmt.bind] = safe
                 env.params[mstmt.bind] = safe  # visible to later statements
                 # a checked Bool value, NOT a host receiver: entered in the
@@ -9530,12 +9819,12 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 # reclaims it when the instance dies, not when the component
                 # tears down. Only `spawn` may be acquired here in phase 1 —
                 # a general method-body acquisition is a separate feature.
-                if mstmt.bind in env.params or mstmt.bind in method_locals:
-                    raise RevlError(filename, mstmt.line,
-                                    f"`{mstmt.bind}` is already bound in `{method.name}`")
+                _check_rebind(mstmt.bind, mstmt.line)
                 safe = _safe_name(mstmt.bind,
-                                  set(env.params.values()) | set(method_locals.values()))
-                acquire = _lower_expr(mstmt.acquire, env, mode="setup")
+                                  set(env.params.values()) | set(method_locals.values())
+                                  | set(env.locals.values()))
+                with _acquire_position(env, mstmt.acquire):
+                    acquire = _lower_expr(mstmt.acquire, env, mode="setup")
                 method_locals[mstmt.bind] = safe
                 env.params[mstmt.bind] = safe  # visible to later statements
                 # record the handle's `Instance[C]` type so a later `s.<key>`
@@ -9568,7 +9857,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 # (emit's `_method_witnessed_step` keys the transactional
                 # registration off the acquisition's callee), and a plain
                 # missing-undo effect raises the unchanged G4 refusal.
-                acquire = _lower_expr(mstmt.acquire, env, mode="setup")
+                with _acquire_position(env, mstmt.acquire):
+                    acquire = _lower_expr(mstmt.acquire, env, mode="setup")
                 mbody.append(_lower_effect_step(
                     acquire, mstmt.undo, env, filename, mstmt.line,
                     bind=None, raw_acquire=mstmt.acquire))
@@ -9586,16 +9876,18 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             elif isinstance(mstmt, LetStmt):
                 # a plain value binding: name an intermediate result instead
                 # of nesting every call into a single expression
-                if mstmt.name in env.params or mstmt.name in method_locals:
-                    raise RevlError(filename, mstmt.line,
-                                    f"`{mstmt.name}` is already bound in `{method.name}`")
-                safe = _safe_name(mstmt.name, set(env.params.values()) | set(method_locals.values()))
+                _check_rebind(mstmt.name, mstmt.line)
+                safe = _safe_name(mstmt.name, set(env.params.values())
+                                  | set(method_locals.values()) | set(env.locals.values()))
                 value = _lower_expr(mstmt.value, env, mode="setup")
                 # item 404: raise on a definite operator/index/builtin misuse in
                 # the bound value, uniformly with a `fn`/`test` body.
                 swept = _sweep(value, mstmt.line)
                 method_locals[mstmt.name] = safe
                 env.params[mstmt.name] = safe  # visible to later statements
+                _note_provision_alias(safe, value, env)
+                if isinstance(mstmt.value, ExprArrow):
+                    env.local_arrows[mstmt.name] = mstmt.value
                 if mstmt.type is not None:
                     # a `let x: T` annotation in a provide-method body. It is
                     # recorded rather than ignored so `infer_ir` sees it, but
@@ -9715,6 +10007,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         safe_params = [env.params[p] for p in method.params]
         env.params = saved
         env.type_env = saved_tenv
+        env.provision_locals = saved_provisions
+        env.local_arrows = saved_arrows
 
         # A service declaration is an *upper bound* on its providers' effects:
         # consumers bind to the service, not to this component, and a provider
@@ -10309,6 +10603,84 @@ def _timer_body_reaches_async(body, env) -> bool:
     return bool(called & (getattr(env, "async_callables", None) or set()))
 
 
+def _refuse_unbracketed_host_acquire(root: str, verb: str, where: str,
+                                     filename: str | None, line: int) -> None:
+    """A host acquire verb is legal ONLY as the acquisition of an
+    `effect … undo …` bracket (G4/G6).
+
+    `Pool.open`/`Map.new`/`Stream.source` open a host resource whose release is
+    a separate verb. The bracket is the only construct that registers that
+    release with the activation's teardown accumulator, so a call anywhere else
+    acquires something no teardown reclaims: the runtime reports it as residue
+    (`pool#1 (open() with no close())`, R1) on a program the checker admitted.
+
+    The rule was enforced at exactly one position — an activation-body `effect`
+    with no `undo` (`g4_missing_undo.rvl`) — and every OTHER position an
+    expression can occupy was silent: a `fn`/`test` body, a plain `let` in a
+    provide-method body, an `undo`/`compensate` slot. This is the same rule at
+    every position, which is why it lives at the two host-call lowering arms
+    rather than as a fourth special case.
+
+    The `acquire` EXTERN twin of this refusal is
+    `_refuse_teardown_bound_externs_in_fn_body` (items 399/400); the wording
+    below deliberately echoes it."""
+    release = _HOST_ACQUIRE_VERBS[f"{root}.{verb}"]
+    raise RevlError(
+        filename or "<unknown>", line,
+        f"host acquisition `{root}.{verb}` cannot be called in {where} — "
+        f"nothing registers its `{release}()`, so the resource is acquired "
+        f"irreversibly (G4)",
+        hint=f"acquire it in a bracket, where the teardown accumulator holds "
+             f"the release: `let h = effect {root}.{verb}(…) undo h.{release}()` "
+             f"in a component activation body. A `fn` body has no host access at "
+             f"all (G6), and a teardown slot may not acquire "
+             f"(docs/design/teardown-contract.md)",
+        code="G4", category="acquire",
+    )
+
+
+@contextlib.contextmanager
+def _acquire_position(env, expr):
+    """Mark `expr` as THE acquisition expression of an effect bracket.
+
+    Identity, not shape: only the bracket's own root call is in acquire
+    position, so `effect wrap(Pool.open(u, 1)) undo …` — which acquires a pool
+    the bracket's inverse never names — is still refused."""
+    saved = getattr(env, "_host_acquire_root", None)
+    env._host_acquire_root = expr
+    try:
+        yield
+    finally:
+        env._host_acquire_root = saved
+
+
+def _resolve_provision_alias(node, env):
+    """A `name` node bound to a spawn-handle provision, resolved back to the
+    `instance-get` it names (else `node`, untouched).
+
+    See `Env.provision_locals`. Every consumer of a provision call —
+    `_instance_get_call` (G4's marker check), `__main__._boundary` (G8's audit
+    fold), `cardinality`, `parallel` — matches the RECEIVER shape, so restoring
+    the shape at name resolution is the whole fix: nothing downstream has to
+    learn what an alias is. A fresh copy per use keeps the IR a tree."""
+    if not isinstance(node, dict) or node.get("kind") != "name":
+        return node
+    inst = (getattr(env, "provision_locals", None) or {}).get(node.get("id"))
+    if inst is None:
+        return node
+    return copy.deepcopy(inst)
+
+
+def _note_provision_alias(safe: str, value, env) -> None:
+    """Record that `safe` names a spawn-handle provision, when it does.
+
+    Both the direct read (`let t = w.task`) and a second hop (`let u = t`) land
+    here, because the second hop's value has already been resolved through this
+    same map by `_resolve_provision_alias`."""
+    if isinstance(value, dict) and value.get("kind") == "instance-get":
+        env.provision_locals[safe] = value
+
+
 def _instance_get_call(node: dict, env: Env):
     """If `node` is a method call whose receiver is a provision read off a
     spawn handle (`s.<key>.<method>(...)`), return `(instance_get, decl)`:
@@ -10599,7 +10971,8 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                             f"`{field.name}` is not a config field of {comp.name}")
         node = {"kind": "config", "field": field.name}
     elif head in env.params or head in env.locals:
-        node = {"kind": "name", "id": env.params.get(head) or env.locals[head]}
+        node = _resolve_provision_alias(
+            {"kind": "name", "id": env.params.get(head) or env.locals[head]}, env)
     elif head in env.requires:
         if not ops or ops[0].args is None:
             raise RevlError(env.filename, expr.line,
