@@ -99,10 +99,10 @@ was corrected by hand and had drifted back within a day.
 | closures.md | needs-work | 3 |  |
 | collections.md | needs-work | 34 | yes |
 | commands-reference.md | current | 5 |  |
-| component-leases.md | needs-work | 24 |  |
+| component-leases.md | needs-work | 26 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |
-| composition-rows.md | needs-work | 13 |  |
+| composition-rows.md | needs-work | 15 |  |
 | conformance.md | needs-work | 38 |  |
 | contract-errata.md | needs-work | 93 | yes |
 | crash-recovery.md | needs-work | 44 |  |
@@ -124,14 +124,14 @@ was corrected by hand and had drifted back within a day.
 | function-types.md | needs-work | 31 |  |
 | gate-as-a-service.md | needs-work | 21 | yes |
 | gate-dependency-contract.md | needs-work | 28 |  |
-| gauntlet.md | needs-work | 17 |  |
+| gauntlet.md | needs-work | 19 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 10 |  |
 | guide-ai-agents.md | stale-fixed | 2 |  |
 | guide-humans.md | stale-fixed | 0 | yes |
 | harness-gate-guide.md | needs-work | 2 |  |
 | holes.md | needs-work | 29 |  |
-| import-a2a.md | current | 6 |  |
+| import-a2a.md | current | 11 |  |
 | import-cordis.md | needs-work | 58 |  |
 | import-openapi.md | needs-work | 45 |  |
 | import-wit.md | needs-work | 29 |  |
@@ -145,7 +145,7 @@ was corrected by hand and had drifted back within a day.
 | network-path.md | needs-work | 25 |  |
 | network-placement.md | needs-work | 21 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
-| operator-capabilities.md | needs-work | 26 |  |
+| operator-capabilities.md | needs-work | 30 |  |
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |
@@ -169,7 +169,7 @@ was corrected by hand and had drifted back within a day.
 | schedule-testing.md | needs-work | 0 |  |
 | seam-deadlines.md | needs-work | 15 |  |
 | selfhost-compile.md | stale-fixed | 0 |  |
-| selfhost-findings.md | live-owned (not audited) | 251 |  |
+| selfhost-findings.md | live-owned (not audited) | 256 |  |
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 17 |  |
@@ -187,6 +187,7 @@ was corrected by hand and had drifted back within a day.
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
 | truc.md | needs-work | 47 |  |
+| ts-runtime-contract.md | current | 0 | yes |
 | verified-canary.md | needs-work | 22 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |

@@ -51,7 +51,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .. import audit_diff, why_runtime
-from ..compiler import compile_files, compile_source
 from ..errors import RevlError
 from ..policy import Policy, component_realms, evaluate as policy_evaluate
 from ..why import CHAIN, TraceStep, WhyTrace
@@ -239,19 +238,26 @@ def _parse_dsl(text: str, source: str | None) -> SelfRepairPolicy:
 # ======================================================================
 
 
-def _compile(candidate: dict, manifest: dict | None = None):
-    """Compile a candidate (`source` inline or `files` paths), through the same
-    entry points a human `revl compile` and the gauntlet use. Returns the IR, or
-    raises RevlError — the caller grades that."""
+def _compile(candidate: dict, manifest: dict | None = None,
+             over_the_transport: bool = True):
+    """Compile a candidate (`source` inline or `files` paths) through
+    `server.compile_under_authoring`, the one compiler door for agent-supplied
+    source. Returns the IR, or raises RevlError — the caller grades that.
+
+    A repair candidate is agent-authored like any other, and the loop hands it
+    to `gauntlet.run` (which boots it). Compiling it with no profile made the
+    repair loop a second door past the authoring trust `revl_check` /
+    `revl_admit` / `revl_swap` enforce. Lazy import: `server` imports this
+    module."""
+    from .server import compile_under_authoring  # noqa: PLC0415 — cycle
+
     source = candidate.get("source")
     files = candidate.get("files")
-    modules = candidate.get("modules")
-    if source is not None:
-        return compile_source(source, "<repair-candidate>.rvl",
-                              manifest=manifest, modules=modules)
-    if files:
-        return compile_files(list(files), manifest=manifest)
-    raise ValueError("candidate provides neither `source` nor `files`")
+    if source is None and not files:
+        raise ValueError("candidate provides neither `source` nor `files`")
+    return compile_under_authoring(source, files, manifest=manifest,
+                                   modules=candidate.get("modules"),
+                                   over_the_transport=over_the_transport)
 
 
 def _capabilities_reached(audit: dict) -> list[str]:
@@ -368,7 +374,8 @@ def _canary_follow_on() -> dict:
 
 
 def run_repair(session, arguments: dict,
-               strategy: RemediationStrategy | None = None) -> dict:
+               strategy: RemediationStrategy | None = None, *,
+               over_the_transport: bool = True) -> dict:
     """Run the unattended repair loop for one faulting component and return the
     incident dossier.
 
@@ -444,7 +451,8 @@ def run_repair(session, arguments: dict,
 
     # 4/5/6/7. GAUNTLET (31) -> POLICY (33) -> WIDENING (21).
     verdicts, gate = _run_gates(session, candidate_arg, running_ir, policy,
-                                set(arguments.get("accept") or []))
+                                set(arguments.get("accept") or []),
+                                over_the_transport=over_the_transport)
     if gate["blocked"]:
         status = (STATUS_AWAITING_ACK if gate["reason"] == "widening"
                   else STATUS_REJECTED)
@@ -496,7 +504,8 @@ def run_repair(session, arguments: dict,
 
 
 def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
-               policy: SelfRepairPolicy, accepted: set) -> tuple[dict, dict]:
+               policy: SelfRepairPolicy, accepted: set,
+               over_the_transport: bool = True) -> tuple[dict, dict]:
     """Run gauntlet (31) -> boundary policy (33) -> widening/may-touch (21) in
     order, short-circuiting at the first block. Returns `(verdicts, gate)` where
     `gate` carries `blocked`, `reason`, and — when everything passed — the
@@ -506,7 +515,8 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
     verdicts: dict = {}
 
     # -- gauntlet (item 31): admission + lifecycle no-residue, graded ---------
-    gauntlet_dossier = _gauntlet.run(session, dict(candidate_arg))
+    gauntlet_dossier = _gauntlet.run(session, dict(candidate_arg),
+                                     over_the_transport=over_the_transport)
     verdicts["gauntlet"] = gauntlet_dossier
     if gauntlet_dossier.get("verdict") != "admissible":
         return verdicts, {"blocked": True, "reason": "gauntlet"}
@@ -514,7 +524,8 @@ def _run_gates(session, candidate_arg: dict, running_ir: dict | None,
     # the candidate as a standalone composition — what a swap installs and what
     # the boundary/policy/widening gates read.
     try:
-        candidate_ir = _compile(candidate_arg)
+        candidate_ir = _compile(candidate_arg,
+                                over_the_transport=over_the_transport)
     except (RevlError, ValueError) as error:
         verdicts["policy"] = {"evaluated": False,
                               "reason": f"candidate is not a whole composition: {error}"}

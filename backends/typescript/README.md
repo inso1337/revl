@@ -18,6 +18,14 @@ npm test        # emits test fixtures, runs R1–R5 + emitter + upstream suites
 Requirements: Node >= 23.6 (erasable-syntax TypeScript, used directly — no
 build step) and `python3` on PATH (the emitter is pure-Python, stdlib only).
 
+**What an emitted module may assume about its environment is a written
+contract: `docs/ts-runtime-contract.md`.** `npm test` runs the suite under
+vitest, which supplies more than the shipping runtime does (a CommonJS scope
+with `require`/`__dirname`, vite's module resolution, full TypeScript). So
+`revl test --backend ts` re-runs every emitted module under plain node through
+`scripts/node-tier-runner.mjs` before it reports a pass; read the contract
+before adding a construct — or a matcher — to `emit.py`.
+
 Other commands:
 
 ```sh

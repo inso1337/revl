@@ -160,6 +160,24 @@ branch:
 
     python3 tools/check_site_wheel.py --write
 
+The same applies to the generated doc blocks, and for the same reason. Issue
+#296: `docs/DOC-STATUS.md`'s `doc-status` block embeds a row per `docs/*.md`, so
+**any** landing that touches **any** doc re-stales it. Unlike the site
+wheel, `tools/docgen.py --check` *is* a per-PR gate (it runs in the required
+`frontend` job). So a stale block on main reddens every open PR at once, for a
+reason none of their authors caused. It was already stale at the merge commit
+that introduced the gate.
+
+So `make docs-gen` joins the site wheel and the gate crate as merge-time
+regeneration the orchestrator owns:
+
+    make docs-gen        # or: python3 tools/docgen.py --write
+
+Regenerate it against the tip that actually lands, not the base the branch was
+cut from: a block regenerated an hour earlier is stale again if anything touched
+a doc in between. This is the same hazard as merging on a green whose run
+predates the last landing: the verdict was true when taken, and false when used.
+
 ## Issues are the state
 
 Every unfinished roadmap item has an issue. The roadmap stays the
