@@ -49,6 +49,12 @@ program rather than of the machine, and comes out identical on every run:
   n and 2n so the growth is visible.
 - **bytes**: `tracemalloc` peak, as corroboration on live-set growth.
 
+`run.py --load` reports the same three counters for the module LOAD instead of
+the run: executing the emitted module with none of its functions called. That
+is where a declaration the emitter writes and nothing constructs shows up, and
+everything else here is blind to it for the same reason `ops` is blind to
+copying — the cost is paid before the first call.
+
 `copycount.verify()` asserts that the instrumented module returns exactly what
 the plain one returns, so a copy count can never be bought with a behaviour
 change. `micro.py` likewise asserts that each emitted and hand-written spelling
