@@ -380,7 +380,8 @@ def admission_decision(session, report: dict) -> dict:
 
 # --------------------------------------------------------------- entry point
 
-def run(session, arguments: dict) -> dict:
+def run(session, arguments: dict, *,
+        over_the_transport: bool = True) -> dict:
     """Quarantine a candidate: grade it with the gauntlet, then prove it in the
     sandbox, and return a report whose verdict is one of ``passed`` / ``trapped``
     / ``rejected`` / ``deferred`` / ``unavailable`` (see the module docstring).
@@ -394,7 +395,8 @@ def run(session, arguments: dict) -> dict:
     # 1. The gauntlet grade (item 31), reused verbatim: admission proved,
     #    teardown derived, boundary enumerated, host lifecycle battery tested in
     #    an isolated scratch session. A rejection is a verdict, not a crash.
-    dossier = _gauntlet.run(session, arguments)
+    dossier = _gauntlet.run(session, arguments,
+                            over_the_transport=over_the_transport)
 
     if dossier.get("verdict") != "admissible":
         # admission refused: the candidate never reaches the substrate.
@@ -426,7 +428,7 @@ def run(session, arguments: dict) -> dict:
         # compile the candidate standalone for lowering — the same IR the
         # gauntlet booted in its scratch session (candidate summary carries it).
         try:
-            ir = _standalone_ir(arguments)
+            ir = _standalone_ir(arguments, over_the_transport)
             service = _service_name(ir, arguments)
             substrate = _run_substrate(canonical, ir, service)
         except RevlError as error:
@@ -455,7 +457,7 @@ def run(session, arguments: dict) -> dict:
     return report
 
 
-def _standalone_ir(arguments: dict) -> dict:
+def _standalone_ir(arguments: dict, over_the_transport: bool = True) -> dict:
     """Compile the candidate as a standalone composition — what the substrate
     lowers and boots (independent of the live composition it was admitted
     against). Mirrors the gauntlet's ``boot_ir`` compile.
@@ -473,7 +475,8 @@ def _standalone_ir(arguments: dict) -> dict:
     if source is None and not files:
         raise ValueError("provide `source` or `files`")
     return compile_under_authoring(source, files,
-                                   modules=arguments.get("modules"))
+                                   modules=arguments.get("modules"),
+                                   over_the_transport=over_the_transport)
 
 
 def _verdict_note(verdict: str) -> str:

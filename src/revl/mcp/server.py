@@ -450,7 +450,8 @@ def _host_bodies(ir: dict) -> list:
 def compile_under_authoring(source: str | None, files: list[str] | None,
                             manifest: dict | None = None,
                             modules: dict | None = None,
-                            replacing: tuple = ()) -> dict:
+                            replacing: tuple = (),
+                            over_the_transport: bool = True) -> dict:
     """Compile inline source or paths through the same entry points the CLI
     uses, so the admission gate is literally the same code.
 
@@ -465,6 +466,15 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     it reads every compiler call site under `src/revl/mcp/` out of the source
     and fails on one that neither passes `profile=` nor routes through here, so
     the NEXT door cannot be added silently.
+
+    `over_the_transport` says whether the source came from the agent on the far
+    end of an MCP session (the default, and the safe direction) or from the
+    OPERATOR'S OWN machine. `revl bundle`, `revl canary`, `revl repair`,
+    `revl quarantine` and `truc` reuse these modules as a library from the CLI,
+    where the human running the command IS the author — the same reason jailed
+    `files` compile unprofiled below. Those callers pass
+    `over_the_transport=False` explicitly; nothing that reaches a `handle`
+    dispatch may.
 
     Inline source never touches the disk: `compile_source` carries the
     ambient manifest and any in-memory `use` modules itself.
@@ -501,8 +511,8 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     decision compile, and its document is what loads.
     """
     # jailed `files` with no transport-carried text are operator-authored.
-    over_the_transport = source is not None or bool(modules)
-    profile = AUTHORING.profile() if over_the_transport else None
+    inline = source is not None or bool(modules)
+    profile = AUTHORING.profile() if inline and over_the_transport else None
     providers = dict(AUTHORING.providers or {})
     # operator-sanctioned modules ride UNDER the agent's own `modules`: an
     # agent-supplied entry can never displace a provider the operator granted.
