@@ -1907,6 +1907,98 @@ def _mutable_free_vars(expr, scope: dict, bound: set[str] | None = None) -> set[
     return set()
 
 
+# ---------------------------------------------------------------------------
+# By-value capture for a DERIVED INVERSE (docs/syntax-2.0.md §3.5,
+# docs/closures.md).
+#
+# An arrow literal snapshots the mutable names it reads: the lowering computes
+# them into the IR `captures` list (`_mutable_free_vars` above) and every
+# emitter binds them to their current values at arrow-creation time. A derived
+# inverse -- the `undo` of an `effect` / `let-effect`, the `compensate` of an
+# `emit` -- is NOT an arrow node, so it never went through that path. Each
+# emitter instead wraps the raw undo EXPRESSION in a closure of its own, which
+# in Python, TypeScript and Go captures the enclosing local by REFERENCE.
+#
+# That matters only in a provide-method body, the one place `var` and `effect`
+# coexist (`var` is fn-local, so an activation body has none, and item 399
+# refuses `effect` in a plain `fn` body). There, the inverse runs LATER -- at
+# teardown, or on abort -- so a `var` the body reassigns after the effect
+# registers changes what the inverse acts on:
+#
+#     var k = key
+#     effect store.insert(k, "v") undo store.remove(k)
+#     k = "zz"                       # the inverse now removes "zz"
+#
+# The accumulator entry is not the inverse of the effect that ran. G7's
+# LIFO-completeness holds over the wrong set, A8's revert-and-contain replays
+# against a value the forward step never used, and the R4 residue report still
+# reads clean because the runtime has no way to know.
+#
+# The fix gives the derived inverse the same contract the arrow already has:
+# the lowering names the mutable locals it reads on the step itself, under
+# `undo_captures` / `compensate_captures`, and each emitter binds them to their
+# current values where it builds the inverse closure -- the same division of
+# labour `captures` already has, and the one docs/closures.md §Backends already
+# describes. The names, not the binding idiom, are the part that has to agree
+# across tiers, so the front end owns them and no backend re-derives them.
+#
+# Naming them rather than rewriting the body keeps this invisible to everything
+# that reads the IR positionally: no step is inserted, so no effect LABEL moves
+# (the rust tier derives `C.set.effect.N` from the step index, and those labels
+# are observable in trace records), and a tier that already snapshots by other
+# means -- rust clones each free name into its `move` closure before the
+# reassignment can land -- keeps emitting byte-identical code.
+
+
+def _ir_name_reads(node, out: set, bound: frozenset = frozenset()) -> None:
+    """Every local name an IR expression READS, minus the ones an inner arrow
+    parameter shadows. Both spellings the lowering emits for a name reference
+    are covered: the component path's `{"kind": "name", "id": …}` and the pure
+    path's `{"kind": "var", "name": …}`."""
+    if isinstance(node, list):
+        for item in node:
+            _ir_name_reads(item, out, bound)
+        return
+    if not isinstance(node, dict):
+        return
+    kind = node.get("kind")
+    if kind == "name" and isinstance(node.get("id"), str):
+        if node["id"] not in bound:
+            out.add(node["id"])
+    elif kind == "var" and isinstance(node.get("name"), str):
+        if node["name"] not in bound:
+            out.add(node["name"])
+    elif kind == "arrow":
+        bound = bound | frozenset(node.get("params") or [])
+    for value in node.values():
+        _ir_name_reads(value, out, bound)
+
+
+def _pin_inverse_captures(body: list) -> None:
+    """Name, on each step that carries a derived inverse, the mutable locals that
+    inverse reads -- the ones an emitter must bind BY VALUE where it builds the
+    inverse closure (see the note above). Mutates `body` in place.
+
+    A step whose inverse reads no mutable local is left untouched, so the IR of
+    every program that never had the problem is byte-identical."""
+    mutable: set = set()
+    for step in body:
+        for slot in ("undo", "compensate"):
+            inverse = step.get(slot) if mutable else None
+            if inverse is None:
+                continue
+            reads: set = set()
+            _ir_name_reads(inverse, reads)
+            pinned = sorted(reads & mutable)
+            if pinned:
+                step[f"{slot}_captures"] = pinned
+        if step.get("step") == "let" and isinstance(step.get("name"), str):
+            if step.get("mutable"):
+                mutable.add(step["name"])
+            else:
+                mutable.discard(step["name"])
+
+
 def _block_arm_unimplemented(filename: str, line: int) -> RevlError:
     """Block-bodied match arms lower by lambda-lifting into a synthetic helper
     fn (`_lift_block_arm`), which needs a lift sink in scope. A position without
@@ -9924,6 +10016,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # unawaited coroutine at runtime. Admitted (async-flagged) arrows are
         # skipped inside the walk.
         _refuse_leaky_arrow(mbody, env, comp.source or filename, method.line)
+
+        # By-value capture for the derived inverses in this body: an `undo` /
+        # `compensate` reading a `var` the body goes on to reassign must act on
+        # the value its effect used, so name those locals for the emitters.
+        _pin_inverse_captures(mbody)
 
         methods.append({"name": method.name, "params": safe_params, "body": mbody})
 
