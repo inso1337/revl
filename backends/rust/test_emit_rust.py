@@ -2773,8 +2773,12 @@ def test_non_witnessed_non_compensating_program_is_untouched():
     """A program using neither `witnessed` nor `emit ... compensate` must
     emit byte-identically to before this slice: no `RevlTeardown`, no
     `revl_teardown_begin`, no phase-2 machinery at all."""
+    # An ordinary bracket. Spelled `effect Map.new() undo Map.new()` before —
+    # an inverse that ACQUIRES a second host Map rather than releasing the
+    # first, which a teardown slot now refuses; nothing this test asserts
+    # depends on that shape.
     src = emit.emit(compile_source(
-        "component C { effect Map.new() undo Map.new() }\n", "plain.rvl"))
+        "component C { let m = effect Map.new() undo m.drop() }\n", "plain.rvl"))
     assert "RevlTeardown" not in src
     assert "revl_teardown_begin" not in src
     assert "phase2" not in src
