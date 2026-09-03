@@ -1193,7 +1193,13 @@ def test_the_channel_is_wired_into_the_crossing_record():
     other = _step_back_record(_CLEAN_MODEL_SRC, "clean.rvl",
                               ["a different prompt"])
 
-    assert first["event"] == wr.EMIT and first["activationId"] == "Agent#g1"
+    # `activationId` carries a generation and, since item 121 slice 2, an
+    # activation suffix (`Agent#g1#a0`). This test is item 444's -- it owns the
+    # taint channel, not the id's shape -- so it pins the generation prefix and
+    # leaves the suffix to slice 2's own tests. An exact match here went red the
+    # moment the two landed together, each PR green on its own.
+    assert first["event"] == wr.EMIT
+    assert first["activationId"].startswith("Agent#g1")
     digest = first["llm"]["promptDigest"]
     assert digest["salted"].startswith("hmac-sha256:")
     assert digest["provenance"] == "revl-side-args"
