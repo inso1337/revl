@@ -1,0 +1,49 @@
+// Typecheck settings for HAND-WRITTEN TypeScript (issue #223).
+//
+// `tsconfig.json` covered `runtime.ts`, `demo.ts` and `golden/**`, and
+// `tsconfig.generated.json` (issue #198) covered the emitted modules under
+// `tests/generated/`. That left the rest of the tier's hand-written source in
+// no tsconfig at all: the 35 vitest suites, plus `bridge.ts` (the seam),
+// `revl_fs_ts.ts` (the filesystem confinement surface, roadmap item 422),
+// `placement_runner.ts`, `bridge_node.ts`, `revl_shell*.ts`,
+// `scripts/emit-fixtures.ts` and `vitest.config.ts`. Turning a check on them
+// found 9 real errors on the first run: 7 × TS2476 (`FiberState[state]`, a
+// const-enum reverse lookup cordis' JS supports and its `.d.ts` forbids) and
+// 2 × TS2554 (`ctx.plugin(C)` with no config, against an emitted `apply` that
+// declared its all-defaulted config MANDATORY while the runtime treated it as
+// optional).
+//
+// Everything strict stays strict: this config changes NO compiler option. It
+// exists to carry a different `include`, and to be read by a script rather
+// than by `tsc -p`.
+//
+// ONE PROGRAM PER FILE, for the reason `tsconfig.generated.json` documents on
+// the emitted side. Every emitted module declares its provisions by augmenting
+// cordis' GLOBAL `Context` (`declare module 'cordis' { interface Context { db:
+// Database } }`), and each test file imports one or more of them. Two test
+// files in one program therefore merge two augmentations of the same interface
+// and produce TS2717 (and then TS2339/TS2554 as `ctx.db` resolves to the
+// loser) about code that is fine — 8 such errors across this file set. A test
+// file is a real program on its own; a pile of them is not. So
+// `scripts/typecheck-handwritten.mjs` is the entry point, not
+// `tsc -p tsconfig.handwritten.json`.
+//
+// The same rule binds INSIDE a file: one test file may not import two modules
+// that provide the same service name (see the note at the top of
+// `tests/semantics.test.ts`, which is why R3 lives in its own file). That is a
+// real constraint on the tier, not an artifact of how the gate groups things,
+// and this is where it becomes enforceable.
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "bridge.ts",
+    "bridge_node.ts",
+    "placement_runner.ts",
+    "revl_fs_ts.ts",
+    "revl_shell_classify_ts.ts",
+    "revl_shell_ts.ts",
+    "vitest.config.ts",
+    "scripts/**/*.ts",
+    "tests/*.ts"
+  ]
+}

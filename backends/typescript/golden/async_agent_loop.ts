@@ -147,7 +147,7 @@ export const Agent = {
   name: "Agent",
   inject: [],
   provide: ["agent"],
-  apply(ctx: Context, rawConfig: AgentConfig) {
+  apply(ctx: Context, rawConfig?: AgentConfig) {
     const config = host.applyConfigDefaults("Agent", rawConfig, { max_steps: { default: 8n } }) as Required<AgentConfig>
     ctx.effect(function* () {
       yield ctx.provide("agent", {
