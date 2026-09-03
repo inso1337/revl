@@ -14,6 +14,7 @@
 
 import type { Context } from 'cordis'
 import { execFileSync } from 'node:child_process'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import net from 'node:net'
 import tls from 'node:tls'
@@ -206,6 +207,83 @@ export function decodeValue(v: unknown): unknown {
   return v
 }
 
+// --- item 118: the correlation envelope this consumer stamps on every call ---
+//
+// The py consumer (backends/python/bridge.py `_Client`, src/revl/deploy.py
+// `seal`) rides a `correlation` member on the JSON-line request, and the
+// provider's `CorrelationGuard` refuses a call that does not carry one. Node had
+// NO correlation parameter at all, so a node consumer of a guarded UDS seam sent
+// a pre-118 request and would be refused as `malformed-envelope` — which is why
+// src/revl/placement.py refused to install the guard whenever any consumer was
+// on this tier, leaving that provider unguarded. This is the missing half.
+//
+// Sealing is byte-exact with the py side or it is worthless: the tag is an
+// HMAC-SHA256 over the CANONICAL bytes of the envelope minus its own `auth`
+// member, and canonical means `revl.attest._canonical_bytes` — JSON with sorted
+// keys, no whitespace, UTF-8. `JSON.stringify(obj, sortedKeys)` is that
+// spelling: the replacer-array form emits members in the array's order, and
+// stringify already writes compact separators.
+
+/** What placement.py ships in a proxy entry's `correlation` block. `secret` is
+ *  present on a LOCAL (UDS) seam, where the HMAC is the only thing binding the
+ *  claimed identity to a real caller, and ABSENT on a network seam, where the
+ *  mTLS handshake has already bound it and the receiving
+ *  `TransportReplayGuard` scopes dedup by that proven identity instead. */
+export interface CorrelationSpec {
+  composition_id: string
+  peer_identity: string
+  secret?: string
+  generation?: number
+}
+
+/** A per-call envelope: either a spec this bridge stamps from, or a callable
+ *  the caller supplies (the shape the py client also accepts). */
+export type Correlation =
+  | CorrelationSpec
+  | ((key: string, method: string) => Record<string, unknown>)
+
+function canonicalBytes(wire: Record<string, unknown>): string {
+  const keys = Object.keys(wire).filter((k) => k !== 'auth').sort()
+  return JSON.stringify(wire, keys)
+}
+
+/** The envelope for one crossing. A fresh `idempotency_key` per call, so a
+ *  captured request replayed against the provider collides with the crossing
+ *  already admitted and is refused — the same discipline the py consumer keeps
+ *  (src/revl/_process_runner.py). */
+export function sealCorrelation(
+  spec: CorrelationSpec,
+  key: string,
+  method: string,
+): Record<string, unknown> {
+  const wire: Record<string, unknown> = {
+    composition_id: spec.composition_id,
+    generation: spec.generation ?? 0,
+    peer_identity: spec.peer_identity,
+    effect_id: `${key}.${method}`,
+    realm: null,
+    idempotency_key: crypto.randomUUID().replace(/-/g, ''),
+    parent_effect: null,
+  }
+  if (spec.secret) {
+    wire.auth = crypto
+      .createHmac('sha256', Buffer.from(spec.secret, 'hex'))
+      .update(canonicalBytes(wire), 'utf8')
+      .digest('hex')
+  }
+  return wire
+}
+
+function correlationFor(
+  correlation: Correlation | null,
+  key: string,
+  method: string,
+): Record<string, unknown> | null {
+  if (correlation == null) return null
+  if (typeof correlation === 'function') return correlation(key, method)
+  return sealCorrelation(correlation, key, method)
+}
+
 /** Environment for the one-shot client, per seam target (UDS or TCP+mTLS). */
 function clientEnv(target: SeamTarget, request: string, deadlineMs: number | null): NodeJS.ProcessEnv {
   const base: NodeJS.ProcessEnv = { ...process.env, BRIDGE_REQ: request }
@@ -235,8 +313,14 @@ function seamCall(
   method: string,
   args: unknown[],
   deadlineMs: number | null,
+  correlation: Correlation | null = null,
 ): unknown {
-  const request = JSON.stringify({ key, method, args: args.map(encodeBigInts) })
+  const envelope = correlationFor(correlation, key, method)
+  const body: Record<string, unknown> = { key, method, args: args.map(encodeBigInts) }
+  // Absent a correlation the request line is byte-identical to the pre-118
+  // wire, so an unguarded seam is untouched by this.
+  if (envelope) body.correlation = envelope
+  const request = JSON.stringify(body)
   let out: string
   try {
     out = execFileSync(process.execPath, ['-e', CLIENT_SRC], {
@@ -325,12 +409,18 @@ export function watchPeer(
  *  call; on a **network** seam a breached deadline is treated as a lost peer and
  *  triggers reactive withdrawal (a wedged remote provider is, to a consumer,
  *  indistinguishable from a dead one — the seam is unusable either way), while a
- *  local UDS seam keeps the death-only withdrawal it always had. */
+ *  local UDS seam keeps the death-only withdrawal it always had.
+ *
+ *  `correlation` (item 118) is the envelope stamped on every call: a
+ *  `CorrelationSpec` from the placement spec (sealed with its `secret` on a UDS
+ *  seam, unsealed on a network one), or a callable returning a wire envelope.
+ *  Absent, the request line is byte-identical to the pre-118 wire. */
 export function makeProxy(
   key: string,
   methods: string[],
   target: SeamTarget,
   deadlineMs: number | null = null,
+  correlation: Correlation | null = null,
 ) {
   const lostCallbacks: Array<() => void> = []
   let fired = false
@@ -346,7 +436,7 @@ export function makeProxy(
   for (const method of methods) {
     proxy[method] = (...args: unknown[]) => {
       try {
-        return seamCall(target, key, method, args, deadlineMs)
+        return seamCall(target, key, method, args, deadlineMs, correlation)
       } catch (error) {
         // A network seam that breaches its deadline withdraws: the remote
         // provider is unreachable-in-time, so the consumer stops depending on

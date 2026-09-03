@@ -30,6 +30,7 @@ to the diagnostic; see docs/why-traces.md.
 
 ## The families
 
+<!-- docgen:guarantees begin -->
 | code | guarantee | refused by |
 | ---- | --------- | ---------- |
 | G1 | declared access: a component reads only what it requires | lower |
@@ -40,15 +41,20 @@ to the diagnostic; see docs/why-traces.md.
 | G6 | purity outside effect forms | parser/checker |
 | G7 | derived LIFO teardown | by lowering (+ totality check) |
 | G8 | the boundary surface is enumerable | parser (extern classification) |
+| G9 | untrusted data cannot create authority without a declared declassification | lower (taint flow) |
+| G-SECRET | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) |
+| G-SECRET-FLOW | a Secret[T] value never reaches a disclosure sink (a log, a serialization, an LLM prompt, an MCP return, an unapproved realm or an undeclared receiver); it crosses only at a declared Secret[T] receiver and downgrades only at a declared endorse[confidential] | lower (taint flow) |
 | A1 | iteration boundaries exist only during activation | lower |
 | A2 | no acquisition after a provision | linker |
 | A3 | host-safe identifiers | lowering transform (renames, never refuses) |
 | A5 | compensation accompanies an emission | by construction |
 | A6 | provide-methods match the service signature | lower / compat gate |
 | A8 | mid-body failure reverts and contains (L-Raise) | lower |
+| A9 | a provide key is declared in the component's `provides` clause | lower |
 | T1 | declared types are checked | checker |
-| T2 | absence is `Opt[T]`; `null` has no type | checker |
-| T3 | a hole is an obligation: it checks, but it never runs | admission gate |
+| T2 | absence is Opt[T]; `null` has no type | checker |
+| T3 | a hole is an obligation: it checks, but it never runs (docs/holes.md) | admission gate |
+<!-- docgen:guarantees end -->
 
 ## G1 — declared access
 
