@@ -1,4 +1,4 @@
-# Backend IR contract — v0 errata & decisions
+# Backend IR contract: v0 errata & decisions
 
 Arbitration of the two backend REPORTs (backends/python/REPORT.md,
 backends/typescript/REPORT.md) against the frozen v0 contract
@@ -36,28 +36,29 @@ This goes in the compiler spec, not the runtimes.
 | A4 | `format` lacks escaping for literal `$N` and coercion rules | both | v1: `$$` escapes; coercion = host string conversion, documented |
 | A5 | `emit` has no `compensate` slot despite DESIGN §3.5 | ts | v1 adds optional `compensate` expression on `emit` steps |
 | A6 | Service methods untyped (`any` in TS output); provide-method params duplicate the service declaration | ts | v1 carries param/return types; emitters derive signatures from the service, methods stop restating params |
-| A7 | `emission` flags are advisory to backends (unenforceable there) | py | working as intended — enforcement is the *checker's* job (G4); noted so nobody expects backend enforcement |
+| A7 | `emission` flags are advisory to backends (unenforceable there) | py | working as intended; enforcement is the *checker's* job (G4), noted so nobody expects backend enforcement |
 | A8 | Mid-body acquire-failure semantics inherited from runtime, not contracted | py | v1 contracts the paper's L-Raise reading: accumulated effects revert, component lands FAILED, siblings unaffected |
-| A9 | A `provide` block keyed outside the `provides` clause was rejected with a bare, uncoded `RevlError` — no guarantee, no fix hint (item 153, site-playground finding) | py | sibling of A6 (A6 bounds a declared key's *methods*; A9 bounds the *key* against the clause). Dedicated code A9 — A1–A8 are all occupied above (A4 = `format` `$$`-escaping, A7 = advisory emission flags), so A9 is the next amendment slot. Hint names both fixes: rename the provide block to a declared key, or add the key (with its service) to the `provides` clause. `diagnostics.GUARANTEES`/`FIXES` + `lower.py` raise; `examples/rejections/a9_provide_key_not_declared.rvl` |
+| A9 | A `provide` block keyed outside the `provides` clause was rejected with a bare, uncoded `RevlError` carrying no guarantee and no fix hint (item 153, site-playground finding) | py | sibling of A6 (A6 bounds a declared key's *methods*; A9 bounds the *key* against the clause). Dedicated code A9, since A1–A8 are all occupied above (A4 = `format` `$$`-escaping, A7 = advisory emission flags), so A9 is the next amendment slot. Hint names both fixes: rename the provide block to a declared key, or add the key (with its service) to the `provides` clause. `diagnostics.GUARANTEES`/`FIXES` + `lower.py` raise; `examples/rejections/a9_provide_key_not_declared.rvl` |
 
 ## Upstream issues surfaced (to file / track)
 
-- **cordis (TS) residue bug** (RESOLVED — fixed in the pinned fork,
+- **cordis (TS) residue bug** (RESOLVED: fixed in the pinned fork,
   `inso1337/cordis@harden-assert-active` commit `c8b94b2`, PR draft at
   `docs/upstream/cordis-ts-assertActive.md`; do NOT open the upstream PR
   without the coordinator's confirmation): `assertActive` checked `uid !==
   null`, not lifecycle state, so an undo could register an effect during
-  deactivation that landed after the unload snapshot and was never disposed —
-  permanent residue, the G5 gap, on the tier the README calls the portability
-  proof. The fork's `assertActive` now also refuses `FiberState.UNLOADING`
-  (`effect()`, `ctx.on()`, `ctx.plugin()`, `restart()` and `update()` all
-  inherit the guard), and the repo's TS tooling pins the fork revision in
+  deactivation that landed after the unload snapshot and was never disposed.
+  That is permanent residue, the G5 gap, on the tier the README calls the
+  portability proof. The fork's `assertActive` now also refuses
+  `FiberState.UNLOADING` (`effect()`, `ctx.on()`, `ctx.plugin()`, `restart()`
+  and `update()` all inherit the guard), and the repo's TS tooling pins the
+  fork revision in
   `backends/typescript/package.json` (codeload tarball at the fork commit)
   until the fix merges upstream (feeds cordiverse/cordis#39 review). The
   repro at `backends/typescript/tests/upstream.test.ts` ("finding 2") was a
   red-on-fix characterization test; it now pins the fixed behavior (the exact
   playbook that closed cordis-py's A8 async gap).
-- **cordis-py dict-plugin `Config`** (RESOLVED — one-line fix in the pinned
+- **cordis-py dict-plugin `Config`** (RESOLVED: one-line fix in the pinned
   fork, `inso1337/cordis-py@harden-fiber-lifecycle` commit `1c5e6f1`, now
   pinned by `backends/python/setup.sh` per roadmap item 76(c); follow-up
   candidate to geohotstan/cordis-py#1): `registry.plugin()` read `inject`
@@ -67,18 +68,18 @@ This goes in the compiler spec, not the runtimes.
   `inject`; the emitter ships the schema as `'Config'` on the plugin dict and
   drops the in-`apply` resolution (`ConfigSchema.validate` speaks cordis-py's
   `{issues, value}` protocol; the Frame still attributes the `<name>.config`
-  trace and R4 `resolved_config` state; the replay harness — which calls
-  emitted `apply` directly — applies the same resolution itself).
+  trace and R4 `resolved_config` state; the replay harness calls emitted
+  `apply` directly and applies the same resolution itself).
 - **cordis-py ordering provenance** (documented, not a bug): the fiber's
   unload empirically starts disposals newest-first, but this is disclaimed by
   its docs; the py adapter's drain derives R1 from the *documented* contract
   and covers async undos. Do not remove the drain on the strength of the
   empirical ordering.
-- **cordis-py A8 async-body gap** (RESOLVED — fixed in the pinned runtime,
+- **cordis-py A8 async-body gap** (RESOLVED: fixed in the pinned runtime,
   `inso1337/cordis-py@harden-fiber-lifecycle` commit `1316174`, folded into
   geohotstan/cordis-py#1): a component body containing an `await` compiled to
   an *async* generator, and cordis-py routed an async effect-setup failure to
-  `_make_effect_guard` (auto-dispose) rather than the fiber's error slot — the
+  `_make_effect_guard` (auto-dispose) rather than the fiber's error slot. The
   accumulated inverses ran LIFO with no residue (A8 containment held) but the
   fiber landed `ACTIVE` instead of `FAILED`, dropping A8's "the component lands
   FAILED with the error recorded" for async bodies. The runtime now routes an
@@ -91,14 +92,15 @@ This goes in the compiler spec, not the runtimes.
 - **cordis-rs A1 divergence** (documented, runtime-verified): cordis-rs 0.3.0
   drives `plugin_async` activation to completion with `block_on` *under the
   fiber transition lock* (fiber.rs), so a divert during a component `await`
-  **defers until activation finishes** — post-boundary steps (including
+  **defers until activation finishes**: post-boundary steps (including
   emissions) run, then everything reverts LIFO. cordis-py diverts *at* the
   boundary and skips the remainder; the wasm tier physically rolls back
-  mid-activation. The invariant that holds on every tier — asserted under a
-  concurrent-divert race loop in `backends/rust/scenarios/scenarios.rs` — is
-  torn-state freedom: after disposal, every completed effect has run its
-  inverse, in LIFO order. Authors relying on "emission after boundary never
-  happens once diverted" get that guarantee on py/wasm, not on rs.
+  mid-activation. The invariant that holds on every tier is torn-state
+  freedom: after disposal, every completed effect has run its inverse, in LIFO
+  order. It is asserted under a concurrent-divert race loop in
+  `backends/rust/scenarios/scenarios.rs`. Authors relying on "emission after
+  boundary never happens once diverted" get that guarantee on py/wasm, not on
+  rs.
 
   **Decision (2026-08-24): A1's contracted invariant is promoted to torn-state
   freedom.** The weaker invariant that holds on *every* tier becomes the
@@ -107,13 +109,13 @@ This goes in the compiler spec, not the runtimes.
   property, not the contract: on cordis-rs a divert during a component `await`
   defers (post-boundary steps run, then everything reverts LIFO), and that is
   compliant. No upstream fix (fork+PR: don't hold the fiber transition lock
-  across the await boundary) at this time — cordis-rs stays pinned at 0.3.0,
+  across the await boundary) at this time. cordis-rs stays pinned at 0.3.0,
   and the race-loop assertion pins the promoted invariant so it cannot drift.
   Revisit the stronger guarantee only if a consumer's correctness actually
   depends on divert-at-boundary on the rs tier.
 - **cordis4j global-realm divergence** (documented, runtime-verified): revl's
   contract (docs/design-v2-realms.md) is that realms are keyed by label and
-  **equal realm-label strings denote the same realm** — two components that
+  **equal realm-label strings denote the same realm**: two components that
   both `isolate kv in realm("t")` share one realm, so a second provider of `kv`
   in realm `"t"` is a G2 conflict and a consumer in realm `"t"` resolves the
   provider in realm `"t"`. That holds at runtime on cordis-py, cordis (TS), and
@@ -121,19 +123,19 @@ This goes in the compiler spec, not the runtimes.
   targets: equal strings do **not** share, they separate.
 
   *Observable difference (runtime-verified on the real cordis4j jar with revl's
-  own emitted code — `examples/tenants.rvl` → `emit.emit`, driven by
+  own emitted code: `examples/tenants.rvl` → `emit.emit`, driven by
   `backends/java/scenarios/RunRealmDivergence.java`):*
   - Two `TenantAStorePlugin` instances, both emitting `ctx.isolate(Kv.class,
     "tenant_a")` and both providing `kv`, loaded onto one root → **BOTH LOAD**.
     The contract requires a G2 `SupplyConflictException` (one label = one
-    realm). `root.find(kv)` is even `<absent>` — each provision hides in its own
-    isolate child.
+    realm). `root.find(kv)` is even `<absent>`, because each provision hides in
+    its own isolate child.
   - `TenantAApp` (`isolate kv in realm("tenant_a")`, requires `kv`) loaded after
     `TenantAStore` (same realm) → **`NoSuchServiceException`** ("looked up
     through the context chain: #9 → #7 (root)"): the consumer's isolate child is
     a *different* context from the provider's, so it never resolves the
-    provider. The reference tiers resolve it. (Distinct realm strings —
-    `tenant_a` vs `tenant_b` — separate correctly on every tier, including Java;
+    provider. The reference tiers resolve it. (Distinct realm strings,
+    `tenant_a` versus `tenant_b`, separate correctly on every tier, including Java;
     only the equal-string *sharing* direction diverges.)
 
   *Root cause (verified against the real cordis4j sources,
@@ -141,7 +143,7 @@ This goes in the compiler spec, not the runtimes.
   `ctx = ctx.isolate(<Svc>.class, "<label>")` **inside each component's
   `apply()`** (`backends/java/emit.py:2127-2129`). Core `Context` exposes
   exactly one isolate overload, `<T> Context isolate(Class<T>, String)`
-  (`core/Context.java:124`), and it **always mints a fresh child** —
+  (`core/Context.java:124`), and it **always mints a fresh child**:
   `new ContextImpl(this)` + `child.registry.overrideRealm(type, realm)`
   (`core/internal/ContextImpl.java:160-168`). Each `ContextImpl` owns its own
   `ServiceRegistry.store` (`core/internal/ServiceRegistry.java:41`); the realm
@@ -172,18 +174,19 @@ This goes in the compiler spec, not the runtimes.
   with plain `plugin`/`inject` calls. Two independent `apply()` invocations have
   nothing to intern a string against. Closing the gap would require one of:
   (i) re-architecting the Java backend to drive composition through `Loader` +
-  a `ComponentSpec.Isolate` tree — replacing the `plugin`/`inject` composition
-  that G7 LIFO teardown, A8 self-revert, and Theorem-63 withdrawal ordering are
-  all built and runtime-verified against, and making Java's composition model
-  diverge from the other four tiers; or (ii) hand-rolling interning in emitted
-  glue (a static `Map` keyed by root identity + type + realm that get-or-creates
-  the isolate child) — which reimplements, worse, what `Loader` already does
+  a `ComponentSpec.Isolate` tree, which replaces the `plugin`/`inject`
+  composition that G7 LIFO teardown, A8 self-revert, and Theorem-63 withdrawal
+  ordering are all built and runtime-verified against, and makes Java's
+  composition model diverge from the other four tiers; or (ii) hand-rolling
+  interning in emitted glue (a static `Map` keyed by root identity + type +
+  realm that get-or-creates
+  the isolate child), which reimplements, worse, what `Loader` already does
   (no path-keyed nesting, no refcounted disposal at `:275-296`, and it leaks
   contexts and would reuse a disposed context on reload) and injects global
   mutable state into every emitted program. Both are out of proportion, so this
   divergence is documented rather than force-fixed.
 
-  *Recommended path:* route Java realm placement through `Loader` — lift the
+  *Recommended path:* route Java realm placement through `Loader`. Lift the
   `isolate` out of `apply()` and emit a `Loader.of(root).reconcileTree(...)`
   composition whose `ComponentSpec.Isolate` nodes carry the realm labels, so
   cordis4j's own `domains` interning (`core/Loader.java:341-359`) makes equal
@@ -200,7 +203,7 @@ This goes in the compiler spec, not the runtimes.
 ## Semantic divergences (closed, recorded so they cannot regress)
 
 - **`==` was not structural on every tier**, though syntax-2.0 §3.4 says revl
-  has one equality, that it is structural, and — in as many words — that
+  has one equality and that it is structural, and says in as many words that
   because the parser canonicalizes `===`→`==` in the IR, "no backend can
   diverge". Two tiers did.
 
@@ -269,7 +272,7 @@ This goes in the compiler spec, not the runtimes.
   How it survived: `tests/test_cross_tier.py` checks that every emitter
   *accepts* a construct, which catches a tier that refuses and cannot catch a
   tier that accepts and then means something else. This is the project's own
-  recurring lesson one level up — "the emitter did not raise" never implied
+  recurring lesson one level up: "the emitter did not raise" never implied
   "the code is right", and "every emitter agreed on a shape" never implied
   "every tier agrees on a value". `tests/test_cross_tier_execution.py` closes
   the class by *running* the probe on each tier.
@@ -312,13 +315,13 @@ This goes in the compiler spec, not the runtimes.
   they need none, run in the `frontend` job, and there is now one per
   lowering per tier, four of them for this defect specifically.
 
-## Arithmetic divergences (open, pinned — one root cause)
+## Arithmetic divergences (open, pinned, one root cause)
 
 Found by executing the same source on every tier
 (`tests/test_cross_tier_execution.py`), which is also where each is pinned so
 it cannot drift silently. **These are not fixed.**
 
-- ✅ **`Int / Int` is not `Int`** — *closed, and closed the other way round
+- ✅ **`Int / Int` is not `Int`**. *Closed, and closed the other way round
   from how it first looked.* The checker typed it `Int` while python and
   TypeScript produced `3.5`, so the declared type and the runtime value
   disagreed. The fix was not to make those two truncate: §0 says `/` is
@@ -328,7 +331,7 @@ it cannot drift silently. **These are not fixed.**
   integer division has named operations (`div_trunc` / `div_floor` /
   `div_euclid`), and `mod` gives the Euclidean remainder. See
   docs/arithmetic.md.
-- ✅ **`%` disagreed on negatives** — *closed.* python floored (`-7 % 3 == 2`)
+- ✅ **`%` disagreed on negatives**. *Closed.* python floored (`-7 % 3 == 2`)
   where rust, java and JS truncate (`== -1`). `%` is now the truncated
   remainder everywhere, which §0 requires (it is TypeScript's spelling) and
   which the pairing law confirms: `%` partners `div_trunc`, `mod` partners
@@ -338,22 +341,23 @@ it cannot drift silently. **These are not fixed.**
 - **`Int` lost precision past 2^53 on TypeScript** (closed). JS numbers are
   f64, so `9007199254740993 - 9007199254740992` was `0`. python is
   arbitrary-precision and rust is `i64`. Unlike the other two this needed
-  `BigInt`, not a type annotation — `Int` now maps to `bigint` on that tier,
+  `BigInt`, not a type annotation: `Int` now maps to `bigint` on that tier,
   which imposes the 64-bit bound and traps on overflow the way python does.
   docs/arithmetic.md records the Int/Float boundary rules the port settled.
 - **Unary minus on `Int.MIN`** (closed). Negating `Int.MIN` overflows (it is
   `0 - Int.MIN`), and the tiers used to split three ways. Every tier now
-  faults: python via `_revl_i64`, wasm via checked `0 - x`, rust's native `-`
-  panic, and — the three that used to wrap or grow — go via `revlSub(0, x)`,
-  java via `Math.negateExact`, TypeScript via `revlI64(-x)`. Asserted by
-  execution across py/ts/go/java and by per-tier emit checks
+  faults: python via `_revl_i64`, wasm via checked `0 - x`, and rust's native
+  `-` panic. The three that used to wrap or grow fault too: go via
+  `revlSub(0, x)`, java via `Math.negateExact`, TypeScript via `revlI64(-x)`.
+  Asserted by execution across py/ts/go/java and by per-tier emit checks
   (tests/test_cross_tier_execution.py::test_negation_of_int_min_traps).
 - **`Int.MIN / -1`** (closed). Integer division overflows at exactly this
   input (quotient 2^63; mod is fine, `Int.MIN % -1 == 0`). Every tier now
   handles it: rust panics, wasm's `i64.div_s` traps, TypeScript re-imposes the
-  bound via `revlI64`, and the three that used to wrap or grow — python bounds
-  the faulting quotient through `_revl_i64`, go through `revlDivTrunc` /
-  `revlDivFloor` (panic), java through `Math.divideExact` / `Math.negateExact`.
+  bound via `revlI64`. The three that used to wrap or grow handle it now too:
+  python bounds the faulting quotient through `_revl_i64`, go through
+  `revlDivTrunc` / `revlDivFloor` (panic), java through `Math.divideExact` /
+  `Math.negateExact`.
   The checked forms (`checked_div_*`) return `Err("revl: Int overflow")` rather
   than a wrapped value, totalising the range as well as the zero divisor.
   Asserted by execution (tests/test_cross_tier_execution.py::
@@ -361,24 +365,24 @@ it cannot drift silently. **These are not fixed.**
 
 **The root cause is closed.** An IR `bin` node used to carry `op`, `left` and
 `right` and *no type*, so no backend could distinguish `Int / Int` from
-`Float / Float` — a runtime dispatch works on python, where `int` and `float`
+`Float / Float`. A runtime dispatch works on python, where `int` and `float`
 are distinct, and cannot work on TypeScript, where both are `number`. `/` and
 `%` now carry an `operands` field (`"Int"` / `"Float"`) when the checker can
-determine it, and so does unary minus on an `Int` — the one unary operator
-whose operand type a backend must know, since negating `Int.MIN` overflows
-(see the entry above). The annotation is additive and v1 documents are
+determine it, and so does unary minus on an `Int`. That is the one unary
+operator whose operand type a backend must know, since negating `Int.MIN`
+overflows (see the entry above). The annotation is additive and v1 documents are
 untouched, so the frozen-reference invariant holds.
 
 `%` and the `Int` width are both settled now (docs/arithmetic.md): `%` is
 the truncated remainder, and `Int` is 64-bit two's complement with trapping
-overflow on every tier — including wasm, whose `Int` was widened to `i64`
+overflow on every tier. That includes wasm, whose `Int` was widened to `i64`
 with checked `$int_*` helpers. The one residual split is the *message*: a
 wasm trap carries no payload, so it faults with `unreachable` where the
 hosted tiers raise a labelled overflow error (see docs/arithmetic.md).
 
 **Decision (2026-08-24): the bare-`unreachable` trap is accepted as a
-documented tier limit.** A wasm trap carries no payload by design — the fault
-channel is the trap itself, not a value the module can hand back — so a
+documented tier limit.** A wasm trap carries no payload by design: the fault
+channel is the trap itself, not a value the module can hand back. So a
 designated fault-reason export before the trap would buy a labelled message
 at the cost of a second, concurrent error channel (an export the module must
 write *and* the host must read) for information the trap already conveys.
@@ -395,10 +399,10 @@ so this section is not read as "arithmetic is broken generally".
 
 `Int32` landed complete across all six tiers (docs/arithmetic.md, "Sized
 integers"): type, IR widen marker, codegen and trapping overflow, proven by
-cross-tier execution. Its sibling on the roadmap — **`Integer`, arbitrary
-precision** — is **not built**, and is fenced here so it never reads as clean.
+cross-tier execution. Its sibling on the roadmap, arbitrary-precision
+**`Integer`**, is **not built**, and is fenced here so it never reads as clean.
 
-**Trigger.** A program that names the type `Integer` — `fn f(x: Integer)`,
+**Trigger.** A program that names the type `Integer`: `fn f(x: Integer)`,
 `let x: Integer = ...`. There is no `.to_integer()` conversion and no
 arbitrary-precision arithmetic; the design is docs/integer-proposal.md.
 
@@ -406,7 +410,7 @@ arbitrary-precision arithmetic; the design is docs/integer-proposal.md.
 is an unknown capitalized type name, so the checker treats it like any
 undeclared nominal type. A binding whose value type is known (`let x: Integer =
 5`) is rejected with a type mismatch, but a bare `fn f(x: Integer) -> Integer`
-signature is **accepted** — the parameter and return infer to an unknown and
+signature is **accepted**: the parameter and return infer to an unknown and
 flow untyped, exactly the gradual-frontier behaviour, and no tier can lower it.
 So the gap is a silent-accept at the signature boundary, contained to programs
 that opt into the unbuilt type. Until it is built, do not spell `Integer`.
@@ -415,24 +419,24 @@ that opt into the unbuilt type. Until it is built, do not spell `Integer`.
 it is fenced rather than half-shipped on the two easy tiers:
 
 - **cheap / native**: python `int` and TypeScript `bigint` are already
-  arbitrary precision — `+ - *` are the host operators with the i64 bound
-  *removed*, not imposed.
+  arbitrary precision, so `+ - *` are the host operators with the i64 bound
+  *removed* rather than imposed.
 - **native but not `+`**: java `BigInteger` and go `math/big.Int` carry
   arbitrary precision but only through method calls (`.add`, `(&big.Int).Add`)
-  and reference/pooling semantics — a different emission shape from every
-  scalar op the emitters render today.
+  and reference/pooling semantics, which is a different emission shape from
+  every scalar op the emitters render today.
 - **new dependency**: rust needs a bignum crate (`ibig`/`malachite`); the go
   and rust tiers are otherwise dependency-light, so this is a policy choice as
   much as a code one.
-- **concentrated in wasm**: wasm has no bignum. It would need a bignum-in-WAT —
+- **concentrated in wasm**: wasm has no bignum. It would need a bignum-in-WAT:
   tag a pointer and keep the digits inside linear memory so confinement holds
-  (docs/integer-proposal.md) — which is a linear-memory arithmetic library, not
+  (docs/integer-proposal.md). That is a linear-memory arithmetic library, not
   an instruction. This is the tier the whole feature's cost concentrates in,
   and the reason `Integer` is a separate pass from `Int32`.
 
 Shipping `Integer` on python+TypeScript alone would be a 2-of-6 feature that
-reads as clean on two tiers and is absent on four — the exact failure this
-section exists to prevent. It stays one fence until it can land whole (or land
+reads as clean on two tiers and is absent on four. That is the exact failure
+this section exists to prevent. It stays one fence until it can land whole (or land
 with its own per-tier pins), tracked as roadmap item 12's second half.
 
 ## Typing gaps (fenced, not closed)
@@ -445,23 +449,23 @@ else the checker does not type infers to an unknown and is left alone by
 design.
 
 **Closed since the last revision** (roadmap "Typing follow-ups"; rejection
-files `t8`–`t17`). One of these — generic instantiation — was fenced here; the
+files `t8`–`t17`). One of these, generic instantiation, was fenced here; the
 rest were *not*, which is the failure mode this section exists to prevent: a
 review found six programs the checker accepted and the strict tiers refuse,
 none of them named by any fence. Each closure is verified against `javac
 --release 21` and the emitted Rust.
 
-- a declared return not produced on every path — in a `fn` and in a `provide`
+- a declared return not produced on every path, in a `fn` and in a `provide`
   method alike (rust E0308, java "missing return statement"; python silently
   returned `None`, and python is the reference backend);
 - a call with the wrong arity (rust E0061, java "cannot be applied to given
   types"), in `fn`, component and `test` bodies;
-- any access *through* an `Opt` — `.field`, `[i]`, a stdlib method — plus `?.`
+- any access *through* an `Opt` (`.field`, `[i]`, a stdlib method), plus `?.`
   on a non-optional and `?.` typed as the inner rather than `Opt[inner]` (rust
   E0609, java "cannot find symbol"). This one contradicted the README's
   headline claim outright: `return o` was refused while `o.name` escaped to an
   unknown and then flowed anywhere;
-- `Str` indexing (rust E0277, java "cannot find symbol" — the emitter renders
+- `Str` indexing (rust E0277, java "cannot find symbol", since the emitter renders
   `.get(i)` on a `String`); the specified surface is `charAt` / `charCodeAt` /
   `slice`;
 - a `match` arm naming something that is not a case of the scrutinee's ADT
@@ -472,38 +476,38 @@ none of them named by any fence. Each closure is verified against `javac
   the author's own alias unusable (`f("abc")` was refused for a `Sku`
   parameter) while `fn g() -> Sku { return Str }` was accepted, `Str` having
   resolved as that variant's nullary case constructor. This was the governing
-  principle's own failure case — `type X = Y` is TypeScript's alias spelling
-  and revl gave it a different meaning with no diagnostic — and a live trap for
-  importers, since a WIT `type sku = string` transcribed naively was quietly
-  wrong. Now a transparent alias; see below for where the line falls.
+  principle's own failure case: `type X = Y` is TypeScript's alias spelling
+  and revl gave it a different meaning with no diagnostic. It was also a live
+  trap for importers, since a WIT `type sku = string` transcribed naively was
+  quietly wrong. Now a transparent alias; see below for where the line falls.
 
 Arrow bodies are now checked against their enclosing scope, which is where the
 first four used to hide. Do not re-fence any of these; each has an executable
 rejection.
 
-- **Host-object results are untyped** (by design, host provenance — *closed as
+- **Host-object results are untyped** (by design, host provenance; *closed as
   of roadmap 75(b)*):
   the method *names, arities, and argument types* on a constructor-tracked
   receiver are now checked: `Map.new()` infers the family, and a method call on
   it is validated against the stub surface spelled in `_HOST_ARG_SIG`
-  (docs/stdlib-2.0.md) — `m.putt(k)`, the typo'd method that used to emit a
+  (docs/stdlib-2.0.md). `m.putt(k)`, the typo'd method that used to emit a
   dynamic dispatch and crash at host runtime, is now a compile error
   (`HOST-METHOD`). What stays opaque is the *result*: no table entry claims to
   know what a stub returns, so a value flowing out of `store.get(k)` carries no
-  type and is unchecked wherever it goes — **but it can no longer call a method
-  on the way out**. Receivers whose provenance no constructor pins (an extern's
+  type and is unchecked wherever it goes. **But it can no longer call a method
+  on the way out.** Receivers whose provenance no constructor pins (an extern's
   return, a host-object result, a type parameter) type unknown; every method
   call on them is now refused, stdlib-named or not (`t24_opaque_receiver_builtin.rvl`;
-  the stdlib-named-method sliver — `pool.remove("k")` lowering as the Map
-  `remove` builtin — is closed with the same HOST-METHOD diagnostic), so a
+  the stdlib-named-method sliver, `pool.remove("k")` lowering as the Map
+  `remove` builtin, is closed with the same HOST-METHOD diagnostic), so a
   value cannot lower *through* the builtin table into a misdispatch. Only a
   receiver the checker can *prove* is a Str/List/Int/Int32/Bytes/Map value
   takes the table; an annotation (`let v: Str = store.get(k)`) is how a host
   result becomes provable. The fence is now exactly "host-object **results**
-  are on the audit surface" — the G8 line as designed, with no accidental hole
+  are on the audit surface": the G8 line as designed, with no accidental hole
   through the builtin table. Tooling half of the same closure: the stdlib
   method table and the host-verb surface are checked disjoint at *table-edit*
-  time — a module-load assertion in `typecheck.py`/`lower.py` fails with the
+  time. A module-load assertion in `typecheck.py`/`lower.py` fails with the
   colliding name if either table is extended with a name from the other
   (`remove` is the one sanctioned overlap, safe because dispatch is by
   receiver kind; dogfood/findings-mapiter.md §2). Still the deliberate G8
@@ -512,27 +516,28 @@ rejection.
   typed and their misuse is refused, in `fn` bodies and (as of the setup op
   sweep) in component effect blocks alike.
 
-- **Arrow *values* have no type** — **CLOSED as of roadmap 75(a) slice 1**.
+- **Arrow *values* have no type**. **CLOSED as of roadmap 75(a) slice 1.**
   Arrow values have a type; its unknown components are `Any`, the documented
   gradual frontier the rest of the checker already lives with. Every arrow
-  types as a function type, so its arity — which is syntactic and never in
-  doubt — is checked at every call through it (`examples/rejections/t33`), and
+  types as a function type, so its arity, which is syntactic and never in
+  doubt, is checked at every call through it (`examples/rejections/t33`), and
   where the author annotates (`(v: Int): Int => …`, parameters or return) or
   the body cannot depend on an un-annotated parameter, the result is known and
   is checked wherever it flows (`examples/rejections/t32`, the entry's own
   trigger). A written `Async[...]` return is refused: colour is positional and
   an arrow may not self-declare it (`t34`, docs/function-types.md rule C1).
 
-  Two residuals, both named rather than latent: (1) stratum 3 — `infer_ir`,
-  the checker over component and `provide`-method bodies, still types no arrow
-  and no call through one (75(a) slice 3); (2) a result that *does* depend on
-  an un-annotated parameter stays unknown, deliberately — inferring it from a
-  body typed under unknown parameters yields half-solved types (`[x]` infers
+  Two residuals, both named rather than latent: (1) stratum 3, where
+  `infer_ir` (the checker over component and `provide`-method bodies) still
+  types no arrow and no call through one (75(a) slice 3); (2) a result that
+  *does* depend on an un-annotated parameter stays unknown, deliberately.
+  Inferring it from a body typed under unknown parameters yields half-solved
+  types (`[x]` infers
   `List[Never]`, `{ a: x }` infers `{a: Any}`), and widening the rule needs a
   dependency analysis rather than the syntactic free-occurrence test.
 
 - **Type parameters cannot be bounded, and the implicit spelling still
-  applies** (frontier, narrowed): instantiation is closed — a type parameter is
+  applies** (frontier, narrowed): instantiation is closed. A type parameter is
   a wildcard only inside its own fn's body and is unified against the actual
   arguments at every call site (`collect_tparams` / `unify`, `typecheck.py`),
   so `fn id(x: T) -> T` then `id("hello")` no longer satisfies an `Int`
@@ -541,16 +546,16 @@ rejection.
   name, a strict superset of the implicit single-uppercase heuristic
   (docs/generics.md). What remains open:
 
-  (a) ~~the implicit rule is still positional-by-spelling and still on~~ —
+  (a) ~~the implicit rule is still positional-by-spelling and still on~~.
   **CLOSED as of roadmap 75(c)**: a signature that carries an explicit `[T]`
-  list turns the implicit heuristic OFF for that signature — declared means
+  list turns the implicit heuristic OFF for that signature. Declared means
   declared, and a stray one-letter name is an ordinary undeclared (opaque
   nominal) type that errors where it is used instead of silently quantifying
   (`t25_explicit_tparam_heuristic_off.rvl`; the interaction is pinned in
   docs/generics.md). (b) Parameters cannot be bounded, or shared across
-  signatures — **bounds (`[T: Ord]`) stay deferred**: no consumer demands them
+  signatures. **Bounds (`[T: Ord]`) stay deferred**: no consumer demands them
   yet, and the decision (not the machinery) is pinned in docs/generics.md.
-  (c) Only `fn` and `extern` quantify — service `provide`-methods
+  (c) Only `fn` and `extern` quantify. Service `provide`-methods
   are checked through a separate path and are not in the shared signature
   table, so they take no list, and a one-letter name in a record field or an
   ADT payload is an ordinary opaque nominal type, like any other undeclared
@@ -559,7 +564,7 @@ rejection.
 
 - **Type aliases are transparent, and the alias/variant line is drawn where
   TypeScript's own is** (closed, recorded because the rule is subtle): `type X
-  = Y` is an alias exactly when `Y` names an existing type — a builtin, a
+  = Y` is an alias exactly when `Y` names an existing type: a builtin, a
   declared record/variant/alias, a type application (`List[Row]`), or the `T?`
   sugar. It is then substituted at every declaration site and its declaration
   erased, so no alias name reaches the type table, the IR or a backend. When
@@ -567,27 +572,28 @@ rejection.
   Pending` is still how an opaque nominal is spelled, and a payload always
   makes a newtype (`type W = Wrap(Int)`), never an alias.
 
-  The split is not arbitrary — it is TypeScript's, verified against `tsc
+  The split is not arbitrary. It is TypeScript's, verified against `tsc
   --strict`: `type Sku = string` compiles and is transparent in both
   directions, while `type Sku = Ident` and `type K = Ident | Keyword` with
   undeclared names are hard errors (TS2304). So revl now agrees with
   TypeScript everywhere TypeScript compiles, and is free to mean its own thing
-  only where TypeScript refuses — which is exactly what the governing
+  only where TypeScript refuses, which is exactly what the governing
   principle asks for. Transparent rather than nominal for the same reason: a
   nominal alias would need construction syntax revl does not have, and would
   re-commit the sin by giving TypeScript's spelling a different meaning.
 
   Consequences worth knowing: an alias cannot carry type parameters (there is
   nothing to instantiate), an alias cycle is refused rather than looped on, and
-  `List[Row] | Str` is refused with "revl has no union types" — `|` separates
-  variant *cases*, which are constructor names, not types. The interaction with
-  implicit type parameters resolves in the alias's favour and does so before
+  `List[Row] | Str` is refused with "revl has no union types", since `|`
+  separates variant *cases*, which are constructor names rather than types. The
+  interaction with implicit type parameters resolves in the alias's favour and
+  does so before
   the signature table is built: `type S = Str` makes `S` mean `Str`, while an
   undeclared one-letter name in a signature is still that fn's type parameter.
 
 - **A `match` over an untypable scrutinee stays best-effort** (frontier,
   unchanged): case-name and exhaustiveness checks need the scrutinee's ADT.
-  When it is not recoverable — a host-valued local, an arrow result — both
+  When it is not recoverable (a host-valued local, an arrow result) both
   checks are skipped and the Python emitter adds a runtime fallback. Trigger:
   `match store.lookup(k) { ... }` on a host object. Blast radius: a missing or
   misspelled case in that one `match` reaches the tiers. Narrowed: a bare
@@ -598,28 +604,28 @@ rejection.
 
 The G8 boundary surface (`revl audit`, and the `host:`/`emit:` crossing tokens
 `revl audit --diff` gates on) is meant to be the *enumerable* set of host
-reaches — "everything that reaches the host must appear on the audit surface"
+reaches: "everything that reaches the host must appear on the audit surface"
 (docs/rejections.md, G8). One enumeration gap was known and fenced here; it is
 now **RESOLVED** (item 24), and the record is kept for provenance.
 
-- **G8 enumeration for first-class host reaches — RESOLVED (item 24)** (found by
+- **G8 enumeration for first-class host reaches: RESOLVED (item 24)** (found by
   the gate threat-model program, docs/threat-model.md; the pin
   `tests/test_adversarial_gate.py::test_first_class_laundered_host_reach_is_enumerated_on_the_g8_surface`
   is now a plain passing assertion, no longer `xfail`). *The gap that was:* a
-  host `extern` reached **only** through a first-class function value —
-  `indirect(ship, a)` rather than `ship(a)` — did **not** appear in `revl
+  host `extern` reached **only** through a first-class function value
+  (`indirect(ship, a)` rather than `ship(a)`) did **not** appear in `revl
   audit`'s per-component `externs` list, so it produced no
   `host:<component>:<extern>` crossing token; `revl audit --diff` (the
   authority-drift gate) could not detect a widening that added such a reach.
-  Throughout, the load-bearing G4 defence held — the operation was still
+  Throughout, the load-bearing G4 defence held: the operation was still
   correctly flagged `readOnlyHint: false` / `destructiveHint: true`, and the
   same launder in a *plain* (read-only) operation was *refused* at compile
-  time — so it was an *enumeration* incompleteness, never a read-only lie.
+  time. So it was an *enumeration* incompleteness, never a read-only lie.
   *How it was closed:* `_boundary` (`src/revl/__main__.py`) now folds the
   first-class reach the G4 fixed point already computes onto the audit surface.
   For each component body it collects first-class *value* references the same
-  way the emission analysis does — reusing `emission_analysis._calls_in`'s
-  value channel (read-only; no change to `emission_analysis.py`) — and joins
+  way the emission analysis does, reusing `emission_analysis._calls_in`'s
+  value channel (read-only; no change to `emission_analysis.py`), and joins
   each referenced callable's capabilities from `_emitting_capabilities` into the
   per-component host set. A laundered host extern now surfaces the identical
   `host:<component>:<extern>` crossing as a direct call, so `revl audit --diff`
@@ -662,13 +668,13 @@ sampled.
   `xs[0]`, `s.charAt(0)` and a `_` arm stay accepted). A soundness check with
   no false-positive test is a check nobody can safely tighten later.
 
-## Record updates on receivers with no named type (RESOLVED — item 71)
+## Record updates on receivers with no named type (RESOLVED, item 71)
 
 ✅ **Closed by structural record types (roadmap item 71).** `{ r | f = e }` was
 field-checked only when `r`'s type was *known*: a declared record parameter, a
 named binding, or a value read from a typed position. A receiver whose type the
-checker could not recover — in practice, a `let`-bound **anonymous record
-literal** (`let a = { h: "x" }`) — had no name to look up, so the update's field
+checker could not recover, in practice a `let`-bound **anonymous record
+literal** (`let a = { h: "x" }`), had no name to look up, so the update's field
 names and value types were **not checked**, and neither were later reads through
 the binding. The trigger below compiled, an Int flowing into a Str-shaped
 record:
@@ -684,7 +690,7 @@ fn main() -> Int {
 ```
 
 The fix was the design the roadmap called for, not a patch. An anonymous record
-literal now infers a **structural record type** — spelled `{field: Type, ...}`
+literal now infers a **structural record type**, spelled `{field: Type, ...}`
 in canonical (sorted) order, in the checker only (`typecheck.py`
 `structural_fields` / `format_structural`). An update `{ a | f = e }` on it is
 field-checked against that shape: an undeclared field, or a replacement of the
@@ -693,14 +699,14 @@ wrong type, is refused naming the guarantee (fixtures
 reads through the binding are checked too.
 
 At every *declared* boundary the structural type **unifies field-wise with the
-nominal record it meets** — the field set must match and each field type must be
+nominal record it meets**: the field set must match and each field type must be
 compatible, with the `List[Never]` bottom rule falling out of the elementwise
 `compatible` recursion (`Never` flows out of a bottom position into any other,
 and nothing flows in). This is the same shape
 as item 11's `?T` widening marker: a checker-level annotation that **never
 reaches the IR**. The `record` / `record_update` IR nodes carry no type, an
-inferred `let` type is not emitted, and the emitted `types` table stays nominal
-— so the v1/v2/v3 goldens are byte-identical and no emitter changed. See
+inferred `let` type is not emitted, and the emitted `types` table stays
+nominal, so the v1/v2/v3 goldens are byte-identical and no emitter changed. See
 docs/records.md ("Structural vs nominal at declared boundaries").
 
 ## TCK A5 respec: two-phase teardown (amendment, 2026-08-26)
