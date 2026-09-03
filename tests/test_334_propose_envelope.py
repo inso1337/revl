@@ -269,17 +269,81 @@ def test_the_refusal_is_root_scoped():
                    profile=AdmissionProfile.self_extension([]))  # admits
 
 
+# The candidate with its own host body — refused by the `untrusted_author`
+# BASE of the profile (G8, `check_no_extern`), so it measures the other half.
+_AGENT_EXTERN = _DECLS + (
+    'extern pure fn peek(p: Str) -> Str = @py { return p }\n'
+    "component ToolV2 requires ops: Ops provides tool: Tool {\n"
+    "  provide tool {\n"
+    '    fn describe() = peek("v2")\n'
+    "    fn run(p) { emit ops.stash(p) }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+def _decision_only_gate():
+    """A `Gate` carrying exactly what `propose`'s DECISION compile reads: the
+    loaded latch and a session that is not halted.
+
+    The decision refuses before step 2 ever builds the transition composition,
+    so nothing here reaches `Session.swap` and no cordis runtime is needed —
+    which is the point. The profile the decision compiles under is observable
+    from the verdict `propose` returns, in the plain `frontend` job."""
+    from types import SimpleNamespace
+
+    from revl.gate import Gate
+
+    gate = Gate.__new__(Gate)
+    gate._loaded = True
+    gate._session = SimpleNamespace(halted=False)
+    return gate
+
+
 def test_propose_admits_under_self_extension_not_untrusted_author():
-    """The wiring, asserted at the seam rather than inferred: `propose` builds
-    the profile with the realm refusal ON. Without this the two checks above are
-    true of a profile nothing uses."""
-    import inspect
+    """The wiring at the seam, DRIVEN rather than read off `propose`'s source.
 
-    from revl import gate as gate_mod
+    Deliberately not a source grep. The assertion this replaced matched
+    `"AdmissionProfile.self_extension(granted)"` in the method text, and text
+    certifies nothing about which profile the compile RUNS under: building the
+    right profile and then handing the compiler `profile=None`, or relaxing
+    `no_realm_placement` on the next line, both leave that grep green and put
+    the authority-address grab straight back. Here the realm-grabbing candidate
+    goes through `propose` itself and the refusal it returns is the evidence.
 
-    src = inspect.getsource(gate_mod.Gate.propose)
-    assert "AdmissionProfile.self_extension(granted)" in src
-    assert "AdmissionProfile.untrusted_author(" not in src
+    The refusal is attributable to the `self_extension` DELTA specifically: the
+    same source under `untrusted_author` admits (asserted below), so a `propose`
+    that built the per-turn profile would have carried this candidate on to the
+    swap."""
+    from revl.admit_profile import AdmissionProfile
+    from revl.compiler import compile_source
+
+    result = _decision_only_gate().propose(_AGENT_REALM, granted=["Ops"],
+                                           providers=_PROVIDERS)
+    assert result.admitted is False
+    assert result.code == "G9"
+    assert 'realm("billing")' in result.message
+
+    # the same one line, under the per-turn profile: admitted. So the verdict
+    # above is the delta and nothing else.
+    compile_source(_AGENT_REALM, "<turn>.rvl",
+                   profile=AdmissionProfile.untrusted_author(["Ops"]))
+
+
+def test_propose_keeps_the_untrusted_author_base_at_the_seam():
+    """`self_extension` is `untrusted_author` PLUS the realm refusal, so the
+    seam has to carry both halves. A profile object built with only
+    `no_realm_placement` would pass the test above and lose G8/R2 entirely."""
+    with_extern = _decision_only_gate().propose(
+        _AGENT_EXTERN, granted=["Ops"], providers=_PROVIDERS)
+    assert with_extern.admitted is False
+    assert "extern" in with_extern.message.lower()
+
+    # and the `granted` set is the one the caller passed, not a stand-in: the
+    # clean candidate reaches `Ops`, so an empty grant refuses it.
+    ungranted = _decision_only_gate().propose(_AGENT_V2, granted=[],
+                                              providers=_PROVIDERS)
+    assert ungranted.admitted is False
 
 
 # =========================================================================== #
