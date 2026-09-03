@@ -140,7 +140,14 @@ const fibers: Array<[string, any]> = []
 for (const [key, info] of Object.entries<any>(spec.proxies || {})) {
   const target = info.endpoint ?? info.socket
   const deadlineMs = info.deadline != null ? info.deadline * 1000 : null
-  const { component, onPeerLost } = makeProxy(key, info.methods, target, deadlineMs)
+  // item 118: the correlation envelope this consumer stamps on every crossing,
+  // when placement.py shipped one for this seam (its own peer identity + the
+  // composition, plus a per-boot secret on a LOCAL seam; a network seam carries
+  // no secret because the mTLS handshake already bound the identity). Absent,
+  // the request line is byte-identical to the pre-118 wire.
+  const { component, onPeerLost } = makeProxy(
+    key, info.methods, target, deadlineMs, info.correlation ?? null,
+  )
   const fiber = ctx.plugin(component)
   await fiber
   fibers.push([`${key}-proxy`, fiber])
