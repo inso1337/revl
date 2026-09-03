@@ -117,8 +117,12 @@ def test_emit_executes_types_and_functions():
     assert ns["classify"](0) == "zero"
     assert ns["classify"](5) == "pos"
     assert ns["first"]([7, 8]) == 7
-    row = ns["Row"](id=1, name="x")
-    assert row.id == 1 and row.name == "x"
+    # a record VALUE is a dict; `Row` is the emitted SHAPE, annotations only,
+    # and nothing constructs it (docs/records.md §7)
+    assert ns["Row"].__annotations__ == {"id": int, "name": str}
+    assert not hasattr(ns["Row"], "__dataclass_fields__")
+    with pytest.raises(TypeError):
+        ns["Row"](id=1, name="x")
     assert issubclass(ns["Ok"], ns["Outcome"])
     assert isinstance(ns["NotFound"](), ns["Outcome"])
     assert ns["Invalid"]("bad").value == "bad"
@@ -145,12 +149,12 @@ def test_match_expression_emits_and_executes():
         }
         """
     )
-    row = ns["Row"](id=1, name="ada")
+    row = {"id": 1, "name": "ada"}   # a record value is a dict (docs/records.md §7)
     assert ns["describe"](ns["Ok"](row)) == "ada"
     assert ns["describe"](ns["NotFound"]()) == "not found"
     assert ns["describe"](ns["Invalid"]("bad")) == "bad"
     assert ns["label"](ns["NotFound"]()) == "other"
-    assert ns["label"](ns["Ok"](ns["Row"](id=2, name="bob"))) == "bob"
+    assert ns["label"](ns["Ok"]({"id": 2, "name": "bob"})) == "bob"
 
 
 def test_match_nonexhaustive_over_known_variant_rejected():
@@ -350,7 +354,10 @@ def test_loops_mutation_and_destructuring_emit_and_execute():
     )
     assert ns["count_idents"](["Ident", "Str", "Ident"]) == 2
     assert ns["skip_spaces"]("   x", 0) == 3
-    assert ns["destructure"](ns["Row"](id=4, name="ab")) == 6
+    # the record value a `{ id: 4, name: "ab" }` literal in revl emits. This
+    # passed a constructed `Row(...)` object, which no emitted module produces,
+    # and so never executed the destructure against a real record value
+    assert ns["destructure"]({"id": 4, "name": "ab"}) == 6
     assert ns["list_destructure"]([3, 4, 5]) == 5
 
 
