@@ -15,6 +15,7 @@
 
 import type { Context } from 'cordis'
 import type { Fiber } from 'cordis'
+import type { FiberState } from 'cordis'
 
 // ---------------------------------------------------------------------------
 // v2: realm placement (docs/design-v2-realms.md)
@@ -1498,6 +1499,44 @@ export const host = {
   // extern whose declared return was `Secret[T]` (the origin).
   markSecret,
   secretResult,
+}
+
+// ---------------------------------------------------------------------------
+// Fiber state names (issue #223)
+//
+// cordis' JS ships `FiberState` as an ordinary reverse-mapped enum object, so
+// `FiberState[fiber.state]` WORKS at runtime — which is why several tests wrote
+// it and nothing complained. Its `.d.ts` declares `const enum`, though, and a
+// const enum may only be indexed by a string literal (TS2476): under a
+// typecheck the reverse lookup is an error, seven times over. The typings
+// understate the shipped object; we do not get to edit them, so the tier names
+// the states itself. `demo.ts` and `placement_runner.ts` each already carried a
+// private copy of this table for exactly that reason — this is the one they
+// share.
+// The table is written as LITERAL ordinals, and `FiberState` is imported as a
+// TYPE only, on purpose. A value import of cordis is not erased by node's
+// type-stripping, and `runtime.ts` is loaded by tests that run in CI's
+// `frontend` job, which deliberately installs no `node_modules` — so importing
+// the enum as a value here fails those tests with ERR_MODULE_NOT_FOUND even
+// though the typings are satisfied. The ordinals are pinned against the enum
+// below, so a cordis renumbering is a typecheck error rather than a silently
+// mislabelled trace.
+const FIBER_STATE_NAMES: readonly string[] = [
+  'PENDING', 'LOADING', 'ACTIVE', 'FAILED', 'DISPOSED', 'UNLOADING',
+]
+
+type _Assert<T extends true> = T
+type _FiberStateOrdinalsArePinned = _Assert<
+  [FiberState.PENDING, FiberState.LOADING, FiberState.ACTIVE,
+   FiberState.FAILED, FiberState.DISPOSED, FiberState.UNLOADING] extends
+    [0, 1, 2, 3, 4, 5] ? true : false
+>
+
+/** The name of a `FiberState` value, for traces and assertion messages. An
+ * unknown numeric state renders as its own digits rather than `undefined`, so a
+ * cordis release that adds a state degrades a message instead of hiding one. */
+export function fiberStateName(state: number): string {
+  return FIBER_STATE_NAMES[state] ?? String(state)
 }
 
 // ---------------------------------------------------------------------------

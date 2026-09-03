@@ -241,6 +241,13 @@ REJECTIONS = {
         "`fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
         "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+    # item 260: the BUDGET half of attenuation. Stripping the ceilings makes
+    # both sides the same bare `net`, so only the dedicated ceiling check sees
+    # it. Its accepted twin is `examples/budget_attenuation.rvl`; the pair is
+    # what makes the differential oracle's ceiling branch reachable (issue 210).
+    "g4_spawn_widens_budget.rvl":
+        "with a wider resource budget than it holds: `net(calls=1000)` widens "
+        "`calls` to 1000 over the parent's 100",
     "g4_spawn_widens_capability.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
     # item 82: an emission reached through a spawn handle (`w.task.run(...)`,
     # an `instance-get` provision access) must still be marked `emit` — an

@@ -8,7 +8,13 @@ language buys us: the emitter can produce type-incorrect TypeScript and stay
 green as long as the code happens to RUN. Widening it found 20 real type errors
 across four emitted modules on the first run.
 
-Two halves have to stay true or the gate goes quiet again, and neither can be
+Issue #223 closed the other half of the same gap: the tier's HAND-WRITTEN
+TypeScript — the vitest suites, `bridge.ts`, `revl_fs_ts.ts`,
+`placement_runner.ts` — was in no tsconfig either, and probing it found 9 more
+real errors. `scripts/typecheck-handwritten.mjs` covers it, with a coverage
+guard that fails if any `.ts` in the tier is matched by no tsconfig at all.
+
+Three halves have to stay true or the gate goes quiet again, and none can be
 checked from inside the tier's own suite:
 
 1. `backend-typescript` must actually invoke `scripts/typecheck-generated.mjs`,
@@ -20,6 +26,11 @@ checked from inside the tier's own suite:
    script must keep cross-checking its file list against the fixture list. That
    cross-check is what makes "0 modules checked, all good" impossible; without
    it, one gitignored directory rename returns the tier to where it started.
+3. `backend-typescript` must also invoke `scripts/typecheck-handwritten.mjs`,
+   after the same step, and that script must keep asking whether every `.ts` in
+   the tier is covered by SOME tsconfig. Dropping the coverage question is how
+   #223 happened the first time: two configs that each looked complete, and a
+   third of the tier's TypeScript between them.
 
 Like `tests/test_java_javac_gate_runs_in_ci.py`, this is static: it needs no
 node and no toolchain, so it runs in the `frontend` job with everything else in
@@ -37,6 +48,7 @@ CI = ROOT / ".github" / "workflows" / "ci.yml"
 TS = ROOT / "backends" / "typescript"
 JOB = "backend-typescript"
 GATE = "scripts/typecheck-generated.mjs"
+HAND_GATE = "scripts/typecheck-handwritten.mjs"
 
 
 def _job_block(name: str) -> str:
@@ -76,6 +88,12 @@ def test_the_gate_and_its_config_exist():
     assert (TS / "tsconfig.generated.json").is_file(), (
         "backends/typescript/tsconfig.generated.json is gone; the emitted "
         "modules are back to being typechecked by nobody (issue #198)."
+    )
+    assert (TS / HAND_GATE).is_file(), f"backends/typescript/{HAND_GATE} is gone"
+    assert (TS / "tsconfig.handwritten.json").is_file(), (
+        "backends/typescript/tsconfig.handwritten.json is gone; the tier's "
+        "hand-written TypeScript is back to being typechecked by nobody "
+        "(issue #223)."
     )
 
 
@@ -119,12 +137,100 @@ def test_the_generated_typecheck_runs_after_the_fixtures_are_emitted():
     )
 
 
-def test_the_hand_written_typecheck_still_runs():
+def test_the_plain_tsc_project_check_still_runs():
     """Widening to emitted output must not cost the check that was already
-    there (`runtime.ts`, `demo.ts`, `golden/**`)."""
+    there (`runtime.ts` and the `demo.ts` that drives it)."""
     steps = _run_steps(_job_block(JOB))
     assert any("tsc --noEmit" in s for s in steps), (
         f"the `{JOB}` job no longer runs `tsc --noEmit`"
+    )
+
+
+# --- half 3: the hand-written half runs too, in the right order (#223) ------ #
+def test_backend_typescript_runs_the_hand_written_typecheck():
+    steps = _run_steps(_job_block(JOB))
+    assert any(HAND_GATE in s for s in steps), (
+        f"the `{JOB}` job does not run {HAND_GATE}. The vitest suites, "
+        "bridge.ts and revl_fs_ts.ts are executed but typechecked by "
+        "nobody — that is issue #223, reopened."
+    )
+
+
+def test_the_hand_written_typecheck_runs_after_the_fixtures_are_emitted():
+    """Same ordering constraint as the emitted half, for a different reason:
+    the suites IMPORT `tests/generated/`, so with that directory cold every one
+    of them fails to resolve."""
+    steps = _run_steps(_job_block(JOB))
+    gate_at = next(i for i, s in enumerate(steps) if HAND_GATE in s)
+    emit_at = next((i for i, s in enumerate(steps) if "vitest run" in s), None)
+    assert emit_at is not None and emit_at < gate_at, (
+        "the hand-written typecheck runs BEFORE the step that emits "
+        "tests/generated/, which the suites import."
+    )
+
+
+def test_the_hand_written_gate_asks_whether_every_file_is_covered():
+    """The guard that makes this gate hard to reopen: it is not enough for the
+    listed files to typecheck, every `.ts` in the tier has to be matched by
+    SOME tsconfig. Delete that question and a new file can go uncovered exactly
+    the way the suites did."""
+    src = (TS / HAND_GATE).read_text(encoding="utf-8")
+    assert "tsconfig.handwritten.json" in src, (
+        f"{HAND_GATE} no longer reads tsconfig.handwritten.json"
+    )
+    for config in ("tsconfig.json", "tsconfig.generated.json"):
+        assert config in src, (
+            f"{HAND_GATE} no longer counts {config} towards coverage, so the "
+            "files it owns now read as covered by nobody — or, worse, the "
+            "coverage guard was dropped and nothing asks at all (issue #223)."
+        )
+
+
+def test_no_typescript_file_in_the_tier_is_covered_by_no_tsconfig():
+    """The static twin of the gate's own coverage guard, so the claim holds in
+    the `frontend` job too — with no node, and on a cold checkout where
+    `tests/generated/` does not exist and the gate cannot run at all.
+
+    Reads the `include` globs out of the three configs and matches them against
+    the tier's committed `.ts` files. Deliberately cruder than the real guard:
+    it exists to notice a file added to a directory no config mentions."""
+    import fnmatch
+
+    includes: list[str] = []
+    for name in ("tsconfig.json", "tsconfig.generated.json",
+                 "tsconfig.handwritten.json"):
+        text = (TS / name).read_text(encoding="utf-8")
+        body = re.search(r'"include"\s*:\s*\[(.*?)\]', text, re.S)
+        assert body, f"{name} has no include array"
+        includes += re.findall(r'"([^"]+)"', body.group(1))
+    assert len(includes) >= 4, "the three configs between them include almost nothing"
+
+    def covered(rel: str) -> bool:
+        for pattern in includes:
+            if pattern == rel:
+                return True
+            # tsconfig treats `dir/**/*.ts` as "at any depth" and `dir/*.ts` as
+            # "this level only"; fnmatch's `*` crosses `/`, so anchor the
+            # single-star form on the segment count.
+            if "**" in pattern:
+                if fnmatch.fnmatch(rel, pattern.replace("**/", "*")):
+                    return True
+            elif fnmatch.fnmatch(rel, pattern) and rel.count("/") == pattern.count("/"):
+                return True
+        return False
+
+    tracked = [
+        p.relative_to(TS).as_posix()
+        for p in TS.rglob("*.ts")
+        if "node_modules" not in p.parts and "tests/generated/" not in
+        p.relative_to(TS).as_posix()
+    ]
+    assert len(tracked) >= 40, "found suspiciously few .ts files to check"
+    uncovered = sorted(f for f in tracked if not covered(f))
+    assert not uncovered, (
+        "these TypeScript files are matched by no tsconfig include, so nothing "
+        f"typechecks them: {uncovered}. That is issue #223 — add each to the "
+        "config that should own it."
     )
 
 

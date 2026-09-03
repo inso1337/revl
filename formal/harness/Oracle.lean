@@ -2,6 +2,8 @@ import RevL.Manifest
 import RevL.Lemmas.CapLemmas
 import RevL.Theorems.CapCeilings
 import RevL.Theorems.G7_LifoComplete
+import RevL.Theorems.A8_WalDischarge
+import RevL.Theorems.R4_NoResidue
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -85,6 +87,19 @@ Fact rows in (tab-separated, one fact per line):
                                              registration site, ignored here
   J <scen> <verdict>                         the verdict that teardown ran
                                              under (commit|abort|halted)
+  L <scen> run                               declares one crash-recovery
+                                             scenario (A8/R4)
+  L <scen> descriptor <seq> <entry> <idem>   a durable WAL record, in append
+  L <scen> effect <seq> <b> <rc> <idem>      order; the constructors of
+  L <scen> discharge <seqs-csv>              `RevL.Lemmas.Rec`, one row each
+  L <scen> fence <seq>
+  L <scen> deferred <seq>
+  L <scen> marker <approved|aborted|forkfrozen|complete>
+  L <scen> fails <seq>                       the re-issue ORACLE (243 rule 6):
+                                             this seq's inverse fails when
+                                             re-issued. Not a WAL record — a
+                                             property of the world the
+                                             reference drives.
 
 Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 — the checker's own parser. Nothing here re-reads the capability grammar.
@@ -96,6 +111,7 @@ Verdict rows out:
   W <file> <comp> <child> <atten=ok|fail>          spawn attenuation
   X <file> <refused=CODE>                          refusal of record
   D <scen> <replayed=csv> <discharged=csv> <stranded=csv>   G7 disposition
+  O <scen> <outcome=...> <replayed=csv> <residue=csv|n/a>   A8/R4 recovery
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -551,6 +567,218 @@ theorem replayedLabels_phase_order (v : Verdict) (log : List LogEntry) :
 
 end G7Disposition
 
+/-! ## Deciding the crash-recovery disposition (A8, R4)
+
+The `D` row above is about a teardown that RUNS. This one is about what a
+FRESH PROCESS concludes from a durable log after the old one died — the
+guarantee A8 states (`RevL.Theorems.A8_WalDischarge`) and the residue
+surface R4 states (`RevL.Theorems.R4_NoResidue`). Until this row existed
+both were proved only against the design documents: `formal/STATUS.md`
+carried 17 A8 theorems and 8 R4 theorems and no oracle row, so the model
+was checked for internal consistency and never against `src/revl`.
+
+Like `D`, the reference half RUNS rather than reads: it writes the
+scenario's records as a real JSON-Lines WAL and calls
+`src/revl/recovery.py`'s `recover` over it, observing what was actually
+applied to the `World` and what the report names as residue
+(`diff_corpus.recovery_observation`). This file computes what
+`RevL.Lemmas.WalLemmas` says should happen. Nothing below restates the
+rule: the three columns are the model's own `outcome` / `replayed` /
+`reported`.
+
+Three things about the columns, stated so the row is not read as wider
+than it is:
+
+* `replayed` is compared as a SET (both sides sort it). The model's
+  `rollbackReplay` walks the log in append order; `_roll_back` walks the
+  legacy `effect` family newest-first and the descriptor families by
+  descending seq. Neither order is claimed by the other, so ordering them
+  would be comparing two bookkeeping conventions, not a guarantee. The
+  LIFO claim that IS a guarantee is G7's, and the `D` row checks it
+  ordered.
+* `residue` is printed only under `outcome = rolledBack`. That is the
+  model's OWN scope condition — `RevL.Lemmas.reported` models the
+  roll-back path's surface, and R4 is stated under
+  `outcome L = .rolledBack`. The roll-forward window's `flush-residue` is
+  a different surface the model does not have, so the column says `n/a`
+  there rather than agreeing about a claim neither side is making.
+* the re-issue oracle `ok` (243 rule 6: the inverse is fallible) is a
+  parameter of the model, so it is a fact in the corpus (`fails` rows)
+  rather than fixed to `okAll` here. That is what puts
+  `Disp.residue .restoreFailed` under the row at all.
+-/
+
+section Recovery
+
+open RevL.Lemmas
+
+def parseBoolField : String → Option Bool
+  | "0" => some false
+  | "1" => some true
+  | _ => none
+
+def parseEntry : String → Option Entry
+  | "transactional" => some .transactional
+  | "compensation" => some .compensation
+  | _ => none
+
+/-- One durable WAL record of one recovery scenario, as the model's own
+`Rec`. A malformed row is `none` and the caller refuses the corpus — never
+a silently dropped record, which would move the verdict. -/
+def parseL (f : List String) : Option (String × Rec) :=
+  match f with
+  | ["L", scen, "descriptor", seq, entry, idem] => do
+      let s ← seq.toNat?
+      let e ← parseEntry entry
+      let i ← parseBoolField idem
+      some (scen, .descriptor s e i)
+  | ["L", scen, "effect", seq, b, rc, idem] => do
+      let s ← seq.toNat?
+      let bb ← parseBoolField b
+      let rr ← parseBoolField rc
+      let ii ← parseBoolField idem
+      some (scen, .effect s bb rr ii)
+  | ["L", scen, "discharge", seqs] => do
+      let ss ← (splitKeys seqs).mapM (·.toNat?)
+      some (scen, .discharge ss)
+  | ["L", scen, "fence", seq] => do
+      let s ← seq.toNat?
+      some (scen, .replayFence s)
+  | ["L", scen, "deferred", seq] => do
+      let s ← seq.toNat?
+      some (scen, .deferredEmission s)
+  | ["L", scen, "marker", "approved"] => some (scen, .commitApproved)
+  | ["L", scen, "marker", "aborted"] => some (scen, .aborted)
+  | ["L", scen, "marker", "forkfrozen"] => some (scen, .forkFrozen)
+  | ["L", scen, "marker", "complete"] => some (scen, .activationComplete)
+  | _ => none
+
+/-- `L <scen> run` — a scenario exists, so an `O` row is owed for it. -/
+def parseLRun (f : List String) : Option String :=
+  match f with
+  | ["L", scen, "run"] => some scen
+  | _ => none
+
+/-- `L <scen> fails <seq>` — the re-issue oracle's `false` points. -/
+def parseLFail (f : List String) : Option (String × Seq) :=
+  match f with
+  | ["L", scen, "fails", seq] => (seq.toNat?).map fun s => (scen, s)
+  | _ => none
+
+/-- A row of the corpus that is an `L` row of SOME shape. Used to refuse a
+malformed one instead of skipping it. -/
+def isLRow (f : List String) : Bool :=
+  match f with
+  | "L" :: _ => true
+  | _ => false
+
+/-- The re-issue oracle 243 rule 6 makes fallible, built from the corpus's
+`fails` rows. `RevL.R4.okAll` is the special case with no such row. -/
+def okOf (failing : List Seq) : Seq → Bool := fun s => !memSeq s failing
+
+/-- The printed name of the model's `Outcome`. -/
+def outcomeName : Outcome → String
+  | .rolledForward => "rolledForward"
+  | .rolledBack => "rolledBack"
+  | .forkRetired => "forkRetired"
+
+/-- **The printed name IS the outcome.** Distinct outcomes print
+differently, so comparing the strings compares the model's verdicts and a
+reference that converged on a different one disagrees with this column. -/
+theorem outcomeName_inj : ∀ a b : Outcome, outcomeName a = outcomeName b → a = b := by
+  intro a b h
+  cases a <;> cases b <;> simp_all [outcomeName]
+
+/-- The seqs a whole recovery run APPLIES against the world
+(`RevL.Lemmas.replayed`), as labels. -/
+def replayedSeqLabels (L : Log) : List String := (replayed L).map toString
+
+/-- The residue surface a roll-back reports (`RevL.Lemmas.reported`), as
+labels. -/
+def reportedSeqLabels (L : Log) (ok : Seq → Bool) : List String :=
+  (reported L ok).map toString
+
+/-- **The replayed column is the model's applied set.** A seq is applied
+exactly when the run rolls back AND some record of the log re-issues it.
+So a reference that applies an inverse this model skips — or skips one it
+re-issues — disagrees with this column. -/
+theorem mem_replayed_iff (L : Log) (s : Seq) :
+    s ∈ replayed L ↔ outcome L = .rolledBack ∧ ∃ r ∈ L, s ∈ reissued L r := by
+  have hr : replayed L = if outcome L = .rolledBack then rollbackReplay L else [] := by
+    unfold replayed; cases outcome L <;> simp
+  rw [hr]
+  by_cases h : outcome L = .rolledBack
+  · simp [h, rollbackReplay, List.mem_flatMap]
+  · simp [h]
+
+/-- **The residue column is the model's reported surface.** Left to right:
+a seq printed here belongs to a record the roll-back walk disposed as
+residue. Right to left: every such record's seq is printed. So a reference
+that silently retains an owed referent, or reports one the model
+discharges, disagrees with this column. -/
+theorem mem_reported_iff (L : Log) (ok : Seq → Bool) (s : Seq) :
+    s ∈ reported L ok ↔ ∃ r ∈ L, ∃ d : Residue, dispose L ok r = some (s, .residue d) := by
+  simp only [RevL.Lemmas.reported, List.mem_filterMap]
+  constructor
+  · rintro ⟨r, hr, hd⟩
+    refine ⟨r, hr, ?_⟩
+    revert hd
+    rcases hdis : dispose L ok r with _ | ⟨t, d⟩
+    · simp
+    · cases d <;> simp_all
+  · rintro ⟨r, hr, d, hd⟩
+    exact ⟨r, hr, by rw [hd]⟩
+
+/-- The printed columns are the model's two lists, spelled. -/
+theorem replayedSeqLabels_eq (L : Log) :
+    replayedSeqLabels L = (replayed L).map toString := rfl
+
+theorem reportedSeqLabels_eq (L : Log) (ok : Seq → Bool) :
+    reportedSeqLabels L ok = (reported L ok).map toString := rfl
+
+/-- **A commit applies nothing.** `RevL.A8.commit_replays_no_inverse`, as
+it lands in the column: the whole replayed list is empty whenever the
+outcome is not a roll-back, so a reference that re-issued an inverse after
+a durable `commit-approved` or `activation-complete` disagrees. -/
+theorem replayedSeqLabels_nil_of_not_rolledBack {L : Log}
+    (h : outcome L ≠ .rolledBack) : replayedSeqLabels L = [] := by
+  simp only [replayedSeqLabels, RevL.A8.commit_replays_no_inverse h, List.map_nil]
+
+/-- **A committed transaction is never rolled back**
+(`RevL.A8.committed_transaction_is_retained`), as it lands in the column:
+a descriptor whose seq carries a durable `discharge` record re-issues
+nothing, so its seq cannot reach the replayed list through that record. -/
+theorem discharged_not_reissued {L : Log} {s : Seq} {e : Entry} {i : Bool}
+    (h : s ∈ dischargedSeqs L) : reissued L (.descriptor s e i) = [] := by
+  cases e <;> simp [reissued, memSeq_iff.mpr h]
+
+/-- **At most once, across the crash** (item 309 §3a). An UNDECLARED
+inverse whose fence is already durable is not applied again — by either
+record family. This is the branch the `O` row caught missing from the
+legacy `effect` family in `RevL.Lemmas.dispose`. -/
+theorem fenced_not_reissued {L : Log} {s : Seq} (h : s ∈ fencedSeqs L) :
+    reissued L (.descriptor s .transactional false) = []
+    ∧ reissued L (.effect s true true false) = [] := by
+  refine ⟨?_, ?_⟩ <;> simp [reissued, memSeq_iff.mpr h]
+
+/-- **A declared-idempotent inverse replays freely** — the other half of
+309, and the reason the `idem` field is in the corpus at all. Over a log
+with no durable discharge, a declared-idempotent transactional inverse is
+re-issued no matter how many fences the log carries. -/
+theorem declared_idempotent_reissued {L : Log} {s : Seq}
+    (h : s ∉ dischargedSeqs L) :
+    reissued L (.descriptor s .transactional true) = [s] := by
+  simp [reissued, memSeq_false.mpr h]
+
+/-- **The residue column is empty exactly when the roll-back owes
+nothing** — `RevL.Lemmas.clean`, the predicate `residue.clean` in the
+reference's report. -/
+theorem reportedSeqLabels_nil_iff_clean (L : Log) (ok : Seq → Bool) :
+    reportedSeqLabels L ok = [] ↔ clean L ok = true := by
+  simp [reportedSeqLabels, clean, List.isEmpty_iff]
+
+end Recovery
+
 -- ---------------------------------------------------------------- rows
 
 structure MRow where
@@ -828,6 +1056,9 @@ def main (args : List String) : IO UInt32 := do
     let xrows := fields.filterMap parseX
     let erows := fields.filterMap parseE
     let jrows := fields.filterMap parseJ
+    let lrecs := fields.filterMap parseL
+    let lruns := fields.filterMap parseLRun
+    let lfails := fields.filterMap parseLFail
     let capTable := buildCapTable (fields.filterMap parseZ) (fields.filterMap parseY)
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
@@ -863,6 +1094,25 @@ def main (args : List String) : IO UInt32 := do
         out := out ++ s!"D\t{j.scen}\treplayed={csv (replayedLabels v log)}\t" ++
           s!"discharged={csv (dischargedLabels v log)}\t" ++
           s!"stranded={csv (strandedLabels v log)}\n"
+    -- O rows (A8/R4 crash recovery), one per scenario. The records are the
+    -- scenario's `L` rows IN FILE ORDER, which is the WAL's append order, read
+    -- straight into the model's own `Rec`. An `L` row of no known shape is a
+    -- HARD error: a silently dropped record moves the verdict.
+    let lrows := fields.filter isLRow
+    if lrows.length != lrecs.length + lruns.length + lfails.length then
+      IO.eprintln "oracle: malformed L row in the crash-recovery corpus"
+      return 1
+    for scen in lruns do
+      let log : Log := (lrecs.filter (·.1 == scen)).map (·.2)
+      let failing : List Seq := (lfails.filter (·.1 == scen)).map (·.2)
+      let ok := okOf failing
+      -- `reported` models the ROLL-BACK path's residue surface and R4 is stated
+      -- under `outcome L = .rolledBack`, so the column says `n/a` rather than
+      -- claiming a surface the model does not have.
+      let residue :=
+        if outcome log = .rolledBack then csv (reportedSeqLabels log ok) else "n/a"
+      out := out ++ s!"O\t{scen}\toutcome={outcomeName (outcome log)}\t" ++
+        s!"replayed={csv (replayedSeqLabels log)}\tresidue={residue}\n"
     for p in paths do
       let fm := mrows.filter (fun r => r.path == p)
       let ub := brows.filter (fun r => r.path == p)
@@ -953,3 +1203,13 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.mem_strandedLabels_iff
 #print axioms RevLOracle.row_is_total
 #print axioms RevLOracle.replayedLabels_phase_order
+#print axioms RevLOracle.outcomeName_inj
+#print axioms RevLOracle.mem_replayed_iff
+#print axioms RevLOracle.mem_reported_iff
+#print axioms RevLOracle.replayedSeqLabels_eq
+#print axioms RevLOracle.reportedSeqLabels_eq
+#print axioms RevLOracle.replayedSeqLabels_nil_of_not_rolledBack
+#print axioms RevLOracle.discharged_not_reissued
+#print axioms RevLOracle.fenced_not_reissued
+#print axioms RevLOracle.declared_idempotent_reissued
+#print axioms RevLOracle.reportedSeqLabels_nil_iff_clean
