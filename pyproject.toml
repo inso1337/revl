@@ -28,7 +28,12 @@ classifiers = [
 # `coverage` is a TEST dependency, not a runtime one: tests/test_selfhost_coverage.py
 # measures which statements of the mirrored reference emitters the self-host corpus
 # never executes (roadmap item 429) and gates on it, which needs a real tracer.
-test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0"]
+# `pyyaml`: tests/test_env_gated_skips_run_somewhere.py reads .github/workflows/
+# to pair each CI-gated test against the job that actually runs it. It used to
+# reach for PyYAML through `importorskip`, so on an install without it the
+# strongest anti-silent-skip checks in the repo silently skipped (issue #266).
+# It is a test dependency now, so they cannot.
+test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0", "pyyaml"]
 # OpenTelemetry export for causal lifecycle traces (revl.otel, item 120). Kept
 # out of the base install so it stays dependency-light; absent, revl.otel
 # degrades to a no-op / span-mapping dump rather than a hard import error.

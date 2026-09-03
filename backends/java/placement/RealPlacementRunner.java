@@ -133,10 +133,28 @@ public final class RealPlacementRunner {
             for (Object p : probes) runProbe(root, ifaces, (String) p);
         }
 
+        // THE SHUTDOWN HOOK GOES UP BEFORE THE `UP` LINE, and that ordering is
+        // the whole contract (the java half of the fix py got in #226; issue
+        // 290). `[name] UP` is what the conductor waits on: `run_placement`'s
+        // `--once` path blocks on every child's UP and then calls `stop_all`
+        // immediately, so the SIGTERM can land microseconds after the print.
+        // Printing first left a window in which the JVM's DEFAULT SIGTERM
+        // disposition was still in force — no hook registered means the JVM dies
+        // without running one — so a signal arriving inside it killed this
+        // process outright: no LIFO unwind, no inverses replayed, no clean-unload
+        // WAL marker, no `DOWN` (G7 and R4, both violated). The window belongs to
+        // the LAST process to boot — every earlier one is still being waited on —
+        // which is why it lands on the process most likely to still owe an
+        // inverse and a residue proof.
+        //
+        // `events` is an unbounded BlockingQueue, so a STOP offered in the old
+        // window is merely PARKED and the loop below takes it on its first
+        // iteration: the unwind runs either way, and `UP` means what it says —
+        // loaded, serving, AND able to be stopped.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> events.offer(STOP)));
+
         System.out.println("[" + name + "] UP");
         System.out.flush();
-
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> events.offer(STOP)));
 
         // 3. main loop: every context call stays on this thread (cordis4j D8).
         while (true) {

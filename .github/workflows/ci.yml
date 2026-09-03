@@ -4,6 +4,20 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Merge queue. GitHub builds each queued candidate on top of the queue's tip
+  # and asks THIS workflow for the same 13 required checks before it lands.
+  #
+  # Without this trigger a queued PR waits forever for checks that never run,
+  # so the trigger must be on main BEFORE the queue is enabled.
+  #
+  # Why the queue exists: three defects reached main in one day from merges git
+  # reported as clean -- two branches independently defining the same function
+  # with incompatible signatures, an assertion pinning a literal another branch
+  # extended, and a shared `continue` belonging to both arms of a merged
+  # conditional. Every one was green in isolation and broken only in the union,
+  # because no branch's CI ever ran against the merged result. The queue closes
+  # that class by construction: what CI tests IS what lands (issue #292).
+  merge_group:
   # Exposed as a reusable workflow so the release job can gate the PyPI publish
   # on the *same* suite that gates main (see .github/workflows/publish.yml).
   # A version on PyPI must be a claim this whole matrix passed. No job below
@@ -881,6 +895,46 @@ jobs:
           # narrowed to make this fit. A smaller green is exactly what let
           # items 430 and 433 happen.
           REVL_CROSS_TIER_SLOW: "1"
+          # Issue #266. This job installed the cordis-py runtime and ran
+          # `npm ci`, so a py- or ts-tier probe that reports "toolchain not
+          # installed" HERE is a broken provisioning step, not an environment
+          # fact — and a skip is green, so it would say nothing. This turns
+          # that one class of skip into a failure. Only that class: a tier's
+          # by-design refusal of a document still skips (revl.test.Absent).
+          # rust/java/wasm/go are not required yet; the reasons are enumerated
+          # in tests/test_env_gated_skips_run_somewhere.py.
+          REVL_REQUIRE_TIERS: "py,ts"
+      # The rest of the tier-execution suites, run where BOTH tiers exist.
+      #
+      # Issue #266: every one of these files calls `RUNNERS[tier]` and turns an
+      # absent toolchain into `pytest.skip`. `frontend` has no cordis-py and no
+      # node_modules; `frontend-cordis` has the runtime but still no
+      # node_modules — so their ts halves executed in NO job, and reported green
+      # everywhere by skipping. tests/test_163_match_payload_bind_scope.py is
+      # the one that got caught: `test_payload_bind_scope_executes[ts]` had a
+      # live `TypeError: Cannot mix BigInt and other types` under it.
+      #
+      # This job is the one place the cordis-py venv and backends/typescript/
+      # node_modules both exist, so the files run here, with the switch on. The
+      # list is checked against the suite by
+      # tests/test_env_gated_skips_run_somewhere.py
+      # ::test_every_tier_test_is_required_to_actually_run_in_some_ci_job, so a
+      # new tier test cannot be added without landing in a step like this one.
+      # Measured at ~4 minutes with both tiers live and zero skips.
+      - run: >
+          backends/python/.venv/bin/python -m pytest
+          tests/test_163_match_payload_bind_scope.py
+          tests/test_async_match_block_arm.py
+          tests/test_crypto_stdlib.py
+          tests/test_insert_if_absent.py
+          tests/test_json_cross_tier_bytes.py
+          tests/test_run_go.py
+          tests/test_run_ts_stdlib_fs_root.py
+          tests/test_stdlib_version.py
+          tests/test_total_field_surface.py
+          -q
+        env:
+          REVL_REQUIRE_TIERS: "py,ts"
       # ci/placement_smoke.sh boots examples/user_cache.rvl split py<->node,
       # py<->rust, py<->go and py<->java (`--once`: boot, cross the seam via a
       # probe, tear down, exit). It fails the build on a seam that will not come

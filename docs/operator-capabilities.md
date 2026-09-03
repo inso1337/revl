@@ -140,11 +140,41 @@ to strand two hundred brackets and leave every handle held — and the E-Stop is
 the one verb a composition or an agent must never be able to invoke on itself,
 which is what holding it here buys ([443-estop.md](design/443-estop.md)).
 
+### Composed verbs — a swap reached through another verb
+
+The gate is positional over the dispatch table, so a verb is gated by the name
+it is called under. Two verbs perform a swap through *another* verb's
+machinery, and both are mapped to `swap` rather than to verbs of their own —
+an operator who may not swap a component may not ship or repair it either:
+
+* **`revl_ship`** fuses check → admit → plan → swap and, with `apply: true`,
+  calls the `revl_swap` handler directly;
+* **`revl_repair`**'s remediation step calls `Session.swap` itself, so it is
+  also checked against an enforced component lease (item 61) exactly as
+  `revl_swap` is.
+
+Both are conditional: each has a rehearsal mode that mutates nothing
+(`revl_ship` without `apply`, `revl_repair` with `apply: false`), and a
+rehearsal is not a privileged action. The rule for a new verb: **if it can
+reach `Session.swap` / `.load` / `.unload` / `.restore` / `.rollback` /
+`.undo` / `.estop` — through its own handler or any handler it calls — it must
+be in `operator.TOOL_VERB` or `operator.COMPOSED_TOOL_VERB`.**
+`tests/test_mcp_authority_gate.py` enumerates every advertised verb and fails
+on one that is in neither and not recorded as deliberately ungated.
+
+### An undecidable target set fails closed
+
 When the target set cannot be determined without running the action — a
 candidate that does not compile, or a verb with nothing loaded — the gate
-**steps aside**: the handler itself refuses and nothing mutates, so there is
-nothing to scope. The gate never lets a mutation through un-scoped; it only
-declines to add a second, redundant refusal.
+scopes the action to the **unnameable whole composition**, which only a literal
+`may <verb> on *` grant satisfies. A subject-scoped operator is refused; an
+unscoped one proceeds and gets the handler's own diagnostic. Component leases
+apply the same rule: a swap whose targets cannot be derived is checked against
+*every* active lease.
+
+"I cannot work out what this touches" is a reason to refuse, never a reason to
+ungate. Deferring instead was a bypass an attacker could steer into: make the
+target derivation fail and the gate stopped gating.
 
 ### How it reuses item 33's evaluation
 
