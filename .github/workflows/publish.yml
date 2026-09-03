@@ -76,6 +76,23 @@ jobs:
         run: |
           python -m pip install --upgrade twine
           twine check dist/*
+      # The last thing between this runner's filesystem and PyPI.
+      #
+      # `twine check` reads the metadata and never opens the payload. This
+      # asserts the wheel's member list against `git ls-files` of the trees
+      # pyproject maps into it: an upload is refused unless the artifact is
+      # exactly the tagged commit's contents. Before GHSA-gj88-cx6q-38r2,
+      # `pyproject.toml` force-included `backends/` and `stdlib/` verbatim —
+      # force-include is exempt from every exclude and from the ignore files —
+      # so a build on a runner that had touched the node/cargo/TS-fixture
+      # toolchains would have shipped `node_modules`, cargo `target/` and
+      # generated key material to PyPI, permanently and irrevocably. A clean
+      # runner made that latent rather than absent; this makes it impossible.
+      #
+      # Deliberately placed BEFORE the publish step, and with no `if:` guard: a
+      # release that cannot prove what it contains is not a release.
+      - name: The wheel ships exactly the tagged commit's files
+        run: python3 tools/check_wheel_manifest.py dist/*.whl
       # Trusted Publishing (OIDC) — the recommended path, no API token stored.
       #
       # MAINTAINER TODO (one-time, before the first release):

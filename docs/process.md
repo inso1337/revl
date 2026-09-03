@@ -81,7 +81,7 @@ job-level `permissions` block **replaces** the workflow-level one rather than
 merging into it, `contents` was `none` and `actions/checkout` could not have
 read the tag it publishes (issue #191, fixed in PR #190).
 
-Two things cover it now, and neither is a substitute for the other.
+Three things cover it now, and none is a substitute for the others.
 
 `tools/check_workflow_permissions.py` runs in `lint` on every PR. It resolves
 each job's effective permission set and checks it against the scopes the
@@ -93,14 +93,45 @@ too. The action-to-scopes table is deliberately small and hand-checked: an
 action not in it is skipped with a note rather than guessed at, so add the
 entry when you add the action.
 
+`tools/check_wheel_manifest.py` runs in `lint` on every PR, in the release dry
+run, and in `publish.yml` immediately before the upload. It asserts that the
+built wheel's member list **equals** `git ls-files` of the trees
+`hatch_build.TREES` maps into it, plus the `.dist-info` — set equality, so an
+over-wide `exclude` is as red as an over-inclusion — and that the **sdist**
+carries no file the commit does not track. It exists because the
+wheel used to `force-include` `backends/` and `stdlib/` verbatim.
+`force-include` runs after file selection and is exempt from every exclude rule
+and from the ignore files, so the wheel contained whatever sat on the builder's
+disk under those trees: a developer build came out at 2933 members and 250 MB
+unpacked against the 523 the commit describes, carrying `node_modules`, cargo
+`target/`, a cloned `.cordis-py`, compiled runner binaries and the generated
+key material `.gitignore` parks under `backends/typescript/test-secret-store/`.
+The size was the visible half; the half that mattered is that the published
+artifact was a function of the builder's filesystem rather than of the
+revision. `hatch_build.py` now computes that force-include list per file from
+`git ls-files` (falling back to `[tool.hatch.build] exclude` where there is no
+git, as when a wheel is built out of an unpacked sdist), and the same excludes
+took 909 cargo `target/` files and a compiled runner binary out of the sdist.
+The gate is deliberately not the same mechanism: it asks git directly, from
+outside the build, because the hook and the excludes are exactly what could
+drift. Its `--self-test` doctors a built wheel in both directions and plants a
+real untracked file under `backends/`, and that runs in `lint` too.
+
+The wheel target keeps `packages = ["src/revl"]`. Remapping `backends` with a
+`sources` entry is the tidier spelling and does not work here: a `sources`
+rewrite that changes a prefix rather than removing one makes editable installs
+impossible, and `pip install -e ".[test]"` is how eleven CI jobs and every
+contributor set the repository up.
+
 `.github/workflows/release-dryrun.yml` builds the distribution, runs
-`twine check`, installs the wheel into a clean environment and compiles an
-example with it. It runs weekly, on `workflow_dispatch`, and on a PR that edits
-`pyproject.toml` or the release workflows. It has no upload step, not even a
-skipped one. It is also the only place the built **wheel** is used at all: the
-rest of CI tests the checkout tree, so a break in pyproject's force-include of
-`backends/` and `stdlib/` is invisible everywhere else and would surface as a
-broken release on PyPI.
+`twine check` and the wheel-manifest gate, installs the wheel into a clean
+environment and compiles an example with it. It runs weekly, on
+`workflow_dispatch`, and on a PR that edits `pyproject.toml`, the manifest gate
+or the release workflows. It has no upload step, not even a skipped one. It is
+also the only place the built **wheel** is *used* at all: the rest of CI tests
+the checkout tree, so a break in what pyproject packages into `revl/backends`
+and `revl/stdlib` is invisible everywhere else and would surface as a broken
+release on PyPI.
 
 What is still not covered is the publish job's own runtime environment, its
 `pypi` environment and the Trusted Publishing OIDC handshake. Those exist only
