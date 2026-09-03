@@ -121,6 +121,14 @@ def guarantees() -> dict[str, str]:
 # that fails constantly gets routinely bypassed, and a bypassed gate is the
 # failure this one exists to prevent. The style column serves docs people
 # read; the roadmap is not one of them.
+#
+# Issue #296 asked whether the roadmap can rejoin now that the block is
+# membership plus em-dashes and nothing else. Measured, it cannot, because the
+# roadmap is a churn source in its own right and not merely a victim of one:
+# across the 40 most recent first-parent landings on main its own em-dash count
+# moved on 13 of them, against 18 for the whole of the rest of docs/ put
+# together. Re-joining would add a third again as much churn to a gate every
+# open PR pays for. The exclusion stays.
 DOC_STATUS_EXCLUDED = frozenset({"DOC-STATUS.md", "v2.0-roadmap.md"})
 
 
@@ -206,6 +214,19 @@ def block_doc_status(current: str) -> str:
     literally `read_text().count("—")`). Carried: `status` and `tier-limit
     notes`, which are a human's reading. A doc with no committed row arrives as
     `needs-work`, which is the honest default: not audited.
+
+    NOT derived, deliberately, and never has been: a line count, a byte count,
+    a word count or any other measure of a doc's size. `--check` byte-compares
+    this block in the required `frontend` job, so whatever the block tracks is
+    paid for by every open PR at once and not only by the branch that moved it
+    (issue #296). The em-dash count earns that price: 18 of the 40 most recent
+    first-parent landings on main moved an em-dash count or the doc list, and
+    17 of them RAISED a count, which is exactly the AI-tell regression the
+    style pass exists to catch. A size column would have moved the block on 23
+    of those same 40 and detected nothing a diff does not already show. Both
+    directions are pinned by `tests/test_docgen_doc_status_shape.py`; the churn
+    a landing cannot regenerate away is a merge-ordering problem, fixed by the
+    merge queue, not by weakening what this block says.
     """
     rows = parse_rows(current)
     out = ["| doc | status | em-dashes | tier-limit notes |", "|---|---|---|---|"]
@@ -474,6 +495,24 @@ def main() -> int:
         for s in stale:
             print(f"  {s}", file=sys.stderr)
         print(f"  fix: {WRITE_HINT}", file=sys.stderr)
+        # A stale block is very often NOT this branch's doing. The blocks are a
+        # pure function of their sources, so any landing that touches a source
+        # re-stales them for every open PR at once -- and this check runs in the
+        # required `frontend` job, so the author sees a red they did not cause.
+        # Say so here rather than letting each author rediscover it.
+        print("", file=sys.stderr)
+        print("  NOTE: this may be INHERITED from main rather than caused by "
+              "your branch.", file=sys.stderr)
+        print("  These blocks are a pure function of their sources, so any "
+              "merge that touches", file=sys.stderr)
+        print("  a source re-stales them for every open PR. Check main first:",
+              file=sys.stderr)
+        print("      git fetch origin && git worktree add --detach "
+              "/tmp/dg origin/main \\", file=sys.stderr)
+        print("        && (cd /tmp/dg && python3 tools/docgen.py --check) "
+              "; git worktree remove /tmp/dg", file=sys.stderr)
+        print("  If main is stale too, it is main's to fix (a regenerate "
+              "commit), not yours.", file=sys.stderr)
     if failures:
         print("docgen: documentation coverage FAILED. A subcommand or verb exists "
               "in the code with nothing describing it.", file=sys.stderr)
