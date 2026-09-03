@@ -166,6 +166,7 @@ exclude = [
 artifacts = [
   "backends/typescript/tests/generated/conformance.ts",
   "backends/typescript/tests/generated/dynamic_reserved_key.ts",
+  "backends/typescript/tests/generated/empty_list_types.ts",
   "backends/typescript/tests/generated/fr1_loop.ts",
   "backends/typescript/tests/generated/fr3_json_int.ts",
   "backends/typescript/tests/generated/instance_get.ts",

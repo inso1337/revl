@@ -214,3 +214,41 @@ def test_installed_layout_resolves_emitter(tmp_path, monkeypatch):
     monkeypatch.setattr(_paths, "_PKG_DIR", site)
     root = _paths.backends_root()
     assert (root / "python" / "emit.py").is_file()
+
+
+def test_the_artifacts_list_is_every_tracked_fixture_under_the_ignored_dir():
+    """`[tool.hatch.build] artifacts` must name every tracked file under
+    `backends/typescript/tests/generated/`, which `.gitignore:36` ignores.
+
+    The list is by exact path on purpose: a glob would also sweep up whatever
+    the TS harness last wrote there, which is the non-determinism the packaging
+    work exists to remove. The cost of that choice is that adding a fixture
+    means adding a line, and the instruction to do so lived only in a comment.
+
+    It was missed exactly once, immediately: #323 added `empty_list_types.ts`
+    and the wheel manifest gate caught it as a tracked file the wheel does not
+    ship. This asserts the rule instead of asking people to remember it.
+    """
+    import re
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    listed = set(
+        re.findall(
+            r'"(backends/typescript/tests/generated/[^"]+)"',
+            (root / "pyproject.toml").read_text(encoding="utf-8"),
+        )
+    )
+    tracked = set(
+        subprocess.run(
+            ["git", "ls-files", "backends/typescript/tests/generated/"],
+            cwd=root, capture_output=True, text=True, check=True,
+        ).stdout.split()
+    )
+    assert tracked, "expected tracked fixtures under the ignored directory"
+    assert listed == tracked, (
+        "[tool.hatch.build] artifacts has drifted from the tree.\n"
+        f"  tracked but NOT listed (the wheel will not ship these): "
+        f"{sorted(tracked - listed)}\n"
+        f"  listed but NOT tracked (stale entries): {sorted(listed - tracked)}"
+    )
