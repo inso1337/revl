@@ -204,14 +204,29 @@ So source that ARRIVES OVER THE TRANSPORT (inline `source`, `modules`, a
 `revl_gauntlet` / `revl_canary` candidate) compiles under the item-329
 untrusted-author profile, exactly as item 334's `Gate.propose` compiles an
 agent-authored component: no new `extern`/host block, no reach into one through
-an imported module, no self-minted declassifier. `.rvl` **files** inside a
-sanctioned root are not agent-authored — no MCP verb writes to disk — so they
-compile unprofiled, the way an embedder's own sources do.
+an imported module, no self-minted declassifier, and **no self-chosen realm**.
+`.rvl` **files** inside a sanctioned root are not agent-authored — no MCP verb
+writes to disk — so they compile unprofiled, the way an embedder's own sources
+do.
+
+The realm half is the one that reads as decoration and is not. A realm is an
+authority ADDRESS: the item-246/251 approval policy scopes standing approvals
+and auto-approve rules by `(component glob, realm)` and matches the realm half
+against `ticket["realm"]`, read straight off the component's `isolate` map. An
+agent writes its own component NAMES, so the glob half discriminates nothing
+against it and the realm was the only half left — one line,
+`isolate <key> in realm("billing")`, and a swapped-in component sits at the
+operator's address inheriting the rules written for it. So transport-carried
+source that names a realm is refused at admission (`G9`), and the component
+lands in the shared realm, which is where a candidate that said nothing was
+going anyway. An operator placing its own reviewed code into a realm sends it
+as a jailed **file**, runs it from the CLI, or declares `--author-trust
+trusted`.
 
 | flag | what the operator is deciding |
 |---|---|
-| `--author-trust untrusted` (default) | the agent may compose granted services; it may neither author nor reach host code |
-| `--author-trust trusted` | the agent MAY author host code. Every class-(c) ticket then carries `unreviewedHostCode` and says the declared capabilities are not a bound on what those bodies do |
+| `--author-trust untrusted` (default) | the agent may compose granted services; it may neither author nor reach host code, nor place a component into a named realm |
+| `--author-trust trusted` | the agent MAY author host code, and name its own realms. Every class-(c) ticket then carries `unreviewedHostCode` and says the declared capabilities are not a bound on what those bodies do |
 | `--provider MODULE.rvl` | operator-written host code the untrusted agent may compose the SERVICES of — item 334's granted-providers map. Reaching its externs directly is still refused |
 | `--grant SERVICE` | turn on the item-329 reach allowlist. With no grants the allowlist is off: there is no honest default for which of a running system's services an agent may reach |
 | `--root DIR` | a directory the agent's path arguments may name. Defaults to the directory the server was started in |

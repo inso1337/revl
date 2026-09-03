@@ -672,11 +672,38 @@ changes something a proposal has no business changing.
    co-composed `providers` module still places whatever the OPERATOR wrote. The
    agent's realms are refused; the operator's are untouched.
 
-   `no_realm_placement` is OFF in `untrusted_author`, so item 330's per-turn
-   `Session.admit` is byte-identical. The per-turn case is the same question
-   with a shorter blast radius (a turn is additive and torn down with the turn,
-   where a proposal replaces the composition and keeps serving), and it is NAMED
-   here, not solved.
+   **AMENDED — the refusal belongs to the AUTHOR, not to this door.** Slice 2
+   shipped `no_realm_placement` as an opt-in that `self_extension` alone set,
+   leaving it OFF in `untrusted_author` so item 330's per-turn `Session.admit`
+   stayed byte-identical, and naming the per-turn case as the same question with
+   a shorter blast radius. Two things were wrong with stopping there.
+
+   First, the enumeration was incomplete. `self_extension` was not one door of
+   two, it was one of THREE, and the third was neither per-turn nor bounded:
+   `mcp.server.AuthoringTrust.profile()` backs `compile_under_authoring`, the
+   one compiler door for agent-supplied source, and therefore the `revl_load`
+   and `revl_swap` MCP verbs with inline `source`. A `revl_swap` replaces the
+   composition and the successor keeps serving — exactly what this section says
+   about `propose`, and it ran at DEFAULT authoring trust with no operator flags.
+
+   Second, "additive, torn down with the turn" bounds the DURATION, not the
+   authority. `Session._wire_turn` rebuilds the class map over the MERGED
+   composition — it has to; skipping it was a total class-(c) approval bypass —
+   so the turn's components sit in the live ir and `ClassMap.component_realm`
+   reads their `isolate` map like any other. The realm the turn wrote for itself
+   is the `ticket["realm"]` half of every match its own crossings are judged by,
+   for as long as the turn runs, and one covered class-(c) crossing is a
+   complete exfiltration.
+
+   `no_realm_placement` is therefore ON in `untrusted_author`, and every door
+   that admits source whose AUTHOR is untrusted carries it.
+   `AdmissionProfile.self_extension` remains as an alias for this door's
+   readers. What is NOT refused is source the OPERATOR authored: jailed `files`,
+   `--author-trust trusted`, and the CLI callers that pass
+   `over_the_transport=False` (`revl bundle`, `truc ship`, `revl canary` /
+   `repair` / `quarantine`, the `revl swap` / `load` CLI) all compile unprofiled
+   and keep every realm the human wrote. The distinction is not which function
+   is called, it is whether the source arrived over the transport.
 
 2. **A halt dominates a proposal.** `Session.swap` already refused under an
    E-Stop (item 443, `session.py:882`), but that refusal reached the loop
@@ -704,11 +731,20 @@ changes something a proposal has no business changing.
 | --- | --- |
 | CAN change | which component implements a key; the revl-level composition over the granted providers; the set of keys served (subject to the health gate, which holds the successor to the keys gen N actually served) |
 | CANNOT change | the host code (no new `extern`, no transitive host-extern reach — G8); the reach (`granted` only — R2); the decider (the forbidden-grant rule); its own authority address (no realm — G9); whether a halt applies to it (`HALTED` dominates) |
-| MUST pass | the standalone decision compile under `self_extension(granted)`, then the item-246 activation gate and the post-activation health gate on the swap, with `_abort_swap` back to gen N on any failure |
+| MUST pass | the standalone decision compile under `self_extension(granted)` (= `untrusted_author(granted)`), then the item-246 activation gate and the post-activation health gate on the swap, with `_abort_swap` back to gen N on any failure |
 
 Everything in the CANNOT row needs a FRESH admission — the operator-gated
 trusted `swap`/`load`, where a human reviewed it — and none of it is reachable
 from the autonomous loop.
+
+That premise is about WHO AUTHORED the source, and it does not hold for a
+`swap`/`load` whose source arrived over the MCP transport: the server itself
+classifies inline `source` and `modules` as agent-authored and applies the
+untrusted-author profile to them. A "fresh admission" is the operator's own
+reviewed bytes — a `.rvl` file inside a sanctioned root (no MCP verb writes to
+disk), an explicit `--author-trust trusted`, or a CLI caller passing
+`over_the_transport=False`. The whole CANNOT row is enforced at all three doors
+that admit an untrusted author's source, not at `propose` alone.
 
 **Still deferred after slice 2, named not solved:** the rust host (below, and
 still genuinely blocked); the re-entrant `propose` (enforced-deferred by the
