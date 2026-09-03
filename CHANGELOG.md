@@ -149,6 +149,15 @@ but not seen. Every instance was closed. Representative fixes:
   `bound`. The cost of the default is that such approvals no longer fold into a
   distilled auto-approve rule, and the distiller now says so and names the flag
   when it declines. Author-written literal targets are recorded either way.
+- The TypeScript emitter escapes author text that reaches an emitted comment.
+  A `config` field's default is rendered into a `/** default: ... */` doc line,
+  and the string escaping it went through is the one a string LITERAL needs —
+  a comment has no escape syntax at all, only sequences that end it. The doc
+  line now goes through a comment escaper that breaks both of those (a line
+  terminator, and `*/`), so a default can no longer close the comment and put
+  the rest of itself in code position. Emitted string literals, identifiers and
+  template literals were already routed through their own escapers and are
+  unchanged; no golden bytes move.
 
 ### Live systems
 
