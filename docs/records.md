@@ -132,3 +132,55 @@ per-record copy constructor walk; Go needs typed struct copies; Wasm needs a
 linear-memory clone routine — each is mechanical but unproven, and an
 unverified emitter is worse than a loud refusal on a tier whose contract is
 byte-exact output.
+
+## 7. What an emitted record IS (python tier)
+
+The representation of a record value is part of the tier's contract, not an
+implementation detail, because things outside the emitted module produce and
+consume record values: a host handing an argument across a service boundary,
+the `prop test` generators and shrinkers in `src/revl/fault.py`, the item-60
+auto-mocks in `src/revl/mocks.py`, and every test that execs an emitted module.
+
+**A record value is a plain `dict`, keyed by the revl field name, spelled
+exactly as the source spells it.** `{ id: 4, from: "a" }` emits
+`{'id': 4, 'from': 'a'}`. There is one representation and it holds everywhere —
+inside the module and out.
+
+The emitted `class Row:` is a **shape declaration**: field names and types as
+annotations, no constructor, nothing to instantiate. It is emitted because it
+makes the module readable next to the revl source. It is not the value carrier
+and cannot be made into one by accident, because a field's **class attribute**
+is renamed for Python keyword collisions (item 165) while its **runtime key**
+is the raw revl name:
+
+```
+type Q = { from: Str, class: Int }
+```
+
+```python
+class Q:                 # shape: `from` renamed, because `class Q: from: str` is a SyntaxError
+    from_: str
+    class_: int
+
+def mk():
+    return {'from': 'a', 'class': 2}          # value: the raw revl names
+
+def readit(q):
+    return (_fv['class'] if isinstance((_fv := q), dict) else getattr(_fv, 'class'))
+```
+
+An instance of `Q` answers neither field read. The `getattr` arm of that
+dispatch is for **ADT payloads**, which are real objects (`Ok(v)` has a `.value`
+attribute), never for records; it also lets a record a host hands back as an
+object still read on the common case.
+
+The class carried `@dataclass` until roadmap item 436 F9, which is why building
+one appeared to work. It appeared to work in tests only: `_make_record` and
+three `tests/test_v2_emit.py` cases constructed the class, so both `prop test`
+and the auto-mocks explored a value shape no emitted program can produce. That
+is how a live defect stayed green — `let {id, name} = row` emitted `tmp.id` and
+raised `AttributeError` on every record value the emitter itself produces. It
+now emits the same dispatch a `row.id` read does.
+
+Corollary for anything that builds a record value from outside: build the dict.
+Do not call the class.
