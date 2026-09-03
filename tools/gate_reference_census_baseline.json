@@ -46,6 +46,7 @@
    "examples/regressions/fuzz_rust_ca5feca4.rvl",
    "examples/regressions/fuzz_wasm_ad4e66e8.rvl",
    "examples/regressions/fuzz_wasm_af371f9d.rvl",
+   "examples/ts_host_body.rvl",
    "examples/uxprobe2_fault.rvl",
    "examples/uxprobe2_jobs.rvl",
    "examples/uxprobe_cache.rvl",
@@ -620,6 +621,18 @@
    "reference": {
     "message": "an arrow may not declare its own async colour",
     "tag": "A1"
+   }
+  },
+  "examples/ts_host_body.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
    }
   },
   "examples/uxprobe2_fault.rvl": {
