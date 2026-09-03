@@ -336,10 +336,18 @@ def _fn_emitting(prog) -> set[str]:
 
 
 def _resolve_emission(root: str, chain: str, requires: dict, handles: dict,
-                      psvc: dict) -> tuple[str, str] | None:
+                      psvc: dict, aliases: dict | None = None
+                      ) -> tuple[str, str] | None:
     """(svc, method) a call reaches, or None when not a boundary-typed
-    receiver: a require binding (single-hop chain) or a spawn handle
-    (`w.task.run` => child's provide key `task` -> service, method `run`)."""
+    receiver: a require binding (single-hop chain), a spawn handle
+    (`w.task.run` => child's provide key `task` -> service, method `run`), or
+    a local aliasing one of that handle's provisions.
+
+    The ALIAS arm is the same crossing one binding later: `let t = w.task`
+    then `t.run(p)` reads the same provision `w.task.run(p)` does, so the
+    receiver is boundary-typed and the marker rule applies. Without it the
+    model saw a plain local call and reported nothing, which is the shape the
+    checker used to miss too (`g4_unmarked_alias_emission.rvl`)."""
     if root in requires:
         return requires[root], chain
     if root in handles and "." in chain:
@@ -348,11 +356,40 @@ def _resolve_emission(root: str, chain: str, requires: dict, handles: dict,
             return None
         svc = psvc.get(handles[root], {}).get(head)
         return (svc, rest) if svc else None
+    if aliases and root in aliases and chain and "." not in chain:
+        comp, key = aliases[root]
+        svc = psvc.get(comp, {}).get(key)
+        return (svc, chain) if svc else None
     return None
 
 
+def collect_provision_aliases(node, handles: dict, aliases: dict) -> None:
+    """Fill `aliases` (var -> (component, provide key)) from `let t = w.task`
+    bindings, where `w` is a spawn handle. Runs after `collect_spawns`, whose
+    `handles` it reads."""
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return
+    if type(node).__name__ == "LetStmt":
+        value = getattr(node, "value", None)
+        name = getattr(node, "name", None)
+        if isinstance(value, ExprField) and isinstance(value.target, ExprVar) \
+                and value.target.name in handles and isinstance(name, str):
+            aliases[name] = (handles[value.target.name], value.name)
+        elif isinstance(value, ExprVar) and value.name in aliases \
+                and isinstance(name, str):
+            aliases[name] = aliases[value.name]  # a second hop
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            collect_provision_aliases(getattr(node, f.name), handles, aliases)
+        return
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            collect_provision_aliases(x, handles, aliases)
+
+
 def walk_reach(node, out: set[str], region: str, requires: dict, handles: dict,
-               psvc: dict, bounds: dict, em_set: set, emitting: set) -> None:
+               psvc: dict, bounds: dict, em_set: set, emitting: set,
+               aliases: dict | None = None) -> None:
     """Collect the canonical emission caps `node` crosses.
 
     `region` is "emit-step" (count only MARKED crossings — the attenuation
@@ -366,17 +403,18 @@ def walk_reach(node, out: set[str], region: str, requires: dict, handles: dict,
         if dataclasses.is_dataclass(node):
             for f in dataclasses.fields(node):
                 walk_reach(getattr(node, f.name), out, "all", requires,
-                           handles, psvc, bounds, em_set, emitting)
+                           handles, psvc, bounds, em_set, emitting, aliases)
         return
     if isinstance(node, ExprCall):
         rt = _route(node.callee)
         if rt:
             root, chain = rt
-            res = _resolve_emission(root, chain, requires, handles, psvc)
+            res = _resolve_emission(root, chain, requires, handles, psvc,
+                                    aliases)
             if res is not None and region == "all":
                 svc, meth = res
                 if (svc, meth) in em_set:
-                    if root in handles:
+                    if root in handles or (aliases and root in aliases):
                         out.add("*")
                     else:
                         mode, entries = bounds[(svc, meth)]
@@ -389,17 +427,17 @@ def walk_reach(node, out: set[str], region: str, requires: dict, handles: dict,
                 out.add("*")
         for a in node.args:
             walk_reach(a, out, region, requires, handles, psvc, bounds,
-                       em_set, emitting)
+                       em_set, emitting, aliases)
         return
     if dataclasses.is_dataclass(node) and not isinstance(node, type):
         for f in dataclasses.fields(node):
             walk_reach(getattr(node, f.name), out, region, requires, handles,
-                       psvc, bounds, em_set, emitting)
+                       psvc, bounds, em_set, emitting, aliases)
         return
     if isinstance(node, (list, tuple)):
         for x in node:
             walk_reach(x, out, region, requires, handles, psvc, bounds,
-                       em_set, emitting)
+                       em_set, emitting, aliases)
 
 
 def collect_spawns(node, handles: dict, rows: list) -> None:
@@ -608,13 +646,22 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 tsv.append("\t".join(["S", rel, c.name, child]))
             for bind, child in sorted(handles.items()):
                 tsv.append("\t".join(["H", rel, c.name, bind, child]))
+            # ... and the locals that ALIAS one of those handles' provisions
+            # (`let t = w.task`). Collected everywhere `handles` is, and for
+            # the same reason: the receiver must resolve wherever it was bound.
+            # No TSV row: an alias is a spelling of the H binding it resolves
+            # to, and the U rows it produces already carry the resolved
+            # (service, method), so both sides read the same crossing.
+            aliases: dict[str, tuple[str, str]] = {}
+            for stmt in c.body:
+                collect_provision_aliases(stmt, handles, aliases)
 
             # activation emit-step surface (A): the component's OWN marked
             # crossings — the base of the attenuation reach.
             act_reach: set[str] = set()
             for stmt in c.body:
                 walk_reach(stmt, act_reach, "emit-step", require_map, handles,
-                           psvc, bounds, em_set, emitting)
+                           psvc, bounds, em_set, emitting, aliases)
             caps_seen.update(act_reach)
             for cap in sorted(act_reach):
                 tsv.append("\t".join(["A", rel, c.name, cap]))
@@ -631,7 +678,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         reach: set[str] = set()
                         for inner in pm.body:
                             walk_reach(inner, reach, "all", require_map, handles,
-                                       psvc, bounds, em_set, emitting)
+                                       psvc, bounds, em_set, emitting, aliases)
                         caps_seen.update(reach)
                         for cap in sorted(reach):
                             tsv.append("\t".join(
@@ -673,7 +720,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 saw_raw = False
                 for root, chain, ctx in local_calls:
                     res = _resolve_emission(root, chain, require_map, handles,
-                                            psvc)
+                                            psvc, aliases)
                     if res is None:
                         continue  # host/local/provide receiver: not a crossing
                     svc, meth = res
@@ -1672,12 +1719,35 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         align[key] = align.get(key, 0) + 1
         samples.setdefault(key, []).append(rel)
 
-    def checker_code(rel: str) -> str:
+    # G4 refusal CATEGORIES the shaped model does not cover. The model's G4
+    # fragment is the MARKER rule — a classified statement's marker presence
+    # against the interface's declared emission, over crossings it can resolve
+    # to a (service, method). `acquire` is a different rule under the same
+    # guarantee: a HOST acquire verb (`Pool.open`) called anywhere but an
+    # acquisition bracket, where the release is registered. There is no host
+    # verb in the model's vocabulary at all, so it cannot see one, and bucketing
+    # by the code letter alone reads that as the model being weaker than the
+    # checker on the rule it does model.
+    #
+    # This is not a new exemption, only an explicit one: the corpus already
+    # carries two G4-coded host/extern acquisition refusals the model does not
+    # model — `g4_missing_undo.rvl` and `v2_extern_acquire_no_undo.rvl` — and
+    # both escape `missed-G4` today by accident, one because the PARSER refuses
+    # it before the model sees it and one because its file declares no
+    # component. Naming the category keeps the fatal bucket pointed at the
+    # fragment the model actually covers, and a G4 refusal in ANY other
+    # category is fatal exactly as before. Modelling host acquisition — a
+    # verb table, an acquisition-position fact and the Lean rule over it — is
+    # its own piece of work.
+    OUT_OF_FRAGMENT_G4 = {"acquire"}
+
+    def checker_code(rel: str) -> tuple[str, str]:
         try:
             compile_source((REPO / rel).read_text(encoding="utf-8"), rel)
-            return "accept"
+            return "accept", ""
         except RevlError as e:
-            return classify(e).get("code") or "UNCODED"
+            info = classify(e)
+            return (info.get("code") or "UNCODED"), (info.get("category") or "")
 
     for rel in file_facts:
         comp_rows = [(k, x) for k, x in v.comps.items() if k[0] == rel]
@@ -1688,12 +1758,14 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             x == "ok" for _, x in comp_rows + prov_rows + spawn_rows)
         raw_found = any(x == "fail"
                         for _, x in comp_rows + prov_rows + spawn_rows)
-        code = checker_code(rel)
+        code, category = checker_code(rel)
         if code == "accept":
             # `formal-strict`: the checker ACCEPTS the file but the shaped
             # model does not — the model is stricter than the fragment it
             # covers, which is a finding to chase, not a licence to relax it.
             record("agree-accept" if formal_clean else "formal-strict", rel)
+        elif code == "G4" and category in OUT_OF_FRAGMENT_G4:
+            record("out-of-fragment-G4", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
         elif code in ("G2", "G3"):
@@ -1711,7 +1783,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     # invisible.
     nm_codes: dict[str, list[str]] = {}
     for rel in componentless:
-        nm_codes.setdefault(checker_code(rel), []).append(rel)
+        nm_codes.setdefault(checker_code(rel)[0], []).append(rel)
 
     total = sum(align.values())
     print(f"checker alignment ({total} modeled files, informational except "
