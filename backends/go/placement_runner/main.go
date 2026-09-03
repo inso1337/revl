@@ -172,19 +172,44 @@ func main() {
 		log("probe", label, "=> "+string(encoded))
 	}
 
+	// 5. THE STOP HANDLER GOES UP BEFORE THE `UP` LINE, and that ordering is
+	//    the whole contract (the go half of the fix py got in #226; issue 290).
+	//    `[name] UP` is what the conductor waits on: `run_placement`'s `--once`
+	//    path blocks on every child's UP and then calls `stop_all` immediately,
+	//    so the SIGTERM can land microseconds after the print. Printing first
+	//    left a window in which go's DEFAULT SIGTERM disposition was still in
+	//    force, and a signal arriving inside it killed this process outright —
+	//    no LIFO unwind, no inverses replayed, no residue proof, no `DOWN` (G7
+	//    and R4, both violated). The window belongs to the LAST process to boot
+	//    — every earlier one is still being waited on — which is why it lands
+	//    on the process most likely to still owe an inverse and a residue proof.
+	//
+	//    The restructure the reorder needed: `signal.Notify` cannot simply move
+	//    up on its own, because the channels it feeds are consumed by the
+	//    `select` below, which must stay AFTER the print (it blocks). So the
+	//    whole rendezvous — `stop`, `sig`, and the two feeder goroutines — is
+	//    hoisted here, and only the blocking `select` is left behind. Both
+	//    channels are buffered (cap 1), so a signal arriving in the old window
+	//    is now merely PARKED in `stop` and the `select` below returns from it
+	//    at once: the unwind runs either way, and `UP` means what it says —
+	//    loaded, serving, AND able to be stopped.
+	//
+	//    Installed in once mode too, where there is no `select` to reach it: a
+	//    SIGTERM landing during the immediate once-mode teardown is absorbed
+	//    rather than turned back into a kill of a half-finished unwind.
+	stop := make(chan struct{}, 1)
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	go func() { <-sig; stop <- struct{}{} }()
+	go func() { io.Copy(io.Discard, os.Stdin); stop <- struct{}{} }()
+
 	fmt.Printf("[%s] UP\n", name)
 
-	// 5. once mode: the round-trip ends here — boot, then straight to LIFO
-	//    teardown + the no-residue proof. Otherwise hold until the conductor
-	//    stops us (SIGTERM, or stdin EOF) OR a peer dies. A dead provider
-	//    withdraws its proxy so consumers deactivate.
+	// 5b. once mode: the round-trip ends here — boot, then straight to LIFO
+	//     teardown + the no-residue proof. Otherwise hold until the conductor
+	//     stops us (SIGTERM, or stdin EOF) OR a peer dies. A dead provider
+	//     withdraws its proxy so consumers deactivate.
 	if !s.Once {
-		stop := make(chan struct{}, 1)
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-		go func() { <-sig; stop <- struct{}{} }()
-		go func() { io.Copy(io.Discard, os.Stdin); stop <- struct{}{} }()
-
 		select {
 		case key := <-peer:
 			log("peer", key, "provider died: withdrawing the proxy")
