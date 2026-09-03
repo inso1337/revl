@@ -312,8 +312,9 @@ hand-written one.
 The generated `extern` bodies are **stubs** — the typed boundary is generated,
 the host call into the Cordis service is not — and `--backend` chooses which
 tier they are tagged for: `ts` (the default, where a Cordis plugin lives),
-`py`, or `rust`. There is deliberately no `wasm`: the cordis-wasm tier is
-i32-only, so it cannot host a TypeScript plugin.
+`py`, or `rust`. There is deliberately no `wasm`: a cordis-wasm component
+cannot host a node/TypeScript plugin at all, so the tag would name a boundary
+that has nothing on the other side.
 
 ## 7. Fixtures and verification
 

@@ -24,9 +24,11 @@ after stc-go's Inject gate has already evaluated on the un-isolated context,
 which strands a realm-scoped consumer in Pending forever. This mirrors the
 same fix carried in the Rust backend (`_revl_realm`).
 
-Scope: ir_version 1 and 2 components (effect/inverse, config+defaults,
-provide/inject, provide-method bodies, isolate, intercept). v3 pure
-functions and spawn/instance-parametric IR are out of scope.
+Scope: ir_version 1, 2 and 3. Components (effect/inverse, config+defaults,
+provide/inject, provide-method bodies, isolate, intercept), v3 pure functions
+and the typed core (`_go_v3_expr`, `_emit_v3_go_types`, the `backends/go/v3`
+stdlib), and instance-parametric `spawn` (`_spawn_expr`, one `*stc.Realm` per
+spawn, scenario `backends/go/scenarios/spawn.rvl`).
 """
 
 from __future__ import annotations
@@ -414,7 +416,9 @@ def _expr(node, env: _Env, expected=None) -> str:
             # (the `field`'s target is the `instance-get`). The component
             # dialect's own method call arrives via `target`/`method` below, so
             # `field` here is unambiguously a method selector, not struct-field
-            # access (records are unsupported on this tier).
+            # access. (Record field access IS lowered on this tier, but only on
+            # the v3 typed-components path, and it arrives as a bare `field`
+            # node rather than as a call callee. See the `kind == "field"` arm.)
             if callee.get("kind") == "field":
                 recv = _expr(callee.get("target"), env)
                 meth = _camel(callee.get("name"))

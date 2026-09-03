@@ -194,9 +194,9 @@ divergence between backends (docs/arithmetic.md). Rationale: models emit both
 reflexively; making one of them an error would burn feedback cycles on a
 distinction revl doesn't have. The
 compiler canonicalizes to `==` in the IR (the parser folds `===`→`==`,
-`!==`→`!=`), so no backend can diverge on the *spelling*; a source-level
-formatter pass that also rewrites the spelling is future work (`revl fmt`
-today only does `--migrate`).
+`!==`→`!=`), so no backend can diverge on the *spelling*; `revl fmt` is a full
+canonical formatter with a `--check` gate ([fmt.md](fmt.md)); what it does not
+do is rewrite the `===` spelling to `==`, which is still future work.
 
 That clause used to read "so no backend can diverge", full stop. Three
 backends have since diverged on the *meaning*, which canonicalizing to one IR

@@ -1,8 +1,8 @@
 # Records: functional update & block-bodied match arms
 
 **Status:** functional record update implemented (python + typescript
-emitters); block-bodied match arms specified, parsed and typechecked with all
-emitters deferred. See §6. Proposed 2026-06; both gaps were first-class field
+emitters); block-bodied match arms implemented on every tier. See §6: they
+lower to a helper `fn` plus a call, so no backend needed new emit support. Proposed 2026-06; both gaps were first-class field
 data from the selfhost porting agents (dogfood refusal logs).
 
 ## 1. Grammar
@@ -113,8 +113,11 @@ documents are byte-identical:
   parameter. The arm's IR is a *call* to that helper, so the arm body stays an
   expression and no backend needs new emit support. `ir_version` stays 3 (a
   helper fn and a call are already v3 shapes). Lowering happens inside a module
-  `fn` body; a block arm in another position (a `test`/component/prop-test
-  body, an extern undo expression) still refuses loudly.
+  `fn` body. A component or provide-method block arm is handled separately by
+  `_lower_component_block_arm` (item 361), which lowers it inline as a `do`
+  expression (an IIFE on ts, an awaited walrus sequence on py) rather than
+  lifting it. A block arm in a `test` or prop-test body, or in an extern undo
+  expression, still refuses loudly.
 
 ## 6. Tier status
 
