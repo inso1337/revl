@@ -552,12 +552,50 @@ class RowDecl:
 
 
 @dataclass
+class RemoteRowDecl:
+    """A `remote` row: a row whose provider is SYNTHESIZED from a service
+    declaration plus a peer address (item 424 D-424c.1, slice C2).
+
+    The wiring stays local — every consumer keeps `requires <key>: <Service>`
+    and G2/G3/G4 are unchanged — so remoteness is an ADMISSION fact (a reach, a
+    capability, a failure mode) and never a wiring fact. That is the rule
+    `docs/interop-bridge.md` §3 already states for a seam ("manifest data, not
+    source text"), applied to a callee that is in no manifest at all.
+
+    `remote`, `at`, `host`, `through` and `on_failure` are CONTEXTUAL keywords,
+    recognised only in this one position inside a `composition` block. The
+    lexer's KEYWORDS set is untouched, so the self-host lexer needs no sync and
+    no program using any of those words as an ordinary name is broken. `in` and
+    `realm` are already keywords and are reused verbatim from `isolate`.
+    """
+    label: str
+    key: str                       # the provision key the row claims
+    service: str                   # the locally declared service being remoted
+    host: str                      # the peer authority, `host("h:port")`
+    line: int
+    realm: str | None = None       # `in realm("...")`; None == the shared realm
+    transport: str | None = None   # `through <ident>`; None == the default wire
+    # D-424c.3: a transport failure is a WITHDRAWAL by default and a value by
+    # opt-in. `"result"` is admitted only if every method returns `Result[T, E]`.
+    # Silently swallowing a transport failure has no spelling.
+    on_failure: str = "withdraw"
+    on_failure_line: int = 0
+    # The line the address itself is written on, so an address refusal points at
+    # the address rather than at the row's first line.
+    host_line: int = 0
+
+
+@dataclass
 class CompositionDecl:
     name: str
     rows: list[RowDecl]
     line: int
     uses: list[tuple[str, int]] = field(default_factory=list)
     source: str = ""  # provenance: the file this composition was parsed from
+    # item 424 C2: rows whose provider is synthesized rather than read from a
+    # file. Kept in their own list because they carry no `from` path and
+    # resolution reads no header for them.
+    remotes: list["RemoteRowDecl"] = field(default_factory=list)
     # item 426 S2 (§3.1): the ordered layer stack. `stack` entries are LEVEL 1
     # peers — conflicts between them refuse — and `site` is the single LEVEL 2
     # layer, the one level at which "I decide" is expressible. Both are ordered
@@ -2620,6 +2658,7 @@ class Parser:
         name = self.expect("ident", what="a composition name").value
         self.expect("{")
         rows: list[RowDecl] = []
+        remotes: list[RemoteRowDecl] = []
         uses: list[tuple[str, int]] = []
         stack: list[tuple[str, int]] = []
         site: tuple[str, int] | None = None
@@ -2653,30 +2692,50 @@ class Parser:
                              "provider, which decision 4 forbids")
                 site = (self.expect("string", what="a layer path string").value, sline)
                 continue
+            if self.at("ident", "remote"):
+                # item 424 C2: a row whose provider is SYNTHESIZED from a
+                # service declaration plus a peer address (D-424c.1).
+                remote = self.remote_row_decl(name)
+                self._composition_label(name, remote.label, remote.line, seen)
+                remotes.append(remote)
+                continue
             if not self.at("ident", "row"):
                 tok = self.peek()
                 raise self.err(
                     tok.line,
-                    f"expected `row`, `use`, `stack`, `site`, or `}}` in "
-                    f"composition {name}, found {tok.value!r}",
+                    "expected `row`, `remote`, `use`, `stack`, `site`, or "
+                    f"`}}` in composition {name}, found {tok.value!r}",
                     hint="a composition document declares rows: "
-                         '`row @label from "path.rvl" provides key`')
+                         '`row @label from "path.rvl" provides key`, or '
+                         '`remote @label provides key: Service at host("h:port")`')
             rows.append(self.row_decl(name))
-            # 426 §1.2: two labels with the same spelling WITHIN ONE ORIGIN is a
-            # refusal at parse time, the same shape as a duplicate component
-            # name. Across origins they are distinct qualified labels and do not
-            # collide, which is why this check is per document.
-            if rows[-1].label in seen:
-                raise self.err(
-                    rows[-1].line,
-                    f"duplicate row label `@{rows[-1].label}` in composition "
-                    f"{name} (first declared on line {seen[rows[-1].label]})",
-                    hint="a label is the row's identity and is scoped to this "
-                         "document's origin, so it must be unique here "
-                         "(426 §1.2)")
-            seen[rows[-1].label] = rows[-1].line
+            self._composition_label(name, rows[-1].label, rows[-1].line, seen)
         self.expect("}")
-        return CompositionDecl(name, rows, line, uses, stack=stack, site=site)
+        return CompositionDecl(name, rows, line, uses, stack=stack,
+                               site=site, remotes=remotes)
+
+    def _composition_label(self, composition: str, label: str, line: int,
+                           seen: dict[str, int]) -> None:
+        """426 §1.2: two labels with the same spelling WITHIN ONE ORIGIN is a
+        refusal at parse time, the same shape as a duplicate component name.
+        Across origins they are distinct qualified labels and do not collide,
+        which is why this check is per document.
+
+        One namespace, not two: a `remote` row's label is a row label like any
+        other, so `@billing` cannot be both a file row and a remote row. The
+        whole point of D-424c.1 is that a consumer cannot tell the difference,
+        and two rows that a consumer cannot tell apart must not share a name.
+        """
+        if label in seen:
+            raise self.err(
+                line,
+                f"duplicate row label `@{label}` in composition "
+                f"{composition} (first declared on line {seen[label]})",
+                hint="a label is the row's identity and is scoped to this "
+                     "document's origin, so it must be unique here (426 §1.2); "
+                     "a `remote` row shares that one namespace, because a "
+                     "consumer cannot tell the two apart (424 D-424c.1)")
+        seen[label] = line
 
     def row_decl(self, composition: str) -> RowDecl:
         line = self.next().line                       # `row`
@@ -2948,6 +3007,137 @@ class Parser:
                            hint="an operation that changes nothing is dead weight in "
                                 "the diff — drop it")
         return out
+    def remote_row_decl(self, composition: str) -> RemoteRowDecl:
+        """`remote @label provides <key>: <Service> [in realm("r")]
+        at host("h:port") [through <ident>] [on_failure(withdraw|result)]`
+
+        Item 424 D-424c.1, slice C2. Every word this clause introduces is a
+        CONTEXTUAL keyword read only here (`remote`, `at`, `host`, `through`,
+        `on_failure`, and its two arguments); `provides`, `in` and `realm` are
+        the keywords the language already has. So the lexer stays context-free
+        and the self-host lexer needs no sync — the same discipline 426 S2 chose
+        for `configure @db with { ... }`, and the reason `remote` is not being
+        promoted to a real keyword: `remote` is a perfectly ordinary provision
+        key, require alias and config field name today, and reserving it would
+        break those programs, force a matching edit in the self-host lexer, and
+        put a second copy of the reserved-word set on every backend that
+        re-derives it.
+
+        Unlike a `row`, a `remote` names no `from` path: its provider does not
+        exist as source until resolution synthesizes it from the service
+        declaration and the peer address (§4 of the design note — the same
+        `synthesize_provider` a config row, a seam forwarder and item 60's mock
+        provider are the other three kinds of).
+        """
+        line = self.next().line                       # `remote`
+        label = self._row_label()
+        if not self.at("kw", "provides"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `provides` after remote row label `@{label}`, "
+                f"found {tok.value!r}",
+                hint='a remote row names the key it claims AND the service it '
+                     'remotes: `remote @%s provides key: Service at '
+                     'host("h:port")`' % label)
+        self.next()
+        key = self._provision_key(what="a provision key")
+        # The service name is REQUIRED and is not inferred from the key. A
+        # remote row has no component header to check the claim against, so the
+        # service declaration is the only contract there is; making the document
+        # name it keeps the "a composition cannot lie about its wiring" property
+        # 426 §1.3 buys for an ordinary row.
+        if not self.at(":"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `: <Service>` after `provides {key}` on remote row "
+                f"`@{label}`, found {tok.value!r}",
+                hint="a remote row has no component header, so the service "
+                     "declaration IS its contract and the document names it "
+                     "(424 D-424c.1)")
+        self.next()
+        service = self.expect("ident", what="a service name").value
+
+        realm: str | None = None
+        host: str | None = None
+        host_line = line
+        transport: str | None = None
+        on_failure = "withdraw"
+        on_failure_line = line
+        while True:
+            if self.at("kw", "in"):
+                iline = self.next().line
+                if realm is not None:
+                    raise self.err(iline, f"duplicate `in realm(...)` clause on "
+                                          f"remote row `@{label}`")
+                # D-424c.4: `@RemoteScope` is a REALM and there is nothing to
+                # build. Two peers of one service are two rows in two realms,
+                # they are two different `(key, realm)` addresses, and G2 keeps
+                # them from colliding with no new rule (426 §2.3).
+                realm = self.realm_label()
+            elif self.at("ident", "at"):
+                aline = self.next().line
+                if host is not None:
+                    raise self.err(aline, f"duplicate `at host(...)` clause on "
+                                          f"remote row `@{label}`")
+                if not self.at("ident", "host"):
+                    tok = self.peek()
+                    raise self.err(tok.line,
+                                   f"expected `host(\"...\")` after `at` on "
+                                   f"remote row `@{label}`, found {tok.value!r}")
+                self.next()
+                self.expect("(")
+                tok = self.peek()
+                if tok.kind != "string":
+                    raise self.err(
+                        tok.line,
+                        "a peer address is a static string literal",
+                        hint="the address is read before the composition exists "
+                             "and is exactly the class of value roadmap item 350 "
+                             "binds through a `boot` component; until 350 lands "
+                             "it is written here as a literal, never computed")
+                host = self.next().value
+                host_line = tok.line
+                self.expect(")")
+            elif self.at("ident", "through"):
+                tline = self.next().line
+                if transport is not None:
+                    raise self.err(tline, f"duplicate `through` clause on remote "
+                                          f"row `@{label}`")
+                transport = self.expect("ident", what="a transport name").value
+            elif self.at("ident", "on_failure"):
+                on_failure_line = self.next().line
+                self.expect("(")
+                tok = self.peek()
+                choice = tok.value if tok.kind == "ident" else None
+                if choice not in ("withdraw", "result"):
+                    raise self.err(
+                        tok.line,
+                        f"`on_failure` takes `withdraw` or `result`, found "
+                        f"{tok.value!r}",
+                        hint="`withdraw` (the default) reuses peer-death "
+                             "withdrawal, R2/R3; `result` returns the failure "
+                             "in-band and is admitted only if every method "
+                             "returns `Result[T, E]`. Silently swallowing a "
+                             "transport failure has no spelling (424 D-424c.3)")
+                self.next()
+                on_failure = choice
+                self.expect(")")
+            else:
+                break
+
+        if host is None:
+            raise self.err(
+                line,
+                f"remote row `@{label}` names no peer address",
+                hint='every remote row writes `at host("host:port")`; the reach '
+                     "bound is derived from that host, and there is no default "
+                     "peer to fall back to")
+        return RemoteRowDecl(label, key, service, host, line, realm=realm,
+                             transport=transport, on_failure=on_failure,
+                             on_failure_line=on_failure_line,
+                             host_line=host_line)
 
     def row_config_block(self, label: str) -> list[tuple[str, object, int]]:
         """`config { field: <literal>, ... }` on a row.
