@@ -89,7 +89,7 @@ was corrected by hand and had drifted back within a day.
 | backend-ir-v1.md | needs-work | 16 |  |
 | backend-ir-v3.md | needs-work | 18 |  |
 | backend-ir.md | needs-work | 11 |  |
-| backends-roadmap.md | needs-work | 44 |  |
+| backends-roadmap.md | needs-work | 42 |  |
 | bench-selfhost.md | live-owned (not audited) | 49 |  |
 | boundary-policy.md | needs-work | 22 |  |
 | bundle.md | needs-work | 0 |  |
@@ -103,12 +103,12 @@ was corrected by hand and had drifted back within a day.
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |
 | composition-rows.md | needs-work | 13 |  |
-| conformance.md | needs-work | 36 |  |
+| conformance.md | needs-work | 38 |  |
 | contract-errata.md | needs-work | 93 | yes |
 | crash-recovery.md | needs-work | 44 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
-| deploy.md | needs-work | 33 |  |
+| deploy.md | needs-work | 37 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 69 |  |
 | design-v2-realms.md | needs-work | 17 |  |
@@ -143,7 +143,7 @@ was corrected by hand and had drifted back within a day.
 | mcp-reference.md | current | 3 |  |
 | namespacing.md | needs-work | 8 |  |
 | network-path.md | needs-work | 25 |  |
-| network-placement.md | needs-work | 19 |  |
+| network-placement.md | needs-work | 21 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
 | operator-capabilities.md | needs-work | 26 |  |
 | parallel-activation.md | needs-work | 17 |  |
@@ -194,5 +194,5 @@ was corrected by hand and had drifted back within a day.
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |
-| witnessed-fs.md | needs-work | 1 |  |
+| witnessed-fs.md | needs-work | 6 |  |
 <!-- docgen:doc-status end -->
