@@ -130,7 +130,8 @@ pure/acquire/emission fns with `@py` bodies) and `stdlib/json.rvl`
 
 **Tier: py bodies only in v1.** The bodies call straight into the `revl`
 package in-process (§3), and `revl run --backend py` boots in-process
-(`src/revl/__main__.py:1679`, `src/revl/run.py::_Driver`) — no bridge seam,
+(the `args.command == "run"` dispatch in `src/revl/__main__.py`,
+`src/revl/run.py::_Driver`): no bridge seam,
 no subprocess. Other tiers gain bodies only if truc is ever wanted
 standalone-compiled (non-goal for now, §9).
 

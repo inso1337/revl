@@ -94,11 +94,12 @@ mechanical pieces and one real prerequisite:
    (`docs/v2.0-roadmap.md`, "Do: key namespacing + an interface-compatibility
    check ... **before** any registry"): two independent authors both
    providing `db` collide on key identity, and there is no versioning to
-   qualify them. The **compatibility half of that precondition is done** (this
-   probe is its proof); the **namespacing half is not** — it is item 9's
-   deferred half, and it remains item 49's prerequisite exactly as the roadmap
-   states. It does not reshape item 49; it is a named dependency the search
-   primitive sits on top of.
+   qualify them. **Both halves are now done.** The compatibility half is this
+   probe; the namespacing half landed as namespace-qualified provision keys
+   (`ns::key`, `src/revl/parser.py`), so two authors publish `acme::db` and
+   `bcorp::db` and neither collides. See
+   [namespacing.md](namespacing.md), which names this file as the dependency it
+   satisfies.
 
 ## Bottom line for item 49
 

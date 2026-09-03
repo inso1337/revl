@@ -36,7 +36,7 @@ number a bisection converges on is exact and does not move.
 | `programs/*.revl` | the bench programs, one boundary shape each |
 | `harness.py` | emit, static analysis, component build, fuel bisection, variants |
 | `run.py` | the bench: baseline vs each variant, per program |
-| `probe_heap.py` | executed proof that the emitted heap is one fixed page that never grows and never frees |
+| `probe_heap.py` | executed regression witness for the item-432(e) fixes: the bump heap grows through `$__heap_grow`, and a canonical export rewinds `$__hp` to the arena floor on the way out |
 | `results.json` | the last recorded run |
 
 ## Variants

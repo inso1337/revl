@@ -406,6 +406,6 @@ the sync failure it shows exactly one accumulated step, `undone: true`,
 What is still **not** covered here: multi-generation replay across a
 `revl_swap` (the recorder starts fresh timelines per generation, which is
 tested, but stepping back into a superseded generation is not a thing this
-supports); and the `extern emission` limit in §5. Other tiers (TS, rust, java,
-wasm) accumulate the same inverses in the same order; nothing here has been
-ported to them.
+supports); and the `extern emission` limit in §5. The other five tiers (ts,
+rust, java, wasm, go) accumulate the same inverses in the same order; nothing
+here has been ported to them.
