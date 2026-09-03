@@ -1888,6 +1888,26 @@ def _infer_state_env(body, model: TaintModel, source: str, line: int,
             real = frozenset(o for o in seeded.origins if _param_index(o) is None)
             if real:
                 state_env[name] = Taint(real, seeded.via)
+    # A WRITE INTO a state world from the activation body counts too. There are
+    # two ways a world becomes tainted, and the loop above sees only the first:
+    #
+    #   let store = effect Map.new()             # the BINDING carries the taint
+    #   effect store.insert("k", config.token)   # a CALL writes INTO the world
+    #
+    # The second leaves nothing in `act_env["store"]` — `store` is bound to a
+    # clean `Map.new()` and never rebound. `_taint_of_state_access` records it
+    # where every other writer is recorded, `state_writes`, which the method
+    # fixpoint below already folds in. Fold the activation body's the same way,
+    # or a world written only there is seeded CLEAN and every later `.get()`
+    # reads back clean — a declared `Secret[T]` losing its `confidential` origin
+    # across a state write, and reaching a disclosure sink with no `endorse`
+    # (§7, docs/design/256-capability-bound-secrets.md). The identical program
+    # with the `insert` inside a provide method was always refused; where the
+    # write is spelled is not a confidentiality boundary.
+    for name, taint in act.state_writes.items():
+        joined = _join(state_env.get(name, CLEAN), taint)
+        if joined.dirty:
+            state_env[name] = joined
 
     methods: list = []
     for step in body or []:

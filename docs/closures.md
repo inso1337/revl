@@ -150,12 +150,35 @@ that teaches the divergence.
   in a record by reference, or be returned as a cell. Reading a `var`'s value
   into a record literal (`{ value: n }`, roadmap item 154) is the same
   value-copy the closure does, and is likewise fine.
-* **Effect and provide bodies.** `var`/`while`/`for` are function-local
-  (they parse only inside a `fn`/provide-method body). The teardown accumulator
-  therefore never holds a closure over a mutable cell, because no such closure
-  can be built. G7/A8 hold by construction, not by runtime discipline.
+* **Effect and provide bodies.** `var`/`while`/`for` are function-local (they
+  parse only inside a `fn`/provide-method body), and a plain `fn` body may not
+  hold an `effect` at all (roadmap item 399) — so a provide-method body is the
+  one place a mutable local and a derived inverse coexist. There the two DO
+  meet, and the accumulator entry has to be pinned rather than assumed:
+
+  ```revl
+  var k = key
+  effect store.insert(k, "v") undo store.remove(k)
+  k = "zz"
+  ```
+
+  The inverse runs at teardown, or on abort, long after the method returned. An
+  inverse that read `k`'s cell would remove `"zz"` — it would not merely fail to
+  undo, it would MUTATE A KEY THE COMPONENT NEVER ACQUIRED, leave `"alpha"`
+  behind, and report success: G7 counts the entry discharged, A8 reports the
+  revert complete, and R4 reports no residue. So the derived inverse takes the
+  same by-value snapshot an arrow does. G7/A8 hold because the capture is
+  pinned, not because the shape cannot be written.
 * **Backends.** The by-value snapshot is realized identically across the
-  tiers: the IR arrow node carries a `captures` list, and each emitter binds
-  those names to their current values at arrow-creation time (see the
-  `captures` handling in `backends/*/emit.py`). No backend has a shared-cell
-  path to diverge on, because the front end never emits one.
+  tiers, and the FRONT END owns which names are snapshotted so no backend
+  re-derives them: an arrow node carries a `captures` list, and a step carrying
+  a derived inverse carries `undo_captures` / `compensate_captures`
+  (`src/revl/lower.py::_pin_inverse_captures`). Each emitter binds those names
+  to their current values where it builds the closure, in whatever idiom its
+  language spells that: a Python default argument (`lambda k=k: …`), a
+  TypeScript IIFE around the arrow (a default parameter cannot spell it — the
+  initialiser's right-hand side resolves to the parameter and hits the TDZ), a
+  Go inner-scope shadow (`k := k`), a Java `final` copy — which the Java tier
+  needs anyway, since javac refuses to let a lambda read a local that is not
+  effectively final. Rust needs no annotation to act on: it already clones each
+  of the inverse's free names into the `move` closure at the effect site.
