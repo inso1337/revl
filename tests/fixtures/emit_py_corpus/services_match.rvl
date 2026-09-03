@@ -1,0 +1,26 @@
+// A match in a COMPONENT body (`_ComponentEmitter._expr`'s match arm, mirrored
+// by `cmatch`/`cmatch_branch`). The corpus reached the fn-body match through
+// control.rvl/mixed.rvl/result.rvl but never the component one, so item 436
+// F3's binder-free arm shapes were emitted there with no oracle over them.
+//
+// Four arms, one per case the binder decides:
+//   * `Final(n) => n`        the body IS the bind         -> the payload itself
+//   * `NeedTool(t) => 0`     the body never reads it      -> no binder at all
+//   * `Final(n) => n + 1`    the body reads it            -> the one-shot lambda
+//   * `Some(v) => v`         the Opt payload, which binds the SCRUTINEE rather
+//                            than a `.value`
+type Step = Final(Int) | NeedTool(Int)
+
+service Router {
+  fn label(s: Step) -> Int
+  fn bump(s: Step) -> Int
+  fn or_zero(o: Opt[Int]) -> Int
+}
+
+component Route provides router: Router {
+  provide router {
+    fn label(s) = match s { Final(n) => n, NeedTool(t) => 0 }
+    fn bump(s) = match s { Final(n) => n + 1, NeedTool(t) => t }
+    fn or_zero(o) = match o { Some(v) => v, None => 0 }
+  }
+}

@@ -154,7 +154,7 @@ was corrected by hand and had drifted back within a day.
 | prop-test.md | needs-work | 23 |  |
 | quarantine-tier.md | needs-work | 26 |  |
 | queries.md | needs-work | 43 |  |
-| records.md | needs-work | 13 |  |
+| records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 15 |  |
 | registry.md | needs-work | 46 | yes |
 | rejections.md | needs-work | 66 |  |
