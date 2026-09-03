@@ -49,6 +49,7 @@ Backends and their runners:
 
 from __future__ import annotations
 
+import _thread
 import importlib.util
 import ipaddress
 import json
@@ -75,6 +76,8 @@ from .deploy import (ADMISSION_PEER_BOUND, ADMISSION_SEALED,
 from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
+from .estop import (HALTED_LINE, LATCH_ENV, TIERS_WITH_ESTOP, latch_path,
+                    read_latch)
 from .sandbox_runtime import resolve_driver as resolve_sandbox_driver
 
 KNOWN_BACKENDS = ("py", "node", "ts", "rust", "java", "go")
@@ -2250,7 +2253,212 @@ def _stranded_teardown_report(names: list[str]) -> str:
     )
 
 
-def run_placement(files, placement_path: str, once: bool = False) -> int:
+# --- the operator E-Stop, conductor half (item 443, docs/design/443-estop.md)
+#
+# Every stop the CONDUCTOR had was cooperative: `_stop_all` asks each child to
+# unwind and waits on its own `DOWN` line, which is the child's statement that
+# its LIFO walk covered every registered entry (G7) and its no-residue proof
+# printed (R4). That is right for a composition fault and wrong for an operator
+# emergency, where two hundred brackets are two hundred more chances for the
+# runaway to cross the boundary again.
+#
+# The halt below is the other verdict. It runs NO inverse, waits for NO `DOWN`,
+# and earns no residue proof. What it buys with that is bounded latency; what
+# it owes in exchange is the accounting, which is why `_estop_halt_report` names
+# every component individually rather than printing one line about the group.
+_ESTOP_HALT_WINDOW = 2.0
+
+
+def _estop_halt_window() -> float:
+    """How long a LATCH-HONORING child gets to name its inventory before the
+    conductor kills it anyway.
+
+    This is not a teardown grace and must never grow into one. By the time it
+    starts, the child's own crossing seams are already refusing (that is what
+    honoring the latch means), so the window buys the INVENTORY — the list of
+    stranded entries and the at-most-one ambiguous crossing — and nothing else.
+    A child that misses it is killed and reported as residue UNKNOWN, which is
+    strictly better than a halt that waits."""
+    raw = os.environ.get("REVL_ESTOP_HALT_WINDOW")
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return _ESTOP_HALT_WINDOW
+        if value >= 0:
+            return value
+    return _ESTOP_HALT_WINDOW
+
+
+def _halt_all(children: dict, backends: dict, has_inventory,
+              window: float | None = None) -> dict:
+    """Halt every child NOW. Returns pname -> disposition tag.
+
+    Two populations, and the split is the honest part:
+
+      * a child on a tier with NO E-Stop seam (`node`, `rust`, `go`, `java`,
+        `wasm`) is SIGKILLed immediately, because a kill is the only halt that
+        exists for it. It may have dispatched a crossing microseconds before
+        it died and nothing recorded that, so its residue is UNKNOWN;
+      * a child on a latch-honoring tier is already refusing new crossings at
+        its own seams by the time we get here, so it is given a BOUNDED window
+        to print its in-flight inventory, then killed regardless.
+
+    No child is asked to unwind and none is waited on for `DOWN`. A `DOWN`
+    line would be a teardown, and a teardown is the thing this verb exists not
+    to do."""
+    if window is None:
+        window = _estop_halt_window()
+    disposition: dict[str, str] = {}
+    honoring: list[str] = []
+    for name, (proc, _stop_mode) in children.items():
+        if _canonical_backend(backends.get(name, "py")) in TIERS_WITH_ESTOP:
+            # Including one that has ALREADY exited: a child that read the
+            # latch itself halts and dies on its own, and its inventory may
+            # still be in the pipe. `poll()` is not evidence of anything here.
+            honoring.append(name)
+            continue
+        if proc.poll() is not None:
+            disposition[name] = "exited"
+            continue
+        proc.kill()
+        disposition[name] = "killed-no-seam"
+    deadline = time.monotonic() + window
+    while honoring and time.monotonic() < deadline:
+        if all(has_inventory(n) for n in honoring):
+            break
+        time.sleep(0.02)
+    for name in honoring:
+        proc = children[name][0]
+        still_running = proc.poll() is None
+        if still_running:
+            proc.kill()
+        if not has_inventory(name):
+            disposition[name] = "killed-silent"
+        else:
+            # A child that read the latch itself halts and then dies where it
+            # stands, with no teardown; one that named its inventory but is
+            # still up gets the kill. The report says which, because "it
+            # stopped itself" and "we had to shoot it" are different facts.
+            disposition[name] = ("halted-then-killed" if still_running
+                                 else "halted-self-exit")
+    for proc, _stop_mode in children.values():
+        try:
+            proc.wait(timeout=_TEARDOWN_EXIT_GRACE)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    return disposition
+
+
+def _estop_halt_report(record: dict, latch: str, roster: dict,
+                       backends: dict, disposition: dict,
+                       inventories: dict) -> str:
+    """What the operator is owed after hitting the button.
+
+    A halt that leaves silent residue is worse than no halt, so this names
+    every component left un-torn-down and every outstanding obligation,
+    including the ones it CANNOT name — a tier with no E-Stop seam reports
+    `UNKNOWN` here rather than being quietly omitted.
+
+    `roster` is the LIVE composition at halt time — `pname -> {"components":
+    [...]}` for exactly the processes `_halt_all` acted on — and NOT the
+    placement file's `[processes]` table. The two differ after a `revl swap`,
+    and in both directions: the file does not name the synthesized successor
+    (`<component>__t<n>`) this halt just killed, and it still names the
+    predecessor that unwound cleanly on the cutover, minutes earlier and with
+    a no-residue proof. Reporting off the file would therefore omit the one
+    process that holds residue and invent residue for one that holds none.
+    """
+    lines = ["", "E-STOP ENGAGED — the placement is HALTED, not torn down",
+             f"  latch     {latch}",
+             f"  reason    {record.get('reason') or 'operator halt'}",
+             f"  operator  {record.get('operator') or 'unknown'}",
+             "",
+             "  Nothing was unwound. No inverse ran, no compensation ran,",
+             "  nothing was discharged, and no process earned a `DOWN` line.",
+             "  G7's LIFO completeness is VACUOUS under the `halted` verdict",
+             "  (nothing replays) and R4's no-residue proof does NOT hold. The",
+             "  counterpart claim is the inverse one: all residue, all of it",
+             "  reported here.", ""]
+
+    rows: list[tuple[str, str, str, str]] = []
+    for pname in roster:
+        tier = _canonical_backend(backends.get(pname, "py"))
+        tag = disposition.get(pname, "killed-silent")
+        inv = inventories.get(pname) or {}
+        if tag == "exited":
+            note = "already exited before the halt — it is not this halt's residue"
+        elif tag in ("halted-self-exit", "halted-then-killed"):
+            stranded = len(inv.get("stranded") or [])
+            ambiguous = len(inv.get("inFlight") or [])
+            ending = ("and died where it stood" if tag == "halted-self-exit"
+                      else "and was then killed")
+            note = (f"HALTED at its own crossing seams (no new crossing "
+                    f"dispatched) {ending}; {stranded} entr"
+                    f"{'y' if stranded == 1 else 'ies'} STRANDED, "
+                    f"{ambiguous} crossing{'' if ambiguous == 1 else 's'} AMBIGUOUS")
+        elif tag == "killed-no-seam":
+            note = (f"SIGKILLed at once: the {tier} tier has NO E-Stop seam, so "
+                    f"it kept dispatching crossings until it died — residue UNKNOWN")
+        else:
+            note = (f"SIGKILLed after {_estop_halt_window():g}s without naming an "
+                    f"inventory — residue UNKNOWN")
+        for cname in (roster[pname].get("components") or []) or ["(no components)"]:
+            rows.append((cname, pname, tier, note))
+    lines.append(f"  components left UN-TORN-DOWN ({len(rows)}):")
+    width = max((len(r[0]) for r in rows), default=1)
+    for cname, pname, tier, note in rows:
+        lines.append(f"    {cname:<{width}}  process {pname}  tier {tier}")
+        lines.append(f"    {'':<{width}}  {note}")
+
+    residue: list[str] = []
+    unknown: list[str] = []
+    for pname in roster:
+        tier = _canonical_backend(backends.get(pname, "py"))
+        tag = disposition.get(pname, "killed-silent")
+        if tag == "exited":
+            continue
+        if tag in ("halted-self-exit", "halted-then-killed"):
+            inv = inventories.get(pname) or {}
+            for entry in list(inv.get("inFlight") or []) + list(inv.get("stranded") or []):
+                residue.append(
+                    f"    {pname}/{entry.get('component') or '?'}  "
+                    f"{entry.get('kind')}  {entry.get('method') or '-'}  "
+                    f"outcome {entry.get('outcome')}"
+                    + (f"  [seq {entry['seq']}]" if entry.get("seq") is not None else ""))
+            if not (inv.get("inFlight") or inv.get("stranded")):
+                residue.append(f"    {pname}  (nothing was registered — no residue)")
+        else:
+            unknown.append(
+                f"    {pname}  UNKNOWN  the {tier} tier named no inventory; "
+                f"whatever it held is still held and still owed")
+    lines.append("")
+    lines.append(f"  outstanding residue ({len(residue) + len(unknown)} lines, "
+                 f"{len(unknown)} of them UNKNOWN):")
+    lines.extend(residue + unknown)
+    if not (residue or unknown):
+        lines.append("    (none)")
+    lines.extend([
+        "",
+        "  Every handle those processes held — descriptors, pool connections,",
+        "  leases — went away with the process, not with an inverse: nothing",
+        "  that had an external effect was undone. That is the trade the",
+        "  button makes (docs/design/443-estop.md).",
+        "",
+        "  The instance is DEAD; there is no resume (item 443, open question 3).",
+        "  Reconcile with: revl recover --wal <file>",
+        "  Read the durable inventory with: revl estop --report --wal <file>",
+    ])
+    return "\n".join(lines)
+
+
+def run_placement(files, placement_path: str, once: bool = False,
+                  estop_latch: str | None = None) -> int:
+    # item 443: the operator E-Stop. `--estop-latch FILE` (or the ambient
+    # REVL_ESTOP_LATCH) arms it; UNARMED is the default, and a placement that
+    # never arms one runs byte-identically to the pre-443 conductor — no
+    # watcher thread, no latch read, no change to any teardown path.
+    estop_latch = latch_path(estop_latch)
     try:
         ir = compile_files(files)
     except RevlError as exc:
@@ -2930,6 +3138,13 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     # module in CWD shadow a real one.
     inherited = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([src_dir, *inherited])}
+    if estop_latch:
+        # The py child finds the latch here (`runtime.estop_latch_path`), so its
+        # crossing seams refuse from the instant an operator arms it — the same
+        # rendezvous single-process `revl run --estop-latch` uses. A child on a
+        # tier with no E-Stop seam inherits the variable and ignores it, which
+        # is exactly why `_halt_all` kills that population instead.
+        env[LATCH_ENV] = estop_latch
 
     # per-backend build steps, done lazily and cached: the initial placement
     # builds every backend it uses, and a later `revl swap ... --to <backend>`
@@ -3047,6 +3262,12 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
 
     for pname, spec in specs.items():
         adapt_spec(spec, backends[pname])
+        if estop_latch and _canonical_backend(backends[pname]) in TIERS_WITH_ESTOP:
+            # In the SPEC as well as the environment: a sandboxed process (item
+            # 411) is wrapped by a driver that need not forward the conductor's
+            # environment, and an emergency stop that a confined process cannot
+            # see is not an emergency stop.
+            spec["estopLatch"] = estop_latch
 
     # --- sandbox runtime driver (item 411, Slice 2): ESTABLISH each declared
     # isolation boundary before anything spawns, or refuse the placement.
@@ -3153,6 +3374,11 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     # provider, the final teardown), because any one of them can be the one
     # that was cut.
     stranded: list[str] = []
+    # item 443: pname -> the halt inventory that child printed for itself, and
+    # the conductor-side halt state. `halted` is a one-shot latch: pressing the
+    # button twice is not two halts.
+    inventories: dict[str, dict] = {}
+    halted: dict = {}
     threads: list[threading.Thread] = []
     _re_repoint = re.compile(r"^\[(?P<p>[^\]]+)\] REPOINTED (?P<k>\S+) ->")
 
@@ -3165,6 +3391,15 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 up.add(pname)
             elif text == f"[{pname}] DOWN":
                 down.add(pname)
+            elif text.startswith(f"[{pname}] {HALTED_LINE} "):
+                # item 443: the child's own in-flight inventory, printed when
+                # the latch tripped its seams. It is NOT a `DOWN` line and must
+                # never be read as one — the child unwound nothing.
+                try:
+                    inventories[pname] = json.loads(
+                        text.split(" ", 2)[2])
+                except (ValueError, IndexError):
+                    inventories[pname] = {}
             else:
                 m = _re_repoint.match(text)
                 if m and m.group("p") == pname:
@@ -3193,8 +3428,71 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         while time.time() < deadline:
             if pred():
                 return True
+            if halted:
+                # item 443: an operator halt outranks whatever this loop was
+                # waiting for. Nothing is coming up after the button.
+                return False
             time.sleep(0.05)
         return pred()
+
+    # --- the operator E-Stop (item 443) --------------------------------------
+    watch_stop = threading.Event()
+    conductor_thread = threading.current_thread()
+
+    def engage_estop(record: dict) -> None:
+        """Halt the placement. One-shot: the button is idempotent.
+
+        Order matters and is the whole design. (1) SAY IT, before anything
+        that can take time, so the operator sees the halt at the instant it
+        lands. (2) Stop every child — killing outright the tiers that have no
+        E-Stop seam, and giving the ones that do a bounded window to name
+        their inventory. (3) REPORT, naming every component left un-torn-down
+        and every outstanding obligation, including the ones no tier could
+        name. (4) Unblock the conductor so `revl run` actually returns.
+
+        What it deliberately does NOT do: ask any child to unwind, wait for a
+        `DOWN` line, run an inverse, or run `stop_all`. Every one of those is
+        the graceful path this verb exists to bypass."""
+        if halted:
+            return
+        halted["record"] = record
+        reason = record.get("reason") or "operator halt"
+        # The banner rides the interleaved TRACE on stdout, where it belongs in
+        # the run's timeline; the verdict below goes to stderr, the same split
+        # `_stranded_teardown_report` already uses.
+        print(f"\n[conductor] E-STOP {reason} — halting {len(children)} "
+              f"process(es) now, NO unwind", flush=True)
+        disposition = _halt_all(children, backends, lambda n: n in inventories)
+        halted["disposition"] = disposition
+        # The roster the report enumerates is the composition that is actually
+        # RUNNING, taken from the children `_halt_all` just acted on and the
+        # live `placed` map — never the placement file's `[processes]` table.
+        # After a `revl swap` the file is wrong in both directions: it does not
+        # name the successor this halt just killed, and it still names the
+        # predecessor that unwound with a no-residue proof on the cutover. So a
+        # file-driven report would omit the process that holds residue and
+        # attribute residue to one that holds none, which is the one failure
+        # mode this whole verb exists to avoid.
+        roster: dict[str, dict] = {pname: {"components": []} for pname in children}
+        for cname, host in placed.items():
+            if host in roster:
+                roster[host]["components"].append(cname)
+        print(_estop_halt_report(record, estop_latch, roster, backends,
+                                 disposition, inventories),
+              file=sys.stderr, flush=True)
+        watch_stop.set()
+        if conductor_thread is threading.main_thread():
+            # The conductor may be parked in `input()` (the swap REPL) or in a
+            # wait loop. An emergency stop that needed the main loop's
+            # cooperation to be noticed would not be one, so interrupt it.
+            _thread.interrupt_main()
+
+    def estop_watch() -> None:
+        while not watch_stop.wait(0.05):
+            record = read_latch(estop_latch)
+            if record is not None:
+                engage_estop(record)
+                return
 
     def stop_all(group: dict) -> None:
         """`_stop_all` with this conductor's DOWN tracker wired in, recording
@@ -3421,6 +3719,29 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 "composition_id": _old_corr["composition_id"],
                 "peers": dict(_old_corr["peers"]),
             }
+        # item 443: carry the operator's E-Stop latch onto the successor, for
+        # the same reason and by the same rule as the correlation guard above.
+        # The latch is HOW AN OPERATOR HALTS A RUNNING PLACEMENT, and `revl
+        # swap` is ordinary use: a successor that quietly booted without it
+        # could not be stopped by the button that armed its predecessor, so the
+        # composition would be haltable only until the first swap — which is
+        # not haltable. The environment alone is not enough to rely on here,
+        # which is the whole reason the boot path sets this key as well: a
+        # sandboxed process (item 411) is wrapped by a driver that need not
+        # forward the conductor's environment, and `_process_runner` reads
+        # `spec["estopLatch"]` first and the ambient variable only as a
+        # fallback.
+        #
+        # Gated on the TARGET tier exactly as the boot path gates it: only a
+        # tier with an E-Stop seam can read a latch. A swap onto a seamless
+        # tier is not a silent loss of the halt — the successor simply joins
+        # the population `_halt_all` SIGKILLs outright and the report names as
+        # residue UNKNOWN, the same disposition it would have had if the
+        # placement had booted it on that tier in the first place. So the
+        # composition stays haltable across every swap; only the QUALITY of the
+        # halt follows the tier, and the report says which one it got.
+        if estop_latch and _canonical_backend(to_backend) in TIERS_WITH_ESTOP:
+            succ_spec["estopLatch"] = estop_latch
         adapt_spec(succ_spec, to_backend)
         print(f"swap: booting {component} on the {to_backend} tier ({succ}) ...", flush=True)
         spawn(succ, to_backend, succ_spec)
@@ -3517,6 +3838,13 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     for pname, spec in specs.items():
         spawn(pname, backends[pname], spec)
 
+    if estop_latch:
+        print(f"  E-Stop (item 443): armed on {estop_latch} — "
+              f"`revl estop --latch {estop_latch}` halts this placement "
+              f"without unwinding it", flush=True)
+        threading.Thread(target=estop_watch, name="revl-estop",
+                         daemon=True).start()
+
     rc = 0
     try:
         if once:
@@ -3549,6 +3877,11 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        watch_stop.set()
+        # After a halt every child is already dead, so `stop_all` terminates
+        # nothing and strands nothing — the graceful path becomes a no-op
+        # rather than being skipped, which keeps the sandbox/tmpdir cleanup
+        # below on one code path.
         stop_all(children)
         # item 411 Slice 2: `--rm` already fires on a clean exit; this is the
         # belt, so a torn-down placement never leaves a confined process (or a
@@ -3568,5 +3901,10 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         # one. A child killed mid-teardown used to be indistinguishable from a
         # clean exit here, so a partial teardown passed as success.
         print(_stranded_teardown_report(stranded), file=sys.stderr)
+        rc = rc or 1
+    if halted:
+        # item 443: an E-Stop is NEVER clean. The report above already named
+        # what is owed; this is only the status that carries it out of the
+        # process, so a halted placement cannot pass as a finished one.
         rc = rc or 1
     return rc
