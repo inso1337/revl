@@ -1,8 +1,22 @@
-# revl swap — verified live migration across tiers
+# swap: verified live migration across tiers
 
-**Status:** implemented (2026-08-23) · `revl swap <component> --to <backend>`
-inside a running `revl run --placement` session · companion to
+**Status:** implemented (2026-08-23) · companion to
 [interop-bridge.md](interop-bridge.md) and [service-compat.md](service-compat.md)
+
+`swap` is **not a `revl` subcommand**. It is a verb of the REPL that
+`revl run --placement` drops you into once every process is up:
+
+```
+revl run app.rvl --placement topology.toml
+swap> swap <component> --to <backend>
+swap> :keys
+swap> :q
+```
+
+Typing `revl swap` at a shell is an invalid choice. The same verbs can be piped
+in on stdin instead of typed, which is how the exit test drives it (see
+"Scripted (non-interactive) swaps" below). Source: `swap_repl` in
+`src/revl/placement.py`.
 
 Placement (`revl run --placement`) brought the six runtime tiers into one
 lifecycle: a component provided in one process, on one tier, consumed in

@@ -333,7 +333,7 @@ Anything checked in that a tool reproduces from the tree: the per-backend
 emitter goldens, the emitted Go under `backends/go/`, the crash-recovery
 scenarios, and `crates/revl-gate`. That last one is a committed generated rust
 crate that embeds emitted rust, so *any* change to `backends/rust/emit.py` or
-`selfhost/*.rvl` rewrites roughly 1900 lines of it, and it is the common way a
+`selfhost/*.rvl` rewrites roughly 8000 lines of it, and it is the common way a
 PR goes red on drift alone. The fix is `python3 tools/regen_goldens.py
 gate-crate` in the same commit, never a revert of the emitter change.
 

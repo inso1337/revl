@@ -108,7 +108,7 @@ in any runtime adapter. That is item zero, and it is new work, not a free ride.
 
 This one opens with `spawn` itself — before per-instance realms are ever added.
 
-The checker (`src/revl/lower.py:3047-3048`):
+The checker (`_realm` in `src/revl/lower.py`):
 
 ```python
 def _realm(entry: dict, key: str) -> str:
@@ -118,7 +118,7 @@ def _realm(entry: dict, key: str) -> str:
 A flat lookup on the entry's own `isolate` map. The runtime instead reads
 `_effective_isolate()` off the **parent chain** (`cordis/context.py:83-89`), and
 `plug` isolates a scoped context *before* `ctx.plugin`
-(`backends/python/runtime.py:72-80`).
+(`def plug` in `backends/python/runtime.py`).
 
 These agree today only because everything is plugged onto the root context. The
 moment a child is plugged onto its spawner's context, the linker says "shared
@@ -190,12 +190,14 @@ control reproduced both experiments above verbatim.
 | cordis4j | yes | yes — `ctx.fork()` alone isolates, no label needed | yes |
 | cordis-wasm | yes | **no** — no realm concept in the runtime at all | yes |
 
-**Local realms are available on four tiers today.** cordis-wasm is the only gap:
-its provider table is a flat `dict[str, Provider]` and realms are compile-time
-name mangling (`backends/wasm/emit.py:151-155`), so a runtime-determined instance
-count cannot be expressed without emitting one module per instance. The fix is a
-realm prefix applied at resolve, publish, and the conflict check
-(`backends/wasm/runtime.py:293`, `:332`, `:131-137`).
+**Local realms are available on every tier now.** cordis-wasm was the last gap:
+its provider table was a flat `dict[str, Provider]` and realms were compile-time
+name mangling, so a runtime-determined instance count could not be expressed
+without emitting one module per instance. The realm prefix at resolve, publish
+and the conflict check landed in the cordis-wasm runtime and unblocked `spawn`
+on that tier; `backends/wasm/test_spawn_exec.py` executes it. The runtime file
+lives in the cordis-wasm repository, not in this one, which is why no path here
+names it.
 
 ### The inversion
 
