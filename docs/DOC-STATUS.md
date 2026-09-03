@@ -102,13 +102,13 @@ was corrected by hand and had drifted back within a day.
 | component-leases.md | needs-work | 24 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |
-| composition-rows.md | needs-work | 0 |  |
-| conformance.md | needs-work | 31 |  |
+| composition-rows.md | needs-work | 13 |  |
+| conformance.md | needs-work | 36 |  |
 | contract-errata.md | needs-work | 93 | yes |
 | crash-recovery.md | needs-work | 44 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
-| deploy.md | needs-work | 21 |  |
+| deploy.md | needs-work | 33 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 69 |  |
 | design-v2-realms.md | needs-work | 17 |  |
@@ -156,7 +156,7 @@ was corrected by hand and had drifted back within a day.
 | queries.md | needs-work | 43 |  |
 | records.md | needs-work | 13 |  |
 | registry-probe.md | needs-work | 15 |  |
-| registry.md | needs-work | 39 | yes |
+| registry.md | needs-work | 46 | yes |
 | rejections.md | needs-work | 66 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
