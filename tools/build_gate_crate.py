@@ -976,15 +976,30 @@ update the crate docs and this test: {}",
 
 #[test]
 fn a_construct_outside_the_frontier_is_declined() {
-    // `.is_digit()` is a reference stdlib builtin the self-host lowering does
-    // not treat as a builtin, so it sits in the generated frontier table.
-    let src = "fn f(s: Str) -> Bool { return s.charAt(0).is_digit() }";
-    match admit(src) {
+    // Built from the GENERATED table, never from a hand-picked construct: item
+    // 391 ported `.is_digit()` and `.str()` into the self-host lowering, which
+    // emptied the builtin row and left the two tests that named them asserting
+    // a gap that no longer exists. An empty table is a legitimate generation
+    // (the two front ends agree on the whole lexical surface today), so the
+    // size bound below carries the fail-closed property on its own.
+    let name = match frontier_probe() {
+        Some(name) => name,
+        None => return,
+    };
+    let src = format!("fn f(x: Str) -> Bool {{ return x.{}() }}", name);
+    match admit(&src) {
         Verdict::OutsideFrontier { reason } => {
-            assert!(reason.contains("is_digit"), "reason must name the gap: {}", reason);
+            assert!(reason.contains(name), "reason must name the gap: {}", reason);
         }
         other => panic!("a frontier construct must not be decided, got {:?}", other),
     }
+}
+
+/// One name from the generated frontier table, or `None` when the table is
+/// empty. GENERATED alongside the table itself, so it can never name a
+/// construct the self-host has since ported.
+fn frontier_probe() -> Option<&'static str> {
+    @FRONTIER_PROBE@
 }
 
 #[test]
@@ -998,7 +1013,9 @@ fn an_oversized_source_is_declined_rather_than_risked() {
 
 #[test]
 fn a_frontier_gap_reads_as_not_admitted_on_the_wire() {
-    let verdict = admit("fn f(s: Str) -> Bool { return s.charAt(0).is_digit() }");
+    // The always-live trigger: the size bound. It does not depend on the
+    // generated lexical table having an entry left in it.
+    let verdict = admit(&"fn id(x: Int) -> Int { return x } ".repeat(20_000));
     assert_eq!(verdict.code(), Some("FRONTIER"));
     assert_eq!(verdict.kind(), "outside_frontier");
     assert!(verdict.to_json().contains("\"admitted\":false"));
@@ -1683,9 +1700,17 @@ fn a_duplicated_name_is_not_resolved() {
 
 #[test]
 fn a_frontier_gap_and_an_oversized_source_are_undecided() {
-    // an excluded builtin is a construct the two compilers lower differently
-    let gap = symbols("fn f(s: Str) -> Int {\n  return s.codepoint_at(0)\n}\n");
-    assert!(gap.is_undecided(), "{gap:?}");
+    // The lexical probe is GENERATED from the frontier table, never hand-picked:
+    // this test used to name `.codepoint_at()`, item 391 ported it, and the
+    // assertion outlived the gap it was asserting. `None` here means both
+    // lexical rows are empty at this generation, which is a legitimate state —
+    // the size bound below is the always-live trigger.
+    let probe: Option<&str> = @FRONTIER_PROBE@;
+    if let Some(name) = probe {
+        let src = format!("fn f(s: Str) -> Int {{\n  return s.{}(0)\n}}\n", name);
+        let gap = symbols(&src);
+        assert!(gap.is_undecided(), "{gap:?}");
+    }
     let huge = "// pad\n".repeat(revl_gate::MAX_SOURCE_BYTES / 7 + 1);
     assert!(symbols(&huge).is_undecided());
 }
@@ -1951,6 +1976,12 @@ def render(tables: dict[str, list[str]], digest: str, fid: str, language: str,
                     or "(none at this generation)")
     builtin_line = (", ".join(f"`.{n}()`" for n in tables["builtins"])
                     or "(none at this generation)")
+    # The crate's own integration test needs a construct that is actually in the
+    # table; when the table is empty there is none, and the size bound carries
+    # the fail-closed property alone. Generated rather than hand-picked: item 391
+    # ported `.is_digit()` and `.str()`, and the hand-picked probes that named
+    # them went on asserting a gap that had closed.
+    probe = (f'Some("{tables["builtins"][0]}")' if tables["builtins"] else "None")
     return {
         "Cargo.toml": CARGO_TOML_TEMPLATE.replace("@CRATE_VERSION@", CRATE_VERSION),
         ".gitignore": GITIGNORE,
@@ -1986,8 +2017,8 @@ def render(tables: dict[str, list[str]], digest: str, fid: str, language: str,
         "src/selfhost.rs": selfhost_rs,
         "src/session.rs": SESSION_RS,
         "src/symbols.rs": SYMBOLS_RS,
-        "tests/admit.rs": TESTS_ADMIT_RS,
-        "tests/symbols.rs": TESTS_SYMBOLS_RS,
+        "tests/admit.rs": TESTS_ADMIT_RS.replace("@FRONTIER_PROBE@", probe),
+        "tests/symbols.rs": TESTS_SYMBOLS_RS.replace("@FRONTIER_PROBE@", probe),
     }
 
 

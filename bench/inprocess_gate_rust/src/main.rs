@@ -168,9 +168,26 @@ component C provides cache: Cache {
 /// as an admission.
 const TYPE_LAYER_MISS: &str = "fn f() -> Int { return \"s\" }\n";
 
-/// A reference builtin the self-host lowering does not carry, so the crate's
-/// generated frontier table declines to decide at all.
-const FRONTIER_BUILTIN: &str = "fn f(s: Str) -> Bool { return s.charAt(0).is_digit() }\n";
+/// A source the crate declines to decide because it is over the size bound.
+///
+/// This used to be an `.is_digit()` call — a reference builtin the self-host
+/// lowering did not carry, so it sat in the generated frontier table. Item 391
+/// PORTED it (and every other builtin the table named), which emptied the
+/// lexical tables and left the size bound as the only always-live fail-closed
+/// trigger. The batch still has to exercise that arm, so it exercises the one
+/// that is left: a single tiny `fn` behind a comment large enough to cross
+/// `revl_gate::MAX_SOURCE_BYTES`. The reference ADMITS it (a comment is not a
+/// program) and this gate declines to decide it, which is exactly the shape a
+/// host must not read as an admission.
+fn frontier_oversized() -> &'static str {
+    let mut source = String::with_capacity(revl_gate::MAX_SOURCE_BYTES + 128);
+    source.push_str("// ");
+    while source.len() <= revl_gate::MAX_SOURCE_BYTES {
+        source.push_str("padding ");
+    }
+    source.push_str("\nfn id(x: Int) -> Int { return x }\n");
+    Box::leak(source.into_boxed_str())
+}
 
 struct Candidate {
     /// The py harness's name where the candidate is shared, so the driver can
@@ -236,9 +253,9 @@ fn batch() -> Vec<Candidate> {
             shared_with_py: false,
         },
         Candidate {
-            name: "frontier_builtin",
-            source: FRONTIER_BUILTIN,
-            note: "an `is_digit()` call; py ADMITS, this gate is not entitled to decide",
+            name: "frontier_oversized",
+            source: frontier_oversized(),
+            note: "a source over the size bound; py ADMITS, this gate is not entitled to decide",
             shared_with_py: false,
         },
     ]
@@ -809,7 +826,7 @@ Every one of those five is in the TOLERATED direction: a no-objection is never
 an admission, so none of them is a false admit. Together they are the reason the
 crate has no `Admitted` arm, and the reason an embedder that reads a
 no-objection as a green ships an unsafe host. The one candidate this gate
-declines outright (`frontier_builtin`) is the fail-closed path working: `py`
+declines outright (`frontier_oversized`) is the fail-closed path working: `py`
 ADMITS it, and rather than decide a construct it does not cover, the gate says
 so.
 
@@ -827,8 +844,11 @@ twin screens best.
 * an oversized source (over `MAX_SOURCE_BYTES` = {max_bytes}) is DECLINED
   ({oversized}) rather than risked: the emitted front end is deeply recursive and
   a stack exhaustion aborts, which cannot be turned back into a refusal;
-* a construct outside the generated frontier table (`frontier_builtin` above) is
-  declined with code `FRONTIER`;
+* the same source, as a batch CANDIDATE (`frontier_oversized` above), is declined
+  with code `FRONTIER` — the batch's fail-closed arm. The generated frontier
+  table's two LEXICAL rows (excluded keywords, excluded builtins) are both empty
+  at this generation: item 391 ported the last builtins they named, so the size
+  bound is the trigger a batch can still demonstrate;
 * `compile_to` refuses on both tiers ({compile_to}) - the self-host emitters
   still carry `@py`-only helper externs, so there is no native emitter to call
   (item 332 Stage 4).
