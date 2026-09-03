@@ -1,14 +1,14 @@
-# revl 2.0 — full-language syntax proposal
+# revl 2.0: full-language syntax proposal
 
-**Status:** implemented on branch `v2.0` (2026-08-17) — see
+**Status:** implemented on branch `v2.0` (2026-08-17). See
 docs/v2.0-roadmap.md for per-item status; the §10 acceptance benchmark is
 running post-hoc and its findings may still revise stratum 1. Originally a
 proposal (2026-08-16), successor to DESIGN.md §3.
 
 revl 1.x is a component-composition language with a deliberately tiny pure
-expression layer. revl 2.0 grows it into a full-powered language — able to
-express general computation, its own compiler, and everything an AI author
-needs — without weakening a single guarantee.
+expression layer. revl 2.0 grows it into a full-powered language that expresses
+general computation, its own compiler, and everything an AI author needs,
+without weakening a single guarantee.
 
 ## 0. The governing principle
 
@@ -16,8 +16,8 @@ needs — without weakening a single guarantee.
 
 Where a construct means *exactly* what it means in TypeScript, revl 2.0 uses
 TypeScript's syntax verbatim, harvesting every model's training prior. Where
-the paradigm's semantics begin — effects, inverses, provisions, boundaries —
-the syntax stays distinctly revl, as a deliberate semantic speed bump. The
+the paradigm's semantics begin (effects, inverses, provisions, boundaries) the
+syntax stays distinctly revl, as a deliberate semantic speed bump. The
 constructs models write on autopilot are the ones where autopilot is correct.
 
 Corollaries:
@@ -41,7 +41,7 @@ The language has four strata, each with its own rules:
 
 ## 1. Modules and visibility
 
-A file is a module. `use` imports **pure** declarations only — types,
+A file is a module. `use` imports **pure** declarations only: types,
 functions, services. Components are never imported: they are *composed*, by
 the linker, over a manifest. This keeps the two composition mechanisms from
 blurring: `use` is compile-time and pure; the manifest is runtime and stateful.
@@ -59,20 +59,20 @@ fn helper() -> Int { ... }                        // default: module-private
 - Import cycles between modules are a compile error (distinct from G3, which
   governs runtime component graphs).
 - **Resolution (roadmap 319).** `use` resolves the path relative to the
-  importing file first, and that always wins — a genuine local file is never
+  importing file first, and that always wins, so a genuine local file is never
   shadowed. Only when nothing sits there does the compiler fall back to a
   search path, tried in order: each directory on `REVL_IMPORT_PATH` (like
-  `PYTHONPATH` — entries joined by the OS path separator), then the revl
+  `PYTHONPATH`, with entries joined by the OS path separator), then the revl
   stdlib's install location (a source checkout's `<repo>/stdlib`, or the copy
-  packaged into the wheel). That fallback is what lets `use "stdlib/fs.rvl"`
-  resolve for a module anywhere — not only ones that live inside the revl
-  checkout — without vendoring a copy of the stdlib into the consumer's own
-  tree. A path that resolves nowhere in that list is a compile error naming
-  the `use` path and the search path that was tried.
+  packaged into the wheel). That fallback is what lets any module resolve
+  `use "stdlib/fs.rvl"`, including modules outside the revl checkout, without
+  vendoring a copy of the stdlib into the consumer's own tree. A path that
+  resolves nowhere in that list is a compile error naming the `use` path and
+  the search path that was tried.
 
 ## 2. Types and data
 
-Type syntax stays revl's own — capitalized names, `[]` generics. Rationale:
+Type syntax stays revl's own: capitalized names, `[]` generics. Rationale:
 type-level TS is structural and enormous; revl types are nominal-ish and
 host-neutral, so the "same meaning" premise fails and distinct syntax is
 correct. `[]` generics also avoid the classic `<` ambiguity in expressions.
@@ -90,7 +90,7 @@ type Outcome = Ok(Row) | NotFound | Invalid(Str)        // ADT (payloads)
 
 - Records are structural; ADTs are nominal. `match` (§3.3) is the eliminator
   for ADTs and is exhaustiveness-checked.
-- No `null`/`undefined` in the type system — absence is `Opt[T]`. In
+- The type system has no `null`/`undefined`. Absence is `Opt[T]`. In
   expressions, TS's `??` and `?.` operate on `Opt` (§3.2): the familiar
   syntax, the honest type.
 
@@ -115,21 +115,21 @@ fn classify(n: Int) -> Str {
 ```
 
 `fn` bodies are **pure from the outside**: no context, no effects, no host
-access, no observable mutation. G6 keeps its by-construction character —
-there is no syntactic path from a `fn` body to an effect.
+access, no observable mutation. G6 keeps its by-construction character: there
+is no syntactic path from a `fn` body to an effect.
 
-### 3.2 The admitted TS subset (semantics coincide — syntax verbatim)
+### 3.2 The admitted TS subset (semantics coincide, so syntax is verbatim)
 
 - literals: numbers, strings, booleans, `[a, b]`, `{ id: 1, name: "x" }`
-- template strings: `` `hello ${user.name}` `` — **replaces 1.x `$name`
+- template strings: `` `hello ${user.name}` ``, which **replaces 1.x `$name`
   interpolation** (breaking change; 1.x sources migrate mechanically). A
   `${ ... }` body is captured by balancing braces string-aware, so a `}` inside
-  a nested string or comment does not end it early — `` `v=${m.lookup("}")}` ``
+  a nested string or comment does not end it early: `` `v=${m.lookup("}")}` ``
   captures the whole `m.lookup("}")`.
 - operators: `+ - * / %`, comparisons, `&& || !`, ternary `c ? a : b`
-- `?.` optional chaining and `??` nullish coalescing — typed against `Opt[T]`
+- `?.` optional chaining and `??` nullish coalescing, typed against `Opt[T]`
 - arrow functions `x => expr`, `(a, b) => { ... }`; captures are by-value
-  snapshots (no shared mutable environment — see §3.5)
+  snapshots (no shared mutable environment; see §3.5)
 - method calls, indexing `xs[i]`, slicing via methods, spread `[...xs, y]`,
   destructuring `let { id, name } = row`, `let [head, ...rest] = xs`
 
@@ -154,15 +154,16 @@ match lookup(key) {
   effect layer), `++`/`--`, compound assignment on non-`var`, `async`
   arrows in pure code, generators.
 
-### 3.4 Equality — the one negotiated lookalike
+### 3.4 Equality: the one negotiated lookalike
 
 revl has a single equality: structural value equality, no coercion. Both
 spellings `==` and `===` are accepted and mean that one thing (`!=`/`!==`
 likewise). **One exception, and it is IEEE's, not revl's:** `Float` is IEEE
 754 binary64, so `NaN != NaN` and equality on Float is not reflexive. Every
-tier agrees on this — it is a property of the type, not a divergence between
-backends (docs/arithmetic.md). Rationale: models emit both reflexively; making one of them an
-error would burn feedback cycles on a distinction revl doesn't have. The
+tier agrees on this, because it is a property of the type rather than a
+divergence between backends (docs/arithmetic.md). Rationale: models emit both
+reflexively; making one of them an error would burn feedback cycles on a
+distinction revl doesn't have. The
 compiler canonicalizes to `==` in the IR (the parser folds `===`→`==`,
 `!==`→`!=`), so no backend can diverge on the *spelling*; a source-level
 formatter pass that also rewrites the spelling is future work (`revl fmt`
@@ -182,7 +183,8 @@ node), not about what the emitters do with it.
 
 Self-hosting a parser without loops or a mutable position index is
 masochism, and models write loops fluently. revl 2.0 admits **function-local
-mutation** — unobservable from outside, so functions remain pure in meaning:
+mutation**. It is unobservable from outside, so functions remain pure in
+meaning:
 
 ```revl
 type TokenKind = Ident | Keyword | IntLit | StrLit
@@ -215,14 +217,14 @@ Rules that keep this honest:
   survive it. The decision and the G7/A8 analysis are in
   [docs/closures.md](closures.md); the executable rejection is
   `examples/rejections/g6_closure_mutates_capture.rvl`.
-- `for (x of xs)` and `while` — TS syntax verbatim; both total-checked only
-  in `verified` contexts (§7), unrestricted elsewhere.
-- `break` and `continue` — bare loop control (no label, no value), valid only
+- `for (x of xs)` and `while` are TS syntax verbatim; both are total-checked
+  only in `verified` contexts (§7), unrestricted elsewhere.
+- `break` and `continue` are bare loop control (no label, no value), valid only
   inside a `while`/`for` body, and TS-verbatim like the loops themselves
   (item 379, [docs/design/379-break-continue.md](design/379-break-continue.md)).
   `break` leaves the innermost enclosing loop; `continue` skips to its next
   iteration. In a `while`, `continue` re-tests the condition **without** running
-  anything after it — a trailing `i += 1` in the loop body is skipped, exactly
+  anything after it, so a trailing `i += 1` in the loop body is skipped, exactly
   as every C-family language does, so a `while` that mutates its own index
   should advance it before the `continue`. Both are frame-neutral: a loop is
   never a teardown boundary, so an early loop exit runs no disposer that a
@@ -242,7 +244,7 @@ fn first_gap(xs: List[Int]) -> Int {
 
 ## 4. Components and effects (unchanged core, new block forms)
 
-Stratum 3 is revl 1.x, deliberately untouched — these keywords are the
+Stratum 3 is revl 1.x, deliberately untouched. These keywords are the
 semantic speed bumps and *must not* look like anything in the corpus:
 
 ```revl
@@ -283,29 +285,29 @@ let conn = effect {
 ```
 
   The block body is stratum-1 pure code plus the final acquisition; `undo`
-  is unchanged. G5 still holds by construction — `undo` has no statement
+  is unchanged. G5 still holds by construction: `undo` has no statement
   position.
 
 - **`fail` statement** for deliberate L-Raise from an activation body:
-  `if (config.replicas < 1) fail "at least one replica required"` —
-  lowering to the A8 semantics (revert accumulated, land FAILED).
+  `if (config.replicas < 1) fail "at least one replica required"`, lowering
+  to the A8 semantics (revert accumulated, land FAILED).
 
 - **Realms and interception (paper §3.2.3) are implemented** (merged in the
   v2.0 branch; see docs/design-v2-realms.md): `isolate db in realm("tenant")`
-  · `intercept db with { paths: [...] }` — with **static** string labels only;
+  · `intercept db with { paths: [...] }`, with **static** string labels only;
   the dynamic `realm(config.tenant)` form remains reserved (instance-parametric
   components).
 
 ## 4b. Rules the implementation added
 
-These are not in the original proposal — each was forced by building
-something real, and each is now enforced. They belong with §4 because they
+These are not in the original proposal. Each was forced by building something
+real, and each is now enforced. They belong with §4 because they
 are all about how a component's boundary is declared.
 
 ### 4b.1 A service declaration is an upper bound on its providers (G4)
 
 A service operation declared plain may not reach an emission in *any*
-provider's body — directly, through an `emission` extern, or through a
+provider's body, whether directly, through an `emission` extern, or through a
 function that transitively reaches one:
 
 ```
@@ -316,14 +318,14 @@ function that transitively reaches one:
 ```
 
 The bound is one-directional: a provider may be **purer** than declared
-(declared `emission`, body doesn't emit — the consumer already assumed the
+(declared `emission`, body doesn't emit; the consumer already assumed the
 worst), never less pure. That direction is the sound one because consumers
 bind to the *service*, not to a component, and providers hot-swap
 underneath them.
 
 It also repairs `revl audit`: G8 enumerates a caller's emissions by reading
-the declarations of the operations it calls, so an under-declared operation
-made every consumer's audit incomplete — not merely misleading.
+the declarations of the operations it calls, so an under-declared operation did
+not merely mislead a consumer's audit, it made that audit incomplete.
 
 The bound refines from a flag to a **set** with `emission[db, bus] fn …`,
 which says *where* a provider may cross rather than only that it does; bare
@@ -331,7 +333,7 @@ which says *where* a provider may cross rather than only that it does; bare
 
 ### 4b.2 `emit` is also an expression
 
-`emit` began as a statement, which discarded its value — fatal for the
+`emit` began as a statement, which discarded its value. That was fatal for the
 canonical emission that *returns* data (an LLM completion, an HTTP GET).
 It is now also a prefix in value position, so the marker stays at the call
 site (G4's actual point) while the value flows:
@@ -381,7 +383,7 @@ its own message.
 ### 4b.6 `??` requires an optional on the left
 
 `a ?? b` supplies a fallback when `a` is absent, so a non-optional left
-operand makes the fallback dead code. It is now a type error — three
+operand makes the fallback dead code. It is now a type error. Three
 backends could not render it (rust would emit `unwrap_or_else` on an `i64`,
 java `orElseGet` on a `long`), and python silently accepted it.
 
@@ -428,16 +430,16 @@ pub service Database {
 ```
 
 - `async fn` operations: provide-method bodies implementing them may
-  `await` *host* async values. This `await` is **not** a divert boundary —
+  `await` *host* async values. This `await` is **not** a divert boundary:
   boundaries exist only in activation bodies. Same keyword, and the meaning
   is TS's own (suspend on a promise), so the principle holds; the *boundary*
   reading of `await` is exclusive to component bodies and the checker
   enforces the separation (a body `await` in a method is still rejected, A1).
 - `commutative` on a service (or a single operation) declares Def. 39
-  order-independence, discharged under §7 — the opt-in that upgrades a key
+  order-independence, discharged under §7. It is the opt-in that upgrades a key
   from LIFO-only to reorderable recovery.
 
-## 6. Host blocks — full power, honestly labeled
+## 6. Host blocks: full power, honestly labeled
 
 The escape hatch is an `extern` with per-backend verbatim bodies. Inside is
 the host language, unchecked, opaque; the boundary is typed; the whole
@@ -471,20 +473,20 @@ extern emission fn send(sock: Socket, data: Bytes)
 - Multiple `@backend` bodies make an extern portable; a component compiles
   on exactly the backends whose bodies (or builtin mappings) exist, and
   `revl audit` reports the per-backend surface.
-- Classification is mandatory and semantic: `pure` (no observable effect —
-  trusted, audited), `acquire` (must carry `undo`), `emission` (may carry
+- Classification is mandatory and semantic: `pure` (no observable effect,
+  trusted and audited), `acquire` (must carry `undo`), `emission` (may carry
   `compensate`). An unclassified extern does not parse.
-- Inside a host block the model writes *real* TypeScript or Python — the
+- Inside a host block the model writes *real* TypeScript or Python. The
   place full fluency is wanted is exactly the place checking was never
   promised.
 
-### 6.0 `config` — static configuration for a document-global extern
+### 6.0 `config`: static configuration for a document-global extern
 
 A document-global extern is context-free by construction: it has no component,
 so it cannot `require` a service to read configuration, and the historical
 workaround was ambient environment variables (the wart recorded in
 docs/design/378-sync-extern-service-reach.md, roadmap item 379). An extern that
-needs *static* configuration — provider identity, an endpoint, a model name —
+needs *static* configuration (provider identity, an endpoint, a model name)
 declares a typed `config` block, the same shape a component carries, resolved
 once at plug time from the composition `--config` map and bound in the host body
 as `_revl_config`:
@@ -499,17 +501,17 @@ extern emission fn raw_model_post(body: Str) -> Str
 
 - The schema is checked like a component's: a non-`null` default must fit its
   declared field type, and a required field (no default) missing at load is
-  refused at admission — the same `--config` preflight a component gets, never a
-  runtime `KeyError` inside the host body.
+  refused at admission by the same `--config` preflight a component gets, never
+  by a runtime `KeyError` inside the host body.
 - The value is resolved **once at plug**, so a config extern gets a static
   identity, not a live service. A mechanism that must observe a service whose
-  state changes at runtime (a live provider swap) is not a config extern — it is
+  state changes at runtime (a live provider swap) is not a config extern. It is
   a `provide` method on a component that `requires` the service (option (c) in
   the design note). Config is static data; a live reach needs a home component.
 - `config` touches neither color nor capability: a sync config extern stays
-  sync (A1 is untouched — config is data, not an async op), and it reaches no
-  service, so it needs no capability grant. A *secret* carried in config is
-  governed by the untrusted-author admission profile
+  sync (A1 is untouched, because config is data rather than an async op), and
+  it reaches no service, so it needs no capability grant. A *secret* carried in
+  config is governed by the untrusted-author admission profile
   (docs/design/329-untrusted-author-profile.md), unchanged: a model-authored
   source that `no_extern` refuses still cannot declare one.
 - The coeffect works on **every seamful tier**, not just `@py` (item 378
@@ -532,16 +534,16 @@ extern emission fn raw_model_post(body: Str) -> Str
 - An extern with no `config` block is byte-identical across parse, IR, and every
   emitted tier: the clause is purely additive.
 
-### 6.1 `acquire` and the two undos — the durable-resource discipline
+### 6.1 `acquire` and the two undos: the durable-resource discipline
 
-An `acquire` extern that opens a durable host resource — a socket, a pool, a
-file handle — carries an `undo` because G4 demands it. But that extern-level
+An `acquire` extern that opens a durable host resource (a socket, a pool, a
+file handle) carries an `undo` because G4 demands it. But that extern-level
 `undo` is **documentation, not the working release**, and knowing why is the
 whole discipline. An acquire's teardown runs with almost nothing in scope: it
 sees the implicit `result` binding and nothing else (§6 above), and no tier
 defines teardown parameter capture. So an extern whose release needs the
 *specific handle it just produced* cannot spell that release at the extern
-level — the handle is not nameable there. The slot still has to parse (G4),
+level, because the handle is not nameable there. The slot still has to parse (G4),
 so it names the inverse operation against a placeholder:
 
 ```revl fragment
@@ -553,8 +555,8 @@ extern acquire fn log_open(path: Str) -> LogHandle undo log_close(result)
 ```
 
 The real, revertible release is one level up, in the component that performs
-the acquisition. There the acquired handle *is* in scope — it is the effect's
-own binding — so the component's `undo` closes exactly the descriptor that was
+the acquisition. There the acquired handle *is* in scope, as the effect's own
+binding, so the component's `undo` closes exactly the descriptor that was
 opened. It is the acquiring binding's OWN undo, so item 308's own-undo
 exemption admits its call to the declared inverse. Thread the handle through:
 
@@ -586,17 +588,17 @@ teardown and what `no_residue` checks reverted. The rule: **an `acquire`
 extern's `undo` names the inverse over its `result` handle; the component's
 `effect … undo …` performs the release with the acquired handle threaded
 through, and only that acquiring binding's own undo may call the inverse (item
-308, O1).** The worked, compiling, runtime-tested version — with real
-`os.open`/`os.write`/`os.close` bodies and a `lifecycle test` that opens the
-log, records a line, unloads, and asserts `no_residue` — is
-`examples/durable_log.rvl` (pinned by `tests/test_durable_log_example.py`).
+308, O1).** The worked, compiling, runtime-tested version is
+`examples/durable_log.rvl` (pinned by `tests/test_durable_log_example.py`). It
+has real `os.open`/`os.write`/`os.close` bodies and a `lifecycle test` that
+opens the log, records a line, unloads, and asserts `no_residue`.
 
 One ergonomic that *used* to complicate this is gone: a multi-line `@py`/`@ts`
-extern body no longer has to start in column 0 — the py and ts emitters
+extern body no longer has to start in column 0. The py and ts emitters
 `textwrap.dedent` the body (roadmap item 78), so `os.open(...)` can sit at a
 natural indent inside the `= @py { … }` block.
 
-### 6.2 `boot component` — the environment contract (item 350)
+### 6.2 `boot component`: the environment contract (item 350)
 
 Some values are read before the composition exists: the port, the auth token,
 the data dir, which model provider to boot. The host has to know them to stand
@@ -623,7 +625,7 @@ boot component HarnessBoot provides env: Env {
   lexer's `KEYWORDS` table (and the generated gate crate's frontier table with
   it) needs no sync.
 - The `config {}` block IS the contract: the exhaustive, typed list of what the
-  host must inject. `revl run --env FILE` is its one door — a `--config` table
+  host must inject. `revl run --env FILE` is its one door: a `--config` table
   naming the boot component is refused, an undeclared `--env` key is refused,
   and a missing required field refuses the boot before any runtime is imported.
 - A config field in a boot component may carry an **admission bound**, checked
@@ -643,7 +645,7 @@ boot component HarnessBoot provides env: Env {
 Full treatment, including what this does *not* close, in
 docs/environment-binding.md.
 
-## 7. `verified` and `test` — the self-checking loop
+## 7. `verified` and `test`: the self-checking loop
 
 ```revl sketch
 verified fn parse_int(s: Str) -> Opt[Int] { ... }   // totality-checked:
@@ -664,11 +666,11 @@ test "put then get roundtrips" {
   (`verified effect` requires the checker to find or generate the
   `undo ∘ do = id` witness over the declared value model).
 
-### 7.1 `lifecycle test` — the paradigm's own guarantee, asserted in-language
+### 7.1 `lifecycle test`: the paradigm's own guarantee, asserted in-language
 
-A plain `test` block is stratum-1: pure statements over pure functions. That
-leaves the one property revl exists to provide — that composition is
-*revertible* — expressible only in each backend's own host test suite. A
+A plain `test` block is stratum-1: pure statements over pure functions. revl
+exists to provide one property, that composition is *revertible*, and a plain
+`test` leaves it expressible only in each backend's own host test suite. A
 `lifecycle test` closes that: it is a script over a **live composition**.
 
 ```revl fragment
@@ -688,14 +690,14 @@ lifecycle test "cache reverts cleanly" {
 `verified fn`: an adjective that changes what a body may contain without
 changing what the declaration *is*. A lifecycle test is still a named,
 runnable unit that `revl test` executes and reports; only its body's stratum
-differs (3, components and effects — not 1, pure expressions). The grammar
+differs: 3, components and effects, rather than 1, pure expressions. The grammar
 delta is therefore one token in one position, which is what the §8
 prompt-size requirement demands.
 
 `lifecycle` is a **contextual** keyword: it is recognized only immediately
 before `test` at top level and remains an ordinary identifier everywhere
 else. So are `load`, `unload` and `call` inside a lifecycle body, and
-`no_residue` after `assert`. Nothing is added to the lexer's keyword set — no
+`no_residue` after `assert`. Nothing is added to the lexer's keyword set, so no
 existing program can stop compiling because of this feature, and the
 self-hosted lexer's token stream (§11) is unchanged.
 
@@ -713,7 +715,7 @@ lcstmt   := 'load' IDENT ['with' '{' (IDENT ':' expr)* '}']   // instantiate
 
 Six statements, no new expression forms. `stmt` (the pure statement set) is
 *not* admitted in a lifecycle body and `lcstmt` is not admitted in a pure
-one — each is refused by name, not by a parse error:
+one. Each is refused by name, not by a parse error:
 
 ```
 `load` is only allowed in a `lifecycle test` body
@@ -727,18 +729,18 @@ A lifecycle body is *linear*, so the checker tracks exactly which components
 are live and which keys are provided at every point. Every rule below is a
 compile error, not a runtime surprise.
 
-- **`load C with { field: expr, … }`** — instantiate `C` and settle the
+- **`load C with { field: expr, … }`** instantiates `C` and settles the
   composition. The `with` clause is checked against `C`'s `config` block:
   unknown field, duplicate field, missing required field, and type mismatch
   are all rejected. `with { }` may be omitted when `C` has no required
   config. Loading is *not* activation: a component whose `requires` are unmet
-  stays PENDING (R2), and only becomes ACTIVE when a provider arrives —
+  stays PENDING (R2), and only becomes ACTIVE when a provider arrives.
   `load UserCache` before `load PgDatabase` is legal and does nothing until
   the database lands.
-- **`unload C`** — dispose the instance, running its accumulated inverses
+- **`unload C`** disposes the instance, running its accumulated inverses
   newest-first (R1) and withdrawing its provisions (R5). Unloading a
   component that is not loaded is a compile error.
-- **`call key.op(args)`** / **`let x = call key.op(args)`** — invoke an
+- **`call key.op(args)`** / **`let x = call key.op(args)`** invokes an
   operation through a *provision key*, not through a component: consumers in
   revl bind to services, and so does the test. The key must be provided by a
   component that is loaded at that point, `op` must be an operation of that
@@ -746,25 +748,25 @@ compile error, not a runtime surprise.
   declaration. The binding form names the result and is single-assignment;
   its type is the operation's declared return type, so `assert` over it is
   type-checked like any other expression. An `async fn` operation is awaited
-  by the driver — the test does not spell `await`, because the boundary
+  by the driver. The test does not spell `await`, because the boundary
   reading of `await` belongs to activation bodies only (§5).
   **No `emit` marker is required to call an emission operation.** G4's rule
   (§4b.1) is that *a service declaration is an upper bound on its providers*;
-  a lifecycle test is not a provider, it is the top of the composition — the
-  same position `demo.py` occupies — so there is no declaration for it to
+  a lifecycle test is not a provider. It sits at the top of the composition,
+  the same position `demo.py` occupies, so there is no declaration for it to
   exceed and nothing for a marker to bound.
-- **`assert no_residue`** — see below.
-- **`assert <expr>`** — an ordinary Bool expression over the test's `let`
+- **`assert no_residue`**: see below.
+- **`assert <expr>`** takes an ordinary Bool expression over the test's `let`
   bindings, checked exactly as in a `fn` body. A bare word that is not a
   binding is reported as an unknown *lifecycle assertion*, since that is what
   it almost always is.
 
 #### What `no_residue` means
 
-It is R4 from docs/backend-ir.md §Required semantics — *"after unloading
+It is R4 from docs/backend-ir.md §Required semantics: *"after unloading
 everything, the host runtime holds no bindings, listeners, or effects from
-the composition (assert via the runtime's introspection)"* — taken verbatim
-from the suite that defines residue-freedom for the reference tier,
+the composition (assert via the runtime's introspection)"*. That clause is
+taken verbatim from the suite that defines residue-freedom for the reference tier,
 `backends/python/tests/test_semantics.py::test_r4_no_residue_after_unloading_
 everything`. The emitted assertion snapshots the same four quantities that
 test does, at the top of the lifecycle test, and compares at the assertion
@@ -778,26 +780,26 @@ point:
 | plugin runtimes | `root.registry.size` |
 
 **And a second half, because R4 alone cannot fail.** R5 is the reason: the
-emitted module hand-rolls no teardown at all — every inverse goes through the
-runtime's revertible `provide`/`set` and the effect protocol — so for *any*
+emitted module hand-rolls no teardown at all, since every inverse goes through
+the runtime's revertible `provide`/`set` and the effect protocol. So for *any*
 component the compiler accepts, the runtime's own introspection always
 returns to baseline. An assertion that cannot fail is not an assertion. The
 falsifiable half of residue-freedom is R1's: *unloading runs the accumulated
 undos, including those accumulated by provide-method calls while active.*
 So `no_residue` also requires that every host resource acquired during the
-test was released by the end — no `Pool.open` without a `close`, no `Map.new`
-without a `drop` — read off the host-builtin trace (`runtime.set_trace`), the
-same signal the R1 suite asserts ordering on.
+test was released by the end: no `Pool.open` without a `close`, and no
+`Map.new` without a `drop`. That is read off the host-builtin trace
+(`runtime.set_trace`), the same signal the R1 suite asserts ordering on.
 
 Together the two halves catch the two ways a composition leaks:
 
-- *the test left something loaded* — R4 fires (`provisions: [] -> ['db']`);
-- *an `undo` is not the inverse of its acquisition* — R1 fires
+- *the test left something loaded*: R4 fires (`provisions: [] -> ['db']`);
+- *an `undo` is not the inverse of its acquisition*: R1 fires
   (`pool#1 (open() with no close())`).
 
 The second is the interesting one, and it is why this form earns its place:
 G4 requires an acquisition to *carry* an `undo`, but nothing in the type
-system knows whether that undo undoes anything — `verified effect` (§7)
+system knows whether that undo undoes anything. `verified effect` (§7)
 would, and is not implemented. `examples/lifecycle_leak.rvl` is a component
 that passes every static check and leaks a connection pool on every unload;
 the assertion catches it.
@@ -812,7 +814,7 @@ states it over its own, against the same R1/R4 clauses.
 The roadmap sketch for this form included `swap C -> C2`. It cannot exist:
 G2 forbids two components in one document from providing the same key, so a
 replacement *provider* for a key is not expressible in the document a
-lifecycle test lives in — and if the two are in different realms (§4) they
+lifecycle test lives in. And if the two are in different realms (§4) they
 are not replacements for one consumer either. What the demo actually swaps is
 a replacement *instance*: `unload C` then `load C with { … }`, which this
 statement set already spells, and whose R2 reactivation is exactly what the
@@ -828,15 +830,15 @@ the sketch that motivated this form fails with its own explanation.
 an R1 host-resource counter), **cordis (TS)** (async vitest cases over a live
 `Context`, R4 introspection + R1 live-host-resource accounting),
 **cordis-go** (`go test` funcs over the live stc-go runtime, `len(root
-.Fibers()) == 0` + an R1 host-resource counter), and — as of item 178(b) —
+.Fibers()) == 0` + an R1 host-resource counter), and, as of item 178(b),
 **cordis4j** (static methods on the `REVL_TESTS` roster: the root comes from
 `Contexts.create()`, load is `root.plugin(new <Comp>Plugin(<config>))`, unload
 is the `Disposable` that returns, and `assert no_residue` is R4 read back
-through the public API — nothing the document provides still answers
-`ctx.get(iface)` — plus an R1 host-resource counter; the same read
-`revl run --backend java --once` proves after its LIFO teardown), and — as of
-item 142 — the **wasm** substrate (the emitted components booted on the live cordis-wasm
-runtime: load = `rt.plug`, call = resolve the provision key in the coeffect
+through the public API (nothing the document provides still answers
+`ctx.get(iface)`) plus an R1 host-resource counter; the same read
+`revl run --backend java --once` proves after its LIFO teardown), and, as of
+item 142, the **wasm** substrate (the emitted components booted on the live
+cordis-wasm runtime: load = `rt.plug`, call = resolve the provision key in the coeffect
 table Σ and invoke its op, unload = `rt.unplug`, and `assert no_residue` =
 `len(rt.fibers) == 0` (R4) + the coeffect table `rt.table` empty (R1), the
 substrate mirror of the once-mode boot's no-residue proof). Each tier states
@@ -845,7 +847,7 @@ R1 over its own host-builtin vocabulary against the same R1/R4 clauses
 
 The wasm substrate carries lifecycle tests over its **scalar** instruction set
 (Int is i64, Bool is i32; backends/wasm/README.md "Widths"). A lifecycle test
-whose steps stay scalar — Int/Bool service boundaries, no `config`, no timers —
+whose steps stay scalar (Int/Bool service boundaries, no `config`, no timers)
 *runs* there; one the substrate genuinely cannot express skips **per test, with
 a reason** (never a false pass): a `load … with { … }` (no instantiation-config
 channel), a `call`/`assert` that crosses a non-scalar boundary (Str/List/record/
@@ -858,7 +860,7 @@ docs/wasm-capabilities.md.
 Two java refusals survive, both per-construct rather than per-tier: the
 pre-`ir_version: 3` dialects have no test machinery on that tier at all, and an
 `advance` step drives the clock coeffect, which does not lower there yet (the
-item-57 follow-on, docs/time-coeffect.md — a component that arms a timer
+item-57 follow-on, docs/time-coeffect.md; a component that arms a timer
 already skips the same way):
 
 ```
@@ -870,7 +872,7 @@ lifecycle test 'cache reverts cleanly' is not lowerable on the cordis4j tier
 
 `revl test --all` reports those refusals, and any per-test wasm skip, as `skip:`
 with the reason (a tier that cannot run the document's tests is never a failure
-of the run). A refusal by name is deliberate — a construct silently dropped by
+of the run). A refusal by name is deliberate. A construct silently dropped by
 one renderer and honored by another is this project's recurring bug class. In the IR a
 lifecycle test is an ordinary `ir_version: 3` entry in `tests` carrying
 `"lifecycle": true`, so a pure `test` document is byte-identical to what it
@@ -911,7 +913,7 @@ lcstmt      := load | unload | call | 'assert' ('no_residue' | expr)   (§7.1)
 ```
 
 The full grammar remains small enough to include, in its entirety, in a
-model's system prompt — that property is a requirement, not an accident,
+model's system prompt. That property is a requirement, not an accident,
 and grammar growth that would break it needs this document amended first.
 
 **Identifiers are ASCII.** `IDENT` is `[A-Za-z_][A-Za-z0-9_]*`, and the lexer
@@ -942,7 +944,7 @@ Mechanical, one release:
 - IR v3 carries: `fn` declarations (lowered bodies), `match`, ADT layouts,
   extern host bodies keyed by backend, `test` units. Backends that predate
   v3 reject it by version, as v1 established. (`ir_version: 2` is already
-  taken by realms/interception — see docs/design-v2-realms.md.)
+  taken by realms/interception; see docs/design-v2-realms.md.)
 
 ## 10. Why this serves the AI-author goal (and how we'll know)
 
@@ -952,8 +954,8 @@ Mechanical, one release:
   corrections; §6 gives full fluency where checking was never claimed；§7
   closes the loop in-file.
 - Synthetic-corpus bootstrap: the checker's totality lets us mass-generate
-  compile-verified 2.0 code for fine-tuning — the corpus gap is a decaying
-  liability, not a fixed one.
+  compile-verified 2.0 code for fine-tuning, so the corpus gap is a decaying
+  liability rather than a fixed one.
 - **Acceptance experiment** (before implementation hardens): 30 component
   specs × {1.x syntax, 2.0 syntax, 2.0+host-blocks} × several models;
   measure first-pass compile rate and iterations-to-green. The syntax ships
@@ -962,7 +964,7 @@ Mechanical, one release:
 ## 11. Self-hosting shape (the point of all this)
 
 With strata 1–2, the compiler becomes expressible as what it structurally
-already is — a pipeline of components with pure interiors:
+already is: a pipeline of components with pure interiors:
 
 ```revl sketch
 component Lexer provides tokens: TokenStream {
@@ -975,5 +977,5 @@ component Emitter requires typed: TypedAst, target: Backend { ... }
 ```
 
 A compiler whose checker pass can be hot-swapped in a running process, with
-rollback if the replacement fails its own admission check — the paradigm
+rollback if the replacement fails its own admission check: the paradigm
 eating its own dogfood is the 2.0 exit criterion.

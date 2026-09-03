@@ -80,10 +80,10 @@ The guard has three properties that make it real rather than decorative:
    and additionally requires them to be a sidecar this workspace itself
    produced. The inverses are `pure` externs, so they carry no capability and
    are callable from any pure position (and are reconstructed from WAL data by
-   `revl recover` with no revl source involved at all) — shrinking their
-   authority to "a sidecar we made, moved back inside the root we own" is what
-   makes that classification safe, since item 243 rule 3 leaves no
-   capability-scoped spelling for an inverse.
+   `revl recover` with no revl source involved at all). Item 243 rule 3 leaves
+   no capability-scoped spelling for an inverse, so what makes that
+   classification safe is how small their authority is: a sidecar we made,
+   moved back inside the root we own.
 3. **The reversal machinery lives inside the root.** The session garbage dir
    (`.revl-fs-garbage`) and the preimage snapshots (`.revl-fs-preimage`) are
    subdirectories of the workspace root, so an `rm` parks its target inside the
@@ -107,8 +107,8 @@ the enumeration cannot quietly grow a fifth member.
 
 The four ops above mutate. A consumer also needs to *look*: read a workspace
 file, check that a write took, decide whether a path is a directory before
-telling a model to create one. That question — "may I touch this path, and what
-is there?" — is the confinement decision, and a consumer must not answer it for
+telling a model to create one. Asking "may I touch this path, and what is
+there?" is the confinement decision, and a consumer must not answer it for
 itself. A body that calls `os.path.exists` on a raw path has skipped the guard,
 and the case it gets wrong is a symlink inside the root pointing out of it.
 
@@ -133,7 +133,8 @@ user compile-root tree, and `backends/typescript/revl_fs_ts.ts` lives in the
 install tree. Item 410's second root (`__REVL_STDLIB_REF_ROOT__`) is reserved
 for install-origin modules, which a consumer's file is not. And item 422 F1
 removed the unconfined primitives the deprecated `globalThis.__revlFs` seam
-published — correctly, since an exported unconfined rename *is* that finding.
+published. That removal was correct: an exported unconfined rename *is* that
+finding.
 What was left was a relative path guess into the install tree
 (`require("../../revl_fs_ts.ts")`, three candidates deep), which breaks whenever
 revl moves; revl-harness hit that three times.
@@ -163,8 +164,8 @@ nothing to break when the install moves.
 
 **Observation only, deliberately.** The write primitives are not here and are
 not coming back: their absence is the item 422 F1 fix. A caller that appears to
-need one needs a witnessed op from the catalog above — revertible by
-construction, enumerated by the WAL — or a filed finding. `tests/
+need one has two doors: a witnessed op from the catalog above, revertible by
+construction and enumerated by the WAL, or a filed finding. `tests/
 test_fs_observation.py` pins all of this, including a live py-vs-ts diff of one
 case corpus run through the real emitted bodies on both tiers, and an end-to-end
 consumer that reaches the jail on py and on ts importing nothing.
