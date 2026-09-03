@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -254,22 +255,111 @@ def test_default_wal_dir_prefers_xdg_state_home(tmp_path, monkeypatch):
     assert directory == str(tmp_path / "xdg" / "revl" / "approval-wal")
 
 
-def test_session_default_wal_uses_durable_helper():
-    """The MCP session's auto-opened approval WAL routes through the durable
-    helper, not the old tempdir literal (item 413.4 wiring guard).
+class _StubRecorder:
+    """The one `replay.Recorder` surface `Session._ensure_wal_open` touches: a
+    `wal` slot and an `open_wal(path, generation)`. Substituting it is what lets
+    the durability guarantee be asserted on the PATH the session opens, with no
+    cordis runtime and no real log on disk."""
 
-    `_configure_owner_approvals` used to inline the open; it now delegates to
-    `_ensure_wal_open`, the session's single opener (load and the typed-approval
-    path both call it), so the guard follows the opener rather than pinning the
-    caller. Both are read, so wherever the call lives the tempdir literal stays
-    out and the durable helper stays in."""
-    import inspect
+    def __init__(self) -> None:
+        self.wal = None
+        self.opened: list[tuple] = []
 
+    def open_wal(self, path, generation):
+        self.opened.append((path, generation))
+        self.wal = SimpleNamespace(path=path, is_open=True)
+        return self.wal
+
+
+def _stubbed_session():
     from revl.mcp.session import Session
-    src = (inspect.getsource(Session._configure_owner_approvals)
-           + inspect.getsource(Session._ensure_wal_open))
-    assert "default_wal_path" in src
-    assert "gettempdir" not in src
+
+    session = Session()
+    session.recorder = _StubRecorder()
+    return session
+
+
+_APPROVAL_EDGE_SOURCE = (
+    'extern emission fn charge(sink: Str, msg: Str) requires approval = @py '
+    "{ return }\n"
+    "service Ops { fn ping() -> Int }\n"
+    "component Biller provides ops: Ops {\n"
+    '  let a = await approval["charge"] { amount: 1 }\n'
+    '  emit charge("s", "m") with a\n'
+    "  provide ops { fn ping() = 1 }\n"
+    "}\n"
+)
+
+
+def test_the_sessions_auto_opened_wal_lands_in_the_durable_state_dir(
+        tmp_path, monkeypatch):
+    """The MCP session's auto-opened approval WAL lands in the durable per-user
+    state directory, not the reboot-wiped tempdir (item 413.4).
+
+    Deliberately NOT a source grep. The assertion this replaced read
+    `"default_wal_path" in src` / `"gettempdir" not in src` over two method
+    bodies, and neither establishes where the log is WRITTEN: an import line
+    satisfies the first, and a hard-coded `"/tmp/..."` or a `$TMPDIR` read
+    satisfies the second while putting the gate's authority right back in the
+    reboot-wiped directory. This drives the shipped opener and asserts the path.
+
+    Exact equality against the XDG state location, not "outside `gettempdir()`":
+    a test HOME under `tmp_path` is itself under the tempdir on CI, so the
+    negative form is unsound (same reasoning as
+    `test_default_wal_path_is_durable_not_tempdir` above)."""
+    monkeypatch.delenv("REVL_WAL_DIR", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("sys.platform", "linux")
+
+    session = _stubbed_session()
+    session._ensure_wal_open()
+
+    (path, generation), = session.recorder.opened
+    assert path == str(tmp_path / ".local" / "state" / "revl" / "approval-wal"
+                       / f"revl-approval-{session._session_id}.wal")
+    assert generation == session._generation
+    assert session.recorder.wal.path == path
+
+
+def test_the_sessions_auto_opened_wal_honours_the_host_override(
+        tmp_path, monkeypatch):
+    """And it is the durable HELPER it goes through, not a re-derivation of the
+    same default: an embedder that pins `REVL_WAL_DIR` steers the session's log
+    too. A session that computed its own path would ignore this."""
+    monkeypatch.setenv("REVL_WAL_DIR", str(tmp_path / "host-state"))
+
+    session = _stubbed_session()
+    session._ensure_wal_open()
+
+    (path, _generation), = session.recorder.opened
+    assert path == str(tmp_path / "host-state"
+                       / f"revl-approval-{session._session_id}.wal")
+
+
+def test_a_typed_approval_composition_opens_that_durable_wal_at_configure(
+        tmp_path, monkeypatch):
+    """The other half of the wiring the grep was standing in for: the
+    typed-approval path (item 246, Decision 3) needs the log OPEN before the
+    activation body's crossing, and `_configure_owner_approvals` is where that
+    happens. Driven with a real compiled IR carrying an approval edge and the
+    shipped method — a `_configure_owner_approvals` that stops opening the log,
+    or opens one somewhere else, reds here."""
+    monkeypatch.setenv("REVL_WAL_DIR", str(tmp_path / "host-state"))
+    from revl.compiler import compile_source
+
+    ir = compile_source(_APPROVAL_EDGE_SOURCE, "biller.rvl")
+    session = _stubbed_session()
+    session._owner = SimpleNamespace(grant_approval=lambda grant: None)
+    assert session._typed_approval_active(ir), \
+        "the fixture must exercise the typed-approval path"
+
+    session._configure_owner_approvals(ir)
+
+    (path, _generation), = session.recorder.opened
+    assert path == str(tmp_path / "host-state"
+                       / f"revl-approval-{session._session_id}.wal")
+    assert session._owner.approval_enforced is True
 
 
 @pytest.mark.skipif(
