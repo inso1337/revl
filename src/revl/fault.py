@@ -1914,9 +1914,33 @@ def _case_is_recursive(payload: str | None, adt_head: str) -> bool:
 # --- construction (mirrors backends/python/emit.py type emission) -----------
 
 
+def _record_field(value, name: str):
+    """Read one field off a record value the way the emitted module reads it.
+
+    The emitted read is `v['f'] if isinstance(v, dict) else getattr(v, 'f')`
+    (`backends/python/emit.py::_field_read`). A generated record is always the
+    dict arm; the `getattr` arm is kept so a record a HOST hands back across a
+    service boundary — an ORM row, a `SimpleNamespace` — still observes and
+    shrinks instead of raising.
+    """
+    return value[name] if isinstance(value, dict) else getattr(value, name)
+
+
 def _make_record(module, name: str, spec: dict, field_values: dict):
-    cls = getattr(module, name)
-    return cls(*[field_values[field] for field in spec.get("fields", {})])
+    """A record VALUE, in the one representation an emitted module has.
+
+    An emitted record is a plain dict keyed by the revl field name — see the
+    contract in `backends/python/emit.py::_emit_types` and docs/records.md §7.
+    This used to build the module's record CLASS, which worked only while that
+    class happened to carry `@dataclass` (roadmap item 436 F9 removed it: the
+    class is a shape declaration, and its attribute names are `_mangle`d, so an
+    instance answers no field read the emitter writes). Generating the class
+    meant `prop test` and the auto-mocks explored a value shape no emitted
+    program can produce, which is how a live `let {a, b} = rec` defect stayed
+    green. `module` stays in the signature so every generator/shrinker call
+    site keeps one uniform shape.
+    """
+    return {field: field_values[field] for field in spec.get("fields", {})}
 
 
 def _make_case(module, case_name: str, payload_value):
@@ -2066,7 +2090,7 @@ def _observe(value, type_str: str, types: dict, cov: dict) -> None:
         spec = types.get(head) if head and not args else None
         if spec and spec.get("kind") == "record":
             for name, ftype in spec.get("fields", {}).items():
-                _observe(getattr(value, name), ftype, types, cov)
+                _observe(_record_field(value, name), ftype, types, cov)
         elif spec and spec.get("kind") == "variant":
             case_name = type(value).__name__
             cov["adt"].setdefault(head, set()).add(case_name)
@@ -2175,7 +2199,7 @@ def _shrink_value(value, type_str: str, types: dict, module):
     spec = types.get(head) if head and not args else None
     if spec and spec.get("kind") == "record":
         fields = list(spec.get("fields", {}).items())
-        current = {name: getattr(value, name) for name, _ in fields}
+        current = {name: _record_field(value, name) for name, _ in fields}
         for name, ftype in fields:
             for smaller in _shrink_value(current[name], ftype, types, module):
                 variant = dict(current)
@@ -2297,12 +2321,19 @@ def _render_arg(value) -> str:
         return repr(value)
     if isinstance(value, list):
         return "[" + ", ".join(_render_arg(v) for v in value) + "]"
+    if isinstance(value, dict):              # a record (or a Map)
+        # rendered as the revl record literal it is, `{id: 1, name: "x"}`, not
+        # as `Row(id=1, …)`: a constructor call would name a class no emitted
+        # module instantiates, so a counterexample pasted back into revl would
+        # not be the value that broke the property
+        inner = ", ".join(
+            f"{k if isinstance(k, str) and k.isidentifier() else _render_arg(k)}: "
+            f"{_render_arg(v)}"
+            for k, v in value.items()
+        )
+        return "{" + inner + "}"
     if hasattr(value, "value"):              # ADT payload case
         return f"{cls}({_render_arg(value.value)})"
-    fields = getattr(value, "__dataclass_fields__", None)
-    if fields:                               # record
-        inner = ", ".join(f"{name}={_render_arg(getattr(value, name))}" for name in fields)
-        return f"{cls}({inner})"
     return f"{cls}()"                        # no-payload ADT case
 
 

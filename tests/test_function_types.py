@@ -43,8 +43,8 @@ def _run_python(source: str) -> pytypes.ModuleType:
     """Compile `source` and execute the python tier's output."""
     emit = _emitter("python")
     module = pytypes.ModuleType("revl_ft")
-    # `@dataclass` resolves string annotations through `sys.modules[cls.
-    # __module__]`, so an emitted record type needs its module registered
+    # registered in sys.modules for any consumer that resolves the emitted
+    # record annotations by module name
     sys.modules["revl_ft"] = module
     try:
         exec(compile(emit.emit(compile_source(source)), "<function-types>", "exec"),
@@ -290,7 +290,9 @@ def test_python_renders_a_function_typed_record_field_as_callable():
         "type Handler = { run: (Int, Str) -> Bool }\n"
         "fn f(h: Handler) -> Bool { let r: (Int, Str) -> Bool = h.run  return r(1, \"a\") }"))
     assert "run: Callable[[int, str], bool]" in out
-    assert "from typing import Any, Callable, Optional, Union" in out
+    # only the names the record annotations mention (item 436 F9): this record
+    # spells `Callable` and nothing else
+    assert "from typing import Callable\n" in out
 
 
 @pytest.mark.parametrize("tier", ["java", "wasm"])
