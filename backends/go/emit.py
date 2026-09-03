@@ -34,6 +34,7 @@ spawn, scenario `backends/go/scenarios/spawn.rvl`).
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from typing import Optional
@@ -41,6 +42,22 @@ from typing import Optional
 
 class EmitError(ValueError):
     pass
+
+
+def _finite_float(value):
+    """The literal's value, refused when a `Float` is not finite (issue #312).
+
+    A non-finite `Float` has no literal spelling in revl and no uniform one
+    across the tiers — the host repr renders `inf`, which is an UNBOUND NAME
+    in this target's source, not a number. The frontend refuses such a literal
+    at the checker (`typecheck._reject_float_literal_range`), so this is the
+    backend's own belt: an IR handed straight to the emitter still cannot make
+    it print a name nothing binds.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EmitError(
+            f"non-finite Float literal {value!r} has no representation in this tier")
+    return value
 
 
 # Dispatcher conformance (roadmap item 76a). This file carries TWO expression
@@ -2868,7 +2885,7 @@ def _go_lifecycle_arg(node, payload_surface, env):
         if isinstance(value, int) and payload_surface in ("Int", "Int32"):
             return "%s(%s)" % (_go_type(payload_surface), value)
         if isinstance(value, float) and payload_surface == "Float":
-            return "float64(%s)" % repr(value)
+            return "float64(%s)" % repr(_finite_float(value))
     return _expr(node, env, payload_surface)
 
 
@@ -4076,7 +4093,7 @@ def _go_v3_lit(node: dict) -> str:
         # 0.3 at compile time and compares equal to it — which is not IEEE 754
         # binary64, the semantics revl specifies (docs/arithmetic.md). Typing
         # the literal forces ordinary float64 arithmetic.
-        return f"float64({value!r})"
+        return f"float64({_finite_float(value)!r})"
     raise EmitError(f"unsupported v3 literal: {node!r}")
 
 

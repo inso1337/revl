@@ -81,7 +81,7 @@ was corrected by hand and had drifted back within a day.
 |---|---|---|---|
 | README.md | needs-work | 48 |  |
 | apply.md | needs-work | 19 |  |
-| arithmetic.md | needs-work | 68 |  |
+| arithmetic.md | needs-work | 69 |  |
 | audit-diff.md | needs-work | 14 |  |
 | authoring-for-agents.md | needs-work | 0 |  |
 | auto-mocks.md | needs-work | 16 |  |
