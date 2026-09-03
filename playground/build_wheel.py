@@ -15,12 +15,42 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+import subprocess
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "revl"
 OUT_DIR = Path(__file__).resolve().parent / "vendor"
+
+
+def _tracked(tree: Path) -> set[str] | None:
+    """The repo-relative paths git tracks under `tree`, or None without git.
+
+    GHSA-gj88-cx6q-38r2 was the PyPI wheel force-including whatever sat on the
+    builder's disk. This wheel is a different artifact with a different
+    distribution path (it is committed, and `tools/check_site_wheel.py` gates it
+    against a fresh build), but the selection had the same shape: `rglob("*.py")`
+    is a question about the filesystem, not about the commit, so a developer's
+    untracked scratch module under `src/revl/` — or a stray `__pycache__/x.py` —
+    rode into the wheel the playground serves. Asking git instead makes this
+    wheel a function of the commit too.
+
+    Returning None (no git, not a checkout) leaves the caller on its glob, which
+    is what this file did before; the committed-wheel drift gate is the backstop
+    there.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z", "--", str(tree.relative_to(ROOT))],
+            cwd=ROOT, capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    paths = {p for p in proc.stdout.split("\0") if p}
+    return paths or None
 
 
 def _version() -> str:
@@ -54,9 +84,13 @@ def main() -> None:
         "Tag: py3-none-any\n"
     )
 
+    src_tracked = _tracked(SRC)
     records: list[str] = []
     with zipfile.ZipFile(wheel_path, "w", zipfile.ZIP_DEFLATED) as whl:
         for path in sorted(SRC.rglob("*.py")):
+            rel = path.relative_to(ROOT).as_posix()
+            if src_tracked is not None and rel not in src_tracked:
+                continue
             arcname = "revl/" + path.relative_to(SRC).as_posix()
             data = path.read_bytes()
             whl.writestr(arcname, data)
@@ -64,12 +98,16 @@ def main() -> None:
 
         # The py-tier runtime glue (emit/runtime/replay/...), packaged where
         # `_paths.backends_root()` finds it in an installed wheel
-        # (revl/backends) — the same layout as pyproject's force-include,
+        # (revl/backends) — the same layout pyproject's wheel target ships,
         # scoped to the one tier the in-browser session can boot. With the
         # cordis wheel installed beside it, `revl.mcp.session.Session` runs
         # load/call/swap/unload entirely client-side.
         py_backend = ROOT / "backends" / "python"
+        backend_tracked = _tracked(py_backend)
         for path in sorted(py_backend.glob("*.py")):
+            rel = path.relative_to(ROOT).as_posix()
+            if backend_tracked is not None and rel not in backend_tracked:
+                continue
             arcname = "revl/backends/python/" + path.name
             data = path.read_bytes()
             whl.writestr(arcname, data)
