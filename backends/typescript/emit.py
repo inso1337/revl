@@ -48,6 +48,11 @@ __all__ = ["emit", "EmitError"]
 
 IDENT_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 
+# A comment has no escape syntax, so author text that reaches one is made
+# safe by breaking the sequences that END a comment: a line terminator (`//`)
+# and `*/` (`/* */`). See `_comment_text`.
+_COMMENT_LINE_BREAK_RE = re.compile(r"[\r\n\u0085\u2028\u2029]")
+
 # Names the emitted scaffolding uses; user bindings may not shadow them.
 EMITTER_RESERVED = {"ctx", "config", "rawConfig", "host", "Context"}
 
@@ -272,6 +277,52 @@ def _ident(name: object, role: str) -> str:
 def _string(value: str) -> str:
     # json.dumps produces a valid TS double-quoted string literal.
     return json.dumps(value)
+
+
+def _comment_text(value: object) -> str:
+    """Author text made safe for the inside of an emitted COMMENT.
+
+    Every other lexical context this emitter puts author text into has an
+    escape mechanism: `_string`/`_literal` go through `json.dumps`,
+    `_template_text` neutralises a template literal's `\\`/`` ` ``/`${`, and
+    `_ident`/`_raw_field` reject anything that is not an identifier outright.
+    A COMMENT has none: there is no escape syntax inside `/* */` or after
+    `//`, so the only way to keep author text inside one is to break the
+    character sequences that END it.
+
+    Two sequences end a comment, and both are broken here:
+
+    * A line terminator ends a `//` comment. CR, LF and the Unicode line
+      separators U+2028/U+2029/U+0085 collapse to a space, the same rule
+      `revl.import_openapi._comment_safe` applies for the same reason.
+    * `*/` ends a `/* */` comment. A backslash is inserted between the two
+      characters (`*\\/`), which is inert text inside a comment. `/*` is
+      broken the same way: JS block comments do not nest, so a stray `/*`
+      is harmless to the compiler, but it derails editors and doc tooling
+      and costs nothing to neutralise.
+
+    Neither substitution can manufacture the sequence the other breaks. Both
+    only ever INSERT a backslash between two characters that were already
+    adjacent; no `*` and no `/` is ever added, and the inserted backslash
+    separates rather than joins. `str.replace` leaves no occurrence behind
+    (a match consumes one `*` and one `/`, so it can never swallow half of a
+    later pair), so after the first call no `*/` remains, and the second call
+    cannot create one.
+
+    `selfhost/emit_ts.rvl`'s `comment_text` is the same two substitutions in
+    the same order: the two emitters are held to byte agreement, so the escape
+    has to be one algorithm, not two that happen to agree on the corpus.
+
+    Why this matters: without it, a `config` field whose default carried a
+    `*/` ended the `/** default: ... */` line in `_config_interface` early
+    and left the rest of the default in CODE POSITION in the emitted module.
+    `json.dumps` escapes quotes and backslashes, which is everything a string
+    literal needs and nothing a comment needs — routing author text through a
+    literal escaper is not the same as routing it through a comment escaper,
+    and this is the one context where the difference is the whole thing.
+    """
+    text = _COMMENT_LINE_BREAK_RE.sub(" ", str(value))
+    return text.replace("*/", "*\\/").replace("/*", "/\\*")
 
 
 def _prop_key(name: object, role: str) -> str:
@@ -1904,7 +1955,8 @@ def _config_interface(component: dict) -> list[str]:
         fname = _ident(field.get("name"), "config field")
         ts_type = TYPE_MAP.get(field.get("type"), "any")
         if field.get("default") is not None:
-            lines.append(f"  /** default: {json.dumps(field['default'])} */")
+            rendered = _comment_text(json.dumps(field["default"]))
+            lines.append(f"  /** default: {rendered} */")
             lines.append(f"  {fname}?: {ts_type}")
         else:
             lines.append(f"  {fname}: {ts_type}")
