@@ -1,0 +1,21 @@
+// REJECTED — G4/G5, the same rule in a TEARDOWN slot: an inverse may not
+// acquire.
+//
+// `undo Pool.open(config.url, 1)` opens a NEW pool on every unload and on
+// every abort, and nothing ever closes any of them: the inverse leaves more
+// residue than the acquisition it is supposed to reverse. A teardown slot is
+// not an acquisition position, so the host acquire verb is refused there for
+// the same reason it is refused in a `fn` body.
+//
+// expected error:
+//   host acquisition `Pool.open` cannot be called in a teardown slot —
+//     nothing registers its `close()`, so the resource is acquired
+//     irreversibly (G4)
+
+service S { fn go(u: Str) -> Int }
+
+component C provides s: S {
+  config { url: Str }
+  let m = effect Map.new() undo Pool.open(config.url, 1)
+  provide s { fn go(u) = 1 }
+}

@@ -16,7 +16,7 @@ from revl import RevlError, compile_source  # noqa: E402
 
 PRELUDE = """
 pub fn double(x: Int) -> Int { return x + x }
-extern pure fn sha(x: Int) -> Int = @py { return x * 2 } = @ts { return x * 2 }
+extern pure fn sha(x: Int) -> Int = @py { return x * 2 } = @ts { return x * 2n }
 service Kv {
   fn get(k: Int) -> Int
   fn put(k: Int, v: Int)
