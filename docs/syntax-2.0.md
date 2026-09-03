@@ -37,6 +37,35 @@ The language has four strata, each with its own rules:
 | 3. Components & effects | revl's own (unchanged from 1.x) | G1–G8, A1–A8 |
 | 4. Host blocks | verbatim host language | boundary types + G8 audit |
 
+### 0.1 Source text, and the limits on it
+
+A `.rvl` file is **UTF-8 text**. A leading byte-order mark is part of that
+encoding rather than part of the program, so it is consumed: a file saved by
+Notepad or PowerShell compiles like any other. A BOM anywhere *else* is refused
+by name, and an unpaired UTF-16 surrogate is refused wherever it appears —
+unreachable from a real file, and reachable from every JSON-carried source path
+(the LSP, the MCP verbs, `gate.admit(str)`), where it used to arrive as a
+crash instead of a diagnostic.
+
+Two limits are the **compiler's**, not the language's, and are stated because
+a bound nobody can read is a crash with better manners:
+
+- **Nesting.** The parser is recursive descent, so nesting costs stack.
+  Expressions are bounded at `revl.parser.NESTING_LIMIT` levels — a
+  parenthesis, a call argument, a list or record element, a lambda body and a
+  `${...}` interpolation each count one — and the other nestings (blocks, type
+  arguments) by the interpreter's own limit. Past either, the refusal is a
+  diagnostic naming the bound. Name the inner expressions with `let` bindings
+  and the nesting goes away.
+- **Literal size.** An `Int` literal is refused past the 64-bit range and a
+  `Float` literal is refused when it folds to a non-finite value; see
+  [arithmetic.md](arithmetic.md), "A literal outside the range never reaches a
+  tier".
+
+The rule under all of these is the same one §0 states: the frontend **answers**.
+A refusal is the language saying no, and a traceback is a bug — in `revl.gate`,
+a bug in a security surface.
+
 ---
 
 ## 1. Modules and visibility

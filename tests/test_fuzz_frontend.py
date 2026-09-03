@@ -244,7 +244,8 @@ LONE_SURROGATE = "\ud800"
     'fn f() -> Str { return """' + LONE_SURROGATE + '""" }',
     "fn f" + LONE_SURROGATE + "() -> Int { return 1 }",
     "// " + LONE_SURROGATE + "\nfn f() -> Int { return 1 }",
-])
+], ids=["double-quoted", "single-quoted", "template", "triple-quoted",
+        "identifier", "comment"])
 def test_a_lone_surrogate_is_a_diagnostic(src):
     """Issue #311. `lower._str_literal_value` raised a bare `ValueError` — the
     invariant it documents is real, but the refusal belongs in the lexer, where
@@ -266,7 +267,7 @@ def test_astral_characters_still_lex():
     "fn f() -> Float { return 1.5e400 }",
     "fn f() -> Float { let x = 1e999\n  return x }",
     "fn f() -> Float { return " + "9" * 4400 + ".5 }",
-])
+], ids=["exponent", "negated", "fraction-exponent", "let-bound", "digit-run"])
 def test_a_non_finite_float_literal_is_a_diagnostic(src):
     """Issue #312, the worst of the four: this one did not crash, it COMPILED.
     `1e999` folded to IEEE infinity and every emitter printed the host repr as
@@ -302,7 +303,7 @@ def test_no_backend_can_render_a_non_finite_float():
 @pytest.mark.parametrize("src", [
     "\ufefffn f() -> Int { return 1 }",
     "\ufeff// a comment\nfn f() -> Int { return 1 }",
-])
+], ids=["before-a-declaration", "before-a-comment"])
 def test_a_leading_byte_order_mark_is_consumed(src):
     """Issue #315. A UTF-8 BOM is part of the file's ENCODING — Notepad and
     PowerShell write one — and `encoding="utf-8"` hands it through as a first

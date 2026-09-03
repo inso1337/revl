@@ -227,6 +227,21 @@ reachable by computation from in-range literals — `0 - 9223372036854775807 -
 1` — which is an ordinary runtime value on every tier, inside the range and
 checked like any other arithmetic.
 
+A `Float` literal has the same rule for the same reason
+(`examples/rejections/t36_float_literal_range.rvl`). `1e999` is past the
+largest finite binary64, so it folds to IEEE infinity — and revl has no
+*spelling* for infinity, which meant every emitter printed the host's name for
+it as a bare word: `inf` on python, `inff64` on rust, `infd` on java,
+`float64(inf)` on go. Those are unbound identifiers, so the program failed to
+compile or died at runtime, while TypeScript alone rendered `Infinity` and ran.
+A literal that non-finite is refused at the checker.
+
+The bound is the *literal's*, not arithmetic's. `1e308 * 10.0` still overflows
+to infinity at runtime on every tier, exactly as IEEE 754 says it should:
+that is a computed value with one agreed meaning, and this rule does not touch
+it. `1e-999` likewise still underflows to `0.0`, which is also what IEEE 754
+says, and is a finite value.
+
 ### Every tier holds it
 
 Two did not, and both were closed by the ports written up below — wasm was
