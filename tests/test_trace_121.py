@@ -1121,16 +1121,104 @@ def test_the_gate_fails_closed_on_every_unproven_path():
         assert index.origins_for("Agent") is None
 
 
+class _StubTimeline:
+    """The one `Timeline` surface `_replay("back")` touches: a component name and
+    a step-back report carrying a single model-completion crossing."""
+
+    component = "Agent"
+
+    def __init__(self, args):
+        self._args = args
+
+    async def step_back(self, at, force=False):
+        return {
+            "inversesRan": [], "compensationsRan": [], "failed": [],
+            "emissionsCrossed": [{
+                "kind": "emission", "label": "Model.complete",
+                "index": _CROSSING_STEP,
+                "detail": {"service": "model", "args": self._args},
+            }],
+            "guarantee": "a crossed emission has no inverse",
+        }
+
+
+class _StubRecorder:
+    def __init__(self, args):
+        self._timeline = _StubTimeline(args)
+        self.timelines = {"Agent": self._timeline}
+
+    def timeline(self, component=None):
+        return self._timeline
+
+
+_CROSSING_STEP = 7
+
+
+def _step_back_record(src: str, filename: str, args):
+    """Drive the SHIPPED `emissionsCrossed` arm — `_Driver._replay("back")`
+    itself, not a re-implementation of it — over one model-completion crossing,
+    and return the `emit` record it appended.
+
+    This is the wiring assertion with teeth: a driver that stops consulting
+    `_crossing_taint`, or feeds the gate anything it cannot prove, changes the
+    RECORD, which is what a consumer of `revl trace` actually reads."""
+    driver = _driver_for(src, filename)
+    driver.recorder = _StubRecorder(args)
+    driver._log = lambda *a, **k: None
+    driver._flush = lambda: asyncio.sleep(0)
+    # the item-242 seam: bind the completion observation to the crossing the
+    # arm is about to record, exactly as `record_emission` does at record time.
+    rt.revl_note_emission_index("Agent", _CROSSING_STEP)
+    rt.validate_retry(lambda: {"tag": "ok"}, budget=0,
+                      schema={"type": "object"}, where="Agent")
+    asyncio.run(driver._replay("back", 0, False, "Agent"))
+    return driver._events[-1]
+
+
 def test_the_channel_is_wired_into_the_crossing_record():
     """The gate must be fed BY the `emissionsCrossed` arm, not merely be
-    available — this is the assertion that fails if run.py goes back to passing
-    the hard-wired `taint_engaged=False`."""
-    import inspect
-    src = inspect.getsource(run._Driver)
-    arm = src[src.index("emissionsCrossed"):]
-    assert "_crossing_taint" in arm
-    assert "taint_engaged=taint_engaged" in arm
-    assert "taint_engaged=False" not in src
+    available — driven through the arm and asserted on the record it emits.
+
+    Deliberately NOT a source grep. The assertion this replaced matched
+    `"taint_engaged=taint_engaged"` in run.py's text, and text certifies
+    nothing: un-wiring the arm one line higher (`arg_origins, taint_engaged =
+    None, False`) kills the digest on every shipped run and leaves that grep
+    green. Both halves of the item-444 exit test are asserted here on the real
+    record — a certified-clean composition digests, a `secret`-minting one is
+    suppressed with the hop intact."""
+    first = _step_back_record(_CLEAN_MODEL_SRC, "clean.rvl",
+                              ["summarise this", "context"])
+    again = _step_back_record(_CLEAN_MODEL_SRC, "clean.rvl",
+                              ["summarise this", "context"])
+    other = _step_back_record(_CLEAN_MODEL_SRC, "clean.rvl",
+                              ["a different prompt"])
+
+    # `activationId` carries a generation and, since item 121 slice 2, an
+    # activation suffix (`Agent#g1#a0`). This test is item 444's -- it owns the
+    # taint channel, not the id's shape -- so it pins the generation prefix and
+    # leaves the suffix to slice 2's own tests. An exact match here went red the
+    # moment the two landed together, each PR green on its own.
+    assert first["event"] == wr.EMIT
+    assert first["activationId"].startswith("Agent#g1")
+    digest = first["llm"]["promptDigest"]
+    assert digest["salted"].startswith("hmac-sha256:")
+    assert digest["provenance"] == "revl-side-args"
+    # the within-run equality the surface exists to provide, observed on the
+    # record a real step-back produces
+    assert again["llm"]["promptDigest"] == digest
+    assert other["llm"]["promptDigest"]["salted"] != digest["salted"]
+    blob = json.dumps([first, again, other])
+    assert "summarise this" not in blob and "a different prompt" not in blob
+
+
+def test_a_secret_composition_is_suppressed_in_the_crossing_record():
+    """The fail-closed half through the same arm: the hop is recorded in full,
+    only the digest is absent (§4, HIGH 2 — suppression never refuses)."""
+    ev = _step_back_record(_SECRET_MODEL_SRC, "secret.rvl",
+                           ["summarise this", "context"])
+    assert ev["llm"] is not None
+    assert "promptDigest" not in ev["llm"]
+    assert ev["llm"]["attempts"] == 1 and ev["llm"]["attemptCeiling"] == 1
 
 
 def test_a_new_generation_rebuilds_the_origin_index():

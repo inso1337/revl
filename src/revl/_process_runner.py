@@ -610,17 +610,28 @@ async def run(spec: dict, spec_path=None) -> None:
             correlation = None
             if corr:
                 from revl.deploy import Correlation, seal  # noqa: PLC0415
-                secret = bytes.fromhex(corr["secret"])
+                # A LOCAL (UDS) entry carries a `secret` and the envelope is
+                # SEALED with it. A NETWORK entry carries none by design (item
+                # 118 §1.4b): the receiver scopes dedup by the identity the mTLS
+                # handshake proved, so the envelope needs no HMAC — and a secret
+                # is exactly what a cross-composition caller could never hold.
+                # Both stamp a fresh idempotency key per call, so a captured
+                # request replayed against the provider collides with the
+                # crossing already admitted and is refused.
+                secret = (bytes.fromhex(corr["secret"])
+                          if corr.get("secret") else None)
                 composition_id = corr["composition_id"]
                 peer_identity = corr["peer_identity"]
 
                 def correlation(k, method, _secret=secret, _cid=composition_id,
                                 _peer=peer_identity):
-                    return seal(Correlation(composition_id=_cid, generation=0,
-                                            peer_identity=_peer,
-                                            effect_id=f"{k}.{method}",
-                                            idempotency_key=uuid.uuid4().hex),
-                               _secret)
+                    envelope = Correlation(composition_id=_cid, generation=0,
+                                           peer_identity=_peer,
+                                           effect_id=f"{k}.{method}",
+                                           idempotency_key=uuid.uuid4().hex)
+                    if _secret is None:
+                        return envelope.to_wire()
+                    return seal(envelope, _secret)
             proxy = bridge.proxy_component(key, info["methods"], target, module,
                                            deadline=info.get("deadline"),
                                            deadlines=info.get("deadlines"),
@@ -710,14 +721,32 @@ async def run(spec: dict, spec_path=None) -> None:
         if serve.get("peers"):
             from revl.deploy import PeerAllowlist  # noqa: PLC0415
             allow = PeerAllowlist(serve["peers"])
+        # item 118 §1.4b: the freshness gate a network seam CAN carry. It holds
+        # no secret — dedup is scoped by the identity the mTLS handshake proved
+        # — so placement.py installs it on every network `serve` block, whether
+        # or not an allowlist was declared, and it refuses no caller that used
+        # to be answered (a crossing with no idempotency key is dispatched as
+        # before). Absent (a UDS seam, or a spec predating this) it stays None.
+        replay = None
+        rspec = serve.get("replay")
+        if rspec:
+            from revl.deploy import TransportReplayGuard  # noqa: PLC0415
+            replay = TransportReplayGuard(
+                per_peer=int(rspec.get("per_peer") or 1024),
+                max_peers=int(rspec.get("max_peers") or 64))
         server = await bridge.serve(root, serve.get("methods") or serve["keys"], serve_target,
-                                    module=module, correlation=guard, peers=allow)
+                                    module=module, correlation=guard, peers=allow,
+                                    replay=replay)
         # The level this seam achieved, named on the seam's own log line so it is
         # readable where the seam is, not only in the conductor's audit block.
+        fresh = " + replay-checked" if replay is not None else ""
         if guard is not None:
             level = " (correlation-guarded)"
         elif allow is not None:
-            level = f" (peer-pinned: {len(allow)} declared peer(s))"
+            level = f" (peer-pinned: {len(allow)} declared peer(s){fresh})"
+        elif replay is not None:
+            level = (" (UNVERIFIED: no peer admission — any caller that reaches "
+                     "it; replays refused)")
         else:
             level = " (UNVERIFIED: no peer admission — any caller that reaches it)"
         log("serve", ", ".join(serve["keys"]),

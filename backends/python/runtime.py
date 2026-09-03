@@ -38,6 +38,7 @@ import re
 import time
 import types
 import weakref
+from collections import OrderedDict
 from typing import Any, Callable, Optional
 
 # The confidentiality choke point (item 256 Slice 3): `confidential.py`, the
@@ -77,6 +78,7 @@ __all__ = [
     "EstopHalted", "EstopRefused",
     "SessionCommitError", "SessionOwner",
     "SpawnHandle", "StateIncompatible",
+    "EventContract",
     "Stream", "StreamFaulted", "StreamSource", "Subscription", "STREAM_CLOSED",
     "TimerHandle", "TransientError", "add_trace", "arm_fault_probe", "clear_session_owner",
     "disarm_fault_probe",
@@ -4799,6 +4801,65 @@ class Subscription:
         return True
 
 
+class EventContract:
+    """The contract half of a typed event (item 130 Slice 5,
+    docs/design/130-stream-reactive-types.md §6).
+
+    An event is a `Stream[T]` element with a contract, so this object holds
+    exactly the two things events add on top of the stream protocol and nothing
+    else: the SCHEMA every delivered item is checked against before the handler
+    body runs, and the bounded window of recently admitted KEYS that collapses a
+    redelivery. Everything else about an `on … as` handler — the subscription
+    bracket, the cancellation-first `next`, the terminal handling, the LIFO
+    teardown — is the Slice 1/4 machinery, untouched.
+
+    A schema violation raises `StreamFaulted`, which is not a new failure mode:
+    it is the same terminal a provider abort delivers, so it takes the same path
+    the iteration form already defines — uncaught out of the loop, the activation
+    fails, the accumulated prefix reverts LIFO, and the subscription bracket on
+    that prefix CLOSES the subscription. That is §6's "a failed handler does not
+    leave a subscription active", reached here without a line of new teardown.
+
+    The dedup memory is a fixed-size LRU of key values, CONSTANT per handler, so
+    it is not the per-item accumulation §4.7 refuses. Being bounded also bounds
+    what it claims: a redelivery further apart than the window runs the handler
+    again. This collapses redeliveries; it is not a durable exactly-once claim,
+    which needs the §4.5 durable cursor (a later slice). Every decision is
+    traced (`event.<name> admit` / `event.<name> duplicate`), so a collapsed
+    duplicate is observable rather than silent."""
+
+    def __init__(self, name: str, schema: dict, key: str, window: int) -> None:
+        self.name = name
+        self.schema = schema
+        self.key = key
+        self.window = max(1, int(window))
+        self._seen: "OrderedDict[Any, bool]" = OrderedDict()
+
+    def admit(self, item: Any, where: str = "") -> bool:
+        """Check one delivered item against the contract; True to run the body.
+
+        Validation comes FIRST: the key read below is only sound because the
+        schema already proved the item is an object carrying that field at a
+        scalar type, so there is no path where a malformed item reaches the
+        dedup table (or the body) at all."""
+        err = _json_schema_error(item, self.schema, "$")
+        if err is not None:
+            raise StreamFaulted(
+                f"{where}: event {self.name} item failed its schema: {err}"
+                if where else
+                f"event {self.name} item failed its schema: {err}")
+        key = item[self.key]
+        if key in self._seen:
+            self._seen.move_to_end(key)
+            _record(f"event.{self.name} duplicate")
+            return False
+        self._seen[key] = True
+        while len(self._seen) > self.window:
+            self._seen.popitem(last=False)
+        _record(f"event.{self.name} admit")
+        return True
+
+
 class Stream:
     """Host builtin (item 130): `Stream.source()` opens a provider; `subscribe`
     lowers to `Stream.subscribe(source, policy)`. `pending()` is the residue
@@ -4825,6 +4886,15 @@ class Stream:
         than reading as an ordinary end of stream (§4.3, A8). Mirrors the go
         tier's `IsStreamClosed` so the two tiers spell one predicate."""
         return value is STREAM_CLOSED
+
+    @classmethod
+    def contract(cls, name: str, schema: dict, key: str,
+                 window: int) -> EventContract:
+        """The per-handler contract an `on <Event> as … in <sub>` opens (item
+        130 Slice 5). One per handler, built once before the loop — never per
+        delivered item, which is what keeps the dedup memory constant in the
+        length of the stream."""
+        return EventContract(name, schema, key, window)
 
     @classmethod
     def merge(cls, a: StreamSource, b: StreamSource) -> StreamSource:

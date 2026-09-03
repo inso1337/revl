@@ -2434,6 +2434,42 @@ def _refuse_unlowered_stream_surface(node, tier: str) -> None:
             "`--backend py`" % tier)
 
 
+def _refuse_dropped_stream_component(ir: dict) -> None:
+    """Refuse a document the pure typed-core path would route past while a
+    component in it holds a stream (item 130).
+
+    The pure path exists for documents whose component is incidental to a
+    record/pure-fn/test case, and it drops those components. A stream component
+    is never incidental: its subscription is a bracket with an inverse, and a
+    program emitted without it would run, appear healthy, and never subscribe.
+    Naming the refusal keeps this tier's story the one Slices 3-5 tell — go
+    lowers subscribe / next / close and `merge`, the iteration and event forms
+    are the py reference tier's."""
+    steps = [step for comp in ir.get("components") or []
+             for step in comp.get("body") or []]
+    # the iteration/event form first: it is the more specific refusal, and a
+    # handler always sits BELOW the subscribe it pulls, so a positional walk
+    # would report the subscription and hide the form the author wrote.
+    for step in steps:
+        if step.get("step") == "stream-iter":
+            form = ("`on … as` typed-event handler" if step.get("event")
+                    else "`every … in` stream iteration form")
+            raise EmitError(
+                f"the {form} is not lowered on the go tier, and this "
+                "document would otherwise route to the pure typed-core path "
+                "and drop the component entirely; the iteration and event "
+                "forms run on the py reference tier (item 130 Slices 4 and "
+                "5) — try `--backend py`")
+    for step in steps:
+        if step.get("subscribe"):
+            raise EmitError(
+                "this document declares a stream subscription inside a "
+                "component, but its top-level declarations route it to the "
+                "pure typed-core path, which would drop the component and "
+                "with it the subscription's bracket (item 130) — emit it "
+                "with `--backend py`, or split the pure declarations out")
+
+
 def _stream_head(node, env) -> str:
     """The stream a `subscribe` acquires: a plain source, or a `merge(a, b)`
     fan-in (item 130 Slice 3). Recursive — a merged stream is itself a stream.
@@ -2664,12 +2700,17 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # go emitter's activation-body walk has no per-item scope to bind it in.
         # Refuse by name rather than emit a subscription whose body silently
         # never runs — the same call `_refuse_unlowered_stream_surface` makes for
-        # the Slice 2 surface this tier does not lower.
+        # the Slice 2 surface this tier does not lower. Slice 5's `on … as`
+        # typed-event handler lowers to this SAME step (an event is a stream
+        # item with a contract), so it is refused here too — and named for the
+        # form the author actually wrote.
+        form = ("`on … as` typed-event handler" if step.get("event")
+                else "`every … in` stream iteration form")
         raise EmitError(
-            "the `every … in` stream iteration form is not lowered on the go "
+            f"the {form} is not lowered on the go "
             "tier; this tier lowers subscribe / next / close and `merge` "
             "(item 130 Slices 1 and 3) while the iteration form runs on the py "
-            "reference tier (Slice 4) — try `--backend py`")
+            "reference tier (Slices 4 and 5) — try `--backend py`")
     elif s == "intercept":
         # handled at load site (metadata); no-op in Apply
         pass
@@ -2733,6 +2774,23 @@ def _emit_load_helpers(ir, out):
             out.append("func Load%s(target *stc.Context, cfg %sConfig) *stc.Fiber {" % (cname, cname))
         else:
             out.append("func Load%s(target *stc.Context) *stc.Fiber {" % cname)
+        # item 421 F6, the config half: a `Secret[T]` config field is the third
+        # declared marking, beside a `Secret[T]` service parameter (the receiver,
+        # registered at the head of the provide method) and a `Secret[T]` extern
+        # return (the origin). It arrives ONCE, here, and `Load%s` is the single
+        # door every path uses — the lifecycle tests and the placement runner's
+        # `RevlLoad` alike — so the registration sits here rather than at each
+        # read. Without it the go host trace printed an operator-supplied
+        # credential verbatim while the py and ts tiers, which register their
+        # config values at load, scrubbed it: the same declaration meant
+        # different things on different tiers.
+        if _SECRET_MODE and has_config:
+            secret_fields = [
+                "cfg.%s" % _camel(f["name"]) for f in comp.get("config") or []
+                if isinstance(f, dict) and f.get("secret")
+            ]
+            if secret_fields:
+                out.append("\trevlMarkSecret(%s)" % ", ".join(secret_fields))
         if isolate or intercept:
             out.append("\tctx := target.Child()")
             for key, realm in isolate.items():
@@ -7415,6 +7473,17 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         # document must stay on the stc-go runtime path even though it also
         # carries top-level `test` blocks (FR-5); the pure path would drop the
         # components and refuse the lifecycle steps.
+        #
+        # item 130: the pure path DROPS the components it routes past — that is
+        # the point for a document whose component is incidental to a record or
+        # pure-fn corpus case. It is not acceptable for a stream, whose whole
+        # contract is a live subscription with a bracket: dropping the component
+        # would emit a program that silently never subscribes, the exact outcome
+        # the honest `EmitError` exists to prevent. Reached routinely from Slice
+        # 5, where the event's record declaration is what puts a `types` entry in
+        # the document in the first place, so a typed-event program on this tier
+        # would otherwise compile to a bare struct.
+        _refuse_dropped_stream_component(ir)
         return _emit_v3_go(ir, package)
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
