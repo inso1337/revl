@@ -1058,12 +1058,22 @@ class Correlation:
 
     @classmethod
     def from_wire(cls, wire: Mapping) -> "Correlation":
+        key = wire.get("idempotency_key")
+        if key is not None and not isinstance(key, str):
+            # The idempotency key is half of a dedup scope, and a scope is a
+            # dict key. A peer-supplied list or object would raise
+            # `unhashable type` inside the ledger — past every caller written
+            # to read an `(ok, reason)` verdict, taking the seam down instead
+            # of refusing one envelope (roadmap 428 F10's class). It has no
+            # scope, so it is malformed, and both guards already turn a
+            # `TypeError` here into that refusal.
+            raise TypeError("idempotency_key must be a string or absent")
         return cls(composition_id=str(wire["composition_id"]),
                    generation=int(wire["generation"]),
                    peer_identity=str(wire["peer_identity"]),
                    effect_id=str(wire["effect_id"]),
                    realm=wire.get("realm"),
-                   idempotency_key=wire.get("idempotency_key"),
+                   idempotency_key=key,
                    parent_effect=wire.get("parent_effect"))
 
     def dedup_key(self) -> tuple:
