@@ -26,6 +26,11 @@ Covered subset (what emits byte-identical):
     appended ``unreachable!()``); user record/variant names in ``_rust_type``
     (``List[Point]`` -> ``Vec<Point>``); and the ``_V3Ctx`` type inference
     (``case_adt`` / ``case_payload`` / ``record_by_fields``);
+  * ``_emit_v3_externs`` (issue 275) — each ``extern`` as a Rust ``fn`` carrying
+    its verbatim ``@rs`` body, emitted BEFORE the free functions, plus the
+    ``_V3Ctx.fn_returns`` seeding from the extern returns that types a ``let``
+    bound to an extern call. A ``config``-schema extern and one with no ``@rs``
+    body stay OUT (each takes a loud marker; the reference RAISES on the latter);
   * ``_emit_v3_functions`` — each module fn as a Rust ``fn`` with ``_rust_type``
     for scalar / ``List`` / ``Opt`` / ``Map`` / ``Result`` / user-type parameter
     and return types, ``pub`` visibility, and ``todo!()`` for an empty body;
@@ -90,7 +95,7 @@ Rust reference itself *raises* on ``record_update`` — a structural exclusion, 
 merely un-ported); the stdlib surface (every ``builtin``/``len`` node and the
 ``_stdlib_helper_traits`` it pulls in); the Value/serde erasure surface
 (``_emit_bridge``, ``Pool``/``Map``/``Job`` host stubs); async coloring / spawn /
-instances / realms; externs and in-file ``test``/lifecycle-test emission; the
+instances / realms; in-file ``test``/lifecycle-test emission; the
 canonical Float->Str ``revl_ftoa`` (so float interpolation is excluded); the
 ``impl Fn(..)`` lowering of a declared function type; the non-ASCII reaches of
 ``_string`` beyond the ASCII core; and ``let_pattern`` (the list form names a
@@ -161,6 +166,13 @@ CORPUS = [
     # `list_reduce` free call; the rust tier lowers its `(A, T) -> A` param to
     # `impl Fn(i64, i64) -> i64` (the monomorphisable param position) + the arrow
     "transforms.rvl",
+    # issue 275 / item 429 — the `_emit_v3_externs` section. No fixture declared
+    # an `extern` before this one, so the oracle stayed GREEN while the self-host
+    # emitted NO externs section at all (a silent drop, not a divergence: the
+    # emitted module called `shout(..)` with no `fn shout` in it) and typed no
+    # `let` from an extern's declared return (`tag(p)` where the reference emits
+    # `tag(p.clone())`). An oracle catches divergence, not absence.
+    "externs.rvl",
 ]
 
 
@@ -253,6 +265,32 @@ def test_selfhosted_emitter_typed_core_scaffold(emitted):
     assert "return Tree::Leaf;" in var
     assert "Tree::Node(v) => v," in var
     assert "_ => unreachable!()," in var
+
+
+def test_selfhosted_emitter_extern_section(emitted):
+    """issue 275: the externs section EXISTS, is emitted between the types and the
+    free functions (the reference's `_emit_v3` order), splices the `@rs` body
+    verbatim, mangles a Rust-keyword name, and seeds the `let` inference with the
+    extern's declared return so a by-value use clones.
+
+    The byte-agreement case above already covers all of this; this pins the
+    individual surfaces so a regression names itself instead of arriving as an
+    opaque byte diff — and so the SECTION's absence, the actual 275 defect, can
+    never again be invisible to a green oracle."""
+    src = emitted["emit_rust_src"](compile_files([str(CORPUS_DIR / "externs.rvl")]))
+    assert "fn shout(s: String) -> String {\n    s.to_uppercase()\n}" in src
+    assert "fn impl_(n: i64) -> bool {" in src          # the _mangle rename
+    assert "fn noop(tag: String) -> () {\n    // (empty @rs body)\n}" in src
+    assert "fn twice(a: i64, b: i64) -> i64 {\n    let t = a + b;\n        t * 2\n}" in src
+    assert "fn pick(xs: Vec<i64>, i: i64) -> Option<i64> {" in src
+    assert "fn nudge(p: Point, dx: i64) -> Point {" in src
+    # section order: types, then externs, then the free functions
+    assert src.index("pub struct Point") < src.index("fn shout(")
+    assert src.index("fn shout(") < src.index("fn relabel(")
+    # the extern-seeded `let` inference (the E0382 half of 275)
+    assert "let moved = nudge(p.clone(), 1i64);" in src
+    assert "return shout(up.clone());" in src
+    assert "<<DEFER" not in src and "<<EXTERN-NO-RS-BODY" not in src
 
 
 def test_selfhosted_emitter_component_bridge_scaffold(emitted):
