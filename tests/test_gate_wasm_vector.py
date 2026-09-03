@@ -386,9 +386,12 @@ def test_admit_artifact_declines_and_names_the_gap(component):
 #     read back off the thing it generated.
 #
 # Deriving the probes from the table is also what keeps them honest in the other
-# direction: this test used to hand-pick `.is_digit()`, item 391 closed that gap,
-# and the probe would have gone on asserting a gap that no longer existed. A
-# probe derived from the table cannot outlive the gap it probes.
+# direction. `tests/test_gate_crate_admit.py` and the crate's own cargo tests
+# hand-picked `.is_digit()` and `.str()`; item 391 ported both, and the probes
+# went on asserting a gap that had closed until the same commit derived them. A
+# probe derived from the table cannot outlive the gap it probes — and, as this
+# file just demonstrated, a derived probe that is allowed to SKIP when the table
+# empties trades that failure mode for a worse one.
 #
 # The size bound is deliberately NOT probed through this door: `wasmtime run
 # --invoke` passes the source as a single argv element and Linux caps one
