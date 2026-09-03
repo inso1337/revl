@@ -711,9 +711,26 @@ async def run(spec: dict, spec_path=None) -> None:
         except Exception as exc:  # noqa: BLE001
             log("probe", expr, f"ERROR {type(exc).__name__}: {exc}")
 
-    print(f"[{name}] UP", flush=True)
-
     # 5. hold until the conductor stops us, then tear down consumers first.
+    #
+    # THE HANDLERS GO UP BEFORE THE `UP` LINE, and that ordering is the whole
+    # contract. `[name] UP` is what the conductor waits on: `run_placement`'s
+    # `--once` path blocks on `len(up) == len(children)` and then calls
+    # `stop_all` immediately, so the SIGTERM can land microseconds after this
+    # print. Printing first left a window in which the default SIGTERM
+    # disposition was still installed, and a signal arriving inside it killed
+    # the process outright — no LIFO unwind, no inverses replayed, no residue
+    # proof, no `DOWN`. Worse, that death is SILENT: the child has exited by the
+    # time `_stop_all` looks, so `proc.poll()` is not None, the kill path that
+    # records a stranded child is never reached, and a placement that tore down
+    # nothing reports rc 0.
+    #
+    # The window belongs to the LAST process to boot — every earlier one is
+    # still being waited on — which is why it was the consumer, the one process
+    # with an inverse (`store.remove`) and a residue proof to run, that lost it.
+    # Installed here, a signal arriving in the same window merely sets the event
+    # and `await stop.wait()` returns at once: the unwind runs either way, and
+    # `UP` means what it says — loaded, serving, AND able to be stopped.
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -721,6 +738,8 @@ async def run(spec: dict, spec_path=None) -> None:
             loop.add_signal_handler(sig, stop.set)
         except (NotImplementedError, RuntimeError):  # pragma: no cover (non-unix)
             pass
+
+    print(f"[{name}] UP", flush=True)
 
     # A control channel on stdin: the conductor pushes `repoint` commands here
     # to migrate a proxy to a successor provider (`revl swap`). Runs on a

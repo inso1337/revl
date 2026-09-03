@@ -52,6 +52,7 @@ is never imported.
 from __future__ import annotations
 
 import inspect
+import itertools
 import json
 import os
 import sys
@@ -133,6 +134,35 @@ KINDS = (KIND_EFFECT, KIND_PROVISION, KIND_EMISSION, KIND_COMPENSATION,
 #: headline correctness point that keeps the fork rewind from itself PUT-ing a
 #: preimage to a remote endpoint mid-fork (the CRITICAL the review found).
 HOST_CONFINED_CAPS = frozenset({"fs"})
+
+
+# ---------------------------------------------------------------------------
+# item 121 Slice 2: the model-hop value-flow bridge (docs/design/121-revl-trace.md
+# §2.2). The recorder owns `Step.index`, the ONE identity that already crosses
+# the runtime/driver boundary; the `validate_retry` seam and the emitter-marked
+# downstream crossing live in the sibling `runtime` module. This module refuses
+# to import that module eagerly — it is loaded on its own path precisely because
+# it needs no cordis — so the bridge is looked up in `sys.modules` at call time
+# and honest-degrades to "no bridge" when the runtime is not loaded (in which
+# case nothing minted a token either).
+# ---------------------------------------------------------------------------
+
+_MODEL_TRACE_IMPORT_TRIED = False
+
+
+def _model_trace():
+    """The sibling `runtime` module's item-121 bridge, or None."""
+    global _MODEL_TRACE_IMPORT_TRIED
+    module = sys.modules.get("runtime")
+    if module is None and not _MODEL_TRACE_IMPORT_TRIED:
+        _MODEL_TRACE_IMPORT_TRIED = True
+        try:
+            import runtime as module  # noqa: PLC0415 — sibling, loaded by path
+        except ImportError:  # pragma: no cover — no runtime in this process
+            module = None
+    if module is None or not hasattr(module, "revl_take_produced_by"):
+        return None
+    return module
 
 
 def scope_host_confined(scope: Optional[dict]) -> bool:
@@ -375,12 +405,22 @@ class Step:
 # ---------------------------------------------------------------------------
 
 
+#: Monotonic per-process activation counter (item 121 Slice 2). `component + gen`
+#: cannot separate two concurrent activations of one component — `gen` is a
+#: process-global RELOAD counter (`run.py`), not a per-activation id — so each
+#: recorded activation takes the next ordinal here and the driver spells its
+#: activation id `component#gN#aK`. This is the design's NEW CRITICAL
+#: discriminator (docs/design/121-revl-trace.md §4 attack 3).
+_ACTIVATION_ORDINALS = itertools.count(1)
+
+
 class Timeline:
     """The recorded activation of one component, and the operations over it."""
 
     def __init__(self, component: str, sources: Optional[Sources] = None,
                  secrets: Optional["confidential.SecretIndex"] = None) -> None:
         self.component = component
+        self.activation = next(_ACTIVATION_ORDINALS)
         self.sources = sources or Sources()
         # Which argument positions of a crossing this composition declared
         # `Secret[T]` (item 256 Slice 3, §7b). The recorder owns one index per
@@ -445,12 +485,24 @@ class Timeline:
                     "args": confidential.redact_args(args, secret, _describe)},
             note="an emission is a one-way boundary crossing: it has no inverse",
         )
+        # item 121 Slice 2: if the emitter proved THESE arguments read a
+        # validated completion's binding (`runtime.revl_produced_emit` set the
+        # marker), stamp that completion's step index on the record. The marker
+        # is CONSUMED, so exactly one crossing carries it; no bridge or no
+        # marker means no `producedBy` — the edge is absent, never guessed.
+        bridge = _model_trace()
+        if bridge is not None:
+            produced_by = bridge.revl_take_produced_by()
+            if produced_by is not None:
+                step.detail["producedBy"] = produced_by
         if file is not None:
             self._emission_sites[(file, lineno)] = step
         # item 242: mark the crossing at RECORD time. `validate_retry` brackets
         # the completion, so this fires inside `make_call` and the seam that
         # returns next binds its observation to THIS step — the fix for the
         # driver's newest-first walk attributing a model hop to a later crossing.
+        # The same publication carries this crossing's STEP INDEX, the identity
+        # the item-121 Slice 2 value-flow token holds.
         _note_emission_index(self.component, step.index)
         self._wal_append(step)
         return step
@@ -1055,6 +1107,12 @@ def _emission_entry(step: Step) -> dict:
         "args": detail.get("args"),
         "site": step.site,
     }
+    # item 121 Slice 2: the step index of the validated model completion whose
+    # binding this crossing's arguments read (the emitter's static value-flow
+    # fact plus the seam's fiber-local token). Present only when both held; the
+    # driver resolves it to a trace seq and back-patches the model hop.
+    if detail.get("producedBy") is not None:
+        entry["producedBy"] = detail["producedBy"]
     if step.compensation is not None:
         entry["compensation"] = step.compensation   # a step index, unfired
     return entry
@@ -1150,9 +1208,19 @@ class _ServiceProxy:
 
         def emission(*args, **kwargs):
             frame = sys._getframe(1)
+            # item 121 Slice 2: a crossing the emitter marked as reading a
+            # validated completion's binding is fired THROUGH
+            # `runtime.revl_produced_emit`, which declares itself transparent.
+            # Skip its frame so the recorded site stays the emitted module's own
+            # line — the compensation adjacency rule (module docstring, rule 2)
+            # and `_emission_sites` both key on it.
+            while frame is not None and \
+                    "_revl_transparent_frame" in frame.f_code.co_varnames:
+                frame = frame.f_back
             timeline.record_emission(
                 key, name, args, service,
-                (frame.f_code.co_filename, frame.f_lineno))
+                (frame.f_code.co_filename, frame.f_lineno)
+                if frame is not None else (None, None))
             return attr(*args, **kwargs)
 
         return emission

@@ -127,6 +127,19 @@ class AdmissionProfile:
     # model-authored turn annotates nothing), and byte-identical when off, so a
     # plain compile never moves. Also reachable via `revl compile --taint-strict`.
     taint_strict: bool = False
+    # item 334 (slice 2): forbid the admitted ROOT source from naming a REALM —
+    # `isolate <key> in realm("x")` and the item-162 `realms(...)` route. A realm
+    # is not decoration, it is an AUTHORITY ADDRESS: the item-246/251 approval
+    # policy scopes its standing approvals and auto-approve rules by
+    # `(component glob, realm)` (`session._find_auto_approve`, matched against
+    # `ticket["realm"]`, which is `approval.component_realm` -> the component's
+    # `isolate` map). An untrusted author writes its own component NAMES, so the
+    # glob half is no discriminator at all; the realm is the only one left, and a
+    # source that picks its own realm picks which of the operator's standing
+    # approvals cover its class-(c) crossings. Off (inert) by default, so item
+    # 330's `Session.admit` is byte-identical; ON for `self_extension`, the
+    # profile `Gate.propose` admits under.
+    no_realm_placement: bool = False
 
     @staticmethod
     def untrusted_author(granted) -> "AdmissionProfile":
@@ -139,10 +152,32 @@ class AdmissionProfile:
                                 no_declassify=True,
                                 taint_strict=True)
 
+    @staticmethod
+    def self_extension(granted) -> "AdmissionProfile":
+        """`untrusted_author` plus the realm-placement refusal — the profile a
+        SELF-EXTENDING proposal is admitted under (item 334, slice 2).
+
+        The delta over `untrusted_author` is exactly `no_realm_placement`, and it
+        exists because the two admissions differ in what they can reach. An item-
+        330 per-turn `admit` is ADDITIVE: it wires into the running composition
+        and is torn down with the turn. A `propose` REPLACES the composition and
+        the successor keeps serving, so the address its components sit at is the
+        address every later crossing is judged from. Letting the untrusted author
+        choose that address is letting it choose its own authority, which is the
+        one thing a proposal must not be able to change without a fresh
+        admission. The per-turn case is the same question with a shorter blast
+        radius; it is NAMED here, not solved (see slice 2's doc section)."""
+        return AdmissionProfile(no_extern=True,
+                                granted=frozenset(granted or ()),
+                                no_declassify=True,
+                                taint_strict=True,
+                                no_realm_placement=True)
+
     @property
     def active(self) -> bool:
         return (self.no_extern or self.granted is not None
-                or self.no_declassify or self.taint_strict)
+                or self.no_declassify or self.taint_strict
+                or self.no_realm_placement)
 
     @property
     def untrusted(self) -> bool:
@@ -187,6 +222,114 @@ def check_no_extern(root_programs: list[Program], profile: AdmissionProfile) -> 
                 code="G8", category="admission",
                 navigate=_granted_navigate(profile.granted),
             )
+
+
+def _realm_navigate(realms) -> dict:
+    """A realm-placement refusal is author-enactable in one direction only: drop
+    the clause and run in the shared realm. Naming the realm anyway is an
+    OPERATOR alternative (the reviewed, gated swap), never author-enactable —
+    which is the whole point of the gate."""
+    from . import navigate as nav  # noqa: PLC0415 — lazy, avoids a cycle
+    alts = [
+        nav.alternative(
+            enacts=nav.ENACTS_AUTHOR,
+            action=("drop the `in realm(...)` clause and let the component sit "
+                    "in the shared realm, which is the only address this "
+                    "profile may write"),
+            ref="shared-realm"),
+        nav.alternative(
+            enacts=nav.ENACTS_OPERATOR,
+            action=("or have an operator place the component into that realm "
+                    "through the reviewed, gated swap — a realm placement is a "
+                    "fresh admission, not something a proposal carries in"),
+            ref="operator-swap"),
+    ]
+    # profile=None on purpose: the admit-profile family does not collapse (§4).
+    return nav.record(family="admit-profile",
+                      refused={"realms": sorted(set(realms))},
+                      blocked=False, alternatives=alts, profile=None)
+
+
+def _iter_realm_placements(node, out: list) -> None:
+    """Every realm-naming statement reachable from a parsed AST fragment, by the
+    same structural dataclass walk `_iter_var_refs` uses. A recursive walk rather
+    than a scan of `ComponentDecl.body`, so a placement nested inside any future
+    body-bearing form (a `spawn ... with { ... }` block, say) is seen too — the
+    gate must not depend on where in the tree the clause is legal today."""
+    from .parser import IsolateStmt, RouteStmt  # noqa: PLC0415 — import cycle
+    if isinstance(node, (IsolateStmt, RouteStmt)):
+        out.append(node)
+        return
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _iter_realm_placements(item, out)
+        return
+    fields = getattr(node, "__dict__", None)
+    if fields:
+        for value in fields.values():
+            _iter_realm_placements(value, out)
+
+
+def check_no_realm_placement(root_programs: list[Program],
+                             profile: AdmissionProfile) -> None:
+    """Refuse if the untrusted-authored source names a REALM (item 334, slice 2).
+
+    A realm is an authority address. The item-246/251 approval policy scopes a
+    standing approval and an auto-approve rule by `(component glob, realm)`, and
+    matches the realm half against `ticket["realm"]`, which is read straight off
+    the crossing component's `isolate` map (`approval.component_realm` ->
+    `policy.component_realms` -> the component IR's `isolate` field). An
+    untrusted author chooses its own component NAMES, so the glob half
+    discriminates nothing against it; the realm is the only half left. A source
+    that writes `isolate <key> in realm("billing")` therefore selects which of
+    the operator's standing approvals cover its class-(c) crossings — it widens
+    its own authority, with no fresh admission anywhere in the loop. The item-162
+    plural (`realms(...)`, the multi-realm route) is the same fact with a fan-out
+    attached and is refused identically.
+
+    Refusing leaves the source in the SHARED realm, which is where a source that
+    said nothing was going anyway: it can still be covered by an unscoped rule
+    (`realm: None`) or a shared-realm rule, and it can no longer reach into a
+    realm-scoped one. The check is strictly narrowing, structural, and root-
+    scoped exactly as `check_no_extern` is — a trusted co-composed provider
+    module still places whatever the operator wrote.
+    """
+    if not profile.no_realm_placement:
+        return
+    from .parser import RouteStmt  # noqa: PLC0415 — import cycle
+    for program in root_programs:
+        found: list = []
+        _iter_realm_placements(program.components, found)
+        if not found:
+            continue
+        stmt = found[0]
+        plural = isinstance(stmt, RouteStmt)
+        named = list(stmt.realms) if plural else [stmt.realm]
+        spelling = (f'`isolate {stmt.key} in realms('
+                    + ", ".join(f'"{r}"' for r in named) + ')`') if plural else \
+                   f'`isolate {stmt.key} in realm("{stmt.realm}")`'
+        raise RevlError(
+            program.filename, stmt.line,
+            f"admission refused: this profile forbids naming a realm, but this "
+            f"source declares {spelling}",
+            hint="a realm is an authority address, not decoration — the approval "
+                 "policy scopes its standing approvals and auto-approve rules by "
+                 "(component glob, realm), and an untrusted author writes its own "
+                 "component names, so choosing the realm chooses which standing "
+                 "approvals cover its class-(c) crossings. A proposal may not "
+                 "widen its own authority; drop the clause and run in the shared "
+                 "realm, or have an operator place it through the gated swap "
+                 "(item 334)",
+            # G9: an untrusted author may not MINT authority. `no_declassify`
+            # refuses the self-minted declassifier; this refuses the self-minted
+            # authority ADDRESS, which is the same rule one layer out — the realm
+            # decides which standing approvals cover the crossing.
+            code="G9", category="admission",
+            navigate=_realm_navigate(
+                [r for s in found
+                 for r in (list(s.realms) if isinstance(s, RouteStmt)
+                           else [s.realm])]),
+        )
 
 
 def _iter_var_refs(node, out: set) -> None:
@@ -556,16 +699,24 @@ def check_allowlist(document: dict, profile: AdmissionProfile) -> None:
 
 def enforce_source(root_programs: list[Program],
                    profile: AdmissionProfile | None) -> None:
-    """Pre-lowering half of the profile: the structural no-extern check on the
-    parsed source. Runs BEFORE lowering, so an untrusted `extern` is refused
-    with the profile's own message before any host body is even lowered — never
-    a runtime check. A `None`/inert profile is a no-op."""
+    """Pre-lowering half of the profile: the structural checks on the parsed
+    source (no new extern, no self-minted declassifier, no self-chosen realm).
+    Runs BEFORE lowering, so an untrusted `extern` is refused with the profile's
+    own message before any host body is even lowered — never a runtime check. A
+    `None`/inert profile is a no-op."""
     if profile is None:
         return
     if profile.no_extern:
         check_no_extern(root_programs, profile)
     if profile.no_declassify:
         check_no_declassify(root_programs, profile)
+    # item 334 slice 2: the realm-placement refusal, root-scoped exactly as the
+    # no-extern check is (a trusted co-composed provider module still places
+    # whatever the operator wrote) and structural exactly as it is (no lowering,
+    # no runtime). Inert unless `no_realm_placement` is set, which only
+    # `self_extension` does — item 330's per-turn admit is byte-identical.
+    if profile.no_realm_placement:
+        check_no_realm_placement(root_programs, profile)
 
 
 def enforce_document(document: dict, profile: AdmissionProfile | None) -> None:

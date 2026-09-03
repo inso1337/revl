@@ -25,6 +25,16 @@ Three things fail the gate:
   3. A marker cites a commit sha that is a commit in THIS repo but is not
      reachable from the base ref.
 
+A fourth fails it only in the PULL REQUEST context, under `--head-branch`:
+
+  4. A marker says the work is IN FLIGHT on the PR's OWN head branch. Rules 1
+     to 3 catch a marker that is already stale. This catches the one that is
+     about to become stale: the merge deletes the branch, so the marker the PR
+     introduced reddens main's `lint` on landing, and with it every open PR
+     whose merge-ref carries the new text. Past-tense self-naming ("landed via
+     `fix/x`") is a historical statement that survives the deletion and does
+     NOT fail: only the in-flight phrasing does. See `self_branch_findings`.
+
 WHAT THIS GATE CANNOT KNOW, and will not pretend to know. It cannot tell
 whether a landed branch actually CLOSED the finding its marker is attached to.
 A branch merges for many reasons: it can fix one instance of a defect and leave
@@ -481,6 +491,65 @@ def branch_findings(markers: list[dict], git: Git) -> list[str]:
                 f"it covers and which it does not, then reword the marker in the "
                 f"past tense (for example: 'landed via {branch}')."
             )
+    return findings
+
+
+def self_branch_findings(markers: list[dict], branch: str) -> list[str]:
+    """A marker that says work is IN FLIGHT on the branch this PR is FROM.
+
+    `branch_findings` catches a marker naming a branch that is already gone.
+    This catches the one that CREATES one. A PR whose roadmap text says
+    "FIXING on `fix/277-rust-vec-char`" is green while it is open, because
+    that branch exists. The merge deletes the branch, so the marker the PR
+    just introduced is stale the instant it lands: main's `lint` goes red,
+    and because `lint` runs on branch tips, every open PR whose merge-ref
+    carries the new text goes red with it until each is retriggered by hand.
+    One merge, N stalled PRs; four occurrences on 2026-09-02 alone.
+
+    NARROW ON PURPOSE, and the narrowing is the whole check. A marker naming
+    its own branch in the PAST tense is legitimate and common - two open PRs
+    add ``LANDED SO FAR (`fix/391-selfhost-parity`)`` and are entirely
+    correct - because a sentence about what a branch DID stays true after the
+    branch is deleted. Only a sentence about what a branch IS DOING goes
+    stale. So the input here is `collect_markers`'s output and nothing else:
+    the in-flight phrasing is exactly MARKER_RE's (`FIXING`, `being fixed`,
+    `in flight`, `in-progress`, `underway`, `WIP`) plus an item's leading
+    in-progress glyph, and the branch is exactly the one BRANCH_RE and WINDOW
+    attributed to it.
+
+    Reusing the gate's own matcher is not a convenience, it is the correctness
+    argument. THE INVARIANT: this fires exactly when `branch_findings` will
+    fire on main once the merge deletes the branch (rule 2, "names a branch
+    that no longer exists on origin"). Same markers, same branch attribution,
+    one step earlier. A second matcher written to the same description would
+    drift from this one, and then the PR-time check and the main-time check
+    would disagree about which sentences are markers at all - the check meant
+    to stop a red would start causing one, or miss the one it exists for. The
+    gate's own regex is the oracle.
+
+    Scope: the whole roadmap as the PR branch has it, not the diff. A marker
+    naming this branch in flight goes stale on merge whether this PR wrote the
+    line or inherited it, so restricting to added lines would only lose true
+    positives. And only in the PR context: on main a marker naming a live
+    branch is legitimate, and is already `branch_findings`' business.
+    """
+    findings: list[str] = []
+    for mk in _dedupe(markers):
+        if mk["branch"] != branch:
+            continue
+        findings.append(
+            f"L{mk['line']}: marker says {mk['phrase']!r} on branch "
+            f"{branch!r}, which is THIS PR's own head branch.\n"
+            f"    quote: ...{mk['quote']}...\n"
+            f"    Merging deletes this branch, so this marker is stale the "
+            f"moment it lands: it reddens main's lint and every open PR whose "
+            f"merge-ref carries it. Cite the PR instead (`PR #123`), or once "
+            f"it has landed, the merge sha. A marker must not name a ref that "
+            f"is about to stop existing.\n"
+            f"    Naming this branch in the PAST tense is fine and is not what "
+            f"this reports: 'landed via {branch}' stays true after the branch "
+            f"is gone."
+        )
     return findings
 
 
@@ -1493,6 +1562,14 @@ def main(argv: list[str] | None = None) -> int:
                          f"(default {DEFAULT_BASE})")
     ap.add_argument("--no-fetch", action="store_true",
                     help="never touch the network; verdicts may be stale")
+    ap.add_argument("--head-branch", default="",
+                    help="the PR's own head branch. ALSO fail when an "
+                         "in-progress marker names THIS branch: merging "
+                         "deletes it, so such a marker is stale on landing "
+                         "and reddens main plus every open PR. Empty (the "
+                         "default, and what a push to main passes) turns the "
+                         "check off. Past-tense mentions of the branch are "
+                         "unaffected.")
     ap.add_argument("--require-issue", action="store_true",
                     help="ALSO require every open or partial top-level item to "
                          "cite a GitHub issue. Off until the issue migration "
@@ -1551,6 +1628,11 @@ def main(argv: list[str] | None = None) -> int:
     namespaces -= dirs
     markers = collect_markers(text, dirs, namespaces, heads)
     findings = branch_findings(markers, git) + sha_findings(text, git)
+    # PR context only. `--head-branch` is passed as `github.head_ref`, which is
+    # empty on a push to main, so main gets the same run it always got.
+    head_branch = args.head_branch.strip()
+    if head_branch:
+        findings += self_branch_findings(markers, head_branch)
     if args.require_issue:
         extra = issue_findings(text)
         if extra:

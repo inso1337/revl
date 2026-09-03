@@ -402,3 +402,108 @@ def test_e_leaves_the_same_number_in_another_section_alone():
 def test_e_leaves_a_number_with_one_block_alone():
     assert gate.duplicate_header_findings(
         SECTION + "428. **SUPPLY-CHAIN AUDIT.** Findings below.\n") == []
+
+
+# --------------------------------------------------------------------------
+# (F) A MARKER NAMING THE PR'S OWN HEAD BRANCH, in in-flight phrasing. Rules 1
+# to 3 catch a marker that is already stale; this catches the one that is
+# about to become stale. A PR adding "FIXING on `fix/277-rust-vec-char`" is
+# green while it is open, because that branch exists. Merging deletes the
+# branch, so the marker the PR just introduced reddens main's lint on landing
+# and, since lint runs on branch tips, every open PR whose merge-ref carries
+# the new text. Four occurrences on 2026-09-02.
+#
+# The bound that makes this usable is PAST TENSE. Two open PRs add text naming
+# their own branch and are entirely correct (#147's ``LANDED SO FAR
+# (`fix/391-selfhost-parity`)``, #157's ``REVL SIDE LANDED``), because a
+# sentence about what a branch DID stays true after the branch is deleted.
+# Only a sentence about what a branch IS DOING goes stale. Both shapes are
+# pinned below, and the check reads `collect_markers` — the gate's own
+# MARKER_RE/BRANCH_RE/WINDOW — so it cannot drift from the gate it extends.
+# --------------------------------------------------------------------------
+SELF_BRANCH = "fix/277-rust-vec-char"
+
+_F_BITES = SECTION + """277. **RUST TIER AUDIT (2026-09-02).** Findings below.
+
+**F1 HIGH, ❌ STILL OPEN.** The `Vec[Char]` lowering drops the last
+element. FIXING on `fix/277-rust-vec-char`.
+"""
+
+# The escape hatch, and the house style: cite the PR, which outlives the merge.
+_F_PASSES = _F_BITES.replace(
+    "FIXING on `fix/277-rust-vec-char`.",
+    "Being fixed in PR #175.")
+
+
+def _markers(text: str) -> list[dict]:
+    return gate.collect_markers(text, DIRS, NAMESPACES, HEADS)
+
+
+def test_f_marker_naming_the_prs_own_branch_in_flight_bites():
+    found = gate.self_branch_findings(_markers(_F_BITES), SELF_BRANCH)
+    assert len(found) == 1, _labels(found)
+    assert "THIS PR's own head branch" in found[0]
+    assert "stale the moment it lands" in found[0]
+
+
+def test_f_passes_once_the_marker_cites_the_pr_instead_of_the_branch():
+    """`PR #175` is not a branch, so nothing is collected to go stale."""
+    assert _markers(_F_PASSES) == []
+    assert gate.self_branch_findings(_markers(_F_PASSES), SELF_BRANCH) == []
+
+
+def test_f_past_tense_self_naming_passes():
+    """The #147 shape. ``LANDED SO FAR (`fix/391-selfhost-parity`)`` on a PR
+    from `fix/391-selfhost-parity` looks exactly like the trap and is not one:
+    what a branch DID stays true after the branch is deleted."""
+    text = SECTION + """391. **SELF-HOST PARITY (2026-09-02).** Findings below.
+
+**F1 MEDIUM, ◑ PARTLY CLOSED.** LANDED SO FAR (`fix/391-selfhost-parity`):
+the lowerer's fn-body path and the wasm flow emitter.
+"""
+    assert _markers(text) == []
+    assert gate.self_branch_findings(
+        _markers(text), "fix/391-selfhost-parity") == []
+
+
+def test_f_past_tense_passes_on_the_same_sentence_the_in_flight_form_fails():
+    """The one word that decides it, on one fixture, so the two shapes cannot
+    drift apart: 'FIXING on X' fails and 'landed via X' passes."""
+    past = _F_BITES.replace("FIXING on `fix/277-rust-vec-char`.",
+                            "Landed via `fix/277-rust-vec-char`.")
+    assert _markers(past) == []
+    assert gate.self_branch_findings(_markers(past), SELF_BRANCH) == []
+
+
+def test_f_leaves_a_marker_naming_a_DIFFERENT_branch_alone():
+    """The false positive this check must not have. A marker naming another
+    live branch is legitimate and is `branch_findings`' business, not this
+    one's — the merge of THIS PR does not delete that branch."""
+    other = _F_BITES.replace("fix/277-rust-vec-char", "fix/999-somewhere-else")
+    assert len(_markers(other)) == 1, "fixture stopped producing a marker"
+    assert gate.self_branch_findings(_markers(other), SELF_BRANCH) == []
+
+
+def test_f_leaves_a_marker_citing_a_sha_alone():
+    """A sha has no slash, so it is not a branch reference and outlives the
+    merge anyway. The second half of the documented remedy."""
+    sha = _F_BITES.replace("FIXING on `fix/277-rust-vec-char`.",
+                           "Being fixed on `1602cc94`.")
+    assert gate.self_branch_findings(_markers(sha), SELF_BRANCH) == []
+
+
+def test_f_the_in_progress_glyph_form_bites_too():
+    """`collect_markers`' other source: an item whose leading status glyph is
+    the in-progress one, with no phrase at all. It asserts the same thing and
+    goes stale the same way."""
+    text = SECTION + ("277. \U0001f6a7 **The rust `Vec[Char]` lowering drops "
+                      "the last element.** On `fix/277-rust-vec-char`.\n")
+    found = gate.self_branch_findings(_markers(text), SELF_BRANCH)
+    assert len(found) == 1, _labels(found)
+    assert "carries the in-progress glyph" in found[0]
+
+
+def test_f_is_off_when_no_head_branch_is_known():
+    """A push to main passes an empty `--head-branch`. Nothing is a self-name
+    then, and main's own behaviour is unchanged."""
+    assert gate.self_branch_findings(_markers(_F_BITES), "") == []

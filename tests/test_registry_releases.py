@@ -112,13 +112,128 @@ def test_a_first_release_is_recorded_frozen_and_indexed(reg):
 
 def test_the_discoverability_fields_ride_into_the_published_row(reg):
     """description/tags are the two fields the compiler cannot derive, so the
-    publish carries them into the row (they are not part of the regenerated
-    surface `verify` reproduces)."""
+    publish records them beside the source in `meta.json` and the regenerator
+    copies them into the row from there."""
     registry.publish_release(reg, "greeter", V1, version="1.0.0",
                              description="greets", tags=["greet"])
 
     assert _row(reg)["description"] == "greets"
     assert _row(reg)["tags"] == ["greet"]
+    assert json.loads((_entry(reg) / registry.ENTRY_META_FILENAME).read_text()) \
+        == {"description": "greets", "tags": ["greet"]}
+
+
+def test_a_publish_with_a_description_leaves_a_verifiable_index(reg):
+    """THE point of putting description/tags in a file. They used to be patched
+    into the row AFTER `build_index` ran, so no regeneration could ever
+    reproduce them and `verify` called every registry with a published component
+    stale — forever, which made a genuinely stale index indistinguishable from
+    the normal state. The whole row is regenerable now, so the check bites
+    again."""
+    registry.publish_release(reg, "greeter", V1, version="1.0.0",
+                             description="greets", tags=["greet"])
+
+    assert registry.verify(reg) == []
+    # not vacuously: the row really does carry the two fields, and the check
+    # covers them rather than skipping past them.
+    assert registry.build_index(reg, write=False)["components"]["greeter"] \
+        == _row(reg)
+    assert _row(reg)["description"] == "greets"
+
+
+def test_a_hand_edited_description_turns_the_check_red(reg):
+    """The other half of the same claim: `verify` now catches a row whose
+    discoverability fields disagree with the file they are generated from, the
+    way it already catches a hand-edited capability set."""
+    registry.publish_release(reg, "greeter", V1, version="1.0.0",
+                             description="greets", tags=["greet"])
+    index_path = reg / registry.INDEX_FILENAME
+    doc = json.loads(index_path.read_text())
+    doc["components"]["greeter"]["description"] = "does absolutely everything"
+    index_path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+
+    problems = registry.verify(reg)
+
+    assert any("stale" in p for p in problems)
+
+
+def test_an_update_that_restates_nothing_keeps_the_description(reg):
+    """A regeneration used to DROP the fields it could not derive, so an update
+    that did not restate them silently un-described the component. They live in
+    a file the update leaves alone."""
+    registry.publish_release(reg, "greeter", V1, version="1.0.0",
+                             description="greets", tags=["greet"])
+    registry.publish_release(reg, "greeter", V1_PLUS, version="1.1.0")
+
+    assert _row(reg)["description"] == "greets"
+    assert _row(reg)["tags"] == ["greet"]
+    assert registry.verify(reg) == []
+
+
+def test_meta_json_that_the_row_cannot_be_regenerated_from_is_refused(reg):
+    """Fail closed like the `version` file: a meta.json the regenerator cannot
+    copy verbatim is a refusal, not a shrug — it is the only thing holding these
+    two fields under the check."""
+    registry.publish_release(reg, "greeter", V1, version="1.0.0",
+                             description="greets", tags=["greet"])
+    meta_path = _entry(reg) / registry.ENTRY_META_FILENAME
+
+    meta_path.write_text(json.dumps({"description": "greets", "homepage": "x"}))
+    with pytest.raises(RevlError) as caught:
+        registry.build_index(reg, write=False)
+    assert "homepage" in str(caught.value)
+
+    meta_path.write_text(json.dumps({"tags": "greet"}))
+    with pytest.raises(RevlError) as caught:
+        registry.build_index(reg, write=False)
+    assert "tags must be a list of strings" in str(caught.value)
+
+
+# ------------------------------------------------------- the existing registry
+
+def test_a_registry_published_before_meta_json_is_told_what_to_run(reg):
+    """The migration answer. A registry whose rows were written by the old path
+    has description/tags in `index.json` and no `meta.json` to regenerate them
+    from. `verify` must not merely say "stale": the obvious repair for a stale
+    index — regenerate and commit — would DELETE the two fields, because nothing
+    under `components/` records them any more. So it names that case, and names
+    the migration."""
+    registry.publish_release(reg, "greeter", V1, version="1.0.0",
+                             description="greets", tags=["greet"])
+    (_entry(reg) / registry.ENTRY_META_FILENAME).unlink()   # the old shape
+
+    problems = registry.verify(reg)
+
+    assert any(registry.ENTRY_META_FILENAME in p and "migrate_meta" in p
+               for p in problems)
+    assert any("would drop them" in p for p in problems)
+
+
+def test_migrate_meta_lifts_the_fields_out_of_the_committed_index(reg):
+    registry.publish_release(reg, "greeter", V1, version="1.0.0",
+                             description="greets", tags=["greet"])
+    (_entry(reg) / registry.ENTRY_META_FILENAME).unlink()
+
+    assert registry.migrate_meta(reg) == ["greeter"]
+
+    assert json.loads((_entry(reg) / registry.ENTRY_META_FILENAME).read_text()) \
+        == {"description": "greets", "tags": ["greet"]}
+    assert _row(reg)["description"] == "greets"
+    assert registry.verify(reg) == []
+    # idempotent, and it never overwrites the file beside the component.
+    assert registry.migrate_meta(reg) == []
+
+
+def test_a_registry_with_no_published_description_needs_no_migration(reg):
+    """The five entries committed under `registry/` are this shape: they carry
+    hand-written `version` files and published rows, but nothing ever wrote a
+    description or tags into their rows, so there is nothing to lift and their
+    index bytes do not move."""
+    registry.publish_release(reg, "greeter", V1, version="1.0.0")
+
+    assert "description" not in _row(reg)
+    assert registry.migrate_meta(reg) == []
+    assert registry.verify(reg) == []
 
 
 def test_an_unversioned_first_release_stays_legal_and_carries_no_release_row(reg):

@@ -14,7 +14,7 @@ export function build(n: bigint): bigint[] {
     let xs = []
     let i = 0n
     while ((i < n)) {
-      xs = [...xs, i]
+      xs.push(i)
       i = revlI64(i + 1n)
     }
     return xs
