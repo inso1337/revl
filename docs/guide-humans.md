@@ -228,20 +228,25 @@ compile error, never a host pass-through ([docs/stdlib-2.0.md](stdlib-2.0.md)):
 This is the point of the language, each rejection names the guarantee and
 the fix ([DESIGN.md](../DESIGN.md) §4):
 
+<!-- docgen:guarantees-humans begin -->
 | # | Guarantee |
 |---|---|
-| G1 | Every requirement is declared; undeclared access can't be written |
-| G2 | Provision disjointness in a composition |
-| G3 | Dependency cycles rejected |
-| G4 | Every mutation carries an inverse or an `emit` marker |
-| G5 | Teardown can't register effects (by construction) |
-| G6 | Code outside effect forms is pure (confinement) |
-| G7 | Derived teardown is LIFO-complete |
-| G8 | The boundary surface (externs, emissions) is enumerable |
+| G1 | declared access: a component reads only what it requires |
+| G2 | provision disjointness: one provider per key (per realm) |
+| G3 | acyclic dependencies: a cycle can never activate |
+| G4 | every mutation carries an inverse, or admits irreversibility with `emit` |
+| G5 | teardown cannot register effects |
+| G6 | purity outside effect forms |
+| G7 | derived LIFO teardown |
+| G8 | the boundary surface is enumerable |
+| G9 | untrusted data cannot create authority without a declared declassification |
 
-…plus the lifecycle rules A1–A8 (await boundaries, no acquisition after
-`provide`, `fail` semantics, and so on). The rejection suite in
-[`examples/rejections/`](../examples/rejections/) is the executable spec.
+...plus the lifecycle rules A1, A2, A3, A5, A6, A8 and A9 (await boundaries, no acquisition
+after `provide`, `fail` semantics, and so on), the confidentiality rules
+`G-SECRET` and `G-SECRET-FLOW`, and the typing rules T1, T2 and T3. The rejection
+suite in [`examples/rejections/`](../examples/rejections/) is the
+executable spec, and [rejections.md](rejections.md) is the full table.
+<!-- docgen:guarantees-humans end -->
 
 ## Tooling
 
@@ -255,11 +260,17 @@ below; the exhaustive per-command flag reference is
 |---|---|---|
 | `revl compile FILES` | parse → check → link → IR (`-o OUT`, `--json-diagnostics`) | [commands-reference.md](commands-reference.md#revl-compile) · [backend-ir-v1.md](backend-ir-v1.md) |
 | `revl explain CODE` | what a diagnostic code guarantees and how to fix it | [commands-reference.md](commands-reference.md#revl-explain) · [why-traces.md](why-traces.md) |
+| `revl grammar` | the language surface, sized for a prompt (`--prompt` prints the full pinnable grammar) | [commands-reference.md](commands-reference.md#revl-grammar) · [syntax-2.0.md](syntax-2.0.md) |
 | `revl doctor` | diagnose each backend tier, runtime and dependency (OK/WARN/MISSING + version), then smoke-test every available tier (`--json`, `--no-smoke`, `--smoke-timeout`) | [commands-reference.md](commands-reference.md#revl-doctor) |
 | `revl scaffold --service NAME` | generate a typed, holed composition skeleton from a spec (`--requires`/`--capabilities`/`--method`/`--emits`/`--config`, `-o`, `--json`) | [scaffold.md](scaffold.md) |
+| `revl composition FILE` | resolve a composition document's row table: label, claims, component, config and requires per row, without lowering a body (`--json`, `--admit`) | [composition-rows.md](composition-rows.md) |
+| `revl layer check FILE` | the same folded row table with each row's LAYER provenance, so an overlay's origin is visible (`--json`, `--set`) | [composition-layers.md](composition-layers.md) |
+| `revl adapt NEED CANDIDATE` | can this candidate service stand in for the required one, and `--emit` the adapter that makes it so | [commands-reference.md](commands-reference.md#revl-adapt) |
+| `revl policy evaluate POLICY FILES` | dry-run a boundary policy: per rule, which clauses pass or fail and why (fact against threshold) | [boundary-policy.md](boundary-policy.md) |
 | `revl audit FILES` | manifest + G8 boundary surface (`--json`); `--diff PREV.json` is the authority-drift gate, `--accept`/`--accept-all` acknowledge added crossings | [interchange-format.md](interchange-format.md) · [audit-diff.md](audit-diff.md) |
 | `revl diff PREV CURR` | semantic composition diff: components added/removed/changed, emissions gained/lost, provide/require edges, the PR-review tool for agent-generated compositions | [revl-diff.md](revl-diff.md) |
 | `revl version PREV CURR` | derive the required semver bump from the interface diff against a previous composition | [derived-versioning.md](derived-versioning.md) |
+| `revl changelog --from OLD --to NEW` | the release note derived from the interface, structural and authority delta, with the semver headline | [derived-versioning.md](derived-versioning.md) |
 | `revl contract FILES` | federated contracts between sovereign compositions: export a consumer surface, or check a provider against a pinned one | [federation.md](federation.md) |
 | `revl erase-report FILES --realm R` | right-to-erasure evidence for one realm (`--json`, `--no-residue-proof`) | [erase-report.md](erase-report.md) |
 | `revl plan FILES` | dry run for admission (`--manifest RUNNING.json`, `--replacing`); `-o change.plan` serializes an executable plan | [plan.md](plan.md) |
@@ -275,7 +286,11 @@ below; the exhaustive per-command flag reference is
 | `revl repair --component C [--candidate FILE] [--plan]` | the repair loop: diagnose a fault and re-admit a fix within declared policy bounds | [repair-loop.md](repair-loop.md) |
 | `revl run FILES` | boot on a Cordis runtime, see the tier table below and the flag list | [replay.md](replay.md) · [crash-recovery.md](crash-recovery.md) |
 | `revl recover --wal FILE` | crash recovery: roll a WAL forward/back to a checked verdict + residue proof (`--restore`, `--json`) | [crash-recovery.md](crash-recovery.md) |
+| `revl estop` | the operator's emergency halt: stop dispatching crossings now, unwind nothing, and report what was left stranded | [commands-reference.md](commands-reference.md#revl-estop) |
+| `revl branch --wal FILE` | session branch lineage over durable WALs: the branch tree, and the fork partition of a recorded tail (`--at SEQ`) | [commands-reference.md](commands-reference.md#revl-branch) |
+| `revl compare LEFT.wal RIGHT.wal` | what two sessions did after a shared fork point, and what durable logs cannot yet say | [commands-reference.md](commands-reference.md#revl-compare) |
 | `revl why COMPONENT --trace FILE` | explain a recorded lifecycle transition's cause chain; `--check FILES` runs the withdraw oracle | [why-runtime.md](why-runtime.md) |
+| `revl trace FILE` | the causal trace of a recorded run, hop by hop (`--component`, `--model`, `--otel`) | [why-traces.md](why-traces.md) |
 | `revl metrics --trace FILE` | capability-aware runtime metrics over a `run --trace` JSONL: emissions by capability, failures by G-rule, average lifecycle duration | [revl-metrics.md](revl-metrics.md) |
 | `revl profile --trace FILE` | diff a component's declared emission surface against what a run actually emitted, flagging over-declaration | [revl-profile.md](revl-profile.md) |
 | `revl attest FILES` | sign a portable record that this exact composition was admitted (IR hash + verdict + guarantees + timestamp); `--verify` checks one | [revl-attest.md](revl-attest.md) |
@@ -286,6 +301,9 @@ below; the exhaustive per-command flag reference is
 | `revl mcp import MANIFEST` | turn an MCP `tools/list` manifest into revl source | [mcp-bridge.md](mcp-bridge.md) |
 | `revl import wit\|openapi\|cordis\|a2a FILE` | import an external interface definition as typed revl source | [import-wit.md](import-wit.md) · [import-openapi.md](import-openapi.md) · [import-cordis.md](import-cordis.md) · [import-a2a.md](import-a2a.md) |
 | `revl export wit FILES --service N\|--composition` | generate the standard WIT interface for a revl service/composition | [wit-bridge.md](wit-bridge.md) |
+| `revl emit FILES` | render one backend's source directly, no IR round-trip (`--backend`, `--target temporal`) | [backends-roadmap.md](backends-roadmap.md) |
+| `revl bundle FILES --out DIR` | emit every tier plus the runtime manifest into one portable bundle (`--backend`, `--topology`) | [deploy.md](deploy.md) |
+| `revl verify BUNDLE` | check a bundle tier by tier; nonzero on a failing tier, so it is usable as a release gate | [commands-reference.md](commands-reference.md#revl-verify) |
 | `revl truc VERB …` | the component manager namespaced under the compiler, `add`/`rm`/`assemble`/`ship`/`reproduce`, tail passed through unchanged | [truc.md](truc.md) |
 
 Two module entry points sit outside the `revl` subcommand tree. `python -m
@@ -426,11 +444,14 @@ easiest place to overclaim:
   runtime.
 - **`mcp serve`** holds a composition **in memory** so an agent can load,
   call, swap and prove no-residue without touching the filesystem
-  ([mcp-bridge.md](mcp-bridge.md)). The tool surface, its annotations and its
-  structured rejections are gated by `tests/test_mcp.py` (33 tests). The live
-  session, actually booting a composition through those tools, is
-  `tests/test_mcp_session.py`, which needs the cordis-py runtime and
-  therefore **skips in CI**.
+  ([mcp-bridge.md](mcp-bridge.md)). The live session, actually booting a
+  composition through those tools, is `tests/test_mcp_session.py`, which needs
+  the cordis-py runtime and therefore **skips in CI**.
+
+<!-- docgen:mcp-test-count begin -->
+The `mcp serve` tool surface, its annotations and its structured rejections
+are gated by `tests/test_mcp.py` (47 tests).
+<!-- docgen:mcp-test-count end -->
 
 ## Backends
 

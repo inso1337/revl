@@ -250,6 +250,17 @@ else
     note "site wheel freshness"
 fi
 
+# issue #255: the source-derived doc blocks (the MCP verb table, the CLI verb
+# list, the guarantee tables, the DOC-STATUS inventory, the test count) must
+# equal a fresh generation, and every subcommand and verb must be documented at
+# all. Same contract as the matrix above. `make docs-gen` is the fix for a stale
+# block; prose is the fix for a coverage failure.
+if want gate docs; then
+    step "docs drift      (docgen --check)"    python3 tools/docgen.py --check
+else
+    note "docs drift      (docgen --check)"
+fi
+
 # 5. Lint (the CI `lint` job): ruff at the pinned version. Prefer a ruff already
 #    on PATH; else fetch the pinned one with uvx; else loud-skip.
 if ! want gate ruff; then
