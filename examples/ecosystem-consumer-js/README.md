@@ -110,7 +110,7 @@ The four candidates are worked examples, not decoration:
 | `undeclared_tool.rvl` | `REJECT`, `G1` | refuses | a component reaching `db` it never declared, refused locally in the tab with no server and no Python |
 | `unmarked_emission_tool.rvl` | `REJECT`, `G4` | refuses | a plain-declared method reaching an emission extern |
 | `double_tool.rvl` | `ESCALATE`, `no-objection` | **admits** | the cross-tier case: py ADMITS this, and this gate merely has nothing to refuse. Reading the second as the first is the mistake the contract exists to prevent |
-| `digit_tool.rvl` | `ESCALATE`, `outside-frontier` | admits | uses `.is_digit()`, a reference builtin the self-host does not lower, so the gate declines to decide rather than guessing |
+| `digit_tool.rvl` | `ESCALATE`, `no-objection` | admits | uses `.is_digit()`. This was the batch's `outside-frontier` row until roadmap item 391 ported that builtin into the self-host lowering, emptying both lexical rows of the generated frontier table. The remaining fail-closed trigger is the SIZE bound (`MAX_SOURCE_BYTES`), exercised by an oversized candidate the test writes beside these rather than a 256 KB file committed here |
 
 ## The double enforcement, which is what the browser demo is for
 
