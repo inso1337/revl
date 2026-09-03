@@ -175,19 +175,21 @@ def test_exit_one_of_n_diverges_and_reverts_clean(baseline_ir):
 
 def test_exit_test_over_the_mcp_verb():
     """The same exit test, driven through the `revl_canary` MCP verb, proving
-    the server surface returns the identical verdict."""
-    from revl.mcp import server
+    the server surface returns the identical verdict.
 
-    with open(BASELINE, encoding="utf-8") as handle:
-        baseline_src = handle.read()
-    with open(CANDIDATE_DIVERGE, encoding="utf-8") as handle:
-        candidate_src = handle.read()
+    Through `baselineFiles`/`candidateFiles`, not inline `source`. These
+    compositions place their components into per-tenant REALMS, which is an
+    authority address an untrusted author may not write (item 334's G9), and
+    inline text is agent-authored whatever path it claims to sit at. A `.rvl`
+    file inside a sanctioned root is not: no MCP verb writes to disk, so a human
+    put it there. That is the route an operator's own reviewed source takes."""
+    from revl.mcp import server
 
     response = server.handle({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "revl_canary", "arguments": {
-            "baseline": baseline_src,
-            "candidate": candidate_src,
+            "baselineFiles": [BASELINE],
+            "candidateFiles": [CANDIDATE_DIVERGE],
             "realm": "tenant_a",
             "proveResidue": False,
         }},
