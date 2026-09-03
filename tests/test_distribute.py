@@ -231,10 +231,15 @@ def test_placement_preflights_a_missing_cordis_before_spawning(monkeypatch, caps
 
 
 class _FakeProc:
-    """Enough of a Popen for the conductor: comes up, then stops."""
+    """Enough of a Popen for the conductor: comes up, then unwinds."""
 
     def __init__(self, name):
-        self.stdout = io.StringIO(f"[{name}] UP\n")
+        # Both lines, because a child that says UP and then exits
+        # without ever saying DOWN is a STRANDED teardown, not a clean
+        # one, and the conductor now says so (issue 265). Every real
+        # runner prints DOWN; a double that does not is modelling a
+        # failure this test is not about.
+        self.stdout = io.StringIO(f"[{name}] UP\n[{name}] DOWN\n")
         self.stdin = io.StringIO()
 
     def poll(self):

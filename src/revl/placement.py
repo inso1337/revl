@@ -2087,6 +2087,15 @@ _TEARDOWN_GRACE = 30.0
 # Once a child HAS said DOWN its unwind is complete and proven; all that is
 # outstanding is its own exit (a flush, a socket close), which is bounded.
 _TEARDOWN_EXIT_GRACE = 5.0
+# How long to let the conductor's reader thread catch up after a child has
+# exited, before concluding that no `DOWN` line is coming (issue 265). The
+# child prints `DOWN` and exits microseconds later, but `is_down` is fed by a
+# SEPARATE pump thread, so `proc.poll()` can go non-None while that line is
+# still sitting unread in the pipe. Without this wait, widening the stranded
+# check to "exited without DOWN" would accuse a cleanly-unwound child. It is
+# paid only when `DOWN` has not been seen yet, and it is draining a pipe that
+# is already at EOF, so it is generous rather than tuned.
+_TEARDOWN_DOWN_READ_GRACE = 2.0
 
 
 def _teardown_grace() -> float:
@@ -2119,17 +2128,55 @@ def _stop_all(children: dict, is_down=None, grace: float | None = None) -> list[
     `grace` survives as a HANG BACKSTOP so a wedged child can never hang the
     conductor forever -- the kill exists for a reason. Because it is no longer
     racing an ordinary teardown it is generous, and, the half that matters,
-    tripping it is REPORTED: this returns the name of every child that had to
-    be SIGKILLed before it said DOWN. Such a child is `halted` in item 443's
-    sense -- its entries are stranded (registered, not run, not dropped) and
-    its residue is UNKNOWN -- and the caller must say so. A kill is never a
-    clean exit.
+    tripping it is REPORTED.
+
+    WHAT IS REPORTED IS "IT EXITED WITHOUT EVER SAYING DOWN" (issue 265), not
+    "we had to SIGKILL it". Which signal ended a child says nothing about
+    whether its unwind completed; the `DOWN` line is the only thing that does.
+    A child that dies on the SIGTERM above -- the runner losing the window
+    between `UP` and its own signal handler, a hard crash inside the unwind, an
+    external `kill` -- already has `proc.poll() is not None` by the time this
+    looks, and the old check let it out through the same `continue` as a child
+    that walked every entry and printed its residue proof. That is exactly the
+    silence issue 239 exists to break, arriving through the one door 246 left
+    open: G7 (LIFO teardown completeness) and R4 (no residue) both violated,
+    neither reported, conductor rc 0.
+
+    So: this returns the name of every child that exited before saying DOWN,
+    however it died. Such a child is `halted` in item 443's sense -- its entries
+    are stranded (registered, not run, not dropped) and its residue is UNKNOWN
+    -- and the caller must say so. Neither a kill nor a silent death is a clean
+    exit.
     """
     if grace is None:
         grace = _teardown_grace()
 
     def said_down(name: str) -> bool:
         return is_down is not None and bool(is_down(name))
+
+    def settled_down(name: str) -> bool:
+        """`said_down`, but only after the reader has had its chance.
+
+        Called once a child has EXITED, where a bare `said_down` would race the
+        conductor's pump thread: the runner prints `DOWN` and returns from
+        `main` microseconds later, so the process can be reaped before the line
+        it just wrote has been read. Returns immediately in the common case
+        (the line is already in) and waits a bounded, generous moment
+        otherwise -- the pipe is at EOF, so the reader is not waiting on the
+        child for anything. NOT used on the kill path below, which has already
+        spent the whole of `grace` polling `said_down` and needs no further
+        benefit of the doubt.
+        """
+        if said_down(name):
+            return True
+        if is_down is None:
+            return False
+        limit = time.monotonic() + _TEARDOWN_DOWN_READ_GRACE
+        while time.monotonic() < limit:
+            time.sleep(0.02)
+            if said_down(name):
+                return True
+        return False
 
     for proc, stop_mode in children.values():
         if proc.poll() is not None:
@@ -2156,6 +2203,10 @@ def _stop_all(children: dict, is_down=None, grace: float | None = None) -> list[
                 break
             time.sleep(0.02)
         if proc.poll() is not None:
+            # It is gone without our having to kill it -- which says nothing
+            # about whether it UNWOUND (issue 265). Only `DOWN` says that.
+            if not settled_down(name):
+                stranded.append(name)
             continue
         proc.kill()
         try:
@@ -2170,7 +2221,7 @@ def _stop_all(children: dict, is_down=None, grace: float | None = None) -> list[
 
 
 def _stranded_teardown_report(names: list[str]) -> str:
-    """What the conductor says about a child it had to SIGKILL mid-teardown.
+    """What the conductor says about a child that exited mid-teardown.
 
     Deliberately the E-Stop verdict's vocabulary (`_render_estop` in
     `cli/change.py`), because it is the same epistemic position: the unwind
@@ -2180,8 +2231,8 @@ def _stranded_teardown_report(names: list[str]) -> str:
     listed = ", ".join(names)
     plural = "es" if len(names) > 1 else ""
     return (
-        f"error: teardown HALTED -- {len(names)} process{plural} had to be "
-        f"SIGKILLed before saying DOWN: {listed}\n"
+        f"error: teardown HALTED -- {len(names)} process{plural} exited "
+        f"before saying DOWN: {listed}\n"
         "  The unwind was cut mid-flight. The LIFO walk did not reach every\n"
         "  registered entry (G7) and no no-residue proof printed (R4), so every\n"
         "  entry those processes still held is STRANDED -- registered, not run,\n"
@@ -3056,11 +3107,13 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     up: set[str] = set()
     repointed: set[tuple[str, str]] = set()
     down: set[str] = set()
-    # issue 239: children SIGKILLed before they said DOWN. Their unwind was cut
-    # mid-flight, so their residue is UNKNOWN; the conductor must never report
-    # that as a clean exit. Accumulated across EVERY teardown this run performs
-    # (a refused swap successor, a swapped-out provider, the final teardown),
-    # because any one of them can be the one that was cut.
+    # issue 239 / 265: children that exited before they said DOWN -- by
+    # SIGKILL, by the SIGTERM that asked them to stop, or by any other death.
+    # Their unwind was cut mid-flight, so their residue is UNKNOWN; the
+    # conductor must never report that as a clean exit. Accumulated across
+    # EVERY teardown this run performs (a refused swap successor, a swapped-out
+    # provider, the final teardown), because any one of them can be the one
+    # that was cut.
     stranded: list[str] = []
     threads: list[threading.Thread] = []
     _re_repoint = re.compile(r"^\[(?P<p>[^\]]+)\] REPOINTED (?P<k>\S+) ->")
@@ -3107,7 +3160,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
 
     def stop_all(group: dict) -> None:
         """`_stop_all` with this conductor's DOWN tracker wired in, recording
-        any child that had to be killed before it finished unwinding."""
+        any child that exited before it finished unwinding."""
         for name in _stop_all(group, is_down=lambda n: n in down):
             if name not in stranded:
                 stranded.append(name)
@@ -3392,7 +3445,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             # issue 239: the drain was cut short, so the sentence below would be
             # a lie. Say what is actually known instead.
             print(f"swap: {component} now on {to_backend} ({succ}), but the old "
-                  f"provider {old} was SIGKILLed before it said DOWN: its unwind "
+                  f"provider {old} exited before it said DOWN: its unwind "
                   f"is INCOMPLETE and its residue is UNKNOWN.", flush=True)
         else:
             print(f"swap: {component} now on {to_backend} ({succ}); the old provider "
