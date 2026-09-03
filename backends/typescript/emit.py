@@ -1059,12 +1059,21 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
     """
     scope = ctx.component_scope
     lines: list[str] = []
+    # issue #273: a method body has no declared local types either; the same
+    # pre-pass types its `[]` bindings (there is no `returns` to lean on here,
+    # so it decides from the pushes, or falls back to `any[]`).
+    empty_lists = _v3_empty_list_types(steps, None, None, ctx)
     for step in steps:
         kind = step.get("step")
         if kind == "let":
             name = scope.bind(step["name"])
             keyword = "let" if step.get("mutable") else "const"
-            lines.append(f"{indent}{keyword} {name} = {_expr(step['value'], ctx)}")
+            # issue #273: `[]` alone has no element type; annotate it.
+            ann = ""
+            if _v3_is_empty_list(step.get("value")):
+                ann = ": " + empty_lists.get(step.get("name"), "any[]")
+            lines.append(
+                f"{indent}{keyword} {name}{ann} = {_expr(step['value'], ctx)}")
         elif kind == "assign":
             lines.append(f"{indent}{_ident(step['name'], 'binding')} = "
                          f"{_expr(step['value'], ctx)}")
@@ -2252,6 +2261,17 @@ class _Ctx:
         }
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # issue #273: declared return type by callable name, so the empty-list
+        # pre-pass can type `let out = []` from what a call feeding it answers.
+        self.returns_by_name: dict = {
+            entry.get("name"): entry.get("returns")
+            for entry in list(functions or []) + list(externs or [])
+            if isinstance(entry, dict) and isinstance(entry.get("returns"), str)
+        }
+        # issue #273: local name -> TS type for the bindings of the body being
+        # rendered that are introduced as `[]`. Empty in every context that has
+        # not run the pre-pass, which emits exactly as before.
+        self.empty_list_types: dict = {}
         # item 243 (docs/design/243-witnessed-externs.md): witnessed externs by
         # name, so a call site can be recognised as a transactional effect and
         # register its DECLARED inverse (not a site-spelled one) into the
@@ -2301,11 +2321,14 @@ class _Ctx:
         return f"$revl_match_{self._counter[0]}"
 
     def with_scope(self, scope, in_async=None, async_locals=None,
-                   in_arrow=None) -> "_Ctx":
+                   in_arrow=None, empty_list_types=None) -> "_Ctx":
         view = _Ctx.__new__(_Ctx)
         view.types = self.types
         view.function_names = self.function_names
         view.extern_names = self.extern_names
+        view.returns_by_name = self.returns_by_name
+        view.empty_list_types = (self.empty_list_types
+                                 if empty_list_types is None else empty_list_types)
         view.witnessed = self.witnessed
         view.async_names = self.async_names
         view.async_ops = self.async_ops
@@ -2541,14 +2564,21 @@ def _v3_do_expr(node: dict, ctx: "_Ctx") -> str:
         raise EmitError("a `do` block arm requires a component/method body")
     inner = ctx.component_scope.child()
     body_ctx = ctx.with_scope(inner)
+    stmts = node.get("stmts") or []
+    # issue #273: annotate the arm's `[]` bindings the same way a method body's
+    # are (the arm's tail is an expression, so there is no declared return).
+    empty_lists = _v3_empty_list_types(stmts, None, None, ctx)
     lines: list[str] = []
-    for st in node.get("stmts") or []:
+    for st in stmts:
         if st.get("step") != "let":
             raise EmitError(f"unsupported step in a `do` block arm: {st.get('step')!r}")
         value = _expr(st.get("value"), body_ctx)
         name = inner.bind(st.get("name"))
         keyword = "let" if st.get("mutable") else "const"
-        lines.append(f"{keyword} {name} = {value};")
+        ann = ""
+        if _v3_is_empty_list(st.get("value")):
+            ann = ": " + empty_lists.get(st.get("name"), "any[]")
+        lines.append(f"{keyword} {name}{ann} = {value};")
     lines.append(f"return {_expr(node.get('tail'), body_ctx)};")
     a = "async " if ctx.in_async else ""
     body = " ".join(lines)
@@ -2760,6 +2790,211 @@ def _ts_inplace_stmt(name: str, value: dict, ctx: "_Ctx") -> str:
     return f"{name}.delete({args[0]})"
 
 
+# ---------------------------------------------------------------------------
+# issue #273: annotate a local bound to an EMPTY list literal.
+#
+# `let xs = []` gives TypeScript nothing to infer an element type from. TS has
+# an "evolving array" analysis that rescues SOME of these — `let xs = []` whose
+# only writes are `xs.push(v)` acquires `v[]` — but it gives up the moment the
+# binding is READ before its type is determined, and then reports TS7034 at the
+# declaration plus a TS7005 per read. Two shapes the emitter produces routinely
+# land there:
+#
+#   * the persistent-append lowering, `xs = [...xs, v]`. The spread is a read of
+#     `xs`, so the evolving analysis never starts. (This is why the item-445
+#     unique markers — which turn that into an in-place `xs.push(v)` where the
+#     old value is provably dead — *reduced* the failure count without removing
+#     it: they change which shape is emitted, not whether the bare `[]` is
+#     typed.)
+#   * a binding that is only ever returned or iterated, never pushed to.
+#
+# `typecheck-generated` exists to prove this tier emits TypeScript that actually
+# typechecks, so the fix belongs here rather than in a config. The pre-pass
+# below recovers the surface type from the rest of the body and the emitter
+# annotates the `let` with it. It is deliberately partial: where the IR does not
+# make the type certain it falls back to `any[]`, which is still a DETERMINED
+# type (no TS7034/TS7005) and no worse than the implicit `any[]` TypeScript was
+# inferring anyway — never a guessed concrete type, which could reject a program
+# the frontend accepted.
+# ---------------------------------------------------------------------------
+
+def _v3_is_empty_list(node: object) -> bool:
+    """`[]` — a list literal with no items, the shape TS cannot type."""
+    return (isinstance(node, dict) and node.get("kind") == "list"
+            and not node.get("items"))
+
+
+def _v3_dicts(node: object):
+    """Every dict in an IR subtree, parents before children."""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _v3_dicts(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _v3_dicts(value)
+
+
+# `and`/`or` are spelled as the revl operators in the IR; the rest are the
+# comparison set `_TS_V3_BIN_OPS` renders. All of them answer `Bool`.
+_V3_BOOL_OPS = frozenset((
+    "==", "===", "!=", "!==", "<", ">", "<=", ">=", "and", "or", "&&", "||"))
+
+
+def _v3_list_element(surface: object) -> "str | None":
+    """`List[T]` -> `T`, anything else -> None."""
+    if isinstance(surface, str) and surface.strip().startswith("List["):
+        inner = surface.strip()
+        return inner[len("List["):inner.rindex("]")].strip() or None
+    return None
+
+
+def _v3_surface_type(node: object, known: dict, ctx: "_Ctx") -> "str | None":
+    """The revl surface type of an expression, when the IR makes it CERTAIN.
+
+    Deliberately partial and conservative — it answers None rather than guess,
+    because the only consumer (`_v3_empty_list_types`) turns a non-None answer
+    into a type annotation on emitted code. A wrong answer would reject a
+    program the frontend accepted; None just falls back to `any[]`.
+    """
+    if not isinstance(node, dict):
+        return None
+    if node.get("widen") == "Int":
+        return "Int"
+    kind = node.get("kind")
+    if kind in ("var", "name"):
+        return known.get(node.get("name") or node.get("id"))
+    if kind == "lit":
+        value = node.get("value")
+        if isinstance(value, bool):
+            return "Bool"
+        if isinstance(value, int):
+            return "Int"
+        if isinstance(value, float):
+            return "Float"
+        if isinstance(value, str):
+            return "Str"
+        return None
+    if kind == "interp":
+        return "Str"
+    if kind == "len":
+        return "Int"
+    if kind == "list":
+        # the frontend stamps `expected` on a literal it checked against a
+        # declared type (`var acc: List[Int] = []`) — the strongest evidence
+        # there is, and the only evidence an empty literal ever carries
+        if isinstance(node.get("expected"), str):
+            return node["expected"]
+        items = node.get("items") or []
+        if not items:
+            return None
+        inner = _v3_surface_type(items[0], known, ctx)
+        return f"List[{inner}]" if inner else None
+    if kind == "bin":
+        if node.get("op") in _V3_BOOL_OPS:
+            return "Bool"
+        operands = node.get("operands")
+        return operands if isinstance(operands, str) else None
+    if kind == "call":
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") in ("var", "name"):
+            return ctx.returns_by_name.get(callee.get("name"))
+        return None
+    if kind == "index":
+        return _v3_list_element(_v3_surface_type(node.get("target"), known, ctx))
+    if kind == "builtin":
+        # every list/map builtin the emitter lowers answers the RECEIVER's type
+        # (`push`/`concat`/`slice`/`set`/`remove` are the persistent forms)
+        if node.get("method") in ("push", "concat", "slice", "set", "remove"):
+            return _v3_surface_type(node.get("target"), known, ctx)
+        return None
+    return None
+
+
+def _v3_empty_list_types(body: object, params: object, returns: object,
+                         ctx: "_Ctx") -> dict:
+    """Local name -> TS type for every local this body binds to `[]`.
+
+    Every such local gets an entry (`any[]` when nothing better is provable),
+    so no bare `let xs = []` survives into emitted output.
+    """
+    empties = {
+        node.get("name")
+        for node in _v3_dicts(body)
+        if node.get("step") in ("let", "assign")
+        and _v3_is_empty_list(node.get("value"))
+        and isinstance(node.get("name"), str)
+    }
+    if not empties:
+        return {}
+
+    # Forward-infer the surface type of every binding in the body, so a push of
+    # a local (`out.push(res)`) or of a loop variable can type the accumulator.
+    # Twice, so a value naming an earlier-typed local resolves.
+    known: dict = {
+        p.get("name"): p.get("type")
+        for p in (params or []) if isinstance(p, dict) and p.get("type")
+    }
+    for _ in range(2):
+        for node in _v3_dicts(body):
+            if node.get("step") in ("let", "assign"):
+                t = _v3_surface_type(node.get("value"), known, ctx)
+                if t is not None:
+                    known.setdefault(node.get("name"), t)
+            elif node.get("step") == "for":
+                t = _v3_list_element(
+                    _v3_surface_type(node.get("iterable"), known, ctx))
+                if t is not None:
+                    known.setdefault(node.get("bind"), t)
+
+    resolved: dict = {}
+    declared = {
+        node.get("name"): node["value"]["expected"]
+        for node in _v3_dicts(body)
+        if node.get("step") in ("let", "assign")
+        and _v3_is_empty_list(node.get("value"))
+        and isinstance(node["value"].get("expected"), str)
+    }
+    for name in empties:
+        # (0) the local's OWN declared annotation, when the source spelled one.
+        surface = declared.get(name)
+        # (1) otherwise the other declared evidence: an accumulator that is
+        # returned takes the function's declared return type.
+        if surface is None and isinstance(returns, str) \
+                and _v3_list_element(returns):
+            if any(node.get("step") == "return"
+                   and isinstance(node.get("expr"), dict)
+                   and node["expr"].get("kind") in ("var", "name")
+                   and node["expr"].get("name") == name
+                   for node in _v3_dicts(body)):
+                surface = returns
+        # (2) otherwise, what gets pushed into it decides the element type.
+        if surface is None:
+            for node in _v3_dicts(body):
+                if node.get("kind") == "builtin" and node.get("method") == "push":
+                    target = node.get("target")
+                    args = node.get("args") or []
+                    if isinstance(target, dict) \
+                            and target.get("kind") in ("var", "name") \
+                            and target.get("name") == name and args:
+                        elem = _v3_surface_type(args[0], known, ctx)
+                        if elem is not None:
+                            surface = f"List[{elem}]"
+                            break
+        # (3) or an aliasing rebind (`xs = ys`) to a binding already typed.
+        if surface is None:
+            for node in _v3_dicts(body):
+                if node.get("step") in ("let", "assign") \
+                        and node.get("name") == name \
+                        and not _v3_is_empty_list(node.get("value")):
+                    candidate = _v3_surface_type(node.get("value"), known, ctx)
+                    if _v3_list_element(candidate):
+                        surface = candidate
+                        break
+        resolved[name] = _ts_v3_type(surface) if surface else "any[]"
+    return resolved
+
+
 def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: bool) -> None:
     step = node.get("step")
     if step in ("let", "assign"):
@@ -2771,7 +3006,11 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
         value = _expr(node.get("value"), ctx)
         if step == "let":
             keyword = "let" if node.get("mutable") else "const"
-            out.append(f"{'  ' * indent}{keyword} {name} = {value}")
+            # issue #273: `[]` alone has no element type; annotate it.
+            ann = ""
+            if _v3_is_empty_list(node.get("value")):
+                ann = ": " + ctx.empty_list_types.get(node.get("name"), "any[]")
+            out.append(f"{'  ' * indent}{keyword} {name}{ann} = {value}")
         else:
             out.append(f"{'  ' * indent}{name} = {value}")
     elif step == "return":
@@ -3375,6 +3614,10 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
             for p in fn.get("params") or []
         )
         returns = _ts_v3_type(fn.get("returns"))
+        # issue #273: type this body's `let xs = []` bindings before rendering
+        # it, from the declared signature and the body's own writes.
+        empty_lists = _v3_empty_list_types(
+            fn.get("body"), fn.get("params"), fn.get("returns"), ctx)
         # a phase-2 async-colored fn (docs/design/async-extern.md §3) emits as
         # `async function …: Promise<T>`, and its body is rendered in an async
         # context so every call to an async callable is awaited (see `_expr`).
@@ -3390,11 +3633,13 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
                 if _is_async_fn_type(p.get("type"))
             }
             fn_ctx = ctx.with_scope(ctx.component_scope, in_async=True,
-                                    async_locals=async_locals)
+                                    async_locals=async_locals,
+                                    empty_list_types=empty_lists)
             lines.append(
                 f"export async function {name}({params}): Promise<{returns}> {{")
         else:
-            fn_ctx = ctx
+            fn_ctx = ctx.with_scope(ctx.component_scope,
+                                    empty_list_types=empty_lists)
             lines.append(f"export function {name}({params}): {returns} {{")
         if not fn.get("body"):
             lines.append("  // (empty body)")
@@ -3665,8 +3910,14 @@ def _emit_ts_tests(tests: list, types: dict, functions: list, externs: list) -> 
         if not test.get("body"):
             lines.append("  // (empty test body)")
         else:
+            # issue #273: a `test` body binds locals too, and its module is
+            # typechecked by the same gate.
+            test_ctx = ctx.with_scope(
+                ctx.component_scope,
+                empty_list_types=_v3_empty_list_types(
+                    test["body"], None, None, ctx))
             for stmt in test["body"]:
-                _v3_stmt(stmt, ctx, lines, 2, test_mode=True)
+                _v3_stmt(stmt, test_ctx, lines, 2, test_mode=True)
         lines.append("})")
         lines.append("")
     return lines
