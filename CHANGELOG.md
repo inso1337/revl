@@ -171,6 +171,21 @@ but not seen. Every instance was closed. Representative fixes:
   the rest of itself in code position. Emitted string literals, identifiers and
   template literals were already routed through their own escapers and are
   unchanged; no golden bytes move.
+- `revl fmt` proves meaning preservation for every file it writes. Its
+  equivalence gate had two holes that met in the middle: the IR comparison
+  compiled with no module resolution, so every `use`-bearing file skipped it,
+  and the fall-back it landed on compared the formatter's own trivia scanner
+  with itself, which cannot fail no matter how wrong that scanner is. The
+  scanner had drifted from the lexer, so a `use`-bearing file with a
+  triple-quoted string, a `0x`/`0b`/`0o` literal, a `_` digit separator, a
+  `'...'` string, a `\"` escape or a `}` inside a host body was silently
+  rewritten into a different program. The gate now lexes both texts with the
+  reference lexer and refuses on any difference, before anything else and
+  whatever the file contains; the IR comparison resolves imports for an on-disk
+  file so it actually runs; and the scanner calls the lexer's own number,
+  string and brace-matching routines instead of a second copy of its rules.
+  Across the 888 `.rvl` files in the tree the formatter now changes the
+  compiled meaning of none.
 
 ### Operations
 
