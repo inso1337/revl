@@ -184,6 +184,13 @@ CORPUS = [
     # persistent `new Map(…)` IIFE. Without it three of the four in-place shapes
     # would be invisible to the oracle (item 429's trap).
     "unique_writes.rvl",
+    # A config default carrying the block-comment delimiters. The default is
+    # rendered into a `/** default: … */` doc line, and a comment has no escape
+    # syntax, so both emitters break the closer instead of escaping it. NO other
+    # fixture puts a delimiter in a default, so without this one the two escapes
+    # could disagree — or one emitter could carry none at all, which is a live
+    # injection on that tier — and the oracle would stay green (item 429's trap).
+    "config_default_comment.rvl",
 ]
 
 def _load_reference_emit():

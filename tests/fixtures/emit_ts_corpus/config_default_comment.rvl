@@ -1,0 +1,17 @@
+// A config default whose text carries the block-comment delimiters. The
+// default is rendered into a `/** default: … */` doc line, and a comment has
+// no escape syntax, so both emitters must break the closer rather than escape
+// it. No other fixture puts a delimiter in a default, so without this one the
+// two emitters could disagree on the escape and the oracle would not see it
+// (item 429's trap). The quote and backslash are here too: they exercise the
+// STRING-literal escaping in the same emitted line, which is a different
+// escaper and must stay exactly as it was.
+service Sink {
+  fn write(line: Str) -> Int
+}
+
+component Marker requires sink: Sink {
+  config { note: Str = "a */ b /* c \" d \\ e", level: Int = 1 }
+
+  effect sink.write(config.note) undo sink.write("bye")
+}

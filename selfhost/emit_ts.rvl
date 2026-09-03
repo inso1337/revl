@@ -180,6 +180,22 @@ extern pure fn template_text(v: Any) -> Str = @py {
     ob = chr(123)
     return v.replace(bs, bs + bs).replace(bt, bs + bt).replace(dl + ob, bs + dl + ob)
 }
+// The comment escaper (`_comment_text`): a comment has no escape syntax, so
+// author text that reaches one is kept inside it by breaking the sequences
+// that END one — a line terminator, and the block-comment closer. The two
+// substitutions are the reference emitter's, in the reference's order, so the
+// two stay byte-identical on a default that carries either. Built from `chr()`
+// so the `@py` block carries no closer of its own.
+extern pure fn comment_text(v: Any) -> Str = @py {
+    star = chr(42)
+    slash = chr(47)
+    bs = chr(92)
+    text = str(v)
+    for sep in (chr(13), chr(10), chr(133), chr(8232), chr(8233)):
+        text = text.replace(sep, chr(32))
+    text = text.replace(star + slash, star + bs + slash)
+    return text.replace(slash + star, slash + bs + star)
+}
 // A real newline — revl plain strings carry no escapes, so the one genuine
 // U+000A the module separator needs is sourced here.
 extern pure fn newline() -> Str = @py { return chr(10) }
@@ -2037,7 +2053,7 @@ fn config_interface(comp: Any) -> List[Str] {
     if (value_is_null(dflt)) {
       out = out.push(`  ${fname}: ${ty}`)
     } else {
-      out = out.push(`  /** default: ${json_dumps(dflt)} */`)
+      out = out.push(`  /** default: ${comment_text(json_dumps(dflt))} */`)
       out = out.push(`  ${fname}?: ${ty}`)
     }
   }
