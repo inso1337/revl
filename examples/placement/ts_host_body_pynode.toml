@@ -1,0 +1,24 @@
+# The ts-host-body placement smoke (issue #295).
+#
+#   revl run examples/ts_host_body.rvl \
+#     --placement examples/placement/ts_host_body_pynode.toml --once
+#
+# Same py <-> node seam as user_cache_pynode.toml, with one difference that is
+# the whole reason this file exists: `UserCache.module_scope` calls a VERBATIM
+# `@ts` extern body, and the process it runs on is a real `node` process
+# (backends/typescript/placement_runner.ts). The first probe below therefore
+# executes hand-written TypeScript on the runtime the ts tier ships on, and
+# prints what module scope it got. ci/placement_smoke.sh requires the answer to
+# be `TS-MODULE-SCOPE ESM` in the trace - not merely that the process came up,
+# because `--once` exits 0 even when every probe errors.
+
+[config.PgDatabase]
+url = "postgres://primary:5432/app"
+
+[processes.provider]
+components = ["PgDatabase"]
+
+[processes.consumer]
+backend = "node"
+components = ["UserCache"]
+probe = ["cache.module_scope()", "cache.put('alice', '42')", "cache.get('alice')"]
