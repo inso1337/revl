@@ -84,8 +84,38 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff==0.16.4 pyyaml==6.0.2
+      - run: pip install ruff==0.16.4 pyyaml==6.0.2 build==1.2.2.post1 hatchling==1.27.0
       - run: ruff check
+      # What the wheel ships, against what the commit tracks. `pyproject.toml`
+      # used to `force-include` the whole of `backends/` and `stdlib/`;
+      # force-include is exempt from every exclude rule and from the ignore
+      # files, so the wheel carried whatever was on the builder's disk under
+      # those trees rather than what the revision says. A developer build came
+      # out at 2933 members / 250 MB against the 523 the commit describes, and
+      # the same commit built on two machines produced two different wheels.
+      # Size was the visible half; the half that matters is that a published
+      # artifact was not a function of its commit.
+      #
+      # `hatch_build.py` now computes that entry list per file from
+      # `git ls-files`, and `[tool.hatch.build] exclude` states the artefact
+      # classes for the sdist. This asserts the result from OUTSIDE the build,
+      # deliberately not through the same mechanism: the wheel's member list
+      # must EQUAL `git ls-files` of the mapped trees plus its .dist-info --
+      # both directions, so an over-wide exclude is as red as an
+      # over-inclusion -- and the sdist must carry no untracked file.
+      #
+      # It lives in `lint` rather than in a job of its own because branch
+      # protection matches thirteen exact contexts and this is a seconds-long
+      # stdlib check next to the ones already here. The release dry run and
+      # `publish.yml` run the same tool against the artifacts they are about to
+      # smoke-test and upload.
+      #
+      # The self-test runs FIRST: it doctors a built wheel in both directions
+      # and plants a real untracked file under `backends/`, so the gate's teeth
+      # are exercised on every PR rather than asserted in a comment. Never add
+      # `|| true`.
+      - run: python3 tools/check_wheel_manifest.py --self-test
+      - run: python3 tools/check_wheel_manifest.py
       # issue #191: every job's EFFECTIVE GITHUB_TOKEN permissions must support
       # the actions that job invokes. A job-level `permissions` block REPLACES
       # the workflow-level one rather than merging into it, and that is how the
