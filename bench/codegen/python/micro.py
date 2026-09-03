@@ -105,13 +105,24 @@ def pairs():
          lambda p: p['x'],
          [(rec,)]),
 
-        # item 436 F3: the scrutinee bind rides the first arm's test. The
-        # PAYLOAD bind still rides a lambda — see the item for why.
+        # item 436 F3: the scrutinee bind rides the first arm's test, and an
+        # arm whose body IS the bind (`Some(v) => v`) is the payload itself —
+        # no function object, no frame.
         ("match Some/None  (emit.py::_match_expr)",
-         lambda o: ((lambda v: v)(match) if (match := o) is not None
+         lambda o: (match if (match := o) is not None
                     else (0 if match is None
                           else (_ for _ in ()).throw(TypeError('x')))),
          lambda o: (match if (match := o) is not None else 0),
+         [(5,), (None,)]),
+
+        # item 436 F3, the half that is NOT closed: a bind read from inside a
+        # larger body keeps its one-shot lambda, because inlining the payload
+        # there needs the arm body rewritten before it is rendered.
+        ("match Some(v) => v + 1  (emit.py::_match_expr)",
+         lambda o: ((lambda v: v + 1)(match) if (match := o) is not None
+                    else (0 if match is None
+                          else (_ for _ in ()).throw(TypeError('x')))),
+         lambda o: (v + 1 if (v := o) is not None else 0),
          [(5,), (None,)]),
 
         # item 436 C1/F7: the left operand is bound once by a walrus, so it is
