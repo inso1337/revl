@@ -11,6 +11,15 @@ portability assertion: it fails the run if any *available* tier fails.
 ``fail`` — and a ``summary: N pass, M skipped, K failed`` line, so a by-design
 refusal (a lifecycle test on a tier that does not lower it yet, a missing
 toolchain) reads as a skip, never as a regression (FR-5).
+
+**Where the toolchain IS installed, a skip is a lie** (issue #266). "Absent
+toolchain -> skip" is right on a laptop and wrong in a job that just ran
+``npm ci``: there the skip means the provisioning broke, and a skip is green,
+so the coverage vanishes without a mark on the dashboard. ``REVL_REQUIRE_TIERS``
+names the tiers a job has provisioned; an absent-toolchain skip on one of those
+becomes a FAILURE. See :class:`Absent` for why only *that* kind of skip flips,
+and ``tests/test_env_gated_skips_run_somewhere.py`` for the check that every
+tier test in ``tests/`` is actually run under the switch by some CI job.
 """
 
 from __future__ import annotations
@@ -114,6 +123,76 @@ def _fault_note(ir: dict, tier: str) -> str:
     return note
 
 
+class Absent(str):
+    """A skip reason that means *the toolchain is not installed here*.
+
+    A tier runner answers ``("skip", reason)`` for two different things, and
+    telling them apart is the whole point of issue #266:
+
+    * **the toolchain is absent** — no node_modules, no cargo, no JDK, no
+      cordis-py. Nothing about the DOCUMENT caused it; run the same call on a
+      machine that has the tier and it executes. That skip is an environment
+      report, and a CI job that provisioned the tier must never see one.
+    * **the tier refuses this document** — a `lifecycle test` the wasm
+      substrate cannot express, a timer step java does not lower yet
+      (``_timer_follow_on``). That is a by-design answer, correct on every
+      machine, and it stays a skip forever.
+
+    Only the first kind carries this marker, and only the first kind is turned
+    into a failure by ``REVL_REQUIRE_TIERS``. It is a ``str`` subclass, so it
+    formats, compares, prints and serializes exactly like the plain reason it
+    replaces — nothing downstream has to know it exists.
+    """
+
+    __slots__ = ()
+
+
+#: The switch that makes "this tier is not installed" a FAILURE rather than a
+#: skip, for the tiers named in it (comma- or space-separated, or ``all``).
+#:
+#: Issue #266, and the third instance of the class behind roadmap items 430,
+#: 433 and 445. A tier test skips wherever its toolchain is missing, a skip is
+#: green, and so `test_payload_bind_scope_executes[ts]` reported success by
+#: omission in every fresh worktree AND in every CI job that does not run
+#: `npm ci` — while a real `TypeError: Cannot mix BigInt and other types` sat
+#: under it. Nothing about the test said so: it reads like it executes on ts.
+#:
+#: A CI job that installs a tier sets this, and from then on that tier cannot
+#: quietly go missing there. Unset (a laptop, a fresh worktree) keeps the
+#: old, correct behaviour: an absent toolchain still skips with a reason.
+#: `tests/test_env_gated_skips_run_somewhere.py` is what checks that the CI
+#: half is actually wired, per test file and per tier.
+REQUIRE_TIERS_ENV = "REVL_REQUIRE_TIERS"
+
+
+def required_tiers() -> frozenset[str]:
+    """The tiers ``REVL_REQUIRE_TIERS`` says must really run here."""
+    raw = os.environ.get(REQUIRE_TIERS_ENV, "")
+    names = {n for n in raw.replace(",", " ").split() if n}
+    if "all" in names:
+        return frozenset(_RAW_RUNNERS)
+    return frozenset(names)
+
+
+def _require(tier: str, runner):
+    """Wrap *runner* so an ABSENT-toolchain skip fails when the tier is required."""
+
+    def run(ir: dict) -> tuple[str, str]:
+        outcome, message = runner(ir)
+        if outcome == "skip" and isinstance(message, Absent) \
+                and tier in required_tiers():
+            return ("fail", (
+                f"the {tier} tier is REQUIRED here ({REQUIRE_TIERS_ENV}) but its "
+                f"toolchain is absent, so this test would have measured nothing "
+                f"and reported green: {message}"))
+        return outcome, message
+
+    run.__name__ = f"run_{tier}"
+    run.__qualname__ = run.__name__
+    run.__doc__ = runner.__doc__
+    return run
+
+
 def _cordis_available() -> bool:
     """Can THIS interpreter import the cordis-py runtime? (Seam for tests —
     monkeypatch to simulate the missing-runtime environment.)"""
@@ -159,7 +238,7 @@ def run_py(ir: dict) -> tuple[str, str]:
             # tiers treat a missing toolchain the same way, and `--all` must
             # not read as a regression because this interpreter lacks cordis-py
             # (FR-5; the module docstring's "toolchain absent -> skip" contract).
-            return ("skip", _PY_RUNTIME_REMEDY)
+            return ("skip", Absent(_PY_RUNTIME_REMEDY))
         module = types.ModuleType("revl_test_module")
         # Register before exec: the emitter renders record types as @dataclass,
         # and dataclasses._process_class resolves each field via
@@ -246,11 +325,104 @@ def run_py(ir: dict) -> tuple[str, str]:
     return ("pass", "; ".join(summary))
 
 
+# --- the ts tier's runtime contract (issue #295) ----------------------------
+#
+# `revl test --backend ts` runs the emitted module under VITEST. Everything
+# that SHIPS runs it under plain node: `revl run --backend ts` and
+# `revl run --placement` both spawn `["node", placement_runner.ts, spec]`
+# (src/revl/placement.py). Measured on this repo's own vitest 4.1.10 against
+# node 26, vitest additionally hands the module a CommonJS scope (`require`,
+# `module`, `exports`, `__dirname`, `__filename`), vite's resolution
+# (extensionless imports, `.js`->`.ts`, directory/index, attribute-less JSON)
+# and full TypeScript (`enum`, `namespace`, parameter properties,
+# `import x = require(...)`) — every one of which node refuses. The whole list
+# and the contract it implies are in docs/ts-runtime-contract.md.
+#
+# So a green vitest run proved "this runs under vitest", never "this runs on
+# the ts tier", and no gate could tell the two apart. It cost a downstream
+# consumer a green 34/34 suite over `@ts` extern bodies calling bare
+# `require(...)`, which are a `ReferenceError` on the emitted module.
+#
+# The fix keeps vitest — it is what reports a failing assertion legibly — and
+# re-executes THE SAME GENERATED BYTES under plain node through
+# backends/typescript/scripts/node-tier-runner.mjs, which resolves the
+# specifier `vitest` to a shim carrying exactly the two names emit.py emits.
+# A tier verdict is `pass` only when both agree.
+
+# The node that can execute an emitted module the way the tier ships it needs
+# (a) unflagged TypeScript type stripping and (b) `module.registerHooks`, the
+# synchronous resolve hook the runner uses to point `vitest` at the shim.
+# Type stripping is on by default from 22.18 and (on the 23 line) 23.6;
+# registerHooks lands in 22.15 / 23.5. Below that the contract cannot be
+# checked, and the tier says so rather than reporting vitest's verdict as the
+# tier's.
+def _node_can_run_emitted(version: "tuple[int, int] | None") -> bool:
+    if version is None:
+        return False
+    if version[0] == 22:
+        return version[1] >= 18
+    return version >= (23, 6)
+
+
+def _node_version() -> "tuple[int, int] | None":
+    """(major, minor) of the node on PATH, or None when node is absent/broken."""
+    import re  # noqa: PLC0415 — only this one function needs it
+
+    if shutil.which("node") is None:
+        return None
+    try:
+        probe = subprocess.run(["node", "--version"], capture_output=True,
+                               text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.match(r"^v(\d+)\.(\d+)\.", probe.stdout.strip())
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def _ts_runtime_contract(path: Path) -> tuple[str, str]:
+    """Re-run the module vitest just passed under PLAIN NODE.
+
+    Returns ``("pass", note)``, ``("fail", reason)`` or ``("skip", reason)`` —
+    a skip when this machine's node cannot execute an emitted module at all,
+    which is unmeasured, never a pass.
+    """
+    version = _node_version()
+    if not _node_can_run_emitted(version):
+        # This is a TOOLCHAIN-ABSENCE skip, not a by-design refusal. When
+        # PR #286 (issue #266) lands its `Absent` marker, wrap this reason in
+        # it so `REVL_REQUIRE_TIERS=ts` makes it a failure in a job that has
+        # provisioned the tier.
+        shown = f"node {version[0]}.{version[1]}" if version else "no node on PATH"
+        return ("skip", f"the ts runtime contract could not be checked ({shown}; "
+                        f"needs >= 22.18 or >= 23.6) — vitest's verdict is not "
+                        f"the tier's (docs/ts-runtime-contract.md)")
+    runner = BACKENDS / "typescript" / "scripts" / "node-tier-runner.mjs"
+    try:
+        result = subprocess.run(
+            ["node", str(runner), str(path)],
+            cwd=BACKENDS / "typescript",
+            capture_output=True, text=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return ("fail", "the emitted module did not terminate under plain node "
+                        "(docs/ts-runtime-contract.md)")
+    if result.returncode != 0:
+        detail = (result.stderr + result.stdout).strip()
+        print(detail)
+        first = next((line for line in detail.splitlines() if line.strip()), "")
+        return ("fail", f"vitest passed but the emitted module does not run under "
+                        f"plain node — the runtime the ts tier ships on "
+                        f"(docs/ts-runtime-contract.md): {first}")
+    return ("pass", "; also executed under plain node (ts runtime contract)")
+
+
 def run_ts(ir: dict) -> tuple[str, str]:
-    """Emit the v3 test blocks and run them under the backend's vitest."""
+    """Emit the v3 test blocks and run them under the backend's vitest, then
+    re-run the same module under plain node (issue #295, above)."""
     vitest = BACKENDS / "typescript" / "node_modules" / ".bin" / "vitest"
     if not vitest.exists():
-        return ("skip", "vitest not installed (`cd backends/typescript && npm ci`)")
+        return ("skip", Absent(
+            "vitest not installed (`cd backends/typescript && npm ci`)"))
     note = _fault_note(ir, "ts")
     try:
         source = _emitter("typescript").emit(_without_fault_tests(ir),
@@ -295,14 +467,22 @@ def run_ts(ir: dict) -> tuple[str, str]:
             capture_output=True, text=True, timeout=180,
             env={**os.environ, "CI": "1"},
         )
+        output = (result.stdout + result.stderr).strip()
+        if output:
+            print(output)
+        if result.returncode != 0:
+            return ("fail", f"vitest exited {result.returncode}")
+        # Green under vitest says nothing about the runtime the tier ships on.
+        # The contract check runs on the SAME file, and only on the green path
+        # (a failing assertion is vitest's to report, legibly).
+        contract, detail = _ts_runtime_contract(path)
     finally:
         path.unlink(missing_ok=True)
-    output = (result.stdout + result.stderr).strip()
-    if output:
-        print(output)
-    if result.returncode != 0:
-        return ("fail", f"vitest exited {result.returncode}")
-    return ("pass", "vitest: all emitted tests passed" + note)
+    if contract == "fail":
+        return ("fail", detail)
+    if contract == "skip":
+        return ("skip", detail)
+    return ("pass", "vitest: all emitted tests passed" + detail + note)
 
 
 _CRATES_IO: bool | None = None
@@ -334,9 +514,10 @@ def run_rust(ir: dict) -> tuple[str, str]:
     timers as a documented follow-on (see ``_timer_follow_on``).
     """
     if shutil.which("cargo") is None:
-        return ("skip", "cargo not installed")
+        return ("skip", Absent("cargo not installed"))
     if not _crates_io_reachable():
-        return ("skip", "crates.io unreachable (cordis-rs is resolved from the index)")
+        return ("skip", Absent(
+            "crates.io unreachable (cordis-rs is resolved from the index)"))
     note = _fault_note(ir, "rust")
     try:
         emit = _emitter("rust")
@@ -376,7 +557,7 @@ def run_go(ir: dict) -> tuple[str, str]:
     """
     go = shutil.which("go")
     if go is None:
-        return ("skip", "go not installed")
+        return ("skip", Absent("go not installed"))
     note = _fault_note(ir, "go")
     try:
         emit = _emitter("go")
@@ -519,7 +700,7 @@ def run_java(ir: dict) -> tuple[str, str]:
         return _timer_follow_on("java")
     toolchain = _java_toolchain()
     if isinstance(toolchain, str):
-        return ("skip", toolchain)
+        return ("skip", Absent(toolchain))
     javac, java = toolchain
     note = _fault_note(ir, "java")
     try:
@@ -695,8 +876,8 @@ def _run_wasm_lifecycle(ir: dict, lifecycle: list) -> tuple[str, str]:
         note = ""
         if skips:
             note = "; also skipped — " + "; ".join(skips)
-        return ("skip", "the cordis-wasm runtime is not available to run "
-                        f"{len(runnable)} lifecycle test(s): {reason}" + note)
+        return ("skip", Absent("the cordis-wasm runtime is not available to run "
+                               f"{len(runnable)} lifecycle test(s): {reason}" + note))
 
     component_modules = {c["name"]: modules[c["name"]]
                          for c in (ir.get("components") or [])
@@ -751,6 +932,12 @@ def _combine_wasm_verdicts(*verdicts: tuple[str, str] | None) -> tuple[str, str]
         return ("fail", messages)
     if any(o == "pass" for o, _ in present):
         return ("pass", messages)
+    # The join above flattens every reason to a plain `str`, which would drop
+    # the `Absent` marker and quietly exempt the wasm tier from
+    # REVL_REQUIRE_TIERS. Carry it: if any portion skipped because the runtime
+    # is not installed, the folded skip is a toolchain absence too.
+    if any(isinstance(m, Absent) for _, m in present):
+        return ("skip", Absent(messages))
     return ("skip", messages)
 
 
@@ -769,7 +956,7 @@ def run_wasm(ir: dict) -> tuple[str, str]:
         return _timer_follow_on("wasm")
     wasmtime = shutil.which("wasmtime")
     if wasmtime is None:
-        return ("skip", "wasmtime not installed (brew install wasmtime)")
+        return ("skip", Absent("wasmtime not installed (brew install wasmtime)"))
     note = _fault_note(ir, "wasm")
     lifecycle = [t for t in (ir.get("tests") or []) if t.get("lifecycle")]
 
@@ -784,7 +971,10 @@ def run_wasm(ir: dict) -> tuple[str, str]:
     return _combine_wasm_verdicts(pure_verdict, lifecycle_verdict)
 
 
-RUNNERS: dict[str, callable] = {
+#: The bare runners, un-gated. `RUNNERS` is what everything calls; this exists
+#: so `required_tiers()` knows the tier names `all` expands to, and so the
+#: gating wrapper has something to wrap.
+_RAW_RUNNERS: dict[str, callable] = {
     "py": run_py,
     "ts": run_ts,
     "rust": run_rust,
@@ -792,6 +982,26 @@ RUNNERS: dict[str, callable] = {
     "wasm": run_wasm,
     "go": run_go,
 }
+
+#: Every tier runner, each one gated by `REVL_REQUIRE_TIERS` (issue #266). The
+#: gate is here rather than at each of the ~40 call sites in `tests/` that
+#: write `if status == "skip": pytest.skip(...)`: a rule enforced per call site
+#: is a rule the next test forgets, which is how this class keeps recurring.
+RUNNERS: dict[str, callable] = {
+    tier: _require(tier, runner) for tier, runner in _RAW_RUNNERS.items()
+}
+
+# Rebind the module-level names onto the gated runners as well. Two suites
+# (tests/test_crypto_stdlib.py, tests/test_run_ts_stdlib_fs_root.py) import
+# `run_py`/`run_ts` by name rather than through `RUNNERS`; without this they
+# would hold the ungated function and be exempt from the switch by accident,
+# which is the bypass this whole issue is about.
+run_py = RUNNERS["py"]
+run_ts = RUNNERS["ts"]
+run_rust = RUNNERS["rust"]
+run_java = RUNNERS["java"]
+run_wasm = RUNNERS["wasm"]
+run_go = RUNNERS["go"]
 
 _TAG = {"pass": "pass", "skip": "skip", "fail": "fail"}
 

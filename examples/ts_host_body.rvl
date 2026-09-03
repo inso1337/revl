@@ -1,0 +1,68 @@
+// The placement smoke's ts-host-body case (issue #295).
+//
+// `examples/user_cache.rvl` is the smoke's default app and contains no `@ts`
+// at all (`grep -c "@ts" examples/user_cache.rvl` is 0), so no HAND-WRITTEN
+// TypeScript had ever executed on a real `node` process in CI. That is the gap
+// that let `revl test --backend ts` diverge from the shipping runtime unnoticed:
+// vitest supplies a CommonJS module scope (`require`, `module`, `exports`,
+// `__dirname`, `__filename`) that plain node does not, and a downstream
+// consumer's `@ts` extern bodies were built on it.
+//
+// This is `user_cache.rvl` plus one extern and one method. The composition is
+// placed py <-> node (examples/placement/ts_host_body_pynode.toml), the extern
+// body runs on the node side, and its answer comes back through the probe
+// trace, where ci/placement_smoke.sh asserts it. `typeof` on an undeclared
+// name is legal JavaScript, so the body reports the scope it was given instead
+// of throwing on it - a ReferenceError would say "something is wrong" where
+// this says WHICH environment the tier actually got.
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  // the probe target: what module scope the emitted module was evaluated in.
+  fn module_scope() -> Str
+  emission fn put(key: Str, value: Str)
+}
+
+// Verbatim host source on both tiers. The ts body is the point; the py body
+// exists because the py-placed process emits the whole document too, and it
+// names the tier so a trace that reports it is unmistakably the wrong process.
+pub extern pure fn host_module_scope() -> Str
+  = @py { return "TS-MODULE-SCOPE not-ts (py tier)" }
+  = @ts {
+    const cjs = [typeof require, typeof module, typeof exports,
+                 typeof __dirname, typeof __filename]
+    return cjs.every((t) => t === "undefined")
+      ? "TS-MODULE-SCOPE ESM"
+      : "TS-MODULE-SCOPE CJS " + cjs.join(",")
+  }
+
+component PgDatabase provides db: Database {
+  config { url: Str, pool_size: Int = 10 }
+
+  let pool = effect Pool.open(config.url, config.pool_size)
+             undo   pool.close()
+
+  provide db {
+    fn query(sql)   = pool.query(sql)
+    fn execute(sql) = pool.execute(sql)
+  }
+}
+
+component UserCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key) = store.get(key)
+    fn module_scope() = host_module_scope()
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute(`INSERT INTO cache_log VALUES (${key})`)
+    }
+  }
+}
