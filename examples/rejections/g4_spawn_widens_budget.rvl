@@ -1,0 +1,32 @@
+// REJECTED - item 260/294: a spawn widens a capability's BUDGET ceiling.
+//
+// `Supervisor` holds `net(calls=100)` (it requires a network boundary declared
+// at 100 calls per activation). It spawns `Child`, which reaches
+// `net(calls=1000)` - ten times the parent's ceiling. A ceiling parameter only
+// narrows down a lineage, so re-minting a wider one at a spawn is refused.
+//
+// The resource half of attenuation cannot see this: strip the ceilings and
+// both sides are the same bare `net` token, so the crossing-coverage fold
+// reports nothing uncovered. Only the dedicated ceiling check flags it, which
+// is why this file (and its accepted twin `examples/budget_attenuation.rvl`)
+// is in the corpus at all.
+//
+// expected error:
+//   `Supervisor` spawns `Child`, granting it a wider resource budget
+
+service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }
+service NetWide { emission[net(requests=1000)] fn call(u: Str) -> Int }
+service Worker { emission[net] fn go() -> Int }
+
+component Child requires net: NetWide provides worker: Worker {
+  provide worker {
+    fn go() -> Int {
+      emit net.call("row")
+      return 0
+    }
+  }
+}
+
+component Supervisor requires net: NetTight {
+  let w = effect spawn Child with { } undo w.dispose()
+}
