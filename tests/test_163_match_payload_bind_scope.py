@@ -37,9 +37,21 @@ from revl.test import RUNNERS  # noqa: E402
 
 # `twice` is an async extern, so every module fn reaching it is colored async
 # and its match renders through the AWAITED payload binder (item 263).
+#
+# The `@ts` body writes `2n`, not `2` (issue #266). An extern body is HOST
+# source, copied through verbatim, so it is the author's job to spell its
+# literals in the host's representation of the declared revl type — and on the
+# ts tier `Int` is a JS `bigint` (backends/typescript/emit.py TYPE_MAP, chosen
+# for 64-bit two's-complement fidelity; docs/arithmetic.md). `n` therefore
+# arrives as a bigint at runtime, JS refuses `bigint * number` outright, and
+# `n * 2` died with `TypeError: Cannot mix BigInt and other types` the moment
+# this fixture actually executed on ts. Everything the EMITTER writes is
+# already bigint (`5n`, `0n`, `1n`, `7n`, `38n` in the emitted module); this one
+# operand was the only `number` in the Int lane. Same class as roadmap item 281,
+# and fixed the same way: in the `@ts` body.
 _HDR = (
     'extern emission async fn twice(n: Int) -> Int\n'
-    '  = @ts { return await Promise.resolve(n * 2) }\n'
+    '  = @ts { return await Promise.resolve(n * 2n) }\n'
     '  = @py { return n * 2 }\n'
     'fn wrap(n: Int) -> Opt[Int] { return Some(n) }\n'
     'fn call1(f: (Int) -> Int) -> Int { return f(1) }\n'

@@ -1,0 +1,33 @@
+// REJECTED — G9: a closure CAPTURE is a carrier, so it cannot launder an
+// untrusted value into a `Trusted[T]` sink.
+//
+// `d` is `Untrusted[Str]` (an `fs` read). `f` captures it; `f("z")` is called
+// with a clean literal and its result is emitted into `run`, which declares
+// `Trusted[Str]`. The call is over-approximated from its ARGUMENTS only, so a
+// capture-only closure produced the captured value out of clean arguments —
+// the one carrier of the eighteen tried that reported CLEAN.
+//
+// The binding already holds the join of the arrow's free names, so a call
+// through a callee the checker cannot name now joins the callee VALUE's taint
+// as well as its arguments'. That also covers an arrow MINTED by a fn
+// (`fn mk(d) -> (Str) -> Str { return (x) => d }`), which carries the same
+// join out through the fn's return, and stays exact for a closure that
+// captured nothing clean-typed.
+//
+// expected error:
+//   untrusted value (fs) flows into a shell command at argument 1 of `run`
+
+extern emission[fs] fn read_file(p: Str) -> Untrusted[Str] = @py { return "" }
+extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }
+
+service Ops { emission fn go(p: Str) }
+
+component A provides ops: Ops {
+  provide ops {
+    fn go(p) {
+      let d = emit read_file(p)
+      let f = (x: Str) => d
+      emit run(f("z"))
+    }
+  }
+}

@@ -1529,6 +1529,180 @@ def test_javac_compiles_the_map_value_type(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# The ACCUMULATOR gate (issue #274).
+#
+# `MAP_SRC` above types every Map operation through a PARAMETER, and that is
+# exactly the shape that hid the defect: the java Map ACCUMULATOR — a local
+# born from `Map.empty()` and rebound in a loop — did not compile at all.
+# `var m = Map.empty()` froze the local at `Map.of()`'s inferred
+# `Map<Object, Object>`, so javac reported `revlMapSet(Map<Object, Object>, ..)`
+# inapplicable and a `Map<Object, Object>` where the declared `Map<String, Long>`
+# was required. Nothing in this tier's suite ever compiled that construct, and a
+# gate that never compiles the emitted accumulator cannot report that the
+# accumulator does not compile — the same shape as issue #198 (emitted
+# TypeScript was never typechecked) and as the finding that these tests grepped
+# source instead of compiling it.
+#
+# So this corpus is not "one more case". It is the accumulator SURFACE — every
+# empty-container local this tier can declare, in the loop that fills it:
+#   * the unannotated Map accumulator, returned         (`tally`)
+#   * the annotated one, whose pin rides on the literal (`tallyAnnotated`)
+#   * one READ BACK OUT into a scalar position          (`lengthOf`)
+#   * non-Int value types: Str and List[Int]            (`index`, `buckets`)
+#   * the remove/has writers                            (`dropped`)
+#   * an empty Map with NO writer at all (the raw arm)  (`fresh`)
+#   * the empty LIST accumulator, the same declaration
+#     problem one container over                        (`seq`)
+# and it is gated three ways: `_emit` compiles it (below), the JVM RUNS it
+# (`test_java_runs_the_map_accumulator_on_the_jvm`), and
+# `test_the_accumulator_gate_covers_every_empty_container_form` fails if the
+# corpus ever stops reaching one of the declaration forms the emitter can
+# produce. The `test` block's expectations are the reference tier's own answers
+# (`revl test` on the python backend passes the identical block), so this is a
+# value gate and not only a compile gate.
+# --------------------------------------------------------------------------
+
+MAP_ACCUM_SRC = """
+pub fn tally(words: List[Str]) -> Map[Str, Int] {
+  var m = Map.empty()
+  var i = 0
+  while (i < words.length()) {
+    m = m.set(words[i], words[i].length())
+    i += 1
+  }
+  return m
+}
+pub fn tallyAnnotated(words: List[Str]) -> Map[Str, Int] {
+  var m: Map[Str, Int] = Map.empty()
+  var i = 0
+  while (i < words.length()) {
+    m = m.set(words[i], words[i].length())
+    i += 1
+  }
+  return m
+}
+pub fn lengthOf(words: List[Str], k: Str) -> Int {
+  var m = Map.empty()
+  var i = 0
+  while (i < words.length()) {
+    m = m.set(words[i], words[i].length())
+    i += 1
+  }
+  return m.lookup(k) ?? (0 - 1)
+}
+pub fn index(words: List[Str]) -> Map[Str, Str] {
+  var m = Map.empty()
+  var i = 0
+  while (i < words.length()) {
+    m = m.set(words[i], words[i])
+    i += 1
+  }
+  return m
+}
+pub fn buckets(words: List[Str]) -> Map[Str, List[Int]] {
+  var m = Map.empty()
+  var i = 0
+  while (i < words.length()) {
+    m = m.set(words[i], [words[i].length()])
+    i += 1
+  }
+  return m
+}
+pub fn dropped(k: Str) -> Bool {
+  var m = Map.empty()
+  m = m.set(k, 1)
+  m = m.remove(k)
+  return m.has(k)
+}
+pub fn fresh() -> Map[Str, Int] {
+  let m = Map.empty()
+  return m
+}
+pub fn seq(n: Int) -> List[Int] {
+  var out = []
+  var i = 0
+  while (i < n) {
+    out = out.push(i)
+    i += 1
+  }
+  return out
+}
+test "the Map accumulator computes the same values it does on the reference tier" {
+  assert lengthOf(["a", "bb", "ccc"], "bb") == 2
+  assert lengthOf(["a", "bb", "ccc"], "zz") == 0 - 1
+  assert (tally(["a", "bb"]).lookup("bb") ?? 0) == 2
+  assert (tallyAnnotated(["a", "bb"]).lookup("bb") ?? 0) == 2
+  assert (index(["a", "bb"]).lookup("bb") ?? "") == "bb"
+  assert (buckets(["ccc"]).lookup("ccc") ?? [])[0] == 3
+  assert dropped("k") == false
+  assert fresh().has("k") == false
+  assert seq(3)[2] == 2
+}
+"""
+
+# The three declaration forms `_let_keyword` can give an empty container, each
+# with the corpus function that must keep producing it. Written out here so the
+# structural check below names what it is protecting instead of pattern-matching
+# whatever the corpus happens to emit today.
+_EMPTY_CONTAINER_DECL_FORMS = {
+    # the value type learned from the body's own `m.set(k, v)` writers
+    "java.util.Map<String, java.lang.Long> m = java.util.Map.of();": "tally",
+    "java.util.Map<String, String> m = java.util.Map.of();": "index",
+    "java.util.Map<String, java.util.List<java.lang.Long>> m = "
+    "java.util.Map.of();": "buckets",
+    # nothing to learn from (no writer): the raw type, so erasure carries the
+    # `return`, exactly as the empty list literal beside it
+    "java.util.Map m = java.util.Map.of();": "fresh",
+    "java.util.List out = java.util.List.of();": "seq",
+}
+
+
+def test_map_accumulator_declares_a_typed_local():
+    """Issue #274. `var` freezes a local at its initializer, so the accumulator
+    gets a DECLARED type instead: the Map type the writers name, or the raw
+    `java.util.Map` when they name nothing."""
+    src = _emit(compile_source(MAP_ACCUM_SRC))
+    # the defect, spelled out: never `var` on a `Map.empty()` binding
+    assert "var m = java.util.Map.of();" not in src
+    assert "final var m = java.util.Map.of();" not in src
+    for decl in _EMPTY_CONTAINER_DECL_FORMS:
+        assert decl in src, decl
+
+
+def test_the_accumulator_gate_covers_every_empty_container_form():
+    """A gate that stops reaching a declaration form stops gating it.
+
+    This is the half issue #274 asks for on its own account: the emitter's Map
+    accumulator was broken for as long as it existed because no test compiled
+    one. If a later edit narrows `MAP_ACCUM_SRC` so a form below is no longer
+    emitted, the coverage goes away silently — unless something fails. This is
+    that something."""
+    src = _emit(compile_source(MAP_ACCUM_SRC))
+    missing = [decl for decl in _EMPTY_CONTAINER_DECL_FORMS if decl not in src]
+    assert not missing, (
+        "the accumulator corpus no longer reaches these declaration forms, so "
+        "javac no longer gates them: " + "; ".join(missing))
+
+
+@pytest.mark.skipif(JAVAC is None, reason="no working javac")
+def test_javac_compiles_the_map_accumulator(tmp_path):
+    """The exit test's first half, against a real compiler rather than a
+    substring match: the accumulator COMPILES under `javac --release 21`."""
+    _javac_compile(tmp_path, emit.emit(compile_source(MAP_ACCUM_SRC)))
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason=NO_JDK)
+def test_java_runs_the_map_accumulator_on_the_jvm(tmp_path):
+    """The exit test's second half: it EXECUTES to the right value. The `test`
+    block's expectations are the reference tier's (`revl test` passes the same
+    block on the python backend), so a java tier that compiled and then meant
+    something else fails here."""
+    run = _run_revl_tests(tmp_path, emit.emit(compile_source(MAP_ACCUM_SRC)))
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "REVL_TESTS_OK" in run.stdout
+
+
+# --------------------------------------------------------------------------
 # FR-4 (FEATURE-REQUESTS.md FR-4 / docs/v2.0-roadmap.md item 77(c)) — non-
 # String values in the HOST Map. The session ledger (`Map[Str, List[Msg]]`)
 # used to emit a hardcoded `HashMap<String, String>` and fail javac
