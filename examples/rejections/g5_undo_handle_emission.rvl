@@ -1,0 +1,43 @@
+// REJECTED — G5: a bracket inverse may not cross a boundary, and reaching the
+// crossing through a SPAWN HANDLE does not exempt it
+// (docs/design/teardown-contract.md: a bracket inverse "may emit in teardown:
+// no").
+//
+// `w.task.run("bye")` reads the `task` provision off the spawn handle `w` and
+// calls its `run` operation, which the service declares `emission`. In an
+// `undo` slot that emission runs on clean unload AND on abort, at or after the
+// session verdict: it is invisible to the emission fold, to the capability
+// declarations and to the approval gate, and it cannot be rolled back — the
+// same reason `undo db.execute(...)` through a required key is refused.
+//
+// The accepting twin is a NON-emission provision method in the same slot
+// (`undo w.task.status()`), which is a plain call and stays admitted; the
+// crossing is what is refused, not the handle.
+//
+// expected error:
+//   the `undo` of this bracket calls `w.task.run`, which is an emission —
+//     a bracket inverse runs in teardown and may not cross a boundary (G5)
+
+service Net {
+  emission[net] fn send(msg: Str) -> Int
+}
+
+service Task {
+  emission[net] fn run(prompt: Str) -> Int
+  fn status() -> Int
+}
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+    fn status() = 0
+  }
+}
+
+component Sup requires net: Net {
+  let w = effect spawn Worker with { } undo w.dispose()
+  let m = effect Map.new() undo w.task.run("bye")
+}
