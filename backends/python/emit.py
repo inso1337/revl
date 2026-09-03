@@ -1379,7 +1379,8 @@ class _ComponentEmitter:
                 for arm in arms)
             return _match_expr(self._expr(expr.get("scrutinee"), where),
                                [{**arm, "body": _RenderedBody(
-                                   self._expr(arm.get("body"), where))}
+                                   self._expr(arm.get("body"), where),
+                                   arm.get("body"))}
                                 for arm in arms],
                                awaited=awaited)
         if kind == "do":
@@ -2619,19 +2620,68 @@ def _py_type(type_name: str) -> str:
     return type_name  # named record/variant type or generic param
 
 
+# The `typing` names `_py_type` can put in a record annotation. `Union` was
+# imported alongside them and is not one of them, so every module that declared
+# a type paid for a name nothing could ever spell (roadmap item 436 F9).
+_PY_TYPING_NAMES = ("Any", "Callable", "Optional")
+
+
+def _typing_imports(types: dict) -> list:
+    """The `typing` names the emitted record annotations actually mention.
+
+    Record annotations are the only place `_py_type` is rendered, so a module
+    whose type declarations are all variants imports nothing at all.
+    """
+    used: set = set()
+    for spec in types.values():
+        if spec.get("kind") != "record":
+            continue
+        for ftype in (spec.get("fields") or {}).values():
+            # the same identifier tokenisation the forward-ref check uses, so
+            # the self-host port can reuse `ident_tokens` and agree exactly
+            used.update(re.findall(r"[A-Za-z_]\w*", _py_type(ftype)))
+    return [n for n in _PY_TYPING_NAMES if n in used]
+
+
 def _emit_types(types: dict) -> "_Lines":
     out = _Lines()
+    # THE EXTERNAL CONTRACT OF AN EMITTED RECORD (docs/records.md §7).
+    #
+    # A record VALUE is a plain dict keyed by the revl field name, spelled
+    # exactly as the source spells it: `{'id': 0, 'from': 'a'}`. That holds for
+    # every producer and every consumer, INSIDE the module and OUT: a record
+    # literal, a `record_update` spread, a field read, a destructure, a value a
+    # host hands in across a service boundary, and a value `src/revl/fault.py`
+    # generates for a `prop test` or an auto-mock. There is one representation,
+    # and the class below is not it.
+    #
+    # The class is a SHAPE DECLARATION — annotations only, no constructor. It
+    # cannot be the value carrier even in principle: a field's CLASS ATTRIBUTE
+    # is `_mangle`d for Python keyword collisions while its RUNTIME KEY is the
+    # raw revl name, so `type Q = { from: Str }` emits `class Q: from_: str`
+    # against a read of `q['from']`. An instance of `Q` therefore answers no
+    # field read the emitter writes. Constructing it is always wrong, and the
+    # `getattr` fallback in `_field_read` is for ADT payloads (real objects),
+    # not for records.
+    #
+    # It used to carry `@dataclass`, which built an `__init__`, `__repr__` and
+    # `__eq__` for that never-constructed class at every module load: executing
+    # `tests/fixtures/emit_py_corpus/types.rvl`'s three record declarations was
+    # 17246 bytecode instructions, 468 Python frames and a 105973 B tracemalloc
+    # peak, against 237, 9 and 14711 without the decorator (roadmap item 436
+    # F9; `bench/codegen/python/run.py --load` measures this). The decorator is
+    # gone and the class stays, because the field names and types are what
+    # makes the emitted module readable next to the revl source.
+    #
     # Forward-reference support: revl types may be mutually recursive (a
     # record referencing an ADT defined later, or vice versa), but Python
     # evaluates class-body annotations at class-definition time, so a bare
     # name would raise NameError. We cannot use `from __future__ import
-    # annotations` (PEP 563): @dataclass's InitVar/ClassVar detection calls
-    # sys.modules.get(cls.__module__).__dict__ on every string annotation,
-    # which crashes for consumers that exec() the module without registering
-    # it in sys.modules. Instead, quote only the annotations that actually
-    # reference a not-yet-emitted type; dataclasses treat any string
-    # annotation as lazy, and the ADTs here are plain classes (no
-    # InitVar/ClassVar introspection), so quoting is always safe.
+    # annotations` (PEP 563), which would leave a consumer that resolves these
+    # annotations reaching for a module it exec'd without registering in
+    # sys.modules. Instead, quote only the annotations that actually reference
+    # a not-yet-emitted type: a string annotation is inert, and nothing in the
+    # emitted module resolves one.
     all_names = {_ident(name, "type name") for name in types}
     emitted: set[str] = set()
 
@@ -2646,16 +2696,16 @@ def _emit_types(types: dict) -> "_Lines":
     for name, spec in types.items():
         name = _ident(name, "type name")
         if spec["kind"] == "record":
-            out.add(0, "@dataclass")
             out.add(0, f"class {name}:")
             if not spec["fields"]:
                 out.add(1, "pass")
             for field, ftype in spec["fields"].items():
-                # the field is a dataclass attribute name here (a real Python
+                # the field is a class attribute name here (a real Python
                 # identifier), so a keyword-named field is renamed; record
-                # VALUES are dicts read by string key through `_revl_field`, so
-                # this annotation-only rename never has to agree with a runtime
-                # attribute access (item 165)
+                # VALUES are dicts read by string key, so this annotation-only
+                # rename never has to agree with a runtime attribute access,
+                # and it stays INJECTIVE so two revl fields can never collapse
+                # onto one annotation (item 165)
                 out.add(1, f"{_mangle(field)}: {_ann(ftype)}")
             emitted.add(name)
         else:
@@ -2733,6 +2783,60 @@ def _interp_fstring(parts) -> str:
     return "(" + " + ".join(pieces) + ")"
 
 
+def _arm_source(body: object) -> object:
+    """The IR node an arm body was rendered from.
+
+    The component renderer hands `_match_expr` bodies it has ALREADY rendered
+    (`_RenderedBody`), whose text is opaque to the checks below; each one keeps
+    the node it came from so both renderers answer the same question. `None`
+    means "no node available", and both checks read that as "assume the worst".
+    """
+    return body.source if isinstance(body, _RenderedBody) else body
+
+
+def _arm_body_is_bind(body: object, bind: str) -> bool:
+    """Is this arm body EXACTLY the payload bind — `Some(v) => v`?
+
+    `var` (a fn body) and `name` (a component body) are the two nodes that are
+    a bare local read, and both render as the identifier itself. `Some` and
+    `None` are rendered specially by `_expr` (identity and the host `None`), so
+    a bind under either name is left to the binder rather than inlined.
+    """
+    node = _arm_source(body)
+    if not isinstance(node, dict) or bind in ("Some", "None"):
+        return False
+    kind = node.get("kind")
+    if kind == "var":
+        return node.get("name") == bind
+    if kind == "name":
+        return node.get("id") == bind
+    return False
+
+
+def _arm_body_mentions(body: object, bind: str) -> bool:
+    """Could this arm body read `bind`? Answered CONSERVATIVELY: true if the
+    name occurs anywhere in the subtree at all, as a node value or an object
+    key, whether or not it is in a position that reads a local.
+
+    A false positive costs the arm its binder-free spelling and nothing else. A
+    false negative would delete a live bind, so the walk deliberately does not
+    reason about which node kinds carry a name: an arrow parameter list, a
+    nested match's `bind`, a record key and a plain `var` all count the same,
+    and anything the walk does not recognise counts as a mention.
+    """
+    if isinstance(body, _RenderedBody) and body.source is None:
+        return True  # rendered with no node behind it: keep the binder
+    node = _arm_source(body)
+    if isinstance(node, str):
+        return node == bind
+    if isinstance(node, list):
+        return any(_arm_body_mentions(item, bind) for item in node)
+    if isinstance(node, dict):
+        return any(key == bind or _arm_body_mentions(value, bind)
+                   for key, value in node.items())
+    return False  # a scalar leaf: a literal, a flag, or an absent field
+
+
 def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
     """Emit a match expression as a nested `isinstance` chain.
 
@@ -2763,13 +2867,34 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
     comprehension's cell, and every `await` still lands directly in the
     enclosing `async def`. The payload is evaluated once, before the body, in
     both forms.
+
+    TWO ARM SHAPES NEED NO BINDER AT ALL, and those are the ones this emits
+    without a frame (item 436 F3's remaining half). An arm whose body never
+    mentions the bind (`Err(e) => -1`) drops the binder outright: the payload
+    is `match` or `match.value`, a name and a `__slots__` read, so not
+    evaluating it is not observable. An arm whose body IS the bind (`Some(v)
+    => v`, `Ok(v) => v`, the unwrap that `match` mostly exists for) becomes the
+    payload expression itself. Neither introduces a name, so neither can
+    shadow, clobber or share a cell, which is what makes them safe where the
+    walrus is not. A bind USED INSIDE a larger body keeps its lambda: rendering
+    that body with the bind replaced by the payload needs the arm body rewritten
+    before `_expr` sees it, and `selfhost/emit_py.rvl` reads the IR through a
+    read-only value API with no way to build the rewritten node (item 429
+    requires the two emitters to agree byte-for-byte).
     """
     # `match` is a revl keyword, so it can never be a user binding in the
     # revl source. Python 3.10+ treats it as a soft keyword, which is still
     # legal as a lambda parameter and as a walrus target.
     tmp = "match"
 
-    def bind_payload(bind: str, body: str, payload: str) -> str:
+    def bind_payload(bind: str, body: str, payload: str, node: object) -> str:
+        # The two binder-free arm shapes first (item 436 F3): a body that is
+        # the bind becomes the payload, and a body that cannot read the bind
+        # keeps neither the binder nor the payload evaluation.
+        if _arm_body_is_bind(node, bind):
+            return payload
+        if not _arm_body_mentions(node, bind):
+            return body
         # `await`-free arm -> the classic one-shot lambda; an awaited arm ->
         # a one-element comprehension, whose iteration variable is a scope the
         # `await` in the body can still be spelled inside.
@@ -2792,7 +2917,8 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
         itself. A conditional expression evaluates its condition FIRST, so the
         bind is complete before any arm body (or any later arm's test) runs."""
         pattern = arm.get("pattern")
-        body = _expr(arm.get("body"))
+        node = arm.get("body")
+        body = _expr(node)
         if pattern == "_":
             return body
         bind = arm.get("bind")
@@ -2804,10 +2930,10 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
         elif pattern == "Some":
             cond = f"{head} is not None"
             if bind:
-                body = bind_payload(bind, body, tmp)
+                body = bind_payload(bind, body, tmp, node)
         else:
             if bind:
-                body = bind_payload(bind, body, f"{tmp}.value")
+                body = bind_payload(bind, body, f"{tmp}.value", node)
             cond = f"isinstance({head}, {pattern})"
         if rest is None:
             return f"({body} if {cond} else (_ for _ in ()).throw(TypeError('non-exhaustive match')))"
@@ -3074,10 +3200,17 @@ def _expr(node: dict) -> str:
 
 class _RenderedBody(dict):
     """An arm body already rendered by the component emitter; `_expr` returns
-    it unchanged so `_match_expr` can be shared by both renderers."""
+    it unchanged so `_match_expr` can be shared by both renderers.
 
-    def __init__(self, text: str) -> None:
+    `source` is the IR node the text was rendered from, which is what
+    `_match_expr`'s binder-free arm checks read (item 436 F3): without it a
+    rendered body is opaque, and "does this body mention the bind?" could only
+    be answered by keeping the binder.
+    """
+
+    def __init__(self, text: str, source: object = None) -> None:
         super().__init__(kind="__rendered__", text=text)
+        self.source = source
 
 
 def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
@@ -3092,9 +3225,14 @@ def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
     out.add(indent, f"{tmp} = {_expr(node['value'])}")
     if node["pattern"] == "record":
         for name in node["names"]:
-            # the binding is a fresh local, so mangle its keyword collisions;
-            # the attribute-read spelling is preserved byte-for-byte
-            out.add(indent, f"{_mangle(name)} = {tmp}.{name}")
+            # the binding is a fresh local, so mangle its keyword collisions.
+            # The READ is `_field_read`, exactly as `row.name` is: a record
+            # value is a dict (see `_emit_types`), so the plain `{tmp}.{name}`
+            # this used to emit raised `AttributeError` on every record value
+            # an emitted module actually produces. Nothing caught it because
+            # the only destructure test constructed the record CLASS, which no
+            # emitted module ever does. `rereadable`: `tmp` is already a name.
+            out.add(indent, f"{_mangle(name)} = {_field_read(tmp, name, rereadable=True)}")
     elif node["pattern"] == "list":
         names = [_mangle(n) for n in node["names"]]
         rest = node.get("rest")
@@ -4671,9 +4809,13 @@ def emit(ir: dict) -> str:
             out.add(2, f"return hash(({builtin!r}, self.value))")
             out.add(0)
     if types:
-        out.add(0, "from dataclasses import dataclass")
-        out.add(0, "from typing import Any, Callable, Optional, Union")
-        out.add(0)
+        # Only what the record annotations below actually mention (item 436
+        # F9): `dataclasses` is no longer imported at all, `Union` never was
+        # spellable by `_py_type`, and a variant-only module imports nothing.
+        typing_names = _typing_imports(types)
+        if typing_names:
+            out.add(0, f"from typing import {', '.join(typing_names)}")
+            out.add(0)
         out.extend(_emit_types(types))
     if functions:
         out.extend(_emit_functions(functions))
