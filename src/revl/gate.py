@@ -359,10 +359,17 @@ class ProposeResult:
     composition to it, in one process. Three terminal shapes, all data (a refusal
     is the repair signal, never a raised error the loop cannot catch):
 
+    * `admitted` False, `code` `HALTED` — the session was E-STOPPED (item 443).
+      Nothing was compiled and nothing was swapped. A halt DOMINATES: it is not
+      reported as a refusal of the candidate (the candidate was never judged) and
+      never as a revert (there is no gen N still serving to revert to — the
+      instance is dead and every registered entry is stranded). The way back is
+      `revl recover`, never another `propose`.
     * `admitted` False — the candidate was REFUSED before it ever became live:
-      either the forbidden-grant rule fired (`code` `FORBIDDEN_GRANT`) or the
-      untrusted-author compile refused it (`code`/`message` the reference
-      compiler's why-trace, verbatim). The running composition is UNTOUCHED.
+      the forbidden-grant rule fired (`code` `FORBIDDEN_GRANT`), or the
+      self-extension compile refused it (`code`/`message` the reference
+      compiler's why-trace, verbatim — including the `G9` realm-placement
+      refusal, item 334 slice 2). The running composition is UNTOUCHED.
     * `admitted` True, `swapped` False, `reverted` True — the candidate admitted
       but FAILED TO ACTIVATE (its activation raised/left a fiber FAILED, or a
       requirement was unmet -> PENDING, or a declared provide never resolved).
@@ -607,6 +614,33 @@ class Gate:
             raise GateError("nothing is loaded; load a base composition first")
         granted = list(granted)
 
+        # -1. HALT DOMINANCE (item 443 + 334 slice 2) — checked FIRST, ahead of
+        #     the forbidden-grant rule and any compile, because a halt is not one
+        #     more verdict to be weighed against the candidate's: it dominates.
+        #     `Session.swap` already refuses under a halt, so without this the
+        #     halt reached the loop as the `SWAP_REVERTED` arm — which asserts
+        #     three things that are all FALSE after an E-Stop: that the candidate
+        #     was judged (it never was), that gen N is intact (its entries are
+        #     STRANDED, not discharged), and that the process is still serving
+        #     (the instance is dead). That mislabel is not cosmetic: SWAP_REVERTED
+        #     is the RETRY-shaped verdict, the one a self-extension loop answers
+        #     by generating a better candidate, so a halted gate would be proposed
+        #     at forever instead of reconciled. Refuse as a halt, and say where
+        #     the way back is.
+        if self._session.halted:
+            return ProposeResult(
+                False, code="HALTED",
+                message=(
+                    "propose refused: this session was E-STOPPED (item 443) and "
+                    "the instance is dead. Nothing was compiled and nothing was "
+                    "swapped; the halt dominates, so this is not a verdict on "
+                    "the candidate and not a revert to a running generation — "
+                    "every registered entry is stranded, owed and not "
+                    "discharged. There is no resume and no better candidate: "
+                    "reconcile with `revl recover --wal <file>`, or `unload` "
+                    "(which strands rather than unwinds) and start a fresh "
+                    "session."))
+
         # 0. FORBIDDEN-GRANT — before any compile, independent of the operator.
         forbidden = sorted(set(granted) & _DECIDER_SERVICES)
         if forbidden:
@@ -638,7 +672,16 @@ class Gate:
         #    closure. It is compiled STANDALONE (no `manifest=`): the candidate
         #    reaches only what it is explicitly given, never the running base's
         #    other ambient services.
-        profile = AdmissionProfile.untrusted_author(granted)
+        #    Under `self_extension`, not `untrusted_author`: the delta is the
+        #    item-334 slice-2 realm refusal. `untrusted_author` bounds WHAT the
+        #    candidate reaches; the swap makes it the running composition, so the
+        #    proposal also has to be bounded in WHERE it sits — a realm is the
+        #    address the item-246/251 approval policy scopes its standing
+        #    approvals and auto-approve rules by, and a candidate that picks its
+        #    own realm picks which of them cover its class-(c) crossings. The
+        #    component-glob half of that scope is no bound on an author who names
+        #    its own components, so the realm was the only half left.
+        profile = AdmissionProfile.self_extension(granted)
         try:
             compile_source(source, "<candidate>.rvl",
                            modules=dict(providers) if providers else None,
@@ -659,6 +702,24 @@ class Gate:
         try:
             state = self._invoke_with_approval(self._session.swap, ir)
         except _session_error() as error:
+            # A halt can engage BETWEEN the check above and here, in one thread,
+            # with no concurrency: the swap runs the item-246 activation gate,
+            # which calls the embedder's `approver` callback, which is host code
+            # that may well answer a class-(c) prompt by hitting the E-Stop. That
+            # is the honest ordering of the race, and the halt wins it: re-read
+            # the latch and report HALTED rather than dressing a dead session up
+            # as a healthy gen N that reverted.
+            if self._session.halted:
+                return ProposeResult(
+                    False, code="HALTED",
+                    message=(
+                        f"propose refused: the session was E-STOPPED during the "
+                        f"proposal (item 443) — {error}. The halt dominates the "
+                        f"swap verdict: nothing was reverted, because an E-Stop "
+                        f"runs nothing and unwinds nothing. Every entry "
+                        f"registered up to the halt is STRANDED; read the "
+                        f"inventory with `estop_report()` and reconcile with "
+                        f"`revl recover --wal <file>`."))
             # the post-activation health gate (or a migration reject) rolled the
             # swap back: gen N is intact and still serving. Report it as data.
             return ProposeResult(True, swapped=False, reverted=True,
@@ -742,6 +803,42 @@ class Gate:
             raise GateError(str(error)) from error
         self._loaded = False
         return result
+
+    def estop(self, reason: str = "operator halt",
+              operator: str | None = None) -> dict:
+        """E-STOP this gate: the operator's emergency button (item 443).
+
+        Exposed on the facade because item 334's guarantee is only worth the
+        embedder having it. `propose` promises that a halt dominates a
+        self-extension, and a promise about a button nobody can reach is not a
+        guarantee — the embedded host is the only operator a `Gate` has.
+
+        This is NOT `abort`. `abort` is a verdict on the work: it drops the
+        deferral queue, replays every witnessed inverse and proves a clean world.
+        `estop` stops dispatching NEW crossings immediately, runs NOTHING, and
+        reports what was in flight; every registered entry is left STRANDED and
+        every acquired handle stays held. The session is dead afterwards —
+        `propose`, `call`, `commit` and `abort` all refuse, `unload` strands
+        rather than unwinds, and the way back is `recover`, never a resume."""
+        if not self._loaded:
+            raise GateError("nothing is loaded; call load first")
+        try:
+            return self._session.estop(reason, operator=operator)
+        except _session_error() as error:
+            raise GateError(str(error)) from error
+
+    def estop_report(self) -> dict:
+        """The halt inventory (item 443): what the halt could NAME when it
+        engaged, and what the unwind has stranded since. Never `clean` — an
+        E-Stop violates R4 by design and says so. Reads nothing into the world,
+        so it is safe on a dead session and is the thing to read BEFORE deciding
+        how to reconcile."""
+        if not self._loaded:
+            raise GateError("nothing is loaded; call load first")
+        try:
+            return self._session.estop_report()
+        except _session_error() as error:
+            raise GateError(str(error)) from error
 
     def unload(self) -> dict:
         """Tear down and report the residue checks. Under a session owner a

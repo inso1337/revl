@@ -125,16 +125,18 @@ service BillingAgent {
   // tags (the agent's own claim): billing, read
   // `emission` with NO inverse: a remote effect has no local undo (see the header).
   // The result is `Untrusted[Str]`: the peer is not this composition's trust domain.
-  emission fn invoice_lookup(message: Str) -> Untrusted[Str]
+  // `async`: a network round trip SUSPENDS on this tier, so callers need an
+  // async context (see the header).
+  emission async fn invoice_lookup(message: Str) -> Untrusted[Str]
 }
 
-extern emission[net.billing_internal] fn a2a_billing_agent_invoice_lookup(
+extern emission[net.billing_internal] async fn a2a_billing_agent_invoice_lookup(
     message: Str) -> Untrusted[Str]
   = @ts { /* JSON-RPC 2.0 `message/send`, one crossing */ }
 
 component BillingAgentProvider provides billing_agent: BillingAgent {
   provide billing_agent {
-    fn invoice_lookup(message) = a2a_billing_agent_invoice_lookup(message)
+    async fn invoice_lookup(message) = a2a_billing_agent_invoice_lookup(message)
   }
 }
 ```
@@ -146,6 +148,36 @@ there is to transcribe, and nothing richer is invented.
 Unlike its siblings the extern bodies are **real, not stubs**: `--backend ts`
 and `--backend py` each emit a working JSON-RPC 2.0 `message/send` crossing that
 posts the message, checks the reply, and raises on anything it cannot honour.
+
+### The colour of the crossing
+
+`--backend ts` declares every operation **`async`** — on the service, on the
+extern and on the provide method — because a JSON-RPC round trip suspends and
+JavaScript has no blocking fetch to hide that behind. Before this was declared,
+the ts binding emitted `await` inside a synchronous function and typechecked
+nowhere (issue #251).
+
+PR #250's `remote` row refuses the ts tier over the same sentence, and both
+answers are right. A `remote` row synthesizes only a **provider** for a service
+somebody else already wrote, and its defining property is that a consumer does
+not change by one character when a local provider becomes a remote one — so it
+cannot colour a `service` declaration it did not write. This importer writes the
+service, the extern and the provider together out of one card, so nothing it
+would have to recolour predates it.
+
+For a consumer that means the asynchrony is **declared and readable**: you bind
+`emission async fn` off the generated service and call it from an async context
+(an `async fn` provide method, or a lifecycle `call`). That is A1's existing
+rule — asynchrony crosses a component boundary only by declaration, never
+smuggled in by a provider ([async-extern.md](design/async-extern.md) §3) — and
+the value type is untouched: `-> Untrusted[Str]` still means `Untrusted[Str]`,
+and the `Promise` exists only in the emitted TypeScript (§2).
+
+`--backend py` stays **sync**. A generated file carries exactly one host body
+and declares the colour of that body: `urllib.request.urlopen` blocks rather
+than suspends, and py is a coloured tier, so `async` there would wrap a blocking
+call in an `async def`, stall the caller's loop, and colour every py caller for
+a suspension that never happens.
 
 ---
 

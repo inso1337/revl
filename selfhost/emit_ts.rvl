@@ -1251,6 +1251,68 @@ fn expr(node: Any, counter: Int, acx: ACx) -> Rendered {
   return expr_inner(node, counter, acx)
 }
 
+// ------------------------------------- the self-rebind (unique) lowering
+// `_ts_inplace_write` / `_ts_inplace_stmt`, roadmap item 435 (d) on item 445's
+// frontend marker.
+//
+// `xs = xs.push(e)` renders `[...xs, e]` — the correct rendering of a
+// PERSISTENT write, and a quadratic for the loop idiom, where the receiver is
+// dead the instant the assignment lands. The proof that the copy is
+// unobservable is an aliasing question about the SOURCE, so it is not here: it
+// runs once in the frontend (`src/revl/ownership.py`) and rides the IR.
+//
+//   `assign` step, `"unique": true` — the binding owns its object outright at
+//                                     this write, so the in-place call is the
+//                                     faithful lowering.
+//
+// Absence means "not proven", which keeps the spread, which is always correct.
+// `"unique": "copy"` is NOT honoured on this tier: its `unique_birth` shape is
+// `"List"` or `"Map"`, and `"Map"` covers both a revl `Map` (a JS `Map` here)
+// and a record update (a plain object here), so the birth copy the marker is
+// conditional on has no single spelling. `value_bool` answers `false` for the
+// string `"copy"`, which is exactly the test this needs.
+fn is_inplace_write(node: Any) -> Bool {
+  if (value_str(value_field(node, "step")) != "assign") { return false }
+  if (!value_bool(value_field(node, "unique"))) { return false }
+  let value = value_field(node, "value")
+  if (node_kind(value) == "record_update") { return true }
+  if (node_kind(value) != "builtin") { return false }
+  let m = value_str(value_field(value, "method"))
+  let n = value_list(value_field(value, "args")).length()
+  if (m == "push") { return n == 1 }
+  if (m == "set") { return n == 2 }
+  if (m == "remove") { return n == 1 }
+  return false
+}
+
+// the in-place statement replacing a proven-unique persistent copy; operand
+// evaluation order matches the copying form it replaces
+fn inplace_stmt(name: Str, value: Any, counter: Int, acx: ACx) -> Rendered {
+  if (node_kind(value) == "record_update") {
+    // `Object.assign` builds the whole override object BEFORE writing any of
+    // it, so a swap stays simultaneous exactly as the `{ ...p, .. }` spread was
+    var c = counter
+    var parts = []
+    for (u of value_list(value_field(value, "updates"))) {
+      let vr = expr(value_at(u, 1), c, acx)
+      c = vr.counter
+      parts = parts.push(`${ident(value_str(value_at(u, 0)))}: ${vr.text}`)
+    }
+    return { text: `Object.assign(${name}, { ${parts.join(", ")} })`, counter: c }
+  }
+  let args = value_list(value_field(value, "args"))
+  let method = value_str(value_field(value, "method"))
+  let a0 = expr(args[0], counter, acx)
+  if (method == "push") { return { text: `${name}.push(${a0.text})`, counter: a0.counter } }
+  if (method == "set") {
+    let a1 = expr(args[1], a0.counter, acx)
+    return { text: `${name}.set(${a0.text}, ${a1.text})`, counter: a1.counter }
+  }
+  // `Map.remove` is TOTAL (an absent key is not an error) and `Map.delete`
+  // answers a discarded boolean rather than throwing, so it is exact.
+  return { text: `${name}.delete(${a0.text})`, counter: a0.counter }
+}
+
 // -------------------------------------------------------------- statements
 // `_v3_stmt` (test_mode = false): one fn-body step -> its emitted lines.
 fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
@@ -1267,8 +1329,13 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
     return { lines: [`${pad}${kw} ${ident(value_str(value_field(node, "name")))} = ${r.text}`], counter: r.counter }
   }
   if (step == "assign") {
+    let nm = ident(value_str(value_field(node, "name")))
+    if (is_inplace_write(node)) {
+      let w = inplace_stmt(nm, value_field(node, "value"), counter, a)
+      return { lines: [`${pad}${w.text}`], counter: w.counter }
+    }
     let r = expr(value_field(node, "value"), counter, a)
-    return { lines: [`${pad}${ident(value_str(value_field(node, "name")))} = ${r.text}`], counter: r.counter }
+    return { lines: [`${pad}${nm} = ${r.text}`], counter: r.counter }
   }
   if (step == "return") {
     let e = value_field(node, "expr")

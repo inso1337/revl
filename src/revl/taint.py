@@ -39,10 +39,35 @@ that uses no qualifier. Only the taint verdict is new.
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass, field
 
 from .errors import RevlError
 from .typecheck import parse_type, format_type, FN_HEAD
+
+
+class LiteralSecretDefaultWarning(UserWarning):
+    """A component config field declared `Secret[T]` carries a LITERAL default
+    (roadmap item 256 Slice 3; issue #192).
+
+    What `Secret[T]` buys is redaction at the boundaries the marking reaches:
+    the `<name>.config` run trace, WAL records, seam failure text, MCP
+    approval tickets. It does NOT make the value absent from the compiled
+    artifact. A default is written by the author into the source, so it
+    lowers into the IR like any other default (`lower._ir_config_field`) and
+    into the emitted `ConfigSchema` — the `secret` flag rides ALONGSIDE the
+    plaintext there, it does not replace it.
+
+    That is by construction and stays legal: a canary fixture needs a real
+    value in place to detect a leak, which is why this warns rather than
+    refusing. The risk it addresses is the READER's, not the mechanism's —
+    someone writing `config { api_key: Secret[Str] = "sk-live-..." }` may
+    believe the type is protecting that literal.
+
+    The form with no value anywhere in the source or the IR is item 256's
+    `secret NAME for CAP` (`parser.SecretDecl`, which has `name`, `capability`
+    and `line` and NO value field): the runtime resolves the value against the
+    name and injects it into the bound capability's extern bodies only."""
 
 # a qualifier head standing on its own (not the tail of a longer identifier such
 # as a user type `MyTrusted[T]`), used only as the byte-identity fast-path guard
@@ -524,11 +549,47 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             # the `revl_load` MCP response, so it earns the same stamp.
             if mentions_secret(cfield.type):
                 cfield.secret = True
+                _warn_on_literal_secret_default(comp, cfield)
             clean = strip_qualifiers(cfield.type)
             if clean != cfield.type:
                 cfield.type = clean
 
     return model
+
+
+def _warn_on_literal_secret_default(comp, cfield) -> None:
+    """Warn when a `Secret[T]` config field's default is a literal (issue #192).
+
+    A WARNING, never a refusal. The repo's own leak canaries put a real value
+    in place precisely so a test can detect it downstream, and refusing would
+    break the fixtures that prove the redaction works. What is wrong here is a
+    reader's belief, not the compiler's behaviour, so the repair is a sentence
+    that says what `Secret[T]` does and does not cover, plus the name of the
+    form that has no value to leak.
+
+    `= null` is not reported. The parser lowers `null` to `None`, which is
+    indistinguishable from "no default at all" by the time it reaches here,
+    and it is not a credential either way.
+    """
+    default = getattr(cfield, "default", None)
+    if default is None:
+        return
+    where = f"{getattr(comp, 'name', '?')}.{cfield.name}"
+    warnings.warn(
+        f"config field `{where}` (line {cfield.line}) is declared "
+        f"`{cfield.type}` and carries a literal default. `Secret[T]` does NOT "
+        f"keep that literal out of the compiled artifact: a default is source "
+        f"the author wrote, so it lowers into the IR's config entry and into "
+        f"the emitted ConfigSchema verbatim, with the `secret` marking beside "
+        f"it rather than in place of it. What the marking buys is REDACTION "
+        f"at the boundaries it reaches - the run trace, WAL records, seam "
+        f"failure text, approval tickets - not absence from the build output. "
+        f"For a value that is in neither the source nor the IR, declare "
+        f"`secret {cfield.name} for <capability>` and let the runtime resolve "
+        f"it into the bound capability's extern bodies (item 256); leave this "
+        f"field's value to be supplied at load time. A literal default here is "
+        f"legitimate for a test canary, which is why this is a warning.",
+        LiteralSecretDefaultWarning, stacklevel=2)
 
 
 def _fnparam_setter(param):
