@@ -1499,7 +1499,7 @@ fn callable_tail(tokens: &[Tok], raw: &[selfhost::Token], decl: &Decl) -> Option
         return None;
     }
     let parsed =
-        serde_json::to_value(selfhost::params_at(raw.to_vec(), decl.fn_at as i64 + 3)).ok()?;
+        serde_json::to_value(selfhost::params_at(raw, decl.fn_at as i64 + 3)).ok()?;
     if parsed.get("ok")?.as_bool()? != true {
         return None;
     }
@@ -1517,7 +1517,7 @@ fn callable_tail(tokens: &[Tok], raw: &[selfhost::Token], decl: &Decl) -> Option
     let after = parsed.get("i")?.as_i64()?;
     let mut returns = String::new();
     if tokens.get(after as usize).map(|t| t.kind.as_str()) == Some("arrow") {
-        let ty = serde_json::to_value(selfhost::type_at(raw.to_vec(), after + 1)).ok()?;
+        let ty = serde_json::to_value(selfhost::type_at(raw, after + 1)).ok()?;
         if ty.get("ok")?.as_bool()? != true {
             return None;
         }
@@ -1538,7 +1538,8 @@ TESTS_SYMBOLS_RS = r'''//! The navigation surface's own tests (`cargo test`), ru
 //! the contract that makes [`revl_gate::symbols::symbols`] safe to put behind
 //! an editor: it answers only what it can answer exactly, and every uncertainty
 //! is an absence, never a guess. The reference-agreement half — that an answer
-//! here is byte-identical to `python -m revl.lsp`'s — lives in
+//! here is byte-identical to `python -P -m revl.lsp`'s (the `-P` is the
+//! PYTHONSAFEPATH safety bit, issue #317) — lives in
 //! `crates/revl-lsp/tests/reference_agreement.rs`, because it needs the
 //! reference.
 

@@ -6,10 +6,18 @@
 # on) at a PINNED revision (roadmap item 76(c): a fresh clone must not drift
 # onto the branch's moving HEAD — bump CORDIS_PY_PIN deliberately), creates a
 # local venv, and installs it editable with the test deps — plus revl itself,
-# editable, so this interpreter can run the toolchain:
+# editable, so this interpreter can run the toolchain.
 #
-#     backends/python/.venv/bin/python -m revl run app.rvl
-#     backends/python/.venv/bin/python -m revl run app.rvl --placement p.toml --once
+# The revl package is installed twice: once with `uv` for the cheap dep
+# resolution, then once more with `python -m pip` so `[project.scripts]`
+# actually materialises as the `revl` and `truc` console scripts on PATH.
+# `uv pip install -e .` does not (the editable install resolves to a `.pth`
+# file, no entry points); the second install through stock pip is what makes
+# `revl` callable without `python -P -m revl` (the documented happy path is
+# the console script; the `-P` is the PYTHONSAFEPATH safety bit, issue
+# #317) and closes the CWD-shadowing window issue #317 names (issue #336).
+# The success message points at `revl` for the same reason — the
+# documented happy path is the one with no window.
 #
 # That is the command `revl run` prints when cordis is missing, and the one
 # --placement prints in its preflight; both only work if revl is installed
@@ -48,9 +56,13 @@ uv venv --allow-existing .venv
 # is deliberate — a ratchet that goes quiet when its instrument is missing is
 # the exact failure it exists to catch.
 uv pip install --python .venv/bin/python pytest pytest-asyncio pyyaml watchdog coverage \
-    --editable "$CORDIS_PY" --editable ../..
+    --editable "$CORDIS_PY"
+# Re-install revl through stock pip so `[project.scripts]` (the `revl` and
+# `truc` console-script entries) are written to .venv/bin/. `uv pip install -e`
+# resolves the editable to a `.pth` and skips the entry-point step; issue #336.
+.venv/bin/python -m pip install --no-deps -e ../..
 
 echo
 echo "setup complete — run the suite with:  .venv/bin/pytest"
 echo "                 run the demo with:   .venv/bin/python demo.py"
-echo "                 run a composition:   .venv/bin/python -m revl run ../../examples/user_cache.rvl"
+echo "                 run a composition:   revl run ../../examples/user_cache.rvl"

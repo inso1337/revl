@@ -62,18 +62,18 @@ Point the exporter at a recorded trace:
 
 ```bash
 # emit spans through the OpenTelemetry SDK (default: console exporter)
-python -m revl.otel run.jsonl
+python -P -m revl.otel run.jsonl          # `-P` is PYTHONSAFEPATH (issue #317)
 
 # print the intermediate span mapping as JSON instead (works with or without
 # the SDK installed, useful for inspecting the translation)
-python -m revl.otel run.jsonl --json
+python -P -m revl.otel run.jsonl --json
 ```
 
-If the SDK is **not** installed, `python -m revl.otel run.jsonl` degrades
+If the SDK is **not** installed, `python -P -m revl.otel run.jsonl` degrades
 gracefully: it prints the span mapping as JSON and a note telling you to install
 `revl[otel]`, never a hard `ImportError`.
 
-> Design note: the opt-in is deliberately a standalone `python -m revl.otel`
+> Design note: the opt-in is deliberately a standalone `python -P -m revl.otel`
 > entry point rather than a `revl … --otel` flag, so it touches neither the CLI
 > dispatcher nor the runtime hot path. If a `revl`-subcommand `--otel` flag is
 > wanted later, it can call `revl.otel.export_trace_file`; the integration
