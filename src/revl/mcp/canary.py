@@ -279,7 +279,8 @@ def promote_admission(files, running_ir: dict, remainder_providers: dict,
 
 def run_canary(running_ir: dict, candidate_files=None, candidate_source=None,
                *, realm: str, provider: str | None = None,
-               promote_to: str | None = None, prove_residue: bool = True) -> dict:
+               promote_to: str | None = None, prove_residue: bool = True,
+               over_the_transport: bool = True) -> dict:
     """The composed canary verdict for one slice.
 
     `running_ir` is the baseline composition. The candidate (source or files)
@@ -287,6 +288,10 @@ def run_canary(running_ir: dict, candidate_files=None, candidate_source=None,
     running manifest with `replacing=(provider,)` — the same gate a swap uses.
     Returns the divergence attribution, the revert proof (survivors +
     residue), and, when `promote_to` is given, the promote admission verdict.
+
+    `over_the_transport=False` says the candidate is the OPERATOR'S OWN — `revl
+    canary` on the CLI, where the human running the command is the author. See
+    `server.compile_under_authoring`.
     """
     try:
         slice_ = select_slice(running_ir, realm)
@@ -315,7 +320,8 @@ def run_canary(running_ir: dict, candidate_files=None, candidate_source=None,
         from .server import compile_under_authoring  # noqa: PLC0415 — cycle
         candidate_ir = compile_under_authoring(
             candidate_source, list(candidate_files or []),
-            manifest=running_ir, replacing=(provider,))
+            manifest=running_ir, replacing=(provider,),
+            over_the_transport=over_the_transport)
     except RevlError as error:
         return {"ok": False, "kind": CANARY_KIND, "schema_version": CANARY_VERSION,
                 "realm": realm, "provider": provider,

@@ -267,6 +267,35 @@ def test_the_repair_loop_refuses_what_the_gate_refuses(tmp_path):
     assert not marker.exists(), "revl_repair executed the candidate's host code"
 
 
+def test_the_cli_still_grades_operator_authored_source():
+    """The other side of the same line. `revl bundle`, `truc ship`, `revl
+    canary/repair/quarantine` reuse these modules as a LIBRARY, on the
+    operator's own machine over the operator's own files — the human running
+    the command is the author, exactly as for a jailed `files` compile. They
+    pass `over_the_transport=False` and must keep grading source that an agent
+    on a session may not author.
+
+    The candidate reaches host code only from a method body, so booting it in
+    the scratch session runs nothing."""
+    from revl.mcp import gauntlet as _gauntlet
+    from revl.mcp.session import Session
+
+    source = ('use "stdlib/shell.rvl" { sh }\n'
+              "service Runner { emission fn go() -> Str }\n"
+              "component R provides r: Runner {\n"
+              '  provide r { fn go() = emit sh("true") }\n'
+              "}\n")
+    arguments = {"source": source, "modules": _MODULES}
+
+    over_a_session = _gauntlet.run(Session(), dict(arguments))
+    assert over_a_session["verdict"] == "rejected"
+
+    from_the_cli = _gauntlet.run(Session(), dict(arguments),
+                                 over_the_transport=False)
+    assert from_the_cli["verdict"] == "admissible", \
+        "the CLI is the operator's own author and must keep grading its source"
+
+
 # ============================================================================
 # 3. the composed verbs — a swap reached through another verb's machinery
 # ============================================================================
@@ -452,6 +481,28 @@ def test_every_mcp_compiler_call_goes_through_the_authoring_door():
         + ". Route them through `server.compile_under_authoring`, pass "
           "`profile=AUTHORING.profile()`, or record the module in "
           "COMPILER_DOOR_EXCEPTIONS with the reason it is safe.")
+
+
+def test_no_mcp_verb_opts_out_of_the_authoring_trust():
+    """`over_the_transport=False` says "the operator wrote this, not the agent".
+    It is correct for the CLI callers outside this package and never correct
+    for a verb reached over the transport, so it must not appear here."""
+    offenders = []
+    for path in sorted((ROOT / "src" / "revl" / "mcp").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "over_the_transport" \
+                        and isinstance(kw.value, ast.Constant) \
+                        and kw.value.value is False:
+                    offenders.append(f"{path.name}:{node.lineno}")
+    assert not offenders, (
+        "these MCP modules opt out of the session's authoring trust: "
+        + ", ".join(offenders)
+        + ". Only a CLI caller outside src/revl/mcp/ may pass "
+          "over_the_transport=False.")
 
 
 def test_the_door_guard_would_catch_a_new_unprofiled_call(tmp_path):
