@@ -202,7 +202,7 @@
       "uncovered_statements": 2989
     },
     "java": {
-      "statements": 2403,
+      "statements": 2463,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_V3Ctx.next_gensym": 2,
@@ -214,7 +214,7 @@
           "_emit_result_type": 1,
           "_emit_setup_stmt": 53,
           "_emit_v3_externs": 23,
-          "_emit_v3_tests": 19,
+          "_emit_v3_tests": 20,
           "_emit_witnessed_step": 21,
           "_format_java": 28,
           "_inline_arrow": 12,
@@ -227,7 +227,8 @@
           "_split_generic": 11,
           "_subexprs": 9,
           "_v3_builtin": 57,
-          "_v3_len": 1
+          "_v3_len": 1,
+          "_value_map_write_type": 6
         },
         "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
           "<module>": 1,
@@ -253,6 +254,7 @@
           "_emit_service_interfaces": 1,
           "_emit_v3": 14,
           "_emit_v3_functions": 1,
+          "_empty_map_decl_type": 2,
           "_expr": 49,
           "_fn_name": 3,
           "_guard_frame_neutral_loop": 1,
@@ -267,18 +269,20 @@
           "_mangle": 2,
           "_map_expr_inserts": 9,
           "_map_insert_candidates": 13,
-          "_map_value_expr_type": 93,
+          "_map_value_expr_type": 97,
           "_map_value_surface_type": 1,
           "_metadata_lit": 4,
           "_method_body": 6,
-          "_method_body_lines": 34,
+          "_method_body_lines": 36,
           "_param_type": 1,
+          "_pin_value_map_locals": 6,
           "_refuse_deferred_emissions": 10,
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1,
           "_refuse_missing_host_root": 1,
           "_refuse_stream_host": 1,
           "_reject_fn_type": 1,
+          "_scan_map_writes": 6,
           "_uses_builtin_result": 1,
           "_uses_builtin_result.walk": 3,
           "_uses_float_interp.walk": 3,
@@ -296,7 +300,7 @@
         },
         "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
           "_emit_lifecycle_no_residue_helper": 1,
-          "_emit_v3_lifecycle_tests": 30,
+          "_emit_v3_lifecycle_tests": 31,
           "_java_lifecycle_method_name": 11,
           "_java_test_method_name": 11,
           "_refuse_fault_tests": 2,
@@ -327,7 +331,7 @@
           "_emit_v2": 27
         }
       },
-      "uncovered_statements": 1065
+      "uncovered_statements": 1093
     },
     "py": {
       "statements": 2329,
@@ -617,19 +621,19 @@
       "uncovered_statements": 1584
     },
     "ts": {
-      "statements": 1843,
+      "statements": 1955,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_emit_temporal": 14,
           "_emit_ts_ref_runtime": 1,
           "_emit_ts_ref_thunk": 31,
           "_emit_ts_ref_thunk._mark": 2,
-          "_emit_ts_tests": 13,
+          "_emit_ts_tests": 14,
           "_float_literal": 3,
           "_main": 17,
           "_method_witnessed_step": 19,
           "_ts_extern_config_scaffold": 1,
-          "_v3_do_expr": 17,
+          "_v3_do_expr": 22,
           "_witnessed_step": 19
         },
         "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
@@ -657,7 +661,7 @@
           "_literal": 5,
           "_mangle": 2,
           "_member": 2,
-          "_method_body": 52,
+          "_method_body": 53,
           "_method_body_needs_frame": 2,
           "_needs_frame.walk": 3,
           "_prop_key": 1,
@@ -683,8 +687,10 @@
           "_uses_str_methods": 2,
           "_v3_arm_body": 3,
           "_v3_emission_call_node": 3,
+          "_v3_empty_list_types": 10,
           "_v3_match_expr": 6,
           "_v3_stmt": 33,
+          "_v3_surface_type": 23,
           "_v3_var": 3,
           "_witnessed_extern": 3,
           "emit": 4
@@ -705,7 +711,7 @@
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 618
+      "uncovered_statements": 658
     },
     "wasm": {
       "statements": 2657,
@@ -897,7 +903,7 @@
       "uncovered_statements": 173
     },
     "java": {
-      "statements": 2407,
+      "statements": 2412,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "emit_setup_stmt": 1,
@@ -937,7 +943,7 @@
           "java_bin_ops": 4,
           "java_lit": 5,
           "java_v3_type": 10,
-          "let_keyword": 2,
+          "let_keyword": 3,
           "list_nonempty": 1,
           "lit_value": 5,
           "mangle": 3,
@@ -989,7 +995,7 @@
           "v3_types_need_value_helpers": 1
         }
       },
-      "uncovered_statements": 399
+      "uncovered_statements": 400
     },
     "py": {
       "statements": 2042,
@@ -1140,7 +1146,7 @@
       "uncovered_statements": 196
     },
     "ts": {
-      "statements": 2115,
+      "statements": 2252,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "expected_missing_adt": 1,
@@ -1148,6 +1154,7 @@
           "expected_result_type": 1,
           "ind": 1,
           "indentation_is_two_spaces": 1,
+          "is_bool_op": 1,
           "optcall_result_is_int": 1,
           "sync_acx": 1
         },
@@ -1163,6 +1170,8 @@
           "emit_externs": 2,
           "emit_functions": 1,
           "emit_ts_types": 1,
+          "empty_list_ann": 1,
+          "empty_list_types": 10,
           "expr": 4,
           "expr_inner": 6,
           "float_operand": 5,
@@ -1174,6 +1183,7 @@
           "is_word": 2,
           "is_word_ch": 4,
           "last_index": 2,
+          "list_element": 2,
           "literal_of": 4,
           "mangle": 3,
           "match_expr": 6,
@@ -1189,6 +1199,7 @@
           "render_un": 8,
           "render_var": 3,
           "service_interfaces": 1,
+          "surface_type": 24,
           "ts_bin_op": 6,
           "ts_return_type": 1,
           "ts_scalar_type": 4,
@@ -1217,7 +1228,7 @@
           "ts_type_v1": 2
         }
       },
-      "uncovered_statements": 290
+      "uncovered_statements": 328
     },
     "wasm": {
       "statements": 1472,
