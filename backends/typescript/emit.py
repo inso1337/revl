@@ -463,6 +463,30 @@ class _Scope:
         return name
 
 
+def _pinned_arrow(step: dict, slot: str, arrow: str) -> str:
+    """`arrow`, with the derived inverse's mutable method-locals bound BY VALUE
+    (docs/closures.md; `<slot>_captures`, computed by
+    `src/revl/lower.py::_pin_inverse_captures`).
+
+    An `undo` runs at teardown, long after the method returned, and a JS closure
+    reads the enclosing `let` BINDING — so a `var` the body reassigns after the
+    effect registered would move the value the inverse acts on. The snapshot is
+    the same IIFE-around-the-arrow the `captures` path above uses, and for the
+    same reason a default parameter cannot spell it in JS: a parameter
+    initialiser's right-hand side resolves to the parameter itself and hits the
+    TDZ. Wrapping the arrow (never its BODY) evaluates each name once, where the
+    effect registers; wrapping the body would re-read the rebound `var` on every
+    call.
+
+    Returns `arrow` untouched when the lowering found nothing to pin, so a body
+    without one emits byte-identically."""
+    names = [_ident(n, "inverse capture") for n in step.get(f"{slot}_captures") or []]
+    if not names:
+        return arrow
+    bound = ", ".join(f"{n}: any" for n in names)
+    return f"(({bound}) => {arrow})({', '.join(names)})"
+
+
 # Expression kinds that never need parentheses when used as a call target.
 # `call`/`field`/`index` targets are parenthesised unless atomic; the
 # component dialect and the 2.0 dialect each have their own atomic set
@@ -1159,13 +1183,14 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
                 lines.append(f"{indent}  {bind} = {acquire}")
             else:
                 lines.append(f"{indent}  {acquire}")
+            inverse = _pinned_arrow(step, "undo", f"() => {undo}")
             if bind is not None and _is_map_cas(step.get("acquire")):
                 # item 397: result-guarded undo. A `false` CAS registers the
                 # identity inverse (a no-op disposer), so teardown never removes
                 # the winning claimant's entry.
-                lines.append(f"{indent}  return {bind} ? () => {undo} : () => {{}}")
+                lines.append(f"{indent}  return {bind} ? {inverse} : () => {{}}")
             else:
-                lines.append(f"{indent}  return () => {undo}")
+                lines.append(f"{indent}  return {inverse}")
             lines.append(f"{indent}}})")
         elif kind == "emit":
             if step.get("compensate") is not None:
