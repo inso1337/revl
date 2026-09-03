@@ -16,7 +16,7 @@ export interface Pt {
 }
 
 export function built(n: bigint): bigint[] {
-    let xs = []
+    let xs: bigint[] = []
     let i = 0n
     while ((i < n)) {
       xs.push(i)
@@ -54,7 +54,7 @@ export function moved(n: bigint): Pt {
 
 export function snapshots(n: bigint): bigint[][] {
     let xs = [0n]
-    let out = []
+    let out: bigint[][] = []
     let i = 1n
     while ((i < n)) {
       out.push(xs)
@@ -65,10 +65,10 @@ export function snapshots(n: bigint): bigint[][] {
 }
 
 export function chunked(n: bigint): bigint[][] {
-    let out = []
+    let out: bigint[][] = []
     let i = 0n
     while ((i < n)) {
-      let res = []
+      let res: bigint[] = []
       let j = 0n
       while ((j < 2n)) {
         res.push(revlI64(revlI64(i * 2n) + j))

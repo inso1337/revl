@@ -636,6 +636,7 @@ class _V3Ctx:
     def __init__(self, types: dict, functions: list, externs: list,
                  components: list | None = None) -> None:
         self.types = types or {}
+        self.functions = list(functions or [])
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
         # item 243/318: witnessed externs by name, so a method/activation body's
@@ -678,6 +679,10 @@ class _V3Ctx:
         # {binding name: {"arrow": <arrow node>, "captures": {name: snapshot}}}.
         # See `_inline_arrow` for why an arrow has no Java declaration.
         self.arrows: dict[str, dict] = {}
+        # Value type learned for a local bound to an unannotated `Map.empty()`,
+        # in the body being emitted: {binding name: "Map[Str, V]"}. Reset per
+        # body beside `arrows` above; see `_pin_value_map_locals` (issue #274).
+        self.map_locals: dict[str, str] = {}
 
     def new_match_ignored(self) -> str:
         self._match_counter += 1
@@ -1994,7 +1999,128 @@ def _adt_binding_type(value: object, ctx: _V3Ctx | None) -> str | None:
     return _ident(owner, "type name") if owner else None
 
 
-def _let_keyword(node: dict, ctx: _V3Ctx | None = None) -> str:
+def _value_map_write_type(node: object, var_types: dict,
+                          ctx: "_V3Ctx") -> str | None:
+    """`_map_value_expr_type` plus the shapes a *value* Map write takes.
+
+    The shared oracle below is the HOST Map's, and its fallback (`None` ->
+    the emitter's historical `Str`) is load-bearing for that tier's goldens, so
+    it is not widened here. `xs[i]` is the one extra shape a value-Map
+    accumulator writes in practice (`m = m.set(xs[i], xs[i])`), and it is
+    answered in this wrapper instead.
+    """
+    if isinstance(node, dict) and node.get("kind") == "index":
+        target = _value_map_write_type(node.get("target"), var_types, ctx)
+        if (isinstance(target, str) and target.startswith("List[")
+                and target.endswith("]")):
+            return target[5:-1].strip()
+        return None
+    return _map_value_expr_type(node, var_types, None, ctx.functions, ctx)
+
+
+def _scan_map_writes(node: object, var_types: dict, ctx: "_V3Ctx",
+                     writes: dict) -> None:
+    """Collect `X.set(k, v)` value types by receiver name, anywhere in *node*."""
+    if isinstance(node, list):
+        for item in node:
+            _scan_map_writes(item, var_types, ctx, writes)
+        return
+    if not isinstance(node, dict):
+        return
+    if node.get("kind") == "builtin" and node.get("method") == "set":
+        target = node.get("target") or {}
+        args = node.get("args") or []
+        if target.get("kind") in ("var", "name") and len(args) == 2:
+            name = target.get("name") or target.get("id")
+            if isinstance(name, str):
+                writes.setdefault(name, []).append(
+                    _value_map_write_type(args[1], var_types, ctx))
+    for value in node.values():
+        _scan_map_writes(value, var_types, ctx, writes)
+
+
+def _pin_value_map_locals(body: list | None, params: list | None,
+                          ctx: "_V3Ctx") -> None:
+    """Learn the value type of every local bound to `Map.empty()` (issue #274).
+
+    `var m = Map.empty()` names no type, and on this tier alone that is fatal:
+    `var` freezes the local at `Map.of()`'s inferred `Map<Object, Object>`, so
+    the writer static is inapplicable and the `return` does not convert. The
+    raw-type fallback in `_empty_map_decl_type` makes such a body COMPILE, but
+    only erasure carries it — a read back out (`m.lookup(k) ?? 0`) still hands
+    an `Object` to a `long` position.
+
+    The value type is nonetheless right there in the IR: every `m.set(k, v)`
+    names it. That is exactly the oracle FR-4 already runs for the HOST Map
+    (`_map_value_expr_type` and `_MAP_VALUE_WRITERS` below — V learned per site
+    from the writers), so this reuses it rather than inventing a second answer.
+    Keys are always `Str` on this tier (`revlMapSet` is declared
+    `Map<String, V>`), so only V has to be learned.
+
+    Anything the oracle cannot prove — no writer, disagreeing writers, a value
+    shape it does not type — pins nothing and the local stays raw, which is the
+    conservative direction: a declared generic is erased at runtime, so a pin
+    can only ever change what javac accepts, never what the program computes.
+    """
+    ctx.map_locals = {}
+    if not body:
+        return
+    var_types = {
+        p.get("name"): p.get("type")
+        for p in params or [] if isinstance(p, dict) and p.get("name")
+    }
+    writes: dict[str, list] = {}
+    _scan_map_writes(body, var_types, ctx, writes)
+    for name, candidates in writes.items():
+        if not candidates or any(c is None for c in candidates):
+            continue
+        if len(set(candidates)) != 1:
+            continue  # two writers disagree: pin nothing rather than guess
+        ctx.map_locals[name] = f"Map[Str, {candidates[0]}]"
+
+
+def _empty_map_decl_type(node: dict, pins: dict | None) -> str:
+    """Declaration type for a local bound to `Map.empty()` (issue #274).
+
+    `var` freezes a local at the type of its initializer, and `Map.of()` with
+    no target type infers `Map<Object, Object>`. That is what made the Map
+    ACCUMULATOR uncompilable: `var m = Map.empty()` froze `m` as
+    `Map<Object, Object>`, so `revlMapSet(m, k, v)` was reported inapplicable
+    against `revlMapSet(Map<String, V>, String, V)` and `return m` was a
+    `Map<Object, Object>` where the declared `Map<String, Long>` was required.
+    Nothing here is `Map.of()`'s fault — in every OTHER position (a return, an
+    argument, an annotated declaration) it is a poly expression and infers from
+    its target, which is why item 433 F8 could move the empty map onto it.
+
+    So the local gets a declared type instead of `var`, exactly as an empty
+    list literal already does two lines up:
+
+      * an annotated `var m: Map[Str, Int] = Map.empty()` carries the author's
+        own annotation on the literal (`"expected"`, roadmap 76b — the frontend
+        pin the go tier reads), so it declares the precise
+        `java.util.Map<String, java.lang.Long>` and `Map.of()` infers into it;
+      * an unannotated `var m = Map.empty()` names no type, so the value type
+        is learned from the body's own `m.set(k, v)` writers
+        (`_pin_value_map_locals`, the FR-4 oracle);
+      * and when even that proves nothing, the local takes the raw
+        `java.util.Map` the empty-list case takes: erasure keeps javac's
+        unchecked conversion in play in both directions (the writer call and the
+        `return`), which is correct code plus an unchecked warning rather than
+        an error.
+    """
+    value = node.get("value") or {}
+    expected = value.get("expected")
+    if not isinstance(expected, str) and pins:
+        expected = pins.get(node.get("name"))
+    if isinstance(expected, str):
+        expected = expected.strip()
+        if expected.startswith("Map[") and expected.endswith("]"):
+            return _java_v3_type(expected)
+    return "java.util.Map"
+
+
+def _let_keyword(node: dict, ctx: _V3Ctx | None = None,
+                 pins: dict | None = None) -> str:
     """Declaration type for a v3 `let`/`var`.
 
     An empty list literal has no element type, and `var` would freeze it as
@@ -2005,6 +2131,8 @@ def _let_keyword(node: dict, ctx: _V3Ctx | None = None) -> str:
     value = node.get("value")
     if isinstance(value, dict) and value.get("kind") == "list" and not value.get("items"):
         return "java.util.List"
+    if isinstance(value, dict) and value.get("kind") == "maplit" and not value.get("entries"):
+        return _empty_map_decl_type(node, pins)
     adt = _adt_binding_type(value, ctx)
     if adt is not None:
         return adt if node.get("mutable") else f"final {adt}"
@@ -2039,7 +2167,8 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         ctx.arrows.pop(name, None)  # the name no longer denotes an arrow
         value = _expr(raw, ctx)
         if step == "let":
-            out.append(f"{pad}{_let_keyword(node, ctx)} {name} = {value};")
+            out.append(
+                f"{pad}{_let_keyword(node, ctx, ctx.map_locals)} {name} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
     elif step == "return":
@@ -2614,6 +2743,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         )
         ret = _java_v3_type(fn.get("returns"))
         ctx.arrows = {}  # arrow bindings are local to one body
+        _pin_value_map_locals(fn.get("body"), fn.get("params"), ctx)
         lines.append(f"public static {ret} {name}({params}) {{")
         if not fn.get("body"):
             lines.append("    // (empty body)")
@@ -2642,6 +2772,7 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
         mname = _java_test_method_name(test.get("name"), index, used)
         test_names.append(mname)
         ctx.arrows = {}  # arrow bindings are local to one body
+        _pin_value_map_locals(test.get("body"), None, ctx)
         lines.append(f"public static void {mname}() {{")
         for stmt in test.get("body") or []:
             _v3_stmt(stmt, ctx, lines, 1, test_mode=True)
@@ -2784,6 +2915,7 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
         mname = _java_lifecycle_method_name(test.get("name"), used)
         names.append(mname)
         ctx.arrows = {}  # arrow bindings are local to one body
+        _pin_value_map_locals(test.get("body"), None, ctx)
         # RAW (not run through `_string`): every use below feeds it into its own
         # single `_string(...)` call, the one place allowed to escape it.
         where = f'lifecycle test "{test.get("name")}"'
@@ -3403,6 +3535,11 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
     if kind == "call":
         # v1-style call: `{target: ..., method: ...}`. A required-service call
         # resolves through the component's requires + the service declaration.
+        # A pure `fn` body has no component (issue #274 calls this from
+        # `_pin_value_map_locals` with `env=None`), and then neither shape below
+        # can resolve.
+        if env is None:
+            return None
         target = node.get("target") or {}
         if target.get("kind") == "req":
             service_name = (env.component.get("requires") or {}).get(target.get("name"))
@@ -3447,6 +3584,8 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
             return None
         return (spec.get("fields") or {}).get(node.get("name"))
     if kind == "config":
+        if env is None:
+            return None
         fname = node.get("field")
         for f in env.component.get("config") or []:
             if f.get("name") == fname:
@@ -4353,6 +4492,7 @@ def _method_body_lines(
 ) -> list[str]:
     lines: list[str] = []
     v3_ctx.arrows = {}  # arrow bindings are local to one body
+    _pin_value_map_locals(method.get("body"), method.get("params"), v3_ctx)
     rename = {b: f"this.{b}" for b in _binds(env.component)}
     rename.update({local: f"this.{local}" for local in env.reqs})
     for stmt in method.get("body") or []:
@@ -4425,7 +4565,13 @@ def _method_body_lines(
                 continue
             v3_ctx.arrows.pop(name, None)
             value = _expr(raw, v3_ctx, rename, env)
-            decl = _adt_binding_type(raw, v3_ctx) or "var"
+            if (isinstance(raw, dict) and raw.get("kind") == "maplit"
+                    and not raw.get("entries")):
+                # issue #274, one path over: this arm never went through
+                # `_let_keyword`, so `var m = Map.empty()` froze here too.
+                decl = _empty_map_decl_type(stmt, v3_ctx.map_locals)
+            else:
+                decl = _adt_binding_type(raw, v3_ctx) or "var"
             lines.append(f"{decl} {name} = {value};" if step == "let"
                          else f"{name} = {value};")
         elif step == "provide":
@@ -4440,6 +4586,9 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
         name = _ident(step.get("name"), "binding")
         value = _expr(step.get("value"), v3_ctx, None, env)
         if kind == "let":
+            # No pins: this emitter is reached from several recursive entry
+            # points, so a body's learned pins must not leak into another's
+            # same-named binding. The literal's own annotation still applies.
             out.append(f"{pad}{_let_keyword(step, v3_ctx)} {name} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
