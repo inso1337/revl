@@ -134,6 +134,7 @@ remote    := 'remote' '@' IDENT 'provides' IDENT ':' IDENT       -- key : Servic
              'at' 'host(' STRING ')'        -- bare authority; userinfo REFUSED
              ['through' IDENT]              -- transport name, recorded on the row
              ['on_failure(' ('withdraw' | 'result') ')']   -- default: withdraw
+             ['redirect(' ('refuse' | 'same_origin') ')']  -- default: refuse
 -- `@label` is the row's IDENTITY, scoped to its origin (`.::@db`, `acme_pg::@db`).
 -- `provides` is an ASSERTION checked against the component header; a lost key
 -- refuses, a gained one is reported. Resolve with `revl composition FILE`.
@@ -142,7 +143,9 @@ remote    := 'remote' '@' IDENT 'provides' IDENT ':' IDENT       -- key : Servic
 -- unchanged and remoteness is an ADMISSION fact, not a wiring fact. Every method
 -- must declare an emission bound (G4 at the client); no inverse is synthesized
 -- and a remote effect survives unwind. `remote`/`at`/`host`/`through`/
--- `on_failure` are CONTEXTUAL keywords: the lexer's KEYWORDS set is untouched.
+-- `on_failure`/`redirect` are CONTEXTUAL keywords: the lexer's KEYWORDS set is
+-- untouched. A redirect is REFUSED by default: the peer address is what the row
+-- promises, so a transport that followed `Location` elsewhere would make it false.
 
 --- layers (a patch over a row table; docs/composition-layers.md) ---
 layer     := ['site'] 'layer' IDENT 'for' IDENT '{' (touches | op)* '}'  -- contextual

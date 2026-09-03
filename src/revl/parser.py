@@ -609,7 +609,8 @@ class RemoteRowDecl:
     `docs/interop-bridge.md` §3 already states for a seam ("manifest data, not
     source text"), applied to a callee that is in no manifest at all.
 
-    `remote`, `at`, `host`, `through` and `on_failure` are CONTEXTUAL keywords,
+    `remote`, `at`, `host`, `through`, `on_failure` and `redirect` are
+    CONTEXTUAL keywords,
     recognised only in this one position inside a `composition` block. The
     lexer's KEYWORDS set is untouched, so the self-host lexer needs no sync and
     no program using any of those words as an ordinary name is broken. `in` and
@@ -627,6 +628,16 @@ class RemoteRowDecl:
     # Silently swallowing a transport failure has no spelling.
     on_failure: str = "withdraw"
     on_failure_line: int = 0
+    # `redirect(refuse | same_origin)`; `refuse` is the default and the only
+    # value that needs no argument from the operator. The peer address above is
+    # what a reader of this row is entitled to believe the crossing reaches, so
+    # a transport that followed a `Location` to another host would make the row
+    # false. `same_origin` is the declared opt-in and is still bounded: a 307 or
+    # 308 on the declared origin, never a 301/302/303 (they re-issue the POST as
+    # a GET and drop the body) and never another origin (every header on the
+    # request, credentials included, would travel with it).
+    redirect: str = "refuse"
+    redirect_line: int = 0
     # The line the address itself is written on, so an address refusal points at
     # the address rather than at the row's first line.
     host_line: int = 0
@@ -3083,11 +3094,13 @@ class Parser:
         return out
     def remote_row_decl(self, composition: str) -> RemoteRowDecl:
         """`remote @label provides <key>: <Service> [in realm("r")]
-        at host("h:port") [through <ident>] [on_failure(withdraw|result)]`
+        at host("h:port") [through <ident>] [on_failure(withdraw|result)]
+        [redirect(refuse|same_origin)]`
 
         Item 424 D-424c.1, slice C2. Every word this clause introduces is a
         CONTEXTUAL keyword read only here (`remote`, `at`, `host`, `through`,
-        `on_failure`, and its two arguments); `provides`, `in` and `realm` are
+        `on_failure`, `redirect`, and their arguments); `provides`, `in` and
+        `realm` are
         the keywords the language already has. So the lexer stays context-free
         and the self-host lexer needs no sync — the same discipline 426 S2 chose
         for `configure @db with { ... }`, and the reason `remote` is not being
@@ -3139,6 +3152,8 @@ class Parser:
         transport: str | None = None
         on_failure = "withdraw"
         on_failure_line = line
+        redirect = "refuse"
+        redirect_line = line
         while True:
             if self.at("kw", "in"):
                 iline = self.next().line
@@ -3198,6 +3213,27 @@ class Parser:
                 self.next()
                 on_failure = choice
                 self.expect(")")
+            elif self.at("ident", "redirect"):
+                redirect_line = self.next().line
+                self.expect("(")
+                tok = self.peek()
+                choice = tok.value if tok.kind == "ident" else None
+                if choice not in ("refuse", "same_origin"):
+                    raise self.err(
+                        tok.line,
+                        f"`redirect` takes `refuse` or `same_origin`, found "
+                        f"{tok.value!r}",
+                        hint="`refuse` (the default) is the whole point of "
+                             "writing the peer address on the row: a redirect "
+                             "to another host would make the row stop "
+                             "describing where the crossing goes. "
+                             "`same_origin` follows a 307 or 308 that stays on "
+                             "the declared origin, with the method and the body "
+                             "intact; a 301/302/303 re-issues the POST as a GET "
+                             "and is refused either way")
+                self.next()
+                redirect = choice
+                self.expect(")")
             else:
                 break
 
@@ -3211,6 +3247,7 @@ class Parser:
         return RemoteRowDecl(label, key, service, host, line, realm=realm,
                              transport=transport, on_failure=on_failure,
                              on_failure_line=on_failure_line,
+                             redirect=redirect, redirect_line=redirect_line,
                              host_line=host_line)
 
     def row_config_block(self, label: str) -> list[tuple[str, object, int]]:

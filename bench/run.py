@@ -177,8 +177,22 @@ def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int)
         url, data=body, method="POST",
         headers={"Content-Type": "application/json"},
     )
+    # The runner is pointed at a base URL the operator names, and urllib
+    # follows a redirect off it by default — re-issuing this POST as a GET,
+    # body dropped, at whatever host `Location` says. A benchmark that silently
+    # measured a different server is not a benchmark, so nothing is followed:
+    # the same policy the emitted crossings carry (`revl.crossing_redirect`),
+    # applied to the one other place in this tree that makes an outbound
+    # request.
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise RuntimeError(
+                f"local runner: HTTP {code} redirect refused — "
+                f"{url} is the endpoint you named")
+
+    opener = urllib.request.build_opener(_NoRedirect)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             status = resp.status
             raw = resp.read()
     except urllib.error.HTTPError as exc:

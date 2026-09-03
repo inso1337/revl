@@ -1247,6 +1247,24 @@ _HOST_RESULT_SIG: dict[str, str] = {
 }
 
 
+# Host ACQUIRE verbs: the constructor of a host family whose release is a
+# SEPARATE verb, mapped to that release. Calling one opens a host resource that
+# nothing reclaims until its inverse runs, so the call belongs in an acquisition
+# bracket (`effect <acquire> undo <release>`) and nowhere else — the bracket is
+# what registers the release with the activation's teardown accumulator.
+#
+# Derived by hand rather than from `_HOST_ARG_SIG` because the pairing is a
+# semantic claim, not a naming one: `Job.run` is deliberately absent (a job is
+# fire-and-forget; the family declares no release verb), and `Map.empty` is a
+# VALUE constructor, not a host acquisition, intercepted long before any host
+# path.
+_HOST_ACQUIRE_VERBS: dict[str, str] = {
+    "Map.new": "drop",
+    "Pool.open": "close",
+    "Stream.source": "close",
+}
+
+
 def host_check(fn: str, arg_types: list, filename: str | None, line: int) -> None:
     """Check a host builtin call against its declared argument types."""
     params = _HOST_ARG_SIG.get(fn)

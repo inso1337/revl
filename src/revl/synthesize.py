@@ -99,6 +99,7 @@ import re
 # The audited authority helpers (items 416f and 421 F4). A peer address is the
 # same class of value an importer's server URL is, so these are reused rather
 # than re-derived.
+from .crossing_redirect import CROSSING_TIMEOUT, py_policy
 from .errors import RevlError
 from .import_openapi import _authority_host, _comment_safe
 
@@ -262,7 +263,8 @@ def check_remotable(service, *, doc: str, line: int, label: str,
 
 # ------------------------------------------------------------- the remote kind
 
-def _py_body(host: str, key: str, op: str, in_band: bool) -> str:
+def _py_body(host: str, key: str, op: str, in_band: bool,
+             follow_redirects: bool = False) -> str:
     """One crossing, Python tier. The canonical envelope
     (`{"key","method","args"}` -> `{"ok","value"|"error"}`,
     `backends/python/bridge.py:19`) over HTTPS.
@@ -289,15 +291,24 @@ def _py_body(host: str, key: str, op: str, in_band: bool) -> str:
            '        raise RuntimeError("remote: peer error")\n')
     ok = "    return Ok(_reply.get(\"value\"))\n" if in_band else \
          "    return _reply.get(\"value\")\n"
+    policy = py_policy("remote", follow=follow_redirects)
     return f"""
-    import json as _json, urllib.request as _req
+    import json as _json, urllib.request as _req, urllib.parse as _urlp
     _payload = _json.dumps({{"key": {kj}, "method": {oj},
                             "args": list(_args)}}).encode()
     _r = _req.Request({url}, data=_payload,
                       headers={{"content-type": "application/json"}})
-    try:
-        with _req.urlopen(_r) as _resp:
+{policy}    try:
+        # A crossing that never returns is not a crossing.
+        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) as _resp:
             _reply = _json.loads(_resp.read())
+    except _RedirectRefused:
+        # NOT a transport failure, and so NOT `on_failure`'s to classify:
+        # `on_failure` says what happens when the DECLARED crossing fails, and
+        # a redirect is the peer declining to be the declared endpoint at all.
+        # Folding it into an in-band `Err` would lose the one diagnostic that
+        # says the peer address was contradicted.
+        raise
     except Exception as _exc:
 {fail}    if not _reply.get("ok"):
 {err}{ok}    """
@@ -311,6 +322,10 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
     capability = params["capability"]
     on_failure = params["on_failure"]
     transport = params.get("transport")
+    # `redirect(refuse | same_origin)`, default `refuse`. The peer address is
+    # what the operator reads off the row, so a transport that follows a
+    # `Location` elsewhere makes the row stop describing the crossing.
+    redirect = params.get("redirect", "refuse")
     doc, line = params["doc"], params["line"]
     in_band = on_failure == "result"
 
@@ -365,20 +380,20 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
         externs.append(
             f"extern emission[{capability}] fn {extern}({sig}){arrow}\n"
             f"  = @py {{\n    _args = [{', '.join(names)}]\n"
-            f"{_py_body(host, key, op, in_band)}}}")
+            f"{_py_body(host, key, op, in_band, redirect == 'same_origin')}}}")
         provides.append(f"    fn {op}({', '.join(names)}) = "
                         f"{extern}({', '.join(names)})")
 
     isolate = f"  isolate {key} in realm(\"{realm}\")\n" if realm else ""
     header = _remote_header(service, label, key, host, capability, on_failure,
-                            transport, realm)
+                            transport, realm, redirect)
     body = (f"component {component} provides {key}: {service.name} {{\n"
             f"{isolate}  provide {key} {{\n" + "\n".join(provides) + "\n  }\n}")
     return component, "\n\n".join([header, *externs, body]) + "\n"
 
 
 def _remote_header(service, label, key, host, capability, on_failure,
-                   transport, realm) -> str:
+                   transport, realm, redirect="refuse") -> str:
     safe_host = _comment_safe(host)
     lines = [
         f"// SYNTHESIZED for remote row `@{label}` — this file is not on disk.",
@@ -393,6 +408,30 @@ def _remote_header(service, label, key, host, capability, on_failure,
     ]
     if transport:
         lines.append(f"// Transport requested: `{_comment_safe(transport)}`.")
+    lines += [
+        f"// Redirect: `{redirect}`. THE PEER ADDRESS ABOVE IS THE ADDRESS.",
+        "//   `urllib` follows a redirect by default and re-issues a 301/302/303",
+        "//   POST as a GET with the body dropped, to whatever host `Location`",
+        "//   names — so the address on this row would stop describing where the",
+        "//   crossing goes, the declared emission would become a read, and every",
+        "//   header on the request (a credential, a `Secret[T]`) would travel to",
+        "//   an origin nothing declared. The body below refuses instead, naming",
+        "//   the rule and reporting only the target's ORIGIN.",
+        ("//   `redirect(same_origin)` is declared on this row: a 307 or 308 that "
+         "stays"
+         if redirect == "same_origin" else
+         "//   Write `redirect(same_origin)` on the row to allow a 307 or 308 "
+         "that stays"),
+        "//   on the declared origin is followed with its method and body intact,",
+        "//   at most five hops. A 301, 302 or 303 is refused either way, and so",
+        "//   is any cross-origin hop.",
+        "//   The refusal is a FAULT even under `on_failure(result)`: a redirect",
+        "//   is the peer declining to be the declared endpoint, not a failure of",
+        "//   the declared crossing.",
+        f"// Timeout: {CROSSING_TIMEOUT}s. A peer that accepts the connection and "
+        "then says",
+        "//   nothing is a fault, not a wait.",
+    ]
     lines.append("// Tier: `py` only — an `emission` method emits a SYNCHRONOUS "
                  "ts function,")
     lines.append("//   and a network round trip is not synchronous. The ts "

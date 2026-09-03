@@ -252,10 +252,13 @@ type StmtOut = { lines: List[Str], counter: Int }
 //     declared type is an async function type `(…) -> Async[T]` (item 92): a
 //     call through one returns a `Promise` and is awaited like a named callable.
 //     Per-body (a local name), so it is re-derived at each module-fn boundary.
-type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str] }
+// `empty_lists` (issue #273) is the body-local `[]`-binding annotation table
+// `empty_list_types` computes; it rides on ACx because a `let` can sit at any
+// depth of the statement tree `v3_stmt` walks.
+type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str], empty_lists: Map[Str, Str] }
 
 // The sync, non-component context: the pure fn/test pass and every sync body.
-fn sync_acx() -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [] } }
+fn sync_acx() -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty() } }
 
 // The `"<reqKey>#<method>"` await-seed key.
 fn async_op_key(req_key: Str, method: Str) -> Str {
@@ -917,7 +920,7 @@ fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
   // stays out of the arrow (its Promise flattens). `async_names`/`async_locals`
   // are inherited (the reference's `with_scope` leaves them untouched), so an
   // async callable invoked inside an async arrow is still awaited.
-  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals }
+  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals, empty_lists: acx.empty_lists }
   let br = expr(value_field(node, "body"), counter, body_acx)
   // Item 435(b): the `async` followed the DECLARED type, so `(msgs) =>
   // model.complete(msgs)` rendered `async (msgs: any) =>
@@ -1329,6 +1332,196 @@ fn inplace_stmt(name: Str, value: Any, counter: Int, acx: ACx) -> Rendered {
   return { text: `${name}.delete(${a0.text})`, counter: a0.counter }
 }
 
+// ------------------------------------------ empty-list annotation (issue #273)
+// The reference's `_v3_is_empty_list` / `_v3_list_element` / `_v3_surface_type`
+// / `_v3_empty_list_types`, ported byte-for-byte in behaviour.
+//
+// `let xs = []` gives TypeScript no element type. Its evolving-array analysis
+// rescues a binding whose only writes are `xs.push(v)`, but gives up as soon as
+// the binding is READ before the type settles — the persistent-append spread
+// `xs = [...xs, v]`, a binding only returned or iterated — and then reports
+// TS7034 at the declaration plus a TS7005 per read, which reds the tier's
+// `typecheck-generated` gate. So the `let` carries an annotation this pre-pass
+// recovers from the body. `""` is the `None` of these helpers.
+fn is_empty_list(n: Any) -> Bool {
+  return node_kind(n) == "list" && value_list(value_field(n, "items")).length() == 0
+}
+
+// `List[T]` -> `T`; `""` for anything else.
+fn list_element(surface: Str) -> Str {
+  if (!surface.startsWith("List[")) { return "" }
+  if (!surface.endsWith("]")) { return "" }
+  return surface.slice(5, surface.length() - 1)
+}
+
+// `dict.get(k)` with `""` for absent — the shape emit_go/emit_rust use.
+fn map_get(m: Map[Str, Str], k: Str) -> Str {
+  return match m.lookup(k) { Some(v) => v, None => "" }
+}
+
+// `_V3_BOOL_OPS`: `and`/`or` are the revl spellings the IR carries; the rest is
+// the comparison set. All of them answer `Bool`.
+fn is_bool_op(op: Str) -> Bool {
+  return op == "==" || op == "===" || op == "!=" || op == "!==" || op == "<"
+    || op == ">" || op == "<=" || op == ">=" || op == "and" || op == "or"
+    || op == "&&" || op == "||"
+}
+
+// The revl surface type of an expression when the IR makes it CERTAIN, `""`
+// when it does not. Conservative by design: a wrong answer becomes a wrong
+// annotation on emitted code, while `""` only falls back to `any[]`.
+fn surface_type(n: Any, known: Map[Str, Str]) -> Str {
+  if (value_str(value_field(n, "widen")) == "Int") { return "Int" }
+  let kind = node_kind(n)
+  if (kind == "var" || kind == "name") {
+    var nm = value_str(value_field(n, "name"))
+    if (nm == "") { nm = value_str(value_field(n, "id")) }
+    return map_get(known, nm)
+  }
+  if (kind == "lit") {
+    let vk = value_kind(value_field(n, "value"))
+    if (vk == "bool") { return "Bool" }
+    if (vk == "int") { return "Int" }
+    if (vk == "float") { return "Float" }
+    if (vk == "str") { return "Str" }
+    return ""
+  }
+  if (kind == "interp") { return "Str" }
+  if (kind == "len") { return "Int" }
+  if (kind == "list") {
+    // the frontend stamps `expected` on a literal it checked against a declared
+    // type (`var acc: List[Int] = []`) — the only evidence an EMPTY literal
+    // ever carries
+    let expected = value_str(value_field(n, "expected"))
+    if (expected != "") { return expected }
+    let items = value_list(value_field(n, "items"))
+    if (items.length() == 0) { return "" }
+    let inner = surface_type(items[0], known)
+    if (inner == "") { return "" }
+    return `List[${inner}]`
+  }
+  if (kind == "bin") {
+    if (is_bool_op(value_str(value_field(n, "op")))) { return "Bool" }
+    return value_str(value_field(n, "operands"))
+  }
+  if (kind == "index") {
+    return list_element(surface_type(value_field(n, "target"), known))
+  }
+  if (kind == "builtin") {
+    // every list/map builtin the emitter lowers answers the RECEIVER's type
+    let m = value_str(value_field(n, "method"))
+    if (m == "push" || m == "concat" || m == "slice" || m == "set" || m == "remove") {
+      return surface_type(value_field(n, "target"), known)
+    }
+    return ""
+  }
+  return ""
+}
+
+// `_v3_dicts`: every node of a subtree, parents before children. A non-record
+// node never matches a predicate below, so including them keeps the walk total
+// without changing an answer.
+fn ir_nodes(n: Any) -> List[Any] {
+  var out = [n]
+  for (c of value_children(n)) { out = out.concat(ir_nodes(c)) }
+  return out
+}
+
+fn body_nodes(body: List[Any]) -> List[Any] {
+  var out = []
+  for (s of body) { out = out.concat(ir_nodes(s)) }
+  return out
+}
+
+// `_v3_empty_list_types`: local name -> TS type for every local this body binds
+// to `[]`. Every such local gets an entry (`any[]` when nothing better is
+// provable), so no bare `let x = []` survives into emitted output.
+fn empty_list_types(body: List[Any], params: List[Any], returns: Str) -> Map[Str, Str] {
+  var resolved: Map[Str, Str] = Map.empty()
+  let nodes = body_nodes(body)
+  var empties = []
+  for (n of nodes) {
+    let step = value_str(value_field(n, "step"))
+    if (step == "let" || step == "assign") {
+      let nm = value_str(value_field(n, "name"))
+      if (nm != "" && is_empty_list(value_field(n, "value")) && !list_contains(empties, nm)) {
+        empties = empties.push(nm)
+      }
+    }
+  }
+  if (empties.length() == 0) { return resolved }
+
+  // Forward-infer the surface type of every binding, in document order, so a
+  // push of a local (`out.push(res)`) or of a loop variable can type the
+  // accumulator. First writer wins — for a `[]` binding that is the literal's
+  // own `expected`, and otherwise the first later rebind that is typeable.
+  var known: Map[Str, Str] = Map.empty()
+  for (p of params) {
+    let pt = value_str(value_field(p, "type"))
+    let pn = value_str(value_field(p, "name"))
+    if (pt != "" && !known.has(pn)) { known = known.set(pn, pt) }
+  }
+  for (n of nodes) {
+    let step = value_str(value_field(n, "step"))
+    if (step == "let" || step == "assign") {
+      let t = surface_type(value_field(n, "value"), known)
+      let nm = value_str(value_field(n, "name"))
+      if (t != "" && !known.has(nm)) { known = known.set(nm, t) }
+    }
+    if (step == "for") {
+      let t = list_element(surface_type(value_field(n, "iterable"), known))
+      let bd = value_str(value_field(n, "bind"))
+      if (t != "" && !known.has(bd)) { known = known.set(bd, t) }
+    }
+  }
+
+  for (name of empties) {
+    // (1) what the forward pass already proved about this binding.
+    var surface = map_get(known, name)
+    if (list_element(surface) == "") { surface = "" }
+    // (2) the declared return type, when the binding is what is returned.
+    if (surface == "" && list_element(returns) != "") {
+      for (n of nodes) {
+        if (value_str(value_field(n, "step")) == "return") {
+          let e = value_field(n, "expr")
+          let ek = node_kind(e)
+          if ((ek == "var" || ek == "name") && value_str(value_field(e, "name")) == name) {
+            surface = returns
+          }
+        }
+      }
+    }
+    // (3) otherwise, what gets pushed into it decides the element type.
+    if (surface == "") {
+      for (n of nodes) {
+        if (surface == "" && node_kind(n) == "builtin"
+            && value_str(value_field(n, "method")) == "push") {
+          let tgt = value_field(n, "target")
+          let tk = node_kind(tgt)
+          let args = value_list(value_field(n, "args"))
+          if ((tk == "var" || tk == "name")
+              && value_str(value_field(tgt, "name")) == name && args.length() > 0) {
+            let elem = surface_type(args[0], known)
+            if (elem != "") { surface = `List[${elem}]` }
+          }
+        }
+      }
+    }
+    var rendered = "any[]"
+    if (surface != "") { rendered = ts_type(surface) }
+    resolved = resolved.set(name, rendered)
+  }
+  return resolved
+}
+
+// The `: T` an empty-list `let` carries, `""` for every other value.
+fn empty_list_ann(value: Any, name: Str, known: Map[Str, Str]) -> Str {
+  if (!is_empty_list(value)) { return "" }
+  var t = map_get(known, name)
+  if (t == "") { t = "any[]" }
+  return `: ${t}`
+}
+
 // -------------------------------------------------------------- statements
 // `_v3_stmt` (test_mode = false): one fn-body step -> its emitted lines.
 fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
@@ -1342,7 +1535,9 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
     let r = expr(value_field(node, "value"), counter, a)
     var kw = "const"
     if (value_bool(value_field(node, "mutable"))) { kw = "let" }
-    return { lines: [`${pad}${kw} ${ident(value_str(value_field(node, "name")))} = ${r.text}`], counter: r.counter }
+    // issue #273: `[]` alone has no element type; annotate it.
+    let ann = empty_list_ann(value_field(node, "value"), value_str(value_field(node, "name")), a.empty_lists)
+    return { lines: [`${pad}${kw} ${ident(value_str(value_field(node, "name")))}${ann} = ${r.text}`], counter: r.counter }
   }
   if (step == "assign") {
     let nm = ident(value_str(value_field(node, "name")))
@@ -1441,9 +1636,15 @@ fn emit_functions(functions: List[Any], async_names: List[Str]) -> List[Str] {
     // context so every call to an async callable is awaited. The color was
     // decided by the frontend fixed point and stamped on the IR entry; the
     // emitter only reads `.async`, mirroring the extern signature form.
-    var body_acx = sync_acx()
+    // issue #273: type this body's `[]` bindings before rendering it, from the
+    // declared signature and the body's own writes.
+    let elt = empty_list_types(value_list(value_field(fnode, "body")),
+                               value_list(value_field(fnode, "params")),
+                               value_str(value_field(fnode, "returns")))
+    let sync_base = sync_acx()
+    var body_acx = { sync_base | empty_lists = elt }
     if (value_bool(value_field(fnode, "async"))) {
-      body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals }
+      body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals, empty_lists: elt }
       out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
     } else {
       out = out.push(`export function ${name}(${params}): ${returns} {`)
@@ -1712,6 +1913,9 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx) -> StmtOut 
   let pad = ind(level)
   var out = []
   var c = counter
+  // issue #273: a method body has no declared local types either, and no
+  // `returns` to lean on — the pushes decide, or it falls back to `any[]`.
+  let elt = empty_list_types(steps, [], "")
   for (step of steps) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "let") {
@@ -1719,7 +1923,8 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx) -> StmtOut 
       c = r.counter
       var kw = "const"
       if (value_bool(value_field(step, "mutable"))) { kw = "let" }
-      out = out.push(`${pad}${kw} ${ident(value_str(value_field(step, "name")))} = ${r.text}`)
+      let ann = empty_list_ann(value_field(step, "value"), value_str(value_field(step, "name")), elt)
+      out = out.push(`${pad}${kw} ${ident(value_str(value_field(step, "name")))}${ann} = ${r.text}`)
     } else {
       if (kind == "assign") {
         let r = expr(value_field(step, "value"), c, acx)
@@ -1834,7 +2039,7 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str]
     var body_acx = sync_acx()
     if (is_async) {
       prefix = "async "
-      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [] }
+      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty() }
     }
     out = out.push(`${pad}${prefix}${name}(${sig_parts.join(", ")}) {`)
     // A param the service declared `Secret[T]` is a declared DISCLOSURE
@@ -2790,12 +2995,12 @@ test "the await-seed awaits a req-keyed async op only in an async, non-arrow bod
   let call = { kind: "call", target: { kind: "req", name: "store" }, method: "get",
                args: [{ kind: "name", id: "k" }] }
   let ops = [async_op_key("store", "get")]
-  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [] }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty() }).text
     == "(await ctx.store.get(k))"
   assert expr(call, 0, sync_acx()).text == "ctx.store.get(k)"
-  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [] }).text
+  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty() }).text
     == "ctx.store.get(k)"
-  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [] }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty() }).text
     == "ctx.store.get(k)"
 }
 

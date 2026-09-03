@@ -287,6 +287,77 @@ def test_py_smoke_is_skipped_without_cordis_even_if_python_is_fine():
     assert called == []
 
 
+# ------------------------------------------------- approval WAL durability
+#
+# issue #289: the approval WAL falls back to the process tempdir when no durable
+# per-user state directory can be created. The fallback is right (the session
+# should still run) but it was silent, so the gate's record quietly stopped
+# being durable. `revl doctor` is where an operator asks "is this set up
+# correctly", so the fact belongs on the report — as an OK line naming the
+# durable directory, or a WARN naming the cause.
+
+
+def _wal_env(monkeypatch, home, platform="linux"):
+    monkeypatch.delenv("REVL_WAL_DIR", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("sys.platform", platform)
+
+
+def test_durable_wal_directory_is_an_ok_row_naming_it(tmp_path, monkeypatch):
+    _wal_env(monkeypatch, tmp_path)
+    report = doctor.diagnose(_full_house(), backends_dir=ROOT / "backends")
+    check = _check(report, "approval WAL durability")
+    assert check.status is OK
+    assert str(tmp_path / ".local" / "state" / "revl" / "approval-wal") \
+        in check.detail
+
+
+def test_non_durable_wal_directory_is_a_warn_naming_the_cause(
+        tmp_path, monkeypatch):
+    """HOME as a regular file (unwritable for ANY uid, unlike a chmod, which
+    root ignores): every durable candidate fails and the row must WARN, naming
+    the candidate, the failure, and the tempdir the WAL actually lands in."""
+    import tempfile as _tempfile
+
+    home = tmp_path / "home-is-a-file"
+    home.write_text("not a directory", encoding="utf-8")
+    _wal_env(monkeypatch, home)
+
+    report = doctor.diagnose(_full_house(), backends_dir=ROOT / "backends")
+    check = _check(report, "approval WAL durability")
+    assert check.status is WARN
+    assert "NOT durable" in check.detail
+    assert str(home / ".local" / "state" / "revl" / "approval-wal") in check.detail
+    assert "NotADirectoryError" in check.detail
+    assert _tempfile.gettempdir() in check.detail
+    # and it renders as a single table row, not a multi-line blob
+    row = [line for line in doctor.render_text(report).splitlines()
+           if "approval WAL durability" in line]
+    assert len(row) == 1
+
+
+def test_doctor_reports_the_wal_row_without_emitting_the_runtime_warning(
+        tmp_path, monkeypatch):
+    """Asking the question is not taking the fallback: doctor reads through
+    `resolve_wal_dir`, so diagnosing a non-durable setup reports it rather than
+    raising the session-path warning at the operator a second time."""
+    import warnings
+
+    from revl.wal import NonDurableWALWarning
+
+    home = tmp_path / "home-is-a-file"
+    home.write_text("not a directory", encoding="utf-8")
+    _wal_env(monkeypatch, home)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = doctor.diagnose(_full_house(), backends_dir=ROOT / "backends")
+    assert not [w for w in caught
+                if issubclass(w.category, NonDurableWALWarning)]
+    assert _check(report, "approval WAL durability").status is WARN
+
+
 # ----------------------------------------------------------- the real command
 
 

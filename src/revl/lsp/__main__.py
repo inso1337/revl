@@ -9,6 +9,12 @@ from __future__ import annotations
 
 import sys
 
+# issue #317: see revl._safepath — `-m` puts the working directory at
+# sys.path[0]. An editor launches this with the project root as its cwd.
+from .._safepath import drop_cwd_entry
+
+drop_cwd_entry()
+
 from .server import serve
 
 if __name__ == "__main__":
