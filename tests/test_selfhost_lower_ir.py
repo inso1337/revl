@@ -170,6 +170,34 @@ UNIQUE_MARKER_GAP = {
 
 CORPUS_UNIQUE_AWARE = _corpus_params(UNIQUE_MARKER_GAP)
 
+# item 429: the extern DECLARATION shapes `witnessed.rvl` carries and
+# `selfhost/lower.rvl` does not lower. Measured, three of them, all in the
+# `externs` section and all silent until this document existed:
+#   * an `undo` clause on an extern (`extern acquire fn lock() -> Unit undo
+#     unlock()`) drops the WHOLE `externs` section to `null` rather than
+#     refusing — the reference lowers a full table, the native producer lowers
+#     nothing, and no emitter downstream can tell the difference from a document
+#     with no externs;
+#   * a capability tag on any class (`witnessed[fs]`, `emission[net]`) does the
+#     same;
+#   * the `witnessed` class itself is refused outright by the admission gate
+#     (`BAD|expected fn after extern`) — a FALSE REFUSAL of a program the
+#     reference compiles, recorded on the gate side in
+#     tests/test_selfhost_compile.py's NATIVE_GATE_GAPS.
+# The old corpus reached none of them: `externs.rvl` declares two `pure` externs
+# with no `undo` and no tag. Marked strict-xfail on the same terms as the
+# `Secret[T]` gap was before it closed and the item-445 gap still is: red for a
+# NAMED reason, and it XPASSes loudly the day the grammar lands.
+EXTERN_DECL_GAP = {
+    "witnessed.rvl": (
+        "item 429: selfhost/lower.rvl drops the whole `externs` section to "
+        "`null` for an extern carrying an `undo` clause or a capability tag, so "
+        "the native IR has no extern table to compare against the reference's"
+    ),
+}
+
+CORPUS_EXTERN_AWARE = _corpus_params(EXTERN_DECL_GAP)
+
 
 # ---------------------------------------------------------------- harness
 
@@ -288,7 +316,7 @@ def test_component_docs_emit_full_body(lower_to_ir, rel):
         assert comp["body"] == ref_by_name[comp["name"]]["body"], comp["name"]
 
 
-@pytest.mark.parametrize("rel", CORPUS)
+@pytest.mark.parametrize("rel", CORPUS_EXTERN_AWARE)
 def test_native_ir_matches_reference_externs(lower_to_ir, rel):
     """The `externs` section (item 241) — each extern's class/params/returns and
     the verbatim `@backend` bodies (from the lexer's `hostbody` token) — is byte-

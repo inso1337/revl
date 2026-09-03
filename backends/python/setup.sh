@@ -38,7 +38,16 @@ git -C "$CORDIS_PY" checkout --quiet "$CORDIS_PY_PIN"
 # --allow-existing: re-running setup on an existing venv must work, since the
 # `revl run` diagnostic tells people to run exactly this line.
 uv venv --allow-existing .venv
-uv pip install --python .venv/bin/python pytest pytest-asyncio pyyaml watchdog \
+# `coverage` is here for the same reason `pytest` is: this venv runs the WHOLE
+# `tests/` root in the `frontend-cordis` job, and that root includes the item
+# 429 self-host coverage ratchets, which need a real tracer. The names are
+# listed literally rather than installed as revl's `test` extra because the
+# editable install below is `--editable ../..` with no extras and because
+# pytest-asyncio, pyyaml and watchdog are not in that extra either; keep the
+# two in step. Without coverage here those gates ERROR rather than skip, which
+# is deliberate — a ratchet that goes quiet when its instrument is missing is
+# the exact failure it exists to catch.
+uv pip install --python .venv/bin/python pytest pytest-asyncio pyyaml watchdog coverage \
     --editable "$CORDIS_PY" --editable ../..
 
 echo
