@@ -131,7 +131,7 @@ branch:
 
 The same applies to the generated doc blocks, and for the same reason. Issue
 #296: `docs/DOC-STATUS.md`'s `doc-status` block embeds a row per `docs/*.md`, so
-**any** landing that touches **any** doc re-stales it — and unlike the site
+**any** landing that touches **any** doc re-stales it. Unlike the site
 wheel, `tools/docgen.py --check` *is* a per-PR gate (it runs in the required
 `frontend` job). So a stale block on main reddens every open PR at once, for a
 reason none of their authors caused. It was already stale at the merge commit
@@ -145,7 +145,7 @@ regeneration the orchestrator owns:
 Regenerate it against the tip that actually lands, not the base the branch was
 cut from: a block regenerated an hour earlier is stale again if anything touched
 a doc in between. This is the same hazard as merging on a green whose run
-predates the last landing — the verdict was true when taken and false when used.
+predates the last landing: the verdict was true when taken, and false when used.
 
 ## Issues are the state
 
