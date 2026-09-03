@@ -6513,7 +6513,7 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
         if (st.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             return Step { i: source.revl_length(), line: line, tok: Token { kind: String::from("error"), text: String::from("bad template"), line: line } };
         }
-        return Step { i: st.j, line: (line).checked_add(st.nl).expect("revl: Int overflow"), tok: Token { kind: String::from("template"), text: st.out.clone(), line: (line).checked_add(st.nl).expect("revl: Int overflow") } };
+        return Step { i: st.j, line: (line).checked_add(st.nl).expect("revl: Int overflow"), tok: Token { kind: String::from("template"), text: st.out.clone(), line: line } };
     }
     if is_alpha(&c) {
         let sw = scan_word(source, i, source_revl_cs);

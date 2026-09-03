@@ -1,7 +1,10 @@
 # 121: `revl trace` - the causal trace with the model hop as a first-class span
 
-Status: DESIGN (implementation pending). No compiler code changes land with this
-note; it designs the slices.
+Status: IMPLEMENTED. `revl trace` ships (`src/revl/trace.py`,
+`src/revl/cli/observe.py::_run_trace`, the `trace` subparser in
+`src/revl/cli/parser.py`); flags are documented in
+[../commands-reference.md](../commands-reference.md). This note is kept as the
+design record for the slices.
 
 Roadmap: item 121 (`docs/v2.0-roadmap.md:3176`). Builds on the causal lifecycle
 trace (`src/revl/why_runtime.py`, `docs/why-runtime.md`), extends the OTel

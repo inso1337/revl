@@ -32,9 +32,11 @@ artifacts *within a pinned release*; across releases, emitter output may change
 reviewed. Byte-freezing may return — deliberately, as a versioned promise —
 when a real external consumer appears.
 
-**The guarantees are the stable contract of the language.** G1–G8 and the
-lifecycle rules A1–A8 ([DESIGN.md](../DESIGN.md) §4) define what "it compiled"
-means. A program that compiles satisfies them; that is the promise the whole
+**The guarantees are the stable contract of the language.** G1–G9, the `Secret`
+families (`G-SECRET`, `G-SECRET-FLOW`), the typing rules T1–T3 and the lifecycle
+rules A1, A2, A3, A5, A6, A8 and A9 define what "it compiled" means. The set is
+generated from `revl.diagnostics.GUARANTEES` into [DESIGN.md](../DESIGN.md) §4
+and [rejections.md](rejections.md). A program that compiles satisfies them; that is the promise the whole
 project exists to keep, and it does not weaken across releases. Where a
 guarantee is known to be incompletely enforced, it is named in
 [docs/contract-errata.md](contract-errata.md) rather than silently trusted —

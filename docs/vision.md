@@ -55,6 +55,7 @@ a command or it gets softened:
 | cordis-wasm | `pytest backends/wasm/test_v3_emit.py tests/test_wasm_backend.py -q` | executes on real `wasmtime`; skips without it |
 | cordis-rs, cordis4j | `pytest backends/rust/test_emit_rust.py backends/java/test_emit_java.py -q` | needs cargo + a JDK; skips loudly otherwise |
 | cordis-go | `pytest backends/go/test_emit_go.py -q` | emitted code executes on real stc-go under `go test`; skips loudly otherwise |
+| the formal backbone | `make formal` (`sh formal/scripts/run_gate.sh`) | Lean 4: `formal/`, a layering gate plus an axioms gate (no `sorry`, no project-defined axiom). G2, G3 and G7 are `full` and oracle-checked against the shipped checker; G1 and G6 are `partial`, and G9's coverage is the one UNPROVED row. `formal/STATUS.md` is the per-theorem ledger, and it names each gap. Runs as CI's `formal` job |
 
 What every tier can and cannot *express* is measured by
 `python3 tools/conformance.py` and recorded in
@@ -78,9 +79,15 @@ transport-safety verdict is (`tests/test_distribute.py`).
 - **The extern boundary is trusted, not verified** — but it is *enumerable*
   (G8, `revl audit`): revl cannot check foreign code, only force every escape
   hatch to be declared and auditable.
-- **The metatheorems transfer by construction, they are not re-proved here.**
-  The research claim is a *surface language whose every well-typed program
-  satisfies the calculus's hypotheses* (DESIGN.md §5), not new type theory.
+- **The calculus's metatheorems transfer by construction, they are not
+  re-proved here.** The research claim is a *surface language whose every
+  well-typed program satisfies the calculus's hypotheses* (DESIGN.md §5), not
+  new type theory. What IS proved here, in Lean, is part of revl's own
+  admission judgment: G2 (provision disjointness) and G3 (acyclicity) are `full`
+  in `formal/`, axiom-gated, with non-vacuity witnesses and a differential
+  oracle against `src/revl`. G1 and G6 are `partial` and G9's coverage is
+  unproved, each for a named modelling reason. `formal/STATUS.md` is the ledger,
+  and it is written to be read gap-first.
 
 The pitch, kept honest: **Cordis has revertible effects as a discipline; revl
 makes them a type system.** Everything beyond that is roadmap, not claim.

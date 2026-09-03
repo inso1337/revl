@@ -177,4 +177,4 @@ fault.
 The runtime follows the **paper's** failure semantics (L-Raise = trap,
 failed fibers withheld until explicit `retry`) — the very divergence
 cordis-py marks as a strict xfail. Compiled revl inherits it: this backend
-is the most calculus-faithful of the three.
+is the most calculus-faithful of the six.
