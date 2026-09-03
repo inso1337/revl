@@ -68,8 +68,9 @@ from pathlib import Path
 from ._paths import backends_root, stdlib_root
 from .activation import local_prereqs
 from .attest import canonical_hash
-from .deploy import (ADMISSION_PEER_PINNED, ADMISSION_SEALED,
-                     ADMISSION_UNVERIFIED, SeamAdmission,
+from .deploy import (ADMISSION_PEER_BOUND, ADMISSION_SEALED,
+                     ADMISSION_UNVERIFIED, REPLAY_WINDOW_PEERS,
+                     REPLAY_WINDOW_PER_PEER, SeamAdmission,
                      render_seam_admissions)
 from .compiler import compile_files
 from .distribute import distributability
@@ -195,13 +196,18 @@ def _operator_identities(profile_path: str) -> set[str]:
 
     return set(load_profile(profile_path).operators)
 
-# Tiers whose consumer bridge can SEAL an item-118 correlation envelope. Only
-# the python bridge implements it; `typescript/bridge.ts`, the go bridge and
-# `PlacementRunner.java` take no `correlation` parameter at all, so a consumer
-# on those tiers cannot produce one. A provider is only guarded when every one
-# of its local consumers is listed here (roadmap 421 F8). Add a tier here in the
-# same change that teaches its bridge to seal, never before.
-_CORRELATION_SEALING_TIERS = frozenset({"py"})
+# Tiers whose consumer bridge can SEAL an item-118 correlation envelope. The
+# python bridge and `typescript/bridge.ts` implement it (the ts side seals the
+# same HMAC over the same canonical envelope bytes, proven end to end against
+# the real py guard in tests/test_ts_correlation_seal.py); the go bridge and
+# `PlacementRunner.java` still take no `correlation` parameter at all, so a
+# consumer on those tiers cannot produce one. A provider is only guarded when
+# every one of its local consumers is listed here (roadmap 421 F8). Add a tier
+# here in the same change that teaches its bridge to seal, never before.
+#
+# Spelled `node`, not `ts`: `_canonical_backend` folds the `ts` alias to `node`
+# at the manifest edge, and this set is compared against those canonical names.
+_CORRELATION_SEALING_TIERS = frozenset({"py", "node"})
 
 _BACKENDS_DIR = backends_root()
 _TS_DIR = _BACKENDS_DIR / "typescript"
@@ -2381,6 +2387,21 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     correlation_identity = {pname: identities.get(pname, pname) for pname in processes}
     correlation_secret = {pname: secrets.token_bytes(32) for pname in processes}
     composition_id = canonical_hash(ir)
+
+    def _network_correlation(pname: str) -> dict:
+        """item 118 §1.4b: what a NETWORK consumer stamps on every crossing —
+        its own item-55 identity (the same one its certificate carries) and the
+        composition it is scoped to, and NO SECRET.
+
+        There is nothing to distribute, which is the whole point: the receiving
+        `TransportReplayGuard` scopes dedup by the identity the mTLS handshake
+        proved and only reads `composition_id`/`generation`/`idempotency_key`
+        off this envelope. A consumer in another composition, under another
+        conductor, stamps the same shape from its own certificate and is
+        deduplicated exactly the same way — no key it cannot hold, so no
+        legitimate caller refused."""
+        return {"composition_id": composition_id,
+                "peer_identity": correlation_identity[pname]}
     # provider -> the local (UDS) consumers of its keys, mirroring exactly the
     # branch below that assigns `entry["socket"]` (never a network or remote
     # entry), so the two stay in lockstep by construction.
@@ -2676,6 +2697,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                                              "server_hostname": rs["server_hostname"]}}
                 entry["latency_ms"] = rs["rtt_ms"]
                 entry["remote"] = True
+                entry["correlation"] = _network_correlation(pname)
                 net_seams.append((pname, key, rs["host"], rs["port"], rs["rtt_ms"]))
             elif host in addresses:
                 # a network seam: point the proxy at the machine over TCP+mTLS,
@@ -2691,6 +2713,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 # source (`spec["files"]`) and can re-admit it at boot.
                 entry["component"] = key_component.get(key)
                 entry["backend"] = backends.get(host)
+                entry["correlation"] = _network_correlation(pname)
             else:
                 entry["socket"] = sockets[host]
                 # item 337 Seam 2: the provider's admissible identity, so the
@@ -2769,25 +2792,40 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 # declared one. Names only — no secret crosses a composition
                 # boundary, which is what lets this hold where the correlation
                 # guard cannot.
+                # item 118 §1.4b: freshness, keyed on the identity the mTLS
+                # handshake proved. Installed on EVERY network seam, with or
+                # without an allowlist, because it holds no secret and so
+                # refuses no legitimate caller: a crossing that carries no
+                # idempotency key is dispatched exactly as before, and a
+                # cross-composition consumer under another conductor stamps the
+                # same unsealed envelope from its own certificate.
+                serve_spec["replay"] = {"per_peer": REPLAY_WINDOW_PER_PEER,
+                                        "max_peers": REPLAY_WINDOW_PEERS}
+                window = (f"replays refused per proven identity over a bounded "
+                          f"window ({REPLAY_WINDOW_PER_PEER} keyed crossings x "
+                          f"{REPLAY_WINDOW_PEERS} peers); a crossing declaring no "
+                          "idempotency key is not deduplicated")
                 allow = peer_allowlist.get(pname)
                 if allow:
                     serve_spec["peers"] = list(allow)
                     seam_admissions.append(SeamAdmission(
                         provider=pname, transport="tcp+mtls",
-                        level=ADMISSION_PEER_PINNED,
+                        level=ADMISSION_PEER_BOUND,
                         detail="mTLS peer identity checked against the declared "
-                               "`peers` allowlist; NOT replay-checked (an "
+                               f"`peers` allowlist, and {window}. NOT sealed: an "
                                "off-placement peer cannot hold this boot's "
-                               "correlation secret, so no envelope to dedup)",
+                               "correlation secret, so the envelope is "
+                               "authenticated by the transport, not by an HMAC",
                         peers=allow))
                 else:
                     seam_admissions.append(SeamAdmission(
                         provider=pname, transport="tcp+mtls",
                         level=ADMISSION_UNVERIFIED,
-                        detail="mTLS proves WHICH identity is calling but this "
-                               "placement declares no `peers`, so every identity "
-                               "the shared CA signed is answered — add "
-                               f"[processes.{pname}] peers = [...] to close it"))
+                        detail="mTLS proves WHICH identity is calling and "
+                               f"{window}, but this placement declares no "
+                               "`peers`, so every identity the shared CA signed "
+                               f"is answered — add [processes.{pname}] "
+                               "peers = [...] to close it"))
             else:
                 serve_spec["socket"] = sockets[pname]
                 # item 118 S1 / roadmap 421 F8: the secret table this provider
