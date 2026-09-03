@@ -269,10 +269,21 @@ def test_refused_payload_carries_the_why_and_leaves_the_system_untouched():
 
 @pytest.fixture()
 def _profiled_session():
-    """Bind the real server SESSION to an operator for one test, then clear."""
+    """Bind the real server SESSION to an operator for one test, then clear.
+
+    Also declares the authoring trust the operator would: these compositions
+    place components into per-tenant REALMS, which is what the operator's
+    profile scopes its `swap` authority by, and a realm is an authority address
+    an untrusted author may not write (item 334's G9). Authoring trust and
+    operator authority are orthogonal knobs — the source here is the operator's
+    own, sent inline, which is exactly what `--author-trust trusted` declares —
+    and it is the second knob these tests are about."""
     prior = server.SESSION.operator
+    prior_authoring = server.AUTHORING
     server.SESSION.operator = parse_profile(PROFILE).get("alice")
+    server.set_authoring_trust(host_code=True)
     yield server.SESSION
+    server.AUTHORING = prior_authoring
     server.SESSION.operator = prior
     if server.SESSION.loaded:
         server.SESSION.unload()
