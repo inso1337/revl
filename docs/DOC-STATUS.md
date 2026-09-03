@@ -149,7 +149,7 @@ was corrected by hand and had drifted back within a day.
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |
-| process.md | needs-work | 5 |  |
+| process.md | needs-work | 2 |  |
 | prompt-injection-resistance.md | needs-work | 38 |  |
 | prop-test.md | needs-work | 23 |  |
 | quarantine-tier.md | needs-work | 26 |  |

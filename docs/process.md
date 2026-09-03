@@ -75,7 +75,7 @@ So, whenever you change logic that a `selfhost/*` file mirrors:
 
 1. **Open the self-host file and read the mirrored function.** Directly. Do not
    infer its state from a green oracle, and do not infer it from a sibling port
-   that already landed — item 429(c) is a rule that was ported while its
+   that already landed. Item 429(c) is a rule that was ported while its
    source-of-truth SET was not, which reads as done at a glance.
 2. **Say in the PR body what you found there**: ported, already correct, or a
    gap you are leaving open and why.
@@ -87,11 +87,11 @@ So, whenever you change logic that a `selfhost/*` file mirrors:
 Two gates measure what the corpus does not reach and refuse to let that set
 grow silently, both run by `tests/test_selfhost_coverage.py`:
 
-* `tools/selfhost_line_coverage.py --check` — which STATEMENTS of the mirrored
-  emitters no corpus document executes, on both sides. This is the one the
+* `tools/selfhost_line_coverage.py --check` reports which STATEMENTS of the
+  mirrored emitters no corpus document executes, on both sides. This is the one the
   surface rests on. Measured today: the corpus runs 46.2% of the reference
   emitter statements and 75.1% of the ported ones.
-* `tools/selfhost_coverage.py --check` — the cheap construct-level check over
+* `tools/selfhost_coverage.py --check` is the cheap construct-level check over
   dispatch arms. Kept because it is fast and names constructs rather than
   functions, but it is a proxy: it reports 19% blind where statements say 54%.
 
