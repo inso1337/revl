@@ -23,9 +23,11 @@ Two layers, split on purity (docs/design/332-embeddable-gate-api.md):
 
 The security clause (load-bearing): the gate must NEVER admit what the reference
 `revl` refuses. Layer-1 `admit` on py IS `compile_source`, so its accept/refuse
-verdict and its refusal message are the reference compiler's, verbatim. A native
-(rust) layer-1 gate is a separate, larger deliverable (the `revl-gate` crate)
-and is NOT part of this module; see the module's `gate_version().frontier`.
+verdict and its refusal message are the reference compiler's, verbatim. The native
+(rust) layer-1 gate is a separate deliverable and is NOT part of this module: it
+ships as `crates/revl-gate`, generated from the self-host sources, and it issues
+no admissions (its non-refusing arm is `NoObjection`, not "admitted"). See that
+crate's README and the module's `gate_version().frontier`.
 
 The fail-closed contract: a class-(c) crossing (an irreversible emission with no
 checked inverse) needs a human yes. Embedded, there is no operator channel

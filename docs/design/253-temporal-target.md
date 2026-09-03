@@ -1,6 +1,9 @@
 # Design: a Temporal emission target (item 253)
 
-Status: design proposed. No implementation. This note fixes the mapping,
+Status: IMPLEMENTED. The target ships as `revl emit --target temporal`
+(`backends/typescript/emit_temporal.py`), gated by
+`backends/typescript/test_temporal_target.py` against the committed golden
+`backends/typescript/golden/temporal_booktrip.ts`. This note fixes the mapping,
 states exactly what revl proves that Temporal cannot, decides the target-variant
 mechanism, draws the honest boundary, records two rounds of adversarial review,
 and slices the work. The exit test named by the roadmap (one saga demo on a real
