@@ -1062,7 +1062,7 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
     # issue #273: a method body has no declared local types either; the same
     # pre-pass types its `[]` bindings (there is no `returns` to lean on here,
     # so it decides from the pushes, or falls back to `any[]`).
-    empty_lists = _v3_empty_list_types(steps, None, None, ctx)
+    empty_lists = _v3_empty_list_types(steps, None, None)
     for step in steps:
         kind = step.get("step")
         if kind == "let":
@@ -2261,13 +2261,6 @@ class _Ctx:
         }
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
-        # issue #273: declared return type by callable name, so the empty-list
-        # pre-pass can type `let out = []` from what a call feeding it answers.
-        self.returns_by_name: dict = {
-            entry.get("name"): entry.get("returns")
-            for entry in list(functions or []) + list(externs or [])
-            if isinstance(entry, dict) and isinstance(entry.get("returns"), str)
-        }
         # issue #273: local name -> TS type for the bindings of the body being
         # rendered that are introduced as `[]`. Empty in every context that has
         # not run the pre-pass, which emits exactly as before.
@@ -2326,7 +2319,6 @@ class _Ctx:
         view.types = self.types
         view.function_names = self.function_names
         view.extern_names = self.extern_names
-        view.returns_by_name = self.returns_by_name
         view.empty_list_types = (self.empty_list_types
                                  if empty_list_types is None else empty_list_types)
         view.witnessed = self.witnessed
@@ -2567,7 +2559,7 @@ def _v3_do_expr(node: dict, ctx: "_Ctx") -> str:
     stmts = node.get("stmts") or []
     # issue #273: annotate the arm's `[]` bindings the same way a method body's
     # are (the arm's tail is an expression, so there is no declared return).
-    empty_lists = _v3_empty_list_types(stmts, None, None, ctx)
+    empty_lists = _v3_empty_list_types(stmts, None, None)
     lines: list[str] = []
     for st in stmts:
         if st.get("step") != "let":
@@ -2849,7 +2841,7 @@ def _v3_list_element(surface: object) -> "str | None":
     return None
 
 
-def _v3_surface_type(node: object, known: dict, ctx: "_Ctx") -> "str | None":
+def _v3_surface_type(node: object, known: dict) -> "str | None":
     """The revl surface type of an expression, when the IR makes it CERTAIN.
 
     Deliberately partial and conservative — it answers None rather than guess,
@@ -2888,87 +2880,76 @@ def _v3_surface_type(node: object, known: dict, ctx: "_Ctx") -> "str | None":
         items = node.get("items") or []
         if not items:
             return None
-        inner = _v3_surface_type(items[0], known, ctx)
+        inner = _v3_surface_type(items[0], known)
         return f"List[{inner}]" if inner else None
     if kind == "bin":
         if node.get("op") in _V3_BOOL_OPS:
             return "Bool"
         operands = node.get("operands")
         return operands if isinstance(operands, str) else None
-    if kind == "call":
-        callee = node.get("callee")
-        if isinstance(callee, dict) and callee.get("kind") in ("var", "name"):
-            return ctx.returns_by_name.get(callee.get("name"))
-        return None
     if kind == "index":
-        return _v3_list_element(_v3_surface_type(node.get("target"), known, ctx))
+        return _v3_list_element(_v3_surface_type(node.get("target"), known))
     if kind == "builtin":
         # every list/map builtin the emitter lowers answers the RECEIVER's type
         # (`push`/`concat`/`slice`/`set`/`remove` are the persistent forms)
         if node.get("method") in ("push", "concat", "slice", "set", "remove"):
-            return _v3_surface_type(node.get("target"), known, ctx)
+            return _v3_surface_type(node.get("target"), known)
         return None
     return None
 
 
-def _v3_empty_list_types(body: object, params: object, returns: object,
-                         ctx: "_Ctx") -> dict:
+def _v3_empty_list_types(body: object, params: object, returns: object) -> dict:
     """Local name -> TS type for every local this body binds to `[]`.
 
     Every such local gets an entry (`any[]` when nothing better is provable),
     so no bare `let xs = []` survives into emitted output.
     """
-    empties = {
-        node.get("name")
-        for node in _v3_dicts(body)
-        if node.get("step") in ("let", "assign")
-        and _v3_is_empty_list(node.get("value"))
-        and isinstance(node.get("name"), str)
-    }
+    empties: list = []
+    for node in _v3_dicts(body):
+        name = node.get("name")
+        if node.get("step") in ("let", "assign") \
+                and _v3_is_empty_list(node.get("value")) \
+                and isinstance(name, str) and name not in empties:
+            empties.append(name)
     if not empties:
         return {}
 
-    # Forward-infer the surface type of every binding in the body, so a push of
-    # a local (`out.push(res)`) or of a loop variable can type the accumulator.
-    # Twice, so a value naming an earlier-typed local resolves.
+    # Forward-infer the surface type of every binding, in document order, so a
+    # push of a local (`out.push(res)`) or of a loop variable can type the
+    # accumulator. First writer wins — for a `[]` binding that is the literal's
+    # own `expected` when the source spelled `var acc: List[Int] = []`, and
+    # otherwise the first later rebind that is typeable (`xs = ys`).
     known: dict = {
         p.get("name"): p.get("type")
         for p in (params or []) if isinstance(p, dict) and p.get("type")
     }
-    for _ in range(2):
-        for node in _v3_dicts(body):
-            if node.get("step") in ("let", "assign"):
-                t = _v3_surface_type(node.get("value"), known, ctx)
-                if t is not None:
-                    known.setdefault(node.get("name"), t)
-            elif node.get("step") == "for":
-                t = _v3_list_element(
-                    _v3_surface_type(node.get("iterable"), known, ctx))
-                if t is not None:
-                    known.setdefault(node.get("bind"), t)
+    for node in _v3_dicts(body):
+        if node.get("step") in ("let", "assign"):
+            t = _v3_surface_type(node.get("value"), known)
+            if t is not None:
+                known.setdefault(node.get("name"), t)
+        elif node.get("step") == "for":
+            t = _v3_list_element(
+                _v3_surface_type(node.get("iterable"), known))
+            if t is not None:
+                known.setdefault(node.get("bind"), t)
 
     resolved: dict = {}
-    declared = {
-        node.get("name"): node["value"]["expected"]
-        for node in _v3_dicts(body)
-        if node.get("step") in ("let", "assign")
-        and _v3_is_empty_list(node.get("value"))
-        and isinstance(node["value"].get("expected"), str)
-    }
     for name in empties:
-        # (0) the local's OWN declared annotation, when the source spelled one.
-        surface = declared.get(name)
-        # (1) otherwise the other declared evidence: an accumulator that is
-        # returned takes the function's declared return type.
+        # (1) what the forward pass already proved about this binding.
+        surface = known.get(name)
+        if not _v3_list_element(surface):
+            surface = None
+        # (2) the declared return type, when the binding is what is returned.
         if surface is None and isinstance(returns, str) \
-                and _v3_list_element(returns):
-            if any(node.get("step") == "return"
-                   and isinstance(node.get("expr"), dict)
-                   and node["expr"].get("kind") in ("var", "name")
-                   and node["expr"].get("name") == name
-                   for node in _v3_dicts(body)):
-                surface = returns
-        # (2) otherwise, what gets pushed into it decides the element type.
+                and _v3_list_element(returns) \
+                and any(node.get("step") == "return"
+                        and isinstance(node.get("expr"), dict)
+                        and node["expr"].get("kind") in ("var", "name")
+                        and node["expr"].get("name") == name
+                        for node in _v3_dicts(body)):
+            surface = returns
+        # (3) otherwise, what gets pushed into it decides the element type.
         if surface is None:
             for node in _v3_dicts(body):
                 if node.get("kind") == "builtin" and node.get("method") == "push":
@@ -2977,20 +2958,10 @@ def _v3_empty_list_types(body: object, params: object, returns: object,
                     if isinstance(target, dict) \
                             and target.get("kind") in ("var", "name") \
                             and target.get("name") == name and args:
-                        elem = _v3_surface_type(args[0], known, ctx)
+                        elem = _v3_surface_type(args[0], known)
                         if elem is not None:
                             surface = f"List[{elem}]"
                             break
-        # (3) or an aliasing rebind (`xs = ys`) to a binding already typed.
-        if surface is None:
-            for node in _v3_dicts(body):
-                if node.get("step") in ("let", "assign") \
-                        and node.get("name") == name \
-                        and not _v3_is_empty_list(node.get("value")):
-                    candidate = _v3_surface_type(node.get("value"), known, ctx)
-                    if _v3_list_element(candidate):
-                        surface = candidate
-                        break
         resolved[name] = _ts_v3_type(surface) if surface else "any[]"
     return resolved
 
@@ -3617,7 +3588,7 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
         # issue #273: type this body's `let xs = []` bindings before rendering
         # it, from the declared signature and the body's own writes.
         empty_lists = _v3_empty_list_types(
-            fn.get("body"), fn.get("params"), fn.get("returns"), ctx)
+            fn.get("body"), fn.get("params"), fn.get("returns"))
         # a phase-2 async-colored fn (docs/design/async-extern.md §3) emits as
         # `async function …: Promise<T>`, and its body is rendered in an async
         # context so every call to an async callable is awaited (see `_expr`).
@@ -3915,7 +3886,7 @@ def _emit_ts_tests(tests: list, types: dict, functions: list, externs: list) -> 
             test_ctx = ctx.with_scope(
                 ctx.component_scope,
                 empty_list_types=_v3_empty_list_types(
-                    test["body"], None, None, ctx))
+                    test["body"], None, None))
             for stmt in test["body"]:
                 _v3_stmt(stmt, test_ctx, lines, 2, test_mode=True)
         lines.append("})")
