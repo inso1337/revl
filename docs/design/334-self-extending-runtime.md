@@ -643,6 +643,90 @@ with the one addition of the post-activation health gate on the swap path.
   (`session.py:808-818`), so Slice 1 can start there and add migration coverage
   as a follow-on.
 
+**Slice 2 (LANDED): the proposal's authority envelope.** Slice 1 bounded what a
+candidate may REACH (`untrusted_author`: no new extern, no transitive host-extern
+reach, no ungranted service) and what happens when it fails to activate (the
+health gate). It did not bound two other things, and both are ways a proposal
+changes something a proposal has no business changing.
+
+1. **A proposal may not choose its own authority ADDRESS.** The item-246/251
+   approval policy scopes a standing approval and an auto-approve rule by
+   `(component glob, realm)`, and matches the realm half against
+   `ticket["realm"]` — which is `ClassMap.component_realm`
+   (`approval.py:723`), which is `policy.component_realms` over the component
+   IR's `isolate` map. An untrusted author writes its own component NAMES, so
+   the glob half discriminates nothing against it; the realm was the only half
+   left. A candidate that writes one extra line,
+   `isolate <key> in realm("billing")`, therefore selects which of the
+   operator's standing approvals cover its class-(c) crossings. Nothing in
+   slice 1 looked at that line. `propose` now admits under
+   `AdmissionProfile.self_extension(granted)` = `untrusted_author` plus
+   `no_realm_placement`, a structural root-scoped refusal (`G9`,
+   `check_no_realm_placement`) of both the singular `realm(...)` placement and
+   the item-162 plural `realms(...)` route. The proposal lands in the SHARED
+   realm, which is where a candidate that said nothing was going anyway: it can
+   still be covered by an unscoped rule (`realm: None`) or a shared-realm rule,
+   and it can no longer reach into a realm-scoped one. Strictly narrowing.
+
+   The refusal is ROOT-scoped, exactly as `check_no_extern` is: a trusted
+   co-composed `providers` module still places whatever the OPERATOR wrote. The
+   agent's realms are refused; the operator's are untouched.
+
+   `no_realm_placement` is OFF in `untrusted_author`, so item 330's per-turn
+   `Session.admit` is byte-identical. The per-turn case is the same question
+   with a shorter blast radius (a turn is additive and torn down with the turn,
+   where a proposal replaces the composition and keeps serving), and it is NAMED
+   here, not solved.
+
+2. **A halt dominates a proposal.** `Session.swap` already refused under an
+   E-Stop (item 443, `session.py:882`), but that refusal reached the loop
+   through `propose`'s `except _session_error()` arm and was reported as
+   `SWAP_REVERTED`. That verdict asserts three things, all false after an
+   E-Stop: that the candidate was judged (it never was), that gen N is intact
+   (its entries are STRANDED, owed and not discharged), and that the process is
+   still serving (the instance is dead). The mislabel is not cosmetic:
+   `SWAP_REVERTED` is the RETRY-shaped verdict, the one a self-extension loop
+   answers by generating a better candidate, so a halted gate would be proposed
+   at forever instead of reconciled. `propose` now reads the halt latch FIRST —
+   ahead of the forbidden-grant rule and any compile — and returns
+   `admitted=False, code="HALTED"` pointing at `revl recover`. It re-reads the
+   latch in the swap's `except` arm too, because the race is real and needs no
+   second thread: the swap runs the item-246 activation gate, which calls the
+   embedder's `approver` callback, which is host code that may hit the E-Stop
+   from inside the very call `propose` is awaiting. `Session.halted` is the
+   public read that makes the domination expressible, and `Gate.estop` /
+   `Gate.estop_report` put the button and the inventory on the facade — a
+   guarantee about a button no embedder can reach is not a guarantee.
+
+**What a proposal can and cannot change (the whole answer, after slice 2).**
+
+| | |
+| --- | --- |
+| CAN change | which component implements a key; the revl-level composition over the granted providers; the set of keys served (subject to the health gate, which holds the successor to the keys gen N actually served) |
+| CANNOT change | the host code (no new `extern`, no transitive host-extern reach — G8); the reach (`granted` only — R2); the decider (the forbidden-grant rule); its own authority address (no realm — G9); whether a halt applies to it (`HALTED` dominates) |
+| MUST pass | the standalone decision compile under `self_extension(granted)`, then the item-246 activation gate and the post-activation health gate on the swap, with `_abort_swap` back to gen N on any failure |
+
+Everything in the CANNOT row needs a FRESH admission — the operator-gated
+trusted `swap`/`load`, where a human reviewed it — and none of it is reachable
+from the autonomous loop.
+
+**Still deferred after slice 2, named not solved:** the rust host (below, and
+still genuinely blocked); the re-entrant `propose` (enforced-deferred by the
+forbidden-grant rule); the genuinely-new-host-code path (operator gate or item
+411); live-instance/provider-state MIGRATION across a proposed swap
+(`migrate="generational"`); and the per-turn `Session.admit` realm question
+named in (1).
+
+**The rust host remains BLOCKED, re-verified 2026-09-02.** `crates/revl-gate`
+landed since the slice-1 triage, but it is layer 1 ONLY and admit-only: `admit`
+is a pure function returning `Refused`/`NoObjection`/`OutsideFrontier` with no
+`Admitted` arm at all, `compile_to` is unimplemented, and
+`crates/revl-gate/src/session.rs` is a 25-line documented EMPTY RESERVATION that
+names item 334 as its owner. There is no rust `Session`, no witnessed-effect
+runtime, no WAL and no approver seam, so items 243/245/322 are unavailable on
+that tier and nothing in 334's loop can run there. The blocker is real; what is
+NOT blocked is the py envelope work above, which is why slice 2 exists.
+
 ## Exit test
 
 A live composition, embedded in one host process, accepts an agent-proposed

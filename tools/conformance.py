@@ -287,6 +287,142 @@ CASES: list[tuple[str, str, str]] = [
 ]
 
 
+# --------------------------------------------------------------------------
+# the answer each case computes — the difference between "it compiled" and
+# "it means the same thing" (issue #244)
+# --------------------------------------------------------------------------
+#
+# Everything above this line certifies COMPILATION. `run()` asks "did the
+# emitter raise?"; `tools/validate.py`'s six validators ask "does that output
+# survive its own toolchain?". Neither can see a tier that emits cleanly, type-
+# checks cleanly, and then computes a different number — which is exactly what
+# java did for `Int / Int` (item 433 rider R1) and what TypeScript did for
+# `{a: 1} == {a: 1}`. A matrix of `ok` cells over two different claim strengths
+# is how that stayed invisible, so the corpus now says, per case, WHICH claim
+# it makes.
+#
+# A case is EXECUTED when its construct has an answer a pure call can reach.
+# `PROBES` gives that call and the answer it must produce:
+#
+#     label -> (probe declaration, the answer as a revl literal)
+#
+# The probe is APPENDED to the case source, so the case itself is unchanged and
+# still emitted and validated exactly as before. The executed program is
+# `case + probe + test "conformance_answer" { assert probe() == <answer> }`,
+# and EVERY executed tier asserts the SAME literal. That makes this a
+# differential, not a per-tier smoke test: a tier that builds and runs but
+# computes something else is the only thing that can fail here, and a tier that
+# quietly agrees with a wrong answer is caught too, because the answer is
+# authored rather than read off whichever tier happened to run first.
+#
+# Answers are chosen to be unambiguous and to actually exercise the construct.
+# `expr/Int32 bitwise` is the sharpest of them: `mask(6, 6, 2)` is -1, which
+# separates an arithmetic `>>` from a logical `>>>` and a 32-bit lane from a
+# 64-bit one — three things the six tiers spell differently.
+
+PROBES: dict[str, tuple[str, str]] = {
+    "method/arrow param binds in method scope (FR-1)":
+        ("pub fn probe() -> Int { return apply2(41, v => v + 1) }", "42"),
+    # -1: `(((6 & 6) ^ ~6) | (6 << 2)) >> 1` in a 32-bit lane with an
+    # ARITHMETIC right shift. A logical shift, or a 64-bit `~`, answers
+    # differently — which is the point of executing it.
+    "expr/Int32 bitwise":
+        ("pub fn probe() -> Int { let a = 6.to_int32()\n"
+         "  return mask(a, a, 2.to_int32()).to_int() }", "-1"),
+    # 3.5, not 3: `Int / Int` is true division (docs/arithmetic.md). java
+    # emitted `7L / 2L` here and answered 3 while typechecking clean.
+    "expr/true division":
+        ("pub fn probe() -> Float { return realdiv(7, 2) }", "3.5"),
+    "expr/float equality":
+        ("pub fn probe() -> Bool { return feq(1.5, 1.5) }", "true"),
+    "expr/call a pure fn":
+        ("pub fn probe() -> Int { return double(21) }", "42"),
+    "fn/pure fn":
+        ("pub fn probe() -> Int { return add(20, 22) }", "42"),
+    "fn/while loop":
+        ("pub fn probe() -> Int { return count(7) }", "7"),
+    "fn/for-of loop":
+        ("pub fn probe() -> Int { return total([1, 2, 3]) }", "6"),
+    "fn/recursion":
+        ("pub fn probe() -> Int { return fib(10) }", "55"),
+    "fn/arrow lambda":
+        ("pub fn probe() -> Int { return apply(41) }", "42"),
+    "fn/verified fn":
+        ("pub fn probe() -> Int { return inc(41) }", "42"),
+    # the one probe whose answer travels through a host block on every tier
+    "extern/pure extern":
+        ("pub fn probe() -> Int { return h(42) }", "42"),
+    "test/test block":
+        ("pub fn probe() -> Int { return inc(41) }", "42"),
+    "slice/Str then split":
+        ('pub fn probe() -> List[Str] { return parse("ab cd ef") }',
+         '["ab", "cd", "ef"]'),
+    "slice/Str then length":
+        ('pub fn probe() -> Int { return words("hello") }', "4"),
+    "slice/List then join":
+        ('pub fn probe() -> Str { return firsts(["a", "b", "c"]) }', '"a, b"'),
+    "slice/List then push":
+        ("pub fn probe() -> List[Int] { return keep([1, 2, 3]) }", "[1, 2, 9]"),
+    "slice/List returned":
+        ("pub fn probe() -> List[Int] { return take3([1, 2, 3, 4]) }", "[1, 2, 3]"),
+    "slice/List then index":
+        ("pub fn probe() -> Int { return head([1, 2, 3]) }", "2"),
+}
+
+# Why the rest carry the weaker claim. These are not "not done yet" — they are
+# cases whose answer a pure call cannot reach, and saying so is the whole point
+# of the claim column.
+COMPILE_ONLY_REASONS = {
+    "signature": ("declares a type or service shape and computes no value — "
+                  "there is no answer to compare"),
+    "activation": ("its value is produced inside a component provide-method (or "
+                   "during activation), so reaching it means booting the "
+                   "composition on each tier's runtime, not calling a pure fn"),
+}
+
+
+def claim(label: str) -> str:
+    """`exec` or `compile-only` — which kind of claim this row's cells make."""
+    return "exec" if label in PROBES else "compile-only"
+
+
+def compile_only_reason(label: str, group: str) -> str | None:
+    """The reason key for a compile-only case, or None when it is executed.
+
+    Keyed on the case's group rather than a 43-entry table: a `type/*` case
+    declares a shape and evaluates nothing, and every other unprobed case puts
+    its value behind a provide-method. A new case therefore gets a reason for
+    free, and a new EXECUTABLE case has to be given a probe to lose one.
+    """
+    if label in PROBES:
+        return None
+    return "signature" if group == "type" else "activation"
+
+
+def probe_program(label: str, source: str) -> str | None:
+    """The case source plus its probe and the assertion every tier must satisfy.
+
+    None for a compile-only case. The assertion literal is the corpus's own
+    declared answer, identical on every tier — that identity is what makes the
+    execution pass a cross-tier comparison rather than a per-tier smoke test.
+    """
+    entry = PROBES.get(label)
+    if entry is None:
+        return None
+    declaration, answer = entry
+    return (f"{source}\n{declaration}\n"
+            f'test "conformance_answer" {{ assert probe() == {answer} }}\n')
+
+
+def executable_cases() -> list[tuple[str, str]]:
+    """(label, probe program) for every case whose answer can be executed."""
+    out = []
+    for group, name, source in CASES:
+        label = f"{group}/{name}"
+        program = probe_program(label, source)
+        if program is not None:
+            out.append((label, program))
+    return out
 
 def _emit_kwargs(tier: str, index: int) -> dict:
     """Per-tier emitter options needed to validate many cases side by side.
@@ -378,6 +514,92 @@ def _validate(artifacts: dict[str, list[tuple[str, object]]]) -> dict:
     return out
 
 
+def execute(report: dict | None = None) -> dict:
+    """Run every executable case on every executed tier and compare ANSWERS.
+
+    The compile validators answer "does this output survive its toolchain?".
+    This answers "do the tiers that ran agree on what it evaluates to?" — the
+    question `conformance` is named for and did not ask (issue #244).
+
+    Returns
+
+        {"tiers": {tier: {status, depth, results|reason}},
+         "cases": {label: {tier: "agree"|"differs"|"-"}},
+         "agreed": [label, ...], "diverged": {label: {tier: detail}},
+         "executed": N, "compile_only": {reason: [label, ...]}}
+
+    where a case is `agree` on a tier when that tier ran the program and the
+    corpus's declared answer held. Because every tier asserts the SAME literal,
+    the set of `agree` tiers for a case is a cross-tier agreement, not N
+    independent smoke tests.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from validate import EXECUTORS  # noqa: PLC0415 — resolved next to this file
+
+    cases = executable_cases()
+    admitted = {row["case"] for row in (report or run())["cases"]}
+    out: dict = {"tiers": {}, "cases": {label: {} for label, _ in cases},
+                 "executed": len(cases), "agreed": [], "diverged": {},
+                 "compile_only": compile_only_index(admitted)}
+    for tier, executor in EXECUTORS.items():
+        entry: dict = {"depth": executor.depth}
+        reason = executor.unavailable()
+        if reason:
+            entry["status"] = "unavailable"
+            entry["reason"] = reason
+            out["tiers"][tier] = entry
+            for label, _ in cases:
+                out["cases"][label][tier] = "-"
+            continue
+        try:
+            results = executor.check(cases)
+        except Exception as exc:  # noqa: BLE001 — a broken harness is a datum too
+            entry["status"] = "error"
+            entry["reason"] = str(exc).splitlines()[0]
+            out["tiers"][tier] = entry
+            for label, _ in cases:
+                out["cases"][label][tier] = "-"
+            continue
+        failures = {}
+        for label, (status, detail) in results.items():
+            agreed = status == "ok"
+            out["cases"][label][tier] = "agree" if agreed else "differs"
+            if not agreed:
+                failures[label] = detail
+                out["diverged"].setdefault(label, {})[tier] = detail
+        entry["status"] = "fail" if failures else "ok"
+        entry["failures"] = failures
+        out["tiers"][tier] = entry
+
+    for label, _ in cases:
+        verdicts = out["cases"][label]
+        ran = [t for t, v in verdicts.items() if v != "-"]
+        if ran and all(verdicts[t] == "agree" for t in ran):
+            out["agreed"].append(label)
+    if report is not None:
+        report["execution"] = out
+    return out
+
+
+def compile_only_index(labels: set[str] | None = None) -> dict[str, list[str]]:
+    """reason key -> the cases carrying it. The weaker half of the matrix,
+    enumerated rather than left to look like the executed half.
+
+    `labels` restricts the count to the cases that actually reached the tiers —
+    a case the frontend rejects is neither executed nor compile-only, it is a
+    language-level limit reported on its own line.
+    """
+    index: dict[str, list[str]] = {}
+    for group, name, _ in CASES:
+        label = f"{group}/{name}"
+        if labels is not None and label not in labels:
+            continue
+        reason = compile_only_reason(label, group)
+        if reason:
+            index.setdefault(reason, []).append(label)
+    return index
+
+
 def _check_toolchains(*, as_json: bool = False) -> int:
     """Which tiers can actually be validated — and is that all of them?
 
@@ -391,20 +613,38 @@ def _check_toolchains(*, as_json: bool = False) -> int:
     Exits non-zero if any tier's validator cannot run.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from validate import VALIDATORS  # noqa: PLC0415 — resolved next to this file
+    from validate import EXECUTORS, VALIDATORS  # noqa: PLC0415 — next to this file
 
     status = {}
     for tier in TIERS:
         validator = VALIDATORS[tier]
         status[tier] = {"depth": validator.depth, "reason": validator.unavailable()}
+    # The executed tiers are a second, stronger claim and need their own
+    # runtimes (a vitest install, a go toolchain), which are NOT implied by the
+    # compile validators being ready. A missing one here means the matrix
+    # silently falls back to compile-only for that tier — the exact conflation
+    # issue #244 is about — so it is a broken job here just the same.
+    runtimes = {}
+    for tier, executor in EXECUTORS.items():
+        runtimes[tier] = {"depth": executor.depth, "reason": executor.unavailable()}
 
     missing = [t for t, v in status.items() if v["reason"]]
+    missing_runtimes = [t for t, v in runtimes.items() if v["reason"]]
     if as_json:
-        print(json.dumps({"toolchains": status, "missing": missing}, indent=2))
+        print(json.dumps({"toolchains": status, "missing": missing,
+                          "runtimes": runtimes,
+                          "missing_runtimes": missing_runtimes}, indent=2))
     else:
-        print("validator toolchains:\n")
+        print("validator toolchains (compile depth):\n")
         for tier in TIERS:
             entry = status[tier]
+            if entry["reason"]:
+                print(f"  {tier:<11} UNAVAILABLE — {entry['reason']}")
+            else:
+                print(f"  {tier:<11} ready ({entry['depth']})")
+        print("\nexecuted tiers (answer depth):\n")
+        for tier in EXECUTORS:
+            entry = runtimes[tier]
             if entry["reason"]:
                 print(f"  {tier:<11} UNAVAILABLE — {entry['reason']}")
             else:
@@ -413,9 +653,14 @@ def _check_toolchains(*, as_json: bool = False) -> int:
             print(f"\n{len(missing)} tier(s) cannot be validated here: "
                   f"{', '.join(missing)}.\nTheir emitted code would go "
                   f"unchecked while the run still reported success.")
-        else:
-            print("\nall tiers validatable — no silent gaps")
-    return 1 if missing else 0
+        if missing_runtimes:
+            print(f"\n{len(missing_runtimes)} tier(s) cannot be EXECUTED here: "
+                  f"{', '.join(missing_runtimes)}.\nTheir answers would go "
+                  f"uncompared while the run still reported success.")
+        if not missing and not missing_runtimes:
+            print("\nall tiers validatable and every executed tier runnable — "
+                  "no silent gaps")
+    return 1 if (missing or missing_runtimes) else 0
 
 
 # --------------------------------------------------------------------------
@@ -517,6 +762,14 @@ README_START = "<!-- CONFORMANCE-MATRIX:START -->"
 README_END = "<!-- CONFORMANCE-MATRIX:END -->"
 _README_ANCHOR = "## The toolchain is the developer surface"
 
+# The per-tier emit-sweep summary (issue #233). It was authored by hand from a
+# one-off run and then rotted: rust read 3 refusals against a measured 0 and
+# java 3 against a measured 1, for months, while the tool that answers the
+# question exactly sat in this file. Same fix as the matrix above — generate it
+# and let the staleness gate diff it — so the counts cannot outlive their run.
+SWEEP_START = "<!-- CONFORMANCE-SWEEP:START -->"
+SWEEP_END = "<!-- CONFORMANCE-SWEEP:END -->"
+
 
 def _short(tier: str) -> str:
     return _SHORT.get(tier, tier)
@@ -577,14 +830,29 @@ def _markdown(report: dict, selfhost: dict[str, str] | None) -> str:
                "pipeline compiling itself, where `ok` means byte-identical to "
                "the reference emitter and `lim` is the self-host frontier.")
     out.append("")
+    # The claim column exists because the table used to be uniform over two
+    # different claim strengths, which is how the missing execution tier stayed
+    # invisible (issue #244). It is derived from the corpus (pure data), so it
+    # regenerates deterministically with the rest of the block; whether the
+    # executed rows AGREED is a `--execute` run, gated separately.
+    out.append("**claim** says how strong each row is. `exec` the tiers RUN the "
+               "construct and assert one declared answer, so a tier that "
+               "compiles and then computes something else fails "
+               "(`python3 tools/conformance.py --execute`; python, typescript "
+               "and go execute today). `compile-only` nothing runs it: the "
+               "`ok`/`lim` cells on that row mean the emitter produced code its "
+               "own toolchain accepts, and say nothing about what it evaluates "
+               "to.")
+    out.append("")
 
-    out.append("| construct | " + " | ".join(_short(t) for t in columns) + " |")
-    out.append("|" + "|".join(["---"] * (len(columns) + 1)) + "|")
+    out.append("| construct | claim | " + " | ".join(_short(t) for t in columns) + " |")
+    out.append("|" + "|".join(["---"] * (len(columns) + 2)) + "|")
     for row in cases:
         cells = [_GLYPH[row["emit_kind"][t]] for t in TIERS]
         if selfhost is not None:
             cells.append(_GLYPH.get(selfhost.get(row["case"], "gap"), "**GAP**"))
-        out.append("| " + row["case"] + " | " + " | ".join(cells) + " |")
+        out.append("| " + row["case"] + " | " + claim(row["case"]) + " | "
+                   + " | ".join(cells) + " |")
 
     out.append("")
     out.append(f"**Per tier** ({len(cases)} constructs emitted; "
@@ -595,6 +863,21 @@ def _markdown(report: dict, selfhost: dict[str, str] | None) -> str:
     for tier, ok, limit, gap in _summary_rows(report, selfhost):
         gap_cell = f"**{gap}**" if gap else "0"
         out.append(f"| {tier} | {ok} | {limit} | {gap_cell} |")
+
+    executed = [row["case"] for row in cases if row["case"] in PROBES]
+    index = compile_only_index({row["case"] for row in cases})
+    out.append("")
+    out.append(f"**Per claim** ({len(executed)} executed, "
+               f"{sum(len(v) for v in index.values())} compile-only):")
+    out.append("")
+    out.append("| claim | cases | what a green row proves |")
+    out.append("|---|---|---|")
+    out.append(f"| `exec` | {len(executed)} | every executed tier ran the "
+               f"construct and agreed on one declared answer |")
+    for reason in sorted(index):
+        out.append(f"| `compile-only` ({reason}) | {len(index[reason])} | "
+                   f"the emitter produced code its toolchain accepts; "
+                   f"{COMPILE_ONLY_REASONS[reason]} |")
 
     if report["frontend_rejected"]:
         out.append("")
@@ -608,10 +891,131 @@ def _markdown(report: dict, selfhost: dict[str, str] | None) -> str:
         out.append(f"**Performance.** In-memory admission round-trip "
                    f"(compile + gate) median **{perf}** per candidate component "
                    f"([bench/results/admission-latency.md]"
-                   f"(bench/results/admission-latency.md)). This is the "
+                   # The block is spliced into docs/conformance.md, so the href
+                   # is relative to docs/ — without the `../` it resolved to a
+                   # docs/bench/ that has never existed.
+                   f"(../bench/results/admission-latency.md)). This is the "
                    f"per-candidate cost an agent loop pays at the v3.0 gate.")
 
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# the per-tier emit sweep (issue #233)
+# --------------------------------------------------------------------------
+
+# Why a refusal happened, in the words of the emitter that raised it. Each rule
+# is (matcher, label); the first that matches wins, so order is significance
+# order. A refusal no rule recognises falls back to its case label rather than
+# to a bucket named "other" — an unnamed cause should read as conspicuous in
+# the committed table, not as a tidy count.
+_REFUSAL_RULES: tuple[tuple[str, str], ...] = (
+    ("config block", "config block"),
+    ("host builtin", "host builtin"),
+    ("arrow values are not lowerable", "function-typed signature"),
+    ("declared function type", "function-typed signature"),
+)
+
+_EXTERN_BODY = "has no @"
+_TYPE_REFUSAL = " is not lowerable"
+
+
+def refusal_reason(message: str) -> str:
+    """Classify one emitter refusal into the cause the summary table names.
+
+    Keyed on the emitter's own message, which is the only place the cause is
+    stated. A type refusal names the type (`Float`, `Map[Str, Int]`) and an
+    extern refusal names the missing body tag (`@rs`), so both are read back
+    out rather than hard-coded per tier — a new refusing type or tier needs no
+    edit here.
+    """
+    for needle, label in _REFUSAL_RULES:
+        if needle in message:
+            return label
+
+    if _EXTERN_BODY in message:
+        tag = message.split(_EXTERN_BODY, 1)[1].split()[0]
+        return f"extern with no `@{tag}` body"
+
+    if "type '" in message and _TYPE_REFUSAL in message:
+        named = message.split("type '", 1)[1].split("'", 1)[0]
+        base = named.split("[", 1)[0]
+        return f"`{base}` signature"
+
+    return message
+
+
+def _deliberate_cell(items: list[dict]) -> str:
+    """The `deliberate` column: each cause with how many cases hit it.
+
+    Ordered by count then label so two runs of the same tree render the same
+    string — the staleness gate diffs this text byte for byte.
+    """
+    if not items:
+        return "—"
+    counts: dict[str, int] = {}
+    for item in items:
+        reason = refusal_reason(item["message"])
+        counts[reason] = counts.get(reason, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{reason} ({count})" for reason, count in ordered)
+
+
+def _sweep_markdown(report: dict) -> str:
+    """The per-tier refusal summary, generated from the same walk as the matrix.
+
+    Emit-only and therefore deterministic, exactly like `_markdown`. The three
+    columns answer three different questions and must not be collapsed: how
+    many constructs the tier refused, how many of those are *gaps* (an emitter
+    with no case for a construct it should express), and what the deliberate
+    ones are.
+
+    Scope, deliberately: every cell here is about *emit*, and `--validate`'s
+    second question (does the emitted code survive its real compiler?) is
+    still only a compile. Issue #244 is that the validators never *execute*
+    what they compile, so a row that reads clean proves compilation and not
+    behaviour. When that lands, this table wants a fourth column separating
+    executed rows from compile-only ones — a count that means "ran and agreed"
+    must not render the same as one that means "parsed". The gate is already
+    shaped for it: add the column here and the staleness diff carries it.
+    """
+    out: list[str] = []
+    out.append("_Generated by `python3 tools/conformance.py --write-readme`. "
+               "Do not edit by hand._")
+    out.append("")
+    out.append("| tier | refusals | real gaps | deliberate |")
+    out.append("|---|---|---|---|")
+    for tier in TIERS:
+        items = report["gaps"].get(tier) or []
+        gaps = [item for item in items if not item["deliberate"]]
+        deliberate = [item for item in items if item["deliberate"]]
+        gap_cell = f"**{len(gaps)}**" if gaps else "0"
+        out.append(f"| {_short(tier)} | {len(items)} | {gap_cell} | "
+                   f"{_deliberate_cell(deliberate)} |")
+
+    clean = [_short(t) for t in TIERS if not (report["gaps"].get(t) or [])]
+    refusing = [_short(t) for t in TIERS if (report["gaps"].get(t) or [])]
+    any_gap = any(not item["deliberate"]
+                  for items in report["gaps"].values() for item in items)
+    if clean:
+        out.append("")
+        out.append(f"**{_and_list(clean)} are at zero"
+                   + ("" if not refusing else
+                      f"; every remaining refusal on {_and_list(refusing)} is "
+                      + ("a deliberate tier limit" if not any_gap
+                         else "listed above, and the bold count is a real gap"))
+                   + ".**")
+    return "\n".join(out)
+
+
+def _and_list(names: list[str]) -> str:
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def sweep_block(report: dict) -> str:
+    return f"{SWEEP_START}\n{_sweep_markdown(report)}\n{SWEEP_END}"
 
 
 def _print_emit_timings(report: dict) -> None:
@@ -666,12 +1070,36 @@ def _splice_readme(text: str, block: str) -> str:
     return text.rstrip("\n") + "\n\n" + section
 
 
-def _write_readme(*, check_only: bool) -> int:
-    """Regenerate the README matrix block. `check_only` gates staleness for CI.
+def _splice_marked(text: str, start: str, end: str, block: str) -> str:
+    """Replace an already-marked block. The markers must exist.
 
-    Returns 0 when the committed block already matches a fresh generation (or
-    was written), 1 when `check_only` finds it stale — the same shape as the
-    generated-artifact gates the rest of the tree uses.
+    Unlike `_splice_readme` there is no fallback that invents a section: this
+    block replaces prose that was there before it, so a missing marker means
+    someone deleted the generated table rather than that it has yet to land,
+    and inventing a new section elsewhere in the file would hide that.
+    """
+    if start not in text or end not in text:
+        raise SystemExit(
+            f"docs/conformance.md is missing the {start}/{end} markers — the "
+            "generated block cannot be spliced. Restore them.")
+    pre = text[:text.index(start)]
+    post = text[text.index(end) + len(end):]
+    return pre + block + post
+
+
+def _write_readme(*, check_only: bool) -> int:
+    """Regenerate the generated blocks in docs/conformance.md.
+
+    `check_only` gates staleness for CI. Returns 0 when the committed blocks
+    already match a fresh generation (or were written), 1 when `check_only`
+    finds either stale — the same shape as the generated-artifact gates the
+    rest of the tree uses.
+
+    Two blocks, one walk: the construct x tier matrix and the per-tier emit
+    sweep are two views of the same `run()`, so generating them together costs
+    nothing extra and, more to the point, makes it impossible for one to be
+    regenerated while the other rots (issue #233 — that is exactly what had
+    happened to the sweep, which had been authored by hand).
     """
     report = run()
     selfhost = selfhost_column()
@@ -682,21 +1110,22 @@ def _write_readme(*, check_only: bool) -> int:
     doc = ROOT / "docs" / "conformance.md"
     text = doc.read_text(encoding="utf-8")
     updated = _splice_readme(text, block)
+    updated = _splice_marked(updated, SWEEP_START, SWEEP_END, sweep_block(report))
 
     if check_only:
         if updated == text:
-            print("docs/conformance.md matrix is up to date.")
+            print("docs/conformance.md matrix and emit sweep are up to date.")
             return 0
-        print("docs/conformance.md matrix is STALE — regenerate it with "
-              "`python3 tools/conformance.py --write-readme` (or `make matrix`) "
-              "and commit the result.", file=sys.stderr)
+        print("docs/conformance.md matrix or emit sweep is STALE — regenerate "
+              "it with `python3 tools/conformance.py --write-readme` (or "
+              "`make matrix`) and commit the result.", file=sys.stderr)
         return 1
 
     if updated == text:
-        print("docs/conformance.md matrix already up to date.")
+        print("docs/conformance.md matrix and emit sweep already up to date.")
     else:
         doc.write_text(updated, encoding="utf-8")
-        print("docs/conformance.md matrix regenerated.")
+        print("docs/conformance.md matrix and emit sweep regenerated.")
     return 0
 
 
@@ -709,6 +1138,58 @@ def _matrix(report: dict, cell) -> None:
         print(f"{row['case'].ljust(width)}{cells}")
 
 
+def _execute_command(*, as_json: bool, require: bool) -> int:
+    """`--execute`: the differential. Prints per-case agreement across the
+    executed tiers, and what the compile-only rows are NOT claiming."""
+    result = execute()
+    if as_json:
+        print(json.dumps(result, indent=2))
+    else:
+        tiers = list(result["tiers"])
+        width = max((len(label) for label in result["cases"]), default=10) + 2
+        print("execute — do the tiers that RAN agree on the answer?")
+        print("  agree = ran and matched the declared answer   "
+              "differs = ran and disagreed   - = no runtime here\n")
+        print("case".ljust(width) + "".join(t[:10].ljust(12) for t in tiers))
+        print("-" * (width + 12 * len(tiers)))
+        for label in result["cases"]:
+            cells = "".join(result["cases"][label][t].ljust(12) for t in tiers)
+            print(label.ljust(width) + cells)
+
+        print("\nper tier:")
+        for tier, entry in result["tiers"].items():
+            if entry["status"] in ("unavailable", "error"):
+                tag = "unavailable" if entry["status"] == "unavailable" else "HARNESS ERROR"
+                print(f"  {tier:<11} {tag} — {entry['reason']}")
+                continue
+            failures = entry.get("failures") or {}
+            total = result["executed"]
+            print(f"  {tier:<11} {total - len(failures)}/{total} answers agreed "
+                  f"({entry['depth']})")
+            for label, detail in failures.items():
+                print(f"      {label}: {detail[:160]}")
+
+        index = result["compile_only"]
+        compile_only = sum(len(v) for v in index.values())
+        print(f"\n{result['executed']} of {result['executed'] + compile_only} "
+              f"cases are executable; {compile_only} are compile-only by nature:")
+        for reason in sorted(index):
+            print(f"  {reason:<11} {len(index[reason]):>3} — "
+                  f"{COMPILE_ONLY_REASONS[reason]}")
+
+    unavailable = [t for t, e in result["tiers"].items()
+                   if e["status"] == "unavailable"]
+    broken = [t for t, e in result["tiers"].items() if e["status"] == "error"]
+    if result["diverged"] or broken:
+        return 1
+    if require and unavailable:
+        print(f"\n{len(unavailable)} executed tier(s) had no runtime here: "
+              f"{', '.join(unavailable)}. Their answers went uncompared.",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
@@ -716,6 +1197,14 @@ def main() -> int:
                         help="also compile/typecheck the emitted code with each "
                              "tier's real toolchain (slower; skips tiers whose "
                              "toolchain is absent, and says which)")
+    parser.add_argument("--execute", action="store_true",
+                        help="run every executable case on every tier that has "
+                             "a runtime here and compare the ANSWERS; exits "
+                             "non-zero on a disagreement")
+    parser.add_argument("--require-execution", action="store_true",
+                        help="with --execute, also fail when an executed tier's "
+                             "runtime is absent — for CI, where an unrun tier "
+                             "is a broken job, not a fact of life")
     parser.add_argument("--check-toolchains", action="store_true",
                         help="report which tiers' validators can run and exit "
                              "non-zero if any cannot — for CI, where a missing "
@@ -726,15 +1215,21 @@ def main() -> int:
                              "column and a live per-tier emit-timing readout")
     parser.add_argument("--write-readme", action="store_true",
                         help="regenerate the matrix block between the "
-                             "CONFORMANCE-MATRIX markers in README.md in place")
+                             "CONFORMANCE-MATRIX and CONFORMANCE-SWEEP "
+                             "markers in docs/conformance.md in place")
     parser.add_argument("--check-readme", action="store_true",
-                        help="exit non-zero if README.md's committed matrix "
-                             "block differs from a fresh generation — the CI "
-                             "staleness gate")
+                        help="exit non-zero if either committed block in "
+                             "docs/conformance.md (the matrix or the per-tier "
+                             "emit sweep) differs from a fresh generation — "
+                             "the CI staleness gate")
     args = parser.parse_args()
 
     if args.check_toolchains:
         return _check_toolchains(as_json=args.json)
+
+    if args.execute:
+        return _execute_command(as_json=args.json,
+                                require=args.require_execution)
 
     if args.write_readme or args.check_readme:
         return _write_readme(check_only=args.check_readme)
@@ -743,6 +1238,8 @@ def main() -> int:
         report = run()
         selfhost = selfhost_column()
         print(_markdown(report, selfhost))
+        print()
+        print(_sweep_markdown(report))
         _print_emit_timings(report)
         return 0
 

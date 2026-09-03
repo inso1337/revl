@@ -12,18 +12,13 @@
 
 import { Context, FiberState } from 'cordis'
 import { PgDatabase, UserCache } from './golden/user_cache.ts'
-import { hostLog, onHostEvent, snapshotRuntime, assertNoResidue } from './runtime.ts'
-
-// FiberState is a const enum in cordis's typings, so build an explicit
-// number -> name table for the event log.
-const stateName: Record<number, string> = {
-  [FiberState.PENDING]: 'PENDING',
-  [FiberState.LOADING]: 'LOADING',
-  [FiberState.ACTIVE]: 'ACTIVE',
-  [FiberState.FAILED]: 'FAILED',
-  [FiberState.DISPOSED]: 'DISPOSED',
-  [FiberState.UNLOADING]: 'UNLOADING',
-}
+import {
+  assertNoResidue,
+  fiberStateName,
+  hostLog,
+  onHostEvent,
+  snapshotRuntime,
+} from './runtime.ts'
 
 const log: string[] = []
 const note = (line: string) => log.push(line)
@@ -47,7 +42,7 @@ const ctx = new Context()
 
 onHostEvent((entry) => note(`host  | ${entry}`))
 ctx.on('internal/status', (fiber, oldState) => {
-  note(`fiber | ${fiber.name}: ${stateName[oldState]} -> ${stateName[fiber.state]}`)
+  note(`fiber | ${fiber.name}: ${fiberStateName(oldState)} -> ${fiberStateName(fiber.state)}`)
 })
 
 const baseline = snapshotRuntime(ctx)

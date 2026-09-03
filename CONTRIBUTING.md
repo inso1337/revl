@@ -222,9 +222,12 @@ command, in order, reporting each step:
 | backend-rust | `pytest backends/rust/test_emit_rust.py` (emit/golden tests) |
 | backend-wasm | `pytest backends/wasm/test_v3_emit.py backends/wasm/test_canonical_abi.py` |
 | backend-java | `pytest backends/java/test_emit_java.py` (emit/golden tests) |
-| conformance matrix | `tools/conformance.py --check-readme` |
+| backend-ts | `tools/regen_goldens.py --check typescript` (golden drift) |
+| conformance matrix + emit sweep | `tools/conformance.py --check-readme` |
 | site wheel | `tools/check_site_wheel.py` (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
+| docs drift | `tools/docgen.py --check` (the source-derived doc blocks; `make docs-gen` regenerates) |
 | lint | `ruff check` (pinned `ruff==0.16.4` via `uvx` if not on `PATH`) |
+| formal | `formal/scripts/run_gate.sh` (lake build + axioms gate) |
 
 Two properties make it trustworthy rather than theatre:
 
@@ -372,6 +375,18 @@ in the `lint` CI job) now fails when a marker contradicts git. Four rules:
      and left live everywhere else. No gate can decide semantic parity;
      naming the other tier is the whole discipline, and it is also the escape
      hatch that silences the check honestly.
+   - **A marker must not say work is IN FLIGHT on the branch the PR is from.**
+     ``FIXING on `fix/277-rust-vec-char` `` is green while that PR is open,
+     because the branch exists; the merge deletes it, so the marker the PR
+     introduced is stale on landing. `lint` runs on branch tips, so that reds
+     main *and* every open PR whose merge-ref carries the new text, each of
+     which then has to be retriggered by hand. Four occurrences on 2026-09-02.
+     Cite the PR instead (`PR #175`), or once it has landed, the merge sha.
+     `--head-branch` checks this — CI passes `github.head_ref`, which is empty
+     on a push to main, and `tools/pre_pr.sh` passes your current branch
+     before the PR is even opened. Naming your own branch in the PAST tense is
+     fine and does not trip it: ``LANDED SO FAR (`fix/391-selfhost-parity`)``
+     stays true after the branch is gone, and that is the whole difference.
 
 4. **Security findings go to private GitHub Security Advisories, never public
    issues.** See [SECURITY.md](SECURITY.md). This repository is public and the

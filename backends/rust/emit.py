@@ -4058,11 +4058,16 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         # has no scope for. Refuse by name rather than emit a subscription whose
         # body silently never runs — the same call
         # `_refuse_unlowered_stream_surface` makes for the Slice 2 surface.
+        # Slice 5's `on … as` typed-event handler lowers to this SAME step (an
+        # event is a stream item with a contract), so it is refused here too —
+        # and named for the form the author actually wrote.
+        form = ("`on … as` typed-event handler" if step.get("event")
+                else "`every … in` stream iteration form")
         raise EmitError(
-            "the `every … in` stream iteration form is not lowered on the rust "
+            f"the {form} is not lowered on the rust "
             "tier; this tier lowers subscribe / next / close and `merge` "
             "(item 130 Slices 1 and 3) while the iteration form runs on the py "
-            "reference tier (Slice 4) — try `--backend py`")
+            "reference tier (Slices 4 and 5) — try `--backend py`")
     else:
         raise EmitError(f"unsupported component step in Rust backend: {kind!r}")
 

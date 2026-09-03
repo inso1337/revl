@@ -18,13 +18,22 @@ on:
 # Runs on main are NOT cancelled: main's history is the signal, and dropping a
 # run there would leave a landed commit with no verdict.
 concurrency:
-  # The group carries the SHA on push, so a push to main is unique per commit
-  # and has nothing to cancel. A pull_request keeps a stable per-ref group, so a
-  # new push to the PR cancels the superseded run. Encoding the distinction in
-  # the GROUP rather than in cancel-in-progress is deliberate: the expression
-  # form cancelled main's runs anyway, which cost three merge commits their
-  # verdict.
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  # One stable group per ref, for pushes and pull_requests alike: a newer run on
+  # the same ref supersedes the older one.
+  #
+  # This deliberately reverts an earlier attempt that put github.sha in the group
+  # for push events, so that no main run could ever be cancelled. That protected
+  # each commit's verdict in principle and destroyed all of them in practice:
+  # every merge opened its own group, the runs stacked instead of superseding,
+  # and with a busy merge queue main went 12 consecutive commits with every run
+  # QUEUED and none completed. Preserving every main run means none of them runs.
+  #
+  # The trade, stated: an intermediate main commit can be superseded before it
+  # reports. That is acceptable because every commit reaching main was already
+  # green on all 13 required checks as a PR, and main's job here is to catch
+  # MERGE INTERACTIONS at the tip. A green tip is the signal that matters, and
+  # under this group the tip actually gets one as soon as merging pauses.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 # Least privilege for GITHUB_TOKEN, workflow-wide. Every job below only checks
@@ -105,12 +114,27 @@ jobs:
       #
       # Never add `|| true`, and never narrow a check to make this line pass.
       # `make roadmap-check-all` runs all five locally.
-      - run: |
+      #
+      # --head-branch is `github.head_ref`: the PR's own branch on a
+      # pull_request, and EMPTY on a push to main, which turns that check off.
+      # It refuses a marker saying work is IN FLIGHT on the branch the PR is
+      # from, because merging deletes that branch and the marker is stale the
+      # moment it lands — reddening main and, since this job runs on branch
+      # tips, every open PR whose merge-ref carries the new text. Past-tense
+      # self-naming ("LANDED SO FAR (`fix/x`)") is legitimate and passes.
+      # It goes through `env:` rather than being interpolated into the script:
+      # a branch name is attacker-controllable text, and `${{ }}` inside a
+      # `run:` block is textual substitution that a name containing backticks
+      # or `$(...)` would turn into shell.
+      - env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
           python3 tools/check_roadmap_markers.py \
             --check-contradiction \
             --check-delegation \
             --check-duplicate-headers \
-            --check-orphan
+            --check-orphan \
+            --head-branch "$HEAD_BRANCH"
 
   frontend:
     runs-on: ubuntu-latest
@@ -150,6 +174,17 @@ jobs:
       # the other generated-artifact gates. Emit-only + self-host are pure
       # Python, so this needs no backend toolchain and runs here.
       - run: python3 tools/conformance.py --check-readme
+      # issue #255: five docs carried source-derived content (the MCP verb
+      # table, the CLI subcommand list, the guarantee tables, the DOC-STATUS
+      # inventory, a test count) with nothing to keep them honest, and the one
+      # marker-based mechanism rotted back within a day of a manual correction
+      # pass. Those blocks are generated now and byte-compared here, plus a
+      # coverage check that every build_parser() subcommand and every TOOLS
+      # verb is documented at all. Fix a stale block with `make docs-gen`; fix
+      # a coverage failure by writing the missing section, never by narrowing
+      # the check. Pure Python over the installed package, so it belongs beside
+      # the matrix gate rather than in a new job.
+      - run: python3 tools/docgen.py --check
       # roadmap 110c: the playground/site wheel freshness is NOT checked here,
       # and must not be. The wheel vendors the whole of src/revl, so a per-push
       # gate reddened CI on every source change to a bundled module (an outage
@@ -291,7 +326,10 @@ jobs:
       # runner image ever stops shipping Docker, this fails loudly instead of
       # letting the sandbox level quietly go back to skipping.
       - run: docker version
-      - run: backends/python/.venv/bin/python -m pytest tests/test_sandbox_container_rung_411.py -q --junitxml=/tmp/sandbox-junit.xml
+      # item 118 Slice 2a rides the same gate and the same `revl.sandbox=411`
+      # label: `revl deploy`'s container boundary IS item 411's rung, so it is
+      # exercised here rather than in a second job with its own runtime.
+      - run: backends/python/.venv/bin/python -m pytest tests/test_sandbox_container_rung_411.py tests/test_deploy_map_118.py -q --junitxml=/tmp/sandbox-junit.xml
         env:
           # the gate the file reads. With it set, a missing or broken container
           # runtime REDS this job instead of skipping past the boundary tests.
@@ -361,6 +399,15 @@ jobs:
       # cold it FAILS with the command to run, rather than checking zero files
       # and reporting success.
       - run: cd backends/typescript && node scripts/typecheck-generated.mjs
+      # issue #223: the step above covers EMITTED output. The tier's
+      # hand-written TypeScript — the vitest suites, `bridge.ts` (the seam),
+      # `revl_fs_ts.ts` (the confinement surface) and the rest — was in no
+      # tsconfig at all, and probing it found 9 real type errors. Same
+      # one-program-per-file shape and the same ordering requirement: the
+      # suites import `tests/generated/`, so this runs after `vitest run`. It
+      # also fails if ANY `.ts` in the tier is matched by no tsconfig, which is
+      # what keeps the gap from reopening one file at a time.
+      - run: cd backends/typescript && node scripts/typecheck-handwritten.mjs
       - run: cd backends/typescript && npx tsc --noEmit
       # the tier's acceptance demo (R1-R4 self-checks, exit code reflects them).
       # `tsc --noEmit` above type-checks demo.ts but never RUNS it, so its
@@ -766,6 +813,16 @@ jobs:
       # the baselined gate: new toolchain rejections fail, and a baselined
       # failure that starts passing fails too, so the list can only shrink
       - run: pytest tests/test_conformance_validate.py -q
+      # The matrix's THIRD question (issue #244). Everything above stops at
+      # compile/typecheck depth, so it certifies that a construct emits and
+      # compiles per tier and never what it evaluates to — two tiers could be
+      # green on the same case and disagree about the answer. This runs the
+      # executable half of the corpus on python, typescript and go (the tiers
+      # whose runtime exists in this job: the venv above, the `npm ci` above,
+      # and setup-go) and checks each computes the ONE answer the corpus
+      # declares. --require-execution makes an absent runtime fail the job
+      # rather than quietly demote those rows to compile-only.
+      - run: python3 tools/conformance.py --execute --require-execution
       # Roadmap item 25 — placement across the tier seams, on every commit.
       # The conformance gate above proves each tier's emitted code survives its
       # own compiler; it does NOT boot a composition SPLIT across tiers and run

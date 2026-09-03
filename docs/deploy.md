@@ -1,15 +1,16 @@
 # `revl deploy` — attested admission, correlated seams, coordinated rollback
 
-Roadmap item 118, **Slice 1: single host / local multiprocess.** The design is
+Roadmap item 118, **Slice 1** (single host / local multiprocess) and
+**Slice 2a** (the deploy map, and the container boundary). The design is
 `docs/design/118-revl-deploy.md`; this page is what actually landed and how to
 use it. The code is `src/revl/deploy.py`, the participant runner is
 `src/revl/_deploy_participant.py`, and the seam changes are in
 `backends/python/bridge.py`.
 
-Slice 1 deliberately does not build the cross-machine half. There is no SSH or
-container launch, no replicated WAL, and no quorum coordinator; every seam is a
-local process seam over the item-56 bridge. What Slice 1 does build is the part
-that is honest on today's tree and that the cross-machine half will reuse whole.
+Neither slice builds the cross-machine half. There is no replicated WAL and no
+quorum coordinator, and a **machine boundary is refused** rather than
+best-efforted (§5). What is built is the part that is honest on today's tree and
+that the cross-machine half will reuse whole.
 
 ## What it guarantees, and what it does not
 
@@ -309,12 +310,118 @@ verbatim; it decides nothing on its own.
   between roll-forward and roll-back is precisely the split-brain the durable
   record exists to prevent.
 
-## Not in Slice 1
+## 5. The deploy map, and the boundary a deploy may cross
 
-* cross-machine orchestration: SSH / container / microVM launch of a remote
-  runner (`network-placement.md` still lists orchestration as a non-goal);
-* a replicated WAL and a quorum-durable federation decision;
-* a partition-safe distributed commit coordinator;
-* the Ed25519 upgrade to `attest.py` — a hard prerequisite for the
+**Slice 2a.** Slice 1 built the protocol and left the caller to construct
+`Participant`s in Python. There was no way to *write a deploy down*, and so no
+way to refuse one before things started being spawned.
+
+A deploy map is an item-56 placement map with one new per-process table:
+
+```toml
+[processes.worker]
+components = ["Ingest"]
+
+[processes.worker.deploy]
+via   = "container"                 # local | container | ssh
+image = "python:3.12-slim"
+trust = "/etc/revl/deploy-trust.d"  # the store the far side verifies the chain against
+```
+
+A placement with no `[deploy]` table anywhere is a perfectly good deploy map: it
+says "every process is my own child", which is what `run_placement` does today.
+That back-compat is the point — a deploy map *is* a placement map, byte-identical
+when nothing crosses a boundary.
+
+`admit_deploy_map(placement, seams=...)` admits the whole map before anything is
+launched. The map is **unauthenticated operator input**: it is not inside the
+attested bundle, nothing signs it, and it is the file that says which machine
+runs the composition. So the admission is all-or-nothing (a map that half-admits
+is a deploy that opens some boundaries and then discovers it cannot open the
+rest) and every rule refuses rather than downgrades:
+
+| rule | refused because |
+| --- | --- |
+| `unknown-via` | an unimplemented `via` is not "assume `local`" — the boundary the operator asked for would not be the boundary they got |
+| `machine-boundary` | `via = ssh` is not opened here at all; see below |
+| `container-seam` | the seam is a Unix socket and a Unix socket does not cross a container bind mount portably (measured non-functional in both directions; `sandbox_runtime` refuses the same shape) |
+| `seam-set-unknown` | a container target must be *proven* seam-free; "not told" is not "none" |
+| `network-provider` | the address it binds is a contract other machines already hold, so moving it across a boundary is the re-tier `revl swap` already refuses |
+| `no-trust-store` | a receiver that cannot verify the chain makes this a copy, not a deploy |
+| `container-without-image` | an image resolved later turns a missing image into a dead child instead of a refusal |
+| `local-with-remote-fields` | the table describes a boundary this target does not cross |
+
+### Boundaries, and what teardown is worth across each
+
+`via` names a launch mechanism; what a deploy can *promise* is a function of the
+**boundary** that mechanism crosses. G7 is LIFO-complete over the **registered**
+entries of an accumulator, and that quantifier is the whole answer: each boundary
+changes which set outlives the failure. `TEARDOWN_PROMISE` records one answer per
+boundary, so two mechanisms crossing the same boundary cannot pick up different
+guarantees.
+
+* **`process`** (`via = local`) — Slice 1. The participant runs its own G7 unwind
+  over the entries it registered and reports clean or names its residue. The
+  conductor never substitutes its own unwind; a participant it cannot reach is
+  `unresolved`, never `rolled-back`.
+
+* **`container`** (`via = container`) — identical to a process boundary *while
+  the container is alive*: the control channel is stdio and the participant
+  unwinds in there. When the container is **destroyed**, the accumulator and
+  every closure-only inverse die with it, so the conductor's verdict is
+  `unresolved` and never `rolled-back`. What the container boundary adds over a
+  machine one is that the WAL sits on a mount the conductor *also* holds, so the
+  target is still **settle-able**: `recovery.py` reads that WAL and applies its
+  existing rule over the recorded entries, reporting each closure-only inverse as
+  residue. Settling is a separate step from the deploy verdict, and the deploy
+  never claims it happened.
+
+* **`machine`** (`via = ssh`) — **nothing**, which is why it is refused. A machine
+  that goes away takes the accumulator, the closures *and* the WAL with it. There
+  is no set on this side for G7 to be complete over and the conductor holds no
+  inverse it could run, so the only honest verdict is `unresolved` naming the
+  target for a human. A deploy that cannot promise teardown must not be the thing
+  that quietly discovers it. The refusal also names the control plane that is
+  absent: no bundle staging, no remote `deploy-admit` runner, no load-measured
+  signed COMMIT receipt for the conductor to compare, and no pinned SSH host key
+  (design R2/R4/R5 — without the pin, impersonating the target costs sitting on
+  the network path rather than owning the machine).
+
+### A participant behind a container boundary
+
+`launch_container_participant(target, spec_path=..., state_dir=...)` returns a
+`ContainerParticipant` — a `ProcessParticipant` and nothing more, which is the
+finding: the coordinated protocol never held an inverse, so it does not care what
+kind of boundary the other end is behind. It reuses item 411's
+`sandbox_runtime.container_flags`, so the boundary gets the same hardening
+(read-only root, `--cap-drop=ALL`, no-new-privileges, `--network=none`, the
+invoking uid) and the same `revl.sandbox=411` label the leaked-container audit
+watches.
+
+`state_dir` is the one read-write mount and holds the participant's world file
+and its WAL. Mounts are **identity-mapped**, so the launcher refuses a spec whose
+`world`/`wal` paths are non-canonical or fall outside that directory: such a path
+names a file that does not exist inside the boundary, and it would not fail until
+the participant tried to write it *mid-COMMIT*, where the only verdict left is
+`unresolved`. Every other way the boundary can fail to open — no runtime, an
+unreachable daemon, an image that does not resolve — is likewise a refusal before
+launch, never a downgrade to running the participant unconfined on the
+conductor's own kernel.
+
+## Not landed yet
+
+* **cross-machine orchestration** — the `machine` boundary above, with all of
+  bundle staging, a remote `deploy-admit` runner, a load-measured signed COMMIT
+  receipt the conductor compares, and a pinned SSH host key
+  (`network-placement.md` still lists orchestration as a non-goal);
+* a **replicated WAL** and a quorum-durable federation decision;
+* a **partition-safe distributed commit coordinator**;
+* a **seam-carrying container target** — blocked on the per-rung seam transport
+  (item 411's next sub-slice); until it lands, a container target must be
+  seam-free;
+* a **`revl deploy` CLI command** — Slice 2a lands the map and its admission as
+  library surface; the command that reads a `.toml` off disk and drives
+  `run_deploy` is the next step, and would be a wrapper over what is here;
+* the **Ed25519 upgrade** to `attest.py` — a hard prerequisite for the
   cross-trust-domain deploy, refused explicitly rather than faked;
-* hardware remote attestation (TPM/TEE) of the loaded image.
+* **hardware remote attestation** (TPM/TEE) of the loaded image.
