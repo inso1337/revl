@@ -18,7 +18,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { Context, FiberState } from 'cordis'
 import { TenantAApp, TenantAStore, TenantBStore } from './generated/tenants.ts'
-import { plug, resetHost } from '../runtime.ts'
+import { fiberStateName, plug, resetHost } from '../runtime.ts'
 
 beforeEach(() => resetHost())
 
@@ -28,7 +28,7 @@ describe('v2 realms — consumer-side reactive resolution', () => {
 
     // Consumer first: nothing provides kv@tenant_a yet, so it must wait.
     const app = await plug(ctx, TenantAApp)
-    expect(app.state, `expected PENDING, got ${FiberState[app.state]}`).toBe(
+    expect(app.state, `expected PENDING, got ${fiberStateName(app.state)}`).toBe(
       FiberState.PENDING,
     )
 
@@ -37,7 +37,7 @@ describe('v2 realms — consumer-side reactive resolution', () => {
     const store = await plug(ctx, TenantAStore)
     await store.await()
     await app.await()
-    expect(app.state, `expected ACTIVE, got ${FiberState[app.state]}`).toBe(
+    expect(app.state, `expected ACTIVE, got ${fiberStateName(app.state)}`).toBe(
       FiberState.ACTIVE,
     )
     expect(app.ctx.kv.get('who')).toBe('alice')
@@ -59,7 +59,7 @@ describe('v2 realms — consumer-side reactive resolution', () => {
     await otherRealm.await()
     expect(
       app.state,
-      `consumer wrongly resolved across realms (${FiberState[app.state]})`,
+      `consumer wrongly resolved across realms (${fiberStateName(app.state)})`,
     ).toBe(FiberState.PENDING)
 
     // Now the correct-realm provider arrives -> it finally activates.
