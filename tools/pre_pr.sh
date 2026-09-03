@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # The cheap half of CI, run before you open a PR.
 #
-# These three checks take seconds and are the ones that most often redden the
-# `lint` job. Running the full suite locally is NOT the point and is explicitly
-# not done here: that is CI's job now (docs/process.md). This exists so a
+# These checks take seconds and are the ones that most often redden the `lint`
+# and `frontend` jobs. Running the full suite locally is NOT the point and is
+# explicitly not done here: that is CI's job now (docs/process.md). This exists so a
 # fifteen-second mistake does not cost a CI round-trip.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1

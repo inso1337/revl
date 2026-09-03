@@ -12,10 +12,17 @@ What makes `fmt` more than a whitespace tool is its admissibility rule:
 > **refuses** that file (nonzero exit, names the file) rather than emit a
 > formatting that changed meaning.
 
-The same gate is retrofitted onto `revl fmt --migrate` (the §9 syntax
-migration): a rewrite ships iff the resulting IR is unchanged — or, for a 1.x
-input the current compiler cannot even parse, iff the rewritten output is newly
-admissible. It is the standing rule for every future syntax migration.
+`revl fmt --migrate` (the §9 syntax migration) runs a DIFFERENT gate, and the
+difference is the point. The canonical formatter must leave the IR
+byte-identical. Migration is a deliberate semantic upgrade: since 2.0 makes a
+bare `$` a literal (item 203), rewriting `"$name"` to `` `${name}` ``
+legitimately changes the IR, so an IR delta is admitted with the reason
+``migration rewrite (IR intentionally changed: legacy `$` string → template)``
+(`formatter.ir_equivalent`, called with `token_preserving=False`). What still
+bites migration is
+compilation: a rewrite whose output no longer compiles is refused. The migrate
+scanner only ever rewrites `$`-bearing strings and copies everything else
+through verbatim, which is what makes an IR delta safe to admit here.
 
 ## Usage
 
@@ -67,7 +74,7 @@ guessing:
 | Original | Formatted | Verdict |
 |----------|-----------|---------|
 | compiles | compiles, same IR | **admitted** — IR byte-identical (the headline proof) |
-| compiles | compiles, different IR | **refused** — IR changed |
+| compiles | compiles, different IR | **refused** for a canonical format (the IR changed). **Admitted** under `--migrate`, whose whole job is that rewrite |
 | compiles | fails to compile | **refused** — rewrite broke compilation |
 | fails (imports / rejection example) | — | formatter falls back to proving the **token stream** is byte-identical (the invariant a whitespace-only rewrite actually guarantees); refused if tokens differ |
 | fails (1.x legacy `$`) | compiles | `--migrate` admits it as **newly admissible** |

@@ -79,7 +79,12 @@ export class SeamDeadlineError extends Error {
 // reply line, exit. Run as `node -e`, fed the target/request/deadline via the
 // environment. A wedged provider trips the in-child deadline timer and the child
 // prints a `{ seamDeadline: true }` reply rather than hanging; a TCP refusal
-// (provider still coming up) is retried, so start order stays irrelevant.
+// (provider still coming up) is retried, so start order stays irrelevant for an
+// acyclic process graph. A cycle over PROCESSES (each side requiring a key the
+// other provides) would exhaust the retries on both sides instead; what makes
+// that unreachable is a plan-time gate, not this loop —
+// `placement.process_cycle_refusal` proves the process graph acyclic before any
+// child is spawned (item 171). Background: design/438-petri-reachability.md §5.2.
 const CLIENT_SRC = `
 const net = require('node:net')
 const tls = require('node:tls')
