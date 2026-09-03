@@ -86,11 +86,17 @@ def test_surface_pins_only_external_requirements():
     src = CONSUMER_A + """
 service Local { emission fn tick() }
 component Helper requires l: Local provides l2: Local {
+  // an honest acquisition bracket; the method-time effect works against it.
+  // Spelled `effect Map.new() undo Map.new()` before — an inverse that
+  // ACQUIRES a second host Map rather than releasing the first, which a
+  // teardown slot now refuses. Nothing this test asserts (the pinned external
+  // requirement surface) depends on the shape of Helper's effects.
+  let store = effect Map.new() undo store.drop()
   emit l.tick()
   provide l2 {
     fn tick() {
-      effect Map.new()
-      undo   Map.new()
+      effect store.insert("k", "v")
+      undo   store.remove("k")
     }
   }
 }

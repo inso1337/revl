@@ -893,7 +893,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "armed, every boundary-crossing seam checks the latch, "
                           "so `revl estop --latch FILE` from another terminal "
                           "halts this run immediately — no unwind, an honest "
-                          "in-flight inventory instead. Equivalent to the "
+                          "in-flight inventory instead. With --placement the "
+                          "conductor watches it too and halts every process, "
+                          "naming the ones on tiers that have no E-Stop seam "
+                          "and were only killed. Equivalent to the "
                           "REVL_ESTOP_LATCH environment variable")
     run.add_argument("--wal", default=None, metavar="FILE",
                      help="persist the effect accumulator as a durable write-ahead "
