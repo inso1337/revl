@@ -169,7 +169,7 @@ was corrected by hand and had drifted back within a day.
 | schedule-testing.md | needs-work | 0 |  |
 | seam-deadlines.md | needs-work | 15 |  |
 | selfhost-compile.md | stale-fixed | 0 |  |
-| selfhost-findings.md | live-owned (not audited) | 251 |  |
+| selfhost-findings.md | live-owned (not audited) | 256 |  |
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 17 |  |
