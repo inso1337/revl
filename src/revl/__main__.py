@@ -1009,7 +1009,8 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
             info = row.remote
             print(f"  {'':<24}   REMOTE peer {info['peer']}  "
                   f"reach `{info['capability']}`  "
-                  f"on_failure {info['onFailure']}")
+                  f"on_failure {info['onFailure']}  "
+                  f"redirect {info.get('redirect', 'refuse')}")
             print(f"  {'':<24}   synthesized from service "
                   f"`{info['service']}` ({info['serviceSource']}); "
                   "NO inverse — a remote effect survives unwind")
