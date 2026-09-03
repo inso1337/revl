@@ -20,10 +20,14 @@ WHAT IT CHECKS. Three stages, each with its own oracle:
 
   reference  The reference frontend must never raise anything but `RevlError`
              on any byte string. A refusal is the correct answer; a traceback
-             is a bug. `RecursionError` is counted separately and reported, not
-             failed: the reference parser is recursive-descent and a deeply
-             nested input hitting Python's own limit is a resource bound, not a
-             logic defect.
+             is a bug — `RecursionError` INCLUDED, since issue #310. That arm
+             used to be tolerated as "a resource bound", on the reasoning that
+             a recursive-descent parser meeting python's own limit is not a
+             logic defect. It was: the limit arrived at THIRTY-EIGHT nested
+             parentheses, which is ordinary generated code, and it arrived as a
+             traceback out of `revl.gate`. The frontend now states its nesting
+             bound (`parser.NESTING_LIMIT`) and refuses past it, so a
+             `RecursionError` here is a finding like any other.
 
   lexer      `selfhost/lexer.rvl` vs `src/revl/lexer.py`, token for token, in
              the canonical shape tests/test_selfhost_lexer.py uses. Either both
@@ -275,8 +279,6 @@ class ReferenceStage:
             compile_source(src, "fuzz.rvl")
         except RevlError:
             return None
-        except RecursionError:
-            return Signature("reference", "recursion", ""), "python recursion limit"
         except Exception as exc:  # the finding: an unhandled fault
             return (Signature("reference", type(exc).__name__, _crash_site()),
                     str(exc)[:200])

@@ -42,6 +42,7 @@ CLI: `python3 emit.py <ir.json> [> out.rs]`.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 
@@ -115,6 +116,22 @@ def _mname(name: str) -> str:
 
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
+
+
+def _finite_float(value):
+    """The literal's value, refused when a `Float` is not finite (issue #312).
+
+    A non-finite `Float` has no literal spelling in revl and no uniform one
+    across the tiers — the host repr renders `inf`, which is an UNBOUND NAME
+    in this target's source, not a number. The frontend refuses such a literal
+    at the checker (`typecheck._reject_float_literal_range`), so this is the
+    backend's own belt: an IR handed straight to the emitter still cannot make
+    it print a name nothing binds.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EmitError(
+            f"non-finite Float literal {value!r} has no representation in this tier")
+    return value
 
 
 # Dispatcher conformance (roadmap item 76a). This tier converged to ONE
@@ -1149,7 +1166,7 @@ def _rust_v3_lit(node: dict) -> str:
     if isinstance(value, int):
         return f"{value}i64"
     if isinstance(value, float):
-        return f"{value}f64"
+        return f"{_finite_float(value)}f64"
     raise EmitError(f"unsupported literal node: {node!r}")
 
 
