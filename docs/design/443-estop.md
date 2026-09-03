@@ -5,7 +5,9 @@ Roadmap item 443. Source: `formal/RevL/Semantics.lean` (`Verdict.halted`,
 E-Stop column and the halt cut), `backends/python/runtime.py` (the latch, the
 crossing seams, the stranding), `src/revl/mcp/session.py` (`Session.estop`),
 `src/revl/cli/change.py` (`revl estop`), `src/revl/mcp/operator.py` (the
-`estop` authority).
+`estop` authority), `src/revl/estop.py` (the shared latch vocabulary),
+`src/revl/placement.py` (the conductor halt and its report),
+`src/revl/_process_runner.py` (the child watcher).
 
 ## The gap
 
@@ -227,6 +229,7 @@ The paths back, in order:
 | CLI | `revl estop --report` | reads the inventory back, touches nothing |
 | CLI | `revl estop --clear` | removes the latch; NOT a resume |
 | CLI | `revl run --estop-latch FILE` | arms the run to watch a latch |
+| CLI | `revl run --placement P --estop-latch FILE` | arms the CONDUCTOR and every py child |
 | MCP | `revl_estop` | gated on the `estop` operator verb |
 | MCP | `revl_estop_report` | read-only |
 | runtime | `runtime.estop(reason, operator=…)` | requires an operator token |
@@ -288,10 +291,110 @@ boundary crossing:
 crossing, a deferred flush, and a teardown inverse — so the halt can name the
 one that was out.
 
+## The conductor (`revl run --placement`)
+
+A composition split across processes had no operator halt at all: every stop
+`run_placement` had was `_stop_all`, which asks each child to unwind and waits
+on its own `DOWN` line — the child's statement that its LIFO walk covered every
+registered entry (G7) and its no-residue proof printed (R4). That is the
+graceful path, and it is the one an operator emergency cannot use.
+
+`--estop-latch FILE` arms the conductor. A watcher thread reads the latch, and
+when it appears the conductor does four things, in this order:
+
+1. **Says it**, on the trace, before anything that can take time. The operator
+   sees the halt at the instant it lands rather than after the inventory.
+2. **Stops every child**, in two populations — see below. It asks no child to
+   unwind, waits for no `DOWN`, and does not call `_stop_all`.
+3. **Reports**, on stderr, naming every component left un-torn-down and every
+   outstanding obligation, including the ones it cannot enumerate.
+4. **Unblocks the conductor** (`_thread.interrupt_main`), because a halt that
+   needed the main loop's cooperation to be noticed would not be one. The run
+   exits non-zero: an E-Stop is never clean.
+
+### The two populations, and why the report has to distinguish them
+
+* A child on a tier that **honors the latch** (today: `py`) is already
+  refusing new crossings at its own seams by the time the conductor acts —
+  the conductor hands it the latch path in its environment AND in its process
+  spec, because a sandboxed child (item 411) need not inherit the conductor's
+  environment and an emergency stop a confined process cannot see is not one.
+  Its runner watches the latch on a timer (`runtime.estop_from_latch`), since
+  `_estop_check` engages lazily at the next crossing and an IDLE process
+  crosses nothing — it would notice the emergency only when work next arrived.
+  On the button it prints `[<name>] HALTED <inventory>` and calls `os._exit`:
+  no teardown, no inverse, no residue proof. The conductor merges that
+  inventory into its report by name.
+* A child on **any other tier** has no E-Stop seam, so the only halt that
+  exists for it is a SIGKILL, and the conductor sends one immediately. It may
+  have dispatched a crossing microseconds before it died and nothing recorded
+  that, so its residue is **UNKNOWN**. The report says exactly that, per
+  component, rather than folding it into a group line — a halt that hid which
+  processes were merely killed would be reporting a stop it did not perform.
+
+`REVL_ESTOP_HALT_WINDOW` (default 2s) bounds how long a latch-honoring child
+gets to name its inventory before it is killed anyway. It is not a teardown
+grace and must never become one: when it starts, the child's seams are already
+refusing, so it buys the INVENTORY and nothing else. A child that misses it is
+killed and reported UNKNOWN, which is strictly better than a halt that waits.
+
+### The report
+
+```
+E-STOP ENGAGED — the placement is HALTED, not torn down
+  latch     /run/session.wal.estop
+  reason    runaway loop
+  operator  ops@example
+
+  Nothing was unwound. ... G7's LIFO completeness is VACUOUS under the
+  `halted` verdict (nothing replays) and R4's no-residue proof does NOT hold.
+
+  components left UN-TORN-DOWN (2):
+    HotWorker  process provider  tier py
+               HALTED at its own crossing seams (no new crossing dispatched)
+               and died where it stood; 1 entry STRANDED, 1 crossing AMBIGUOUS
+    Edge       process edge  tier node
+               SIGKILLed at once: the node tier has NO E-Stop seam, so it kept
+               dispatching crossings until it died — residue UNKNOWN
+
+  outstanding residue (3 lines, 1 of them UNKNOWN):
+    provider/HotWorker  estop-ambiguous  write   outcome unknown  [seq 7]
+    provider/HotWorker  estop-stranded   remove  outcome not-attempted  [seq 4]
+    edge  UNKNOWN  the node tier named no inventory; whatever it held is still
+                   held and still owed
+```
+
+The UNKNOWN lines are the point. They are counted in the residue total, so an
+operator reads "3 lines, 1 of them UNKNOWN" and knows the inventory is
+incomplete BY EXACTLY ONE PROCESS rather than being told a comfortable number.
+
+### The report is about the RUNNING composition, not the placement file
+
+The roster the report enumerates is the set of children the halt actually acted
+on, with each one's components read off the live `placed` map. It is not the
+`[processes]` table, and after a `revl swap` the two disagree in both
+directions: the file does not name the synthesized successor
+(`<component>__t<n>`) the halt just killed, and it still names the predecessor
+that unwound with a no-residue proof on the cutover, before the button was ever
+pressed. A report driven off the file therefore omits the one process holding
+residue and attributes residue to one holding none — both of them the exact
+failure this verb exists to prevent, since the reporting is the deliverable and
+the stop is not.
+
+The successor is haltable in the first place because `do_swap` carries
+`estopLatch` onto its spec, under the same rule and for the same reason as the
+correlation guard and the host-module pins (docs/swap.md). Gated on the target
+tier, as the boot path gates it: a swap onto a seamless tier does not lose the
+halt, it just moves the successor into the SIGKILL population the report names
+UNKNOWN.
+
 ## Per-tier status
 
-Landed on the **py reference tier only**. The five other tiers keep their
-existing cooperative teardown and are unaffected; a tier that has not wired
-the latch simply has no E-Stop, which is honest and visible rather than a
-silently degraded one. The formal layer is tier-independent and already
-carries the verdict, so a later tier's loop is built against the same table.
+The halt itself is landed on the **py reference tier only**, and the conductor
+above is what makes that honest across a mixed placement rather than silently
+partial. The five other tiers keep their existing cooperative teardown and have
+no E-Stop seam: under a placement halt they are killed and reported UNKNOWN by
+name. The formal layer is tier-independent and already carries the verdict, so
+a later tier's loop is built against the same table, and wiring one is a matter
+of adding it to `revl.estop.TIERS_WITH_ESTOP` once its runtime reads the latch
+and prints the `HALTED` inventory line.
