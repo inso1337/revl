@@ -149,6 +149,15 @@ CORPUS = [
     # emitter with no site for the stamp emits a schema the runtime cannot redact
     # from.
     "secrets_nested.rvl",
+    # item 243 / item 429: the `witnessed` extern DECLARATION, the one extern
+    # class the corpus had no instance of. Both sides gate the built-in
+    # `Ok`/`Err` classes on it (`_uses_builtin_result` / `uses_builtin_result`),
+    # a clause no other document reaches, so until this landed the construct
+    # `class=witnessed` was blind and the reference's `return True` under it
+    # never executed. The witnessed EFFECT STEP is a different thing and stays
+    # out: the port has none, and closing that is a port, not a corpus case —
+    # see the header of the fixture and item 429 in the roadmap.
+    "witnessed.rvl",
 ]
 
 

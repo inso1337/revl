@@ -226,7 +226,6 @@
       "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
         "body=<true>",
         "class=emission",
-        "class=witnessed",
         "commutative=<true>",
         "config=<true>",
         "deferred=<true>",
