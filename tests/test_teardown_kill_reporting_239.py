@@ -206,7 +206,7 @@ def test_a_child_killed_mid_teardown_is_reported_and_the_run_fails(
     assert "UNKNOWN" in err
     assert "REVL_TEARDOWN_GRACE" in err
     # the provider unwound cleanly, so it is not accused of stranding anything
-    assert "provider" not in err.split("SIGKILLed before saying DOWN:")[1].split("\n")[0]
+    assert "provider" not in err.split("exited before saying DOWN:")[1].split("\n")[0]
 
 
 def test_a_clean_teardown_is_still_rc_zero_and_says_nothing(
@@ -302,8 +302,9 @@ def test_the_report_reuses_the_estop_vocabulary():
     assert "STRANDED" in text and "UNKNOWN" in text
     assert "G7" in text and "R4" in text
     assert "revl recover" in text
-    assert "1 process had to be" in text
-    assert "2 processes had to be" in _placement._stranded_teardown_report(["a", "b"])
+    assert "1 process exited before saying DOWN" in text
+    assert "2 processes exited before saying DOWN" in _placement._stranded_teardown_report(
+        ["a", "b"])
 
 
 @pytest.mark.parametrize("names", [["a"], ["a", "b"]])

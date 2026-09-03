@@ -197,6 +197,55 @@ def test_go_emits_the_funnel_and_both_markings(secretful_ir):
     assert "revlMarkSecret(u)" not in code
 
 
+def test_go_registers_a_secret_config_field_at_load():
+    """The THIRD feeder of the funnel: an operator-supplied credential declared
+    on the component rather than on an extern return or a parameter.
+
+    It arrives once, at `Load<Comp>`, the single door both the lifecycle path
+    and the placement runner's `RevlLoad` go through — so the registration sits
+    there, not at each `config.<field>` read. The py tier registers its config
+    values in `ConfigSchema._park` and the ts tier in its config binder; go read
+    the marking only to switch the funnel ON, so the same declaration used to
+    mean different things on different tiers."""
+    from revl import compile_source  # noqa: PLC0415
+
+    src = (
+        'extern pure fn forget() -> Unit = @go { return }\n'
+        'service Vault { fn lookup(name: Str) -> Str }\n'
+        'component Keeper provides vault: Vault {\n'
+        '  config { url: Str = "pg://x", api_key: Secret[Str] = "k" }\n'
+        '  let pool = effect Pool.open(config.url, 2) undo pool.close()\n'
+        '  provide vault {\n'
+        '    fn lookup(name) {\n'
+        '      effect pool.execute(config.api_key)\n'
+        '      undo   forget()\n'
+        '      return "ok"\n'
+        '    }\n  }\n}\n'
+    )
+    code = _backend("go").emit_placement(compile_source(src))
+    assert "func LoadKeeper(target *stc.Context, cfg KeeperConfig) *stc.Fiber {" in code
+    assert "revlMarkSecret(cfg.ApiKey)" in code
+    # the false-positive control: an ordinary field is not remembered, or the
+    # funnel would erase a DSN out of every trace line for no gain
+    assert "cfg.Url" not in code.split("revlMarkSecret(cfg.ApiKey)")[1].split("\n")[0]
+    assert "revlMarkSecret(cfg.Url)" not in code
+
+
+def test_go_config_registration_is_absent_without_the_qualifier():
+    """A component whose config declares no `Secret[T]` emits the `Load` it
+    always did."""
+    from revl import compile_source  # noqa: PLC0415
+
+    src = (
+        'service Vault { fn lookup(name: Str) -> Str }\n'
+        'component Keeper provides vault: Vault {\n'
+        '  config { url: Str = "pg://x" }\n'
+        '  provide vault { fn lookup(name) = "ok" }\n}\n'
+    )
+    code = _backend("go").emit_placement(compile_source(src))
+    assert "revlMarkSecret" not in code
+
+
 def test_go_secretless_document_is_untouched(secretless_ir):
     code = _backend("go").emit_placement(secretless_ir)
     assert "revlRedactText" not in code
