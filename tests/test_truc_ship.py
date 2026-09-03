@@ -145,19 +145,25 @@ def test_ship_official_with_evidence_publishes_a_discoverable_row(tmp_path):
     assert row["provides"] == {"greet": "Greet"}
     assert "requires" in row and "capabilities" in row and "emissions" in row
 
-    # the structural fields remain byte-reproducible by build_index — ship only
-    # ADDS description/tags (which the compiler cannot derive from source).
+    # the WHOLE row is byte-reproducible by build_index, description and tags
+    # included: ship records them in `components/greeter/meta.json` beside the
+    # source instead of patching them into the generated index, so the registry
+    # a publish leaves behind passes `verify` rather than reading stale forever.
+    assert json.loads((entry / "meta.json").read_text()) == {
+        "description": row["description"], "tags": row["tags"]}
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
     fresh = subprocess.run(
         [str(CORDIS_PY), "-c",
-         "import json,sys;from revl.registry import build_index;"
-         "print(json.dumps(build_index(sys.argv[1], write=False)"
-         "['components']['greeter']))", str(reg)],
+         "import json,sys;from revl.registry import build_index,verify;"
+         "print(json.dumps({'row': build_index(sys.argv[1], write=False)"
+         "['components']['greeter'], 'problems': verify(sys.argv[1])}))",
+         str(reg)],
         env=env, capture_output=True, text=True, timeout=300)
     assert fresh.returncode == 0, fresh.stderr
-    structural = {k: v for k, v in row.items() if k not in ("description", "tags")}
-    assert structural == json.loads(fresh.stdout)
+    regenerated = json.loads(fresh.stdout)
+    assert row == regenerated["row"]
+    assert regenerated["problems"] == []
 
 
 # ---------------------------------------------------------------- refusal (a): metadata
