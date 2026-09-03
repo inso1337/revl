@@ -122,13 +122,25 @@ derived from the ones it can see would lock them out.
 
 It is *not* the item-118 correlation guard, and the conductor does not pretend it
 is. That guard authenticates a caller by a per-boot secret only this conductor's
-own children hold, which a cross-composition peer can never have; it also refuses
-replays. The allowlist does neither. So each seam reports the level it actually
-achieved — `sealed`, `peer-pinned`, or `UNVERIFIED` when nothing closes the set
-(see docs/deploy.md §2b/§2c):
+own children hold, which a cross-composition peer can never have. The allowlist
+does not do that, and does not claim to.
+
+**Replays are refused, with no shared secret.** A network provider also runs
+`deploy.TransportReplayGuard` (installed by the conductor on every network seam,
+allowlist or not). It scopes duplicate detection by the identity the **mTLS
+handshake proved** — read off the peer certificate, never off the request body —
+so a captured request re-delivered to the provider is refused and never
+dispatched. A cross-composition consumer needs no key it cannot hold: it stamps
+an unsealed envelope from its own certificate and is deduplicated the same way. A
+crossing that declares no `idempotency_key` is dispatched as before, and the
+ledger is bounded (docs/deploy.md §2b-ii has the window and what eviction costs).
+
+So each seam reports the level it actually achieved — `sealed`, `peer-bound`,
+`peer-pinned`, or `UNVERIFIED` when nothing closes the set (see docs/deploy.md
+§2b/§2c):
 
 ```
-  seam admission provider (tcp+mtls): peer-pinned — ...  peers: consumer, partner-edge
+  seam admission provider (tcp+mtls): peer-bound — ...  peers: consumer, partner-edge
 ```
 
 **Deadlines and withdrawal, unchanged.** The deadline machinery bounds the reply

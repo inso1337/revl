@@ -172,8 +172,14 @@ inside the process specs of its own children. A network provider may also be
 dialled by an item-151 cross-composition consumer, which runs under a *different*
 conductor and can never hold that secret; distributing it is Slice 2's replicated
 control plane. Demanding a sealed envelope there does not harden the seam, it
-refuses the legitimate caller. The freshness gate needs an envelope to dedup, so
-it goes with the secret.
+refuses the legitimate caller.
+
+**The freshness gate is a different question, and it does not go with the
+secret.** Dedup needs a key naming one crossing and an identity to scope that key
+by. The HMAC exists to bind a *claimed* identity to a real caller — load-bearing
+on UDS precisely because the transport binds nothing there. On TCP+mTLS the
+handshake has already bound the identity, per session, with a CA-signed key, so
+the scope is available with no shared secret at all.
 
 What mTLS *does* prove — per session, with a CA-signed key — is **which** identity
 is calling. What was missing is a closed set to check that against:
@@ -193,6 +199,47 @@ a request is read; a refused peer gets one `{"peer_refused": ...}` line and the
 connection closes. `correlation` and `peers` compose and neither implies the
 other.
 
+### 2b-ii. Replay protection with no shared secret
+
+`deploy.TransportReplayGuard` is the freshness gate for a network seam. It keys
+dedup on `(transport identity, composition_id, generation, idempotency_key)`. The
+first member is read off the **peer certificate**, never off the request body: a
+replayer controls every byte it sends and controls nothing about the mTLS session
+it sends them in.
+
+```python
+server = await bridge.serve(ctx, exports, endpoint,
+                            peers=deploy.PeerAllowlist(["edge", "partner"]),
+                            replay=deploy.TransportReplayGuard())
+```
+
+Unlike `peers` it runs **per request**, after the connection was admitted. Three
+gates:
+
+1. **a proven identity** — no transport identity, no scope to key by, so the
+   request is refused (`unauthenticated-peer`) rather than keyed on the payload;
+2. **agreement** — an envelope naming a `peer_identity` must name the one the
+   handshake proved, so replaying a captured envelope under another certificate
+   is `peer-identity-mismatch`;
+3. **freshness** — a repeat of a seen scope is `duplicate-envelope` and is never
+   dispatched.
+
+A request with no envelope, or one declaring no `idempotency_key`, is dispatched
+and **not** deduplicated: nothing declares it re-deliverable (item 309), and
+refusing it would refuse exactly the cross-composition caller this plane exists
+to keep serving. `placement.py` installs the guard on every network seam and
+gives each network consumer an **unsealed** envelope (identity + composition, no
+secret), so a consumer under another conductor stamps the same shape from its own
+certificate and is deduplicated the same way.
+
+**The ledger is bounded**, because a provider answers a peer for weeks: at most
+1024 keyed crossings remembered per identity and 64 identities at once, LRU on
+both dimensions (`deploy.BoundedReplayLedger`). Past that the oldest scope is
+forgotten and a replay of *that* crossing would be admitted again; the ledger
+counts every eviction. Refusing everything once full would be a self-service
+denial of service, not fail-closed. The bound is per identity so a chatty peer
+cannot age out a quiet one's history.
+
 ### 2c. The level a seam achieved, said out loud
 
 Because the two planes are not the same property, they are not reported under the
@@ -202,6 +249,7 @@ same name. `deploy.SeamAdmission` records what each seam actually got, in
 | level | what holds |
 | --- | --- |
 | `sealed` | caller authenticated by its own per-process secret; replays refused |
+| `peer-bound` | mTLS identity checked against a declared allowlist, and a keyed crossing replay-checked against that proven identity over a bounded window |
 | `peer-pinned` | mTLS identity checked against a declared allowlist; **not** replay-checked |
 | `unverified` | **cannot verify who may call** |
 
@@ -209,7 +257,7 @@ The conductor prints one line per cross-process seam, plus a count of the
 unverified ones:
 
 ```
-  seam admission provider (tcp+mtls): peer-pinned — mTLS peer identity checked ...  peers: consumer, partner
+  seam admission provider (tcp+mtls): peer-bound — mTLS peer identity checked ... and replays refused ...  peers: consumer, partner
   seam admission cache (uds): UNVERIFIED — a consumer runs on a tier whose bridge cannot seal ...
   seam admission: 1 of 2 seam(s) UNVERIFIED — ... a seam is only as closed as the peer set it can name
 ```
