@@ -165,6 +165,7 @@
         "case=Err",
         "case=Ok",
         "else=<true>",
+        "entries=<true>",
         "idempotent=<true>",
         "intercept=<true>",
         "isolate=<true>",
@@ -180,6 +181,7 @@
         "kind=subscribe",
         "lifecycle=<true>",
         "method=codepoint_at",
+        "name=<true>",
         "pattern=Err",
         "pattern=Ok",
         "pattern=record",
@@ -364,6 +366,10 @@
   },
   "ts": {
     "blind": {
+      "NOT TRIAGED - both sides implement this and no corpus document reaches it. Recorded by `--write`; say WHY, or add the corpus case.": [
+        "op=!==",
+        "op=>="
+      ],
       "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the Str-receiver specialisation (`recv=Str`) and Int/Float widening on a mixed-operand binary.": [
         "recv=Str",
         "widen=Float",
@@ -401,8 +407,6 @@
         "kind=variant",
         "lifecycle=<true>",
         "mode=every",
-        "op=!==",
-        "op=>=",
         "pattern=record",
         "returns=<true>",
         "root=stdlib",
@@ -414,7 +418,8 @@
         "step=load",
         "step=timer",
         "step=unload",
-        "strategy=<true>"
+        "strategy=<true>",
+        "type=<true>"
       ]
     }
   },
