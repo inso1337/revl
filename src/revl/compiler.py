@@ -443,41 +443,48 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     merged = Program(filename=paths[0] if paths else "<none>")
     seen_services: dict[str, str] = {}
     seen_components: dict[str, str] = {}
-    emitted_ids: set[int] = set()
+    # A loaded module can appear more than once in the root list (or be reached
+    # both as a root and through an import), so declarations need deduplication.
+    # Do not use id(decl) here: object addresses are recycled after collection and
+    # can make an unrelated declaration disappear from the merged program.
+    emitted_keys: set[tuple[str, str, int]] = set()
+
+    def declaration_key(module: _LoadedModule, kind: str, index: int) -> tuple[str, str, int]:
+        return (module.path, kind, index)
 
     # Components and services from the root modules are the composition.
     # Components are never imported; services are pub by default.
     for module in root_modules:
-        for svc in module.program.services:
+        for index, svc in enumerate(module.program.services):
             if svc.name in seen_services:
                 raise RevlError(module.path, svc.line,
                                 f"duplicate service `{svc.name}` (also declared in {seen_services[svc.name]})")
             seen_services[svc.name] = module.path
             merged.services.append(svc)
-            emitted_ids.add(id(svc))
-        for comp in module.program.components:
+            emitted_keys.add(declaration_key(module, "service", index))
+        for index, comp in enumerate(module.program.components):
             if comp.name in seen_components:
                 raise RevlError(module.path, comp.line,
                                 f"duplicate component `{comp.name}` (also declared in {seen_components[comp.name]})")
             seen_components[comp.name] = module.path
             merged.components.append(comp)
-            emitted_ids.add(id(comp))
+            emitted_keys.add(declaration_key(module, "component", index))
         # fault tests name a component, and components are never imported, so
         # they ride with the composition's own modules rather than with the
         # pure-declaration closure that carries plain `test` blocks
-        for fault in module.program.fault_tests:
-            if id(fault) not in emitted_ids:
+        for index, fault in enumerate(module.program.fault_tests):
+            if declaration_key(module, "fault", index) not in emitted_keys:
                 merged.fault_tests.append(fault)
-                emitted_ids.add(id(fault))
+                emitted_keys.add(declaration_key(module, "fault", index))
         # item 256: a bound secret is a composition-scoped declaration, like a
         # component (never imported: it binds against a capability the roots
         # serve). Carry it into the merged program so `_lower_secrets` cross-
         # indexes it against the merged externs on the multi-file / CLI path,
         # exactly as it already does on the single-source `compile_source` path.
-        for sec in getattr(module.program, "secrets", None) or []:
-            if id(sec) not in emitted_ids:
+        for index, sec in enumerate(getattr(module.program, "secrets", None) or []):
+            if declaration_key(module, "secret", index) not in emitted_keys:
                 merged.secrets.append(sec)
-                emitted_ids.add(id(sec))
+                emitted_keys.add(declaration_key(module, "secret", index))
 
     # Directly imported services enter the composition service table. Alias
     # imports do not: a service is referred to by its interface name, not a
@@ -488,13 +495,17 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if use.names is not None:
                 for name in use.names:
                     svc = used.services.get(name)
-                    if svc is not None and id(svc) not in emitted_ids:
+                    if svc is None:
+                        continue
+                    service_index = used.program.services.index(svc)
+                    key = declaration_key(used, "service", service_index)
+                    if key not in emitted_keys:
                         if svc.name in seen_services:
                             raise RevlError(module.path, use.line,
                                             f"duplicate service `{svc.name}` (also declared in {seen_services[svc.name]})")
                         seen_services[svc.name] = used.path
                         merged.services.append(svc)
-                        emitted_ids.add(id(svc))
+                        emitted_keys.add(key)
 
     # Pure declarations emitted into the IR: every root module plus the
     # transitive closure of modules whose pure declarations are imported.
@@ -506,7 +517,10 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     queue = list(root_modules)
     while queue:
         module = queue.pop(0)
-        for dep_id in module.pure_dependencies:
+        # Sets of module ids are useful for membership, but their iteration order
+        # depends on allocation and changes across otherwise identical compiles.
+        for dep_id in sorted(module.pure_dependencies,
+                             key=lambda value: by_id[value].path):
             if dep_id not in included_ids:
                 included.append(by_id[dep_id])
                 included_ids.add(dep_id)
@@ -525,28 +539,28 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     _apply_module_privacy(included)
 
     for module in included:
-        for decl in module.program.type_decls:
-            if id(decl) not in emitted_ids:
+        for index, decl in enumerate(module.program.type_decls):
+            if declaration_key(module, "type", index) not in emitted_keys:
                 merged.type_decls.append(decl)
-                emitted_ids.add(id(decl))
-        for decl in module.program.fn_decls:
-            if id(decl) not in emitted_ids:
+                emitted_keys.add(declaration_key(module, "type", index))
+        for index, decl in enumerate(module.program.fn_decls):
+            if declaration_key(module, "fn", index) not in emitted_keys:
                 merged.fn_decls.append(decl)
-                emitted_ids.add(id(decl))
-        for decl in module.program.externs:
-            if id(decl) not in emitted_ids:
+                emitted_keys.add(declaration_key(module, "fn", index))
+        for index, decl in enumerate(module.program.externs):
+            if declaration_key(module, "extern", index) not in emitted_keys:
                 merged.externs.append(decl)
-                emitted_ids.add(id(decl))
-        for decl in module.program.tests:
-            if id(decl) not in emitted_ids:
+                emitted_keys.add(declaration_key(module, "extern", index))
+        for index, decl in enumerate(module.program.tests):
+            if declaration_key(module, "test", index) not in emitted_keys:
                 merged.tests.append(decl)
-                emitted_ids.add(id(decl))
+                emitted_keys.add(declaration_key(module, "test", index))
         # prop tests are pure-declaration tests like plain `test` blocks: they
         # ride with the same closure (roadmap item 37)
-        for decl in module.program.prop_tests:
-            if id(decl) not in emitted_ids:
+        for index, decl in enumerate(module.program.prop_tests):
+            if declaration_key(module, "prop_test", index) not in emitted_keys:
                 merged.prop_tests.append(decl)
-                emitted_ids.add(id(decl))
+                emitted_keys.add(declaration_key(module, "prop_test", index))
 
     # Build checker scopes for every emitted function so a module-private
     # declaration from another module is not accidentally callable.

@@ -1783,7 +1783,7 @@ class _ComponentEmitter:
                 else:
                     raise EmitError(f"{mwhere}: unknown step {mkind!r}")
 
-            header = f'(func (export "{self._provide_prefix(key)}.{mname}") {" ".join(decl)}'.rstrip()
+            header = f'(func (export "{_wat_string(self._provide_prefix(key) + "." + mname)}") {" ".join(decl)}'.rstrip()
             # wasm requires local declarations before the body — and each one
             # now has to be declared at the width of the value it holds, which
             # is only known once the body has been lowered (`_declare_local`)
@@ -1905,7 +1905,7 @@ class _ComponentEmitter:
             params = " ".join(f"(param {w})" for w in param_wtys)
             result = f" (result {result_wty})" if result_wty else ""
             sig = f" {params}" if params else ""
-            lines.append(f'  (import "{self._import_module(key)}" "{op}" (func $req_{key}_{op}{sig}{result}))')
+            lines.append(f'  (import "{_wat_string(self._import_module(key))}" "{_wat_string(op)}" (func $req_{key}_{op}{sig}{result}))')
         # item 173: the routed-require ABI. Per routed key called: a `live`
         # probe (`route:<key>.live(index) -> i32`, 1 iff that one realm has an
         # ACTIVE provider — the strict, no-parent-fallback liveness the emitted
