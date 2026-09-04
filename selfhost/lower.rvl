@@ -421,7 +421,7 @@ fn type_ctors(ts: List[Token]) -> List[Str] {
         if (depth == 0 && (t.kind == "=" || t.kind == "|")) {
           ctor = true
         } else {
-          if (ctor && t.kind == "ident" && is_upper_head(t.text)) {
+          if (ctor && t.kind == "ident" && is_upper_name(t.text)) {
             out = union_into(out, [t.text])
           }
           ctor = false
@@ -2188,10 +2188,14 @@ fn acq_root_of(s: Stmt) -> AcqRoot {
   }
 }
 
-// A head whose first character is upper-cased is a host/stdlib constructor
-// receiver (`Map.new()`, `Pool.open(...)`) — the reference lowers an
-// Upper-cased call head as a host acquisition, never a G1 access.
+// A known host root is a host/stdlib constructor receiver (`Map.new()`,
+// `Pool.open(...)`) — the reference lowers it as a host acquisition, never a
+// G1 access. Unknown Upper-cased names remain undeclared.
 fn is_upper_head(name: Str) -> Bool {
+  return name == "Map" || name == "Pool" || name == "Job" || name == "Stream"
+}
+
+fn is_upper_name(name: Str) -> Bool {
   if (name.length() == 0) { return false }
   let c = name.charAt(0)
   return c >= "A" && c <= "Z"
