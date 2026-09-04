@@ -477,6 +477,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
 // `None` render specially, so a bind under either name is left to the binder.
 fn arm_body_is_bind(node: Any, bind: Str) -> Bool {
   if (bind == "Some" || bind == "None") { return false }
+  if (value_kind(node) != "record") { return false }
   let k = value_str(value_field(node, "kind"))
   if (k == "var") { return value_str(value_field(node, "name")) == bind }
   if (k == "name") { return value_str(value_field(node, "id")) == bind }
