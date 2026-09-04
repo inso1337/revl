@@ -194,12 +194,50 @@ def prefilter(tmp_path_factory) -> Path:
     return binary
 
 
-def _run(binary: Path, *args: str) -> subprocess.CompletedProcess:
+def _run(binary: Path, *args: str, candidates: Path | None = None
+         ) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items()
            if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
-    return subprocess.run([str(binary), str(CANDIDATES_DIR), *args],
-                          text=True, capture_output=True, timeout=900,
-                          env=env, check=False)
+    return subprocess.run(
+        [str(binary), str(candidates or CANDIDATES_DIR), *args],
+        text=True, capture_output=True, timeout=900, env=env, check=False)
+
+
+# The one frontier trigger a candidate can still demonstrate.
+#
+# `digit_tool.rvl` used to be the batch's `outside_frontier` arm: it calls
+# `.is_digit()`, a reference stdlib builtin the self-host lowering did not carry,
+# so the crate's GENERATED frontier table declined to decide it. Item 391 ported
+# that builtin (and every other one the table named), which emptied both lexical
+# rows of the table. What is left is the SIZE bound — the emitted front end is
+# deeply recursive and a stack exhaustion aborts, which no `catch_unwind` can
+# turn back into a refusal — so the arm is exercised with an oversized candidate
+# written beside the committed ones rather than committed at 256 KB itself.
+def _oversized_candidate(bound: int) -> str:
+    """A source over `MAX_SOURCE_BYTES` that the REFERENCE admits: one tiny `fn`
+    behind a comment long enough to cross the bound. Admitted-by-the-reference
+    is the point — the gate declining it is a frontier gap, not a refusal."""
+    return "// " + ("padding " * (bound // 8 + 8)) + "\nfn id(x: Int) -> Int { return x }\n"
+
+
+def _max_source_bytes() -> int:
+    src = (ROOT / "crates" / "revl-gate" / "src" / "frontier.rs").read_text(encoding="utf-8")
+    return int(re.search(r"MAX_SOURCE_BYTES: usize = (\d+);", src).group(1))
+
+
+@pytest.fixture(scope="module")
+def records_with_frontier(prefilter, tmp_path_factory) -> dict:
+    """The committed batch plus one oversized candidate, so the fail-closed arm
+    is exercised without committing a 256 KB fixture."""
+    bound = _max_source_bytes()
+    work = tmp_path_factory.mktemp("agent-prefilter-candidates")
+    for path in CANDIDATES_DIR.glob("*.rvl"):
+        shutil.copy(path, work / path.name)
+    (work / "oversized_tool.rvl").write_text(_oversized_candidate(bound),
+                                             encoding="utf-8")
+    proc = _run(prefilter, "--json", candidates=work)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
 
 
 @pytest.fixture(scope="module")
@@ -275,11 +313,12 @@ def test_every_rejection_is_a_real_reference_refusal(records):
 
 
 @needs_rust
-def test_escalations_cover_both_non_refusing_arms(records):
+def test_escalations_cover_both_non_refusing_arms(records_with_frontier):
     """The example's batch must exercise BOTH ways this gate declines to
     decide, because a consumer that only ever saw `no_objection` would not
     learn that `outside_frontier` exists and is equally not an acceptance."""
-    arms = {r["verdict"] for r in records["results"] if r["decision"] == "ESCALATE"}
+    arms = {r["verdict"] for r in records_with_frontier["results"]
+            if r["decision"] == "ESCALATE"}
     assert {"no_objection", "outside_frontier"} <= arms, (
         f"escalated arms seen: {sorted(arms)}")
 
