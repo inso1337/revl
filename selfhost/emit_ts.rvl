@@ -597,6 +597,10 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   if (method == "slice") { return { text: `revlSlice(${target}, ${args[0]}, ${args[1]})`, counter: counter } }
   if (method == "charAt") { return { text: `revlCharAt(${target}, ${args[0]})`, counter: counter } }
   if (method == "charCodeAt") { return { text: `revlCharCodeAt(${target}, ${args[0]})`, counter: counter } }
+  // Codepoint-at-index scan (item 276, item 391 self-host port): the Unicode
+  // scalar at index i, via the same astral-aware helper as `charCodeAt` (JS
+  // `.charCodeAt` would answer a lone surrogate).
+  if (method == "codepoint_at") { return { text: `revlCharCodeAt(${target}, ${args[0]})`, counter: counter } }
   if (method == "div_trunc") { return { text: `revlDivTrunc(${target}, ${args[0]})`, counter: counter } }
   if (method == "div_floor") { return { text: `revlDivFloor(${target}, ${args[0]})`, counter: counter } }
   if (method == "div_euclid") { return { text: `revlDivEuclid(${target}, ${args[0]})`, counter: counter } }
@@ -620,6 +624,29 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   }
   if (method == "startsWith") { return { text: `${target}.startsWith(${args[0]})`, counter: counter } }
   if (method == "endsWith") { return { text: `${target}.endsWith(${args[0]})`, counter: counter } }
+  // Single-character ASCII classification (item 233, item 391 self-host port),
+  // mirroring the py tier's native forms. JS `<=`/`<` on strings is UTF-16
+  // code-unit lexicographic order, and code-unit order IS code-point order for
+  // ASCII, so it matches python's chained comparison exactly — and stays total
+  // the same way (an empty receiver compares less than `"0"`, so the verdict is
+  // `false`, never a fault). The receiver is bound once by an arrow IIFE
+  // (`_rc`), since these builtins re-reference it.
+  if (method == "is_digit") {
+    return { text: `((_rc: string) => "0" <= _rc && _rc <= "9")(${target})`, counter: counter }
+  }
+  if (method == "is_alpha") {
+    return { text: `((_rc: string) => ("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z"))(${target})`, counter: counter }
+  }
+  if (method == "is_alnum") {
+    return { text: `((_rc: string) => ("0" <= _rc && _rc <= "9") || ("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z"))(${target})`, counter: counter }
+  }
+  // is_space: space, tab, LF, CR — equality with each element (a
+  // `String.includes` would wrongly match the empty receiver). revl plain
+  // strings carry no escapes, so the two-character `\t` written here IS the
+  // JS escape the emitted source must contain.
+  if (method == "is_space") {
+    return { text: `((_rc: string) => _rc === " " || _rc === "\t" || _rc === "\n" || _rc === "\r")(${target})`, counter: counter }
+  }
   if (method == "set") {
     return { text: `(() => { const c = new Map(${target}); c.set(${args[0]}, ${args[1]}); return c })()`, counter: counter }
   }
@@ -641,12 +668,14 @@ fn optcall_arg_is_int(method: Str, index: Int) -> Bool {
   if (method == "slice") { return index == 0 || index == 1 }
   if (method == "charAt") { return index == 0 }
   if (method == "charCodeAt") { return index == 0 }
+  if (method == "codepoint_at") { return index == 0 }
   if (method == "repeat") { return index == 0 }
   return false
 }
 
 fn optcall_result_is_int(method: Str) -> Bool {
   return method == "length" || method == "indexOf" || method == "charCodeAt"
+      || method == "codepoint_at"
 }
 
 // `_renders_await`: does a RENDERED fragment carry an `await` operator? Item
@@ -2867,7 +2896,8 @@ fn uses_int_arith(n: Any) -> Bool {
 }
 
 fn is_str_method(m: Str) -> Bool {
-  return m == "length" || m == "slice" || m == "charAt" || m == "charCodeAt" || m == "indexOf"
+  return m == "length" || m == "slice" || m == "charAt" || m == "charCodeAt"
+      || m == "codepoint_at" || m == "indexOf"
 }
 
 fn uses_str_methods(n: Any) -> Bool {
