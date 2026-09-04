@@ -201,6 +201,9 @@
   },
   "py": {
     "blind": {
+      "NOT TRIAGED - both sides implement this and no corpus document reaches it. Recorded by `--write`; say WHY, or add the corpus case.": [
+        "class=witnessed"
+      ],
       "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: Float widening on a mixed-operand binary: no corpus document mixes Int and Float.": [
         "widen=Float"
       ],
@@ -212,12 +215,7 @@
         "step=expr"
       ],
       "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the bare `Some`/`None` constructor read as a variable (the `kind=var` arm, not a `match` pattern), and `Map.remove`.": [
-        "method=remove",
-        "name=None",
-        "name=Some"
-      ],
-      "declared out of the slice by the oracle's own docstring: `adt` construction.": [
-        "kind=adt"
+        "method=remove"
       ],
       "declared out of the slice by the oracle's own docstring: async coloring (async fns/methods/externs).": [
         "async=<true>"
@@ -367,6 +365,8 @@
   "ts": {
     "blind": {
       "NOT TRIAGED - both sides implement this and no corpus document reaches it. Recorded by `--write`; say WHY, or add the corpus case.": [
+        "kind=maplit",
+        "method=remove",
         "op=!==",
         "op=>="
       ],
