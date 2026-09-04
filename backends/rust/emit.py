@@ -289,6 +289,12 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
         # a `&str`). The borrow analysis keeps a borrowed param out of owned
         # slots, so this is a safety net that materialises rather than miscompiles.
         return f"{rendered}.to_string()"
+    if name in ctx.borrowed_list_params:
+        # This argument is a borrowed `&[T]` parameter reaching an OWNED slot (a
+        # `Vec<T>` callee param, a record field, a constructor payload). An owned
+        # `Vec<T>` is produced with `.to_vec()`, the list equivalent of
+        # `.to_string()` for strings (issue #333).
+        return f"{rendered}.to_vec()"
     ty = ctx.var_types.get(name)
     if ty is not None:
         if _is_fn_type(ty):
@@ -326,6 +332,23 @@ def _borrow_str_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     return f"&({rendered})"
 
 
+def _borrow_list_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
+    """Render an argument bound for a borrowed `&[T]` callee parameter (issue #333).
+
+    The callee only reads the list, so the caller lends a borrow instead of
+    cloning it. A bare borrowed `&[T]` parameter passed straight through is
+    already a `&[T]`, so it goes untouched; every other list expression — an
+    owned `Vec<T>` local, a call result — is borrowed with `&`, and `&Vec<T>`
+    coerces to the `&[T]` slot exactly like string borrows do.
+    """
+    name = _arg_ref_name(arg_node)
+    if name is not None and name in ctx.borrowed_list_params:
+        return rendered
+    if isinstance(arg_node, dict) and arg_node.get("kind") in _ATOMIC_KINDS:
+        return f"&{rendered}"
+    return f"&({rendered})"
+
+
 def _by_value_tail(node: object, rendered: str, ctx: "_V3Ctx") -> str:
     """Clone a bare identifier used as the tail VALUE of an `if`-expression
     branch when the same binding is read again in the body.
@@ -346,6 +369,11 @@ def _by_value_tail(node: object, rendered: str, ctx: "_V3Ctx") -> str:
         # `.clone()` (which would keep it a `&str`). The borrow analysis keeps a
         # borrowed param out of owned positions, so this is a safety net.
         return f"{rendered}.to_string()"
+    if name in ctx.borrowed_list_params:
+        # A borrowed `&[T]` param materialised into an owned position (a branch
+        # tail typed `List[T]`) becomes an owned `Vec<T>` via `.to_vec()`, the
+        # list equivalent of string's `.to_string()` (issue #333).
+        return f"{rendered}.to_vec()"
     ty = ctx.var_types.get(name)
     if ty is not None and str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
         return rendered
@@ -858,6 +886,124 @@ def _compute_str_param_borrows(functions: list) -> "dict[str, frozenset]":
     return borrow
 
 
+def _list_param_escapes(body: object, params: "set[str]",
+                        fn_borrow: "dict[str, frozenset]",
+                        function_names: "frozenset[str] | set") -> "set[str]":
+    """The subset of `params` (a function's read-only `List[T]` parameter names)
+    that a `&[T]` lowering could NOT represent: they reach a position that needs
+    an owned `Vec<T>`.
+
+    A bare parameter reference is read-only — safe to borrow — only where its
+    immediate slot proves it: the receiver of a read-only builtin (`.length()`,
+    `.at(i)`, etc.), an argument to a free-fn slot the fixpoint still holds
+    borrowable, or an interpolation hole. Every other slot (a `return` value, a
+    record field, a constructor/ADT payload, a list element, a `let`
+    right-hand side, an owned call argument) moves the value, so a parameter
+    reached there escapes and must stay an owned `Vec<T>`. This mirrors the
+    string borrow analysis (_str_param_escapes).
+    """
+    escaped: set[str] = set()
+
+    def walk(node: object, safe: bool) -> None:
+        if isinstance(node, dict):
+            kind = node.get("kind")
+            if kind in ("var", "name", "req"):
+                ident = node.get("id") or node.get("name")
+                if ident in params and not safe:
+                    escaped.add(ident)
+                return
+            if kind == "builtin":
+                walk(node.get("target"), True)
+                # List read-only builtins: length, at (indexing)
+                arg_safe = node.get("method") in ("length", "at")
+                for a in node.get("args") or []:
+                    walk(a, arg_safe)
+                return
+            if kind == "len":
+                walk(node.get("target"), True)
+                return
+            if kind == "interp":
+                for _pk, pv in node.get("parts") or []:
+                    walk(pv, True)
+                return
+            if kind == "bin":
+                op = node.get("op")
+                operand_safe = op in ("==", "!=")
+                walk(node.get("left"), operand_safe)
+                walk(node.get("right"), operand_safe)
+                return
+            cname, arg_nodes = _free_fn_call(node, function_names)
+            if cname is not None:
+                borrow = fn_borrow.get(cname, frozenset())
+                for idx, a in enumerate(arg_nodes):
+                    walk(a, idx in borrow)
+                return
+            for value in node.values():
+                walk(value, False)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, safe)
+
+    walk(body, False)
+    return escaped
+
+
+def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
+    """Map each free function to the set of parameter INDICES whose `List[T]`
+    argument the callee only reads, so the call can pass `&[T]` (a borrow)
+    instead of cloning the whole vector (issue #333).
+
+    This mirrors _compute_str_param_borrows: an interprocedural fixpoint that
+    identifies read-only list parameters that can be lowered to borrowed slices.
+    Start with every `List[T]` parameter a candidate, then repeatedly drop any
+    that `_list_param_escapes` finds in an owned position. The set only shrinks.
+
+    A `pub` function is exempt: its signature is the module's external contract,
+    so its params stay owned. The per-token clone issue #333 targets lives in
+    the module-internal helpers, which a `pub` entry still lends its owned vec
+    to by borrow.
+
+    Gated like item 282 on the module using the stdlib.
+    """
+    if not _functions_use_stdlib(functions):
+        return {fn.get("name"): frozenset() for fn in functions}
+    function_names = frozenset(
+        fn.get("name") for fn in functions if fn.get("name")
+    )
+    borrow: dict[str, frozenset] = {}
+    for fn in functions:
+        name = fn.get("name")
+        if fn.get("public"):
+            borrow[name] = frozenset()
+            continue
+        borrow[name] = frozenset(
+            idx for idx, p in enumerate(fn.get("params") or [])
+            if _is_list_type(p.get("type"))
+        )
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            name = fn.get("name")
+            candidates = {
+                p.get("name") for idx, p in enumerate(fn.get("params") or [])
+                if idx in borrow[name]
+            }
+            if not candidates:
+                continue
+            escaped = _list_param_escapes(
+                fn.get("body") or [], candidates, borrow, function_names)
+            if escaped:
+                kept = frozenset(
+                    idx for idx in borrow[name]
+                    if (fn.get("params") or [])[idx].get("name") not in escaped
+                )
+                if kept != borrow[name]:
+                    borrow[name] = kept
+                    changed = True
+    return borrow
+
+
 def _render_param_type(borrowed: bool, ftype: object, types: dict) -> str:
     """The Rust type of a free-function parameter, `&str` when the borrow
     analysis lowered this read-only `Str` param to a borrow (item 282), else the
@@ -944,6 +1090,13 @@ def _split_fn_type(name: str) -> tuple[list[str], str]:
                 params = _split_generic(inner) if inner else []
                 return params, ret
     raise EmitError(f"malformed function type: {name!r}")
+
+
+def _is_list_type(ftype: object) -> bool:
+    """True if a type is a List type (issue #333)."""
+    if isinstance(ftype, str):
+        return ftype.startswith("List[")
+    return False
 
 
 def _rust_type(name: object, types: dict | None = None,
@@ -4425,11 +4578,19 @@ class _V3Ctx:
         # shared by every ctx (function bodies, tests, lifecycle tests).
         self.fn_borrow: dict[str, frozenset] = _compute_str_param_borrows(
             functions or [])
+        # Similar for `List[T]` params that lower to `&[T]` (issue #333).
+        self.fn_list_borrow: dict[str, frozenset] = _compute_list_param_borrows(
+            functions or [])
         # Parameters of the function CURRENTLY being emitted that are borrowed
         # `&str` (a subset of its `Str` params). Set per fn by
         # `_emit_v3_functions`, empty in every other emit context, so a read of a
         # borrowed param renders as the `&str` it already is.
         self.borrowed_params: set[str] = set()
+        # Parameters of the function CURRENTLY being emitted that are borrowed
+        # `&[T]` (a subset of its `List[T]` params). Set per fn by
+        # `_emit_v3_functions`, empty in every other emit context, so a read of a
+        # borrowed list param renders as the `&[T]` it already is.
+        self.borrowed_list_params: set[str] = set()
         # Free function name -> parameter INDICES carrying a synthetic
         # `&[char]` view (item 277), so a call site knows the extra arguments
         # to append. Computed once from the whole function list, like
@@ -5981,9 +6142,15 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         ctx.borrowed_params = {
             param_list[idx].get("name") for idx in borrow
         }
+        # Similar for `List[T]` params that lower to `&[T]` (issue #333).
+        list_borrow = ctx.fn_list_borrow.get(fn.get("name"), frozenset())
+        ctx.borrowed_list_params = {
+            param_list[idx].get("name") for idx in list_borrow
+            if _is_list_type(param_list[idx].get("type"))
+        }
         rendered_params = [
             f"{_ident(p.get('name'), 'parameter name')}: "
-            f"{_render_param_type(idx in borrow, p.get('type'), types)}"
+            f"{_render_param_type(idx in borrow or idx in list_borrow, p.get('type'), types)}"
             for idx, p in enumerate(param_list)
         ]
         # item 277: the `&[char]` view. A non-`pub` fn takes it as a synthetic
