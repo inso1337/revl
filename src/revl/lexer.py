@@ -337,9 +337,17 @@ class Token:
     line: int
 
 
-def lex(source: str, filename: str) -> list[Token]:
+def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
+    """Tokenize `source`. Lines are one-based and counted from `line_offset`.
+
+    `line_offset` exists for source that is a FRAGMENT of a larger file: the
+    body of a `${...}` interpolation is re-lexed on its own, and without an
+    offset every token in it — and every diagnostic the checker later raises on
+    it — claimed line 1 of the enclosing file (issue #313). Zero, the default,
+    is a whole file starting at line 1.
+    """
     tokens: list[Token] = []
-    i, line, n = 0, 1, len(source)
+    i, line, n = 0, 1 + line_offset, len(source)
     while i < n:
         c = source[i]
         if c == "\n":
@@ -374,8 +382,20 @@ def lex(source: str, filename: str) -> list[Token]:
             i, value = _lex_string(source, i + 1, line, filename, quote="'")
             tokens.append(Token("string", value, line))
         elif c == '`':
-            i, parts, line, suspect = _lex_template(source, i + 1, line, filename)
-            tok = Token("template", parts, line)
+            # The token's line is where the template OPENS, not where it closes
+            # (issue #313). A template spanning lines 2-5 used to report every
+            # error against it — a type mismatch on the whole literal, say — at
+            # line 5, pointing the reader at the closing backtick instead of at
+            # the expression. `"""` strings above already do this correctly.
+            start_line = line
+            i, parts, line, suspect, interp_lines = _lex_template(
+                source, i + 1, line, filename)
+            tok = Token("template", parts, start_line)
+            # Side-band, for the same reason `stray_backtick` is: the absolute
+            # line each `${...}` body starts on, so the parser can re-parse it
+            # with a line offset. Token equality and every accepted program lex
+            # identically without it.
+            tok.interp_lines = interp_lines
             if suspect is not None:
                 # Side-band marker for the parser's stray-backtick diagnostic
                 # (item 365). Not a Token field, so token equality and every
@@ -717,10 +737,15 @@ def _has_open_block_comment(source: str, start: int, end: int) -> bool:
 def _lex_template(source: str, i: int, line: int, filename: str):
     """Backtick template with `${expr}` interpolation; bare `$` is literal.
 
-    Returns (index-after-closing-backtick, parts, line, suspect) where parts is
-    a list of ("text", str) and ("expr", raw_source) segments. The `${...}` body
-    is captured as raw source with balanced braces; the parser re-parses it into
-    a full expression (§3.2).
+    Returns (index-after-closing-backtick, parts, line, suspect, interp_lines)
+    where parts is a list of ("text", str) and ("expr", raw_source) segments.
+    The `${...}` body is captured as raw source with balanced braces; the parser
+    re-parses it into a full expression (§3.2).
+
+    `interp_lines` holds one absolute line per ("expr", ...) part, in order: the
+    line the interpolation's first non-space character sits on. The parser feeds
+    it to the sub-parser as a line offset so a diagnostic inside `${...}` names
+    the line it is actually on rather than line 1 (issue #313).
 
     `suspect` is `None`, or `(start_line, close_line)` when the closing backtick
     looks like a STRAY backtick that closed the template early — one sitting
@@ -734,6 +759,7 @@ def _lex_template(source: str, i: int, line: int, filename: str):
     it was already going to raise on the mis-parsed tail.
     """
     parts: list[tuple[str, str]] = []
+    interp_lines: list[int] = []
     buf: list[str] = []
     n = len(source)
     start_line = line
@@ -746,7 +772,7 @@ def _lex_template(source: str, i: int, line: int, filename: str):
             suspect = None
             if _closing_backtick_is_stray(source, body_start, i):
                 suspect = (start_line, line)
-            return i + 1, parts, line, suspect
+            return i + 1, parts, line, suspect, interp_lines
         if c == "\n":
             buf.append(c)
             line += 1
@@ -757,17 +783,24 @@ def _lex_template(source: str, i: int, line: int, filename: str):
             # nested braces (record literals, etc.). Balancing is string- and
             # comment-aware so a `}` inside a string — `${m.lookup("}")}` — or
             # after a `//` does not close the interpolation early.
+            dollar_line = line
             j = _match_brace(source, i + 1, _REVL_TRIVIA)
             if j is None:
-                raise RevlError(filename, line, "unterminated `${` interpolation")
+                raise RevlError(filename, dollar_line,
+                                "unterminated `${` interpolation")
             line += source[i:j].count("\n")
-            inner = source[i + 2:j].strip()
+            raw_inner = source[i + 2:j]
+            inner = raw_inner.strip()
             if not inner:
-                raise RevlError(filename, line, "empty `${}` interpolation")
+                raise RevlError(filename, dollar_line, "empty `${}` interpolation")
             if buf:
                 parts.append(("text", "".join(buf)))
                 buf = []
             parts.append(("expr", inner))
+            # `.strip()` above can drop leading newlines — `${\n  nme}` — so the
+            # expression starts further down than the `$` does.
+            lead = len(raw_inner) - len(raw_inner.lstrip())
+            interp_lines.append(dollar_line + raw_inner[:lead].count("\n"))
             i = j + 1
             continue
         buf.append(c)

@@ -557,7 +557,11 @@ def gauntlet_evidence(source: str) -> str:
     # otherwise asyncio refuses ("another loop is running"). One worker thread,
     # joined synchronously: the extern stays a plain call from revl's view.
     def _grade() -> dict:
-        return gauntlet.run(Session(), {"source": source})
+        # truc runs on the operator's own machine over the package it is
+        # shipping: the human is the author, so no MCP authoring trust applies
+        # (see `server.compile_under_authoring`).
+        return gauntlet.run(Session(), {"source": source},
+                            over_the_transport=False)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         dossier = pool.submit(_grade).result()
@@ -576,9 +580,12 @@ def publish(plan_json: str) -> str:
     release being replaced, install the component, record the declared version,
     REGENERATE the index (manifest.json is produced by the current compiler,
     never copied from the author — the reproducibility invariant does the
-    honesty work, docs/registry.md §1), attach the derived changelog, and carry
-    the discoverability fields the compiler cannot derive (description + tags)
-    into the published index row so revl_resolve / registry search can find it.
+    honesty work, docs/registry.md §1), attach the derived changelog, and record
+    the discoverability fields the compiler cannot derive (description + tags) in
+    the entry's own `meta.json`, from which the regenerated index row copies them
+    so revl_resolve / registry search can find it. They go in a file rather than
+    straight into the row because a key nothing regenerates is a key `verify`
+    can never certify (docs/registry.md §1.3).
 
     The registry re-runs its own release checks here rather than trusting the
     plan, so the write path is not safe only because the Shipper looked first.

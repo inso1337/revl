@@ -471,10 +471,62 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   return `<<UNSUPPORTED-BUILTIN:${method}>>`
 }
 
+// `_arm_body_is_bind`: is this arm body EXACTLY the payload bind, `Some(v) =>
+// v`? `var` (a fn body) and `name` (a component body) are the two nodes that
+// are a bare local read, and both render as the identifier itself. `Some` and
+// `None` render specially, so a bind under either name is left to the binder.
+fn arm_body_is_bind(node: Any, bind: Str) -> Bool {
+  if (bind == "Some" || bind == "None") { return false }
+  let k = value_str(value_field(node, "kind"))
+  if (k == "var") { return value_str(value_field(node, "name")) == bind }
+  if (k == "name") { return value_str(value_field(node, "id")) == bind }
+  return false
+}
+
+// `_arm_body_mentions`: could this arm body read `bind`? Answered
+// CONSERVATIVELY — true if the name occurs anywhere in the subtree at all, as
+// a node value or an object key, whether or not it is in a position that reads
+// a local. A false positive costs the arm its binder-free spelling and nothing
+// else; a false negative would delete a live bind.
+fn arm_body_mentions(node: Any, bind: Str) -> Bool {
+  let k = value_kind(node)
+  if (k == "str") { return value_str(node) == bind }
+  if (k == "record") {
+    for (key of value_keys(node)) {
+      if (key == bind) { return true }
+      if (arm_body_mentions(value_field(node, key), bind)) { return true }
+    }
+    return false
+  }
+  if (k == "list") {
+    for (c of value_list(node)) {
+      if (arm_body_mentions(c, bind)) { return true }
+    }
+    return false
+  }
+  return false
+}
+
+// `bind_payload`: the payload bind of one arm. TWO SHAPES NEED NO BINDER AT
+// ALL, and those cost no Python frame (item 436 F3). An arm whose body never
+// mentions the bind drops the binder outright: the payload is `match` or
+// `match.value`, a name and a `__slots__` read, so not evaluating it is not
+// observable. An arm whose body IS the bind (`Some(v) => v`, the unwrap match
+// mostly exists for) becomes the payload expression itself. Neither introduces
+// a name, so neither can shadow, clobber or share a cell, which is what makes
+// them safe where a walrus is not (item 163). A bind USED INSIDE a larger body
+// keeps its one-shot lambda.
+fn bind_payload(bind: Str, body: Str, payload: Str, node: Any) -> Str {
+  if (arm_body_is_bind(node, bind)) { return payload }
+  if (!arm_body_mentions(node, bind)) { return body }
+  return `(lambda ${bind}: ${body})(${payload})`
+}
+
 // `_match_expr` one arm: nested conditional inside a one-shot `lambda match: …`.
 fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   let pattern = value_str(value_field(arm, "pattern"))
-  var body = expr(value_field(arm, "body"))
+  let bnode = value_field(arm, "body")
+  var body = expr(bnode)
   if (pattern == "_") { return body }
   let bind = value_str(value_field(arm, "bind"))
   var cond = ""
@@ -483,9 +535,9 @@ fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   } else {
     if (pattern == "Some") {
       cond = `${head} is not None`
-      if (bind != "") { body = `(lambda ${bind}: ${body})(match)` }
+      if (bind != "") { body = bind_payload(bind, body, "match", bnode) }
     } else {
-      if (bind != "") { body = `(lambda ${bind}: ${body})(match.value)` }
+      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode) }
       cond = `isinstance(${head}, ${pattern})`
     }
   }
@@ -1278,7 +1330,8 @@ fn cun(node: Any) -> Str {
 
 fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   let pattern = value_str(value_field(arm, "pattern"))
-  var body = cexpr(value_field(arm, "body"))
+  let bnode = value_field(arm, "body")
+  var body = cexpr(bnode)
   if (pattern == "_") { return body }
   let bind = value_str(value_field(arm, "bind"))
   var cond = ""
@@ -1287,9 +1340,9 @@ fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   } else {
     if (pattern == "Some") {
       cond = `${head} is not None`
-      if (bind != "") { body = `(lambda ${bind}: ${body})(match)` }
+      if (bind != "") { body = bind_payload(bind, body, "match", bnode) }
     } else {
-      if (bind != "") { body = `(lambda ${bind}: ${body})(match.value)` }
+      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode) }
       cond = `isinstance(${head}, ${pattern})`
     }
   }
@@ -1811,8 +1864,9 @@ fn emit_services_table(services: Any) -> List[Str] {
 // remaining NON-async, NON-spawn MODULE declarations, each a `emit()`-gated
 // section mirrored byte-for-byte:
 //
-//   * `_emit_types`  — record (`@dataclass`) and variant (sealed base + one
-//     subclass per case) type declarations, including the forward-reference
+//   * `_emit_types`  — record (a shape class, never constructed) and variant
+//     (sealed base + one subclass per case) type declarations, the gated
+//     `typing` import, including the forward-reference
 //     annotation-quoting rule and the `_py_type` surface->python-type map
 //     (incl function types -> `Callable[...]`);
 //   * built-in Result classes  — `Ok`/`Err`, gated by `_uses_builtin_result`
@@ -1931,8 +1985,35 @@ fn type_ann(ftype: Str, all_names: List[Str], emitted: List[Str]) -> Str {
   return rendered
 }
 
-// `_emit_types`: each record as an `@dataclass`, each variant as a sealed base
-// class plus one value-semantic subclass per case, in declaration order.
+// `_typing_imports`: the `typing` names the record annotations actually
+// mention. Record annotations are the only place `py_type` is rendered, so a
+// variant-only module imports nothing at all, and `Union` — which `py_type`
+// cannot render — is imported nowhere (item 436 F9).
+fn typing_imports(types: Any) -> List[Str] {
+  var used = []
+  for (nm of value_keys(types)) {
+    let spec = value_field(types, nm)
+    if (value_str(value_field(spec, "kind")) == "record") {
+      let fields = value_field(spec, "fields")
+      for (f of value_keys(fields)) {
+        let rendered = py_type(value_str(value_field(fields, f)))
+        for (tok of ident_tokens(rendered)) {
+          if (!list_contains(used, tok)) { used = used.push(tok) }
+        }
+      }
+    }
+  }
+  var out = []
+  for (nm of ["Any", "Callable", "Optional"]) {
+    if (list_contains(used, nm)) { out = out.push(nm) }
+  }
+  return out
+}
+
+// `_emit_types`: each record as a SHAPE class (a record value is a plain dict,
+// so the class is never constructed and carries no `@dataclass` — item 436
+// F9), each variant as a sealed base class plus one value-semantic subclass
+// per case, in declaration order.
 fn emit_types(types: Any) -> List[Str] {
   var all_names = []
   for (nm of value_keys(types)) { all_names = all_names.push(mangle(nm)) }
@@ -1942,7 +2023,6 @@ fn emit_types(types: Any) -> List[Str] {
     let name = mangle(nm)
     let spec = value_field(types, nm)
     if (value_str(value_field(spec, "kind")) == "record") {
-      out = out.push("@dataclass")
       out = out.push(`class ${name}:`)
       let fields = value_field(spec, "fields")
       let fkeys = value_keys(fields)
@@ -2225,11 +2305,14 @@ pub fn emit_py_src(ir: Any) -> Str {
     if (!list_contains(shadow, "Ok")) { out = out.concat(result_class("Ok")) }
     if (!list_contains(shadow, "Err")) { out = out.concat(result_class("Err")) }
   }
-  // Type declarations (gated): the dataclass/typing imports, then the classes.
+  // Type declarations (gated): only the `typing` names the record annotations
+  // below actually mention, then the classes (item 436 F9).
   if (value_keys(types).length() > 0) {
-    out = out.push("from dataclasses import dataclass")
-    out = out.push("from typing import Any, Callable, Optional, Union")
-    out = out.push("")
+    let names = typing_imports(types)
+    if (names.length() > 0) {
+      out = out.push(`from typing import ${names.join(", ")}`)
+      out = out.push("")
+    }
     out = out.concat(emit_types(types))
   }
   let functions = value_list(value_field(ir, "functions"))

@@ -103,6 +103,70 @@ TOOL_VERB = {
     "revl_estop": "estop",
 }
 
+# ---------------------------------------------------------- composed verbs
+#
+# The gate is positional over the DISPATCH TABLE — `server.handle` runs
+# `decide` before it calls a handler — but a tool that reaches a privileged
+# operation through ANOTHER tool's machinery is dispatched under its own name
+# and so was gated by nothing. Two do:
+#
+#   * `revl_ship` fuses check -> admit -> plan -> swap and, with `apply: true`,
+#     calls the `revl_swap` HANDLER directly. `handle` gated `revl_ship`, which
+#     carried no verb, and never saw the swap underneath it.
+#   * `revl_repair`'s remediation step calls `Session.swap` itself, so it went
+#     past both the operator gate and the item-61 lease check `_tool_swap`
+#     performs.
+#
+# They are mapped to `swap` — the authority the operation they perform already
+# has — rather than to new verbs, because that is what they DO: an operator who
+# may not swap a component may not ship or repair it either, and one who may
+# needs no second grant. Both are CONDITIONAL: each has a rehearsal mode that
+# mutates nothing (`revl_ship` unless `apply`, `revl_repair` with
+# `apply: false`), and a rehearsal is not a privileged action.
+#
+# The rule for anyone adding a verb: if a tool can reach `Session.swap` /
+# `.load` / `.unload` / `.restore` / `.rollback` / `.undo` / `.estop` — its own
+# handler or any handler it calls — it belongs in `TOOL_VERB` or here.
+# `tests/test_mcp_authority_gate.py` enumerates every advertised tool and
+# fails on one that is neither gated nor recorded as ungated with a reason.
+COMPOSED_TOOL_VERB = {
+    "revl_ship": "swap",
+    "revl_repair": "swap",
+}
+
+
+def composed_applies(tool_name: str, arguments: dict) -> bool:
+    """Does this composed verb actually perform its mutation with these
+    arguments? `revl_ship` swaps only when `apply` is truthy (it defaults to
+    the read-only rehearsal); `revl_repair` swaps unless `apply` is explicitly
+    false (it defaults to applying)."""
+    if tool_name == "revl_ship":
+        return bool(arguments.get("apply"))
+    if tool_name == "revl_repair":
+        return arguments.get("apply", True) is not False
+    return True
+
+
+def swap_arguments(tool_name: str, arguments: dict) -> dict:
+    """A composed verb's arguments in the shape `_targets`/`leases.check_swap`
+    read a swap in, so both derive targets for the swap that will actually run
+    rather than for the wrapper's own argument shape.
+
+    `revl_ship` already carries `source`/`files`/`modules`/`replacing` at the
+    top level. `revl_repair` carries them under `candidate`, and its swap
+    replaces the component it was asked to repair — so `replacing` is that
+    component, which is exactly what makes the derivation compile (a repair
+    candidate redeclares the faulting component; without `replacing` it would
+    collide with the running one on G2 and derive nothing)."""
+    if tool_name == "revl_repair":
+        candidate = arguments.get("candidate") or {}
+        component = arguments.get("component")
+        return {"source": candidate.get("source"),
+                "files": candidate.get("files"),
+                "modules": candidate.get("modules"),
+                "replacing": [component] if component else []}
+    return arguments
+
 # friendly verb aliases the profile author may write (canonical on the right)
 VERB_ALIASES = {"rollback": "undo"}
 
@@ -381,20 +445,47 @@ def _snapshot_targets(snap: dict | None) \
     return targets or [("*", frozenset({WHOLE}))]
 
 
-def _compile_candidate(arguments: dict, manifest: dict | None = None):
+def _compile_candidate(arguments: dict, manifest: dict | None = None,
+                       replacing: tuple = ()):
     """Compile inline source for target derivation. Pure frontend, no runtime.
-    Returns None when the candidate does not compile — the handler will reject
-    it and mutate nothing, so gating need not (and cannot) scope it."""
-    from ..compiler import compile_files, compile_source  # noqa: PLC0415
+    Returns None when the candidate does not compile — an *undecidable* target
+    set, which every caller must then fail CLOSED on (see `_targets`).
+
+    The compile must be the SAME SHAPE the handler's compile is, or the gate
+    scopes a different action than the one that runs. Two inputs were missing,
+    and their absence was an authority bypass rather than a scoping bug:
+
+      * `replacing` — `revl_swap`'s handler passes it, so a candidate that
+        RENAMES the component it replaces links cleanly there. Without it the
+        derivation compile sees the running provider *and* the renamed one and
+        dies on a G2 provision conflict, so the target set came back
+        undecidable and the swap sailed past both the operator gate and an
+        enforced lease on the component it was replacing.
+      * the operator's sanctioned `providers` — merged UNDER the agent's own
+        `modules` exactly as `server.compile_under_authoring` merges them, so a
+        composition that resolves for the handler resolves here too.
+
+    Deliberately UNPROFILED: this derives *which components an action touches*,
+    and it neither lowers a host body nor boots anything. The authoring trust is
+    enforced positionally before this runs (`server._authoring_refusal`) and
+    again by the handler's own compile; running it here would only turn refused
+    source into an undecidable target set."""
+    from ..compiler import compile_files, compile_source  # noqa: PLC0415 — see docstring
     from ..errors import RevlError as _RevlError  # noqa: PLC0415
 
+    from .server import AUTHORING  # noqa: PLC0415 — cycle
+
+    merged = dict(AUTHORING.providers or {})
+    for path, text in (arguments.get("modules") or {}).items():
+        merged.setdefault(path, text)
     try:
         if arguments.get("source") is not None:
             return compile_source(arguments["source"], "<candidate>.rvl",
-                                  manifest=manifest,
-                                  modules=arguments.get("modules"))
+                                  manifest=manifest, replacing=replacing,
+                                  modules=merged or None)
         if arguments.get("files"):
-            return compile_files(list(arguments["files"]), manifest=manifest)
+            return compile_files(list(arguments["files"]), manifest=manifest,
+                                 replacing=replacing)
     except _RevlError:
         return None
     return None
@@ -403,19 +494,33 @@ def _compile_candidate(arguments: dict, manifest: dict | None = None):
 def _targets(verb: str, session, arguments: dict) \
         -> list[tuple[str, frozenset[str]]] | None:
     """The components a management verb touches, as (name, labels) targets.
-    None means *undecidable here* — the target set cannot be determined without
-    running the action, which only happens when the handler will itself refuse
-    (nothing loaded, or a candidate that does not compile). Since no mutation
-    occurs in that case, gating safely defers to the handler."""
+
+    ``None`` means *undecidable here* — the target set cannot be determined
+    without running the action. It is NOT a licence to proceed. Every caller
+    must fail CLOSED on it, because "I could not work out what this touches" is
+    the one answer an authority gate may never read as "so let it through":
+
+      * :func:`decide` scopes an undecidable action to the unnameable whole
+        composition, which only a literal ``may <verb> on *`` grant authorizes;
+      * :func:`leases.check_swap` refuses an undecidable swap against ANY
+        component another operator holds.
+
+    Deferring instead was the bypass: a `revl_swap` whose candidate renamed the
+    component it replaced compiled cleanly for the handler and not for the
+    derivation (which dropped `replacing`), so an undecidable target set turned
+    both the operator gate and an enforced lease into no-ops on exactly the
+    swap that needed them most."""
     ir = session.ir
     if verb == "swap":
         inline = any(arguments.get(k) is not None
                      for k in ("source", "files", "modules"))
         if not inline or ir is None:
             return _live_targets(ir)  # server-side re-admit / cold: whole comp
-        candidate = _compile_candidate(arguments, manifest=ir)
+        candidate = _compile_candidate(
+            arguments, manifest=ir,
+            replacing=tuple(arguments.get("replacing") or ()))
         if candidate is None:
-            return None  # will not compile — handler rejects, nothing mutates
+            return None  # undecidable — callers fail closed
         changed = _changed_targets(ir, candidate)
         return changed or _live_targets(ir)  # a no-op swap re-admits everything
     if verb == "load":
@@ -566,6 +671,12 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
     already-live case, and for every state-changing verb (swap/edit/unload/
     restore/undo)."""
     verb = TOOL_VERB.get(tool_name)
+    if verb is None and tool_name in COMPOSED_TOOL_VERB:
+        # a composed verb: gated as the operation it performs underneath, and
+        # only in the mode that actually performs it
+        if composed_applies(tool_name, arguments):
+            verb = COMPOSED_TOOL_VERB[tool_name]
+            arguments = swap_arguments(tool_name, arguments)
     operator = getattr(session, "operator", None)
     if verb is None or operator is None:
         return Decision(gated=False)
@@ -575,8 +686,15 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
 
     targets = _targets(verb, session, arguments)
     if targets is None:
-        # undecidable — the handler will refuse and mutate nothing; do not gate
-        return Decision(gated=False)
+        # UNDECIDABLE — fail closed. The gate cannot work out which components
+        # this action touches, so it scopes the action to the unnameable whole
+        # composition: only a literal `may <verb> on *` grant authorizes it, and
+        # every subject-scoped operator is refused. Deferring here (returning
+        # `Decision(gated=False)`) is what let a swap whose target derivation
+        # failed run with no authority at all; "I cannot tell what this touches"
+        # is a reason to refuse, never a reason to ungate. An operator who does
+        # hold `*` proceeds and gets the handler's own diagnostic.
+        targets = [(WHOLE, frozenset({WHOLE}))]
 
     for offender in targets:
         _name, labels = offender

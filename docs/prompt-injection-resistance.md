@@ -211,10 +211,14 @@ elsewhere or is a human decision; naming them keeps the claim honest.
    audit surface (classified, enumerated, diffable), not to confine what it
    does once it runs. Actually **preventing** a declared-but-dangerous reach
    from happening — sandboxing, quarantine, capability revocation at deploy time
-   — is the **quarantine tier's** job (roadmap item 45), which is **future**:
-   not yet built. Today the answer to "is this reach declared and on the
-   surface?" is machine-checked; "is this reach allowed to actually happen?"
-   still rests on the operator reading the surface and writing the policy.
+   is the **quarantine tier's** job (roadmap item 45,
+   [quarantine-tier.md](quarantine-tier.md)), which ships as an **opt-in gate**:
+   the `revl quarantine` CLI, the `revl_quarantine` MCP verb, the
+   `quarantine required` policy directive and the swap-admission hook. With no
+   requiring policy the gate is inert. So today the answer to "is this reach
+   declared and on the surface?" is machine-checked, and "is this reach allowed
+   to actually happen?" is machine-checkable but only once an operator writes
+   the policy that demands it.
 
 4. **One fenced enumeration gap on the G8 surface.** A host block reached *only*
    through a first-class function value is correctly flagged non-read-only (the

@@ -1,0 +1,809 @@
+{
+ "buckets": {
+  "false-admit/A1": [
+   "examples/rejections/a1_async_compensate_suspends.rvl",
+   "examples/rejections/a1_async_effect_not_awaited.rvl",
+   "examples/rejections/a1_async_emit_step_not_awaited.rvl",
+   "examples/rejections/a1_await_emit_sync.rvl",
+   "examples/rejections/a1_effect_await_sync.rvl",
+   "examples/rejections/t34_arrow_self_declared_async.rvl"
+  ],
+  "false-admit/G4": [
+   "examples/rejections/g4_spawn_widens_parameter.rvl"
+  ],
+  "false-reject/BAD": [
+   "backends/go/scenarios/advance.rvl",
+   "backends/go/scenarios/method_compensate.rvl",
+   "backends/go/scenarios/provide_method_witnessed.rvl",
+   "backends/go/scenarios/records.rvl",
+   "backends/go/scenarios/secret_trace.rvl",
+   "backends/go/scenarios/witnessed_teardown.rvl",
+   "backends/go/testdata/opt_gaps_280.rvl",
+   "backends/go/testdata/result_ctor_302.rvl",
+   "backends/java/scenarios/method_witnessed.rvl",
+   "backends/java/scenarios/runtime_values.rvl",
+   "backends/typescript/tests/fixtures/a2a_agent.rvl",
+   "backends/typescript/tests/fixtures/match_sync_arms.rvl",
+   "backends/wasm/scenarios/crashproof/crashproof.rvl",
+   "examples/async_timer.rvl",
+   "examples/budget_attenuation.rvl",
+   "examples/durable_log.rvl",
+   "examples/lifecycle_cache.rvl",
+   "examples/lifecycle_leak.rvl",
+   "examples/lifecycle_timer.rvl",
+   "examples/lifecycle_wasm.rvl",
+   "examples/prop_test.rvl",
+   "examples/regressions/fuzz_go_6be27824.rvl",
+   "examples/regressions/fuzz_go_915660b0.rvl",
+   "examples/regressions/fuzz_go_ddb42280.rvl",
+   "examples/regressions/fuzz_go_e6afacd3.rvl",
+   "examples/regressions/fuzz_go_ead437e4.rvl",
+   "examples/regressions/fuzz_go_f4963252.rvl",
+   "examples/regressions/fuzz_go_letbind_valuetype.rvl",
+   "examples/regressions/fuzz_go_matchlit_typeswitch.rvl",
+   "examples/regressions/fuzz_go_vet_redundant_bool.rvl",
+   "examples/regressions/fuzz_rust_3c147169.rvl",
+   "examples/regressions/fuzz_rust_ca5feca4.rvl",
+   "examples/regressions/fuzz_wasm_ad4e66e8.rvl",
+   "examples/regressions/fuzz_wasm_af371f9d.rvl",
+   "examples/ts_host_body.rvl",
+   "examples/uxprobe2_fault.rvl",
+   "examples/uxprobe2_jobs.rvl",
+   "examples/uxprobe_cache.rvl",
+   "stdlib/crypto.rvl",
+   "stdlib/json.rvl",
+   "stdlib/list.rvl",
+   "stdlib/render.rvl",
+   "stdlib/shell.rvl",
+   "stdlib/str.rvl",
+   "stdlib/value.rvl",
+   "stdlib/version.rvl",
+   "tests/fixtures/emit_py_corpus/witnessed.rvl",
+   "tests/fixtures/query_mesh.rvl",
+   "tests/fixtures/v2_math_lib.rvl"
+  ],
+  "false-reject/G1": [
+   "backends/go/testdata/stream_130.rvl",
+   "backends/rust/scenarios/stream.rvl"
+  ],
+  "msg-mismatch/A1": [
+   "examples/rejections/a1_async_undo_suspends.rvl"
+  ],
+  "tag-mismatch/G4->BAD": [
+   "examples/rejections/g4_spawn_widens_budget.rvl"
+  ]
+ },
+ "corpus_dirs": [
+  "examples",
+  "tests/fixtures",
+  "selfhost",
+  "stdlib",
+  "demo",
+  "tck",
+  "backends",
+  "dogfood"
+ ],
+ "details": {
+  "backends/go/scenarios/advance.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/go/scenarios/method_compensate.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/go/scenarios/provide_method_witnessed.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/go/scenarios/records.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/go/scenarios/secret_trace.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/go/scenarios/witnessed_teardown.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/go/testdata/opt_gaps_280.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/go/testdata/result_ctor_302.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/go/testdata/stream_130.rvl": {
+   "bucket": "false-reject/G1",
+   "gate": {
+    "code": "G1",
+    "kind": "refused",
+    "message": "`sub` is not a declared requirement of Parked"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/java/scenarios/method_witnessed.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/java/scenarios/runtime_values.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/rust/scenarios/stream.rvl": {
+   "bucket": "false-reject/G1",
+   "gate": {
+    "code": "G1",
+    "kind": "refused",
+    "message": "`sub` is not a declared requirement of Parked"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/typescript/tests/fixtures/a2a_agent.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/typescript/tests/fixtures/match_sync_arms.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/wasm/scenarios/crashproof/crashproof.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/async_timer.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/budget_attenuation.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "bad provide block in component Child"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/durable_log.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/lifecycle_cache.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/lifecycle_leak.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/lifecycle_timer.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/lifecycle_wasm.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/prop_test.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_go_6be27824.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_go_915660b0.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_go_ddb42280.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_go_e6afacd3.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_go_ead437e4.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_go_f4963252.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_go_letbind_valuetype.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_go_matchlit_typeswitch.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_go_vet_redundant_bool.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_rust_3c147169.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_rust_ca5feca4.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_wasm_ad4e66e8.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/regressions/fuzz_wasm_af371f9d.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/rejections/a1_async_compensate_suspends.rvl": {
+   "bucket": "false-admit/A1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`compensate` reaches async operation `model.record`, but teardown is synchronous on every tier \u2014 a suspension there would be a compensation that can hang or silently no-op (A1)",
+    "tag": "A1"
+   }
+  },
+  "examples/rejections/a1_async_effect_not_awaited.rvl": {
+   "bucket": "false-admit/A1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "component `A` acquires through async operation `p.open` but the effect is not awaited; the binding would hold the in-flight value, not the result (A1)",
+    "tag": "A1"
+   }
+  },
+  "examples/rejections/a1_async_emit_step_not_awaited.rvl": {
+   "bucket": "false-admit/A1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`emit` step reaches async operation `model.complete` but the emission is not awaited; py would build a coroutine it never awaits (the emission never fires) and ts a floating unordered Promise (A1)",
+    "tag": "A1"
+   }
+  },
+  "examples/rejections/a1_async_undo_suspends.rvl": {
+   "bucket": "msg-mismatch/A1",
+   "gate": {
+    "code": "A1",
+    "kind": "refused",
+    "message": "component `A` reaches async function `open_conn` in a setup/activation body, which cannot suspend a fiber (A1)"
+   },
+   "reference": {
+    "message": "`undo` reaches async operation `w.heat`, but teardown is synchronous on every tier \u2014 a suspension there would be a teardown that can hang or silently no-op (A1)",
+    "tag": "A1"
+   }
+  },
+  "examples/rejections/a1_await_emit_sync.rvl": {
+   "bucket": "false-admit/A1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`await emit` on an emission that reaches nothing async \u2014 an `await` in an activation body is a real divert window (A1)",
+    "tag": "A1"
+   }
+  },
+  "examples/rejections/a1_effect_await_sync.rvl": {
+   "bucket": "false-admit/A1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`effect await` on an acquisition that reaches nothing async \u2014 an `await` in an activation body is a real divert window (A1)",
+    "tag": "A1"
+   }
+  },
+  "examples/rejections/g4_spawn_widens_budget.rvl": {
+   "bucket": "tag-mismatch/G4->BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "bad provide block in component Child"
+   },
+   "reference": {
+    "message": "`Supervisor` spawns `Child` with a wider resource budget than it holds: `net(calls=1000)` widens `calls` to 1000 over the parent's 100. A spawned child's budget may only narrow, never widen (attenuation, item 66/294/260)",
+    "tag": "G4"
+   }
+  },
+  "examples/rejections/g4_spawn_widens_parameter.rvl": {
+   "bucket": "false-admit/G4",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`Router` spawns `Kid`, granting it `fs.write(path=\"/etc\")`, but `Router` holds only `fs.write(path=\"/tmp\")` \u2014 a spawn may narrow a child's capabilities, never widen them",
+    "tag": "G4"
+   }
+  },
+  "examples/rejections/t34_arrow_self_declared_async.rvl": {
+   "bucket": "false-admit/A1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "an arrow may not declare its own async colour",
+    "tag": "A1"
+   }
+  },
+  "examples/ts_host_body.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/uxprobe2_fault.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/uxprobe2_jobs.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected { after fn signature"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/uxprobe_cache.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "stdlib/crypto.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "stdlib/json.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "stdlib/list.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "stdlib/render.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "stdlib/shell.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "stdlib/str.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "stdlib/value.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "stdlib/version.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "tests/fixtures/emit_py_corpus/witnessed.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "tests/fixtures/query_mesh.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "tests/fixtures/v2_math_lib.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  }
+ },
+ "note": "Recorded by `python3 tools/gate_reference_census.py --record`. Every entry is a KNOWN gate/reference divergence over the census corpus; `--check` fails on one that is not here, and on one here that no longer diverges, so the allowance can only shrink in a diff somebody reads. A `false-admit` entry is an OPEN GATE BYPASS, not an accepted state: the list is capped by name in tests/test_gate_reference_census.py so it cannot grow quietly while it is worked down."
+}

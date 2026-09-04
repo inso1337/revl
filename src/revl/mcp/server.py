@@ -139,16 +139,29 @@ class AuthoringTrust:
     def profile(self) -> AdmissionProfile | None:
         """The admission profile agent-authored source compiles under, or `None`
         when the operator has declared the agent trusted (byte-identical to a
-        human's `revl compile`)."""
+        human's `revl compile`).
+
+        Both arms build `AdmissionProfile.untrusted_author`, which is the whole
+        policy for an untrusted author and not a subset of it — `no_extern`, the
+        transitive reach sweep, `no_declassify`, `taint_strict` AND the item-334
+        `no_realm_placement` refusal. The one field either arm may move is
+        `granted`, below, because the reach allowlist is the one field that needs
+        operator input to be correct. Anything else dropped here is an authority
+        this door hands to the agent on the far end of the transport: while
+        `no_realm_placement` was opt-in and only `Gate.propose` opted in, source
+        sent to `revl_load`/`revl_swap` could place its own components at an
+        operator realm, and a swapped-in successor keeps serving at that address.
+        """
         if self.host_code:
             return None
         if self.granted is not None:
             return AdmissionProfile.untrusted_author(self.granted)
-        # the host-code half of the untrusted-author profile with the reach
-        # allowlist left off: `no_extern` (+ its transitive reach sweep) and
-        # `no_declassify` need no operator input to be correct, the allowlist
-        # does. `taint_strict` rides with them for the same reason it rides in
-        # `untrusted_author`: a model-authored turn annotates nothing.
+        # the untrusted-author profile with the reach allowlist left OFF, and
+        # nothing else off: `no_extern` (+ its transitive reach sweep),
+        # `no_declassify`, `taint_strict` and `no_realm_placement` are all
+        # correct with no operator input. The allowlist is not — there is no
+        # honest default for which of a running system's services this agent may
+        # reach — so the operator declares it with `--grant` or it is inert.
         return replace(AdmissionProfile.untrusted_author(()), granted=None)
 
 
@@ -447,11 +460,34 @@ def _host_bodies(ir: dict) -> list:
     return sorted(out, key=lambda e: str(e["extern"]))
 
 
-def _compile(source: str | None, files: list[str] | None,
-             manifest: dict | None = None, modules: dict | None = None,
-             replacing: tuple = ()) -> dict:
+def compile_under_authoring(source: str | None, files: list[str] | None,
+                            manifest: dict | None = None,
+                            modules: dict | None = None,
+                            replacing: tuple = (),
+                            over_the_transport: bool = True) -> dict:
     """Compile inline source or paths through the same entry points the CLI
     uses, so the admission gate is literally the same code.
+
+    THE ONE COMPILER DOOR FOR AGENT-SUPPLIED SOURCE. Every MCP verb that
+    compiles something the agent sent over the transport goes through here —
+    `revl_check`/`admit`/`plan`/`swap`/`load` via `_compile` below, and
+    `revl_gauntlet`/`quarantine`/`repair`/`canary` through their own modules,
+    which all call this function. A verb that reaches `compile_source` /
+    `compile_files` directly gets NO authoring trust, and a candidate the gate
+    refuses is then compiled — and, for the verbs that boot a scratch session,
+    RUN — by a sibling verb. `tests/test_mcp_authority_gate.py` holds the guard:
+    it reads every compiler call site under `src/revl/mcp/` out of the source
+    and fails on one that neither passes `profile=` nor routes through here, so
+    the NEXT door cannot be added silently.
+
+    `over_the_transport` says whether the source came from the agent on the far
+    end of an MCP session (the default, and the safe direction) or from the
+    OPERATOR'S OWN machine. `revl bundle`, `revl canary`, `revl repair`,
+    `revl quarantine` and `truc` reuse these modules as a library from the CLI,
+    where the human running the command IS the author — the same reason jailed
+    `files` compile unprofiled below. Those callers pass
+    `over_the_transport=False` explicitly; nothing that reaches a `handle`
+    dispatch may.
 
     Inline source never touches the disk: `compile_source` carries the
     ambient manifest and any in-memory `use` modules itself.
@@ -488,8 +524,8 @@ def _compile(source: str | None, files: list[str] | None,
     decision compile, and its document is what loads.
     """
     # jailed `files` with no transport-carried text are operator-authored.
-    over_the_transport = source is not None or bool(modules)
-    profile = AUTHORING.profile() if over_the_transport else None
+    inline = source is not None or bool(modules)
+    profile = AUTHORING.profile() if inline and over_the_transport else None
     providers = dict(AUTHORING.providers or {})
     # operator-sanctioned modules ride UNDER the agent's own `modules`: an
     # agent-supplied entry can never displace a provider the operator granted.
@@ -522,9 +558,21 @@ def _compile(source: str | None, files: list[str] | None,
 
     if providers and profile is not None:
         _compile_once(profile, {})              # 1. the decision
-        ir = _compile_once(None, providers)     # 2. what loads
-    else:
-        ir = _compile_once(profile, providers)
+        return _compile_once(None, providers)   # 2. what loads
+    return _compile_once(profile, providers)
+
+
+def _compile(source: str | None, files: list[str] | None,
+             manifest: dict | None = None, modules: dict | None = None,
+             replacing: tuple = ()) -> dict:
+    """`compile_under_authoring` for the verbs THIS module dispatches, plus the
+    one side effect only they want: remembering the host bodies the compile
+    carried, so a class-(c) approval ticket cannot understate what a yes lets
+    run. The sibling modules call `compile_under_authoring` directly — their
+    scratch compiles must not overwrite what the live session authored."""
+    ir = compile_under_authoring(source, files, manifest=manifest,
+                                 modules=modules, replacing=replacing)
+    over_the_transport = source is not None or bool(modules)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = (_host_bodies(ir)
                              if over_the_transport and AUTHORING.host_code
@@ -1187,6 +1235,16 @@ def _tool_repair(arguments: dict) -> dict:
     if not arguments.get("component"):
         return _session_error("`component` is required — the faulting component "
                               "to repair")
+    # component leases (item 61): the loop's remediation step calls
+    # `Session.swap` itself, so it never reached the check `_tool_swap` runs. A
+    # repair is a swap; under a policy that enforces leases it may no more
+    # replace a component another operator holds than `revl_swap` may. Skipped
+    # for the `apply:false` rehearsal, which swaps nothing.
+    if _operator.composed_applies("revl_repair", arguments):
+        refusal = _leases.check_swap(
+            SESSION, _operator.swap_arguments("revl_repair", arguments))
+        if refusal is not None:
+            return _refused_by_lease(refusal)
     return _repair.run_repair(SESSION, arguments)
 
 
@@ -1738,6 +1796,10 @@ def _tool_fmt(arguments: dict) -> dict:
                 "note": "refused — the rewrite would change what the compiler sees"}
     result = {"ok": True, "admitted": True, "formatted": rewritten,
               "changed": rewritten != source, "proof": gate.proof}
+    # a check the gate could not run to completion travels with the result, so
+    # a weakened proof is as visible to an agent as it is on the CLI.
+    if gate.warning:
+        warnings = [*warnings, gate.warning]
     if warnings:
         result["warnings"] = warnings
     return result

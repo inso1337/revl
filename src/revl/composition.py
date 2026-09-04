@@ -42,6 +42,8 @@ from .errors import RevlError
 from .lower import _config_default_type
 from .parser import (Address, CompositionDecl, IsolateStmt, LayerDecl, Program,
                      RowDecl, parse_file)
+from .synthesize import (
+    cap_token, check_address, check_remotable, synthesize_provider)
 from .typecheck import compatible
 
 # The project's own origin. Reserved and unmintable by anyone else: a third
@@ -132,10 +134,10 @@ class Row:
 
     __slots__ = ("label", "origin", "source", "component", "claims",
                  "extra_claims", "requires", "config", "granted", "line",
-                 "provenance")
+                 "provenance", "remote")
 
     def __init__(self, label, origin, source, component, claims, extra_claims,
-                 requires, config, granted, line, provenance=None):
+                 requires, config, granted, line, provenance=None, remote=None):
         self.label = label
         self.origin = origin
         self.source = source
@@ -150,6 +152,11 @@ class Row:
         # 426 §3.3 step 5: the ordered record of every (level, layer, op) that
         # touched this row. A row nobody patched carries one entry, the base.
         self.provenance = list(provenance or [])
+        # item 424 C2: the admission facts of a `remote` row — the peer, the
+        # reach, the failure mode. `None` for an ordinary row. This is where
+        # "remoteness is an ADMISSION fact, never a wiring fact" is literally
+        # true: it sits beside the wiring, and `wiring()` does not read it.
+        self.remote = remote
 
     @property
     def qualified(self) -> str:
@@ -179,6 +186,8 @@ class Row:
             # composition with no layers produces the S1 document byte for byte.
             out["provenance"] = [{"level": level, "layer": layer, "op": op}
                                  for level, layer, op in self.provenance]
+        if self.remote is not None:
+            out["remote"] = dict(self.remote)
         return out
 
 
@@ -186,14 +195,19 @@ class RowTable:
     """The resolved base composition: rows, plus the file list `compile_files`
     takes. The composition is source of truth for semantics (426 decision 7)."""
 
-    __slots__ = ("name", "origin", "source", "rows", "uses")
+    __slots__ = ("name", "origin", "source", "rows", "uses", "sources")
 
-    def __init__(self, name, origin, source, rows, uses):
+    def __init__(self, name, origin, source, rows, uses, sources=None):
         self.name = name
         self.origin = origin
         self.source = source
         self.rows = rows
         self.uses = uses
+        # item 424 C2: `<relative path> -> revl source` for every row whose
+        # provider was SYNTHESIZED. Nothing is written to disk; `compile_files`
+        # already takes an in-memory `sources` map, so a synthesized provider is
+        # compiled exactly like a file one and `_link` checks it identically.
+        self.sources = sources or {}
 
     def to_ir(self) -> dict:
         return {
@@ -412,7 +426,9 @@ def _check_disjoint(rows: list[Row], name: str, doc: str) -> None:
                     f"row `{resolved.qualified}` (component "
                     f"`{resolved.component}`) in composition {name}",
                     hint="at most one row may claim a `(key, realm)` pair; this "
-                         "is G2, provision disjointness, seen at the row level")
+                         "is G2, provision disjointness, seen at the row level. "
+                         "Two peers of one service are two rows in two REALMS "
+                         "(424 D-424c.4)")
             claimed[claim] = resolved
 
 
@@ -428,6 +444,120 @@ def _resolve_uses(decl: CompositionDecl, doc: str, base: str,
                 hint=f"resolved against `{_relative(base, root)}`")
         uses.append(_relative(target, root))
     return uses
+
+
+def _resolve_remotes(decl: CompositionDecl, doc: str, origin: str, root: str,
+                     uses: list[str], rows: list["Row"]) -> dict:
+    """item 424 C2: append the rows whose provider is SYNTHESIZED, and return
+    the in-memory `<relative path> -> revl source` map they compiled from.
+
+    Resolved after the file rows because the service declaration a remote row
+    remotes is looked up in what those rows and the `use` list already name — a
+    remote row introduces no new source of its own to search.
+    """
+    sources: dict[str, str] = {}
+    if not decl.remotes:
+        return sources
+    catalog = _service_catalog([*uses, *(r.source for r in rows)], root)
+    for remote in decl.remotes:
+        rows.append(_resolve_remote(remote, catalog, decl, doc, origin, root,
+                                    sources))
+    return sources
+
+
+def _service_catalog(paths: list[str], root: str) -> dict:
+    """`service name -> (decl, relative path)` over the sources a composition
+    already names. Header-only, like everything else here: the service
+    declaration is read out of the parse tree and no body is lowered."""
+    catalog: dict = {}
+    for rel in paths:
+        program = parse_file(os.path.join(root, rel))
+        for svc in program.services:
+            catalog.setdefault(svc.name, (svc, rel))
+    return catalog
+
+
+def _synth_path(origin: str, label: str) -> str:
+    """The provenance path a synthesized provider is recorded under.
+
+    No file is written; this is the key the in-memory `sources` map is read by
+    and the `source` the IR records, and it is derived from the origin and the
+    label alone so two machines resolving the same composition produce
+    byte-identical rows (426 exit test 18 holds for a remote row too).
+    """
+    scope = "_project" if origin == PROJECT_ORIGIN else origin
+    return f".revl/synthesized/{scope}/{label}.remote.rvl"
+
+
+def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
+                    origin: str, root: str, sources: dict) -> "Row":
+    """Resolve one `remote` row: check the address, check that the service is
+    remotable, synthesize its provider, and return an ordinary `Row`.
+
+    It returns an ORDINARY row on purpose. Everything downstream — the wiring
+    projection, the G2 pre-check, `paths()`, the load order — treats it exactly
+    like a file row, which is D-424c.1 holding at the level of this module's own
+    data structures and not just in the prose.
+    """
+    if remote.service not in catalog:
+        known = ", ".join(f"`{n}`" for n in sorted(catalog)) or "<none>"
+        raise RevlError(
+            doc, remote.line,
+            f"remote row `@{remote.label}` remotes service "
+            f"`{remote.service}`, which composition {decl.name} does not "
+            "declare",
+            hint=f"services in scope: {known}. A remote row has no component "
+                 "header, so the service declaration IS its contract; add a "
+                 "`use` for the file declaring it")
+    service, service_source = catalog[remote.service]
+
+    check_address(remote.host, doc=doc, line=remote.host_line or remote.line,
+                  label=remote.label)
+    check_remotable(service, doc=doc, line=remote.line, label=remote.label,
+                    on_failure=remote.on_failure,
+                    on_failure_line=remote.on_failure_line)
+
+    capability = cap_token(remote.host)
+    component, text = synthesize_provider(service, "remote", {
+        "label": remote.label, "key": remote.key, "host": remote.host,
+        "realm": remote.realm, "capability": capability,
+        "on_failure": remote.on_failure, "transport": remote.transport,
+        "redirect": remote.redirect,
+        "doc": doc, "line": remote.line,
+    })
+    rel = _synth_path(origin, remote.label)
+    sources[rel] = text
+    return Row(
+        label=remote.label,
+        origin=origin,
+        source=rel,
+        component=component,
+        claims=[(remote.key, remote.realm)],
+        extra_claims=[],
+        # A synthesized remote provider requires nothing: it holds one extern
+        # per method and no coeffect. That is not an omission — a row that
+        # required something would have to name a provider for it, and there is
+        # no source in which to write one.
+        requires=[],
+        config={},
+        granted=None,
+        line=remote.line,
+        remote={
+            "peer": remote.host,
+            "service": remote.service,
+            "serviceSource": service_source,
+            "capability": capability,
+            "onFailure": remote.on_failure,
+            # The row's redirect policy, on the row table so the audit surface
+            # and the manifest carry it: "where this crossing may reach" is not
+            # readable from the peer address alone if the transport may be
+            # redirected off it.
+            "redirect": remote.redirect,
+            "inverse": None,
+            **({"realm": remote.realm} if remote.realm else {}),
+            **({"transport": remote.transport} if remote.transport else {}),
+        },
+    )
 
 
 def resolve(decl: CompositionDecl, doc_path: str,
@@ -450,9 +580,11 @@ def resolve(decl: CompositionDecl, doc_path: str,
     base = os.path.dirname(os.path.abspath(doc_path))
 
     rows = [_resolve_row(row, origin, doc, base, root)[0] for row in decl.rows]
+    uses = _resolve_uses(decl, doc, base, root)
+    sources = _resolve_remotes(decl, doc, origin, root, uses, rows)
     _check_disjoint(rows, decl.name, doc)
-    return RowTable(decl.name, origin, _relative(doc_path, root), rows,
-                    _resolve_uses(decl, doc, base, root))
+    return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
+                    sources)
 
 
 # ------------------------------------------------------------------- the fold
@@ -684,9 +816,16 @@ def fold(decl: CompositionDecl, doc_path: str, root: str | None = None,
     _apply_overlay(overlay or {}, slots, decl, doc)
     rows = [slot.row for slot in slots.values()]
 
+    uses = _resolve_uses(decl, doc, base, root)
+    # item 424 C2: a `remote` row is an ordinary row, so it is resolved here
+    # too — a composition that declares a layer must not silently lose it.
+    # Layers reach rows by address and no op addresses a synthesized row, so
+    # the remotes join AFTER the fold and before the one disjointness check.
+    sources = _resolve_remotes(decl, doc, origin, root, uses, rows)
+
     _check_disjoint(rows, decl.name, doc)
-    return RowTable(decl.name, origin, _relative(doc_path, root), rows,
-                    _resolve_uses(decl, doc, base, root))
+    return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
+                    sources)
 
 
 def _reject_granted(layer: LayerDecl, rowdecl: RowDecl) -> None:
@@ -1115,7 +1254,15 @@ def compile_composition(path: str, root: str | None = None,
 
     root = os.path.abspath(root or os.getcwd())
     table = resolve_file(path, root, overlay)
-    document = compile_files([os.path.join(root, p) for p in table.paths()], **kwargs)
+    # item 424 C2: a synthesized provider is compiled from memory. It is
+    # ORDINARY revl source and the ordinary compiler compiles it, so `_link`
+    # runs G2, G3 and G4 over it exactly as it does over a file row — which is
+    # why nothing in `synthesize.py` is on the trusted path either.
+    sources = dict(kwargs.pop("sources", None) or {})
+    for rel, text in table.sources.items():
+        sources[os.path.join(root, rel)] = text
+    document = compile_files([os.path.join(root, p) for p in table.paths()],
+                             sources=sources or None, **kwargs)
     document["rows"] = table.to_ir()
     if isinstance(document.get("manifest"), dict):
         document["manifest"]["rows"] = document["rows"]

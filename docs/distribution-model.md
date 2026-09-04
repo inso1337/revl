@@ -194,7 +194,7 @@ new subsystem.
 | **Failover** | reactive coeffects (R2/R3), a withdrawn worker's route suspends, survivors continue | Built |
 | **Remote / cross-machine** | TCP + mTLS network seam (listener on py; consumers on rust/go/java) | Built (with the listener-tier scope note) |
 | **Circuit-breaking** | the quarantine tier, a suspect candidate proves itself in the wasm sandbox before it is admitted | Built (v1: `revl_quarantine`, swap admission hook) |
-| **Registry / multi-resolution** | `revl_resolve`, find an admission-compatible provider instead of hand-wiring | Built (`revl_resolve` MCP verb + CLI) |
+| **Registry / multi-resolution** | `revl_resolve`, find an admission-compatible provider instead of hand-wiring | Built (`revl_resolve` MCP verb; there is no `revl resolve` subcommand, and the CLI reaches the registry through `revl policy evaluate --registry`) |
 
 ### Emitted-body routing: per-tier status (item 173)
 

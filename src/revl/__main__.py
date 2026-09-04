@@ -14,6 +14,13 @@ from __future__ import annotations
 import json
 import sys
 
+# issue #317: `-m` puts the working directory at sys.path[0], so a `cordis.py`
+# or `yaml.py` next to a composition would be imported instead of the real
+# module. Drop it before anything else this entry point pulls in.
+from ._safepath import drop_cwd_entry
+
+drop_cwd_entry()
+
 from .compiler import compile_files
 from .diagnostics import obligations, report
 from .distribute import distributability
@@ -995,6 +1002,18 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
             trail = " -> ".join(f"{op} by `{layer}` (L{level})"
                                 for level, layer, op in row.provenance)
             print(f"  {'':<24}   {trail}")
+        if row.remote is not None:
+            # item 424 C2. The peer, the reach and the failure mode are the
+            # ADMISSION facts a remote row adds; the WIRING panel below prints
+            # nothing different for it, which is D-424c.1 visible in the output.
+            info = row.remote
+            print(f"  {'':<24}   REMOTE peer {info['peer']}  "
+                  f"reach `{info['capability']}`  "
+                  f"on_failure {info['onFailure']}  "
+                  f"redirect {info.get('redirect', 'refuse')}")
+            print(f"  {'':<24}   synthesized from service "
+                  f"`{info['service']}` ({info['serviceSource']}); "
+                  "NO inverse — a remote effect survives unwind")
     print()
     print("WIRING")
     for label, edges in table.wiring().items():

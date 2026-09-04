@@ -127,6 +127,198 @@ def test_peek_ahead_clamps_to_eof():
     assert parser.peek_ahead(0) is parser.peek()
 
 
+# ------------------------------- extreme and malformed input still diagnoses
+#
+# Four inputs (issues #310, #311, #312, #315) that each produced a raw python
+# exception, or a silently broken program, where a diagnostic was the whole
+# contract. They are here rather than in the campaign because none of them is
+# reachable by mutation in any useful time — a 4400-digit literal and a
+# 5000-deep parenthesis nest are not what a shrinker converges on — and each
+# one is a property the frontend now promises out loud.
+
+NESTED = [
+    # (name, source) — every one of these once ended in `RecursionError`
+    ("parens", "fn f() -> Int { return " + "(" * 5000 + "1" + ")" * 5000 + " }"),
+    ("calls", "fn g(x: Int) -> Int { return x }\nfn f() -> Int { return "
+              + "g(" * 500 + "1" + ")" * 500 + " }"),
+    ("lists", "fn f() -> Int { return " + "[" * 500 + "]" * 500 + " }"),
+    ("records", "fn f() -> Int { return " + "{a:" * 500 + "1" + "}" * 500 + " }"),
+    ("templates", 'fn f() -> Str { return ' + "`${" * 500 + '"x"' + "}`" * 500 + " }"),
+    ("blocks", "fn f() -> Int { " + "if (true) { " * 5000 + "return 1"
+               + " }" * 5000 + "\nreturn 0 }"),
+    ("types", "fn f(x: " + "Opt[" * 20000 + "Int" + "]" * 20000 + ") -> Int { return 1 }"),
+]
+
+
+@pytest.mark.parametrize("name,src", NESTED, ids=[n for n, _ in NESTED])
+def test_deep_nesting_is_a_diagnostic_not_a_recursion_error(name, src):
+    """Issue #310. The parser is recursive descent and its precedence ladder
+    cost ~26 python frames per nested `(`, so the ceiling sat at 38 nested
+    parentheses — reached as a traceback. Recursion depth is the COMPILER's
+    bound, not the language's, so the refusal has to say so."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "fuzz.rvl")
+    assert "nest" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("depth", [38, 40, 190])
+def test_ordinary_generated_nesting_still_compiles(depth):
+    """The bound must sit above what generated code writes: 38 parens and a
+    40-deep call chain are the two shapes the issue measured."""
+    compile_source("fn f() -> Int { return " + "(" * depth + "1" + ")" * depth + " }",
+                   "fuzz.rvl")
+    compile_source("fn g(x: Int) -> Int { return x }\nfn f() -> Int { return "
+                   + "g(" * depth + "1" + ")" * depth + " }", "fuzz.rvl")
+
+
+def test_the_nesting_bound_is_stated_in_the_refusal():
+    """A limit nobody can read is a crash with better manners."""
+    import revl.parser as P
+
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("fn f() -> Int { return " + "(" * 5000 + "1" + ")" * 5000 + " }",
+                       "fuzz.rvl")
+    assert str(P.NESTING_LIMIT) in str(excinfo.value)
+
+
+def test_gate_admit_answers_a_recursion_bomb():
+    """`gate.admit` is a security surface with a `Verdict` contract: it
+    ANSWERS. It caught `RevlError` only, so this input walked out of it as a
+    `RecursionError` — fail-closed, but not through the documented boundary."""
+    from revl import gate
+
+    verdict = gate.admit("fn f() -> Int { return " + "(" * 5000 + "1" + ")" * 5000 + " }")
+    assert verdict.admitted is False
+
+
+def test_gate_admit_refuses_rather_than_faults_on_any_of_these():
+    """The whole set, through the gate, as verdicts."""
+    from revl import gate
+
+    for src in (
+        "fn f() -> Int { return " + "9" * 4400 + " }",          # issue #311
+        "fn f() -> Int { return 0x" + "f" * 5000 + " }",        # issue #311
+        'fn f() -> Str { return "' + LONE_SURROGATE + '" }',    # issue #311
+        "fn f() -> Float { return 1e999 }",                     # issue #312
+    ):
+        assert gate.admit(src).admitted is False
+
+
+@pytest.mark.parametrize("digits", [4400, 101, 25])
+def test_an_oversized_int_literal_is_a_diagnostic(digits):
+    """Issue #311. `int(num)` ran before any range check, so past CPython's
+    4300-digit int-str limit the LEXER raised `ValueError` — and the checker's
+    own message could not be built either, because rendering the value is the
+    same conversion."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("fn f() -> Int { return " + "9" * digits + " }", "fuzz.rvl")
+    assert "outside the 64-bit range" in str(excinfo.value)
+
+
+def test_an_oversized_hex_literal_is_a_diagnostic():
+    """`0x` + 5000 hex digits converts fine (the limit is base-10 only) and
+    then died stringifying the value INTO the refusal."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("fn f() -> Int { return 0x" + "f" * 5000 + " }", "fuzz.rvl")
+    assert "outside the 64-bit range" in str(excinfo.value)
+
+
+def test_int_literals_at_the_edge_are_untouched():
+    """The bound is tested, not approximated."""
+    compile_source("fn f() -> Int { return 9223372036854775807 }", "fuzz.rvl")
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("fn f() -> Int { return 9223372036854775808 }", "fuzz.rvl")
+    assert "`9223372036854775808`" in str(excinfo.value)
+
+
+# A lone high surrogate. Unreachable from a UTF-8 file and trivially reachable
+# from every JSON-carried source path: the LSP's `didOpen`, the MCP verbs and
+# `gate.admit(str)`.
+LONE_SURROGATE = "\ud800"
+
+
+@pytest.mark.parametrize("src", [
+    'fn f() -> Str { return "' + LONE_SURROGATE + '" }',
+    "fn f() -> Str { return '" + LONE_SURROGATE + "' }",
+    'fn f() -> Str { return `' + LONE_SURROGATE + '` }',
+    'fn f() -> Str { return """' + LONE_SURROGATE + '""" }',
+    "fn f" + LONE_SURROGATE + "() -> Int { return 1 }",
+    "// " + LONE_SURROGATE + "\nfn f() -> Int { return 1 }",
+], ids=["double-quoted", "single-quoted", "template", "triple-quoted",
+        "identifier", "comment"])
+def test_a_lone_surrogate_is_a_diagnostic(src):
+    """Issue #311. `lower._str_literal_value` raised a bare `ValueError` — the
+    invariant it documents is real, but the refusal belongs in the lexer, where
+    it is a diagnostic with a line."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "fuzz.rvl")
+    assert "surrogate" in str(excinfo.value)
+
+
+def test_astral_characters_still_lex():
+    """The guard is for UNPAIRED surrogates; a real astral scalar is ordinary
+    text and must be untouched."""
+    compile_source('fn f() -> Str { return "\U0001F600" }', "fuzz.rvl")
+
+
+@pytest.mark.parametrize("src", [
+    "fn f() -> Float { return 1e999 }",
+    "fn f() -> Float { return -1e999 }",
+    "fn f() -> Float { return 1.5e400 }",
+    "fn f() -> Float { let x = 1e999\n  return x }",
+    "fn f() -> Float { return " + "9" * 4400 + ".5 }",
+], ids=["exponent", "negated", "fraction-exponent", "let-bound", "digit-run"])
+def test_a_non_finite_float_literal_is_a_diagnostic(src):
+    """Issue #312, the worst of the four: this one did not crash, it COMPILED.
+    `1e999` folded to IEEE infinity and every emitter printed the host repr as
+    a bare word — py `inf`, rust `inff64`, java `infd`, go `float64(inf)`, all
+    unbound names — while TypeScript rendered `Infinity` and passed. A program
+    that does not run, produced quietly, is worse than a traceback."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "fuzz.rvl")
+    assert "Float literal" in str(excinfo.value)
+
+
+def test_finite_float_literals_at_the_edge_still_compile():
+    compile_source("fn f() -> Float { return 1e308 }", "fuzz.rvl")
+    compile_source("fn f() -> Float { return 1e-999 }", "fuzz.rvl")  # underflows to 0.0
+
+
+def test_no_backend_can_render_a_non_finite_float():
+    """The frontend refuses the literal, so this is the emitters' own belt: an
+    IR handed straight to a backend must not make it print an unbound name."""
+    import importlib.util
+
+    node = {"kind": "lit", "value": float("inf")}
+    for backend in ("python", "typescript", "rust", "java", "go", "wasm"):
+        path = ROOT / "backends" / backend / "emit.py"
+        spec = importlib.util.spec_from_file_location(f"_finite_{backend}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with pytest.raises(module.EmitError):
+            module._finite_float(node["value"])
+        assert module._finite_float(1.5) == 1.5
+
+
+@pytest.mark.parametrize("src", [
+    "\ufefffn f() -> Int { return 1 }",
+    "\ufeff// a comment\nfn f() -> Int { return 1 }",
+], ids=["before-a-declaration", "before-a-comment"])
+def test_a_leading_byte_order_mark_is_consumed(src):
+    """Issue #315. A UTF-8 BOM is part of the file's ENCODING — Notepad and
+    PowerShell write one — and `encoding="utf-8"` hands it through as a first
+    character no grammar mentions. It was refused as `unexpected character
+    '\ufeff'`, which names an invisible."""
+    compile_source(src, "fuzz.rvl")
+
+
+def test_a_byte_order_mark_inside_the_file_is_named():
+    """Still refused, but by a name a reader can search for."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("fn f() -> Int { return \ufeff1 }", "fuzz.rvl")
+    assert "byte-order mark" in str(excinfo.value)
+
+
 # ------------------------------------------------ the self-host never faults
 
 def test_gate_survives_a_backward_token_scan(gate):

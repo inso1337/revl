@@ -82,25 +82,20 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
 
 ## Verb reference
 
-| step | CLI (today) | MCP (today) | MCP (planned, item 345) |
-|---|---|---|---|
-| scaffold | `revl scaffold` | none | `revl_scaffold` |
-| fillSpec | folded into scaffold `--json` | `revl_check` (enriches every open hole) | already covered by `revl_check` |
-| fmt | `revl fmt` | none | `revl_fmt` |
-| explain | `revl explain <code>` | the `hint` field on every diagnostic | `revl_explain` |
-| admit | `revl compile`, `revl run` | `revl_admit`, `revl_gauntlet` | already covered |
+| step | CLI | MCP |
+|---|---|---|
+| scaffold | `revl scaffold` | `revl_scaffold` |
+| fillSpec | folded into scaffold `--json` | `revl_check` (enriches every open hole) |
+| fmt | `revl fmt` | `revl_fmt` |
+| explain | `revl explain <code>` | `revl_explain`, plus the `hint` field on every diagnostic |
+| grammar | `revl grammar` | `revl_grammar` |
+| admit | `revl compile`, `revl run` | `revl_admit`, `revl_gauntlet` |
 
-**Today, `scaffold`/`fmt`/`explain` exist only as CLI subcommands**; the MCP
-surface stops at check/admit/plan/ship/swap/edit. An agent driving revl purely
-over MCP has to shell out to the CLI for those three steps, or reimplement
-scaffold-then-fill by hand-writing holed drafts, which is exactly the gap
-that caused the weeks of rediscovery this doc exists to close. Exposing them
-as `revl_scaffold` / `revl_fmt` / `revl_explain` (scaffold returning the
-skeleton and its fill specs in one call, mirroring what `--json` already does
-over the CLI) is tracked as item 345 in [v2.0-roadmap.md](v2.0-roadmap.md).
-Once that lands, the MCP column above becomes the primary surface for an
-MCP-native harness; the CLI forms keep working identically for anything
-driving revl as a subprocess.
+Item 345 landed: `scaffold`, `fmt`, `explain` and `grammar` are MCP verbs, not
+CLI-only steps. An MCP-native harness needs no shell-out for any of them, and
+the CLI forms keep working identically for anything driving revl as a
+subprocess. `revl mcp serve` advertises 51 verbs in total; the full list is in
+[mcp-reference.md](mcp-reference.md).
 
 ## See also
 

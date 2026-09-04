@@ -1,7 +1,12 @@
 # 256: capability-bound secrets, a key confined to one capability's emissions
 
 Design note for roadmap item 256 (`docs/v2.0-roadmap.md`, grep `^256\.`).
-Design only: no compiler code changes land with this note. The companion is
+**Implemented since.** The note itself landed no code, but the design has: the
+`Secret[T]` confidentiality qualifier and the `confidential` origin are in
+`src/revl/taint.py` (Slice 3), plug-time key injection into `_REVL_SECRETS` is in
+`src/revl/lower.py` and `src/revl/run.py`, and per-printer redaction is emitted on
+the python, typescript and go tiers. Read the note as the reasoning, not as the
+current status. The companion is
 item 249 (`docs/design/249-taint-provenance.md`), whose taint machinery this
 note reuses rather than duplicates, and item 379 (extern typed config), whose
 plug-time injection seam this note extends.
@@ -671,6 +676,55 @@ it already applies to every origin), and rejects `endorse[secret]` unconditional
 (4a.3). This is the sharp line between the two features: the bound key has no
 downgrade, the typed `Secret[T]` value has an audited one, and they carry disjoint
 origins so no declassifier can confuse them.
+
+### 7d. What `Secret[T]` does NOT cover: a config field with a literal default
+
+`Secret[T]` is a statement about where a value may GO, not about where it IS.
+Everything in 7a-7c fences the value's onward flow, and the runtime redaction
+(the `<name>.config` trace line, WAL records, seam failure text, MCP approval
+tickets) covers a value that arrives at load time. None of it applies to a
+literal the author typed into the source:
+
+```revl
+component Payments {
+  config { api_key: Secret[Str] = "sk-live-..." }
+}
+```
+
+That default is source. It lowers into the IR's config entry
+(`lower._ir_config_field`) and into the emitted `ConfigSchema` verbatim, with
+the `secret` marking sitting *beside* the plaintext rather than in place of
+it, and from there it reaches every build artifact that carries the IR or the
+emitted backend source: `revl compile -o`, a bundle's `ir/ir.json` and
+`emitted/<backend>/`, and a component published through `truc` (whose registry
+copy is the `.rvl` source itself). The lock file and the attestation carry only
+digests, and the site wheel vendors the compiler rather than any user program,
+so it stops there — but "in every build artifact" is already further than a
+reader who trusted the qualifier would guess.
+
+This is deliberate and stays legal: the repo's own leak canaries put a real
+value in place precisely so a test can detect it downstream
+(`tests/test_secret_externalization.py`). So the frontend WARNS rather than
+refusing — `taint.LiteralSecretDefaultWarning`, raised once per field where
+`mentions_secret(field.type)` holds and the default is not `null`. The warning
+names the form that has no value to leak, which is 1a's bound secret:
+
+```revl
+secret api_key for payments.charge
+
+extern emission[payments.charge] fn charge(amount: Int) -> Str = @py { return "ch_1" }
+```
+
+The `extern` is there because the binding is capability-keyed: a secret whose
+capability no emission serves is refused outright, so the smallest program
+that shows the form has to name the emission it feeds (§1a).
+
+`parser.SecretDecl` carries `name`, `capability` and `line` and has no value
+field at all (§1b), so nothing about the value exists in the AST or the IR to
+be bundled, published or digested. Use that when the value must be absent from
+the artifact; use a plain `Secret[T]` field with the value supplied at load
+time when it must merely be redacted at the boundaries; and use a literal
+default only where a test needs one, knowing what it costs.
 
 ## 8. Adversarial self-review
 

@@ -342,17 +342,46 @@ def test_the_audit_publishes_the_contract_but_never_a_value():
     assert rows["model"]["bound"]["kind"] == "in"
 
 
-def test_a_secret_contract_field_is_marked_and_still_valueless():
-    audit = audit_report(_ir("""
-service Env { fn token() -> Str }
+_SECRET_CONTRACT = """
+service Env { fn port() -> Int }
 boot component Boot provides env: Env {
-  config { auth_token: Secret[Str] }
-  provide env { fn token() = config.auth_token }
+  config { auth_token: Secret[Str], port: Int = 8099 }
+  provide env { fn port() = config.port }
 }
-"""))
+"""
+
+
+def test_a_secret_contract_field_is_marked_and_still_valueless():
+    """`valueless` is a property of the AUDIT ROW, not of the field: no row in
+    this table ever carries a value (the sibling test above says the same of the
+    ordinary fields), because values arrive at `revl run --env` time, after the
+    audit, and never enter the IR. What the secret marking adds is the `secret`
+    flag, so the contract states which field the operator must treat as a
+    credential without the audit becoming the place that discloses it."""
+    audit = audit_report(_ir(_SECRET_CONTRACT))
     row = audit["env"]["fields"][0]
     assert row["name"] == "auth_token" and row["secret"] is True
     assert "value" not in row
+
+
+def test_a_secret_contract_field_may_not_be_handed_back_through_the_contract():
+    """The other half, and the reason the composition above reads the way it
+    does. A contract field declared `Secret[T]` mints the `confidential` origin
+    (item 256 §7a), so returning it from a provide method is a disclosure
+    crossing: a provide-method return is marshalled BY VALUE across the service
+    / MCP bridge and the placement seam, to a caller that declared `-> Str` and
+    therefore never declared a `Secret[T]` receiver. The environment contract
+    says which field is a credential; it is not a channel for handing that
+    credential back out."""
+    src = _SECRET_CONTRACT.replace(
+        "service Env { fn port() -> Int }",
+        "service Env { fn port() -> Int\n  fn token() -> Str }").replace(
+        "fn port() = config.port",
+        "fn port() = config.port\n    fn token() = config.auth_token")
+    with pytest.raises(RevlError) as caught:
+        _ir(src)
+    assert getattr(caught.value, "code", None) == "G-SECRET-FLOW"
+    assert "auth_token" in caught.value.message + (caught.value.hint or "")
 
 
 def test_adding_a_contract_field_is_a_widening():

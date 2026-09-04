@@ -449,3 +449,97 @@ def test_a_short_value_is_never_marked():
 
     confidential.register_secret_value("ok")
     assert confidential.is_secret_value("ok") is False
+
+
+# --------------------------------------------------------------------------
+# THE ONE PLACE `Secret[T]` DOES NOT COVER, and the warning that says so
+# (issue #192). Everything above is about a value that arrives at run time.
+# A config field with a LITERAL DEFAULT is different in kind: the author wrote
+# the value into the source, so it lowers into the IR and into the emitted
+# ConfigSchema like any other default, with the `secret` marking beside it
+# rather than in place of it. That is by construction — the canary above works
+# because a real value can be put in place — so this is a WARNING, and the
+# tests below pin that the lowering is unchanged.
+#
+# The value-free form is item 256's `secret NAME for CAP`: `parser.SecretDecl`
+# carries `name`, `capability`, `line` and no value field at all, so there is
+# nothing for the IR to hold. The warning has to name it, or it tells a reader
+# their belief is wrong without telling them what to write instead.
+# --------------------------------------------------------------------------
+import warnings  # noqa: E402
+
+from revl.taint import LiteralSecretDefaultWarning  # noqa: E402
+
+_LITERAL_DEFAULT = """service Ops { emission fn go(u: Str) -> Int }
+
+component Agent provides ops: Ops {
+  config { api_key: Secret[Str] = "SEKRIT-CANARY-123" }
+  provide ops { fn go(u) = 1 }
+}
+"""
+
+
+def _config_entry(src: str, field: str) -> dict:
+    ir = compile_source(src)
+    for comp in ir["components"]:
+        for entry in comp.get("config") or []:
+            if entry["name"] == field:
+                return entry
+    raise AssertionError(f"no config field {field!r} in the IR")
+
+
+def _compile_quietly(src: str):
+    """Compile with the warning turned into an error, so a test that asserts
+    silence fails on a warning rather than on an assertion about a list."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", LiteralSecretDefaultWarning)
+        return compile_source(src)
+
+
+def test_a_secret_config_field_with_a_literal_default_warns():
+    with pytest.warns(LiteralSecretDefaultWarning) as caught:
+        compile_source(_LITERAL_DEFAULT)
+    message = str(caught[0].message)
+    assert "Agent.api_key" in message
+    assert "does NOT keep that literal out of the compiled artifact" in message
+
+
+def test_the_warning_names_the_value_free_form_as_the_alternative():
+    """A warning that only says 'you are wrong' costs a reader an
+    investigation. This one has to name `secret NAME for CAP`."""
+    with pytest.warns(LiteralSecretDefaultWarning) as caught:
+        compile_source(_LITERAL_DEFAULT)
+    assert "secret api_key for <capability>" in str(caught[0].message)
+
+
+def test_the_literal_still_reaches_the_ir_verbatim():
+    """NOT a refusal, and the warning changes no bytes. The canary fixtures in
+    this file need a real value in place to detect a leak downstream, so the
+    day this starts stripping the default is the day they stop measuring
+    anything. This is also the fact the warning is reporting."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", LiteralSecretDefaultWarning)
+        entry = _config_entry(_LITERAL_DEFAULT, "api_key")
+    assert entry["default"] == CANARY
+    assert entry["secret"] is True
+
+
+def test_a_secret_config_field_with_no_default_is_silent():
+    """The value-free path, and the shape every fixture in this file uses: the
+    value arrives at load time, so there is no literal to be wrong about."""
+    ir = _compile_quietly(_LITERAL_DEFAULT.replace(
+        f'api_key: Secret[Str] = "{CANARY}"', "api_key: Secret[Str]"))
+    assert ir is not None
+
+
+def test_an_unqualified_field_with_a_literal_default_is_silent():
+    """FALSE POSITIVE. `Secret[T]` is what makes a default worth a sentence;
+    an ordinary default is an ordinary default."""
+    _compile_quietly(_LITERAL_DEFAULT.replace("Secret[Str]", "Str"))
+
+
+def test_a_null_default_is_silent():
+    """`= null` lowers to the same `None` as no default at all, so it cannot be
+    distinguished here, and it is not a credential either way."""
+    _compile_quietly(_LITERAL_DEFAULT.replace(
+        f'Secret[Str] = "{CANARY}"', "Secret[Str] = null"))

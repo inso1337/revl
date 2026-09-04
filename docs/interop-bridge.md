@@ -1,8 +1,10 @@
 # revl interop bridge — cross-host services without shared memory
 
-**Status:** proposal (2026-08-16) · companion to docs/syntax-2.0.md · §4
-(distributability audit) implemented in `revl audit`; the transport tier (§3)
-is not yet built
+**Status:** built · companion to [syntax-2.0.md](syntax-2.0.md). §4
+(distributability audit) is implemented in `revl audit`, and the transport tier
+(§3) is implemented over a Unix socket and verified py↔py and py↔node against
+the real runtimes. A network seam (TCP + mTLS) is on top of it; see
+[network-path.md](network-path.md).
 
 A translation layer between the host languages (TypeScript and Python) was
 raised as a follow-up to the [2.0 syntax proposal](syntax-2.0.md): since a

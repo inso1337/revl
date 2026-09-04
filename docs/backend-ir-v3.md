@@ -10,7 +10,7 @@ v1-shaped source still emits `ir_version: 1` byte-identically.
 | 2 | realms and interception | all six |
 | 3 | types, pure functions, externs, tests, and the component-body constructs below | all six |
 
-Ground truth is `tools/conformance.py`: it emits 49 constructs through every
+Ground truth is `tools/conformance.py`: it emits 62 constructs through every
 backend and reports what each does. A tier that cannot express something must
 raise a clear `EmitError` naming the limit — never emit wrong code, never
 crash. (`docs/conformance.md` records where that contract has been broken.)
@@ -76,6 +76,28 @@ Beyond v1's `let-effect` / `effect` / `emit` / `provide` / `await` / `return`:
 `let`/`assign` in a **method** body are new in this tier: a method may name an
 intermediate instead of nesting everything into one expression. Backends
 render them as host locals (`let`/`const`/`var`/`(local $x i32)`).
+
+### Ownership markers on `let` and `assign` (item 445)
+
+`src/revl/ownership.py` stamps two optional keys, proved once in the frontend so
+no backend repeats the analysis. Both are absent on every node that does not
+qualify, so an IR document for a program with no in-place accumulation is
+byte-identical to one produced before they existed.
+
+| key | on | values | meaning |
+|---|---|---|---|
+| `unique` | `assign` | `true` | the binding owns its object outright at this write; the persistent copy is unobservable and an in-place write is the faithful lowering |
+| `unique` | `assign` | `"copy"` | the binding owns its object only if the backend materialised a private copy at the `let` that introduced it |
+| `unique_birth` | `let` | `"List"` / `"Map"` | this `let` binds another name (`var out = m`); a backend honouring `unique: "copy"` materialises ONE private copy of the source here, where the persistent form made one per write. The value names the container shape |
+
+**What rides the IR is a fact, not an instruction.** The marker says the binding
+uniquely owns its object at that write; it does not say "mutate". Each tier
+decides what to do with it, and the tiers genuinely differ: rust needs none of it
+(the borrow checker discharges the same obligation), a Go or Python `Str` cannot
+be mutated at all, and a tier that has not been audited against these rules
+ignores the marker and keeps the copying form. **Ignoring the marker is always
+correct.** A backend that does not implement the birth copy must also ignore
+every `unique: "copy"` write.
 
 **`{"step": "return", "expr": null}` is legitimate** and must be handled. It
 crashed three backends with a raw `AttributeError` before being caught — the

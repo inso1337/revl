@@ -133,12 +133,15 @@ observable* (a deadline, a withdrawal), not hidden.
    *filtered* shared IR. The cleaner shape is **two independent compositions**
    sharing only `service Gate` — the consumer's IR then never contains the
    compiler extern and no filtering is needed. That is the item-56 *network*
-   placement (a provider serving "remote consumers [that] live in other
-   placements", `placement.py`), but its TCP+mTLS transport is **py-only** today
-   (`placement.py`: "place network seams on py processes"), so a *ts* consumer
-   over the network path is not yet wired. Deciding between "filter the shared
-   IR" (this slice) and "two compositions over the network transport" is the
-   next Path-A fork.
+   placement (a provider serving remote consumers that live in other
+   placements, `placement.py`). **The ts fork is settled.** The TCP+mTLS rule is
+   per-role, not py-only: only the network *provider* must be py (the serve side
+   with the mTLS listener), while a node/ts consumer dials it through
+   `backends/typescript/bridge.ts::makeProxy`'s network endpoint and is allowed
+   (item 149). The two-composition `[remotes]` shape is item 151. Both are
+   documented in [network-path.md](network-path.md) and proved by
+   `tests/test_network_gate_path.py` and `tests/test_two_composition_gate.py`.
+   What is still refused is a rust, go or java network consumer.
 2. **Only `admit` is shipped.** evolve needs `propose`/regenerate: admit a
    candidate, and on refusal feed the why-trace back to a generator and retry.
    That loop (and where it runs — the harness, or a `Gate` operation) is the

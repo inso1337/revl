@@ -18,14 +18,43 @@ npm test        # emits test fixtures, runs R1–R5 + emitter + upstream suites
 Requirements: Node >= 23.6 (erasable-syntax TypeScript, used directly — no
 build step) and `python3` on PATH (the emitter is pure-Python, stdlib only).
 
+**What an emitted module may assume about its environment is a written
+contract: `docs/ts-runtime-contract.md`.** `npm test` runs the suite under
+vitest, which supplies more than the shipping runtime does (a CommonJS scope
+with `require`/`__dirname`, vite's module resolution, full TypeScript). So
+`revl test --backend ts` re-runs every emitted module under plain node through
+`scripts/node-tier-runner.mjs` before it reports a pass; read the contract
+before adding a construct — or a matcher — to `emit.py`.
+
 Other commands:
 
 ```sh
 npm run demo       # load PgDatabase + UserCache, hot-swap the provider,
                    # unload everything; prints the R2/R3 event log
 npm run golden     # regenerate golden/user_cache.ts from the reference IR
-npm run typecheck  # tsc --noEmit over runtime.ts, demo.ts, golden/
+npm run typecheck  # every .ts in the tier: the runtime + demo as one program
+                   # (tsc --noEmit), then the emitted modules and the
+                   # hand-written sources one program each
 ```
+
+`npm run typecheck` must run after `npm test`, which is what writes the
+gitignored `tests/generated/`; run cold it says so rather than checking
+nothing. Three configs divide the tier between them, and
+`scripts/typecheck-handwritten.mjs` fails if any `.ts` here is matched by none
+of them:
+
+| config | covers | checked by |
+|---|---|---|
+| `tsconfig.json` | `runtime.ts`, `demo.ts` | `tsc --noEmit`, one program |
+| `tsconfig.generated.json` | `tests/generated/**`, `golden/**` | `scripts/typecheck-generated.mjs`, one program per module |
+| `tsconfig.handwritten.json` | the vitest suites, `bridge.ts`, `revl_fs_ts.ts`, `placement_runner.ts`, `bridge_node.ts`, `revl_shell*.ts`, `scripts/`, `vitest.config.ts` | `scripts/typecheck-handwritten.mjs`, one program per file |
+
+One program per module is not a performance choice. Every emitted module
+declares its provisions by augmenting cordis' global `Context`, so two modules
+that provide the same service name cannot share a program: TypeScript merges
+the augmentations, reports TS2717, and resolves `ctx.<key>` to whichever won.
+The same rule binds inside a file — one test file may not import two modules
+that provide the same key (see the note atop `tests/semantics.test.ts`).
 
 ## Layout
 

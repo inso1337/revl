@@ -104,12 +104,16 @@ def test_gate_refuses_meaning_changing_rewrite():
         "}\n"
     )
     # Change the healthy() result from `true` to `false` -- compiles fine but
-    # the IR differs.
+    # the meaning differs.
     tampered = original.replace("fn healthy() = true", "fn healthy() = false")
 
     result = ir_equivalent(original, tampered, "registry.rvl")
     assert not result.admitted
-    assert "IR changed" in result.reason
+    # Caught by the token check, which runs first and names the exact token
+    # that moved. (Before issue 309 this was caught only by the IR arm, and
+    # only for a file the compiler could build standalone.)
+    assert "token stream" in result.reason
+    assert "'true'" in result.reason and "'false'" in result.reason
 
 
 def test_gate_refuses_rewrite_that_breaks_compilation():
@@ -238,3 +242,133 @@ def test_migrate_gate_holds_on_identity():
     migrated, _ = migrate_source(src, "k.rvl")
     assert migrated == src
     assert ir_equivalent(src, migrated, "k.rvl").admitted
+
+
+# --------------------------------------------------------------------------
+# Issue 309: the gate proves meaning preservation for EVERY construct
+#
+# `revl fmt` used to rewrite a `use`-bearing file with no proof at all. The IR
+# arm compiled with `compile_source`, which refuses a `use` for want of a
+# module directory, so every such file fell through to a "token identity"
+# fall-back that compared the FORMATTER'S OWN scanner with itself -- and that
+# scanner had drifted from the lexer. Both sides were mis-scanned the same
+# way, the comparison passed, and the corrupted rewrite was written in place.
+# --------------------------------------------------------------------------
+
+# Constructs the drifted scanner got wrong. Each is a one-line function body
+# whose meaning the formatter must not touch.
+DRIFTED_CONSTRUCTS = [
+    ('fn f() -> Str { return """abc""" }', "triple-quoted string"),
+    ("fn f() -> Str { return 'abc' }", "single-quoted string (item 382)"),
+    ('fn f() -> Str { return "a\\"b" }', "escaped quote inside a string"),
+    ("fn f() -> Int { return 1_000 }", "digit-group separator (item 381)"),
+    ("fn f() -> Int { return 0xFF }", "hexadecimal literal (item 381)"),
+    ("fn f() -> Int { return 0b1010 }", "binary literal (item 381)"),
+    ("fn f() -> Int { return 0o17 }", "octal literal (item 381)"),
+    ("fn f(a: Int32, b: Int32) -> Int32 { return a & b }", "bitwise and (item 366)"),
+    ("fn f(a: Int32, b: Int32) -> Int32 { return a ^ b }", "bitwise xor (item 366)"),
+    ("fn f(a: Int32, b: Int32) -> Int32 { return a << b }", "bitwise shift (item 366)"),
+    ("fn f(a: Int32) -> Int32 { return ~a }", "bitwise not (item 366)"),
+]
+
+
+def _module_pair(tmp_path, body):
+    """A `use`-bearing file next to the module it imports, on disk."""
+    (tmp_path / "lib.rvl").write_text("pub fn one() -> Int { return 1 }\n")
+    target = tmp_path / "use_it.rvl"
+    target.write_text('use "lib.rvl" as lib\n\n' + body + "\n")
+    return target
+
+
+def test_use_bearing_file_round_trips_with_identical_ir(tmp_path):
+    # The headline claim, proven by COMPILING both texts with `use` resolved
+    # and comparing IR -- not by eyeballing the formatted text.
+    import os
+    from revl.compiler import compile_files
+
+    for body, label in DRIFTED_CONSTRUCTS:
+        target = _module_pair(tmp_path, body)
+        original = target.read_text()
+        # Messy input, so the formatter really does rewrite something.
+        messy = original.replace("fn f(", "fn  f(").replace("{ return", "{   return")
+        target.write_text(messy)
+
+        formatted = format_source(messy, str(target))
+        gate = ir_equivalent(messy, formatted, str(target))
+        assert gate.admitted, f"{label}: refused ({gate.reason})"
+
+        path = os.path.abspath(str(target))
+        before = _canonical_ir(compile_files([path], sources={path: messy}))
+        after = _canonical_ir(compile_files([path], sources={path: formatted}))
+        assert before == after, f"{label}: formatting changed the compiled IR"
+
+
+def test_gate_runs_the_ir_arm_for_a_use_bearing_file(tmp_path):
+    # Not just "admitted": the proof must be the IR comparison. Before the fix
+    # this file reached the vacuous token fall-back instead.
+    target = _module_pair(tmp_path, 'fn f() -> Str { return """abc""" }')
+    messy = target.read_text().replace("fn f()", "fn  f( )")
+    formatted = format_source(messy, str(target))
+    gate = ir_equivalent(messy, formatted, str(target))
+    assert gate.admitted
+    assert gate.proof == "IR byte-identical"
+
+
+def test_token_check_uses_the_reference_lexer_not_the_formatter_scanner():
+    # The check must be able to see a difference the formatter's own scanner
+    # cannot. A scanner that knows only `"` reads `"""abc"""` as `""`, `abc`,
+    # `""` -- the same three pieces it reads from `"" "abc" ""`, which is a
+    # DIFFERENT program. The reference lexer tells them apart.
+    from revl.formatter import _token_signature
+
+    one = 'fn f() -> Str { return """abc""" }'
+    other = 'fn f() -> Str { return "" "abc" "" }'
+    assert _token_signature(one, "a.rvl") != _token_signature(other, "a.rvl")
+
+
+def test_gate_refuses_a_rewrite_that_changes_tokens_in_an_uncompilable_file():
+    # No IR baseline (this does not type-check), so only the token check can
+    # speak -- and it must refuse rather than wave the rewrite through.
+    original = "fn f() -> Str { return \"\"\"abc\"\"\" }\n"
+    tampered = 'fn f() -> Str { return "" "abc" "" }\n'
+    result = ir_equivalent(original, tampered, "<source>")
+    assert not result.admitted
+    assert "token stream" in result.reason
+
+
+def test_gate_refuses_source_that_does_not_lex():
+    # Nothing can be proven about a file the lexer rejects, so nothing is
+    # written. Fail closed rather than fall back to a weaker check.
+    result = ir_equivalent("fn f() { return `unterminated }\n", "anything\n",
+                           "<source>")
+    assert not result.admitted
+    assert "does not lex" in result.reason
+
+
+def test_host_body_brace_inside_a_string_is_not_a_terminator():
+    # A naive brace count truncated the body at the `"}"` string (this is the
+    # shape `stdlib/json.rvl` carries).
+    src = ('extern fn dumps(v: Str) -> Str\n'
+           '@ts {\n'
+           '  const closer = "}"\n'
+           '  return closer\n'
+           '}\n')
+    assert format_source(src, "j.rvl") == src
+
+
+def test_cli_refuses_rather_than_writing_a_corrupted_use_bearing_file(tmp_path):
+    # End to end through the CLI: whatever happens, the file on disk after
+    # `revl fmt` compiles to the same IR as the file before it.
+    import os
+    from revl.compiler import compile_files
+
+    target = _module_pair(tmp_path, 'fn f() -> Str { return """abc""" }')
+    messy = target.read_text().replace("fn f()", "fn  f( )")
+    target.write_text(messy)
+    path = os.path.abspath(str(target))
+    before = _canonical_ir(compile_files([path], sources={path: messy}))
+
+    assert main(["fmt", str(target)]) == 0
+    after_text = target.read_text()
+    assert after_text != messy, "the formatter should have tidied this file"
+    assert _canonical_ir(compile_files([path], sources={path: after_text})) == before

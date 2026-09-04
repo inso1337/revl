@@ -24,10 +24,10 @@ revl refuses.)
 | `repeat(n)` | 1 | Str | n copies concatenated | `x * n` | `x.repeat(n)` |
 | `startsWith(p)` | 1 | Str | prefix probe: `p` is the receiver's first `p.length()` code points (FR-6) | `x.startswith(p)` | `x.startsWith(p)` |
 | `endsWith(p)` | 1 | Str | suffix probe: `p` is the receiver's last `p.length()` code points (FR-6) | `x.endswith(p)` | `x.endsWith(p)` |
-| `is_digit()` | 0 | Str | single-char ASCII digit `0`-`9` (item 233) | `"0" <= x <= "9"` | deferred |
-| `is_alpha()` | 0 | Str | single-char ASCII letter `a`-`z`/`A`-`Z` (NOT `_`) | chained range compare | deferred |
-| `is_alnum()` | 0 | Str | single-char ASCII letter or digit | chained range compare | deferred |
-| `is_space()` | 0 | Str | single-char ASCII blank: space, tab, LF, CR | `x in (" ", "\t", "\n", "\r")` | deferred |
+| `is_digit()` | 0 | Str | single-char ASCII digit `0`-`9` (item 233) | `"0" <= x <= "9"` | chained compare in an IIFE |
+| `is_alpha()` | 0 | Str | single-char ASCII letter `a`-`z`/`A`-`Z` (NOT `_`) | chained range compare | chained range compare |
+| `is_alnum()` | 0 | Str | single-char ASCII letter or digit | chained range compare | chained range compare |
+| `is_space()` | 0 | Str | single-char ASCII blank: space, tab, LF, CR | `x in (" ", "\t", "\n", "\r")` | equality set |
 | `div_trunc(b)` | 1 | Int | integer division rounding toward zero | built | `Math.trunc(a / b)` |
 | `div_floor(b)` | 1 | Int | integer division rounding toward −∞ | `a // b` | `Math.floor(a / b)` |
 | `div_euclid(b)` | 1 | Int | division whose remainder is ≥ 0 | built | built |
@@ -47,8 +47,9 @@ revl refuses.)
   `out = out.push(v)`.
 - `.length` also works in property position (the existing `len` node).
 - List element read is indexing (`xs[i]`), not a method.
-- `charAt`/`charCodeAt` are Str-only by spec; the v0 checker does not yet
-  type-dispatch (misuse is a host runtime error) — full typing tightens this.
+- `charAt`/`charCodeAt` are Str-only, and the checker enforces it: a non-Str
+  receiver is refused with ``builtin `charAt` needs a Str receiver, got
+  `List[Int]` `` (`src/revl/typecheck.py`).
 - Type dispatch for `indexOf` is a Python-side inline helper because
   `str.find`/`list.index` disagree about absence; both backends return `-1`.
 - `split` is pinned to the JS shape on every backend: `"a,,b".split(",")`
@@ -344,12 +345,12 @@ code-point range compare. Lowered native — a chained comparison (`"0" <= x <=
 no call and no intermediate `ord`. See `docs/bench-selfhost.md` for the lexer
 before→after.
 
-**Tier status.** The **py tier** (the bench tier this item targets) lowers all
-four native. Other tiers (rust/java/ts/wasm/go) are **deferred**: nothing
-outside `selfhost/lexer.rvl` — which is only ever emitted through the python
-backend — uses these builtins yet, so no other backend is exercised with them.
-A tier that later adopts them lowers to its own ASCII test (`char::is_ascii_*`
-on rust, a range compare elsewhere).
+**Tier status.** **py, typescript and rust** lower all four native (`char::is_ascii_*`
+on rust, a chained range compare or equality set on ts). **go, java and wasm**
+still refuse them, each with its own message (`unknown v3 builtin method
+'is_digit'` on go, `unknown builtin method 'is_digit'` on java, `unsupported
+builtin method 'is_digit'` on wasm). A tier that later adopts them lowers to its
+own ASCII test.
 
 ### `Str.codepoint_at(i)`: codepoint-at-index scan (item 276)
 

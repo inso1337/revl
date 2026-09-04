@@ -32,7 +32,8 @@ reports how many witnesses it found; a claim is the surface a proof cannot
 reach, so the honest thing is to *list* it rather than assert it holds. Moving
 a fact from `claimed` to `tested` (fault sweep) or from a structural claim to
 a `tested` observation (inverse round-trips) is exactly what roadmap items 30
-and 26 will do — and the schema already has the slots.
+and 26 did, as standalone runners. The dossier slots are not yet wired to them;
+see "the pending slots" below.
 
 ## Dossier schema
 
@@ -122,6 +123,22 @@ leaves residue, or cannot even boot changes nothing the operator can see —
 loads a live composition, grades a *different* candidate against it, and
 asserts the live one still answers with its original provider afterward.
 
+### Isolation is not a licence to run what the gate refuses
+
+The scratch session isolates the candidate from the **live composition**. It
+does not isolate it from the **host**: booting a candidate runs its activation
+body, and a host-body extern the candidate reaches is host code in the server's
+own process (item 24 — the gate does not sandbox host code; that is what
+[`revl_quarantine`](quarantine-tier.md)'s wasm substrate is for).
+
+So the gauntlet's admission compile carries the session's **authoring trust**,
+through `server.compile_under_authoring` — the same door `revl_check`,
+`revl_admit` and `revl_swap` compile through. A candidate the admission gate
+refuses is graded `rejected` on that refusal and is never lowered, never
+booted. Grading a candidate is not permission to run one the gate would not
+admit. `revl_quarantine` and `revl_repair`, which run this battery, compile
+through the same door for the same reason.
+
 ## Graceful degradation
 
 Every branch grades rather than raises:
@@ -144,7 +161,7 @@ Real ingredients, each **reused** from existing machinery, not reimplemented:
   counts.
 - **G8 boundary** — the `__main__._boundary` walk, enumerated per component.
 
-Designed but reporting `pending` until their roadmap items land:
+Two slots the dossier declares and still reports `pending`:
 
 - **faultSweep** (item 30) — inject a fault at each effect boundary and
   confirm the derived teardown still leaves no residue; moves a class of
@@ -153,6 +170,12 @@ Designed but reporting `pending` until their roadmap items land:
   round-trips the pre-state; moves reversibility from a structural claim to a
   `tested` observation with counts.
 
-When 26/30 land they fill their existing slots; nothing about the dossier
-shape changes, only their `status`. That stability is why the schema is
-designed now: item 28's interchange format carries this same document.
+**Both features exist.** Item 30 ships as the fault sweep (`revl test --sweep`,
+`src/revl/fault.py`, [fault-tests.md](fault-tests.md)) and item 26 as verified
+effect ([verified-effect.md](verified-effect.md)). What has not happened is the
+wiring: `_pending_sections` in `src/revl/mcp/gauntlet.py` still hard-codes both
+slots to `pending`, so the dossier does not yet carry their results. Read a
+`pending` here as "this dossier did not run it", never as "the feature does not
+exist". Nothing about the dossier shape changes when they are wired, only their
+`status`; that stability is why the schema was designed up front, since item
+28's interchange format carries this same document.
