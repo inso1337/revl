@@ -542,6 +542,7 @@ async def run(spec: dict, spec_path=None) -> None:
     import runtime as runtime_mod  # noqa: PLC0415
     from cordis import Context  # noqa: PLC0415
     from cordis.fiber import FiberState  # noqa: PLC0415
+    sys.path.remove(backend_dir)
 
     # item 443: arm the operator E-Stop BEFORE the composition is compiled, let
     # alone activated. Armed here, every crossing this process ever makes is

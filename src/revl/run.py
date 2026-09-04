@@ -1751,6 +1751,10 @@ def run_command(args) -> int:
               f"         .venv/bin/python -P -m revl run ...                # absolute-interpreter fallback (the `-P` closes the CWD-shadowing window)",
               file=sys.stderr)
         return 3
+    # The backend directory is a trusted loader path, not an import capability
+    # for generated user bodies. Keep the already-loaded runtime modules alive,
+    # but remove the ambient path before any generated module is executed.
+    sys.path.remove(str(backend_dir))
 
     withdraw = getattr(args, "withdraw", None)
     # item 396 option B: the import roots a `@py ref` file resolves through are
