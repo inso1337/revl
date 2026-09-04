@@ -1886,6 +1886,9 @@ fn walk_parts(xs: Vec<PartN>, i: i64, marked: bool, cx: Ctx, a: Ac) -> Ac {
 }
 
 fn walk_expr(e: Expr, marked: bool, cx: Ctx, a: Ac) -> Ac {
+    if (a.msg != "") {
+        return a;
+    }
     return match e {
     Expr::IntLit(_) => a,
     Expr::FloatLit(_) => a,
@@ -8223,6 +8226,30 @@ fn routing_a_provision_is_refused__route_() {
 fn routing_an_undeclared_key_is_refused__g1_() {
     let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent Router requires kv: Kv provides api: Api {\n  isolate nope in realms(\"r1\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"));
     assert!((v == "G1|`nope` is not a declared requirement of Router"));
+}
+
+#[test]
+fn the_left_operand_s_refusal_wins_over_the_right_one__g1_() {
+    let v = admit_src(String::from("service Kv { fn put(key: Str, value: Str) }\ncomponent C provides kv: Kv {\n  provide kv { fn put(key, value) { let n = alpha | beta.drop() } }\n}"));
+    assert!((v == "G1|`alpha` is not a declared requirement of C"));
+}
+
+#[test]
+fn a_later_refusal_does_not_overwrite_an_earlier_refusal_s_tag__g4_() {
+    let v = admit_src(String::from("service Kv { emission fn put(key: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires kv: Kv provides api: Api {\n  provide api { fn go() { return kv.put(\"a\") + beta } }\n}"));
+    assert!((v == "G4|call to emission `kv.put` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn the_earlier_refusal_still_wins_when_the_operands_are_swapped__g1_() {
+    let v = admit_src(String::from("service Kv { emission fn put(key: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires kv: Kv provides api: Api {\n  provide api { fn go() { return beta + kv.put(\"a\") } }\n}"));
+    assert!((v == "G1|`beta` is not a declared requirement of C"));
+}
+
+#[test]
+fn two_unmarked_emissions_in_one_expression_name_the_first__g4_() {
+    let v = admit_src(String::from("service Db { emission fn run(sql: Str) -> Int }\nservice Bus { emission fn send(m: Str) -> Int }\nservice Api { fn go() -> Int }\ncomponent C requires db: Db, bus: Bus provides api: Api {\n  provide api { fn go() { return db.run(\"a\") + bus.send(\"b\") } }\n}"));
+    assert!((v == "G4|call to emission `db.run` must be marked `emit` (G4)"));
 }
 
 #[test]

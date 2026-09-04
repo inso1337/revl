@@ -1973,7 +1973,25 @@ fn walk_parts(xs: List[PartN], i: Int, marked: Bool, cx: Ctx, a: Ac) -> Ac {
   return walk_parts(xs, i + 1, marked, cx, walk_expr(xs[i].e, marked, cx, a))
 }
 
+// FIRST REFUSAL WINS (issue #285). Every list walker above already stops once
+// `a.msg` is set, because the reference raises on the first thing it finds and
+// this gate promises its refusals are the reference's VERBATIM. `walk_expr`
+// was missing the same guard, and the composite arms below thread the
+// accumulator through more than one sub-walk — `Bin` walks `l` then `r`,
+// `Index` walks the target then the index, `If` walks cond/then/else. A
+// refusal raised by the earlier sub-walk was then overwritten by a refusal
+// from a later one, because `ac_refuse` replaces `msg`/`tag` unconditionally.
+// LAST refusal won instead of first.
+//
+// The visible symptom was a diagnostic naming a subject that looks truncated:
+// a source containing `st|ore` holds two undeclared names, `st` and `ore`; the
+// reference names `st`, this gate named `ore`, and the reader searches for a
+// symbol their program does not contain. The same clobber also replaced the
+// TAG — `kv.put("a") + beta` is a G4 the reference raises on the receiver, and
+// this gate reported the G1 from the right operand, so a consumer switching on
+// the refusal code was handed the wrong guarantee. That half is not cosmetic.
 fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  if (a.msg != "") { return a }
   return match e {
     IntLit(_)   => a,
     FloatLit(_) => a,
@@ -7038,6 +7056,52 @@ component Router requires kv: Kv provides api: Api {
   provide api { fn go(k) { return kv.get(k) } }
 }""")
   assert v == "G1|`nope` is not a declared requirement of Router"
+}
+
+// issue #285: within one expression the FIRST refusal wins, the way the
+// reference's does. `walk_expr` threads the accumulator through both halves of
+// a `Bin`/`Index`/`If`, and `ac_refuse` overwrites unconditionally, so the
+// right-hand refusal used to replace the left-hand one. On a source holding
+// `st|ore` that spelled the subject `ore` — a name the program does not
+// contain — and where the two halves carried different tags it also replaced
+// the TAG, which is a consumer-visible contract break rather than a cosmetic
+// one. Both operand orders are asserted; only one was ever wrong.
+test "the left operand's refusal wins over the right one (G1)" {
+  let v = admit_src("""service Kv { fn put(key: Str, value: Str) }
+component C provides kv: Kv {
+  provide kv { fn put(key, value) { let n = alpha | beta.drop() } }
+}""")
+  assert v == "G1|`alpha` is not a declared requirement of C"
+}
+
+test "a later refusal does not overwrite an earlier refusal's tag (G4)" {
+  let v = admit_src("""service Kv { emission fn put(key: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires kv: Kv provides api: Api {
+  provide api { fn go() { return kv.put("a") + beta } }
+}""")
+  assert v == "G4|call to emission `kv.put` must be marked `emit` (G4)"
+}
+
+test "the earlier refusal still wins when the operands are swapped (G1)" {
+  let v = admit_src("""service Kv { emission fn put(key: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires kv: Kv provides api: Api {
+  provide api { fn go() { return beta + kv.put("a") } }
+}""")
+  assert v == "G1|`beta` is not a declared requirement of C"
+}
+
+// the clobber does not need two tags to be wrong: two unmarked emissions in
+// one expression are both G4, and the SECOND one's message used to win.
+test "two unmarked emissions in one expression name the first (G4)" {
+  let v = admit_src("""service Db { emission fn run(sql: Str) -> Int }
+service Bus { emission fn send(m: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires db: Db, bus: Bus provides api: Api {
+  provide api { fn go() { return db.run("a") + bus.send("b") } }
+}""")
+  assert v == "G4|call to emission `db.run` must be marked `emit` (G4)"
 }
 
 // one binding per key: pinned to a single realm OR routed across a set.
