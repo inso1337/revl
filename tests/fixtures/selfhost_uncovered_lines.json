@@ -390,7 +390,7 @@
           "_ComponentEmitter._validated_call": 2,
           "_ComponentEmitter._witnessed_extern": 3,
           "_ComponentEmitter.emit": 9,
-          "_arm_body_is_bind": 1,
+          "_arm_body_is_bind": 2,
           "_arm_body_mentions": 2,
           "_emit_externs": 40,
           "_emit_functions": 3,
