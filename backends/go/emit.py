@@ -24,14 +24,17 @@ after stc-go's Inject gate has already evaluated on the un-isolated context,
 which strands a realm-scoped consumer in Pending forever. This mirrors the
 same fix carried in the Rust backend (`_revl_realm`).
 
-Scope: ir_version 1 and 2 components (effect/inverse, config+defaults,
-provide/inject, provide-method bodies, isolate, intercept). v3 pure
-functions and spawn/instance-parametric IR are out of scope.
+Scope: ir_version 1, 2 and 3. Components (effect/inverse, config+defaults,
+provide/inject, provide-method bodies, isolate, intercept), v3 pure functions
+and the typed core (`_go_v3_expr`, `_emit_v3_go_types`, the `backends/go/v3`
+stdlib), and instance-parametric `spawn` (`_spawn_expr`, one `*stc.Realm` per
+spawn, scenario `backends/go/scenarios/spawn.rvl`).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from typing import Optional
@@ -39,6 +42,22 @@ from typing import Optional
 
 class EmitError(ValueError):
     pass
+
+
+def _finite_float(value):
+    """The literal's value, refused when a `Float` is not finite (issue #312).
+
+    A non-finite `Float` has no literal spelling in revl and no uniform one
+    across the tiers — the host repr renders `inf`, which is an UNBOUND NAME
+    in this target's source, not a number. The frontend refuses such a literal
+    at the checker (`typecheck._reject_float_literal_range`), so this is the
+    backend's own belt: an IR handed straight to the emitter still cannot make
+    it print a name nothing binds.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EmitError(
+            f"non-finite Float literal {value!r} has no representation in this tier")
+    return value
 
 
 # Dispatcher conformance (roadmap item 76a). This file carries TWO expression
@@ -397,7 +416,9 @@ def _expr(node, env: _Env, expected=None) -> str:
             # (the `field`'s target is the `instance-get`). The component
             # dialect's own method call arrives via `target`/`method` below, so
             # `field` here is unambiguously a method selector, not struct-field
-            # access (records are unsupported on this tier).
+            # access. (Record field access IS lowered on this tier, but only on
+            # the v3 typed-components path, and it arrives as a bare `field`
+            # node rather than as a call callee. See the `kind == "field"` arm.)
             if callee.get("kind") == "field":
                 recv = _expr(callee.get("target"), env)
                 meth = _camel(callee.get("name"))
@@ -1570,8 +1591,26 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
                 compensate_call = _expr(comp_node, env)
                 key, method = _call_descriptor(comp_node)
                 frame = "%s.revlFrame" % env.receiver
+                # By-value capture for the offset, on the same footing as an
+                # `undo` (see `_emit_pins`). The offset runs in Phase 2 of an
+                # abort, so a `var` the body reassigns afterwards would move what
+                # it offsets. A pin cannot shadow in the method scope itself
+                # (that would rebind the name for the REST of the body), so the
+                # registration goes inside a nothing-taking closure whose inner
+                # scope the shadow belongs to. Emitted only where there is
+                # something to pin.
+                pins: list = []
+                _emit_pins(step, "compensate", pins, pad + "\t")
+                if pins:
+                    out.append("%sfunc() {" % pad)
+                    out.extend(pins)
+                    inner_pad = pad + "\t"
+                else:
+                    inner_pad = pad
                 out.append("%s%s.registerMethodCompensation(%s, %s, func() error { %s; return nil })" %
-                           (pad, frame, _go_string(key), _go_string(method), compensate_call))
+                           (inner_pad, frame, _go_string(key), _go_string(method), compensate_call))
+                if pins:
+                    out.append("%s}()" % pad)
                 global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
                 _COMP_NEEDS_TEARDOWN = True
                 # the EXT frame (deferred slice, Abort, the registerMethod* seam)
@@ -1593,6 +1632,7 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             ctx = env.ctx_ref()
             out.append("%svar %s bool" % (pad, bind))
             out.append("%s%s.Effect(func() stc.Inverse {" % (pad, ctx))
+            _emit_pins(step, "undo", out, pad + "\t")
             out.append("%s\t%s = %s" % (pad, bind, acquire))
             if undo is not None:
                 out.append("%s\treturn func() error { if %s { %s }; return nil }"
@@ -1669,6 +1709,27 @@ def _emit_return(expr, ret_surface, env: _Env, out, pad):
     out.append("%sreturn %s" % (pad, _expr(expr, env, ret_surface)))
 
 
+def _emit_pins(step, slot, out, pad):
+    """Bind a derived inverse's mutable method-locals BY VALUE (docs/closures.md;
+    `<slot>_captures`, computed by `src/revl/lower.py::_pin_inverse_captures`).
+
+    A Go closure captures the enclosing VARIABLE, not its value, so an `undo`
+    that reads a `var` the body reassigns after the effect registered would run
+    at teardown against a value its forward step never used. `k := k` inside the
+    effect closure is Go's own by-value snapshot: the inner scope shadows the
+    method local for the whole closure, and the copy is taken when the closure
+    runs, which is where the effect registers. `_ = k` follows because a pin the
+    acquire happens not to mention would otherwise be an unused variable, which
+    on this tier is a compile error rather than a warning.
+
+    Emits nothing when the lowering found nothing to pin, so a body without one
+    stays byte-identical."""
+    for name in step.get(f"{slot}_captures") or []:
+        local = _safe_local(name)
+        out.append("%s%s := %s" % (pad, local, local))
+        out.append("%s_ = %s" % (pad, local))
+
+
 def _emit_effect_step(step, env: _Env, out, indent):
     """A bare `effect ... undo ...` step (inside Apply body or a method)."""
     pad = "\t" * indent
@@ -1676,6 +1737,7 @@ def _emit_effect_step(step, env: _Env, out, indent):
     undo = step.get("undo")
     ctx = env.ctx_ref()
     out.append("%s%s.Effect(func() stc.Inverse {" % (pad, ctx))
+    _emit_pins(step, "undo", out, pad + "\t")
     out.append("%s\t%s" % (pad, acquire))
     if undo is not None:
         out.append("%s\treturn func() error { %s; return nil }" % (pad, _expr(undo, env)))
@@ -2823,7 +2885,7 @@ def _go_lifecycle_arg(node, payload_surface, env):
         if isinstance(value, int) and payload_surface in ("Int", "Int32"):
             return "%s(%s)" % (_go_type(payload_surface), value)
         if isinstance(value, float) and payload_surface == "Float":
-            return "float64(%s)" % repr(value)
+            return "float64(%s)" % repr(_finite_float(value))
     return _expr(node, env, payload_surface)
 
 
@@ -4031,7 +4093,7 @@ def _go_v3_lit(node: dict) -> str:
         # 0.3 at compile time and compares equal to it — which is not IEEE 754
         # binary64, the semantics revl specifies (docs/arithmetic.md). Typing
         # the literal forces ordinary float64 arithmetic.
-        return f"float64({value!r})"
+        return f"float64({_finite_float(value)!r})"
     raise EmitError(f"unsupported v3 literal: {node!r}")
 
 

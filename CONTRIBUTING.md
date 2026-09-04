@@ -25,8 +25,11 @@ the same checks, and a change that skips them will be caught at the gate.
 > rejection suite is an executable spec, why v1 output is byte-frozen, and why
 > emitted code is handed to real compilers instead of trusted.
 
-Read [DESIGN.md](DESIGN.md) §4 (the guarantees G1–G8 and lifecycle rules
-A1–A8) before changing the frontend. Read
+Read [DESIGN.md](DESIGN.md) §4 for the guarantee table (generated from
+`revl.diagnostics.GUARANTEES`, so it cannot drift), and
+[docs/rejections.md](docs/rejections.md) for the full set — the lifecycle rules
+A1, A2, A3, A5, A6, A8 and A9, the confidentiality rules `G-SECRET` and
+`G-SECRET-FLOW`, and the typing rules T1–T3 — before changing the frontend. Read
 [docs/backend-ir-v1.md](docs/backend-ir-v1.md) and
 [docs/backend-ir-v3.md](docs/backend-ir-v3.md) before changing an emitter.
 
@@ -45,8 +48,11 @@ pay for it every iteration. The same two files cover most of it:
 .venv/bin/pytest tests/test_frontend.py tests/test_doc_examples.py -q   # ~0.5s
 ```
 
-Run the full `pytest tests/ -q` before committing (the pre-commit hook runs it
-too), not between every edit.
+Before committing, run the tests your change affects, not the whole tree
+between every edit. The pre-commit hook already does this for you: it selects
+the affected tests with `tools/affected_tests.py` and only falls back to the
+whole suite when the selector is unavailable or reports FULL. For the fast
+inner-loop gate over the same selection, `make pre-merge-affected`.
 
 **Where the code lives (a two-minute map).** The compiler is `src/revl/`
 (`parser.py` → `typecheck.py` → `lower.py` → `apply.py`). The **emitters are
@@ -183,9 +189,17 @@ cannot run.
 
 ## The pre-merge gate
 
-> **Run `make pre-merge` before a change reaches `main`.** This is the required
-> gate, and it is the one that catches the per-backend drift `pytest tests/`
-> alone misses.
+> **Run `make pre-merge` before a change reaches `main`.** It is the gate that
+> catches the per-backend drift `pytest tests/` alone misses.
+
+**If you are an agent working a branch, read
+[docs/process.md](docs/process.md) first: it is authoritative for the
+branch-and-PR flow and it says the opposite of what this section assumes.**
+Under that process the full matrix runs in CI on the PR, agents run only the
+tests covering what they changed plus `./tools/pre_pr.sh`, and the orchestrator
+merges on green. `make pre-merge` stays the local gate for anyone landing
+without that CI round-trip, and `make pre-merge-affected` is the narrow
+inner-loop form.
 
 The pre-commit contract above is necessary but not sufficient, and the gap is
 load-bearing: **the per-backend suites run OUTSIDE `pytest tests/`** (they are
@@ -227,7 +241,7 @@ command, in order, reporting each step:
 | site wheel | `tools/check_site_wheel.py` (also runs post-merge on main: `.github/workflows/site-wheel.yml`) |
 | docs drift | `tools/docgen.py --check` (the source-derived doc blocks; `make docs-gen` regenerates) |
 | lint | `ruff check` (pinned `ruff==0.16.4` via `uvx` if not on `PATH`) |
-| formal | `formal/scripts/run_gate.sh` (lake build + axioms gate) |
+| formal | `sh formal/scripts/run_gate.sh` (lake build + the axioms gate; loud-skips without lake) |
 
 Two properties make it trustworthy rather than theatre:
 
@@ -237,9 +251,11 @@ Two properties make it trustworthy rather than theatre:
   shared dev box. The rust/wasm/java emit suites are run with the heavy compilers
   hidden from `PATH`, so their `which(<tool>)`-gated tests **skip loudly** and
   only the emit/golden half runs — which is the half that catches a stale golden
-  or a respec'd emitter, the exact item-327 drift class. The typescript suite
-  needs `node_modules` and is not in the fast gate at all; run it yourself when
-  you touch that tier (`cd backends/typescript && npm ci && npx vitest run`).
+  or a respec'd emitter, the exact item-327 drift class. The typescript
+  `vitest`/`tsc` suite needs `node_modules` and is not in the fast gate; its
+  pure-Python goldens are (the `backend-ts (golden drift)` step). Run the
+  runtime half yourself when you touch that tier
+  (`cd backends/typescript && npm ci && npx vitest run`).
 - **Nothing is a silent skip.** Every step is either *ran* (and must pass) or
   *skipped* with the reason printed (`SKIPPED (no backends/python/.venv — run sh
   backends/python/setup.sh)`), because a silent gap is precisely what let CI stay
@@ -303,6 +319,21 @@ it. A rejection whose message is a bare "error" is not done.
   toolchain, never silently pass. CI installs the toolchain and, for the tiers
   where it matters, makes a missing runtime *fatal* (e.g.
   `REVL_REQUIRE_WASMTIME=1`) so coverage is real and not implied.
+- **A test that drives `revl.test.RUNNERS` must be run by a CI step that sets
+  `REVL_REQUIRE_TIERS`** for every tier it names (issue #266). The switch takes
+  a comma-separated list of tiers (or `all`); on those tiers an *absent
+  toolchain* stops being a skip and becomes a failure, while a tier's by-design
+  refusal of a document still skips. Unset — a laptop, a fresh worktree — keeps
+  the old behaviour, so nothing about local development changes.
+
+  The `conformance` job is where both halves exist (`sh
+  backends/python/setup.sh` for cordis-py, `npm ci` for cordis-ts), and it runs
+  the tier tests with `REVL_REQUIRE_TIERS: "py,ts"`. Add a new tier test to
+  that step's file list;
+  `tests/test_env_gated_skips_run_somewhere.py::test_every_tier_test_is_required_to_actually_run_in_some_ci_job`
+  fails if you do not. Without it, `test_..._executes[ts]` executes nothing and
+  reports green everywhere the toolchain is absent — which is how a live
+  `TypeError: Cannot mix BigInt and other types` sat under a green ts test.
 
 Some Cordis runtime targets are upstream projects (cordis-py, cordis, cordis-rs,
 cordis4j, stc-go) — a genuine *runtime* defect there is fixed upstream

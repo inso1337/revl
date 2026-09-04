@@ -1,9 +1,19 @@
 # Where the compiler assumes a static, finite, link-time-known set of component instances
 
 **Status:** audit only (branch `agent/static-audit`). Nothing here proposes a design; it
-records what the compiler assumes today and what would break if the same `component` could
-be live N times with N unknown until runtime. Every claim is a file:line citation into
-`src/revl/`, `backends/python/`, or `docs/`.
+records what the compiler assumes and what would break if the same `component` could
+be live N times with N unknown until runtime.
+
+> **The `:NNN` line numbers below are pinned to `agent/static-audit` and have
+> since rotted.** Spot-checked against `main`: `compiler.py:209-212` is now a
+> docstring about vendored-copy drift, not the `duplicate component` raise;
+> `run.py:222-226` is config-extern merging, not the fiber assignment;
+> `parser.py:182-190` is stream-merge prose, not `class ComponentDecl`; and
+> `backends/python/runtime.py:72-80` is `__all__`, not `def plug`. Read every
+> citation below as a *symbol* name — those are still correct — and grep for it
+> rather than jumping to the line. No corrected line number is given here on
+> purpose: a pin is what rotted, and a fresh one would rot the same way. The
+> audit's substance holds; only the pins moved.
 
 ---
 
@@ -41,8 +51,9 @@ enforces that names are unique.
 ```
 
 Everything below is a consequence of this one fact. There is no `instance` concept in the
-AST (`ComponentDecl`, `src/revl/parser.py:182-190`, has `name/config/requires/provides/body/line`
-and nothing else), none in the IR (`docs/backend-ir.md:42-51`), and none in the manifest
+AST (`ComponentDecl` in `src/revl/parser.py` has `name/config/requires/provides/body/line`,
+plus `source` for provenance and the item-296 `require_carry` alias map; no instance
+field among them), none in the IR (`docs/backend-ir.md:42-51`), and none in the manifest
 (`src/revl/lower.py:3145`).
 
 ---

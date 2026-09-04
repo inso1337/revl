@@ -25,7 +25,7 @@ Two things this file proves, matching the design's exit tests:
   set into an isolated directory with nothing else of the checkout visible
   is behaviorally identical to what an unpacked `pip install` produces for
   the modules this example actually touches (`revl.gate` and the pure-python
-  modules it lazily imports — no `backends/`/`stdlib/` force-include is
+  modules it lazily imports — the packaged `backends/`/`stdlib/` trees are not
   needed here because the example never calls `compile_to` or `use`s
   anything).
 """

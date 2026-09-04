@@ -43,7 +43,7 @@ compiles but is never admitted, so it is refused too.
 
 ## 2. What is attested
 
-The signed body carries exactly these members:
+The signed body carries these members:
 
 | member             | meaning                                                            |
 | ------------------ | ------------------------------------------------------------------ |
@@ -57,6 +57,7 @@ The signed body carries exactly these members:
 | `sign_alg`         | `hmac-sha256`, checked at verify time, not merely recorded         |
 | `signer`           | an optional human/agent label (proven identity is the key, not this) |
 | `key_id`           | a non-secret fingerprint of the signing key                        |
+| `evidence_bindings`| OPTIONAL: facet name → sha256 over the item-293 evidence bundle, sorted so the signed bytes are a pure function of the bindings and not of insertion order. Present only when bindings were supplied; folded into the MAC and validated at verify time |
 | `signature`        | HMAC-SHA256 over the canonical bytes of every member above         |
 
 **The canonical hash.** The composition hash is
@@ -194,11 +195,11 @@ and ship it). `revl attest ATT --verify --json` prints the verdict:
 `src/revl/attest.py`:
 
 - `run_gate(paths=None, *, source=None, filename=..., manifest=None,
-  normalize=None) -> GateVerdict` runs the reference frontend and reports what
-  it decided. Never raises for a refusal: a refused composition comes back as
+  modules=None, normalize=None) -> GateVerdict` runs the reference frontend and
+  reports what it decided. Never raises for a refusal: a refused composition comes back as
   `admitted=False` carrying the frontend's own `error`.
-- `make_attestation(ir, key, *, verdict, now=None, signer=None) -> dict`, pure
-  and deterministic given `now`; raises without an admitted `GateVerdict` whose
+- `make_attestation(ir, key, *, verdict, now=None, signer=None,
+  evidence_bindings=None) -> dict`, pure and deterministic given `now`; raises without an admitted `GateVerdict` whose
   hash matches `ir`, on a draft (open holes), or on an empty key.
 - `verify_attestation(att, key, ir=None) -> (ok, reason)`.
 - `canonical_hash(ir) -> str`, the IR content hash.

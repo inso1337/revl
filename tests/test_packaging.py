@@ -11,9 +11,18 @@ These tests pin the fix so it cannot silently regress:
   * `revl._backends_root()` resolves the emitters under BOTH layouts — the
     source checkout (sibling `backends/`) and the installed wheel (packaged
     `revl/backends/`);
-  * `pyproject.toml` declares the console script and force-includes `backends`;
+  * `pyproject.toml` declares the console script and maps `backends` into
+    `revl/backends`;
   * the actually-built wheel carries the entry point and the emitter tree
     (guarded — skips where the build tooling is unavailable).
+
+GHSA-gj88-cx6q-38r2 added the other half of the question. Item 108 asked "does
+the wheel contain enough?"; the advisory asked "does it contain ONLY that?" —
+`force-include` shipped the builder's `node_modules`, cargo `target/` and test
+key material, and the artifact stopped being a function of its commit. The
+static half of that is pinned below; the built-artifact half is
+`tools/check_wheel_manifest.py`, which runs in `lint`, in the release dry run
+and immediately before the PyPI upload.
 """
 
 from __future__ import annotations
@@ -98,11 +107,68 @@ def test_pyproject_states_the_gate_api_stability_contract():
 
 
 def test_pyproject_ships_backends_in_wheel():
-    """The wheel target must force-include the `backends/` tree, else the
-    installed package cannot resolve any emitter."""
+    """The build hook must map the `backends/` tree into `revl/backends`, else
+    the installed package cannot resolve any emitter."""
+    sys.path.insert(0, str(_REPO))
+    import hatch_build
+
+    assert hatch_build.TREES["backends"] == "revl/backends"
+    assert hatch_build.TREES["stdlib"] == "revl/stdlib"
+    hook = _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]["hooks"]["custom"]
+    assert hook["path"] == "hatch_build.py"
+
+
+def test_wheel_target_keeps_packages_so_editable_installs_work():
+    """`sources` is the tidier way to place `backends/` inside the wheel and it
+    cannot be used: a rewrite that CHANGES a prefix rather than removing one
+    makes dev-mode installs impossible ("Dev mode installations are unsupported
+    when any path rewrite in the `sources` option changes a prefix"). Eleven CI
+    jobs and both setup docs run `pip install -e ".[test]"`, so a `sources`
+    entry for `backends` would break every one of them."""
     cfg = _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]
-    force = cfg.get("force-include", {})
-    assert force.get("backends") == "revl/backends"
+    assert cfg.get("packages") == ["src/revl"]
+    for src in cfg.get("sources", {}):
+        assert src == "src/revl", (
+            f"a sources rewrite for {src!r} breaks `pip install -e .`; place the "
+            "tree through hatch_build.py instead")
+
+
+def test_pyproject_never_force_includes_again():
+    """GHSA-gj88-cx6q-38r2. `backends`/`stdlib` were force-included, and
+    hatchling's `force-include` runs AFTER file selection: it is exempt from
+    every exclude rule and from the ignore files, so it copied whatever sat on
+    the builder's disk. A developer wheel came out at 2933 members / 250 MB
+    unpacked against the 523 the commit describes, carrying `node_modules`,
+    cargo `target/`, a cloned `.cordis-py`, compiled runner binaries and the
+    generated key material `.gitignore` parks under
+    `backends/typescript/test-secret-store/` — so the published artifact was a
+    function of the builder's filesystem rather than of the revision.
+
+    `tools/check_wheel_manifest.py` is the gate that holds the built wheel to
+    `git ls-files`; this is the cheap static half, and it is here rather than
+    only in that tool because reaching for `force-include` is the specific
+    mistake that reintroduces the defect."""
+    cfg = _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]
+    assert not cfg.get("force-include"), (
+        "the wheel target force-includes a directory again; hatch_build.py "
+        "computes the entry list per file from git ls-files instead, so add "
+        "paths there (GHSA-gj88-cx6q-38r2)")
+
+
+def test_build_excludes_the_artefact_classes():
+    """The exclude list states, in the packaging file itself, what may never
+    ship. It is deliberately redundant with `.gitignore` — hatchling reads only
+    the ROOT ignore file, and this repo has sixteen nested ones — so a relaxed
+    ignore rule elsewhere cannot widen the sdist, and it is what
+    `hatch_build.py` falls back to when there is no git to ask."""
+    exclude = set(_pyproject()["tool"]["hatch"]["build"].get("exclude", []))
+    for pattern in (
+        "**/node_modules",
+        "**/target",
+        "**/.cordis-py",
+        "backends/typescript/test-secret-store",
+    ):
+        assert pattern in exclude, f"wheel exclude lost {pattern!r}"
 
 
 def test_entry_point_target_is_callable():
@@ -148,3 +214,41 @@ def test_installed_layout_resolves_emitter(tmp_path, monkeypatch):
     monkeypatch.setattr(_paths, "_PKG_DIR", site)
     root = _paths.backends_root()
     assert (root / "python" / "emit.py").is_file()
+
+
+def test_the_artifacts_list_is_every_tracked_fixture_under_the_ignored_dir():
+    """`[tool.hatch.build] artifacts` must name every tracked file under
+    `backends/typescript/tests/generated/`, which `.gitignore:36` ignores.
+
+    The list is by exact path on purpose: a glob would also sweep up whatever
+    the TS harness last wrote there, which is the non-determinism the packaging
+    work exists to remove. The cost of that choice is that adding a fixture
+    means adding a line, and the instruction to do so lived only in a comment.
+
+    It was missed exactly once, immediately: #323 added `empty_list_types.ts`
+    and the wheel manifest gate caught it as a tracked file the wheel does not
+    ship. This asserts the rule instead of asking people to remember it.
+    """
+    import re
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    listed = set(
+        re.findall(
+            r'"(backends/typescript/tests/generated/[^"]+)"',
+            (root / "pyproject.toml").read_text(encoding="utf-8"),
+        )
+    )
+    tracked = set(
+        subprocess.run(
+            ["git", "ls-files", "backends/typescript/tests/generated/"],
+            cwd=root, capture_output=True, text=True, check=True,
+        ).stdout.split()
+    )
+    assert tracked, "expected tracked fixtures under the ignored directory"
+    assert listed == tracked, (
+        "[tool.hatch.build] artifacts has drifted from the tree.\n"
+        f"  tracked but NOT listed (the wheel will not ship these): "
+        f"{sorted(tracked - listed)}\n"
+        f"  listed but NOT tracked (stale entries): {sorted(listed - tracked)}"
+    )

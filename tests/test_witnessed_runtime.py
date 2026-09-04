@@ -272,8 +272,15 @@ def test_non_witnessed_program_is_untouched():
     # neither the transactional call nor the witnessed-forced Result classes
     # appear, and no component even sees the witnessed table.
     emit = _emit_backend()
+    # An ordinary acquisition bracket. It used to be spelled `effect Map.new()
+    # undo Map.new()`, whose inverse ACQUIRES a second host Map instead of
+    # releasing the first — the shape a teardown slot now refuses, since a
+    # bracket inverse is a release and nothing registers the release of what it
+    # opens. Nothing in this test depends on that: it asserts a witnessed-free
+    # program stays free of the transactional machinery, which the honest
+    # bracket shows just as well.
     ir = compile_source(
-        "component C { effect Map.new() undo Map.new() }\n", "plain.rvl")
+        "component C { let m = effect Map.new() undo m.drop() }\n", "plain.rvl")
     body = emit.emit(ir)
     assert "transactional(" not in body
     assert "_revl_frame.transactional" not in body

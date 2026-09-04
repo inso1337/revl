@@ -385,19 +385,26 @@ def _run_py_body(reply: dict, *, backend_source: str | None = None):
 
     calls: list[bytes] = []
 
-    def _fake_urlopen(request, *args, **kwargs):
-        calls.append(request.data)
-        return _Resp(json.dumps(reply).encode())
+    class _Opener:
+        """The body opens through `build_opener(...)`, not `urlopen`, because it
+        installs a redirect-refusing handler (`revl.crossing_redirect`). The
+        stub is therefore an OPENER, and the tests below stay about the JSON-RPC
+        contract; the redirect policy itself is exercised against a real local
+        server in `tests/test_crossing_redirect_policy.py`."""
+
+        def open(self, request, *args, **kwargs):
+            calls.append(request.data)
+            return _Resp(json.dumps(reply).encode())
 
     namespace = {"__name__": "generated"}
     exec(compile(f"def _crossing(message):\n{body}\n", "<a2a-body>", "exec"),
          namespace)
-    original = urllib.request.urlopen
-    urllib.request.urlopen = _fake_urlopen
+    original = urllib.request.build_opener
+    urllib.request.build_opener = lambda *handlers: _Opener()
     try:
         return namespace["_crossing"]("ping"), calls
     finally:
-        urllib.request.urlopen = original
+        urllib.request.build_opener = original
 
 
 def test_a_completed_task_round_trips_its_text_artifact():

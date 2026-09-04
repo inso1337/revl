@@ -111,6 +111,14 @@ class AdmissionProfile:
 
     The default `AdmissionProfile()` is inert: no_extern off, allowlist off, so
     a caller that passes no profile compiles exactly as before.
+
+    THE RULE FOR A NEW CALL SITE: source whose AUTHOR is untrusted is admitted
+    under `untrusted_author(granted)`, never under a hand-assembled
+    `AdmissionProfile(...)` that picks a subset of these fields. Every field is
+    a property of the author, so a site that omits one is not a narrower policy,
+    it is a door with a hole in it —
+    `tests/test_realm_placement_over_the_transport.py` reads the construction
+    sites out of the source and holds this.
     """
 
     no_extern: bool = False
@@ -136,42 +144,61 @@ class AdmissionProfile:
     # `isolate` map). An untrusted author writes its own component NAMES, so the
     # glob half is no discriminator at all; the realm is the only one left, and a
     # source that picks its own realm picks which of the operator's standing
-    # approvals cover its class-(c) crossings. Off (inert) by default, so item
-    # 330's `Session.admit` is byte-identical; ON for `self_extension`, the
-    # profile `Gate.propose` admits under.
+    # approvals cover its class-(c) crossings.
+    #
+    # Off (inert) on a bare `AdmissionProfile()`, so a trusted-author compile is
+    # byte-identical; ON in `untrusted_author`, and therefore at EVERY door that
+    # admits source whose author is untrusted. It shipped as an opt-in that only
+    # `self_extension` set, with `Gate.propose` its one caller, which left the
+    # identical one-line grab open at the two doors that built the per-turn
+    # profile instead: `mcp.server.AuthoringTrust.profile()` (backing the
+    # `revl_load`/`revl_swap` verbs with inline source, and NOT per-turn — a swap
+    # replaces the composition and the successor keeps serving) and
+    # `mcp.session.Session.admit`. Making the refusal a property of "this author
+    # is not trusted" rather than of one call site is what closes the shape
+    # instead of the instance.
     no_realm_placement: bool = False
 
     @staticmethod
     def untrusted_author(granted) -> "AdmissionProfile":
-        """The profile for a model-authored per-turn source: no new host code,
+        """THE profile for source whose AUTHOR is not trusted: no new host code,
         reach bounded to an explicit granted service set, no self-minted
-        declassifier (item 249 Slice C), and derived taint sinks/sources so the
-        defense exists with zero annotations (item 249 Slice D)."""
-        return AdmissionProfile(no_extern=True,
-                                granted=frozenset(granted or ()),
-                                no_declassify=True,
-                                taint_strict=True)
+        declassifier (item 249 Slice C), derived taint sinks/sources so the
+        defense exists with zero annotations (item 249 Slice D), and no
+        self-chosen realm (item 334 Slice 2).
 
-    @staticmethod
-    def self_extension(granted) -> "AdmissionProfile":
-        """`untrusted_author` plus the realm-placement refusal — the profile a
-        SELF-EXTENDING proposal is admitted under (item 334, slice 2).
-
-        The delta over `untrusted_author` is exactly `no_realm_placement`, and it
-        exists because the two admissions differ in what they can reach. An item-
-        330 per-turn `admit` is ADDITIVE: it wires into the running composition
-        and is torn down with the turn. A `propose` REPLACES the composition and
-        the successor keeps serving, so the address its components sit at is the
-        address every later crossing is judged from. Letting the untrusted author
-        choose that address is letting it choose its own authority, which is the
-        one thing a proposal must not be able to change without a fresh
-        admission. The per-turn case is the same question with a shorter blast
-        radius; it is NAMED here, not solved (see slice 2's doc section)."""
+        One constructor, not a family of near-misses, because every field is a
+        property of the author and nothing about WHICH DOOR the source arrived
+        through changes any of them. `no_realm_placement` was the exception —
+        opt-in, set only by `self_extension` — and the exception is exactly where
+        the hole was: the `revl_load`/`revl_swap` verbs with inline source and
+        item 330's per-turn `admit` both built this profile and both let an
+        untrusted author write its own authority address."""
         return AdmissionProfile(no_extern=True,
                                 granted=frozenset(granted or ()),
                                 no_declassify=True,
                                 taint_strict=True,
                                 no_realm_placement=True)
+
+    @staticmethod
+    def self_extension(granted) -> "AdmissionProfile":
+        """The profile a SELF-EXTENDING proposal is admitted under (item 334,
+        slice 2) — `Gate.propose`'s door, named for the reader who arrives from
+        the proposal loop.
+
+        It is `untrusted_author`, and the realm-placement refusal it was
+        introduced to carry now rides in that profile for every untrusted author
+        rather than for this one caller. Slice 2 justified the narrow scope by
+        saying a `propose` REPLACES the composition while an item-330 per-turn
+        `admit` is ADDITIVE and torn down with the turn. Replacement is the wider
+        blast radius, and it is still the reason this door was closed first — but
+        it is a difference in DURATION, not in authority. `Session._wire_turn`
+        rebuilds the class map over the merged composition (it has to; skipping
+        it was a total class-(c) bypass), so an additive turn's self-chosen realm
+        is the realm on every ticket that turn raises, and one covered crossing
+        is all an exfiltration needs. Kept as a distinct name because `propose`'s
+        refusal is load-bearing enough to be greppable."""
+        return AdmissionProfile.untrusted_author(granted)
 
     @property
     def active(self) -> bool:
@@ -241,7 +268,8 @@ def _realm_navigate(realms) -> dict:
             enacts=nav.ENACTS_OPERATOR,
             action=("or have an operator place the component into that realm "
                     "through the reviewed, gated swap — a realm placement is a "
-                    "fresh admission, not something a proposal carries in"),
+                    "fresh admission, not something an untrusted author "
+                    "carries in"),
             ref="operator-swap"),
     ]
     # profile=None on purpose: the admit-profile family does not collapse (§4).
@@ -316,10 +344,10 @@ def check_no_realm_placement(root_programs: list[Program],
                  "policy scopes its standing approvals and auto-approve rules by "
                  "(component glob, realm), and an untrusted author writes its own "
                  "component names, so choosing the realm chooses which standing "
-                 "approvals cover its class-(c) crossings. A proposal may not "
-                 "widen its own authority; drop the clause and run in the shared "
-                 "realm, or have an operator place it through the gated swap "
-                 "(item 334)",
+                 "approvals cover its class-(c) crossings. An untrusted author "
+                 "may not widen its own authority; drop the clause and run in "
+                 "the shared realm, or have an operator place it through the "
+                 "gated swap (item 334)",
             # G9: an untrusted author may not MINT authority. `no_declassify`
             # refuses the self-minted declassifier; this refuses the self-minted
             # authority ADDRESS, which is the same rule one layer out — the realm

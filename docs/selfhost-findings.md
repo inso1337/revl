@@ -1457,52 +1457,6 @@ arguments and keys emission off feature presence (never off an `ir_version`
 branch), a whole reference DISPATCH arm was covered for free. The reference's
 `emit()` needs an explicit `if version in (1, 2)` fork; the port did not, and was
 byte-identical anyway. (Do NOT change the reference — the fork is its right shape.)
-Item 234 flagged that "a component using only isolate/intercept compiles to irv2,
-which the port doesn't mirror" and kept its realm fixtures on the v3 path by adding
-a trivial top-level 2.0 `fn`. Slice 7 chased that flag down and found the mirror
-ALREADY HOLDS byte-for-byte, with NO emitter change: `emit_src` is
-version-agnostic, and for a component-only document `_emit_v1` and `_emit_v3` emit
-the identical byte stream (same header — a v1/v2 doc can carry no test, so no
-`vitest`/lifecycle branch fires; same `_revl_helpers`; same service interfaces —
-`_ts_type`'s `known_types` default is `frozenset()`, exactly what `_emit_v3` passes
-when `types` is empty; same `_context_augmentation`; same per-`_component` object).
-Three v1/v2-dispatch fixtures now pin it: `v1_component_body.rvl` (irv1: config +
-effect/undo + emit/compensate + provide-method ternary), `v2_isolate_only.rvl` and
-`v2_intercept_only.rvl` (irv2, the item-234 case with the trivial `fn` removed).
-All three == `backends/typescript/emit.py` to the last byte.
-
-### Finding (NOT a bug — a verification win): the version dispatch was a phantom gap
-The scoped hazard was that `_emit_v1` might diverge from the version-agnostic
-`emit_src` — a header conditional, a `known_types`-flavored signature, an
-ordering. None materialized: `_emit_v1` is a proper byte-subset of the
-`_emit_v3` assembly for a component-only input. The only real v1/v2 surface that
-DOES diverge is a ROUTED require (item 167), which also lowers to irv2 but needs
-machinery `emit_src` does not emit — so the "v1/v2 path" deferral was really a
-"routed-requires" deferral wearing the version label. Recording it so a later
-slice does not re-audit the whole dispatch when only the router is missing.
-
-### Finding (item 203-adjacent, blocks routed-requires): `_TS_ROUTER_SRC` is a `${…}`/backtick literal that cannot be embedded byte-exact
-Routed-requires is the clean remaining v2 sub-slice, but its runtime realization
-`_TS_ROUTER_SRC` is ~60 lines of verbatim TypeScript that itself contains JS
-template literals — `` `revl: router for ${JSON.stringify(key)} …` `` — i.e. both
-backticks AND `${…}`. In revl a backtick template interpolates `${…}`, and a plain
-string rejects a bare `$name` as would-be 1.x interpolation (item 203, logged
-thrice on the wasm slice). So there is no literal form that reproduces this blob
-byte-for-byte: a backtick template would try to evaluate its inner `${…}`, and a
-plain string trips the 1.x guard on the `$` in `${…}`/`$JSON`. A verbatim/raw
-string form (an `r"…"` with no interpolation and no 1.x check, or sourcing the blob
-through an `@py`-returned constant the way `newline()`/`template_text` already
-bridge host text) would unblock it. Symptom/repro: pasting the router source into
-an `.rvl` string, either flavor, fails to round-trip. Deferred, not fixed here.
-
-### Ergonomics (items 189/195): a zero-code slice — no kit gap, no threading tax
-This slice added no emitter logic (only fixtures + comments), so it surfaced no new
-item-189 kit gap and no item-195 state-threading friction. It is a small data
-point FOR the port's design: because `emit_src` threads its context as plain
-arguments and keys emission off feature presence (never off an `ir_version`
-branch), a whole reference DISPATCH arm was covered for free. The reference's
-`emit()` needs an explicit `if version in (1, 2)` fork; the port did not, and was
-byte-identical anyway. (Do NOT change the reference — the fork is its right shape.)
 
 ## compile.rvl gains the ts tier (item 146 gap 2) — plus a `Secret[T]` hole in every tier
 
@@ -1645,3 +1599,51 @@ defines them — a NameError at the first call rather than a byte divergence.
 Fixed in #234 as its own commit. `secrets_nested.rvl` is the first corpus
 document with a Result-returning extern, which is the whole reason this was
 reachable.
+
+## `selfhost/emit_rust.rvl` — the missing externs section (issue 275)
+
+Filed as an unverified, low-confidence drive-by observation: the rust self-host
+emitter "may silently drop an extern the reference emits". It reproduces, and the
+interesting half is not the drop.
+
+**What was wrong.** `emit_rust_src` assembled the module as header + types +
+functions + components. The reference `_emit_v3` assembles header + types +
+**externs** + functions + tests + components. There was no `emit_v3_externs` in
+the file at all — not a marker, not a refusal, nothing. A document with one
+`extern pure fn shout(s: Str) -> Str = @rs { .. }` and one `fn` calling it
+emitted a module containing `return shout(who.clone());` and no `fn shout`
+anywhere: a `cannot find function` build error handed to rustc for a line revl
+wrote, produced silently.
+
+The second half is worse than the first. `_V3Ctx.fn_returns` seeds from the free
+functions and then `setdefault`s **the externs**, so a `let` bound to an extern
+call carries the extern's declared return type and a later by-value use of that
+binding knows to clone. The self-host built its `fr` map from the functions only,
+so it emitted `tag(p)` where the reference emits `tag(p.clone())` — item 270's
+E0382 shape, in a document that emits without a single marker.
+
+**The oracle was GREEN over both.** `tests/test_selfhost_emit_rust.py` passed
+19/19 the whole time, because not one of its nineteen fixtures declared an
+`extern` — the file's own docstring listed externs under "deliberately OUT". That
+is item 429 exactly: an oracle catches DIVERGENCE, and two implementations that
+both never reach a construct agree on it trivially. The green run was evidence
+about the corpus, not about the emitter. It is the third instance of the shape
+this cycle, after `EXTERN_DECL_GAP` (`lower_to_ir` dropping the whole `externs`
+section for an `undo`/capability-tagged extern) and `NATIVE_GATE_GAPS`.
+
+**Fixed** by porting `_emit_v3_externs` (the section, in the reference's position
+between the types and the functions) and the extern half of the `fn_returns`
+seeding. Two reference shapes stay out and take a LOUD marker instead of a
+guess — the same treatment `selfhost/emit_go.rvl` gives them: an extern with no
+`@rs` body (`<<EXTERN-NO-RS-BODY:name>>`; the reference RAISES, a portability
+boundary) and an extern carrying a `config` schema
+(`<<DEFER-EXTERN-config:name>>`; item 378 Stage 5's `_revl_extern_config`
+scaffold). The body splice is LF-only, so a body carrying one of the code points
+Python `splitlines()` breaks on that `split("\n")` does not takes
+`<<DEFER-EXTERN-linebreak:name>>` rather than splitting differently.
+
+**`tests/fixtures/emit_rust_corpus/externs.rvl` is the new fixture**, and it is
+the part that keeps this closed: the verbatim `@rs` splice, a Rust-keyword extern
+name through `_mangle`, a multi-line body, an empty body, `Unit`, generic and
+user-record param/return positions, and two free functions whose `let`s are typed
+only by the extern returns. It reds on the pre-fix emitter and passes after.

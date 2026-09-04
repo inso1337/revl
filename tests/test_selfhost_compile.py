@@ -325,17 +325,52 @@ def test_three_way_composition_co_compiles(compile_rvl):
     assert callable(compile_rvl["admit"])
 
 
+# item 429: documents the reference admits and the native gate does NOT. A FALSE
+# REFUSAL, which is a self-host frontend gap and not a corpus problem, so the
+# document stays and the gap is NAMED here with the exact verdict it produces.
+# Recording the verdict rather than skipping the document is what makes this a
+# ratchet: the day `selfhost/lower.rvl` grows the grammar, the native gate
+# returns "" and this test fails on the stale entry instead of quietly keeping a
+# waiver nobody rereads. Never add a line here to make a red go away — read what
+# it names first.
+NATIVE_GATE_GAPS = {
+    # `selfhost/lower.rvl`'s extern grammar knows `pure`/`acquire`/`emission`
+    # with no capability tag. It refuses the `witnessed` class (item 243)
+    # outright, and refuses a capability tag on ANY class (`witnessed[fs]`,
+    # `emission[net]`), reporting a parse error against a program the reference
+    # compiles. Its `lower_to_ir` separately drops the whole `externs` section to
+    # `null` for any extern carrying an `undo` clause — see
+    # tests/test_selfhost_lower_ir.py's EXTERN_DECL_GAP for that half. All three
+    # were invisible until item 429's coverage gate demanded a corpus case for
+    # `class=witnessed` and the case spelled them.
+    "emit_py_corpus/witnessed.rvl": "BAD|expected fn after extern",
+}
+
+
 def test_native_gate_admits_the_whole_emit_surface(admit):
     """The native frontend's admission verdict covers the ENTIRE emitter surface —
     every corpus document (functions AND components, both tiers) the reference
     admits, the native gate admits (``""``). The component documents are now also
     compiled byte-exact end to end (item 262); this checks the gate itself over the
-    full admitted surface, including documents outside the byte-exact emit slice."""
+    full admitted surface, including documents outside the byte-exact emit slice.
+
+    ``NATIVE_GATE_GAPS`` above holds the documents where that is not yet true,
+    pinned to the exact refusal so closing the gap reddens this test rather than
+    outliving the waiver."""
     for subdir in ("emit_py_corpus", "emit_rust_corpus", "emit_ts_corpus"):
         for path in sorted((ROOT / "tests" / "fixtures" / subdir).glob("*.rvl")):
             compile_files([str(path)])  # the reference admits it
+            key = f"{subdir}/{path.name}"
             verdict = admit(path.read_text(encoding="utf-8"))
-            assert verdict == "", f"{subdir}/{path.name}: {verdict!r}"
+            expected = NATIVE_GATE_GAPS.get(key, "")
+            if expected:
+                assert verdict == expected, (
+                    f"{key}: the native gate is recorded in NATIVE_GATE_GAPS as "
+                    f"refusing this with {expected!r} and now says {verdict!r}. "
+                    f"If the self-host grammar landed, DELETE the entry; if the "
+                    f"refusal merely changed shape, read it before rewriting it.")
+            else:
+                assert verdict == "", f"{key}: {verdict!r}"
 
 
 # --------------------------------------------- the refusal composes too

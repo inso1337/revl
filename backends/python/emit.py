@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import copy
 import keyword
+import math
 import re
 import textwrap
 from typing import Any, Optional
@@ -112,6 +113,21 @@ _CONTEXT_MEMBERS = {
 
 class EmitError(ValueError):
     """The IR document cannot be lowered by this backend."""
+
+
+def _finite_float(value):
+    """The literal's value, refused when a `Float` is not finite (issue #312).
+
+    A non-finite `Float` has no literal spelling in revl and no uniform one
+    across the tiers — the host repr renders `inf`, which is an UNBOUND NAME
+    in this target's source, not a number. The frontend refuses such a literal
+    at the checker (`typecheck._reject_float_literal_range`), so this is the
+    backend's own belt: an IR handed straight to the emitter still cannot make
+    it print a name nothing binds.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EmitError(f"non-finite Float literal {value!r} has no representation in this tier")
+    return value
 
 
 # Dispatcher conformance (roadmap item 76a). This file carries TWO expression
@@ -332,6 +348,34 @@ def _mangle(name: str) -> str:
             break
         root = root[:-1]
     return name
+
+
+def _pins(step: dict, slot: str) -> str:
+    """The default-argument tail that binds a derived inverse's mutable locals BY
+    VALUE (docs/closures.md; `<slot>_captures`, computed by
+    `src/revl/lower.py::_pin_inverse_captures`).
+
+    An `undo` / `compensate` is a closure the emitter builds around a raw
+    expression, not an IR `arrow`, so it never went through the `captures`
+    snapshot the arrow path uses -- and a Python closure reads the enclosing
+    method-local's CELL, so a `var` reassigned after the effect registered would
+    change what the inverse acts on at teardown. `lambda k=k: …` is the same
+    by-value snapshot the arrow emitter spells with its `captures` list: the
+    default is evaluated where the lambda literal is, which is where the effect
+    registers, so the inverse holds the value its forward step actually used.
+
+    Returns the parameter list alone -- `params` is prepended by the caller, and
+    an empty result means the caller's existing spelling is emitted unchanged, so
+    a body with no such capture stays byte-identical."""
+    names = step.get(f"{slot}_captures") or []
+    return ", ".join(f"{_mangle(n)}={_mangle(n)}" for n in names)
+
+
+def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
+    """`lambda …:`'s header for a derived inverse, with its by-value pins."""
+    pins = _pins(step, slot)
+    bound = ", ".join(p for p in (params, pins) if p)
+    return f"lambda {bound}" if bound else "lambda"
 
 
 def _ident(name: Any, what: str) -> str:
@@ -1206,7 +1250,7 @@ class _ComponentEmitter:
             # `Map.empty()` (docs/stdlib-2.0.md §Map)
             return "{}"
         if kind == "lit":
-            return repr(expr.get("value"))
+            return repr(_finite_float(expr.get("value")))
         if kind == "name":
             return _ident(expr.get("id"), f"{where}: name")
         if kind == "config":
@@ -2347,7 +2391,9 @@ class _ComponentEmitter:
                 fn = f"_effect_{self._counter}"
                 out.add(indent, f"def {fn}():")
                 out.add(indent + 1, self._expr(step.get("acquire"), where))
-                out.add(indent + 1, f"yield lambda: {self._expr(step.get('undo'), where)}")
+                out.add(indent + 1,
+                        f"yield {_inverse_lambda(step, 'undo')}: "
+                        f"{self._expr(step.get('undo'), where)}")
                 out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
             wit = self._witnessed_extern(step.get("acquire"))
@@ -2359,13 +2405,14 @@ class _ComponentEmitter:
                 bind = _ident(step.get("bind"), f"{where}: bind")
                 acquire = self._expr(step.get("acquire"), where)
                 undo = self._expr(step.get("undo"), where)
+                head = _inverse_lambda(step, "undo", bind)
                 if _is_map_cas(step.get("acquire")):
                     # result-guarded undo (item 397): the accumulator entry
                     # receives the bound Bool; on a `false` CAS the inverse is
                     # the identity, so teardown leaves the winner's entry alone.
-                    undo_fn = f"lambda {bind}: ({undo} if {bind} else None)"
+                    undo_fn = f"{head}: ({undo} if {bind} else None)"
                 else:
-                    undo_fn = f"lambda {bind}: {undo}"
+                    undo_fn = f"{head}: {undo}"
                 out.add(
                     indent,
                     f"{bind} = _revl_frame.acquire({self._label(label)!r}, "
@@ -2391,8 +2438,10 @@ class _ComponentEmitter:
                 # register — the sync spelling of the activation body's
                 # `<fire>; yield _revl_frame.compensation(...)`.
                 out.add(indent, self._emit_fire(step, where))
-                out.add(indent, "_revl_frame.compensation_method(lambda: "
-                                f"{self._expr(step.get('compensate'), where)})")
+                out.add(indent,
+                        "_revl_frame.compensation_method("
+                        f"{_inverse_lambda(step, 'compensate')}: "
+                        f"{self._expr(step.get('compensate'), where)})")
             else:
                 out.add(indent, self._emit_fire(step, where))
         elif kind == "return":
@@ -2974,7 +3023,7 @@ def _expr(node: dict) -> str:
         return f"float({_expr(inner)})"
     kind = node["kind"]
     if kind == "lit":
-        return repr(node["value"])
+        return repr(_finite_float(node["value"]))
     if kind == "adt":
         # tagged ADT value: `Case(payload)` / `Case()`. The case class is
         # either a user variant (emitted by _emit_types) or the built-in

@@ -230,19 +230,30 @@ def test_self_extension_profile_refuses_a_named_realm(source, spelling):
     assert refs == {"shared-realm", "operator-swap"}
 
 
-def test_untrusted_author_profile_is_unchanged():
-    """Item 330's per-turn profile is BYTE-IDENTICAL: the new refusal is opt-in
-    (`no_realm_placement`), and only `self_extension` opts in. A per-turn admit
-    is additive and torn down with the turn; a proposal replaces the composition
-    and keeps serving, which is why only the second one is bounded here. The
-    per-turn case is the same question with a shorter blast radius — named, not
-    solved."""
+def test_the_refusal_reaches_every_untrusted_author():
+    """Slice 2 shipped `no_realm_placement` as an OPT-IN that only
+    `self_extension` set, on the argument that a per-turn `admit` is additive
+    and torn down with the turn while a proposal replaces the composition and
+    keeps serving. The blast radii do differ — that is why `propose` was closed
+    first — but the AUTHORITY is the same at both doors, and the opt-in left two
+    others open: `mcp.server.AuthoringTrust.profile()` (the `revl_load` /
+    `revl_swap` verbs with inline source, which are not per-turn either) and
+    `Session.admit`. The refusal is now a property of the untrusted author, so
+    the per-turn profile carries it too.
+
+    `tests/test_realm_placement_over_the_transport.py` holds the doors; this
+    holds the profile they share."""
     from revl.admit_profile import AdmissionProfile
     from revl.compiler import compile_source
+    from revl.errors import RevlError
 
     profile = AdmissionProfile.untrusted_author(["Ops"])
-    assert profile.no_realm_placement is False
-    compile_source(_AGENT_REALM, "<turn>.rvl", profile=profile)  # admits
+    assert profile.no_realm_placement is True
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_AGENT_REALM, "<turn>.rvl", profile=profile)
+    assert excinfo.value.code == "G9"
+    # the same source without the realm line still admits under it.
+    compile_source(_AGENT_V2, "<turn>.rvl", profile=profile)
 
 
 def test_the_refusal_is_root_scoped():
@@ -269,17 +280,80 @@ def test_the_refusal_is_root_scoped():
                    profile=AdmissionProfile.self_extension([]))  # admits
 
 
-def test_propose_admits_under_self_extension_not_untrusted_author():
-    """The wiring, asserted at the seam rather than inferred: `propose` builds
-    the profile with the realm refusal ON. Without this the two checks above are
-    true of a profile nothing uses."""
-    import inspect
+# The candidate with its own host body — refused by the `untrusted_author`
+# BASE of the profile (G8, `check_no_extern`), so it measures the other half.
+_AGENT_EXTERN = _DECLS + (
+    'extern pure fn peek(p: Str) -> Str = @py { return p }\n'
+    "component ToolV2 requires ops: Ops provides tool: Tool {\n"
+    "  provide tool {\n"
+    '    fn describe() = peek("v2")\n'
+    "    fn run(p) { emit ops.stash(p) }\n"
+    "  }\n"
+    "}\n"
+)
 
-    from revl import gate as gate_mod
 
-    src = inspect.getsource(gate_mod.Gate.propose)
-    assert "AdmissionProfile.self_extension(granted)" in src
-    assert "AdmissionProfile.untrusted_author(" not in src
+def _decision_only_gate():
+    """A `Gate` carrying exactly what `propose`'s DECISION compile reads: the
+    loaded latch and a session that is not halted.
+
+    The decision refuses before step 2 ever builds the transition composition,
+    so nothing here reaches `Session.swap` and no cordis runtime is needed —
+    which is the point. The profile the decision compiles under is observable
+    from the verdict `propose` returns, in the plain `frontend` job."""
+    from types import SimpleNamespace
+
+    from revl.gate import Gate
+
+    gate = Gate.__new__(Gate)
+    gate._loaded = True
+    gate._session = SimpleNamespace(halted=False)
+    return gate
+
+
+def test_propose_admits_under_an_untrusted_author_profile():
+    """The wiring at the seam, DRIVEN rather than read off `propose`'s source.
+
+    Deliberately not a source grep. The assertion this replaced matched
+    `"AdmissionProfile.self_extension(granted)"` in the method text, and text
+    certifies nothing about which profile the compile RUNS under: building the
+    right profile and then handing the compiler `profile=None`, or relaxing
+    `no_realm_placement` on the next line, both leave that grep green and put
+    the authority-address grab straight back. Here the realm-grabbing candidate
+    goes through `propose` itself and the refusal it returns is the evidence.
+
+    The control is the SAME one line under a TRUSTED author, which admits — so
+    the verdict below is the untrusted-author profile and nothing else. It used
+    to be the same line under `untrusted_author`, back when `self_extension` was
+    the only profile carrying the refusal; that door is closed now and the delta
+    it measured no longer exists."""
+    from revl.compiler import compile_source
+
+    result = _decision_only_gate().propose(_AGENT_REALM, granted=["Ops"],
+                                           providers=_PROVIDERS)
+    assert result.admitted is False
+    assert result.code == "G9"
+    assert 'realm("billing")' in result.message
+
+    # the same one line, with no profile at all: admitted. The realm clause is
+    # legal revl; it is the AUTHOR that may not write it.
+    compile_source(_AGENT_REALM, "<reviewed>.rvl")
+
+
+def test_propose_keeps_the_untrusted_author_base_at_the_seam():
+    """`self_extension` is `untrusted_author` PLUS the realm refusal, so the
+    seam has to carry both halves. A profile object built with only
+    `no_realm_placement` would pass the test above and lose G8/R2 entirely."""
+    with_extern = _decision_only_gate().propose(
+        _AGENT_EXTERN, granted=["Ops"], providers=_PROVIDERS)
+    assert with_extern.admitted is False
+    assert "extern" in with_extern.message.lower()
+
+    # and the `granted` set is the one the caller passed, not a stand-in: the
+    # clean candidate reaches `Ops`, so an empty grant refuses it.
+    ungranted = _decision_only_gate().propose(_AGENT_V2, granted=[],
+                                              providers=_PROVIDERS)
+    assert ungranted.admitted is False
 
 
 # =========================================================================== #

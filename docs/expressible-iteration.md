@@ -1,6 +1,12 @@
 # Expressible bounded iteration in components — a design
 
-**Status: spec, not implemented.** This document specifies how the agent
+**Status: implemented.** Arrow literals in provide-method bodies bind their
+parameters in the method's scope, so the recursion-with-callbacks shape below
+compiles today. The "Boundaries kept" section is still accurate for method
+bodies; `while` and `for` did later arrive in the **`fn` statement grammar**
+(item 379, [design/379-break-continue.md](design/379-break-continue.md)), which
+is a different scope from the one this note rules them out of. This document
+specifies how the agent
 loop — the roadmap's lighthouse workload (the first product written in
 revl) — becomes expressible *inside* a revl component. It is filed against
 roadmap item 77(a) and the lighthouse workload's FR-1. Nothing here changes existing programs; every
@@ -14,34 +20,41 @@ The harness's product is the agent loop:
 prompt → model → tool calls → model → … → final, bounded by max_steps
 ```
 
-Today that loop **cannot be written in revl**. The harness ships
-`step(session_id)` — one model call plus (maybe) one tool call per
-invocation — and the iteration lives in the host driver (an unrolled
-lifecycle test / a host loop). Honest, but the loop *is* the product, and it
-is exiled to host code.
+When this note was written that loop **could not be written in revl**: the
+harness shipped `step(session_id)`, one model call plus (maybe) one tool call
+per invocation, with the iteration living in the host driver. The loop *is* the
+product, and it was exiled to host code.
 
-Three distinct walls, all inside provide-method bodies (verified by probe):
+Three distinct walls stood inside provide-method bodies. **Wall 2 has since
+fallen; walls 1 and 3 stand.**
 
 1. **No `while`/`for`/`if` statements** in method bodies (G6: "revl bodies
    contain only effect forms"). The method-body statement set is exactly
-   `let` / `var` / assign / `effect…undo…` / `emit` / `return`.
-2. **Arrow parameters are not bound in provide-method scope.** A pure
-   helper + callback-arrow escape fails exactly inside components:
+   `let` / `var` / assign / `effect…undo…` / `emit` / `return`. Still true:
+   `while` in a method body is a parse error citing G6. (`while` and `for` DO
+   exist in the **`fn` statement grammar**, item 379. That is a different
+   scope.)
+2. ~~**Arrow parameters are not bound in provide-method scope.**~~ **Closed.**
+   Arrow literals in provide-method bodies bind their parameters in the
+   method's scope, so this compiles today:
    ```revl
    fn apply(p: Str, ms: List[Str], f: (List[Str]) -> Str) -> Str { return f(ms) }
    component App requires model: Model provides loop: Loop {
      provide loop {
        fn run(prompt) {
          let msgs = ["hi"]
-         return apply(prompt, msgs, msgs2 => emit model.complete(msgs2))  // ← refused
+         return apply(prompt, msgs, msgs2 => emit model.complete(msgs2))
        }
      }
    }
    ```
-   Diagnostic: `` `msgs2` is not a declared requirement of App — add
-   `requires msgs2: <Service>`? `` — the hint actively misdirects (it is not
-   a missing service requirement; it is a missing arrow binding). Same
-   class of confusion as FR-12.
+   The misdirecting `` `msgs2` is not a declared requirement of App `` hint is
+   gone. What refuses now is honest emission coloring: because the arrow
+   reaches `model.complete`, `Loop.run` must be declared `emission fn`, and G4
+   says so with the reach chain. Declare it and the program is admitted. The
+   conformance row is `method/arrow param binds in method scope (FR-1)`: `ok`
+   on python, typescript, rust and go, `lim` on java and wasm (arrow values are
+   not lowerable on either), and `lim` on the self-host column.
 3. **A component cannot call its own provision** (recursion must go through
    a requirement), and **service methods are not first-class values**, so
    the "pass the operation" pattern (`model.complete` as a value) is closed
