@@ -165,7 +165,7 @@ def _manifest_text(norm_ir: dict) -> str:
     same document a registry entry would carry)."""
     from .registry import _audit_document  # noqa: PLC0415, the exact recorded scheme
 
-    return json.dumps(_audit_document(copy.deepcopy(norm_ir)),
+    return json.dumps(_audit_document(norm_ir),
                       indent=2, sort_keys=True) + "\n"
 
 
@@ -404,7 +404,7 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
 
     # policy.json, the capability/emission surface the boundary crosses.
     from .registry import _audit_document  # noqa: PLC0415
-    audit = _audit_document(copy.deepcopy(norm_ir))
+    audit = _audit_document(norm_ir)
     policy = _policy_of(audit)
     (out_dir / POLICY_NAME).write_text(
         json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -658,7 +658,7 @@ def _check_policy(bundle: Path, norm_ir: dict) -> Check:
     from .registry import _audit_document  # noqa: PLC0415
 
     recorded = _read_json(bundle / POLICY_NAME)
-    rebuilt = _policy_of(_audit_document(copy.deepcopy(norm_ir)))
+    rebuilt = _policy_of(_audit_document(norm_ir))
     if rebuilt != recorded:
         return Check("policy surface", MISMATCH,
                      "the rebuilt capabilities/emissions differ from policy.json",
