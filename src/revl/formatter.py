@@ -211,7 +211,7 @@ def _scan_template(source: str, start: int, filename: str) -> int:
     """
     line = source.count("\n", 0, start) + 1
     try:
-        end, _parts, _line, _suspect = _lexer._lex_template(
+        end, _parts, _line, _suspect, _interp_lines = _lexer._lex_template(
             source, start + 1, line, filename)
         return end
     except RevlError as error:
