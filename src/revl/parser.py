@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import contextlib
+import re
 import sys
 
 from .errors import RevlError
@@ -52,6 +53,11 @@ from .lexer import Token, lex
 # must cover the walkers in lower.py and typecheck.py that later descend the
 # same accepted tree.
 NESTING_LIMIT = 200
+
+# Realm labels become part of capability addresses on some backends. Keep the
+# address grammar deliberately narrower than a general string literal so labels
+# cannot introduce namespace or target-language syntax.
+_REALM_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 # ~27 parser frames per level, and the deepest post-parse walker is shallower
 # than that, so this clears `NESTING_LIMIT` with room to spare while staying
@@ -4505,6 +4511,13 @@ class Parser:
         label = tok.value
         if not label:
             raise self.err(line, "a realm label cannot be empty")
+        if not _REALM_LABEL_RE.fullmatch(label):
+            raise self.err(
+                line,
+                f"invalid realm label {label!r}",
+                hint="realm labels must start with an ASCII letter or digit and contain "
+                     "only ASCII letters, digits, `.`, `_`, or `-`",
+            )
         self.expect(")")
         return label
 
@@ -4540,6 +4553,13 @@ class Parser:
             label = tok.value
             if not label:
                 raise self.err(line, "a realm label cannot be empty")
+            if not _REALM_LABEL_RE.fullmatch(label):
+                raise self.err(
+                    line,
+                    f"invalid realm label {label!r}",
+                    hint="realm labels must start with an ASCII letter or digit and contain "
+                         "only ASCII letters, digits, `.`, `_`, or `-`",
+                )
             if label in realms:
                 raise self.err(
                     line,
