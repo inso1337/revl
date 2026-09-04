@@ -26,8 +26,55 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import contextlib
+import sys
+
 from .errors import RevlError
 from .lexer import Token, lex
+
+
+# --------------------------------------------------------- recursion bounds
+#
+# The parser is recursive descent and the precedence ladder alone (`_ternary`
+# -> `_or` -> ... -> `_primary`) costs roughly two dozen python frames for
+# every nested `(`. Against CPython's default 1000-frame limit that put the
+# ceiling at THIRTY-EIGHT nested parentheses and forty nested calls (issue
+# #310) — well inside what generated code writes, and reached as a
+# `RecursionError` traceback rather than a diagnostic. In `revl.gate`, a
+# library with a security contract, that is an input that makes the admission
+# gate raise instead of answering.
+#
+# Two things fix it, and both are needed. `NESTING_LIMIT` is the LANGUAGE's
+# answer: a stated bound, refused with a diagnostic that names it, so a
+# hostile input costs bounded work and gets an honest no. The headroom is the
+# IMPLEMENTATION's: python's own limit must sit far enough above the stated
+# bound that the bound — not the interpreter — is what a program meets, and it
+# must cover the walkers in lower.py and typecheck.py that later descend the
+# same accepted tree.
+NESTING_LIMIT = 200
+
+# ~27 parser frames per level, and the deepest post-parse walker is shallower
+# than that, so this clears `NESTING_LIMIT` with room to spare while staying
+# far below anything that would trouble the C stack.
+_RECURSION_HEADROOM = 12000
+
+
+@contextlib.contextmanager
+def recursion_headroom(frames: int = _RECURSION_HEADROOM):
+    """Raise python's recursion limit for the duration of a compile.
+
+    Restores whatever the embedder had set, and never LOWERS it: a host that
+    already asked for more keeps it.
+    """
+    previous = sys.getrecursionlimit()
+    if previous >= frames:
+        yield
+        return
+    sys.setrecursionlimit(frames)
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(previous)
 
 
 # ---------------------------------------------------------------- AST
@@ -609,7 +656,8 @@ class RemoteRowDecl:
     `docs/interop-bridge.md` §3 already states for a seam ("manifest data, not
     source text"), applied to a callee that is in no manifest at all.
 
-    `remote`, `at`, `host`, `through` and `on_failure` are CONTEXTUAL keywords,
+    `remote`, `at`, `host`, `through`, `on_failure` and `redirect` are
+    CONTEXTUAL keywords,
     recognised only in this one position inside a `composition` block. The
     lexer's KEYWORDS set is untouched, so the self-host lexer needs no sync and
     no program using any of those words as an ordinary name is broken. `in` and
@@ -627,6 +675,16 @@ class RemoteRowDecl:
     # Silently swallowing a transport failure has no spelling.
     on_failure: str = "withdraw"
     on_failure_line: int = 0
+    # `redirect(refuse | same_origin)`; `refuse` is the default and the only
+    # value that needs no argument from the operator. The peer address above is
+    # what a reader of this row is entitled to believe the crossing reaches, so
+    # a transport that followed a `Location` to another host would make the row
+    # false. `same_origin` is the declared opt-in and is still bounded: a 307 or
+    # 308 on the declared origin, never a 301/302/303 (they re-issue the POST as
+    # a GET and drop the body) and never another origin (every header on the
+    # request, credentials included, would travel with it).
+    redirect: str = "refuse"
+    redirect_line: int = 0
     # The line the address itself is written on, so an address refusal points at
     # the address rather than at the row's first line.
     host_line: int = 0
@@ -1496,10 +1554,26 @@ _FOREIGN_STMT_KEYWORDS = {
 
 # ---------------------------------------------------------------- parser
 
+def _found(tok) -> str:
+    """How a token reads in an `expected ..., found ...` message.
+
+    The eof token carries `None` as its value, and `repr(None)` renders as
+    `found None` — which reads as a literal in the source rather than as the
+    input running out. `expect()` has always spelled this "end of file"; the
+    expression path did not (issue #313), and an interpolation that ran out
+    mid-expression is exactly where a reader meets it.
+    """
+    return repr(tok.value) if tok.value is not None else "end of file"
+
+
 class Parser:
-    def __init__(self, source: str, filename: str):
+    def __init__(self, source: str, filename: str, line_offset: int = 0):
         self.filename = filename
-        self.toks = lex(source, filename)
+        # `line_offset` is non-zero only for a sub-parse of a fragment — the
+        # body of a `${...}` interpolation — so its tokens, its AST nodes and
+        # every checker diagnostic on them carry the line the fragment occupies
+        # in the real file instead of line 1 (issue #313).
+        self.toks = lex(source, filename, line_offset=line_offset)
         self.pos = 0
         # When set, the next `_bor` call does not consume a top-level `|` — it
         # is the functional-record-update separator `{base | f = e}`, not the
@@ -1518,6 +1592,12 @@ class Parser:
         # docs/design/379-break-continue.md).
         self._loop_depth = 0
         self._in_block_arm = False
+        # issue #310: how many expressions deep the cursor currently is, held
+        # against `NESTING_LIMIT`. A `${...}` interpolation is parsed by a
+        # SEPARATE `Parser` over the template body, so the depth is handed to
+        # that sub-parser (`_parse_template_parts`) — otherwise nested
+        # templates reset the count and walk straight past the bound.
+        self._nesting = 0
 
     # -- token helpers
 
@@ -1648,13 +1728,36 @@ class Parser:
     # -- productions
 
     def parse(self) -> Program:
-        try:
-            return self._parse_program()
-        except RevlError as e:
-            better = self._maybe_stray_backtick_error(e)
-            if better is not None:
-                raise better from None
-            raise
+        with recursion_headroom():
+            try:
+                return self._parse_program()
+            except RevlError as e:
+                better = self._maybe_stray_backtick_error(e)
+                if better is not None:
+                    raise better from None
+                raise
+            except RecursionError:
+                # The backstop under `NESTING_LIMIT` (issue #310). The bound
+                # above covers the expression ladder, which is what explodes
+                # first and fastest; the other recursive descents here —
+                # nested blocks, nested type arguments — are shallower per
+                # level and reach python's limit only far past anything a
+                # program means. Whichever one gives out, the caller gets a
+                # diagnostic, because a `RecursionError` escaping a library is
+                # an unhandled fault and `revl.gate` is a library with a
+                # security contract.
+                raise self._nesting_too_deep() from None
+
+    def _nesting_too_deep(self) -> RevlError:
+        return self.err(
+            self.peek().line,
+            "this program nests deeper than the compiler can parse",
+            hint="the parser is recursive descent, so nesting costs stack: "
+                 f"expressions are bounded at {NESTING_LIMIT} levels and the "
+                 "other nestings by the interpreter's own limit. This is an "
+                 "implementation bound, not a language one — name the inner "
+                 "constructs with `let` bindings or helper functions.",
+        )
 
     def _maybe_stray_backtick_error(self, e: RevlError) -> "RevlError | None":
         """Item 365: a stray backtick inside a host `//`/`/*` comment closes a
@@ -3083,11 +3186,13 @@ class Parser:
         return out
     def remote_row_decl(self, composition: str) -> RemoteRowDecl:
         """`remote @label provides <key>: <Service> [in realm("r")]
-        at host("h:port") [through <ident>] [on_failure(withdraw|result)]`
+        at host("h:port") [through <ident>] [on_failure(withdraw|result)]
+        [redirect(refuse|same_origin)]`
 
         Item 424 D-424c.1, slice C2. Every word this clause introduces is a
         CONTEXTUAL keyword read only here (`remote`, `at`, `host`, `through`,
-        `on_failure`, and its two arguments); `provides`, `in` and `realm` are
+        `on_failure`, `redirect`, and their arguments); `provides`, `in` and
+        `realm` are
         the keywords the language already has. So the lexer stays context-free
         and the self-host lexer needs no sync — the same discipline 426 S2 chose
         for `configure @db with { ... }`, and the reason `remote` is not being
@@ -3139,6 +3244,8 @@ class Parser:
         transport: str | None = None
         on_failure = "withdraw"
         on_failure_line = line
+        redirect = "refuse"
+        redirect_line = line
         while True:
             if self.at("kw", "in"):
                 iline = self.next().line
@@ -3198,6 +3305,27 @@ class Parser:
                 self.next()
                 on_failure = choice
                 self.expect(")")
+            elif self.at("ident", "redirect"):
+                redirect_line = self.next().line
+                self.expect("(")
+                tok = self.peek()
+                choice = tok.value if tok.kind == "ident" else None
+                if choice not in ("refuse", "same_origin"):
+                    raise self.err(
+                        tok.line,
+                        f"`redirect` takes `refuse` or `same_origin`, found "
+                        f"{tok.value!r}",
+                        hint="`refuse` (the default) is the whole point of "
+                             "writing the peer address on the row: a redirect "
+                             "to another host would make the row stop "
+                             "describing where the crossing goes. "
+                             "`same_origin` follows a 307 or 308 that stays on "
+                             "the declared origin, with the method and the body "
+                             "intact; a 301/302/303 re-issues the POST as a GET "
+                             "and is refused either way")
+                self.next()
+                redirect = choice
+                self.expect(")")
             else:
                 break
 
@@ -3211,6 +3339,7 @@ class Parser:
         return RemoteRowDecl(label, key, service, host, line, realm=realm,
                              transport=transport, on_failure=on_failure,
                              on_failure_line=on_failure_line,
+                             redirect=redirect, redirect_line=redirect_line,
                              host_line=host_line)
 
     def row_config_block(self, label: str) -> list[tuple[str, object, int]]:
@@ -5302,19 +5431,38 @@ class Parser:
 
     # pure expressions — precedence climbing (§3.2)
 
-    def _parse_template_parts(self, raw_parts, line: int):
+    def _parse_template_parts(self, raw_parts, line: int, interp_lines=None):
         """Turn lexer template parts into ("text", str) / ("expr", ast): each
-        `${...}` body is re-parsed as a full pure expression (§3.2)."""
+        `${...}` body is re-parsed as a full pure expression (§3.2).
+
+        `interp_lines` is the lexer's side-band list of absolute start lines,
+        one per `${...}`, and becomes the sub-parser's line offset. Without it
+        every sub-parse started at line 1, so a fault inside an interpolation —
+        a parse error here, or a checker refusal later on the AST this builds —
+        was reported at line 1 of the file no matter where the template sat
+        (issue #313). It is read defensively: a `template` token minted by
+        something other than `lex` (the formatter, a test) has no such list, and
+        the template's own line is the honest fallback.
+        """
         parts = []
+        expr_index = 0
         for kind, value in raw_parts:
             if kind == "text":
                 parts.append(("text", value))
                 continue
-            sub = Parser(value, self.filename)
+            if interp_lines and expr_index < len(interp_lines):
+                interp_line = interp_lines[expr_index]
+            else:
+                interp_line = line
+            expr_index += 1
+            sub = Parser(value, self.filename, line_offset=interp_line - 1)
+            # the interpolation is nested INSIDE this expression: carry the
+            # depth across so `${`${`${...}`}`}` is bounded too (issue #310)
+            sub._nesting = self._nesting
             expr = sub.pure_expr()
             if not sub.at("eof"):
                 extra = sub.peek()
-                raise self.err(line,
+                raise self.err(interp_line,
                                f"unexpected {extra.value!r} in `${{...}}` interpolation",
                                hint="an interpolation holds one expression")
             parts.append(("expr", expr))
@@ -5324,6 +5472,33 @@ class Parser:
         return self._ternary()
 
     def _ternary(self):
+        """The head of the precedence ladder, and so the one place every
+        NESTED expression re-enters (a parenthesised group, a call argument, a
+        list or record element, a lambda body, a `${...}` interpolation). The
+        depth is counted here, once per level, and refused past
+        `NESTING_LIMIT` with a diagnostic that names the bound (issue #310).
+
+        A stated limit, not a crash: the bound is the compiler's, not the
+        language's, so it has to be said out loud. `_bin` itself loops rather
+        than recursing, so a long `a + b + c ...` chain costs no depth."""
+        self._nesting += 1
+        try:
+            if self._nesting > NESTING_LIMIT:
+                raise self.err(
+                    self.peek().line,
+                    f"expression nesting is deeper than the parser's limit of "
+                    f"{NESTING_LIMIT} levels",
+                    hint="this is an implementation bound, not a language one: "
+                         "the parser is recursive descent and a nesting this "
+                         "deep would exhaust the interpreter's stack. Name the "
+                         "inner expressions with `let` bindings and the nesting "
+                         "goes away.",
+                )
+            return self._ternary_body()
+        finally:
+            self._nesting -= 1
+
+    def _ternary_body(self):
         cond = self._or()
         if self.at("?"):
             self.next()
@@ -5812,7 +5987,8 @@ class Parser:
             return ExprLit(tok.value, tok.line)
         if tok.kind == "template":
             self.next()
-            return Interp(self._parse_template_parts(tok.value, tok.line), tok.line)
+            return Interp(self._parse_template_parts(
+                tok.value, tok.line, getattr(tok, "interp_lines", None)), tok.line)
         if tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             return ExprLit({"true": True, "false": False, "null": None}[tok.value], tok.line)
@@ -5980,7 +6156,7 @@ class Parser:
         if tok.kind == "kw" and tok.value == "if":
             return self._if_expr()
         self._reject_incr_decr(tok)  # item 384 / syntax-2.0 §3.3
-        raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
+        raise self.err(tok.line, f"expected an expression, found {_found(tok)}")
 
     def _reject_foreign_keyword(self, tok) -> None:
         """item 384: a known-foreign statement/declaration keyword (`def`,
@@ -6195,7 +6371,8 @@ class Parser:
             base = Lit(tok.value, tok.line)
         elif tok.kind == "template":
             self.next()
-            base = Interp(self._parse_template_parts(tok.value, tok.line), tok.line)
+            base = Interp(self._parse_template_parts(
+                tok.value, tok.line, getattr(tok, "interp_lines", None)), tok.line)
         elif tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             base = Lit({"true": True, "false": False, "null": None}[tok.value], tok.line)
@@ -6205,7 +6382,7 @@ class Parser:
             self.next()
             base = Postfix(tok.value, [], tok.line)
         else:
-            raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
+            raise self.err(tok.line, f"expected an expression, found {_found(tok)}")
 
         while self.at("."):
             self.next()

@@ -1,0 +1,493 @@
+{
+  "_about": [
+    "What the self-host byte-agreement oracles do NOT assert. Generated and",
+    "gated by tools/selfhost_coverage.py (roadmap item 429); see that file's",
+    "module docstring for what a construct is and what this cannot catch.",
+    "",
+    "blind    - both backends/<tier>/emit.py and selfhost/emit_<tier>.rvl",
+    "           implement this construct and no document in the tier's CORPUS",
+    "           reaches it, so the oracle compares bytes that never differ.",
+    "           Reason-first: the reason is the entry, the constructs are its",
+    "           evidence. Every entry is a decision someone made; write it down.",
+    "unported - backends/<tier>/emit.py implements it, the port does not, and no",
+    "           corpus document would notice. This is the shape of the item",
+    "           429(d) Secret[T] gap: the reference redacted, the self-host did",
+    "           not, every oracle stayed green. A ratchet baseline.",
+    "",
+    "Both halves only shrink on their own. An entry that coverage has caught up",
+    "with FAILS as stale and must be deleted. Never widen this file to silence a",
+    "failure you have not read: the fix is normally a corpus document, added",
+    "BEFORE the port and seen to fail."
+  ],
+  "go": {
+    "blind": {
+      "declared out of the slice by the oracle's own docstring: Float (excluded from interpolation and from arithmetic) and the stdlib surface that carries `.to_int()` widening.": [
+        "widen=Float",
+        "widen=Int"
+      ],
+      "declared out of the slice by the oracle's own docstring: the built-in Opt/Result/Map surface, `??` included.": [
+        "op=??"
+      ],
+      "declared out of the slice by the oracle's own docstring: the go LIVE-COMPONENT world - a component routes to the v1/v2 stc-go runtime, not through this emitter, so its dialect expression kinds are unreachable here.": [
+        "kind=if",
+        "kind=name"
+      ]
+    },
+    "unported": {
+      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
+        "args=<true>",
+        "bind=_",
+        "case=Err",
+        "case=None",
+        "case=Ok",
+        "case=Some",
+        "class=witnessed",
+        "components=<true>",
+        "config=<true>",
+        "else=<true>",
+        "event=<true>",
+        "fn=Map.new",
+        "has_config=<true>",
+        "idempotent=<true>",
+        "kind=bool",
+        "kind=builtin",
+        "kind=config",
+        "kind=fn",
+        "kind=format",
+        "kind=hole",
+        "kind=host",
+        "kind=instance-get",
+        "kind=int",
+        "kind=len",
+        "kind=maplit",
+        "kind=optcall",
+        "kind=optfield",
+        "kind=record_update",
+        "kind=req",
+        "kind=spawn",
+        "kind=str",
+        "kind=stream-merge",
+        "kind=subscribe",
+        "lifecycle=<true>",
+        "method=checked_div_trunc",
+        "method=concat",
+        "method=length",
+        "method=next",
+        "method=push",
+        "method=set",
+        "mode=every",
+        "name=<true>",
+        "name=Err",
+        "name=None",
+        "name=Ok",
+        "name=Some",
+        "name=length",
+        "op=!==",
+        "op====",
+        "operands=Float",
+        "pattern=Err",
+        "pattern=None",
+        "pattern=Ok",
+        "pattern=Some",
+        "secret_witness=<true>",
+        "stages=<true>",
+        "step=<true>",
+        "step=advance",
+        "step=assert_no_residue",
+        "step=await",
+        "step=call",
+        "step=effect",
+        "step=emit",
+        "step=fail",
+        "step=intercept",
+        "step=let-effect",
+        "step=load",
+        "step=provide",
+        "step=stream-iter",
+        "step=timer",
+        "step=unload",
+        "step=var",
+        "subscribe=<true>",
+        "value=<true>"
+      ],
+      "item 421 F6 CROSSED TIERS AND THE PORT DID NOT FOLLOW - a live 429(d) recurrence, verified in source on this branch. backends/typescript/emit.py now mentions `secret` 17 times and backends/go/emit.py 20 times, marking `Secret[T]` at both ends; selfhost/emit_ts.rvl and selfhost/emit_go.rvl mention it ZERO times, and neither tier's corpus contains a single `Secret[`, so both oracles are green over a self-hosted emitter that DOES NOT REDACT. This falsifies the (5) sibling survey in the roadmap, which recorded on 2026-09-02 that the marking was python-tier only. Recorded, not fixed: porting it is 421 F6 cross-tier work, and the corpus family must be added FIRST and seen to fail, per exit (3).": [
+        "secret=<true>"
+      ]
+    }
+  },
+  "java": {
+    "blind": {
+      "declared out of the slice by the oracle's own docstring: spawn/instances, and externs (a witnessed extern is an extern).": [
+        "class=witnessed",
+        "kind=spawn"
+      ],
+      "declared out of the slice by the oracle's own docstring: the built-in Opt/Result constructor surface (`Ok`/`Err` and the Opt pair).": [
+        "name=Err",
+        "name=None",
+        "name=Ok",
+        "name=Some"
+      ],
+      "declared out of the slice by the oracle's own docstring: the canonical Float->Str helper, so float interpolation and float arithmetic are both out.": [
+        "operands=Float",
+        "widen=Float",
+        "widen=Int"
+      ],
+      "declared out of the slice by the oracle's own docstring: the component dialect outside the supported subset - a component that reaches these arms surfaces a loud `<<DEFER-component-nonsimple>>`.": [
+        "kind=fn",
+        "kind=format",
+        "kind=if"
+      ],
+      "declared out of the slice by the oracle's own docstring: the stdlib surface: every `builtin`/`len` node and `_emit_stdlib_helpers`.": [
+        "kind=builtin",
+        "method=charAt",
+        "method=charCodeAt",
+        "method=concat",
+        "method=indexOf",
+        "method=join",
+        "method=length",
+        "method=push",
+        "method=repeat",
+        "method=slice",
+        "method=split",
+        "method=to_int",
+        "method=to_str"
+      ],
+      "unreachable from surface revl: `src/revl/parser.py::_CANONICAL_OPS` rewrites `===`/`!==` to `==`/`!=` before lowering, so no IR node can carry these ops.": [
+        "op=!==",
+        "op===="
+      ]
+    },
+    "unported": {
+      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
+        "bind=<true>",
+        "bind=_",
+        "body=<true>",
+        "case=Err",
+        "case=Ok",
+        "else=<true>",
+        "entries=<true>",
+        "idempotent=<true>",
+        "intercept=<true>",
+        "isolate=<true>",
+        "items=<true>",
+        "kind=arrow",
+        "kind=hole",
+        "kind=instance-get",
+        "kind=len",
+        "kind=optcall",
+        "kind=optfield",
+        "kind=record_update",
+        "kind=stream-merge",
+        "kind=subscribe",
+        "lifecycle=<true>",
+        "method=codepoint_at",
+        "name=<true>",
+        "pattern=Err",
+        "pattern=Ok",
+        "pattern=record",
+        "returns=<true>",
+        "routes=<true>",
+        "secret_witness=<true>",
+        "setup=<true>",
+        "sized_length=<true>",
+        "step=advance",
+        "step=assert_no_residue",
+        "step=call",
+        "step=let_pattern",
+        "step=load",
+        "step=unload"
+      ]
+    }
+  },
+  "py": {
+    "blind": {
+      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: Float widening on a mixed-operand binary: no corpus document mixes Int and Float.": [
+        "widen=Float"
+      ],
+      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the `len`/`maplit`/`optfield` expression kinds and the `assert`/bare-`expr` statement steps. The module docstring lists all five as COVERED, and `src/revl/lower.py` emits all five, but no corpus document spells one: the claim of coverage is the docstring's, not the oracle's.": [
+        "kind=len",
+        "kind=maplit",
+        "kind=optfield",
+        "step=assert",
+        "step=expr"
+      ],
+      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the bare `Some`/`None` constructor read as a variable (the `kind=var` arm, not a `match` pattern), and `Map.remove`.": [
+        "method=remove",
+        "name=None",
+        "name=Some"
+      ],
+      "declared out of the slice by the oracle's own docstring: `adt` construction.": [
+        "kind=adt"
+      ],
+      "declared out of the slice by the oracle's own docstring: async coloring (async fns/methods/externs).": [
+        "async=<true>"
+      ],
+      "declared out of the slice by the oracle's own docstring: the component-dialect surfaces beyond `cexpr`'s covered arms - a function VALUE (`kind=fn`) and the `text` node no covered component body produces.": [
+        "kind=fn"
+      ]
+    },
+    "unported": {
+      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
+        "body=<true>",
+        "class=emission",
+        "commutative=<true>",
+        "config=<true>",
+        "deferred=<true>",
+        "else=<true>",
+        "fields=<true>",
+        "idempotency_key=<true>",
+        "idempotent=<true>",
+        "kind=__rendered__",
+        "kind=do",
+        "kind=format",
+        "kind=hole",
+        "kind=host",
+        "kind=instance-get",
+        "kind=lease-acquire",
+        "kind=lease-revoke",
+        "kind=spawn",
+        "kind=stream-merge",
+        "kind=subscribe",
+        "lifecycle=<true>",
+        "pattern=list",
+        "pattern=record",
+        "register=<true>",
+        "setup=<true>",
+        "sized_length=<true>",
+        "stage=take",
+        "step=abort",
+        "step=advance",
+        "step=approval",
+        "step=assert_no_residue",
+        "step=await",
+        "step=call",
+        "step=let_pattern",
+        "step=load",
+        "step=stream-iter",
+        "step=unload",
+        "undo_idempotent=<true>",
+        "validated=<true>"
+      ],
+      "item 310 `cache pure` landed in the reference after this ledger was first taken: backends/python/emit.py::_is_cache_pure reads `decl['cache']['class'] == 'pure_fn'` and gates a memo preamble on it. selfhost/emit_py.rvl has no `pure_fn` at all and no corpus document declares `cache pure`, so the oracle cannot see the difference. A new FEATURE rather than a fix, so item 391's standing port question owns it; named here so it is not invisible.": [
+        "class=pure_fn"
+      ],
+      "the `secrets=<true>` manifest flag the python reference reads when a document declares secret configuration. No corpus document declares one, and the port does not read the flag.": [
+        "secrets=<true>"
+      ]
+    }
+  },
+  "rust": {
+    "blind": {
+      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: a `pub fn`: every document in the rust corpus declares its functions private, so the `pub ` visibility prefix is emitted by neither side under test.": [
+        "public=<true>"
+      ],
+      "declared out of the slice by the oracle's own docstring: `await`/`spawn` and the host `let-effect` binds (`Pool`/`Map`/`Job`).": [
+        "step=await",
+        "step=let-effect"
+      ],
+      "declared out of the slice by the oracle's own docstring: async methods and their `idempotent` retry metadata.": [
+        "idempotent=<true>"
+      ],
+      "declared out of the slice by the oracle's own docstring: body-level `effect`/`timer`/`fail`/`if` steps and the `host`/`format` component-dialect expression kinds.": [
+        "kind=fn",
+        "kind=if"
+      ],
+      "declared out of the slice by the oracle's own docstring: the canonical Float->Str helper: float interpolation and float arithmetic are both out.": [
+        "operands=Float",
+        "widen=Float",
+        "widen=Int"
+      ]
+    },
+    "unported": {
+      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
+        "args=<true>",
+        "bind=_",
+        "body=<true>",
+        "class=witnessed",
+        "else=<true>",
+        "event=<true>",
+        "fn=Job.run",
+        "fn=Map.new",
+        "intercept=<true>",
+        "isolate=<true>",
+        "items=<true>",
+        "kind=builtin",
+        "kind=format",
+        "kind=hole",
+        "kind=host",
+        "kind=instance-get",
+        "kind=len",
+        "kind=optcall",
+        "kind=optfield",
+        "kind=record_update",
+        "kind=spawn",
+        "kind=stream-merge",
+        "kind=subscribe",
+        "lifecycle=<true>",
+        "method=charAt",
+        "method=charCodeAt",
+        "method=codepoint_at",
+        "method=concat",
+        "method=get",
+        "method=indexOf",
+        "method=join",
+        "method=length",
+        "method=next",
+        "method=push",
+        "method=remove",
+        "method=repeat",
+        "method=set",
+        "method=slice",
+        "method=split",
+        "method=to_int",
+        "method=to_str",
+        "mode=every",
+        "name=<true>",
+        "name=Map",
+        "name=get",
+        "name=remove",
+        "pattern=list",
+        "pattern=record",
+        "returns=<true>",
+        "secret_witness=<true>",
+        "sized_length=<true>",
+        "stages=<true>",
+        "step=advance",
+        "step=assert_no_residue",
+        "step=call",
+        "step=fail",
+        "step=let_pattern",
+        "step=load",
+        "step=stream-iter",
+        "step=timer",
+        "step=unload"
+      ]
+    }
+  },
+  "ts": {
+    "blind": {
+      "NOT TRIAGED - both sides implement this and no corpus document reaches it. Recorded by `--write`; say WHY, or add the corpus case.": [
+        "op=!==",
+        "op=>="
+      ],
+      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the Str-receiver specialisation (`recv=Str`) and Int/Float widening on a mixed-operand binary.": [
+        "recv=Str",
+        "widen=Float",
+        "widen=Int"
+      ],
+      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the `len`/`maplit`/`optfield` expression kinds and the `assert`/bare-`expr` statement steps - the same five the py corpus misses, in a corpus of 31 documents.": [
+        "kind=len",
+        "kind=optfield",
+        "step=assert",
+        "step=expr"
+      ],
+      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the built-in Opt/Result constructors read as variables (`Some`/`None`/`Ok`/`Err`) and the `??` operator.": [
+        "name=Err",
+        "name=None",
+        "name=Ok",
+        "name=Some",
+        "op=??"
+      ],
+      "declared out of the slice by the oracle's own docstring: async methods and their `idempotent` retry metadata.": [
+        "idempotent=<true>"
+      ],
+      "unreachable from surface revl: `src/revl/parser.py::_CANONICAL_OPS` rewrites `===`/`!==` to `==`/`!=` before lowering, so no IR node can carry this op. The reference arm is defensive; no corpus document can reach it.": [
+        "op===="
+      ]
+    },
+    "unported": {
+      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
+        "body=<true>",
+        "class=witnessed",
+        "else=<true>",
+        "kind=do",
+        "kind=hole",
+        "kind=stream-merge",
+        "kind=subscribe",
+        "kind=variant",
+        "lifecycle=<true>",
+        "mode=every",
+        "pattern=record",
+        "returns=<true>",
+        "root=stdlib",
+        "sized_length=<true>",
+        "step=advance",
+        "step=assert_no_residue",
+        "step=call",
+        "step=let_pattern",
+        "step=load",
+        "step=timer",
+        "step=unload",
+        "strategy=<true>",
+        "type=<true>"
+      ]
+    }
+  },
+  "wasm": {
+    "blind": {
+      "declared out of the slice by the oracle's own docstring: Float end to end, and `.to_int()` widening (which arrives as a `builtin`, itself excluded).": [
+        "operands=Float",
+        "widen=Int"
+      ]
+    },
+    "unported": {
+      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
+        "args=<true>",
+        "async=<true>",
+        "bind=<true>",
+        "class=witnessed",
+        "config=<true>",
+        "else=<true>",
+        "fn=Job.run",
+        "kind=__wat",
+        "kind=arrow",
+        "kind=bracket",
+        "kind=compensation",
+        "kind=config",
+        "kind=fn",
+        "kind=format",
+        "kind=hole",
+        "kind=host",
+        "kind=if",
+        "kind=instance-get",
+        "kind=interp",
+        "kind=maplit",
+        "kind=match",
+        "kind=name",
+        "kind=optcall",
+        "kind=optfield",
+        "kind=record_update",
+        "kind=req",
+        "kind=spawn",
+        "kind=transactional",
+        "lifecycle=<true>",
+        "method=codepoint_at",
+        "method=dispose",
+        "method=has",
+        "method=indexOf",
+        "method=join",
+        "method=keys",
+        "method=lookup",
+        "method=remove",
+        "method=set",
+        "method=size",
+        "method=split",
+        "name=length",
+        "op=!==",
+        "op=/",
+        "op====",
+        "op=??",
+        "pattern=_",
+        "payload_type=Any",
+        "secret_witness=<true>",
+        "step=await",
+        "step=effect",
+        "step=emit",
+        "step=let-effect",
+        "step=provide",
+        "subscribe=<true>",
+        "witness=Str"
+      ]
+    }
+  }
+}

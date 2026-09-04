@@ -818,6 +818,16 @@ def build_parser() -> argparse.ArgumentParser:
              "peer sits outside the composition's trust boundary and everything "
              "crossing to it is authority leaving the process. The generated "
              "header records that the flag was used")
+    imp_a2a.add_argument(
+        "--follow-redirects", action="store_true", dest="follow_redirects",
+        help="let the generated crossing follow a SAME-ORIGIN 307 or 308 "
+             "redirect. Off by default, because the endpoint is part of what "
+             "the file declares and what the composition admits: a redirect to "
+             "another host makes the derived `net.<host>` reach bound stop "
+             "describing where the crossing can reach, and a 301/302/303 "
+             "re-issues the POST as a GET with the body dropped. Those stay "
+             "refused even with this flag; only the two method-preserving codes "
+             "on the declared origin are followed")
     imp_a2a.add_argument("-o", "--output", default=None,
                          help="output path (default: stdout)")
     imp_a2a.add_argument("--json-diagnostics", action="store_true",
@@ -893,7 +903,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "armed, every boundary-crossing seam checks the latch, "
                           "so `revl estop --latch FILE` from another terminal "
                           "halts this run immediately — no unwind, an honest "
-                          "in-flight inventory instead. Equivalent to the "
+                          "in-flight inventory instead. With --placement the "
+                          "conductor watches it too and halts every process, "
+                          "naming the ones on tiers that have no E-Stop seam "
+                          "and were only killed. Equivalent to the "
                           "REVL_ESTOP_LATCH environment variable")
     run.add_argument("--wal", default=None, metavar="FILE",
                      help="persist the effect accumulator as a durable write-ahead "

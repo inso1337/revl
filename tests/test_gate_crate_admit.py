@@ -56,6 +56,54 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CRATE = ROOT / "crates" / "revl-gate"
+
+# --------------------------------------------- the cross-check exclusion list
+#
+# WHAT IS GIVEN UP, stated rather than left to be inferred: the census's cheap
+# self-host engine is NO LONGER VERIFIED AGAINST THE CRATE on these eight
+# inputs. It is not a loss of census COVERAGE -- `tools/gate_reference_census.py`
+# still runs every one of them through the fast engine and baselines the
+# verdict, so a change in what the census says about them still reds. What is
+# lost is CROSS-ENGINE AGREEMENT on the eight largest programs in the tree, and
+# those are the compiler's own sources, so it is not a comfortable loss.
+#
+# WHY: `crates/revl-gate` is superlinear in input size (issue #333). Measured
+# through the standalone consumer this file builds: 50 assorted corpus programs
+# cost 4.0 s in total, `stdlib/str.rvl` (16 KB) costs 11.6 s, and
+# `selfhost/parser.rvl` (31 KB, the SMALLEST of the eight) costs 90.1 s in a
+# RELEASE build and over 150 s in the debug build this fixture uses. A release
+# build buys roughly 2x and does not rescue it; the largest of the eight is
+# 4.8x bigger than parser.rvl again. The 900 s cap on `_crate_verdicts` is not
+# the problem and raising it would need hours, not minutes.
+#
+# BY NAME, never by size or by pattern: a size cap would silently swallow the
+# next large file someone adds, which is how an exclusion becomes permanent
+# without anyone choosing it. Adding a name here without also recording it in
+# `tools/gate_crate_cross_check_exclusions.json` is a RED
+# (`test_the_cross_check_exclusion_list_only_shrinks`). Removing one is free.
+_CROSS_CHECK_EXCLUSIONS = {
+    "selfhost/parser.rvl":
+        "31 KB. 90.1 s release, >150 s debug, both measured (#333).",
+    "selfhost/emit_go.rvl":
+        "66 KB. >20 s debug measured; release not timed, and it is larger "
+        "than parser.rvl which costs 90 s release (#333).",
+    "selfhost/checker.rvl":
+        "72 KB. >20 s debug measured; larger than parser.rvl (#333).",
+    "selfhost/emit_wasm.rvl":
+        "99 KB. >20 s debug measured; larger than parser.rvl (#333).",
+    "selfhost/emit_rust.rvl":
+        "101 KB. >20 s debug measured; larger than parser.rvl (#333).",
+    "selfhost/emit_py.rvl":
+        "105 KB. >20 s debug measured; larger than parser.rvl (#333).",
+    "selfhost/emit_ts.rvl":
+        "133 KB. >20 s debug measured; larger than parser.rvl (#333).",
+    "selfhost/emit_java.rvl":
+        "149 KB, the largest. >20 s debug measured, and a release run was "
+        "still going at 570 s without completing (#333).",
+}
+
+_CROSS_CHECK_EXCLUSIONS_BASELINE = (
+    ROOT / "tools" / "gate_crate_cross_check_exclusions.json")
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 
@@ -460,7 +508,11 @@ def test_the_census_fast_engine_answers_what_the_crate_answers(consumer):
     sys.modules[spec.name] = census
     spec.loader.exec_module(census)
 
-    cases = census.load_corpus(oracle)
+    cases = [(cid, src) for cid, src in census.load_corpus(oracle)
+             if cid not in _CROSS_CHECK_EXCLUSIONS]
+    skipped = sorted(_CROSS_CHECK_EXCLUSIONS)
+    print(f"cross-check over {len(cases)} programs; "
+          f"{len(skipped)} excluded for cost (#333): {', '.join(skipped)}")
     sources = [src for _, src in cases]
     fast = list(census.SelfhostEngine().verdicts(sources))
     crate = _crate_verdicts(consumer, sources)
@@ -489,3 +541,38 @@ def test_the_census_fast_engine_answers_what_the_crate_answers(consumer):
         f"the census's fast engine and the crate disagree on "
         f"{len(mismatches)} of {len(cases)} programs:\n  "
         + "\n  ".join(mismatches[:20]))
+
+
+def test_the_cross_check_exclusion_list_only_shrinks():
+    """The exclusion list above may lose names freely and gain them only by a
+    deliberate, reviewed edit to the recorded baseline.
+
+    This is the same shape as the census baseline and the coverage ledgers: the
+    check exists because narrowing a gate to make a branch go green is exactly
+    the move that must never be quiet. Removing a name is the only free
+    direction, and it is the direction issue #333 should eventually push.
+    """
+    recorded = json.loads(
+        _CROSS_CHECK_EXCLUSIONS_BASELINE.read_text(encoding="utf-8"))
+    baseline = set(recorded["excluded"])
+    declared = set(_CROSS_CHECK_EXCLUSIONS)
+
+    added = sorted(declared - baseline)
+    assert not added, (
+        "these inputs are excluded from the fast-engine/crate cross-check but "
+        "are not recorded in tools/gate_crate_cross_check_exclusions.json:\n  "
+        + "\n  ".join(added)
+        + "\n\nAn exclusion is a gate being narrowed. Record it there, with "
+          "the measurement and the issue, so it is reviewed on its own rather "
+          "than riding along inside a test edit.")
+
+    # Shrinking is free, and is the point. Report it so the baseline gets
+    # tidied rather than quietly keeping a name nothing excludes any more.
+    for name in sorted(baseline - declared):
+        print(f"no longer excluded, safe to delete from the baseline: {name}")
+
+    for name, reason in sorted(_CROSS_CHECK_EXCLUSIONS.items()):
+        assert "#333" in reason, (
+            f"{name}'s exclusion reason must cite the issue that owns the "
+            f"underlying cost, so a reader can tell a known cost from a "
+            f"known-broken input; got: {reason!r}")

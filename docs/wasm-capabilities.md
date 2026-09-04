@@ -52,8 +52,10 @@ Int/Bool/Str/Bytes/List/record/variant/Opt/Result values
 The fixed-shape stdlib surface (docs/stdlib-2.0.md) lowers over the canonical
 ABI model. The substrate's rule: **`length`, `push`, `concat`, `slice`,
 `charAt`, `charCodeAt`, plus the reader builtins `split`, `join` and `Str`'s
-`indexOf` (and the arithmetic/rendering builtins) lower; only `repeat`, the
-`Map` operations, and `List.indexOf` do not.**
+`indexOf`, `startsWith`, `endsWith`, `codepoint_at` (and the
+arithmetic/rendering builtins) lower; `repeat`, the `Map` operations,
+`List.indexOf` and the four ASCII classifiers (`is_digit`, `is_alpha`,
+`is_alnum`, `is_space`) do not.**
 
 | builtin | on | wasm? | notes / exact refusal |
 |---|---|---|---|
@@ -81,9 +83,11 @@ linear-memory `Str`/`List` ABI, closing the gap the concat-built **writer**
 (`log_line`) already crossed. The three reader helpers are pulled into a module
 only on demand (like `$f64_to_str`), so a component that never splits/joins/
 searches keeps a byte-identical helper preamble. What still does **not** run on
-the substrate is `repeat`, the `Map` operations, and `List.indexOf` (the
-per-element comparison the harness's wire protocol never reaches); those are
-emitted as compile-time refusals, so a wasm target never silently degrades.
+the substrate is `repeat`, the `Map` operations, `List.indexOf` (the
+per-element comparison the harness's wire protocol never reaches) and the four
+ASCII classifiers `is_digit` / `is_alpha` / `is_alnum` / `is_space`
+(`unsupported builtin method 'is_digit'`); those are emitted as compile-time
+refusals, so a wasm target never silently degrades.
 
 ## The service boundary
 

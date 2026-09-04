@@ -119,6 +119,17 @@ CORPUS_DIRS = (
 )
 EXTRA_DIRS = ("bench", "registry", "playground", "site", "docs", "forks")
 
+# Directories that can hold an INSTALLED copy of the tree, or build output.
+# Walking them counts the same corpus twice under a different path: the
+# `frontend-cordis` job runs `backends/python/setup.sh`, which creates
+# `backends/python/.venv` with revl installed, and `backends` is a census
+# directory -- so the walk descended into site-packages and reported 22
+# phantom "new divergences" that were the tree's own programs seen again.
+_SKIP_DIRS = frozenset({
+    "target", ".git", ".venv", "venv", "site-packages",
+    "node_modules", ".cordis-py", "__pycache__",
+})
+
 
 # ------------------------------------------------------------- the reference
 
@@ -405,7 +416,7 @@ def load_corpus(oracle, *, everything: bool = False):
         if not base.is_dir():
             continue
         for path in sorted(base.rglob("*.rvl")):
-            if "target" in path.parts or ".git" in path.parts:
+            if _SKIP_DIRS & set(path.parts):
                 continue
             text = _read(path)
             if text is not None:

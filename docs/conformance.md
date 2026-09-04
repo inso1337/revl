@@ -169,7 +169,7 @@ user targeting a tier by hand.
 The matrix asks **did the emitter produce code?**, under `--validate` **does
 that code hold up in the real toolchain?**, and under `--execute` **do the tiers
 agree on what it evaluates to?** They are three different questions, and for a
-long time only the first was asked — see "What the second question found" below.
+long time only the first was asked. See "What the second question found" below.
 
 | tier | validator | depth |
 |---|---|---|
@@ -190,7 +190,7 @@ run in CI.
 
 Every validator in that table stops at **compile or typecheck depth**. So a
 green matrix proves a construct *emits and compiles* per tier, and never what it
-*evaluates to* — two tiers can be green on the same case and disagree about the
+*evaluates to*. Two tiers can be green on the same case and disagree about the
 answer. That is not hypothetical: `tsc --noEmit` covered
 `backends/typescript/demo.ts` the whole time its runtime assertions were
 failing, and java typechecked `Int / Int` cleanly while answering `3` where
@@ -209,9 +209,9 @@ every other tier answered `3.5` (item 433 rider R1).
 as a revl literal; the executed program is the unchanged case plus that probe
 plus `test "conformance_answer" { assert probe() == <answer> }`, and every tier
 asserts the *same* literal. A tier that builds, runs, and computes something
-else is the only thing that can fail — and because the answer is authored rather
-than read off whichever tier ran first, three tiers quietly agreeing on a wrong
-value fails too. `expr/Int32 bitwise` is the sharpest probe: `mask(6, 6, 2)` is
+else is the only thing that can fail. Because the answer is authored rather than
+read off whichever tier ran first, three tiers quietly agreeing on a wrong value
+fails too. `expr/Int32 bitwise` is the sharpest probe: `mask(6, 6, 2)` is
 `-1`, which separates an arithmetic `>>` from a logical `>>>` and a 32-bit lane
 from a 64-bit one.
 
@@ -221,9 +221,9 @@ two claim strengths never render as one uniform block of `ok` again. A
 compile-only row is not a to-do; it is a case whose value a pure call cannot
 reach:
 
-- **`signature`** — the case declares a type or service shape and computes no
+- **`signature`**: the case declares a type or service shape and computes no
   value at all (every `type/*` case). There is nothing to compare.
-- **`activation`** — the value is produced inside a component provide-method, or
+- **`activation`**: the value is produced inside a component provide-method, or
   during activation (`effect`, `emit`, an `acquire` extern). Reaching it means
   booting the composition on each tier's runtime rather than calling a pure
   function. `ci/placement_smoke.sh` and `revl run --placement` already boot
@@ -292,7 +292,7 @@ the service). A no-config extern is byte-identical on every tier.
 The per-backend byte-equality goldens (`backends/*/golden/user_cache.*`,
 plus wasm's `functions.wat`) are **snapshot tests**, not a compatibility
 contract. The invariant they enforce is **"emitter output never changes
-*unreviewed*"** — never "output never changes". Concretely:
+*unreviewed*"**. It is not "output never changes". Concretely:
 
 - **Regenerating a golden plus reviewing its diff is always an acceptable
   resolution.** When an emitter change deliberately alters output, the fix is
@@ -321,10 +321,10 @@ contract. The invariant they enforce is **"emitter output never changes
   the committed expectation silently disagreeing (a merge that regenerated
   on one branch and not the other, a renderer change that altered bytes
   nobody reviewed). That is why every golden is folded into the default
-  `pytest tests/` entry point (see `tests/test_goldens.py`) — a stale golden
+  `pytest tests/` entry point (see `tests/test_goldens.py`): a stale golden
   must never hide behind a green default suite.
-- **When a real external consumer appears, byte-freezing may return** —
-  deliberately, as a versioned promise in the contract (see
+- **When a real external consumer appears, byte-freezing may return.** It comes
+  back deliberately, as a versioned promise in the contract (see
   [stability.md](stability.md)), not as an accident of test setup.
 
 ### What counts as a golden
@@ -333,7 +333,7 @@ Anything checked in that a tool reproduces from the tree: the per-backend
 emitter goldens, the emitted Go under `backends/go/`, the crash-recovery
 scenarios, and `crates/revl-gate`. That last one is a committed generated rust
 crate that embeds emitted rust, so *any* change to `backends/rust/emit.py` or
-`selfhost/*.rvl` rewrites roughly 1900 lines of it, and it is the common way a
+`selfhost/*.rvl` rewrites roughly 8000 lines of it, and it is the common way a
 PR goes red on drift alone. The fix is `python3 tools/regen_goldens.py
 gate-crate` in the same commit, never a revert of the emitter change.
 
@@ -395,12 +395,12 @@ Starting from 12/5/5/32 (ts/rust/java/wasm) plus two frontend gaps:
 
 - **Frontend**: `match` is now usable in component and method bodies, not
   only in `fn` bodies; a bare `return` parses, which is the natural body of
-  a void service operation. `??` is now type-checked — it requires an
+  a void service operation. `??` is now type-checked: it requires an
   optional on the left, which three tiers could not render and python
   silently accepted.
 - **TypeScript** (14 → 0): `fn` call nodes, `if`/`fail` steps, `match` arm
   bindings, `??` in component bodies, bare `return`.
-- **rust / java** (7 → 3, 6 → 3): `??` implemented on both — lazily, as
+- **rust / java** (7 → 3, 6 → 3): `??` implemented on both, and lazily:
   `unwrap_or_else(|| b)` on `Option<T>` and `orElseGet(() -> b)` on
   `Optional<T>`, since the eager forms would evaluate a fallback that is not
   needed; `match` in component bodies; bare `return` (which had been
@@ -408,8 +408,8 @@ Starting from 12/5/5/32 (ts/rust/java/wasm) plus two frontend gaps:
   `config` inside a guard; java renames a keyword-colliding `fn` instead of
   rejecting it.
 - **wasm** (34 → 19): the component path now delegates every non-i32-native
-  kind to the v3 value engine rather than duplicating it — `if`, `fn` calls
-  (with the called functions lowered into the component's own module),
+  kind to the v3 value engine rather than duplicating it. That covers `if`,
+  `fn` calls (with the called functions lowered into the component's own module),
   `list`/`record`/`index`/stdlib, `match` + ADT construction, bare `return`,
   and `??` on an in-module `Opt`. Every refusal that remains now names the
   i32 boundary rather than reporting an unknown kind.
@@ -418,8 +418,8 @@ Starting from 12/5/5/32 (ts/rust/java/wasm) plus two frontend gaps:
 
 - **`call` is ambiguous by kind across the two dialects.** The component
   form is `target`/`method`; the 2.0 form is `callee`/`args`. Dispatching on
-  kind alone can silently take the wrong branch and read a missing child —
-  the one place the two-renderer split fails *quietly* instead of loudly.
+  kind alone can silently take the wrong branch and read a missing child. It
+  is the one place the two-renderer split fails *quietly* instead of loudly.
   Dispatch must key on shape.
 - **The component IR dialect is not uniform.** `Some(x)` and `None` arrive
   in *v3* spelling inside component bodies while their neighbours use the
@@ -444,34 +444,33 @@ an emit-only sweep and all live in a tier the matrix called clean:
 
 - **Required services were never declared on `Context`.** The emitter
   augmented cordis's `Context` with a component's *provisions* only, so
-  `ctx.bus.send(x)` — the emission path, on six of the fifty cases — hit a
+  the emission path `ctx.bus.send(x)`, taken by six of the fifty cases, hit a
   `Context` with no `bus`. This is the **same bug as the rust one in a
   different spelling**: both tiers rendered a required binding they had never
   brought into scope. Fixed by augmenting with requirements as well; keys
   repeated across emitted files merge, since identical interface members do.
 - **The A1 iteration boundary emitted `yield null`.** cordis types a yielded
   value as `Disposable<T> = () => T`, and `null` is not one. Fixed by
-  yielding a no-op disposer, which is the same semantics — a boundary has
-  nothing to revert — and typechecks.
+  yielding a no-op disposer. That typechecks, and carries the same semantics,
+  since a boundary has nothing to revert.
 - **Arrow parameters were implicitly `any`**, which `strict` rejects. They
   are now explicitly `any`: arrows are in the checker's *enumerated*
   unchecked remainder, so the compiler has no type to emit, and an admission
   beats a guess. Inferring them is a typing-frontier item, not a codegen one.
 
 Then a JDK was installed and the java tier was validated for the first time.
-It emits 47 of 50 cases and **13 of those do not compile** — `long` where a
+It emits 47 of 50 cases and **13 of those do not compile**: `long` where a
 `String` is expected, unresolved symbols, `unexpected type` on generics, and a
 provider that does not implement its own interface for record/ADT parameters.
 The tier's own suite is green, because it asserts on emitted *strings* plus a
 javac gate over four hand-picked examples; nothing walked the surface. They
-are baselined in `tests/test_conformance_validate.py` — new breakage fails,
-and a baselined case that starts passing also fails, so the list can only
-shrink.
+are baselined in `tests/test_conformance_validate.py`. New breakage fails, and
+a baselined case that starts passing also fails, so the list can only shrink.
 
 Once crates.io was reachable, all 47 rust cases went through `cargo check`
-together for the first time: 44 passed, 3 did not — and all three were
-failing on java too, which is what identified them as shared causes rather
-than three coincidences. Chasing them found three bugs and closed five more
+together for the first time: 44 passed, 3 did not. All three were failing on
+java too, which is what identified them as shared causes rather than three
+coincidences. Chasing them found three bugs and closed five more
 java cases as a side effect:
 
 - **The `T` -> `Opt[T]` injection was never materialized.** `compatible()`
@@ -480,7 +479,7 @@ java cases as a side effect:
   `Option<i64> { 1 }` and `Optional<Long> { return 1L; }`. Fixed in the
   frontend (`_inject_opt` in lower.py), not per backend: the frontend is the
   single IR producer, and a backend deciding this would need type information
-  the emitters do not carry. Untyped tiers never noticed — the injection is
+  the emitters do not carry. Untyped tiers never noticed: the injection is
   invisible on python and TypeScript, which is exactly why it survived.
 - **Java put primitives in generic positions.** `Opt[Int]` rendered as
   `Optional<long>`, which is not a Java type. Type *arguments* are now boxed
@@ -504,21 +503,21 @@ TypeScript accept both because their hosts are untyped.
 Fixing it is a language decision, not a codegen one, and the tiers disagree
 today: `docs/backend-ir-v1.md` specifies `Job.run(name)`, while the wasm tier's
 `Job.run` host op takes an interned i32 job id and `examples/pulse.rvl`
-calls `Job.run(1)`. Typing the host
-boundary — and rejecting a mismatch, the way service declarations already
-bound their providers — would settle it, at the cost of breaking whichever
-spelling loses. That is the open question, and it belongs on the G8 boundary
+calls `Job.run(1)`. Typing the host boundary
+would settle it, at the cost of breaking whichever spelling loses. That means
+rejecting a mismatch, the way service declarations already bound their
+providers. That is the open question, and it belongs on the G8 boundary
 surface where the rest of the host contract lives.
 
 The rust failure CI *did* catch is fixed here, and it is the same shape as
 the others: revl's `+` on strings lowered to Rust's `+`, which
 accepts `String + &str` and rejects both `&str + String` and `String +
 String`. It now lowers to `format!`, which accepts every combination. Only
-`cargo check` in CI could see it — see "what is still not checked" below.
+`cargo check` in CI could see it. See "what is still not checked" below.
 
 The residue is honest rather than zero:
 
-- python's validator reaches syntax and unbound names, not types — the tier
+- python's validator reaches syntax and unbound names, not types. The tier
   emits untyped Python, so there is nothing deeper to check.
 - wasm validates modules; it does not drive the component protocol. The wasm
   suite executes emitted components separately.
@@ -529,8 +528,8 @@ The residue is honest rather than zero:
   for a *resolution* reason, and never reclassifies a compile error as
   retryable. Only when both fail does it report unavailable, with that reason,
   rather than reporting clean. (It used to probe `static.crates.io` and call
-  the tier unavailable when the probe failed — which meant a laptop on a plane
-  with every crate already cached reported the rust tier as unchecked. The
+  the tier unavailable when the probe failed, so a laptop on a plane with
+  every crate already cached reported the rust tier as unchecked. The
   hosts are also not `crates.io`: `index.crates.io` and `static.crates.io` are
   different hosts, so a network that serves the website and the `cargo search`
   API can still fail every resolve.) The policy is shared with
@@ -545,24 +544,24 @@ The residue is honest rather than zero:
 `tests/test_doc_examples.py` extracts every ```` ```revl ```` block from
 `README.md` and `docs/**.md` and puts it through the frontend. It exists
 because the docs rotted silently: when the G4 emission rule landed, the
-flagship `UserCache` example stopped compiling in three documents at once —
-one of them contradicting a rule stated seventy lines below it — and no test
-noticed for as long as it took someone to paste a snippet and watch it fail.
+flagship `UserCache` example stopped compiling in three documents at once, one
+of them contradicting a rule stated seventy lines below it. No test noticed, for
+as long as it took someone to paste a snippet and watch it fail.
 
 A doc snippet is often not a program, so a block declares what it is in its
-fence, and **every kind gets a real check** — there is no marker that means
+fence, and **every kind gets a real check**. There is no marker that means
 "skip me":
 
 | fence | what it claims | what is checked |
 |---|---|---|
 | ` ```revl ` | a complete program | must compile |
-| ` ```revl fragment ` | a component body, method body, statement or expression | must be valid revl syntax in at least one scaffold; must *not* compile standalone (then it is a program — drop the marker) |
+| ` ```revl fragment ` | a component body, method body, statement or expression | must be valid revl syntax in at least one scaffold; must *not* compile standalone (if it does, it is a program: drop the marker) |
 | ` ```revl sketch ` | elided pseudocode (`...`) or proposed syntax | must **not** compile; when the feature lands the gate says so and the block gets promoted |
 | ` ```revl reject ` | code the compiler must refuse | must fail to compile |
 | ` ```revl reject T1 ` | ...for a specific reason | must fail with that `revl.diagnostics` code |
 
 Pick the weakest marker that is true. If a block is meant to be a working
-example, the fix is the snippet — not the marker. Every failure reprints this
+example, fix the snippet rather than the marker. Every failure reprints this
 table, so an author who trips the gate does not have to come find it.
 
 The one thing the gate cannot catch is a rotted program mis-marked
@@ -575,11 +574,11 @@ vocabulary is four words long and why each one is loud in review.
 Every gap above is a **renderer** divergence, not a semantic one: the
 frontend produces a well-formed node and some backend has no case for it.
 None of them threatens a guarantee, and all of them are invisible to
-single-tier testing — which is why this file exists and why the matrix
+single-tier testing. That is why this file exists and why the matrix
 belongs in CI.
 
 The structural fix, once the immediate gaps are closed, is to stop having two
 expression renderers per backend. Each emitter should own **one** expression
 function covering every IR kind, with tier limits expressed as explicit
-refusals rather than missing cases. python — the tier with a single 17-kind
-renderer — is the one with zero gaps, which is not a coincidence.
+refusals rather than missing cases. python has a single 17-kind renderer, and
+it is the tier with zero gaps. That is not a coincidence.

@@ -670,6 +670,39 @@ component Store provides kv: Kv {
   provide kv { fn get(k) { return k } }
 }
 """),
+
+    # The ACCEPTING TWINS of the G4 cluster below. Refusing more is trivially
+    # "correct" and is the failure mode a bypass test cannot see, so each new
+    # refusal ships with the legitimate near-twin it must not touch.
+    ("an aliased spawn-handle provision, correctly marked `emit`", """
+service Task { emission[net] fn run(p: Str) -> Int }
+component Worker provides task: Task {
+  provide task { fn run(p) { return 1 } }
+}
+service Sup { emission fn go(p: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(p: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let t = w.task
+      let r = emit t.run(p)
+      return r
+    }
+  }
+}
+"""),
+    ("a host acquisition in its bracket, the whole point of the rule", """
+service S { fn go(u: Str) -> Int }
+component C provides s: S {
+  let m = effect Map.new() undo m.drop()
+  provide s { fn go(u) = 1 }
+}
+"""),
+    ("a host acquisition in a fn no component reaches", """
+fn helper(u: Str) -> Int { let p = Map.new()   return 1 }
+service S { fn go(u: Str) -> Int }
+component C provides s: S { provide s { fn go(u) = 1 } }
+"""),
 ]
 
 
@@ -1094,6 +1127,53 @@ component C requires kv: Kv {
   isolate kv in realms("r1", "r2")
 }
 """, "PRELUDE"),
+
+    # The G4 cluster PR #331 taught the reference to refuse. `crates/revl-gate`
+    # is generated from `selfhost/lower.rvl`, so until these agreed the SHIPPED
+    # gate admitted four programs the reference refuses — the fail-open
+    # direction. The message is compared too (`_agree`), which is the point:
+    # the crate promises its refusals are the reference's verbatim.
+    ("g4 unmarked emission through an aliased spawn-handle provision",
+     _fixture("g4_unmarked_alias_emission"), "G4"),
+    ("g4 host acquire in a provide-method let",
+     _fixture("g4_method_host_acquire"), "G4"),
+    ("g4 host acquire in a teardown slot",
+     _fixture("g4_undo_host_acquire"), "G4"),
+    ("g4 host acquire in a component-reachable fn body",
+     _fixture("g4_fn_body_host_acquire"), "G4"),
+    # the same rule at the two positions no checked-in fixture occupies
+    ("g4 host acquire in an emit expression", """
+service S { fn go(u: Str) -> Int }
+component C provides s: S {
+  let m = effect Map.new() undo m.drop()
+  provide s {
+    fn go(u) {
+      emit Pool.open(u, 1)
+      return 1
+    }
+  }
+}
+""", "G4"),
+    ("g4 host acquire wrapped inside an effect bracket's acquisition", """
+fn wrap(x: Int) -> Int { return x }
+service S { fn go(u: Str) -> Int }
+component C provides s: S {
+  let m = effect wrap(Pool.open("a", 1)) undo m.drop()
+  provide s { fn go(u) = 1 }
+}
+""", "G4"),
+    ("g4 host acquire in a compensation", """
+service Out { emission fn add(u: Str) -> Int }
+service S { emission fn go(u: Str) -> Int }
+component C requires o: Out provides s: S {
+  provide s {
+    fn go(u) {
+      emit o.add(u) compensate Pool.open(u, 1)
+      return 1
+    }
+  }
+}
+""", "G4"),
     # A bare Upper-cased CALL head is not a host acquisition. The reference's
     # host branch is `head[:1].isupper() and ops and ops[0].args is not None`
     # (lower.py `_lower_postfix`) — it needs a `.method(...)` after the head, so

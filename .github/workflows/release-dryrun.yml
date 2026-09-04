@@ -16,7 +16,7 @@
 # condition away from being a release nobody meant to cut.
 #
 # WHAT IT CATCHES that the rest of CI does not. CI tests the checkout tree. The
-# wheel is a different artifact: `pyproject.toml` force-includes `backends/` and
+# wheel is a different artifact: `pyproject.toml` packages `backends/` and
 # `stdlib/` into it, and every backend-touching command breaks once installed if
 # that stops working, because the checkout paths do not exist under
 # site-packages. Nothing else in this repository installs the built wheel and
@@ -46,6 +46,7 @@ on:
   pull_request:
     paths:
       - "pyproject.toml"
+      - "tools/check_wheel_manifest.py"
       - ".github/workflows/publish.yml"
       - ".github/workflows/release-dryrun.yml"
 
@@ -78,6 +79,21 @@ jobs:
           python -m pip install --upgrade twine
           twine check dist/*
 
+      # `twine check` reads the metadata; it says nothing about the payload.
+      # This asserts the wheel's member list against `git ls-files` of the
+      # trees pyproject maps into it -- the artifact that is one `git tag`
+      # away from PyPI, checked against the commit it claims to be built from.
+      #
+      # The `lint` job runs the same tool on every PR. It runs again HERE
+      # because this is the only place the real `python -m build` output is
+      # inspected, and because a wheel that carries a runner's stray files is
+      # a release defect first and a lint defect second (GHSA-gj88-cx6q-38r2:
+      # the wheel force-included `backends/` verbatim, so a build on a machine
+      # that had run `npm ci` or the TS secret-store fixtures shipped
+      # `node_modules`, cargo `target/` and test key material).
+      - name: The wheel ships exactly the tracked files
+        run: python3 tools/check_wheel_manifest.py dist/*.whl
+
       # `check-version` in publish.yml compares the TAG against pyproject. There
       # is no tag here, so this compares what the build actually produced
       # against pyproject instead -- which is the half of that assertion a
@@ -104,7 +120,7 @@ jobs:
           echo "REVL_VERSION=$proj" >> "$GITHUB_ENV"
 
       # The part no other job does: install the WHEEL, in a clean environment,
-      # and use it. `pyproject.toml` force-includes `backends/` and `stdlib/`
+      # and use it. `pyproject.toml` packages `backends/` and `stdlib/`
       # into the wheel because `revl._backends_root()` and
       # `revl._paths.stdlib_root()` fall back to the packaged copies once the
       # checkout paths are gone. A green checkout suite cannot see that break.
@@ -129,7 +145,7 @@ jobs:
           import revl.gate
           from revl import _paths
 
-          # `pyproject.toml` force-includes `backends/` and `stdlib/` into the
+          # `pyproject.toml` packages `backends/` and `stdlib/` into the
           # wheel because `revl._backends_root()` and `_paths.stdlib_root()`
           # fall back to the packaged copies once the checkout is gone. Assert
           # they resolve INSIDE site-packages, not merely that some path came
@@ -146,7 +162,7 @@ jobs:
               if resolved != root / label:
                   raise SystemExit(
                       f"the installed wheel resolves {label} to {resolved}, not to the "
-                      f"packaged {root / label}: pyproject's force-include no longer "
+                      f"packaged {root / label}: pyproject's wheel target no longer "
                       "ships it, and every backend-touching command breaks once installed"
                   )
 

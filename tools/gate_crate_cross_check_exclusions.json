@@ -1,0 +1,15 @@
+{
+  "_what": "Inputs excluded from the fast-engine/crate cross-check in tests/test_gate_crate_admit.py::test_the_census_fast_engine_answers_what_the_crate_answers. NOT excluded from the census itself.",
+  "_ratchet": "SHRINK ONLY. A name declared in the test but missing here is a RED: recording a new exclusion is a deliberate edit to this file, reviewed on its own. Deleting a name here after the test stops declaring it is free, and is the only direction that should ever happen.",
+  "_issue": 333,
+  "excluded": [
+    "selfhost/checker.rvl",
+    "selfhost/emit_go.rvl",
+    "selfhost/emit_java.rvl",
+    "selfhost/emit_py.rvl",
+    "selfhost/emit_rust.rvl",
+    "selfhost/emit_ts.rvl",
+    "selfhost/emit_wasm.rvl",
+    "selfhost/parser.rvl"
+  ]
+}

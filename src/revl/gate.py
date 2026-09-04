@@ -23,9 +23,11 @@ Two layers, split on purity (docs/design/332-embeddable-gate-api.md):
 
 The security clause (load-bearing): the gate must NEVER admit what the reference
 `revl` refuses. Layer-1 `admit` on py IS `compile_source`, so its accept/refuse
-verdict and its refusal message are the reference compiler's, verbatim. A native
-(rust) layer-1 gate is a separate, larger deliverable (the `revl-gate` crate)
-and is NOT part of this module; see the module's `gate_version().frontier`.
+verdict and its refusal message are the reference compiler's, verbatim. The native
+(rust) layer-1 gate is a separate deliverable and is NOT part of this module: it
+ships as `crates/revl-gate`, generated from the self-host sources, and it issues
+no admissions (its non-refusing arm is `NoObjection`, not "admitted"). See that
+crate's README and the module's `gate_version().frontier`.
 
 The fail-closed contract: a class-(c) crossing (an irreversible emission with no
 checked inverse) needs a human yes. Embedded, there is no operator channel
@@ -158,6 +160,33 @@ def _verdict_from_error(error: Exception) -> "Verdict":
                    message=str(error))
 
 
+# The control code for a compiler FAULT — the gate answering "I could not
+# decide" rather than "no". Distinct from every refusal code on purpose: a
+# refusal carries the reference diagnostic, and this carries an exception the
+# reference compiler should never have raised, which is a bug report and not a
+# repair signal for the author.
+FAULT = "COMPILER_FAULT"
+
+
+def _verdict_from_fault(error: BaseException) -> "Verdict":
+    """A fail-closed refusal for an exception that is NOT a `RevlError`.
+
+    The gate's contract is that it ANSWERS: `admit` returns a `Verdict`, and an
+    embedder catching the documented boundary type has handled the boundary. A
+    raw `RecursionError` out of the parser (issue #310) or a `ValueError` out
+    of the lexer (issue #311) broke that contract — the caller got an exception
+    its `except` clauses did not name, out of a security surface, on an input
+    it did not write. Both of those specific faults are fixed at the source;
+    this exists because the NEXT one must not escape either.
+
+    Refusing is the only sound answer: the compiler did not decide the source
+    was safe, so the gate cannot say it was.
+    """
+    return Verdict(False, code=FAULT,
+                   message=f"the compiler faulted on this source "
+                           f"({type(error).__name__}: {error})")
+
+
 def admit(source: str) -> "Verdict":
     """The frontend gate: a program the checker refuses cannot be compiled, and
     a draft with an open obligation may compile but may never run.
@@ -182,6 +211,8 @@ def admit(source: str) -> "Verdict":
         refuse_admission(document)
     except RevlError as error:
         return _verdict_from_error(error)
+    except Exception as error:  # noqa: BLE001 — see `_verdict_from_fault`
+        return _verdict_from_fault(error)
     return Verdict(True)
 
 
@@ -198,6 +229,8 @@ def admit_into(source: str, manifest: Mapping[str, Any]) -> "Verdict":
         compile_source(source, manifest=dict(manifest))
     except RevlError as error:
         return _verdict_from_error(error)
+    except Exception as error:  # noqa: BLE001 — see `_verdict_from_fault`
+        return _verdict_from_fault(error)
     return Verdict(True)
 
 
@@ -222,6 +255,8 @@ def compile_to(source: str, tier: str) -> "Emit":
         ir = compile_source(source)
     except RevlError as error:
         return Emit(_verdict_from_error(error))
+    except Exception as error:  # noqa: BLE001 — see `_verdict_from_fault`
+        return Emit(_verdict_from_fault(error))
     output = _emit_for_tier(ir, tier)
     return Emit(Verdict(True), output=output)
 
@@ -541,6 +576,12 @@ class Gate:
             return compile_files(paths, sources=virtual or None)
         except RevlError as error:
             raise GateError(str(error)) from error
+        except Exception as error:  # noqa: BLE001 — the boundary type is the
+            # contract: an embedder catching `GateError` has handled the
+            # boundary, and a compiler fault must not walk past it as some
+            # other exception type (issue #310).
+            raise GateError(f"the compiler faulted on this source "
+                            f"({type(error).__name__}: {error})") from error
 
     def admit(self, source: str, granted: list[str] | tuple[str, ...] = (),
               *, modules: Mapping[str, str] | None = None) -> "AdmitResult":

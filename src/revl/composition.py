@@ -522,6 +522,7 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
         "label": remote.label, "key": remote.key, "host": remote.host,
         "realm": remote.realm, "capability": capability,
         "on_failure": remote.on_failure, "transport": remote.transport,
+        "redirect": remote.redirect,
         "doc": doc, "line": remote.line,
     })
     rel = _synth_path(origin, remote.label)
@@ -547,6 +548,11 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
             "serviceSource": service_source,
             "capability": capability,
             "onFailure": remote.on_failure,
+            # The row's redirect policy, on the row table so the audit surface
+            # and the manifest carry it: "where this crossing may reach" is not
+            # readable from the peer address alone if the transport may be
+            # redirected off it.
+            "redirect": remote.redirect,
             "inverse": None,
             **({"realm": remote.realm} if remote.realm else {}),
             **({"transport": remote.transport} if remote.transport else {}),

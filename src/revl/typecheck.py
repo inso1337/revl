@@ -67,6 +67,7 @@ Two expression dialects are covered:
 from __future__ import annotations
 
 import dataclasses
+import math
 
 from .errors import RevlError
 
@@ -1247,6 +1248,24 @@ _HOST_RESULT_SIG: dict[str, str] = {
 }
 
 
+# Host ACQUIRE verbs: the constructor of a host family whose release is a
+# SEPARATE verb, mapped to that release. Calling one opens a host resource that
+# nothing reclaims until its inverse runs, so the call belongs in an acquisition
+# bracket (`effect <acquire> undo <release>`) and nowhere else — the bracket is
+# what registers the release with the activation's teardown accumulator.
+#
+# Derived by hand rather than from `_HOST_ARG_SIG` because the pairing is a
+# semantic claim, not a naming one: `Job.run` is deliberately absent (a job is
+# fire-and-forget; the family declares no release verb), and `Map.empty` is a
+# VALUE constructor, not a host acquisition, intercepted long before any host
+# path.
+_HOST_ACQUIRE_VERBS: dict[str, str] = {
+    "Map.new": "drop",
+    "Pool.open": "close",
+    "Stream.source": "close",
+}
+
+
 def host_check(fn: str, arg_types: list, filename: str | None, line: int) -> None:
     """Check a host builtin call against its declared argument types."""
     params = _HOST_ARG_SIG.get(fn)
@@ -1482,6 +1501,45 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
+# Past this many digits the literal is QUOTED BY DESCRIPTION rather than by
+# value. A diagnostic that pastes a five-thousand-digit number is unreadable,
+# and building that string is itself a fault: CPython refuses `str(v)` past
+# 4300 digits (issue #311), so the message that names the mistake becomes the
+# `ValueError` the reader sees instead.
+_INT_LITERAL_SHOWN_DIGITS = 40
+_LOG10_2 = 0.30102999566398120  # digits per bit, for a count without str(v)
+
+
+def int_literal_range_error(filename: str, line: int, *,
+                            value: int | None = None,
+                            digits: int | None = None) -> RevlError:
+    """The one `Int`-outside-the-range diagnostic.
+
+    Two callers, one message. The checker has the VALUE; the lexer, for a run
+    of digits too long to convert at all, has only the COUNT (issue #311) —
+    and a literal that long is out of range by the count alone, since i64's
+    largest value has nineteen digits.
+    """
+    if digits is None:
+        assert value is not None
+        magnitude = abs(value)
+        if magnitude < 10 ** _INT_LITERAL_SHOWN_DIGITS:
+            shown = f"`{value}`"
+        else:
+            digits = int(magnitude.bit_length() * _LOG10_2) + 1
+            shown = f"with about {digits} decimal digits"
+    else:
+        shown = f"with {digits} decimal digits"
+    return RevlError(
+        filename, line,
+        f"Int literal {shown} is outside the 64-bit range",
+        hint="`Int` is 64-bit two's complement "
+             "([-9223372036854775808, 9223372036854775807]); a literal beyond the "
+             "bound reads differently per tier, so it never reaches one "
+             "(docs/arithmetic.md)",
+    )
+
+
 def _reject_int_literal_range(filename: str | None, line: int, v: int) -> None:
     """Refuse an `Int` literal outside the i64 range at compile time.
 
@@ -1490,13 +1548,36 @@ def _reject_int_literal_range(filename: str | None, line: int, v: int) -> None:
     """
     if filename is None or _INT64_MIN <= v <= _INT64_MAX:
         return
+    raise int_literal_range_error(filename, line, value=v)
+
+
+def _reject_float_literal_range(filename: str | None, line: int, v: float) -> None:
+    """Refuse a `Float` literal that folded to a non-finite value (issue #312).
+
+    The lexer reads a decimal float with `float(...)`, so an exponent past the
+    binary64 range (`1e999`) folds to IEEE `inf` — a value revl has no
+    *spelling* for. Every emitter then prints the host's repr of that value as
+    a bare word: py `inf`, rust `inff64`, java `infd`, go `float64(inf)` — an
+    UNBOUND IDENTIFIER, so the program does not compile (rust/java/go) or dies
+    at runtime with a `NameError` (py). TypeScript alone renders `Infinity` and
+    runs, which makes the same source text mean six different things.
+
+    That is the same argument as `_reject_int_literal_range`, one type over: a
+    literal with no tier-independent meaning is refused here, where it is one
+    diagnostic, instead of six behaviours. The bound is the *literal's*, not
+    arithmetic's — `1e308 * 10.0` still overflows to `inf` at runtime, exactly
+    as IEEE 754 says it should.
+    """
+    if filename is None or math.isfinite(v):
+        return
+    what = "infinite" if math.isinf(v) else "not a number"
     raise RevlError(
         filename, line,
-        f"Int literal `{v}` is outside the 64-bit range",
-        hint="`Int` is 64-bit two's complement "
-             "([-9223372036854775808, 9223372036854775807]); a literal beyond the "
-             "bound reads differently per tier, so it never reaches one "
-             "(docs/arithmetic.md)",
+        f"Float literal is {what}: it is outside the range of a 64-bit float",
+        hint="`Float` is IEEE 754 binary64 (docs/arithmetic.md); a literal "
+             "past its largest finite value has no spelling in revl and no "
+             "single reading across tiers, so it never reaches one — write a "
+             "finite literal",
     )
 
 
@@ -1551,6 +1632,9 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             _reject_int_literal_range(filename, line, v)
             return "Int"
         if isinstance(v, float):
+            # the Float twin of the bound above: `1e999` folds to `inf`, which
+            # every emitter prints as an unbound name (issue #312).
+            _reject_float_literal_range(filename, line, v)
             return "Float"
         if isinstance(v, str):
             return "Str"
@@ -2500,6 +2584,7 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
             _reject_int_literal_range(filename, line, v)
             return "Int"
         if isinstance(v, float):
+            _reject_float_literal_range(filename, line, v)
             return "Float"
         if isinstance(v, str):
             return "Str"

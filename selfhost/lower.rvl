@@ -1876,12 +1876,23 @@ fn any_in(xs: List[Str], set: List[Str]) -> Bool {
 // enforced (lower.py's `_instance_get_call` unmarked-handle-emission G4).
 // `provKeySvc` is the global (component `#` key -> service) table those handle
 // reads resolve the op's service through (a target's provided key -> its SvcD).
+// `provAlias` is PROVISION PROVENANCE: a local bound to a spawn-handle
+// provision read (`let t = w.task`) mapped to the `<handle>#<key>` it names.
+// The binding is not the crossing — `t.run(p)` is the same boundary crossing
+// `w.task.run(p)` is — so the alias resolves back to the handle read and the
+// marker rule judges the direct form, exactly as `Env.provision_locals` makes
+// the reference's IR do. Scoped per body (setup, then each provide method on
+// top of setup's), matching the reference's save/restore around a method.
+// `acqWhere` is the position phrase the host-acquire refusal reports for the
+// statement currently being walked (`stmt_acq_where`), the gate's stand-in for
+// `env._expr_mode`.
 type Ctx = { svcs: Map[Str, SvcD], reqMap: Map[Str, Str], caps: CapsT,
              colored: List[Str], emittingNames: List[Str], asyncExterns: List[Str],
              scopeNames: List[Str], fnNames: List[Str], compName: Str,
              fnAsyncSlots: Map[Str, List[Int]],
              underArrow: Bool, handles: Map[Str, Str],
-             provKeySvc: Map[Str, Str] }
+             provKeySvc: Map[Str, Str], provAlias: Map[Str, Str],
+             acqWhere: Str }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -1928,7 +1939,15 @@ fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (i >= ss.length() || a.msg != "") { return a }
   let s = ss[i]
   let marked = s.kind == "emit" || s.kind == "compensate"
-  return walk_stmts(ss, i + 1, cx, walk_expr(s.e, marked, cx, a))
+  // the host-acquire position this statement puts its expression in, and the
+  // one exemption: an `effect` bracket's own root acquisition. Walking that
+  // root's ARGUMENTS rather than the root call itself is what makes the
+  // exemption identity-shaped (see `acq_root_of`).
+  let scx = ctx_acq(cx, stmt_acq_where(s.kind))
+  let root = acq_root_of(s)
+  let na = root.hit ? walk_exprs(root.args, 0, marked, scx, a)
+                    : walk_expr(s.e, marked, scx, a)
+  return walk_stmts(ss, i + 1, cx, na)
 }
 
 fn walk_exprs(xs: List[Expr], i: Int, marked: Bool, cx: Ctx, a: Ac) -> Ac {
@@ -2008,7 +2027,12 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
 fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
   return match tg {
     Field(fl) => match fl.target {
-      Var(v)      => req_call(v, fl.name, args, marked, cx, a),
+      // a local that ALIASES a spawn-handle provision (`let t = w.task`) is
+      // the provision, so `t.<op>(…)` takes the handle path and is judged as
+      // `w.task.<op>(…)` is — same rule, same message, same spelling.
+      Var(v)      => cx.provAlias.has(v)
+        ? alias_call(v, fl.name, args, tg, marked, cx, a)
+        : req_call(v, fl.name, args, marked, cx, a),
       // `h.<key>.<op>(…)` — a doubly-nested field head is a candidate provision
       // read off a spawn handle. If `h` is a known handle it is the instance
       // path (checked like a `req` emission); otherwise it is walked as a value.
@@ -2039,6 +2063,24 @@ fn handle_call(inner: FieldN, op: Str, args: List[Expr], tg: Expr,
   }
 }
 
+// A call through a local that ALIASES a spawn-handle provision. `provAlias`
+// holds `<handle>#<key>`; splitting it restores the receiver the direct
+// spelling has, and `handle_emit` then decides the crossing with no knowledge
+// that it went through a binding. This is the reference's provenance fix
+// (`Env.provision_locals` + `_resolve_provision_alias`) in the gate's shape:
+// no new rule, one resolution, and the marker rule, the async reach and the
+// argument walk all follow.
+fn alias_call(v: Str, op: Str, args: List[Expr], tg: Expr, marked: Bool,
+              cx: Ctx, a: Ac) -> Ac {
+  let ref = match cx.provAlias.lookup(v) { Some(r) => r, None => "" }
+  let cut = ref.indexOf("#")
+  if (cut == 0 - 1) {
+    return walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a))
+  }
+  return handle_emit(ref.slice(0, cut), ref.slice(cut + 1, ref.length()), op,
+                     args, marked, cx, a)
+}
+
 // The `MSig` a `h.<key>.<op>` head resolves to: the handle's spawn target, that
 // component's provision key, the service it yields, and the op on it. Empty
 // (`name == ""`) when any hop is unknown.
@@ -2066,6 +2108,84 @@ fn handle_emit(h: Str, key: Str, op: Str, args: List[Expr], marked: Bool,
            avals: na.avals }
   }
   return walk_exprs(args, 0, marked, cx, na)
+}
+
+// ------------------------------------------------------- host acquire verbs
+//
+// A host ACQUIRE verb is the constructor of a host family whose release is a
+// SEPARATE verb (typecheck.py's `_HOST_ACQUIRE_VERBS`), mapped here to that
+// release. Calling one opens a host resource that nothing reclaims until its
+// inverse runs, so the call belongs in an acquisition bracket
+// (`effect <acquire> undo <release>`) and nowhere else: the bracket is what
+// registers the release with the activation's teardown accumulator. Anywhere
+// else — a plain `let`, a teardown slot, an `emit` expression, a `fn` body a
+// component reaches — the resource is acquired irreversibly and the runtime
+// reports residue (`pool#1 (open() with no close())`, R1) on a program the
+// gate admitted.
+//
+// The table is the reference's, verbatim and by hand rather than derived: the
+// pairing is a semantic claim, not a naming one. `Job.run` is deliberately
+// absent (fire-and-forget, no declared release) and `Map.empty` is a VALUE
+// constructor, not a host acquisition. "" = not an acquire verb.
+fn host_acquire_release(root: Str, verb: Str) -> Str {
+  let dotted = root.concat(".").concat(verb)
+  if (dotted == "Map.new") { return "drop" }
+  if (dotted == "Pool.open") { return "close" }
+  if (dotted == "Stream.source") { return "close" }
+  return ""
+}
+
+// The refusal, spelled exactly as `_refuse_unbracketed_host_acquire` spells it.
+// `where` names the position the call occupies, so the two spellings the
+// reference produces — a positional one ("this position" / "a teardown slot" /
+// "an `emit` expression") and the reach one ("`fn f`, which a component body
+// reaches") — are one message with one hole.
+fn host_acquire_msg(root: Str, verb: Str, rel: Str, where: Str) -> Str {
+  return "host acquisition `".concat(root).concat(".").concat(verb)
+    .concat("` cannot be called in ").concat(where)
+    .concat(" — nothing registers its `").concat(rel)
+    .concat("()`, so the resource is acquired irreversibly (G4)")
+}
+
+// The `where` phrase for a statement position, from the statement's kind. The
+// reference reads `env._expr_mode`: an `undo`/`compensate` slot lowers under
+// mode "undo", an `emit`/`compensate` expression under "emit", everything else
+// under "setup". A compensation is a teardown slot for THIS rule even though
+// it is emit-MARKED for the G4 marker rule: it is the emission's inverse, and
+// an inverse may not acquire.
+fn stmt_acq_where(kind: Str) -> Str {
+  if (kind == "undo" || kind == "compensate") { return "a teardown slot" }
+  if (kind == "emit") { return "an `emit` expression" }
+  return "this position"
+}
+
+// Whether a statement is an `effect` bracket whose OWN root call is a host
+// acquire verb, and the arguments of that root call.
+//
+// Identity, not shape — the reference marks the bracket's acquisition
+// EXPRESSION (`_acquire_position`) and compares by identity, so
+// `effect wrap(Pool.open(u, 1)) undo …`, which acquires a pool the bracket's
+// inverse never names, is still refused. Here the same distinction is drawn by
+// walking the root call's ARGUMENTS instead of the call: the head is exempt,
+// everything under it is not.
+type AcqRoot = { hit: Bool, args: List[Expr] }
+
+fn acq_no_root() -> AcqRoot { return { hit: false, args: [] } }
+
+fn acq_root_of(s: Stmt) -> AcqRoot {
+  if (s.kind != "effect") { return acq_no_root() }
+  return match s.e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target {
+        Var(v) => host_acquire_release(v, fl.name) != ""
+          ? { hit: true, args: c.args }
+          : acq_no_root(),
+        _ => acq_no_root(),
+      },
+      _ => acq_no_root(),
+    },
+    _ => acq_no_root(),
+  }
 }
 
 // A head whose first character is upper-cased is a host/stdlib constructor
@@ -2130,6 +2250,14 @@ fn g1_refuse(cx: Ctx, name: Str, a: Ac) -> Ac {
 fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
             cx: Ctx, a: Ac) -> Ac {
   if (!cx.reqMap.has(root)) {
+    // G4: a host ACQUIRE verb is legal only as an `effect` bracket's own
+    // acquisition. `walk_stmts` has already lifted that one exempt position
+    // out of the walk, so anything reaching here is unbracketed.
+    let rel = host_acquire_release(root, meth)
+    if (rel != "") {
+      return ac_refuse(a, "G4",
+                       host_acquire_msg(root, meth, rel, cx.acqWhere))
+    }
     if (!head_declared(cx, root)) { return g1_refuse(cx, root, a) }
     // a host object or a local receiver, not a requirement — unchecked here
     return walk_exprs(args, 0, marked, cx, a)
@@ -2245,7 +2373,31 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            scopeNames: union_into(cx.scopeNames, names), fnNames: cx.fnNames,
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
-           handles: cx.handles, provKeySvc: cx.provKeySvc }
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, acqWhere: cx.acqWhere }
+}
+
+// The same context carrying the host-acquire position phrase of the statement
+// being walked.
+fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
+  return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, acqWhere: where }
+}
+
+// The same context carrying a body's provision-alias map.
+fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
+  return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: al, acqWhere: cx.acqWhere }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -2256,7 +2408,8 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
-           handles: cx.handles, provKeySvc: cx.provKeySvc }
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, acqWhere: cx.acqWhere }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -2423,7 +2576,8 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
   return { svcs: svcs, reqMap: rm, caps: caps, colored: colored,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
-           underArrow: false, handles: Map.empty(), provKeySvc: pks }
+           underArrow: false, handles: Map.empty(), provKeySvc: pks,
+           provAlias: Map.empty(), acqWhere: "this position" }
 }
 
 // The same context with extra callable names — the program's own ADT
@@ -2435,7 +2589,8 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            scopeNames: cx.scopeNames, fnNames: union_into(cx.fnNames, names),
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
-           provKeySvc: cx.provKeySvc }
+           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
+           acqWhere: cx.acqWhere }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -2456,7 +2611,8 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            asyncExterns: base.asyncExterns, scopeNames: scope_names_of(comp),
            fnNames: base.fnNames, compName: comp.name,
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
-           handles: handles_of(comp), provKeySvc: base.provKeySvc }
+           handles: handles_of(comp), provKeySvc: base.provKeySvc,
+           provAlias: Map.empty(), acqWhere: "this position" }
 }
 
 // The spawn handles a component binds: every `let h = effect spawn C …` in its
@@ -2485,6 +2641,43 @@ fn handles_in(ss: List[Stmt], i: Int, m: Map[Str, Str]) -> Map[Str, Str] {
   let hit = s.spawnTarget != "" && s.kind == "effect"
   let m2 = hit ? m.set(s.bind, s.spawnTarget) : m
   return handles_in(ss, i + 1, m2)
+}
+
+// The provision ALIASES one body binds: `let t = w.task` maps `t` ->
+// `w#task` when `w` is a known spawn handle, and a second hop (`let u = t`)
+// carries the same target forward — the reference's `_note_provision_alias`
+// lands on both, because the second hop's value has already been resolved
+// through the map. Built in statement ORDER, so a name is an alias only after
+// the binding that makes it one.
+//
+// Unlike `handles_of`, this is NOT merged across a component's methods. The
+// reference saves and restores `Env.provision_locals` around every provide
+// method precisely because two methods may bind the same name to different
+// things, and merging here could route an unrelated `t.run(…)` in a second
+// method onto a first method's handle — a refusal on a program the reference
+// admits, which is the one direction this gate may not err in.
+fn alias_note(bind: Str, e: Expr, handles: Map[Str, Str],
+              m: Map[Str, Str]) -> Map[Str, Str] {
+  return match e {
+    Field(fl) => match fl.target {
+      Var(h) => handles.has(h)
+        ? m.set(bind, h.concat("#").concat(fl.name))
+        : m,
+      _ => m,
+    },
+    Var(n) => match m.lookup(n) { Some(r) => m.set(bind, r), None => m },
+    _ => m,
+  }
+}
+
+fn alias_in(ss: List[Stmt], i: Int, handles: Map[Str, Str],
+            m: Map[Str, Str]) -> Map[Str, Str] {
+  if (i >= ss.length()) { return m }
+  let s = ss[i]
+  // a `let h = effect spawn C …` binds the HANDLE, not an alias of one
+  let m2 = (s.bind != "" && s.spawnTarget == "")
+    ? alias_note(s.bind, s.e, handles, m) : m
+  return alias_in(ss, i + 1, handles, m2)
 }
 
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
@@ -2872,6 +3065,192 @@ fn col_values_body(ss: List[Stmt], i: Int, cx: Ctx, acc: List[Str]) -> List[Str]
 // The module-fn value + leaky-arrow verdict for one fn (lower.py's fn loop).
 // "" admits; else a tagged A1 refusal. An extern has an empty body, so both
 // checks are no-ops on it.
+// ------------------------------------ host acquisition in a reachable fn body
+//
+// `_refuse_host_acquire_in_component_reachable_fn`. A `fn` body has no
+// acquisition bracket, so a host acquire verb in one registers its release
+// nowhere. What makes that a soundness break rather than a style question is
+// the CALLER: a component activation promises no residue — the teardown
+// accumulator runs every registered inverse on unload and on abort — and a
+// helper the activation calls acquires inside that promise while contributing
+// nothing to it.
+//
+// The reach qualifier is the invariant, not a carve-out. A `pub fn` no
+// component reaches is a library entry point whose lifecycle belongs to the
+// foreign caller that invoked it, and revl promises nothing about it. So the
+// seed is the fns a component body NAMES, closed over the fn call graph, and
+// the scan runs over that closure in sorted name order (the reference's
+// `for name in sorted(reached)`).
+
+fn fnd_body(fns: List[FnD], n: Str, i: Int) -> List[Stmt] {
+  if (i >= fns.length()) { return [] }
+  if (fns[i].name == n) { return fns[i].body }
+  return fnd_body(fns, n, i + 1)
+}
+
+fn fnd_callees(fns: List[FnD], n: Str, i: Int) -> List[Str] {
+  if (i >= fns.length()) { return [] }
+  if (fns[i].name == n) { return fns[i].callees }
+  return fnd_callees(fns, n, i + 1)
+}
+
+fn fnd_has(fns: List[FnD], n: Str, i: Int) -> Bool {
+  if (i >= fns.length()) { return false }
+  if (fns[i].name == n) { return true }
+  return fnd_has(fns, n, i + 1)
+}
+
+// The bare-call names a component's setup and provide-method bodies reach.
+fn comp_called(comp: CompD, acc: List[Str]) -> List[Str] {
+  var out = body_callees(comp.setup, 0, acc)
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let pv = comp.provs[pi]
+    var mi = 0
+    while (mi < pv.methods.length()) {
+      out = body_callees(pv.methods[mi].body, 0, out)
+      mi += 1
+    }
+    pi += 1
+  }
+  return out
+}
+
+fn comps_called(comps: List[CompD], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= comps.length()) { return acc }
+  return comps_called(comps, i + 1, comp_called(comps[i], acc))
+}
+
+// The fn names a component reaches, transitively. A worklist over `callees`,
+// bounded by the fn count: each round can only add a name, and a name is added
+// once.
+fn reached_fns(fns: List[FnD], seed: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < seed.length()) {
+    if (fnd_has(fns, seed[i], 0) && !contains(out, seed[i])) {
+      out = out.push(seed[i])
+    }
+    i += 1
+  }
+  var changed = true
+  while (changed) {
+    changed = false
+    var j = 0
+    while (j < out.length()) {
+      let cs = fnd_callees(fns, out[j], 0)
+      var k = 0
+      while (k < cs.length()) {
+        if (fnd_has(fns, cs[k], 0) && !contains(out, cs[k])) {
+          out = out.push(cs[k])
+          changed = true
+        }
+        k += 1
+      }
+      j += 1
+    }
+  }
+  return out
+}
+
+// The first host acquire call in an expression, spelled `Root.verb` ("" when
+// there is none). Every position counts here: a `fn` body has no bracket at
+// all, so there is nothing to exempt.
+fn acq_exprs(xs: List[Expr], i: Int) -> Str {
+  if (i >= xs.length()) { return "" }
+  let h = acq_in(xs[i])
+  if (h != "") { return h }
+  return acq_exprs(xs, i + 1)
+}
+
+fn acq_inits(xs: List[InitN], i: Int) -> Str {
+  if (i >= xs.length()) { return "" }
+  let h = acq_in(xs[i].value)
+  if (h != "") { return h }
+  return acq_inits(xs, i + 1)
+}
+
+fn acq_arms(xs: List[ArmN], i: Int) -> Str {
+  if (i >= xs.length()) { return "" }
+  let h = acq_in(xs[i].body)
+  if (h != "") { return h }
+  return acq_arms(xs, i + 1)
+}
+
+fn acq_parts(xs: List[PartN], i: Int) -> Str {
+  if (i >= xs.length()) { return "" }
+  let h = acq_in(xs[i].e)
+  if (h != "") { return h }
+  return acq_parts(xs, i + 1)
+}
+
+fn acq_call(tg: Expr, args: List[Expr]) -> Str {
+  let here = match tg {
+    Field(fl) => match fl.target {
+      Var(v) => host_acquire_release(v, fl.name) != ""
+        ? v.concat(".").concat(fl.name) : "",
+      _ => "",
+    },
+    _ => "",
+  }
+  if (here != "") { return here }
+  return or2(acq_in(tg), acq_exprs(args, 0))
+}
+
+fn acq_in(e: Expr) -> Str {
+  return match e {
+    IntLit(_)   => "",
+    FloatLit(_) => "",
+    StrLit(_)   => "",
+    BoolLit(_)  => "",
+    NullLit     => "",
+    Var(_)      => "",
+    Hole(_)     => "",
+    Bad(_)      => "",
+    Bin(b)      => or2(acq_in(b.l), acq_in(b.r)),
+    Un(u)       => acq_in(u.e),
+    Emit(u)     => acq_in(u.e),
+    Call(c)     => acq_call(c.target, c.args),
+    Field(f)    => acq_in(f.target),
+    OptField(f) => acq_in(f.target),
+    OptCall(c)  => or2(acq_in(c.target), acq_exprs(c.args, 0)),
+    Index(x)    => or2(acq_in(x.target), acq_in(x.idx)),
+    If(x)       => or2(acq_in(x.cond), or2(acq_in(x.then_), acq_in(x.els))),
+    Rec(r)      => acq_inits(r.fields, 0),
+    Lst(l)      => acq_exprs(l.items, 0),
+    Arrow(ar)   => acq_in(ar.body),
+    Match(m)    => or2(acq_in(m.scrut), acq_arms(m.arms, 0)),
+    Templ(t)    => acq_parts(t.parts, 0),
+  }
+}
+
+fn acq_body(ss: List[Stmt], i: Int) -> Str {
+  if (i >= ss.length()) { return "" }
+  let h = acq_in(ss[i].e)
+  if (h != "") { return h }
+  return acq_body(ss, i + 1)
+}
+
+fn check_fn_acquire(fns: List[FnD], reached: List[Str], i: Int) -> Str {
+  if (i >= reached.length()) { return "" }
+  let n = reached[i]
+  let hit = acq_body(fnd_body(fns, n, 0), 0)
+  if (hit != "") {
+    let dot = hit.indexOf(".")
+    return tagged("G4", host_acquire_msg(
+      hit.slice(0, dot), hit.slice(dot + 1, hit.length()),
+      host_acquire_release(hit.slice(0, dot), hit.slice(dot + 1, hit.length())),
+      "`fn ".concat(n).concat("`, which a component body reaches")))
+  }
+  return check_fn_acquire(fns, reached, i + 1)
+}
+
+fn check_reachable_fn_acquire(pg: Prog) -> Str {
+  if (pg.comps.length() == 0 || pg.fns.length() == 0) { return "" }
+  let seed = comps_called(pg.comps, 0, [])
+  return check_fn_acquire(pg.fns, sort_strs(reached_fns(pg.fns, seed)), 0)
+}
+
 fn fn_a1_verdict(f: FnD, base: Ctx) -> Str {
   let vals = sort_strs(col_values_body(f.body, 0, base, []))
   if (vals.length() > 0) {
@@ -2899,7 +3278,12 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
   // resolve names identically, so a provide method walks under the very same
   // `cx`. The `plainBody` flag that used to distinguish them is gone rather
   // than left set-and-unread, so nothing can quietly gate a check on it again.
-  let sa = walk_stmts(comp.setup, 0, cx, empty_ac())
+  // provision provenance is per BODY: setup's aliases are visible to every
+  // provide method (the reference lowers setup first and restores to that map
+  // after each method), a method's own are not visible to the next one.
+  let setupAlias = alias_in(comp.setup, 0, cx.handles, Map.empty())
+  let scx = ctx_alias(cx, setupAlias)
+  let sa = walk_stmts(comp.setup, 0, scx, empty_ac())
   if (sa.msg != "") { return tagged(sa.tag, sa.msg) }
   let pcx = cx
   var pi = 0
@@ -2917,7 +3301,8 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
         return tagged("A1", async_sig_msg(pv.key, pm.name, pv.svcName,
                                           pm.isAsync, decl.isAsync))
       }
-      let a = walk_stmts(pm.body, 0, pcx, empty_ac())
+      let mcx = ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias))
+      let a = walk_stmts(pm.body, 0, mcx, empty_ac())
       if (a.msg != "") { return tagged(a.tag, a.msg) }
       // `await` outside a component body (lower.py's method-lowering AwaitStmt
       // check): an await in a SYNC provide method has no in-flight window; an
@@ -3944,6 +4329,12 @@ pub fn admit_src(src: Str) -> Str {
   // stream rather than out of `Prog`, because `p_top` steps over `type`
   // declarations structurally — see `type_ctors`.
   let base = ctx_with_callables(build_maps(pg), type_ctors(lex_src(src)))
+  // G4: a host acquire verb in a `fn` body a component reaches. Decided over
+  // the whole program before any body is gated, exactly where `check_and_lower`
+  // places `_refuse_host_acquire_in_component_reachable_fn` — after the fn
+  // declarations are lowered and BEFORE the module-fn A1 twins below.
+  let acq = check_reachable_fn_acquire(pg)
+  if (acq != "") { return acq }
   // the module-fn A1 twins (first-class async value, leaky pure arrow) are
   // decided over the lowered fns BEFORE any component is lowered, so they are
   // surfaced first, in declaration order (lower.py's fn loop precedes the

@@ -46,6 +46,7 @@
    "examples/regressions/fuzz_rust_ca5feca4.rvl",
    "examples/regressions/fuzz_wasm_ad4e66e8.rvl",
    "examples/regressions/fuzz_wasm_af371f9d.rvl",
+   "examples/ts_host_body.rvl",
    "examples/uxprobe2_fault.rvl",
    "examples/uxprobe2_jobs.rvl",
    "examples/uxprobe_cache.rvl",
@@ -57,6 +58,7 @@
    "stdlib/str.rvl",
    "stdlib/value.rvl",
    "stdlib/version.rvl",
+   "tests/fixtures/emit_py_corpus/witnessed.rvl",
    "tests/fixtures/query_mesh.rvl",
    "tests/fixtures/v2_math_lib.rvl"
   ],
@@ -622,6 +624,18 @@
     "tag": "A1"
    }
   },
+  "examples/ts_host_body.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
   "examples/uxprobe2_fault.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
@@ -748,6 +762,18 @@
     "code": "BAD",
     "kind": "refused",
     "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "tests/fixtures/emit_py_corpus/witnessed.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
    },
    "reference": {
     "message": "",

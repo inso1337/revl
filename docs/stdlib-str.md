@@ -16,8 +16,8 @@ It is the string-shaped sibling of `stdlib/value.rvl` (item 180): where
 
 ## Pure revl — the key difference from `value.rvl`
 
-`stdlib/value.rvl`'s accessors are per-tier `@py` externs, with the other five
-tiers deferred. **`stdlib/str.rvl` is different: every function is PURE revl.**
+`stdlib/value.rvl`'s accessors are per-tier externs with `@py` and `@ts` bodies;
+rust, go, java and wasm are deferred. **`stdlib/str.rvl` is different: every function is PURE revl.**
 It adds no new primitive — it only *composes* the base `Str` methods item 11
 already froze, and those lower on every tier. So the kit works on **py, ts, rs,
 go, java and wasm the day it lands**, with no per-tier follow-up. It
