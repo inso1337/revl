@@ -1,7 +1,10 @@
 # 121: `revl trace` - the causal trace with the model hop as a first-class span
 
-Status: DESIGN (implementation pending). No compiler code changes land with this
-note; it designs the slices.
+Status: IMPLEMENTED. `revl trace` ships (`src/revl/trace.py`,
+`src/revl/cli/observe.py::_run_trace`, the `trace` subparser in
+`src/revl/cli/parser.py`); flags are documented in
+[../commands-reference.md](../commands-reference.md). This note is kept as the
+design record for the slices.
 
 Roadmap: item 121 (`docs/v2.0-roadmap.md:3176`). Builds on the causal lifecycle
 trace (`src/revl/why_runtime.py`, `docs/why-runtime.md`), extends the OTel
@@ -94,6 +97,61 @@ there); OTel export respects suppression (`otel.build_spans` copies only present
 fields, `otel.py:261-265`).
 
 The rest of this note is revised in place to match; Slice 1 is re-sliced in §5.
+
+## Revision (Slice 2 implementation, 2026-09-02)
+
+Slice 1 shipped the `producedSeq` surface honest-degraded to always-absent: the
+token primitive existed (`revl_note_validated_completion`) but nothing called it,
+because the design's own spelling of it could not be wired. Three facts, verified
+in source, forced a correction rather than a wiring:
+
+- **The mint site can supply neither argument the token asked for.** It wanted a
+  driver-owned activation id and trace seq. `_Driver._seq` is private to `run.py`
+  and never handed to the runtime, and the activation id is synthesised only at
+  step-back time. A mint from emitted code could only invent a number.
+- **The edge pointed the wrong way.** The reader puts `producedSeq` on the model
+  hop naming the DOWNSTREAM emission it produced; the token held the completion's
+  OWN seq. The only self-consistent driver-side mint was a self-loop, which
+  `otel.py` would have exported as a SpanLink pointing at itself.
+- **There was no value-flow fact to gate on.** "Last validated completion in this
+  fiber" is fiber ADJACENCY. Attributing the next crossing in the fiber to it is
+  precisely the guess §4 attack 3 forbids.
+
+The corrected mechanism keeps every safety property above and changes only how
+the two halves of the proof are carried:
+
+1. **The identity bridge is `replay.Step.index`,** the one identity that already
+   crosses the runtime/driver boundary (assigned by the recorder during forward
+   execution, handed to the driver at step-back as `entry["index"]`). The token
+   holds the completion CROSSING's step index, not a trace seq, and carries no
+   activation id.
+2. **The token is keyed by the emitter's static completion SITE,** not by
+   recency: with two completions live in one body, "the last one" attributes the
+   wrong one. The site id rides the `validate_retry` seam as a trailing optional
+   argument; a call site the flow analysis did not reach passes none and mints
+   nothing.
+3. **The static value-flow fact comes from the emitter,** which is the only place
+   that can see a downstream emission's ARGUMENTS read the completion's binding.
+   A marked crossing fires through `runtime.revl_produced_emit`, which sets a
+   fiber-local marker the recorder consumes and stamps as `detail["producedBy"]`.
+   The analysis is a MUST-derive under-approximation: a reassigned name, a
+   crossing reading two completions, or a closure body yields no mark, so the
+   edge is absent rather than wrong.
+4. **The driver back-patches.** It maps step index -> the emit event it recorded
+   and, after the walk (crossings are reported newest-first), resolves each
+   `producedBy` onto the hop and appends the DOWNSTREAM emission's seq to its
+   `producedSeq`. A `producedBy` that resolves to no hop in the activation being
+   recorded, or to a hop under a different activation id, draws no edge — this is
+   the driver-side activation check that replaces the token's dropped argument.
+5. **The activation id gains its per-activation discriminator.** `component#gN`
+   is `component + gen`, which the NEW CRITICAL above calls insufficient. Each
+   recorded `Timeline` now takes a monotonic activation ordinal, and the driver
+   spells the id `component#gN#aK`.
+
+Unchanged by this slice: the digest posture (`revl_prompt_digest` still emits
+only when taint analysis is engaged AND the args are proven to carry neither a
+`secret` nor a `confidential` origin), the host-reported provenance tags, and the
+rule that a suppressed field is simply absent.
 
 ## 0. What already exists, and the one thing missing
 

@@ -66,6 +66,9 @@ def _run_fmt(args: argparse.Namespace) -> int:
             print(f"error: refusing {path_str}: {gate.reason}", file=sys.stderr)
             exit_code = 1
             continue
+        if gate.warning:
+            # a check the gate could not run to completion: never silent.
+            print(f"warning: {gate.warning}", file=sys.stderr)
 
         if getattr(args, "check", False):
             if rewritten != original:
@@ -328,7 +331,8 @@ def _run_import(args) -> int:
             from ..import_a2a import import_a2a_file
             source = import_a2a_file(args.file, backend=args.backend,
                                      service=args.service,
-                                     allow_plaintext=args.allow_plaintext)
+                                     allow_plaintext=args.allow_plaintext,
+                                     follow_redirects=args.follow_redirects)
         else:
             from ..import_wit import import_wit_file
             source = import_wit_file(args.file, backend=args.backend, pure=args.pure)

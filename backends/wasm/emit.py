@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import operator
+import math
 import re
 from typing import Any
 
@@ -106,6 +107,22 @@ def _wat_string(value: str) -> str:
 
 class EmitError(ValueError):
     """The IR document cannot be lowered to the wasm tier."""
+
+
+def _finite_float(value):
+    """The literal's value, refused when a `Float` is not finite (issue #312).
+
+    A non-finite `Float` has no literal spelling in revl and no uniform one
+    across the tiers — the host repr renders `inf`, which is an UNBOUND NAME
+    in this target's source, not a number. The frontend refuses such a literal
+    at the checker (`typecheck._reject_float_literal_range`), so this is the
+    backend's own belt: an IR handed straight to the emitter still cannot make
+    it print a name nothing binds.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EmitError(
+            f"non-finite Float literal {value!r} has no representation in this tier")
+    return value
 
 
 # Dispatcher conformance (roadmap item 76a). This file carries THREE
@@ -2448,9 +2465,12 @@ def _f64_literal(value: float) -> str:
     Python's `float.hex()` is the IEEE-754 hexadecimal form WAT accepts
     verbatim (`0x1.b1ae4d6e2ef50p+69`), so the constant that reaches wasmtime
     is the same 64-bit pattern the source named — no decimal round-trip, no
-    ambiguity. NaN/Infinity never arrive here (they are computed, not written).
+    ambiguity. NaN/Infinity never arrive here (they are computed, not
+    written) — the frontend refuses a non-finite literal, and
+    `_finite_float` re-states that invariant here rather than trusting it
+    (issue #312).
     """
-    return float.hex(value)
+    return float.hex(_finite_float(value))
 
 
 def _wat_bytes(data: bytes) -> str:

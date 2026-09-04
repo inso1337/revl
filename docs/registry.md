@@ -28,8 +28,9 @@ choice below serves that line; anything that doesn't is out of phase 0.
 Why this is safe *now* (the re-scoped §5 stance, roadmap item 49): the
 collision argument gates publishing at scale, not reuse — the reuse loop
 is search → fetch one candidate → admit, and G2 already refuses two
-providers of one key at admission. Namespacing stays where item 9 put it,
-gating phase 2.
+providers of one key at admission. Namespacing has since landed
+(`ns::key`, [namespacing.md](namespacing.md)), so the collision argument that
+gated phase 2 is answered.
 
 ---
 
@@ -44,6 +45,7 @@ registry/
     <name>/                    # single namespace, first-come for a FREE name
       component.rvl            # source, canonical formatting (the current release)
       version                  # the release this entry is, one line (§1.1)
+      meta.json                # description + tags, publisher-declared (§1.3)
       manifest.json            # the compiled manifest (item 28 format)
       dossier.json             # evidence: audit --json today; the item 31
                                # gauntlet dossier when it exists
@@ -158,6 +160,41 @@ changelog across them without opening the tree (`indexVersion` is `"2"`).
 The derived changelog (item 261) is stored as `releases/<version>/changelog.json`
 and its headline is item 64's computed bump. A *first* release has nothing to
 diff against and carries no changelog rather than an invented one.
+
+### 1.3 `meta.json` — the two fields the compiler cannot derive
+
+What a component *is* (`description`) and how to find it (`tags`) cannot be read
+off its source, and `truc ship` refuses an under-described component for that
+reason. They are declared in `meta.json` — a JSON object with those two keys and
+no others — and `build_index` copies them verbatim into the row, exactly as it
+copies `version` from the `version` file.
+
+The point of the file is the check. `index.json` is generated and **a stale
+index fails CI**, which only means something while every key in a row is
+derivable from something under `components/`. The publish path used to write
+these two keys into the row *after* the regenerator had run, so no regeneration
+could reproduce them: `verify` reported every registry with a published
+component as stale, permanently, and a genuinely stale index was
+indistinguishable from the normal state. A check that always fires certifies
+nothing. Putting the fields in a file beside the source puts the whole row back
+under the comparison, and no key is exempted from it — an exempt key is a key a
+stale index can hide behind.
+
+Fail closed like `version`: a `meta.json` that is not an object, declares a key
+nothing regenerates, or gives a description that is not a string or tags that are
+not a list of strings is a **refusal**, not a shrug. It also means the fields
+survive an update that does not restate them, instead of being dropped by the
+next regeneration.
+
+**Migrating a registry published before this file existed.** Its rows carry
+`description`/`tags` with no `meta.json` behind them. `verify` names exactly that
+case, per entry, and points at `registry.migrate_meta` — because the obvious
+repair for a stale index, regenerate and commit, would *delete* the two fields.
+`migrate_meta` lifts them out of the committed index into each entry's
+`meta.json` and regenerates; it is idempotent and never overwrites a `meta.json`
+that already exists. A registry whose rows never carried the fields — the entries
+committed under `registry/` are this shape — needs no migration and its index
+bytes do not move.
 
 ## 2. `revl_resolve` — the one search verb
 
@@ -333,6 +370,9 @@ adapter's alias so G2 still sees exactly one provider of the key.
 
 ## 3. The reuse hint (phase 0.5) — did-you-mean for existence
 
+**Not built.** This section is the phase-0.5 design; nothing below it ships
+today, `--no-reuse-hints` included. The header note above says the same thing.
+
 When compilation/admission of a **freshly authored** component finds a
 registry entry whose provided surface is §5-compatible with what was just
 written, the result carries a non-blocking note:
@@ -409,6 +449,10 @@ why.
       integrity check red (`registry.verify`). *(the two
       `test_..._turns_the_check_red` cases; the CI job that runs `verify`
       lands with phase 1.)*
+- [x] Publishing a component *with a description* still leaves `verify` empty,
+      so a genuinely stale index is distinguishable from the normal state
+      (§1.3). *(`test_a_publish_with_a_description_leaves_a_verifiable_index`,
+      `test_a_hand_edited_description_turns_the_check_red`)*
 - [ ] The reuse hint fires on a full-surface-compatible fresh component,
       does not fire on partial overlap, and never changes the compile
       verdict.

@@ -1,3 +1,4 @@
 fn empty() -> Map[Str, Int] { return Map.empty() }
 fn passthru(m: Map[Str, Int]) -> Map[Str, Int] { return m }
 fn nested() -> Map[Str, List[Int]] { return Map.empty() }
+fn pinned() -> Map[Str, Int] { var m: Map[Str, Int] = Map.empty()  return m }

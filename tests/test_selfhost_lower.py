@@ -647,6 +647,62 @@ component C provides s: S {
   provide s { fn go(y) { let r = emit h(y)   return r } }
 }
 """),
+    # The other side of the bare-Upper-cased-call-head fix below: the call heads
+    # that legitimately ARE Upper-cased must still resolve, or the fix would buy
+    # its bypass back with a false rejection.
+    ("a declared ADT case is a callable head", """
+type Found = Hit(Str) | Missing
+service Kv { fn get(k: Str) -> Found }
+component Store provides kv: Kv {
+  provide kv { fn get(k) { return Hit(k) } }
+}
+"""),
+    ("a built-in Result constructor is a callable head", """
+service Kv { fn get(k: Str) -> Result[Str, Str] }
+component Store provides kv: Kv {
+  provide kv { fn get(k) { return Ok(k) } }
+}
+"""),
+    ("an Upper-cased host acquisition is a callable head", """
+service Kv { fn get(k: Str) -> Str }
+component Store provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+  provide kv { fn get(k) { return k } }
+}
+"""),
+
+    # The ACCEPTING TWINS of the G4 cluster below. Refusing more is trivially
+    # "correct" and is the failure mode a bypass test cannot see, so each new
+    # refusal ships with the legitimate near-twin it must not touch.
+    ("an aliased spawn-handle provision, correctly marked `emit`", """
+service Task { emission[net] fn run(p: Str) -> Int }
+component Worker provides task: Task {
+  provide task { fn run(p) { return 1 } }
+}
+service Sup { emission fn go(p: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(p: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let t = w.task
+      let r = emit t.run(p)
+      return r
+    }
+  }
+}
+"""),
+    ("a host acquisition in its bracket, the whole point of the rule", """
+service S { fn go(u: Str) -> Int }
+component C provides s: S {
+  let m = effect Map.new() undo m.drop()
+  provide s { fn go(u) = 1 }
+}
+"""),
+    ("a host acquisition in a fn no component reaches", """
+fn helper(u: Str) -> Int { let p = Map.new()   return 1 }
+service S { fn go(u: Str) -> Int }
+component C provides s: S { provide s { fn go(u) = 1 } }
+"""),
 ]
 
 
@@ -1071,6 +1127,101 @@ component C requires kv: Kv {
   isolate kv in realms("r1", "r2")
 }
 """, "PRELUDE"),
+
+    # The G4 cluster PR #331 taught the reference to refuse. `crates/revl-gate`
+    # is generated from `selfhost/lower.rvl`, so until these agreed the SHIPPED
+    # gate admitted four programs the reference refuses — the fail-open
+    # direction. The message is compared too (`_agree`), which is the point:
+    # the crate promises its refusals are the reference's verbatim.
+    ("g4 unmarked emission through an aliased spawn-handle provision",
+     _fixture("g4_unmarked_alias_emission"), "G4"),
+    ("g4 host acquire in a provide-method let",
+     _fixture("g4_method_host_acquire"), "G4"),
+    ("g4 host acquire in a teardown slot",
+     _fixture("g4_undo_host_acquire"), "G4"),
+    ("g4 host acquire in a component-reachable fn body",
+     _fixture("g4_fn_body_host_acquire"), "G4"),
+    # the same rule at the two positions no checked-in fixture occupies
+    ("g4 host acquire in an emit expression", """
+service S { fn go(u: Str) -> Int }
+component C provides s: S {
+  let m = effect Map.new() undo m.drop()
+  provide s {
+    fn go(u) {
+      emit Pool.open(u, 1)
+      return 1
+    }
+  }
+}
+""", "G4"),
+    ("g4 host acquire wrapped inside an effect bracket's acquisition", """
+fn wrap(x: Int) -> Int { return x }
+service S { fn go(u: Str) -> Int }
+component C provides s: S {
+  let m = effect wrap(Pool.open("a", 1)) undo m.drop()
+  provide s { fn go(u) = 1 }
+}
+""", "G4"),
+    ("g4 host acquire in a compensation", """
+service Out { emission fn add(u: Str) -> Int }
+service S { emission fn go(u: Str) -> Int }
+component C requires o: Out provides s: S {
+  provide s {
+    fn go(u) {
+      emit o.add(u) compensate Pool.open(u, 1)
+      return 1
+    }
+  }
+}
+""", "G4"),
+    # A bare Upper-cased CALL head is not a host acquisition. The reference's
+    # host branch is `head[:1].isupper() and ops and ops[0].args is not None`
+    # (lower.py `_lower_postfix`) — it needs a `.method(...)` after the head, so
+    # `Map.new()` takes it and `Row(k)` does not. The gate resolved every
+    # Upper-cased head and admitted the whole family; both positions are pinned
+    # here, a provide method and an activation body, because the two reach the
+    # check down different paths.
+    ("a bare Upper-cased call head in a method is undeclared (G1)", """
+service Cache { fn put(k: Str, v: Str) }
+component MemCache provides cache: Cache {
+  provide cache {
+    fn put(k, v) {
+      let row = Row(k)
+    }
+  }
+}
+""", "G1"),
+    ("a bare Upper-cased call head in an activation body is undeclared (G1)", """
+service Log { fn note(m: Str) }
+component Chatty requires log: Log provides out: Log {
+  effect Audit()
+  provide out { fn note(m) { let x = m } }
+}
+""", "G1"),
+    # The G4 evidence list is DEDUPED, first-seen order — the reference collects
+    # it through `_method_emissions`'s `note`, which carries a `seen` set. A
+    # body crossing the same seam twice used to draw
+    # "reaches `db.run`, `db.run`" from the gate and "reaches `db.run`" from the
+    # reference: the same refusal, spelled differently, which is exactly what
+    # `crates/revl-gate`'s byte-agreement promise forbids.
+    ("G4 evidence names a repeated emission once", """
+service Db { emission fn run(sql: Str) -> Int }
+service Cache { fn put(k: Str) }
+component Twice requires db: Db provides cache: Cache {
+  provide cache {
+    fn put(k) {
+      emit db.run(k)
+      emit db.run(k)
+    }
+  }
+}
+""", "G4"),
+    ("g4 host acquire two fn hops from a component body", """
+fn inner(u: Str) -> Int { let p = Pool.open(u, 1)   return 1 }
+fn outer(u: Str) -> Int { return inner(u) }
+service S { fn go(u: Str) -> Int }
+component C provides s: S { provide s { fn go(u) = outer(u) } }
+""", "G4"),
 ]
 
 

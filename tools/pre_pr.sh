@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # The cheap half of CI, run before you open a PR.
 #
-# These three checks take seconds and are the ones that most often redden the
-# `lint` job. Running the full suite locally is NOT the point and is explicitly
-# not done here: that is CI's job now (docs/process.md). This exists so a
+# These checks take seconds and are the ones that most often redden the `lint`
+# and `frontend` jobs. Running the full suite locally is NOT the point and is
+# explicitly not done here: that is CI's job now (docs/process.md). This exists so a
 # fifteen-second mistake does not cost a CI round-trip.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
@@ -43,7 +43,15 @@ uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --
 uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --strict || fail=1
 
 echo "== roadmap markers =="
-python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan || fail=1
+# --head-branch is the cheap half of the PR-context check: a marker saying work
+# is IN FLIGHT on the branch you are about to open the PR from goes stale the
+# moment that PR merges, because the merge deletes the branch. Catching it here
+# costs nothing, catching it in CI costs a round-trip, and not catching it at
+# all reddens main plus every open PR whose merge-ref carries the new text.
+# A detached HEAD reports "HEAD", which names no branch and leaves it off.
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+[ "$branch" = "HEAD" ] && branch=""
+python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --head-branch "$branch" || fail=1
 
 # The frontend suite runs tests/test_gate_crate_drift.py on every PR, so a
 # stale crate is a hard red. crates/revl-gate embeds emitted rust, which means
@@ -58,6 +66,13 @@ python3 tools/build_gate_crate.py --check || fail=1
 # that in one afternoon; both generated crates are checked together now.
 echo "== gate wasm crate drift =="
 python3 tools/build_gate_wasm.py --check || fail=1
+
+# issue #255: five docs carried source-derived content with no drift check, and
+# the one marker-based mechanism rotted back within a day of being introduced.
+# Those blocks are generated now and byte-compared here and in the frontend job.
+# A stale block: `make docs-gen`. A coverage failure: write the missing section.
+echo "== docs drift =="
+python3 tools/docgen.py --check || fail=1
 
 # The site wheel is deliberately NOT checked here. It vendors the whole of
 # src/revl, so a per-push gate reddened CI on every source change to a bundled

@@ -1,0 +1,73 @@
+// item 243 (docs/design/243-witnessed-externs.md), added under item 429: the
+// `witnessed` extern DECLARATION — the one extern class the py corpus carried
+// no instance of at all.
+//
+// WHAT IT HOLDS BOTH SIDES TO. `_uses_builtin_result` (reference) and
+// `uses_builtin_result` (the port) gate the built-in `Ok`/`Err` classes on the
+// EXTERN TABLE, not on a surface `match`/`adt`: a witnessed extern's emitted
+// call site branches on `Ok` to register the transactional inverse, so the
+// classes have to be defined even when nothing in the document names them.
+// That clause is the first one both sides test, and until this document existed
+// no corpus case reached it — `class=witnessed` was a blind construct and the
+// reference's own `return True` under it never executed, so either side could
+// have dropped the clause and emitted a module referencing names it never
+// defined, with every byte-agreement oracle still green.
+//
+// WHAT IT DELIBERATELY DOES NOT HOLD THEM TO: the witnessed EFFECT STEP. A
+// component `effect stash(...)` renders on the reference as the transactional
+// registration (`_revl_wit1 = stash(..)`, `if isinstance(_revl_wit1, Ok):`,
+// `yield _revl_frame.transactional(..)`), and selfhost/emit_py.rvl has no port
+// of it — measured, it emits the bare call plus
+// `yield lambda: <<UNSUPPORTED-CEXPR:>>`, which is a bracket-shaped nothing
+// where a transaction belongs. That gap is a PORT, not a corpus case, and it is
+// not hidden by this document: it stays named on the reference side of
+// tests/fixtures/selfhost_uncovered_lines.json as
+// `_ComponentEmitter._witnessed_step` / `_method_witnessed_step`, NEVER
+// ENTERED, and in the roadmap under item 429.
+//
+// WHAT ADDING THIS DOCUMENT FOUND, which is the whole argument of item 429 in
+// miniature. It reddened two gates nobody was aiming at, both in the SELF-HOST
+// FRONTEND (`selfhost/lower.rvl`), both invisible while the corpus's only
+// externs were two `pure` declarations with no `undo` and no capability tag:
+//   * the admission gate REFUSES a program the reference compiles — `BAD|
+//     expected fn after extern` — because the extern grammar knows
+//     `pure`/`acquire`/`emission` untagged and neither the `witnessed` class nor
+//     a capability tag on any class (`witnessed[fs]`, `emission[net]`);
+//   * `lower_to_ir` drops the WHOLE `externs` section to `null`, silently, for
+//     any extern carrying an `undo` clause or a capability tag. Not a refusal:
+//     a document with a full extern table lowers to one with none, which reads
+//     downstream exactly like a document that declared no externs.
+// Both are recorded where they bite, as ratchets rather than skips:
+// tests/test_selfhost_compile.py's `NATIVE_GATE_GAPS` pins the exact refusal
+// string, and tests/test_selfhost_lower_ir.py's `EXTERN_DECL_GAP` marks this
+// document strict-xfail, so the day the grammar lands both go red on the stale
+// entry instead of outliving it.
+
+type Stash = { path: Str, bak: Str }
+type FsError = { code: Str }
+
+// The declared inverse: named, driven by the data witness, and idempotent
+// (design rule 5), so a WAL replay of it is a no-op once the file is back.
+extern pure fn unstash(w: Stash) -> Unit = @py {
+    import os
+    if os.path.exists(w['bak']):
+        os.replace(w['bak'], w['path'])
+    return
+}
+
+// The witnessed mutation: rename `path` aside, returning the two paths as its
+// data witness. Ok-conditional at the call site — an `Err` touched nothing and
+// registers no rollback.
+extern witnessed[fs] fn stash(path: Str) -> Result[Stash, FsError] undo unstash(result) = @py {
+    import os
+    bak = path + '.bak'
+    os.replace(path, bak)
+    return Ok({'path': path, 'bak': bak})
+}
+
+// A call site for the inverse, so the extern pair is wired into a function the
+// way externs.rvl wires its own (the witnessed extern itself is effect-position
+// only, and the effect step is the shape held out above).
+fn restore(path: Str, bak: Str) -> Unit {
+  return unstash({ path: path, bak: bak })
+}

@@ -24,14 +24,17 @@ after stc-go's Inject gate has already evaluated on the un-isolated context,
 which strands a realm-scoped consumer in Pending forever. This mirrors the
 same fix carried in the Rust backend (`_revl_realm`).
 
-Scope: ir_version 1 and 2 components (effect/inverse, config+defaults,
-provide/inject, provide-method bodies, isolate, intercept). v3 pure
-functions and spawn/instance-parametric IR are out of scope.
+Scope: ir_version 1, 2 and 3. Components (effect/inverse, config+defaults,
+provide/inject, provide-method bodies, isolate, intercept), v3 pure functions
+and the typed core (`_go_v3_expr`, `_emit_v3_go_types`, the `backends/go/v3`
+stdlib), and instance-parametric `spawn` (`_spawn_expr`, one `*stc.Realm` per
+spawn, scenario `backends/go/scenarios/spawn.rvl`).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from typing import Optional
@@ -39,6 +42,22 @@ from typing import Optional
 
 class EmitError(ValueError):
     pass
+
+
+def _finite_float(value):
+    """The literal's value, refused when a `Float` is not finite (issue #312).
+
+    A non-finite `Float` has no literal spelling in revl and no uniform one
+    across the tiers — the host repr renders `inf`, which is an UNBOUND NAME
+    in this target's source, not a number. The frontend refuses such a literal
+    at the checker (`typecheck._reject_float_literal_range`), so this is the
+    backend's own belt: an IR handed straight to the emitter still cannot make
+    it print a name nothing binds.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EmitError(
+            f"non-finite Float literal {value!r} has no representation in this tier")
+    return value
 
 
 # Dispatcher conformance (roadmap item 76a). This file carries TWO expression
@@ -397,7 +416,9 @@ def _expr(node, env: _Env, expected=None) -> str:
             # (the `field`'s target is the `instance-get`). The component
             # dialect's own method call arrives via `target`/`method` below, so
             # `field` here is unambiguously a method selector, not struct-field
-            # access (records are unsupported on this tier).
+            # access. (Record field access IS lowered on this tier, but only on
+            # the v3 typed-components path, and it arrives as a bare `field`
+            # node rather than as a call callee. See the `kind == "field"` arm.)
             if callee.get("kind") == "field":
                 recv = _expr(callee.get("target"), env)
                 meth = _camel(callee.get("name"))
@@ -1570,8 +1591,26 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
                 compensate_call = _expr(comp_node, env)
                 key, method = _call_descriptor(comp_node)
                 frame = "%s.revlFrame" % env.receiver
+                # By-value capture for the offset, on the same footing as an
+                # `undo` (see `_emit_pins`). The offset runs in Phase 2 of an
+                # abort, so a `var` the body reassigns afterwards would move what
+                # it offsets. A pin cannot shadow in the method scope itself
+                # (that would rebind the name for the REST of the body), so the
+                # registration goes inside a nothing-taking closure whose inner
+                # scope the shadow belongs to. Emitted only where there is
+                # something to pin.
+                pins: list = []
+                _emit_pins(step, "compensate", pins, pad + "\t")
+                if pins:
+                    out.append("%sfunc() {" % pad)
+                    out.extend(pins)
+                    inner_pad = pad + "\t"
+                else:
+                    inner_pad = pad
                 out.append("%s%s.registerMethodCompensation(%s, %s, func() error { %s; return nil })" %
-                           (pad, frame, _go_string(key), _go_string(method), compensate_call))
+                           (inner_pad, frame, _go_string(key), _go_string(method), compensate_call))
+                if pins:
+                    out.append("%s}()" % pad)
                 global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
                 _COMP_NEEDS_TEARDOWN = True
                 # the EXT frame (deferred slice, Abort, the registerMethod* seam)
@@ -1593,6 +1632,7 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             ctx = env.ctx_ref()
             out.append("%svar %s bool" % (pad, bind))
             out.append("%s%s.Effect(func() stc.Inverse {" % (pad, ctx))
+            _emit_pins(step, "undo", out, pad + "\t")
             out.append("%s\t%s = %s" % (pad, bind, acquire))
             if undo is not None:
                 out.append("%s\treturn func() error { if %s { %s }; return nil }"
@@ -1669,6 +1709,27 @@ def _emit_return(expr, ret_surface, env: _Env, out, pad):
     out.append("%sreturn %s" % (pad, _expr(expr, env, ret_surface)))
 
 
+def _emit_pins(step, slot, out, pad):
+    """Bind a derived inverse's mutable method-locals BY VALUE (docs/closures.md;
+    `<slot>_captures`, computed by `src/revl/lower.py::_pin_inverse_captures`).
+
+    A Go closure captures the enclosing VARIABLE, not its value, so an `undo`
+    that reads a `var` the body reassigns after the effect registered would run
+    at teardown against a value its forward step never used. `k := k` inside the
+    effect closure is Go's own by-value snapshot: the inner scope shadows the
+    method local for the whole closure, and the copy is taken when the closure
+    runs, which is where the effect registers. `_ = k` follows because a pin the
+    acquire happens not to mention would otherwise be an unused variable, which
+    on this tier is a compile error rather than a warning.
+
+    Emits nothing when the lowering found nothing to pin, so a body without one
+    stays byte-identical."""
+    for name in step.get(f"{slot}_captures") or []:
+        local = _safe_local(name)
+        out.append("%s%s := %s" % (pad, local, local))
+        out.append("%s_ = %s" % (pad, local))
+
+
 def _emit_effect_step(step, env: _Env, out, indent):
     """A bare `effect ... undo ...` step (inside Apply body or a method)."""
     pad = "\t" * indent
@@ -1676,6 +1737,7 @@ def _emit_effect_step(step, env: _Env, out, indent):
     undo = step.get("undo")
     ctx = env.ctx_ref()
     out.append("%s%s.Effect(func() stc.Inverse {" % (pad, ctx))
+    _emit_pins(step, "undo", out, pad + "\t")
     out.append("%s\t%s" % (pad, acquire))
     if undo is not None:
         out.append("%s\treturn func() error { %s; return nil }" % (pad, _expr(undo, env)))
@@ -2434,6 +2496,42 @@ def _refuse_unlowered_stream_surface(node, tier: str) -> None:
             "`--backend py`" % tier)
 
 
+def _refuse_dropped_stream_component(ir: dict) -> None:
+    """Refuse a document the pure typed-core path would route past while a
+    component in it holds a stream (item 130).
+
+    The pure path exists for documents whose component is incidental to a
+    record/pure-fn/test case, and it drops those components. A stream component
+    is never incidental: its subscription is a bracket with an inverse, and a
+    program emitted without it would run, appear healthy, and never subscribe.
+    Naming the refusal keeps this tier's story the one Slices 3-5 tell — go
+    lowers subscribe / next / close and `merge`, the iteration and event forms
+    are the py reference tier's."""
+    steps = [step for comp in ir.get("components") or []
+             for step in comp.get("body") or []]
+    # the iteration/event form first: it is the more specific refusal, and a
+    # handler always sits BELOW the subscribe it pulls, so a positional walk
+    # would report the subscription and hide the form the author wrote.
+    for step in steps:
+        if step.get("step") == "stream-iter":
+            form = ("`on … as` typed-event handler" if step.get("event")
+                    else "`every … in` stream iteration form")
+            raise EmitError(
+                f"the {form} is not lowered on the go tier, and this "
+                "document would otherwise route to the pure typed-core path "
+                "and drop the component entirely; the iteration and event "
+                "forms run on the py reference tier (item 130 Slices 4 and "
+                "5) — try `--backend py`")
+    for step in steps:
+        if step.get("subscribe"):
+            raise EmitError(
+                "this document declares a stream subscription inside a "
+                "component, but its top-level declarations route it to the "
+                "pure typed-core path, which would drop the component and "
+                "with it the subscription's bracket (item 130) — emit it "
+                "with `--backend py`, or split the pure declarations out")
+
+
 def _stream_head(node, env) -> str:
     """The stream a `subscribe` acquires: a plain source, or a `merge(a, b)`
     fan-in (item 130 Slice 3). Recursive — a merged stream is itself a stream.
@@ -2664,12 +2762,17 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # go emitter's activation-body walk has no per-item scope to bind it in.
         # Refuse by name rather than emit a subscription whose body silently
         # never runs — the same call `_refuse_unlowered_stream_surface` makes for
-        # the Slice 2 surface this tier does not lower.
+        # the Slice 2 surface this tier does not lower. Slice 5's `on … as`
+        # typed-event handler lowers to this SAME step (an event is a stream
+        # item with a contract), so it is refused here too — and named for the
+        # form the author actually wrote.
+        form = ("`on … as` typed-event handler" if step.get("event")
+                else "`every … in` stream iteration form")
         raise EmitError(
-            "the `every … in` stream iteration form is not lowered on the go "
+            f"the {form} is not lowered on the go "
             "tier; this tier lowers subscribe / next / close and `merge` "
             "(item 130 Slices 1 and 3) while the iteration form runs on the py "
-            "reference tier (Slice 4) — try `--backend py`")
+            "reference tier (Slices 4 and 5) — try `--backend py`")
     elif s == "intercept":
         # handled at load site (metadata); no-op in Apply
         pass
@@ -2733,6 +2836,23 @@ def _emit_load_helpers(ir, out):
             out.append("func Load%s(target *stc.Context, cfg %sConfig) *stc.Fiber {" % (cname, cname))
         else:
             out.append("func Load%s(target *stc.Context) *stc.Fiber {" % cname)
+        # item 421 F6, the config half: a `Secret[T]` config field is the third
+        # declared marking, beside a `Secret[T]` service parameter (the receiver,
+        # registered at the head of the provide method) and a `Secret[T]` extern
+        # return (the origin). It arrives ONCE, here, and `Load%s` is the single
+        # door every path uses — the lifecycle tests and the placement runner's
+        # `RevlLoad` alike — so the registration sits here rather than at each
+        # read. Without it the go host trace printed an operator-supplied
+        # credential verbatim while the py and ts tiers, which register their
+        # config values at load, scrubbed it: the same declaration meant
+        # different things on different tiers.
+        if _SECRET_MODE and has_config:
+            secret_fields = [
+                "cfg.%s" % _camel(f["name"]) for f in comp.get("config") or []
+                if isinstance(f, dict) and f.get("secret")
+            ]
+            if secret_fields:
+                out.append("\trevlMarkSecret(%s)" % ", ".join(secret_fields))
         if isolate or intercept:
             out.append("\tctx := target.Child()")
             for key, realm in isolate.items():
@@ -2765,7 +2885,7 @@ def _go_lifecycle_arg(node, payload_surface, env):
         if isinstance(value, int) and payload_surface in ("Int", "Int32"):
             return "%s(%s)" % (_go_type(payload_surface), value)
         if isinstance(value, float) and payload_surface == "Float":
-            return "float64(%s)" % repr(value)
+            return "float64(%s)" % repr(_finite_float(value))
     return _expr(node, env, payload_surface)
 
 
@@ -3973,7 +4093,7 @@ def _go_v3_lit(node: dict) -> str:
         # 0.3 at compile time and compares equal to it — which is not IEEE 754
         # binary64, the semantics revl specifies (docs/arithmetic.md). Typing
         # the literal forces ordinary float64 arithmetic.
-        return f"float64({value!r})"
+        return f"float64({_finite_float(value)!r})"
     raise EmitError(f"unsupported v3 literal: {node!r}")
 
 
@@ -7415,6 +7535,17 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         # document must stay on the stc-go runtime path even though it also
         # carries top-level `test` blocks (FR-5); the pure path would drop the
         # components and refuse the lifecycle steps.
+        #
+        # item 130: the pure path DROPS the components it routes past — that is
+        # the point for a document whose component is incidental to a record or
+        # pure-fn corpus case. It is not acceptable for a stream, whose whole
+        # contract is a live subscription with a bracket: dropping the component
+        # would emit a program that silently never subscribes, the exact outcome
+        # the honest `EmitError` exists to prevent. Reached routinely from Slice
+        # 5, where the event's record declaration is what puts a `types` entry in
+        # the document in the first place, so a typed-event program on this tier
+        # would otherwise compile to a bare struct.
+        _refuse_dropped_stream_component(ir)
         return _emit_v3_go(ir, package)
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS

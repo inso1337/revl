@@ -161,6 +161,9 @@ REJECTIONS = {
     "v2_fail_in_pure_fn.rvl": "`fail` is only allowed in a component activation body (A8)",
     "arith_zero_divisor.rvl": "`mod` by a literal zero is undefined",
     "t20_int_literal_range.rvl": "Int literal `9223372036854775808` is outside the 64-bit range",
+    # issue #312: the Float twin of the bound above — `1e999` folds to IEEE
+    # infinity, which every emitter prints as an unbound name.
+    "t36_float_literal_range.rvl": "Float literal is infinite: it is outside the range of a 64-bit float",
     # Int32 (docs/arithmetic.md, "Sized integers"): lossless-widen /
     # checked-narrow, and no silent width-mixing in arithmetic.
     "t21_int32_narrow_implicit.rvl": "this function's return expects `Int32`, got `Int`",
@@ -241,12 +244,64 @@ REJECTIONS = {
         "`fs.write(path=\"/tmp\")` — a spawn may narrow a child's capabilities, "
         "never widen them",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+    # item 260: the BUDGET half of attenuation. Stripping the ceilings makes
+    # both sides the same bare `net`, so only the dedicated ceiling check sees
+    # it. Its accepted twin is `examples/budget_attenuation.rvl`; the pair is
+    # what makes the differential oracle's ceiling branch reachable (issue 210).
+    "g4_spawn_widens_budget.rvl":
+        "with a wider resource budget than it holds: `net(calls=1000)` widens "
+        "`calls` to 1000 over the parent's 100",
     "g4_spawn_widens_capability.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
     # item 82: an emission reached through a spawn handle (`w.task.run(...)`,
     # an `instance-get` provision access) must still be marked `emit` — an
     # unmarked crossing is refused, not silently lowered (and no longer a
     # `KeyError` in `_is_emission_call`).
     "g4_unmarked_handle_emission.rvl": "call to emission `w.task.run` must be marked `emit` (G4)",
+    # --- the indirection cluster ------------------------------------------
+    # One shape recurs across all of these: an obligation is carried through an
+    # INDIRECTION — a spawn handle, an alias, an arrow, a first-class function
+    # value, a spawn `with { … }` config — and the analysis that judges the
+    # direct form loses the indirect one. Each fixture's header says which
+    # indirection it is and what the accepting twin looks like; the twins are
+    # `test_indirection_cluster_twins.py`, which is the half that makes these
+    # refusals safe rather than merely strict.
+    #
+    # The provision ALIAS, one binding past `g4_unmarked_handle_emission.rvl`:
+    # `let t = w.task; t.run(p)` is the same crossing and gets the same
+    # judgment, in both directions (the marked spelling `emit t.run(p)` was
+    # itself refused before, as "not declared `emission`").
+    "g4_unmarked_alias_emission.rvl": "call to emission `w.task.run` must be marked `emit` (G4)",
+    # A host acquire verb is legal only as the acquisition of an `effect …
+    # undo …` bracket, which is the only construct that registers its release
+    # with the teardown accumulator. Three positions that had no rule: a `fn`
+    # body a component reaches, a provide-method `let`, a teardown slot.
+    "g4_fn_body_host_acquire.rvl":
+        "host acquisition `Pool.open` cannot be called in `fn open_it`, which "
+        "a component body reaches",
+    "g4_method_host_acquire.rvl":
+        "host acquisition `Pool.open` cannot be called in this position",
+    "g4_undo_host_acquire.rvl":
+        "host acquisition `Pool.open` cannot be called in a teardown slot",
+    # G5's teardown bound, reached through the three indirections that hid it:
+    # a spawn handle, a locally-bound arrow (followed into its body, so a PURE
+    # local arrow still compiles), and an emitting callable passed as a value.
+    "g5_undo_handle_emission.rvl":
+        "the `undo` of this bracket calls `w.task.run`, which is an emission",
+    "g5_undo_arrow_emission.rvl":
+        "the `undo` of this bracket calls `send`, which is an emission",
+    "g5_undo_fn_value_emission.rvl":
+        "the `undo` of this bracket calls `wrap`, a fn that reaches an "
+        "emission `send` (through wrap -> send)",
+    # A method-local binding may not shadow an activation-body one: the method
+    # lowers into a closure over the activation frame, and the shadow took the
+    # component local's own host-safe name.
+    "g6_method_local_shadows_component.rvl": "`store` is already bound in `set`",
+    # G9 carriers: a closure CAPTURE (not an argument) and a spawn config
+    # hand-off. Both were reported CLEAN into a `Trusted[T]` sink.
+    "g9_closure_capture_launders_taint.rvl":
+        "untrusted value (fs) flows into a shell command at argument 1 of `run`",
+    "g9_spawn_config_launders_taint.rvl":
+        "untrusted value (fs) flows into a shell command at argument 1 of `run`",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     # roadmap item 129: closures capture BY VALUE (syntax-2.0 §3.5). A closure
     # that ASSIGNS to a captured binding is reference capture, which would break

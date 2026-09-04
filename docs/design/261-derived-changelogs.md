@@ -1,6 +1,14 @@
 # Derived changelogs - the release note is computed, not written (item 261)
 
-**Status: design, not implemented.** This document specifies `revl changelog`,
+**Status: implemented.** `revl changelog` ships (`src/revl/changelog.py`,
+`src/revl/cli/observe.py::_run_changelog`, the `changelog` subparser in
+`src/revl/cli/parser.py`), and both slices landed: the Slice-2 authority differs
+`diff_capability_scopes`, `diff_backends`, `diff_recovery`, `diff_registers` and
+`diff_cardinality` all live in `src/revl/audit_diff.py` and are wired into
+`changelog.py`. The flags are documented in
+[../commands-reference.md](../commands-reference.md). Per-finding `Status:` lines
+below are the design's own slice bookkeeping and are left as written. This
+document specifies `revl changelog`,
 a renderer that computes a human-readable release note from the STRUCTURAL delta
 between two generations of a composition. Every line is a projection of a fact
 the drift machinery already produces: `composition_diff.diff` (item 123, the

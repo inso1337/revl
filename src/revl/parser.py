@@ -26,8 +26,55 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import contextlib
+import sys
+
 from .errors import RevlError
 from .lexer import Token, lex
+
+
+# --------------------------------------------------------- recursion bounds
+#
+# The parser is recursive descent and the precedence ladder alone (`_ternary`
+# -> `_or` -> ... -> `_primary`) costs roughly two dozen python frames for
+# every nested `(`. Against CPython's default 1000-frame limit that put the
+# ceiling at THIRTY-EIGHT nested parentheses and forty nested calls (issue
+# #310) — well inside what generated code writes, and reached as a
+# `RecursionError` traceback rather than a diagnostic. In `revl.gate`, a
+# library with a security contract, that is an input that makes the admission
+# gate raise instead of answering.
+#
+# Two things fix it, and both are needed. `NESTING_LIMIT` is the LANGUAGE's
+# answer: a stated bound, refused with a diagnostic that names it, so a
+# hostile input costs bounded work and gets an honest no. The headroom is the
+# IMPLEMENTATION's: python's own limit must sit far enough above the stated
+# bound that the bound — not the interpreter — is what a program meets, and it
+# must cover the walkers in lower.py and typecheck.py that later descend the
+# same accepted tree.
+NESTING_LIMIT = 200
+
+# ~27 parser frames per level, and the deepest post-parse walker is shallower
+# than that, so this clears `NESTING_LIMIT` with room to spare while staying
+# far below anything that would trouble the C stack.
+_RECURSION_HEADROOM = 12000
+
+
+@contextlib.contextmanager
+def recursion_headroom(frames: int = _RECURSION_HEADROOM):
+    """Raise python's recursion limit for the duration of a compile.
+
+    Restores whatever the embedder had set, and never LOWERS it: a host that
+    already asked for more keeps it.
+    """
+    previous = sys.getrecursionlimit()
+    if previous >= frames:
+        yield
+        return
+    sys.setrecursionlimit(frames)
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(previous)
 
 
 # ---------------------------------------------------------------- AST
@@ -270,14 +317,61 @@ class StreamIterStmt:
     the loop pushes one bracket per item onto the owner's single LIFO
     accumulator, which is unbounded in the length of the stream, and the
     per-iteration discharge that would bound it does not exist. The refusal is
-    the parser's (see `stream_iter`), and it names the fix.
+    the parser's (see `_iteration_body`), and it names the fix.
 
     `bind` is the item name; `subject` names the subscription (a bare
     identifier — a `Subscription` is a host-local with no nominal type, so it
-    can be spelled no other way)."""
+    can be spelled no other way).
+
+    `event` is Slice 5 (§6): the typed-event handler `on <Event> as <x> in <sub>
+    { … }` parses to THIS node with the event's name recorded, because an event
+    IS a stream item with a contract and its handler IS this iteration. One node
+    and one lowering means the two forms cannot drift apart on the properties
+    that carry the guarantee — the iteration boundary and the uncaught
+    `Faulted` — which is the whole reason §6 makes events a specialization
+    rather than a second surface. `None` for a plain `every … in`, so a Slice 4
+    program lowers byte-identically."""
     bind: str
     subject: object
     body: list
+    line: int
+    event: str | None = None
+
+
+@dataclass
+class EventDecl:
+    """`event <Name>(key: <field>[, window: <n>]) { <fields> }` — a typed
+    external event (item 130 Slice 5,
+    docs/design/130-stream-reactive-types.md §6).
+
+    An event is a `Stream[T]` element with a CONTRACT, not a second reactive
+    surface (§6): the declaration produces an ordinary record type (carried as a
+    sibling `TypeDecl`, so every record rule — field types, literals, field
+    reads — applies to it unchanged) plus the two things events add on top of a
+    stream, and nothing else.
+
+    * `key` names the field carrying the event's IDENTITY, the value a duplicate
+      delivery repeats. It is item 309's keyed-idempotency role in the one place
+      a consumer can act on it, spelled the way 309 spells it (`(key: <field>)`,
+      the `confined:` precedent); it must name a declared field of scalar-
+      serializable type, and it is REQUIRED — an event with no key can deliver
+      neither of the obligations §6 lists for it (handler idempotency, duplicate
+      handling), and admitting one would ship those two rows as a claim nothing
+      backs.
+    * `window` bounds the dedup memory: the handler remembers the last N keys it
+      admitted, so redelivery inside the window is collapsed. Bounded by
+      construction and constant per handler — NOT one entry per delivered item,
+      which is the unbounded shape §4.7 refuses. `None` takes the runtime
+      default.
+
+    `event` is a CONTEXTUAL keyword (the `boot`/`fault`/`secret` discipline): it
+    heads a declaration only as `event <IDENT> (`, so the corpus's existing
+    `fn log(event: Str)` parameters keep parsing and neither the lexer's
+    KEYWORDS set nor the self-hosted lexer needs a sync."""
+    name: str
+    key: str
+    window: object          # int, or None for the runtime default
+    fields: list
     line: int
 
 
@@ -552,12 +646,61 @@ class RowDecl:
 
 
 @dataclass
+class RemoteRowDecl:
+    """A `remote` row: a row whose provider is SYNTHESIZED from a service
+    declaration plus a peer address (item 424 D-424c.1, slice C2).
+
+    The wiring stays local — every consumer keeps `requires <key>: <Service>`
+    and G2/G3/G4 are unchanged — so remoteness is an ADMISSION fact (a reach, a
+    capability, a failure mode) and never a wiring fact. That is the rule
+    `docs/interop-bridge.md` §3 already states for a seam ("manifest data, not
+    source text"), applied to a callee that is in no manifest at all.
+
+    `remote`, `at`, `host`, `through`, `on_failure` and `redirect` are
+    CONTEXTUAL keywords,
+    recognised only in this one position inside a `composition` block. The
+    lexer's KEYWORDS set is untouched, so the self-host lexer needs no sync and
+    no program using any of those words as an ordinary name is broken. `in` and
+    `realm` are already keywords and are reused verbatim from `isolate`.
+    """
+    label: str
+    key: str                       # the provision key the row claims
+    service: str                   # the locally declared service being remoted
+    host: str                      # the peer authority, `host("h:port")`
+    line: int
+    realm: str | None = None       # `in realm("...")`; None == the shared realm
+    transport: str | None = None   # `through <ident>`; None == the default wire
+    # D-424c.3: a transport failure is a WITHDRAWAL by default and a value by
+    # opt-in. `"result"` is admitted only if every method returns `Result[T, E]`.
+    # Silently swallowing a transport failure has no spelling.
+    on_failure: str = "withdraw"
+    on_failure_line: int = 0
+    # `redirect(refuse | same_origin)`; `refuse` is the default and the only
+    # value that needs no argument from the operator. The peer address above is
+    # what a reader of this row is entitled to believe the crossing reaches, so
+    # a transport that followed a `Location` to another host would make the row
+    # false. `same_origin` is the declared opt-in and is still bounded: a 307 or
+    # 308 on the declared origin, never a 301/302/303 (they re-issue the POST as
+    # a GET and drop the body) and never another origin (every header on the
+    # request, credentials included, would travel with it).
+    redirect: str = "refuse"
+    redirect_line: int = 0
+    # The line the address itself is written on, so an address refusal points at
+    # the address rather than at the row's first line.
+    host_line: int = 0
+
+
+@dataclass
 class CompositionDecl:
     name: str
     rows: list[RowDecl]
     line: int
     uses: list[tuple[str, int]] = field(default_factory=list)
     source: str = ""  # provenance: the file this composition was parsed from
+    # item 424 C2: rows whose provider is synthesized rather than read from a
+    # file. Kept in their own list because they carry no `from` path and
+    # resolution reads no header for them.
+    remotes: list["RemoteRowDecl"] = field(default_factory=list)
     # item 426 S2 (§3.1): the ordered layer stack. `stack` entries are LEVEL 1
     # peers — conflicts between them refuse — and `site` is the single LEVEL 2
     # layer, the one level at which "I decide" is expressible. Both are ordered
@@ -1348,6 +1491,11 @@ class Program:
     services: list[ServiceDecl] = field(default_factory=list)
     components: list[ComponentDecl] = field(default_factory=list)
     type_decls: list[TypeDecl] = field(default_factory=list)
+    # item 130 Slice 5: the typed-event declarations. Each also contributes a
+    # record `TypeDecl` above (an event IS a record with a contract), so the
+    # type table needs no event case; this list carries only the contract the
+    # `on` handler reads. Empty for every program that declares no event.
+    event_decls: list[EventDecl] = field(default_factory=list)
     fn_decls: list[FnDecl] = field(default_factory=list)
     uses: list[UseDecl] = field(default_factory=list)
     externs: list[ExternDecl] = field(default_factory=list)
@@ -1406,10 +1554,26 @@ _FOREIGN_STMT_KEYWORDS = {
 
 # ---------------------------------------------------------------- parser
 
+def _found(tok) -> str:
+    """How a token reads in an `expected ..., found ...` message.
+
+    The eof token carries `None` as its value, and `repr(None)` renders as
+    `found None` — which reads as a literal in the source rather than as the
+    input running out. `expect()` has always spelled this "end of file"; the
+    expression path did not (issue #313), and an interpolation that ran out
+    mid-expression is exactly where a reader meets it.
+    """
+    return repr(tok.value) if tok.value is not None else "end of file"
+
+
 class Parser:
-    def __init__(self, source: str, filename: str):
+    def __init__(self, source: str, filename: str, line_offset: int = 0):
         self.filename = filename
-        self.toks = lex(source, filename)
+        # `line_offset` is non-zero only for a sub-parse of a fragment — the
+        # body of a `${...}` interpolation — so its tokens, its AST nodes and
+        # every checker diagnostic on them carry the line the fragment occupies
+        # in the real file instead of line 1 (issue #313).
+        self.toks = lex(source, filename, line_offset=line_offset)
         self.pos = 0
         # When set, the next `_bor` call does not consume a top-level `|` — it
         # is the functional-record-update separator `{base | f = e}`, not the
@@ -1428,6 +1592,12 @@ class Parser:
         # docs/design/379-break-continue.md).
         self._loop_depth = 0
         self._in_block_arm = False
+        # issue #310: how many expressions deep the cursor currently is, held
+        # against `NESTING_LIMIT`. A `${...}` interpolation is parsed by a
+        # SEPARATE `Parser` over the template body, so the depth is handed to
+        # that sub-parser (`_parse_template_parts`) — otherwise nested
+        # templates reset the count and walk straight past the bound.
+        self._nesting = 0
 
     # -- token helpers
 
@@ -1558,13 +1728,36 @@ class Parser:
     # -- productions
 
     def parse(self) -> Program:
-        try:
-            return self._parse_program()
-        except RevlError as e:
-            better = self._maybe_stray_backtick_error(e)
-            if better is not None:
-                raise better from None
-            raise
+        with recursion_headroom():
+            try:
+                return self._parse_program()
+            except RevlError as e:
+                better = self._maybe_stray_backtick_error(e)
+                if better is not None:
+                    raise better from None
+                raise
+            except RecursionError:
+                # The backstop under `NESTING_LIMIT` (issue #310). The bound
+                # above covers the expression ladder, which is what explodes
+                # first and fastest; the other recursive descents here —
+                # nested blocks, nested type arguments — are shallower per
+                # level and reach python's limit only far past anything a
+                # program means. Whichever one gives out, the caller gets a
+                # diagnostic, because a `RecursionError` escaping a library is
+                # an unhandled fault and `revl.gate` is a library with a
+                # security contract.
+                raise self._nesting_too_deep() from None
+
+    def _nesting_too_deep(self) -> RevlError:
+        return self.err(
+            self.peek().line,
+            "this program nests deeper than the compiler can parse",
+            hint="the parser is recursive descent, so nesting costs stack: "
+                 f"expressions are bounded at {NESTING_LIMIT} levels and the "
+                 "other nestings by the interpreter's own limit. This is an "
+                 "implementation bound, not a language one — name the inner "
+                 "constructs with `let` bindings or helper functions.",
+        )
 
     def _maybe_stray_backtick_error(self, e: RevlError) -> "RevlError | None":
         """Item 365: a stray backtick inside a host `//`/`/*` comment closes a
@@ -1716,6 +1909,28 @@ class Parser:
                 # as an ordinary identifier (and the self-hosted lexer's
                 # KEYWORDS table needs no sync).
                 program.fault_tests.append(self.fault_test_decl())
+
+            elif self.at("ident", "event") \
+                    and self.pos + 2 < len(self.toks) \
+                    and self.toks[self.pos + 1].kind == "ident" \
+                    and self.toks[self.pos + 2].kind in ("(", "{"):
+                # item 130 Slice 5: `event <Name>(key: <field>) { <fields> }`.
+                # `event` is a *contextual* keyword, the `boot`/`fault`/`secret`
+                # discipline: it heads a declaration ONLY in the shape
+                # `event IDENT (` / `event IDENT {`, so the corpus's
+                # `emission fn log(event: Str)` parameters keep parsing and the
+                # self-hosted lexer's KEYWORDS table (and the gate crate's
+                # frontier derived from it) needs no sync. The `{` spelling is
+                # admitted HERE and refused in `_event_contract` so the most
+                # likely mistake — a key-less event — gets the diagnostic that
+                # names the missing key, not "expected a top-level declaration". The declaration ALSO contributes an ordinary record
+                # `TypeDecl`, because an event is a record with a contract (§6):
+                # every record rule then applies to it with no event-specific
+                # case anywhere in the type machinery.
+                decl = self.event_decl()
+                program.event_decls.append(decl)
+                program.type_decls.append(
+                    TypeDecl(decl.name, [], decl.fields, [], decl.line))
 
             elif self.at("ident", "secret") \
                     and self.peek_ahead(1).kind == "ident" \
@@ -2620,6 +2835,7 @@ class Parser:
         name = self.expect("ident", what="a composition name").value
         self.expect("{")
         rows: list[RowDecl] = []
+        remotes: list[RemoteRowDecl] = []
         uses: list[tuple[str, int]] = []
         stack: list[tuple[str, int]] = []
         site: tuple[str, int] | None = None
@@ -2653,30 +2869,50 @@ class Parser:
                              "provider, which decision 4 forbids")
                 site = (self.expect("string", what="a layer path string").value, sline)
                 continue
+            if self.at("ident", "remote"):
+                # item 424 C2: a row whose provider is SYNTHESIZED from a
+                # service declaration plus a peer address (D-424c.1).
+                remote = self.remote_row_decl(name)
+                self._composition_label(name, remote.label, remote.line, seen)
+                remotes.append(remote)
+                continue
             if not self.at("ident", "row"):
                 tok = self.peek()
                 raise self.err(
                     tok.line,
-                    f"expected `row`, `use`, `stack`, `site`, or `}}` in "
-                    f"composition {name}, found {tok.value!r}",
+                    "expected `row`, `remote`, `use`, `stack`, `site`, or "
+                    f"`}}` in composition {name}, found {tok.value!r}",
                     hint="a composition document declares rows: "
-                         '`row @label from "path.rvl" provides key`')
+                         '`row @label from "path.rvl" provides key`, or '
+                         '`remote @label provides key: Service at host("h:port")`')
             rows.append(self.row_decl(name))
-            # 426 §1.2: two labels with the same spelling WITHIN ONE ORIGIN is a
-            # refusal at parse time, the same shape as a duplicate component
-            # name. Across origins they are distinct qualified labels and do not
-            # collide, which is why this check is per document.
-            if rows[-1].label in seen:
-                raise self.err(
-                    rows[-1].line,
-                    f"duplicate row label `@{rows[-1].label}` in composition "
-                    f"{name} (first declared on line {seen[rows[-1].label]})",
-                    hint="a label is the row's identity and is scoped to this "
-                         "document's origin, so it must be unique here "
-                         "(426 §1.2)")
-            seen[rows[-1].label] = rows[-1].line
+            self._composition_label(name, rows[-1].label, rows[-1].line, seen)
         self.expect("}")
-        return CompositionDecl(name, rows, line, uses, stack=stack, site=site)
+        return CompositionDecl(name, rows, line, uses, stack=stack,
+                               site=site, remotes=remotes)
+
+    def _composition_label(self, composition: str, label: str, line: int,
+                           seen: dict[str, int]) -> None:
+        """426 §1.2: two labels with the same spelling WITHIN ONE ORIGIN is a
+        refusal at parse time, the same shape as a duplicate component name.
+        Across origins they are distinct qualified labels and do not collide,
+        which is why this check is per document.
+
+        One namespace, not two: a `remote` row's label is a row label like any
+        other, so `@billing` cannot be both a file row and a remote row. The
+        whole point of D-424c.1 is that a consumer cannot tell the difference,
+        and two rows that a consumer cannot tell apart must not share a name.
+        """
+        if label in seen:
+            raise self.err(
+                line,
+                f"duplicate row label `@{label}` in composition "
+                f"{composition} (first declared on line {seen[label]})",
+                hint="a label is the row's identity and is scoped to this "
+                     "document's origin, so it must be unique here (426 §1.2); "
+                     "a `remote` row shares that one namespace, because a "
+                     "consumer cannot tell the two apart (424 D-424c.1)")
+        seen[label] = line
 
     def row_decl(self, composition: str) -> RowDecl:
         line = self.next().line                       # `row`
@@ -2948,6 +3184,163 @@ class Parser:
                            hint="an operation that changes nothing is dead weight in "
                                 "the diff — drop it")
         return out
+    def remote_row_decl(self, composition: str) -> RemoteRowDecl:
+        """`remote @label provides <key>: <Service> [in realm("r")]
+        at host("h:port") [through <ident>] [on_failure(withdraw|result)]
+        [redirect(refuse|same_origin)]`
+
+        Item 424 D-424c.1, slice C2. Every word this clause introduces is a
+        CONTEXTUAL keyword read only here (`remote`, `at`, `host`, `through`,
+        `on_failure`, `redirect`, and their arguments); `provides`, `in` and
+        `realm` are
+        the keywords the language already has. So the lexer stays context-free
+        and the self-host lexer needs no sync — the same discipline 426 S2 chose
+        for `configure @db with { ... }`, and the reason `remote` is not being
+        promoted to a real keyword: `remote` is a perfectly ordinary provision
+        key, require alias and config field name today, and reserving it would
+        break those programs, force a matching edit in the self-host lexer, and
+        put a second copy of the reserved-word set on every backend that
+        re-derives it.
+
+        Unlike a `row`, a `remote` names no `from` path: its provider does not
+        exist as source until resolution synthesizes it from the service
+        declaration and the peer address (§4 of the design note — the same
+        `synthesize_provider` a config row, a seam forwarder and item 60's mock
+        provider are the other three kinds of).
+        """
+        line = self.next().line                       # `remote`
+        label = self._row_label()
+        if not self.at("kw", "provides"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `provides` after remote row label `@{label}`, "
+                f"found {tok.value!r}",
+                hint='a remote row names the key it claims AND the service it '
+                     'remotes: `remote @%s provides key: Service at '
+                     'host("h:port")`' % label)
+        self.next()
+        key = self._provision_key(what="a provision key")
+        # The service name is REQUIRED and is not inferred from the key. A
+        # remote row has no component header to check the claim against, so the
+        # service declaration is the only contract there is; making the document
+        # name it keeps the "a composition cannot lie about its wiring" property
+        # 426 §1.3 buys for an ordinary row.
+        if not self.at(":"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `: <Service>` after `provides {key}` on remote row "
+                f"`@{label}`, found {tok.value!r}",
+                hint="a remote row has no component header, so the service "
+                     "declaration IS its contract and the document names it "
+                     "(424 D-424c.1)")
+        self.next()
+        service = self.expect("ident", what="a service name").value
+
+        realm: str | None = None
+        host: str | None = None
+        host_line = line
+        transport: str | None = None
+        on_failure = "withdraw"
+        on_failure_line = line
+        redirect = "refuse"
+        redirect_line = line
+        while True:
+            if self.at("kw", "in"):
+                iline = self.next().line
+                if realm is not None:
+                    raise self.err(iline, f"duplicate `in realm(...)` clause on "
+                                          f"remote row `@{label}`")
+                # D-424c.4: `@RemoteScope` is a REALM and there is nothing to
+                # build. Two peers of one service are two rows in two realms,
+                # they are two different `(key, realm)` addresses, and G2 keeps
+                # them from colliding with no new rule (426 §2.3).
+                realm = self.realm_label()
+            elif self.at("ident", "at"):
+                aline = self.next().line
+                if host is not None:
+                    raise self.err(aline, f"duplicate `at host(...)` clause on "
+                                          f"remote row `@{label}`")
+                if not self.at("ident", "host"):
+                    tok = self.peek()
+                    raise self.err(tok.line,
+                                   f"expected `host(\"...\")` after `at` on "
+                                   f"remote row `@{label}`, found {tok.value!r}")
+                self.next()
+                self.expect("(")
+                tok = self.peek()
+                if tok.kind != "string":
+                    raise self.err(
+                        tok.line,
+                        "a peer address is a static string literal",
+                        hint="the address is read before the composition exists "
+                             "and is exactly the class of value roadmap item 350 "
+                             "binds through a `boot` component; until 350 lands "
+                             "it is written here as a literal, never computed")
+                host = self.next().value
+                host_line = tok.line
+                self.expect(")")
+            elif self.at("ident", "through"):
+                tline = self.next().line
+                if transport is not None:
+                    raise self.err(tline, f"duplicate `through` clause on remote "
+                                          f"row `@{label}`")
+                transport = self.expect("ident", what="a transport name").value
+            elif self.at("ident", "on_failure"):
+                on_failure_line = self.next().line
+                self.expect("(")
+                tok = self.peek()
+                choice = tok.value if tok.kind == "ident" else None
+                if choice not in ("withdraw", "result"):
+                    raise self.err(
+                        tok.line,
+                        f"`on_failure` takes `withdraw` or `result`, found "
+                        f"{tok.value!r}",
+                        hint="`withdraw` (the default) reuses peer-death "
+                             "withdrawal, R2/R3; `result` returns the failure "
+                             "in-band and is admitted only if every method "
+                             "returns `Result[T, E]`. Silently swallowing a "
+                             "transport failure has no spelling (424 D-424c.3)")
+                self.next()
+                on_failure = choice
+                self.expect(")")
+            elif self.at("ident", "redirect"):
+                redirect_line = self.next().line
+                self.expect("(")
+                tok = self.peek()
+                choice = tok.value if tok.kind == "ident" else None
+                if choice not in ("refuse", "same_origin"):
+                    raise self.err(
+                        tok.line,
+                        f"`redirect` takes `refuse` or `same_origin`, found "
+                        f"{tok.value!r}",
+                        hint="`refuse` (the default) is the whole point of "
+                             "writing the peer address on the row: a redirect "
+                             "to another host would make the row stop "
+                             "describing where the crossing goes. "
+                             "`same_origin` follows a 307 or 308 that stays on "
+                             "the declared origin, with the method and the body "
+                             "intact; a 301/302/303 re-issues the POST as a GET "
+                             "and is refused either way")
+                self.next()
+                redirect = choice
+                self.expect(")")
+            else:
+                break
+
+        if host is None:
+            raise self.err(
+                line,
+                f"remote row `@{label}` names no peer address",
+                hint='every remote row writes `at host("host:port")`; the reach '
+                     "bound is derived from that host, and there is no default "
+                     "peer to fall back to")
+        return RemoteRowDecl(label, key, service, host, line, realm=realm,
+                             transport=transport, on_failure=on_failure,
+                             on_failure_line=on_failure_line,
+                             redirect=redirect, redirect_line=redirect_line,
+                             host_line=host_line)
 
     def row_config_block(self, label: str) -> list[tuple[str, object, int]]:
         """`config { field: <literal>, ... }` on a row.
@@ -3225,6 +3618,24 @@ class Parser:
                 hint="the subscription is a single-consumer acquisition whose "
                      "inverse `close` needs a name; bind it with `let` (item 130)",
             )
+        if tok.kind == "ident" and tok.value == "on" and self._at_event_handler():
+            # item 130 Slice 5: `on <Event> as <x> in <sub> { … }`, the typed-
+            # event handler. It parses to the SAME `StreamIterStmt` the Slice 4
+            # `every … in` does (§6: `on … as` desugars to `every … in`), so it
+            # inherits that form's whole admission and lowering — including the
+            # position rules below, which is why the same in-method refusal
+            # applies verbatim.
+            if in_method:
+                raise self.err(
+                    tok.line,
+                    "`on … as` event handling is only allowed in a "
+                    "component activation body",
+                    hint="a provide method runs while the component is ACTIVE; "
+                         "`next` is a suspension and the iteration is owned by "
+                         "the activation frame that holds the subscription "
+                         "bracket (item 130 §3.3, §4.7)",
+                )
+            return self.event_handler()
         if tok.kind == "kw" and tok.value in ("every", "after"):
             # item 130 Slice 4: `every <x> in <sub> { … }` is stream iteration,
             # `every <n><unit> { … }` is a timer. ONE token of lookahead past the
@@ -3793,12 +4204,104 @@ class Parser:
     def stream_iter(self) -> "StreamIterStmt":
         """`every <x> in <sub> { <emit>* }` (item 130 Slice 4, §1, §4.7).
 
-        The subject is a BARE identifier naming a subscription binding. That is
-        not a shortcut: a `Subscription` is a host-local with no nominal type, so
-        it cannot be returned from a fn, stored in a record or passed anywhere —
-        a bare name is the only way to spell one, and admitting a general
-        expression here would only produce worse diagnostics for shapes the
-        lowering must refuse anyway.
+        The subject (`_iteration_subject`) is a bare subscription name and the
+        body (`_iteration_body`) is emissions plus `fail`; both are shared with
+        Slice 5's `on … as … in`, which is the same iteration with a contract on
+        each item."""
+        kw = self.expect("kw", "every")
+        bind = self.expect("ident", what="the item name after `every`").value
+        self.expect("kw", "in")
+        subject = self._iteration_subject(bind, f"`every {bind} in …`")
+        body = self._iteration_body(bind, subject.head, kw.line,
+                                    form="`every … in`",
+                                    head=f"`every {bind} in {subject.head}`")
+        return StreamIterStmt(bind, subject, body, kw.line)
+
+    def _at_event_handler(self) -> bool:
+        """True at the head of `on <Event> as …` — the item-130 Slice 5 typed-
+        event handler.
+
+        `on` is a CONTEXTUAL keyword (the `boot`/`fault`/`secret` discipline):
+        it heads a statement only in the shape `on IDENT as`, so a program that
+        used `on` as an ordinary identifier keeps parsing and the self-hosted
+        lexer's KEYWORDS table needs no sync — the same reason Slice 4 reused
+        `every` rather than minting a keyword (§1, judgment call 1)."""
+        if not self.at("ident", "on") or self.pos + 2 >= len(self.toks):
+            return False
+        name = self.toks[self.pos + 1]
+        sep = self.toks[self.pos + 2]
+        return (name.kind == "ident" and sep.kind == "kw" and sep.value == "as")
+
+    def event_handler(self) -> "StreamIterStmt":
+        """`on <Event> as <x> in <sub> { … }` — the typed-event handler (item
+        130 Slice 5, §6).
+
+        Parses to a `StreamIterStmt` carrying the event's name, because §6's
+        call is that `on … as` DESUGARS to `every … in`: an event is a stream
+        item with a contract, and its handler is the Slice 4 iteration with that
+        contract applied per item. One node, one lowering, one emitted loop — so
+        the two properties the guarantee rests on (the iteration boundary
+        immediately after the await, and a `Faulted` that is not caught) are
+        literally the same code, not a second implementation that could drift.
+
+        The `in <sub>` clause names the subscription the handler pulls, and it
+        is the one place this surface departs from §6's `on <Event> as <x> { … }`
+        sketch. That sketch resolves the event's stream through the provide/
+        inject graph — "the event source is the provided `Stream[T]`" — which
+        needs a REQUIRED `Stream[T]` capability the language does not have yet
+        (`subscribe`'s own diagnostic says so: a required stream capability is a
+        later slice). Naming the subscription explicitly keeps the source
+        honest, and keeps every Slice 2/3 qualifier — `policy`, `buffer`,
+        `drain`, the combinator chain, `merge` — available to an event consumer,
+        which an implicit `subscribe` would have stranded."""
+        kw = self.expect("ident", "on")
+        event = self.expect("ident", what="the event's name after `on`").value
+        self.expect("kw", "as")
+        bind = self.expect("ident",
+                           what=f"the item name after `on {event} as`").value
+        if not self.at("kw", "in"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"`on {event} as {bind}` needs the subscription it handles: "
+                f"`on {event} as {bind} in <sub> {{ … }}`",
+                hint="an event handler is the Slice 4 iteration with a contract "
+                     "on each item (item 130 §6), so it pulls a subscription a "
+                     "`subscribe … undo …` bracket already owns — which is what "
+                     "keeps the event's teardown the SAME single LIFO bracket a "
+                     "plain stream's is")
+        self.next()
+        subject = self._iteration_subject(
+            bind, f"`on {event} as {bind} in …`")
+        body = self._iteration_body(bind, subject.head, kw.line,
+                                    form="`on … as`",
+                                    head=f"`on {event} as {bind}`")
+        return StreamIterStmt(bind, subject, body, kw.line, event=event)
+
+    def _iteration_subject(self, bind: str, form: str) -> "Postfix":
+        """The subscription an `every … in` / `on … as … in` pulls.
+
+        A BARE identifier, and that is not a shortcut: a `Subscription` is a
+        host-local with no nominal type, so it cannot be returned from a fn,
+        stored in a record or passed anywhere — a bare name is the only way to
+        spell one, and admitting a general expression here would only produce
+        worse diagnostics for shapes the lowering must refuse anyway."""
+        subj = self.peek()
+        if subj.kind != "ident":
+            found = subj.value if subj.kind in ("ident", "kw") else repr(subj.value)
+            raise self.err(
+                subj.line,
+                f"{form} needs the name of a subscription, found {found}",
+                hint=f"subscribe first, then iterate: `let sub = subscribe "
+                     f"<stream> undo sub.close()` then bind the items with "
+                     f"`{bind}` from `sub` (item 130 §1)")
+        self.next()
+        return Postfix(subj.value, [], subj.line)
+
+    def _iteration_body(self, bind: str, subject: str, head_line: int, *,
+                        form: str, head: str) -> list:
+        """The per-item body shared by `every … in` (Slice 4) and `on … as`
+        (Slice 5) — one parser, so the two forms cannot admit different work.
 
         The body is emissions (the effectful callback, G1/G8-checked) plus
         `fail` (the A8 handler-failure path). Two shapes are refused by name:
@@ -3806,7 +4309,10 @@ class Parser:
         * an ACQUISITION (`effect … undo …`, `subscribe`, a timer, `spawn`)
           — one accumulator entry per delivered item is unbounded in the length
           of the stream, and the per-iteration discharge that would bound it does
-          not exist (§4.7). Acquire once, before the loop.
+          not exist (§4.7). Acquire once, before the loop. Slice 5 does not
+          change this calculus: an event's dedup memory is a fixed-size window
+          per handler (§6), constant in the length of the stream, so it bounds
+          nothing an acquisition would need bounded.
         * an `emit … compensate …` — a compensation registered per item has the
           same unbounded shape, and the same refusal the timer body already makes
           for the same reason.
@@ -3814,21 +4320,6 @@ class Parser:
         A bare `await` inside the body is refused too: the loop IS the pull, and
         a second `next` on the same subscription inside its own iteration would
         be a second consumer of a single-consumer subscription (rule 3.1)."""
-        kw = self.expect("kw", "every")
-        bind = self.expect("ident", what="the item name after `every`").value
-        self.expect("kw", "in")
-        subj = self.peek()
-        if subj.kind != "ident":
-            found = subj.value if subj.kind in ("ident", "kw") else repr(subj.value)
-            raise self.err(
-                subj.line,
-                f"`every {bind} in …` needs the name of a subscription, found "
-                f"{found}",
-                hint=f"subscribe first, then iterate: `let sub = subscribe "
-                     f"<stream> undo sub.close()` then `every {bind} in sub "
-                     f"{{ … }}` (item 130 §1)")
-        self.next()
-        subject = Postfix(subj.value, [], subj.line)
         self.expect("{")
         body: list = []
         while True:
@@ -3840,7 +4331,7 @@ class Parser:
                 if inner.compensate is not None:
                     raise self.err(
                         inner.line,
-                        "an `every … in` body `emit` cannot declare `compensate`",
+                        f"an {form} body `emit` cannot declare `compensate`",
                         hint="a per-item compensation would put one accumulator "
                              "entry on the owner's LIFO stack per delivered item, "
                              "unbounded in the length of the stream; the "
@@ -3854,15 +4345,15 @@ class Parser:
             if isinstance(inner, AwaitStmt):
                 raise self.err(
                     inner.line,
-                    "an `every … in` body cannot `await` — the loop IS the pull",
+                    f"an {form} body cannot `await` — the loop IS the pull",
                     hint="each turn of the iteration already awaits "
-                         f"`{subj.value}.next()` and binds the item to `{bind}`; "
+                         f"`{subject}.next()` and binds the item to `{bind}`; "
                          "a second `next` inside the body would be a second "
                          "consumer racing a single-consumer subscription for "
                          "items (rule 3.1, item 130 §4.1)")
             raise self.err(
-                getattr(inner, "line", kw.line),
-                "an `every … in` body records emissions (and `fail`) only",
+                getattr(inner, "line", head_line),
+                f"an {form} body records emissions (and `fail`) only",
                 hint="the body is a setup-mode effect context: its `emit`s are "
                      "capability-checked against the component's row (G1) and "
                      "enumerated on its boundary (G8), and a `fail` aborts the "
@@ -3873,11 +4364,11 @@ class Parser:
         self.expect("}")
         if not body:
             raise self.err(
-                kw.line,
-                f"an `every {bind} in {subj.value}` body is empty",
+                head_line,
+                f"an {head} body is empty",
                 hint="an iteration that does nothing per item still pulls the "
                      "subscription to its terminal; drop it, or give it work")
-        return StreamIterStmt(bind, subject, body, kw.line)
+        return body
 
     def timer(self) -> "TimerStmt":
         """`every 30s { emit … }` / `after 5m { emit … }` (item 57).
@@ -4168,6 +4659,89 @@ class Parser:
             else:
                 break
         return TypeDecl(name, params, [], cases, line, public)
+
+    def event_decl(self) -> "EventDecl":
+        """`event <Name>(key: <field>[, window: <n>]) { <field>: <type>, … }`
+        — a typed external event (item 130 Slice 5, §6).
+
+        The body is a record body, parsed exactly as `type N = { … }` parses
+        one, because that is what it is: §6's call is that an event is a
+        `Stream[T]` element with a contract, so the schema half of the events
+        proposal is "an ordinary record type-check on `T`" and needs no new
+        machinery. What the head adds is the contract — the identity `key` a
+        duplicate repeats, and the bounded `window` of keys the handler
+        remembers. The key is checked against the fields in lowering, where the
+        whole type table is known, exactly as item 309 checks
+        `idempotent(key: p)` against a signature's parameters."""
+        line = self.expect("ident", "event").line
+        name = self.expect("ident", what="the event's name").value
+        key, window = self._event_contract(name)
+        self.expect("{", what=f"the fields of `event {name}`")
+        fields: list[RecordField] = []
+        while not self.at("}"):
+            fline = self.peek().line
+            fname = self._record_key_name()
+            self.expect(":")
+            ftype = self.type_()
+            fields.append(RecordField(fname, ftype, fline))
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        if not fields:
+            raise self.err(
+                line,
+                f"`event {name}` declares no fields",
+                hint="an event is a record with a contract (item 130 §6); give it "
+                     "the fields the provider delivers, including its key field")
+        return EventDecl(name, key, window, fields, line)
+
+    def _event_contract(self, name: str):
+        """`(key: <field>[, window: <n>])` — the contract clause of an `event`
+        declaration (item 130 Slice 5, §6).
+
+        `key`/`window` are contextual words recognised only in this slot, the
+        same discipline item 309's `idempotent(key: p)` and item 373's
+        `confined: p` use, so the lexer's KEYWORDS set stays untouched. The key
+        is REQUIRED: it is what makes the two obligations §6 assigns to events
+        beyond a plain stream — handler idempotency and duplicate handling —
+        checkable at all, and an event without one would carry those rows as a
+        claim nothing backs."""
+        if not self.at("("):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"`event {name}` needs a key: `event {name}(key: <field>) "
+                f"{{ … }}`",
+                hint="the key names the field carrying the event's identity — the "
+                     "value a duplicate delivery repeats — so the handler can "
+                     "dedup on it and its idempotency obligation is checkable "
+                     "(item 130 §6; the role spelling is item 309's)")
+        self.expect("(")
+        self.expect("ident", "key",
+                    what=f"`key` — the event's identity field (`event {name}"
+                         "(key: <field>)`, item 130 §6)")
+        self.expect(":", what="`:` after `key`")
+        key = self.expect("ident",
+                          what="the field carrying the event's identity").value
+        window = None
+        if self.at(","):
+            self.next()
+            self.expect("ident", "window",
+                        what="`window` — the bounded dedup memory (`event "
+                             f"{name}(key: <field>, window: <n>)`, item 130 §6)")
+            self.expect(":", what="`:` after `window`")
+            tok = self.peek()
+            if tok.kind != "int" or tok.value < 1:
+                raise self.err(
+                    tok.line,
+                    f"`window` needs a positive whole count, found {tok.value!r}",
+                    hint="the dedup memory is BOUNDED by construction — a handler "
+                         "remembers the last N keys it admitted, never one entry "
+                         "per delivered item (item 130 §6, §4.7)")
+            self.next()
+            window = tok.value
+        self.expect(")", what="`)` closing the event's contract clause")
+        return key, window
 
     def _type_param_list(self) -> list[str]:
         """An optional `[T, U]` type-parameter list after a `fn`/`extern` name
@@ -4857,19 +5431,38 @@ class Parser:
 
     # pure expressions — precedence climbing (§3.2)
 
-    def _parse_template_parts(self, raw_parts, line: int):
+    def _parse_template_parts(self, raw_parts, line: int, interp_lines=None):
         """Turn lexer template parts into ("text", str) / ("expr", ast): each
-        `${...}` body is re-parsed as a full pure expression (§3.2)."""
+        `${...}` body is re-parsed as a full pure expression (§3.2).
+
+        `interp_lines` is the lexer's side-band list of absolute start lines,
+        one per `${...}`, and becomes the sub-parser's line offset. Without it
+        every sub-parse started at line 1, so a fault inside an interpolation —
+        a parse error here, or a checker refusal later on the AST this builds —
+        was reported at line 1 of the file no matter where the template sat
+        (issue #313). It is read defensively: a `template` token minted by
+        something other than `lex` (the formatter, a test) has no such list, and
+        the template's own line is the honest fallback.
+        """
         parts = []
+        expr_index = 0
         for kind, value in raw_parts:
             if kind == "text":
                 parts.append(("text", value))
                 continue
-            sub = Parser(value, self.filename)
+            if interp_lines and expr_index < len(interp_lines):
+                interp_line = interp_lines[expr_index]
+            else:
+                interp_line = line
+            expr_index += 1
+            sub = Parser(value, self.filename, line_offset=interp_line - 1)
+            # the interpolation is nested INSIDE this expression: carry the
+            # depth across so `${`${`${...}`}`}` is bounded too (issue #310)
+            sub._nesting = self._nesting
             expr = sub.pure_expr()
             if not sub.at("eof"):
                 extra = sub.peek()
-                raise self.err(line,
+                raise self.err(interp_line,
                                f"unexpected {extra.value!r} in `${{...}}` interpolation",
                                hint="an interpolation holds one expression")
             parts.append(("expr", expr))
@@ -4879,6 +5472,33 @@ class Parser:
         return self._ternary()
 
     def _ternary(self):
+        """The head of the precedence ladder, and so the one place every
+        NESTED expression re-enters (a parenthesised group, a call argument, a
+        list or record element, a lambda body, a `${...}` interpolation). The
+        depth is counted here, once per level, and refused past
+        `NESTING_LIMIT` with a diagnostic that names the bound (issue #310).
+
+        A stated limit, not a crash: the bound is the compiler's, not the
+        language's, so it has to be said out loud. `_bin` itself loops rather
+        than recursing, so a long `a + b + c ...` chain costs no depth."""
+        self._nesting += 1
+        try:
+            if self._nesting > NESTING_LIMIT:
+                raise self.err(
+                    self.peek().line,
+                    f"expression nesting is deeper than the parser's limit of "
+                    f"{NESTING_LIMIT} levels",
+                    hint="this is an implementation bound, not a language one: "
+                         "the parser is recursive descent and a nesting this "
+                         "deep would exhaust the interpreter's stack. Name the "
+                         "inner expressions with `let` bindings and the nesting "
+                         "goes away.",
+                )
+            return self._ternary_body()
+        finally:
+            self._nesting -= 1
+
+    def _ternary_body(self):
         cond = self._or()
         if self.at("?"):
             self.next()
@@ -5367,7 +5987,8 @@ class Parser:
             return ExprLit(tok.value, tok.line)
         if tok.kind == "template":
             self.next()
-            return Interp(self._parse_template_parts(tok.value, tok.line), tok.line)
+            return Interp(self._parse_template_parts(
+                tok.value, tok.line, getattr(tok, "interp_lines", None)), tok.line)
         if tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             return ExprLit({"true": True, "false": False, "null": None}[tok.value], tok.line)
@@ -5535,7 +6156,7 @@ class Parser:
         if tok.kind == "kw" and tok.value == "if":
             return self._if_expr()
         self._reject_incr_decr(tok)  # item 384 / syntax-2.0 §3.3
-        raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
+        raise self.err(tok.line, f"expected an expression, found {_found(tok)}")
 
     def _reject_foreign_keyword(self, tok) -> None:
         """item 384: a known-foreign statement/declaration keyword (`def`,
@@ -5750,7 +6371,8 @@ class Parser:
             base = Lit(tok.value, tok.line)
         elif tok.kind == "template":
             self.next()
-            base = Interp(self._parse_template_parts(tok.value, tok.line), tok.line)
+            base = Interp(self._parse_template_parts(
+                tok.value, tok.line, getattr(tok, "interp_lines", None)), tok.line)
         elif tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             base = Lit({"true": True, "false": False, "null": None}[tok.value], tok.line)
@@ -5760,7 +6382,7 @@ class Parser:
             self.next()
             base = Postfix(tok.value, [], tok.line)
         else:
-            raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
+            raise self.err(tok.line, f"expected an expression, found {_found(tok)}")
 
         while self.at("."):
             self.next()

@@ -23,9 +23,11 @@ Two layers, split on purity (docs/design/332-embeddable-gate-api.md):
 
 The security clause (load-bearing): the gate must NEVER admit what the reference
 `revl` refuses. Layer-1 `admit` on py IS `compile_source`, so its accept/refuse
-verdict and its refusal message are the reference compiler's, verbatim. A native
-(rust) layer-1 gate is a separate, larger deliverable (the `revl-gate` crate)
-and is NOT part of this module; see the module's `gate_version().frontier`.
+verdict and its refusal message are the reference compiler's, verbatim. The native
+(rust) layer-1 gate is a separate deliverable and is NOT part of this module: it
+ships as `crates/revl-gate`, generated from the self-host sources, and it issues
+no admissions (its non-refusing arm is `NoObjection`, not "admitted"). See that
+crate's README and the module's `gate_version().frontier`.
 
 The fail-closed contract: a class-(c) crossing (an irreversible emission with no
 checked inverse) needs a human yes. Embedded, there is no operator channel
@@ -158,6 +160,33 @@ def _verdict_from_error(error: Exception) -> "Verdict":
                    message=str(error))
 
 
+# The control code for a compiler FAULT — the gate answering "I could not
+# decide" rather than "no". Distinct from every refusal code on purpose: a
+# refusal carries the reference diagnostic, and this carries an exception the
+# reference compiler should never have raised, which is a bug report and not a
+# repair signal for the author.
+FAULT = "COMPILER_FAULT"
+
+
+def _verdict_from_fault(error: BaseException) -> "Verdict":
+    """A fail-closed refusal for an exception that is NOT a `RevlError`.
+
+    The gate's contract is that it ANSWERS: `admit` returns a `Verdict`, and an
+    embedder catching the documented boundary type has handled the boundary. A
+    raw `RecursionError` out of the parser (issue #310) or a `ValueError` out
+    of the lexer (issue #311) broke that contract — the caller got an exception
+    its `except` clauses did not name, out of a security surface, on an input
+    it did not write. Both of those specific faults are fixed at the source;
+    this exists because the NEXT one must not escape either.
+
+    Refusing is the only sound answer: the compiler did not decide the source
+    was safe, so the gate cannot say it was.
+    """
+    return Verdict(False, code=FAULT,
+                   message=f"the compiler faulted on this source "
+                           f"({type(error).__name__}: {error})")
+
+
 def admit(source: str) -> "Verdict":
     """The frontend gate: a program the checker refuses cannot be compiled, and
     a draft with an open obligation may compile but may never run.
@@ -182,6 +211,8 @@ def admit(source: str) -> "Verdict":
         refuse_admission(document)
     except RevlError as error:
         return _verdict_from_error(error)
+    except Exception as error:  # noqa: BLE001 — see `_verdict_from_fault`
+        return _verdict_from_fault(error)
     return Verdict(True)
 
 
@@ -198,6 +229,8 @@ def admit_into(source: str, manifest: Mapping[str, Any]) -> "Verdict":
         compile_source(source, manifest=dict(manifest))
     except RevlError as error:
         return _verdict_from_error(error)
+    except Exception as error:  # noqa: BLE001 — see `_verdict_from_fault`
+        return _verdict_from_fault(error)
     return Verdict(True)
 
 
@@ -222,6 +255,8 @@ def compile_to(source: str, tier: str) -> "Emit":
         ir = compile_source(source)
     except RevlError as error:
         return Emit(_verdict_from_error(error))
+    except Exception as error:  # noqa: BLE001 — see `_verdict_from_fault`
+        return Emit(_verdict_from_fault(error))
     output = _emit_for_tier(ir, tier)
     return Emit(Verdict(True), output=output)
 
@@ -359,10 +394,17 @@ class ProposeResult:
     composition to it, in one process. Three terminal shapes, all data (a refusal
     is the repair signal, never a raised error the loop cannot catch):
 
+    * `admitted` False, `code` `HALTED` — the session was E-STOPPED (item 443).
+      Nothing was compiled and nothing was swapped. A halt DOMINATES: it is not
+      reported as a refusal of the candidate (the candidate was never judged) and
+      never as a revert (there is no gen N still serving to revert to — the
+      instance is dead and every registered entry is stranded). The way back is
+      `revl recover`, never another `propose`.
     * `admitted` False — the candidate was REFUSED before it ever became live:
-      either the forbidden-grant rule fired (`code` `FORBIDDEN_GRANT`) or the
-      untrusted-author compile refused it (`code`/`message` the reference
-      compiler's why-trace, verbatim). The running composition is UNTOUCHED.
+      the forbidden-grant rule fired (`code` `FORBIDDEN_GRANT`), or the
+      self-extension compile refused it (`code`/`message` the reference
+      compiler's why-trace, verbatim — including the `G9` realm-placement
+      refusal, item 334 slice 2). The running composition is UNTOUCHED.
     * `admitted` True, `swapped` False, `reverted` True — the candidate admitted
       but FAILED TO ACTIVATE (its activation raised/left a fiber FAILED, or a
       requirement was unmet -> PENDING, or a declared provide never resolved).
@@ -534,6 +576,12 @@ class Gate:
             return compile_files(paths, sources=virtual or None)
         except RevlError as error:
             raise GateError(str(error)) from error
+        except Exception as error:  # noqa: BLE001 — the boundary type is the
+            # contract: an embedder catching `GateError` has handled the
+            # boundary, and a compiler fault must not walk past it as some
+            # other exception type (issue #310).
+            raise GateError(f"the compiler faulted on this source "
+                            f"({type(error).__name__}: {error})") from error
 
     def admit(self, source: str, granted: list[str] | tuple[str, ...] = (),
               *, modules: Mapping[str, str] | None = None) -> "AdmitResult":
@@ -607,6 +655,33 @@ class Gate:
             raise GateError("nothing is loaded; load a base composition first")
         granted = list(granted)
 
+        # -1. HALT DOMINANCE (item 443 + 334 slice 2) — checked FIRST, ahead of
+        #     the forbidden-grant rule and any compile, because a halt is not one
+        #     more verdict to be weighed against the candidate's: it dominates.
+        #     `Session.swap` already refuses under a halt, so without this the
+        #     halt reached the loop as the `SWAP_REVERTED` arm — which asserts
+        #     three things that are all FALSE after an E-Stop: that the candidate
+        #     was judged (it never was), that gen N is intact (its entries are
+        #     STRANDED, not discharged), and that the process is still serving
+        #     (the instance is dead). That mislabel is not cosmetic: SWAP_REVERTED
+        #     is the RETRY-shaped verdict, the one a self-extension loop answers
+        #     by generating a better candidate, so a halted gate would be proposed
+        #     at forever instead of reconciled. Refuse as a halt, and say where
+        #     the way back is.
+        if self._session.halted:
+            return ProposeResult(
+                False, code="HALTED",
+                message=(
+                    "propose refused: this session was E-STOPPED (item 443) and "
+                    "the instance is dead. Nothing was compiled and nothing was "
+                    "swapped; the halt dominates, so this is not a verdict on "
+                    "the candidate and not a revert to a running generation — "
+                    "every registered entry is stranded, owed and not "
+                    "discharged. There is no resume and no better candidate: "
+                    "reconcile with `revl recover --wal <file>`, or `unload` "
+                    "(which strands rather than unwinds) and start a fresh "
+                    "session."))
+
         # 0. FORBIDDEN-GRANT — before any compile, independent of the operator.
         forbidden = sorted(set(granted) & _DECIDER_SERVICES)
         if forbidden:
@@ -638,7 +713,16 @@ class Gate:
         #    closure. It is compiled STANDALONE (no `manifest=`): the candidate
         #    reaches only what it is explicitly given, never the running base's
         #    other ambient services.
-        profile = AdmissionProfile.untrusted_author(granted)
+        #    Under `self_extension`, not `untrusted_author`: the delta is the
+        #    item-334 slice-2 realm refusal. `untrusted_author` bounds WHAT the
+        #    candidate reaches; the swap makes it the running composition, so the
+        #    proposal also has to be bounded in WHERE it sits — a realm is the
+        #    address the item-246/251 approval policy scopes its standing
+        #    approvals and auto-approve rules by, and a candidate that picks its
+        #    own realm picks which of them cover its class-(c) crossings. The
+        #    component-glob half of that scope is no bound on an author who names
+        #    its own components, so the realm was the only half left.
+        profile = AdmissionProfile.self_extension(granted)
         try:
             compile_source(source, "<candidate>.rvl",
                            modules=dict(providers) if providers else None,
@@ -659,6 +743,24 @@ class Gate:
         try:
             state = self._invoke_with_approval(self._session.swap, ir)
         except _session_error() as error:
+            # A halt can engage BETWEEN the check above and here, in one thread,
+            # with no concurrency: the swap runs the item-246 activation gate,
+            # which calls the embedder's `approver` callback, which is host code
+            # that may well answer a class-(c) prompt by hitting the E-Stop. That
+            # is the honest ordering of the race, and the halt wins it: re-read
+            # the latch and report HALTED rather than dressing a dead session up
+            # as a healthy gen N that reverted.
+            if self._session.halted:
+                return ProposeResult(
+                    False, code="HALTED",
+                    message=(
+                        f"propose refused: the session was E-STOPPED during the "
+                        f"proposal (item 443) — {error}. The halt dominates the "
+                        f"swap verdict: nothing was reverted, because an E-Stop "
+                        f"runs nothing and unwinds nothing. Every entry "
+                        f"registered up to the halt is STRANDED; read the "
+                        f"inventory with `estop_report()` and reconcile with "
+                        f"`revl recover --wal <file>`."))
             # the post-activation health gate (or a migration reject) rolled the
             # swap back: gen N is intact and still serving. Report it as data.
             return ProposeResult(True, swapped=False, reverted=True,
@@ -742,6 +844,42 @@ class Gate:
             raise GateError(str(error)) from error
         self._loaded = False
         return result
+
+    def estop(self, reason: str = "operator halt",
+              operator: str | None = None) -> dict:
+        """E-STOP this gate: the operator's emergency button (item 443).
+
+        Exposed on the facade because item 334's guarantee is only worth the
+        embedder having it. `propose` promises that a halt dominates a
+        self-extension, and a promise about a button nobody can reach is not a
+        guarantee — the embedded host is the only operator a `Gate` has.
+
+        This is NOT `abort`. `abort` is a verdict on the work: it drops the
+        deferral queue, replays every witnessed inverse and proves a clean world.
+        `estop` stops dispatching NEW crossings immediately, runs NOTHING, and
+        reports what was in flight; every registered entry is left STRANDED and
+        every acquired handle stays held. The session is dead afterwards —
+        `propose`, `call`, `commit` and `abort` all refuse, `unload` strands
+        rather than unwinds, and the way back is `recover`, never a resume."""
+        if not self._loaded:
+            raise GateError("nothing is loaded; call load first")
+        try:
+            return self._session.estop(reason, operator=operator)
+        except _session_error() as error:
+            raise GateError(str(error)) from error
+
+    def estop_report(self) -> dict:
+        """The halt inventory (item 443): what the halt could NAME when it
+        engaged, and what the unwind has stranded since. Never `clean` — an
+        E-Stop violates R4 by design and says so. Reads nothing into the world,
+        so it is safe on a dead session and is the thing to read BEFORE deciding
+        how to reconcile."""
+        if not self._loaded:
+            raise GateError("nothing is loaded; call load first")
+        try:
+            return self._session.estop_report()
+        except _session_error() as error:
+            raise GateError(str(error)) from error
 
     def unload(self) -> dict:
         """Tear down and report the residue checks. Under a session owner a

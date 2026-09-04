@@ -37,6 +37,13 @@ export function emitFixtures(): void {
   emitFixture('conformance.ir.json', 'conformance.ts')
   emitFixture('v3_stdlib.ir.json', 'v3_stdlib.ts')
   emitFixture('v3_map.ir.json', 'v3_map.ts')
+  // item 435(d): the self-rebind lowering on item 445's `unique` marker —
+  // EXECUTED, because an unsound rewrite here is a wrong VALUE and not a crash
+  emitFixture('unique_writes.ir.json', 'unique_writes.ts')
+  // issue #273: locals born as `[]` and READ before TypeScript's evolving-array
+  // analysis can settle them. Not executed — `typecheck-generated` IS its
+  // assertion: without the emitted annotation this module is red.
+  emitFixture('empty_list_types.ir.json', 'empty_list_types.ts')
   emitFixture('v3_tests.ir.json', 'v3_tests.test.ts')
   emitFixture('spawn.ir.json', 'spawn.ts')
   emitFixture('instance_get.ir.json', 'instance_get.ts')

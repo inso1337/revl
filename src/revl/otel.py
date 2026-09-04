@@ -299,7 +299,8 @@ def _llm_attributes(llm: dict | None, attributes: dict) -> list[SpanLink]:
       a suppressed digest is simply absent (`build_spans` copies only present
       fields, `otel.py` discipline).
     * The `produced` edge is a `SpanLink` ONLY when `producedSeq` is present (the
-      fiber-local token proved it, §3.1 rule 1). When absent it is NEVER
+      emitter's static value-flow fact and the fiber-local token together proved
+      it, §3.1 rule 1). When absent it is NEVER
       adjacency-guessed and NEVER exported as a hard proven cause — a wrong
       SpanLink shipped to a third-party backend reads as proof (§4 attack 3)."""
     if not isinstance(llm, dict):

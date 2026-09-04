@@ -61,7 +61,7 @@ BACKEND_TIERS = ("python", "go", "rust", "wasm", "java", "typescript")
 # is still covered by the folded goldens in tests/test_goldens.py + the frontend
 # ts-referencing tests, which is exactly what the FULL gate does for ts too.
 BACKEND_STEP_TIERS = ("python", "go", "rust", "wasm", "java")
-GATES_ALL = ("conformance", "site-wheel", "ruff", "formal")
+GATES_ALL = ("conformance", "site-wheel", "ruff", "formal", "docs")
 
 # The documented hard core (the top-level import closure of compile_source): a
 # change to any of these is unambiguously a full-gate trigger. `compile_reachable`
@@ -70,6 +70,23 @@ GATES_ALL = ("conformance", "site-wheel", "ruff", "formal")
 DOCUMENTED_CORE = (
     "parser", "typecheck", "lower", "compiler", "lexer", "errors", "_paths",
     "holes", "admit_profile", "admission", "emission_analysis", "why", "fmt",
+)
+
+# Test modules that read a committed `bench/` artifact or pin a bench-side
+# constant. A change under `bench/` selects exactly these instead of the FULL
+# gate. Kept honest by tests/test_affected_tests.py, which recomputes the set
+# from the tree and fails if this tuple has drifted.
+BENCH_DEPENDENT_TESTS = (
+    # The guard below is itself bench-dependent: it validates this very
+    # mapping, so a bench change must re-run it.
+    "tests/test_affected_tests.py",
+    "tests/test_admission_latency.py",
+    "tests/test_demand_ranking.py",
+    "tests/test_inprocess_gate.py",
+    "tests/test_inprocess_gate_rust.py",
+    "tests/test_mcp_edit.py",
+    "tests/test_mcp_ship.py",
+    "tests/test_tokens_to_green.py",
 )
 
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
@@ -336,6 +353,10 @@ def select(changed, root) -> dict:
             gates.add("site-wheel")
             reasons.append("tools/check_site_wheel.py")
             continue
+        if f == "tools/docgen.py":
+            gates.add("docs")
+            reasons.append("tools/docgen.py")
+            continue
         if f.startswith("tools/") and f.endswith(".py"):
             stem = Path(f).stem
             hits = {
@@ -363,15 +384,41 @@ def select(changed, root) -> dict:
         # --- tests/test_*.py (modified — add/delete handled by caller) ------ #
         if f.startswith("tests/") and Path(f).name.startswith("test_") and f.endswith(".py"):
             pytest_nodes.add(f)
+            # docs/guide-humans.md states this module's test count, generated
+            # from its AST, so editing it can stale a doc block (issue #255).
+            if f == "tests/test_mcp.py":
+                gates.add("docs")
             reasons.append(f"{f} (self)")
             continue
 
         # --- generated docs / matrix --------------------------------------- #
         if f.startswith("docs/") or f.endswith(".md"):
-            # The only pre-merge step a doc can break is the generated matrix
-            # (conformance --check-readme). Nothing else is affected.
+            # Two pre-merge steps a doc can break: the generated conformance
+            # matrix (conformance --check-readme) and the source-derived doc
+            # blocks (docgen --check, issue #255). DOC-STATUS's inventory is a
+            # function of every docs/*.md, so ANY doc edit can stale it.
             gates.add("conformance")
-            reasons.append(f"{f} (generated-matrix check)")
+            gates.add("docs")
+            reasons.append(f"{f} (generated-matrix + docgen check)")
+            continue
+
+        # --- bench/ measurement harnesses ---------------------------------- #
+        if f.startswith("bench/"):
+            # A benchmark harness is measurement, not shipped compiler code:
+            # nothing under src/revl imports it, and no CI job runs it. The only
+            # things a bench change can break are the tests that read a
+            # committed bench artifact or pin a bench constant, which is
+            # BENCH_DEPENDENT_TESTS. Before this rule every perf-audit branch
+            # fell through to the fail-safe below and ran the FULL gate for a
+            # file the compiler cannot even see, which is why perf work kept
+            # stalling on whole-suite runs.
+            #
+            # tests/test_affected_tests.py asserts BENCH_DEPENDENT_TESTS still
+            # equals the set of test modules mentioning `bench/`, so a new
+            # dependant cannot silently escape this selection.
+            for t in BENCH_DEPENDENT_TESTS:
+                pytest_nodes.add(t)
+            reasons.append(f"{f} (bench harness -> bench-dependent tests)")
             continue
 
         # --- anything else: fail safe -------------------------------------- #

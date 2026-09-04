@@ -173,6 +173,40 @@ NATIVE_CORPUS = (
     + [("ts", "emit_ts_corpus", n) for n in TS_FUNCTION_DOCS]
 )
 
+# item 445 / item 435 (d): the reference frontend proves UNIQUE OWNERSHIP of an
+# accumulation local once (`src/revl/ownership.py`) and stamps the answer on the
+# IR, and the ts tier now LOWERS it — `out = out.push(f(x))` renders
+# `out.push(f(x))` where the binding owns its object at that write.
+# `selfhost/lower.rvl` has no such stage: it streams tokens straight to IR JSON
+# in one pass, and the analysis is a forward dataflow with a fixpoint over each
+# loop back edge, which needs the statement tree the streaming producer never
+# builds. So the NATIVE IR carries no marker, the native chain emits the copying
+# form the reference used to emit, and the two diverge on any document with an
+# in-place accumulation loop.
+#
+# Recorded as a NAMED strict-xfail on the terms tests/test_selfhost_lower_ir.py
+# records the same gap (`UNIQUE_MARKER_GAP`) — red for a stated reason, XPASSing
+# loudly the day the pass is ported — rather than dropped from the corpus. The
+# reference-IR oracle for the same tier (tests/test_selfhost_emit_ts.py) is
+# unaffected and stays green: `selfhost/emit_ts.rvl` READS the marker, and that
+# oracle feeds it the reference IR, which carries it.
+NATIVE_UNIQUE_MARKER_GAP = {
+    ("ts", "transforms.rvl"): (
+        "item 445: selfhost/lower.rvl has no unique-ownership stage, so the "
+        "native IR carries no `unique` marker and the ts tier's in-place "
+        "lowering (item 435 (d)) does not fire on the native chain"
+    ),
+}
+
+NATIVE_CORPUS_PARAMS = [
+    pytest.param(
+        tier, subdir, name,
+        marks=pytest.mark.xfail(
+            strict=True, reason=NATIVE_UNIQUE_MARKER_GAP[(tier, name)]))
+    if (tier, name) in NATIVE_UNIQUE_MARKER_GAP else pytest.param(tier, subdir, name)
+    for tier, subdir, name in NATIVE_CORPUS
+]
+
 # The FULLY-NATIVE, byte-exact COMPONENT + extern surface (roadmap item 262, the
 # capstone of the self-hosting arc). Items 242 + 241 made lower_to_ir COMPLETE and
 # emitter-ready for component/extern programs; these are the documents each tier's
@@ -232,7 +266,7 @@ def _fixture_path(subdir: str, name: str) -> Path:
 # ---------------------------------------- the fully-native byte-exact proof
 
 @pytest.mark.parametrize(
-    "tier,subdir,name", NATIVE_CORPUS,
+    "tier,subdir,name", NATIVE_CORPUS_PARAMS,
     ids=[f"{t}:{n}" for t, _, n in NATIVE_CORPUS])
 def test_native_compile_is_byte_identical_with_no_reference(
         compile_to, reference_emit, tier, subdir, name):
@@ -301,17 +335,52 @@ def test_three_way_composition_co_compiles(compile_rvl):
     assert callable(compile_rvl["admit"])
 
 
+# item 429: documents the reference admits and the native gate does NOT. A FALSE
+# REFUSAL, which is a self-host frontend gap and not a corpus problem, so the
+# document stays and the gap is NAMED here with the exact verdict it produces.
+# Recording the verdict rather than skipping the document is what makes this a
+# ratchet: the day `selfhost/lower.rvl` grows the grammar, the native gate
+# returns "" and this test fails on the stale entry instead of quietly keeping a
+# waiver nobody rereads. Never add a line here to make a red go away — read what
+# it names first.
+NATIVE_GATE_GAPS = {
+    # `selfhost/lower.rvl`'s extern grammar knows `pure`/`acquire`/`emission`
+    # with no capability tag. It refuses the `witnessed` class (item 243)
+    # outright, and refuses a capability tag on ANY class (`witnessed[fs]`,
+    # `emission[net]`), reporting a parse error against a program the reference
+    # compiles. Its `lower_to_ir` separately drops the whole `externs` section to
+    # `null` for any extern carrying an `undo` clause — see
+    # tests/test_selfhost_lower_ir.py's EXTERN_DECL_GAP for that half. All three
+    # were invisible until item 429's coverage gate demanded a corpus case for
+    # `class=witnessed` and the case spelled them.
+    "emit_py_corpus/witnessed.rvl": "BAD|expected fn after extern",
+}
+
+
 def test_native_gate_admits_the_whole_emit_surface(admit):
     """The native frontend's admission verdict covers the ENTIRE emitter surface —
     every corpus document (functions AND components, both tiers) the reference
     admits, the native gate admits (``""``). The component documents are now also
     compiled byte-exact end to end (item 262); this checks the gate itself over the
-    full admitted surface, including documents outside the byte-exact emit slice."""
+    full admitted surface, including documents outside the byte-exact emit slice.
+
+    ``NATIVE_GATE_GAPS`` above holds the documents where that is not yet true,
+    pinned to the exact refusal so closing the gap reddens this test rather than
+    outliving the waiver."""
     for subdir in ("emit_py_corpus", "emit_rust_corpus", "emit_ts_corpus"):
         for path in sorted((ROOT / "tests" / "fixtures" / subdir).glob("*.rvl")):
             compile_files([str(path)])  # the reference admits it
+            key = f"{subdir}/{path.name}"
             verdict = admit(path.read_text(encoding="utf-8"))
-            assert verdict == "", f"{subdir}/{path.name}: {verdict!r}"
+            expected = NATIVE_GATE_GAPS.get(key, "")
+            if expected:
+                assert verdict == expected, (
+                    f"{key}: the native gate is recorded in NATIVE_GATE_GAPS as "
+                    f"refusing this with {expected!r} and now says {verdict!r}. "
+                    f"If the self-host grammar landed, DELETE the entry; if the "
+                    f"refusal merely changed shape, read it before rewriting it.")
+            else:
+                assert verdict == "", f"{key}: {verdict!r}"
 
 
 # --------------------------------------------- the refusal composes too

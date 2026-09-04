@@ -214,12 +214,23 @@ def test_read_only_verbs_are_never_gated_even_with_a_profile():
         assert decide(sess, tool, {}).gated is False
 
 
-def test_a_candidate_that_does_not_compile_defers_to_the_handler():
-    # gating cannot scope what will not compile; the handler rejects it and
-    # nothing mutates, so the gate steps aside (does not spuriously refuse).
+def test_a_candidate_that_does_not_compile_is_scoped_to_the_whole_composition():
+    # This used to assert `d.gated is False` — "gating cannot scope what will
+    # not compile, so step aside". That was the fail-open a swap could steer
+    # into: make the derivation compile fail (a candidate that renames the
+    # component it replaces did it by accident of the missing `replacing`) and
+    # the gate stopped gating. An undecidable target set is now scoped to the
+    # unnameable whole composition instead: only `may swap on *` authorizes it,
+    # and the handler still reports the real syntax error to whoever holds that.
+    # See tests/test_mcp_authority_gate.py.
     sess = _FakeSession(compile_source(TWO_REALM), parse_profile(PROFILE).get("bob"))
     d = decide(sess, "revl_swap", {"source": "service Broken {"})
-    assert d.gated is False
+    assert d.gated is True and d.allowed is False
+    assert "the whole composition" in d.message
+
+    unscoped = _FakeSession(compile_source(TWO_REALM),
+                            parse_profile("operator root may swap on *").get("root"))
+    assert decide(unscoped, "revl_swap", {"source": "service Broken {"}).allowed is True
 
 
 # ----------------------------------------------- who: the authority stamp
@@ -258,10 +269,21 @@ def test_refused_payload_carries_the_why_and_leaves_the_system_untouched():
 
 @pytest.fixture()
 def _profiled_session():
-    """Bind the real server SESSION to an operator for one test, then clear."""
+    """Bind the real server SESSION to an operator for one test, then clear.
+
+    Also declares the authoring trust the operator would: these compositions
+    place components into per-tenant REALMS, which is what the operator's
+    profile scopes its `swap` authority by, and a realm is an authority address
+    an untrusted author may not write (item 334's G9). Authoring trust and
+    operator authority are orthogonal knobs — the source here is the operator's
+    own, sent inline, which is exactly what `--author-trust trusted` declares —
+    and it is the second knob these tests are about."""
     prior = server.SESSION.operator
+    prior_authoring = server.AUTHORING
     server.SESSION.operator = parse_profile(PROFILE).get("alice")
+    server.set_authoring_trust(host_code=True)
     yield server.SESSION
+    server.AUTHORING = prior_authoring
     server.SESSION.operator = prior
     if server.SESSION.loaded:
         server.SESSION.unload()

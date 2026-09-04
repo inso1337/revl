@@ -1918,6 +1918,16 @@ class Session:
                 # the halt violates it by design and says so.
                 "clean": False}
 
+    @property
+    def halted(self) -> bool:
+        """Whether this session was E-STOPPED (item 443). A public read of the
+        latch `_refuse_if_halted` enforces, so a caller that composes several
+        session verbs into one (item 334's `Gate.propose` = compile + swap) can
+        report the HALT as the halt rather than as whatever its last step raised.
+        A halt dominates every other verdict, and a verdict is only dominated by
+        something the reporter can SEE."""
+        return bool(getattr(self, "_halted", False))
+
     def _refuse_if_halted(self, verb: str) -> None:
         """Every state-changing verb after an E-Stop refuses (item 443, open
         question 3: the instance is dead and recovery is the only path back).
@@ -2425,10 +2435,27 @@ class Session:
         register into THIS session's 245 frame.
 
         The decision applies the item-329 untrusted-author profile: the turn may
-        declare no new `extern`/host-block (no smuggled host code, G8) and may
-        reach no service outside `granted` (the allowlist). And it is ADDITIVE
-        only — a turn that would replace a running component is refused, because
-        an untrusted turn composes granted providers, it never swaps them.
+        declare no new `extern`/host-block (no smuggled host code, G8), may reach
+        no service outside `granted` (the allowlist), and may not name a REALM
+        (G9). And it is ADDITIVE only — a turn that would replace a running
+        component is refused, because an untrusted turn composes granted
+        providers, it never swaps them.
+
+        On that last refusal, and why "additive, torn down with the turn" was not
+        a reason to leave it out. Item 334 slice 2 wired the realm refusal into
+        `Gate.propose` alone, arguing that a proposal replaces the composition
+        and keeps serving while a per-turn admit is the same question with a
+        shorter blast radius. Shorter in DURATION, identical in AUTHORITY:
+        `_wire_turn` rebuilds the class map over the MERGED composition — it has
+        to, skipping it was a total class-(c) bypass — so the turn's components
+        are in `self.ir` and `ClassMap.component_realm` reads their `isolate` map
+        like any other. The realm the turn wrote for itself is therefore the
+        `ticket["realm"]` half of every standing-approval and auto-approve match
+        the turn's own crossings are judged by. A turn that lives for one call
+        still gets that call, and one covered class-(c) crossing is a complete
+        exfiltration. The asymmetry is closed rather than inherited; it now costs
+        an untrusted turn exactly what it costs an untrusted proposal, which is
+        the shared realm it was going to get by saying nothing.
         """
         from ..admit_profile import AdmissionProfile  # noqa: PLC0415
         from ..compiler import compile_source  # noqa: PLC0415

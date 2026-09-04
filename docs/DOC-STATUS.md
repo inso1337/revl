@@ -69,105 +69,131 @@ commands and truc's `reproduce` (297) verb: `README.md`, `guide-ai-agents.md`
 (owned by item 297) and any stdlib-json page (item 281) were left to their
 owners; this pass only links to them.
 
+The table below is GENERATED. `doc` and `em-dashes` come from the tree
+(`docs/*.md`, and each file's em-dash count); `status` and `tier-limit
+notes` are human judgement and are carried across a regeneration. Run
+`make docs-gen` after editing any doc, or `tools/docgen.py --check` reds CI.
+This is the mechanism the pass-notes above lacked: the 2026-09-02 inventory
+was corrected by hand and had drifted back within a day.
+
+<!-- docgen:doc-status begin -->
 | doc | status | em-dashes | tier-limit notes |
 |---|---|---|---|
+| README.md | needs-work | 48 |  |
 | apply.md | needs-work | 19 |  |
 | arithmetic.md | needs-work | 69 |  |
-| audit-diff.md | needs-work | 12 |  |
+| audit-diff.md | needs-work | 14 |  |
+| authoring-for-agents.md | needs-work | 0 |  |
 | auto-mocks.md | needs-work | 16 |  |
-| backend-go-v3.md | needs-work | 15 | yes |
+| backend-go-v3.md | needs-work | 14 | yes |
 | backend-ir-v1.md | needs-work | 16 |  |
-| backend-ir-v3.md | needs-work | 15 |  |
+| backend-ir-v3.md | needs-work | 18 |  |
 | backend-ir.md | needs-work | 11 |  |
-| backends-roadmap.md | needs-work | 44 |  |
-| bench-selfhost.md | live-owned (not audited) | 14 |  |
-| boundary-policy.md | needs-work | 18 |  |
-| capabilities.md | needs-work | 23 |  |
+| backends-roadmap.md | needs-work | 42 |  |
+| bench-selfhost.md | live-owned (not audited) | 49 |  |
+| boundary-policy.md | needs-work | 22 |  |
+| bundle.md | needs-work | 0 |  |
+| capabilities.md | needs-work | 28 |  |
 | capability-attenuation.md | needs-work | 21 |  |
 | capability-realm-placement.md | needs-work | 11 |  |
+| closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
-| commands-reference.md | current | 0 |  |
-| component-leases.md | needs-work | 24 |  |
-| conformance.md | needs-work | 32 |  |
-| contract-errata.md | needs-work | 90 | yes |
-| crash-recovery.md | needs-work | 32 |  |
+| commands-reference.md | current | 5 |  |
+| component-leases.md | needs-work | 26 |  |
+| composition-bootstrap.md | needs-work | 1 |  |
+| composition-layers.md | needs-work | 11 |  |
+| composition-rows.md | needs-work | 15 |  |
+| conformance.md | needs-work | 5 |  |
+| contract-errata.md | needs-work | 0 | yes |
+| crash-recovery.md | needs-work | 44 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
+| deploy.md | needs-work | 3 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 69 |  |
 | design-v2-realms.md | needs-work | 17 |  |
-| distribution-model.md | stale-fixed | 0 |  |
+| distribution-model.md | stale-fixed | 7 |  |
+| environment-binding.md | needs-work | 0 |  |
 | erase-report.md | needs-work | 19 |  |
 | evolve-loop.md | current | 18 |  |
-| expressible-iteration.md | needs-work | 18 |  |
-| fault-tests.md | needs-work | 48 |  |
+| expressible-iteration.md | needs-work | 14 |  |
+| fault-tests.md | needs-work | 70 |  |
 | federation.md | current | 16 |  |
-| fmt.md | needs-work | 13 |  |
-| function-types.md | needs-work | 27 |  |
-| gate-as-a-service.md | needs-work | 18 | yes |
-| gauntlet.md | needs-work | 17 |  |
+| fix-code.md | needs-work | 10 |  |
+| fmt.md | needs-work | 14 |  |
+| function-types.md | needs-work | 31 |  |
+| gate-as-a-service.md | needs-work | 21 | yes |
+| gate-dependency-contract.md | needs-work | 28 |  |
+| gauntlet.md | needs-work | 18 |  |
 | generation-history.md | current | 22 |  |
-| generics.md | needs-work | 9 |  |
-| guide-ai-agents.md | stale-fixed | 0 |  |
+| generics.md | needs-work | 10 |  |
+| guide-ai-agents.md | stale-fixed | 2 |  |
 | guide-humans.md | stale-fixed | 0 | yes |
+| harness-gate-guide.md | needs-work | 2 |  |
 | holes.md | needs-work | 29 |  |
-| import-a2a.md | current | 1 |  |
+| import-a2a.md | current | 11 |  |
 | import-cordis.md | needs-work | 58 |  |
-| import-openapi.md | needs-work | 39 |  |
-| import-wit.md | needs-work | 28 |  |
+| import-openapi.md | needs-work | 45 |  |
+| import-wit.md | needs-work | 29 |  |
 | int32-proposal.md | needs-work | 8 |  |
 | integer-proposal.md | needs-work | 20 |  |
-| interchange-format.md | needs-work | 7 |  |
+| interchange-format.md | needs-work | 8 |  |
 | interop-bridge.md | needs-work | 51 |  |
-| mcp-bridge.md | needs-work | 68 |  |
-| mcp-reference.md | current | 0 |  |
+| mcp-bridge.md | needs-work | 76 |  |
+| mcp-reference.md | current | 3 |  |
 | namespacing.md | needs-work | 8 |  |
-| network-path.md | needs-work | 25 |  |
-| network-placement.md | needs-work | 16 |  |
+| network-path.md | needs-work | 24 |  |
+| network-placement.md | needs-work | 1 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
-| operator-capabilities.md | needs-work | 24 |  |
+| operator-capabilities.md | needs-work | 30 |  |
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |
-| prompt-injection-resistance.md | needs-work | 38 |  |
+| process.md | needs-work | 5 |  |
+| prompt-injection-resistance.md | needs-work | 37 |  |
 | prop-test.md | needs-work | 23 |  |
-| quarantine-tier.md | needs-work | 26 |  |
+| quarantine-tier.md | needs-work | 23 |  |
 | queries.md | needs-work | 43 |  |
-| records.md | needs-work | 11 |  |
-| registry-probe.md | needs-work | 15 |  |
-| registry.md | needs-work | 24 | yes |
-| rejections.md | needs-work | 58 |  |
+| records.md | needs-work | 15 |  |
+| registry-probe.md | needs-work | 14 |  |
+| registry.md | needs-work | 46 | yes |
+| rejections.md | needs-work | 66 |  |
 | repair-loop.md | needs-work | 24 |  |
 | replay.md | needs-work | 51 |  |
-| revl-attest.md | current | 20 |  |
+| revl-attest.md | current | 9 |  |
 | revl-diff.md | current | 19 |  |
 | revl-metrics.md | current | 16 |  |
 | revl-profile.md | current | 15 |  |
-| router.md | stale-fixed | 0 |  |
+| router.md | stale-fixed | 5 |  |
+| scaffold.md | needs-work | 2 |  |
+| schedule-testing.md | needs-work | 0 |  |
 | seam-deadlines.md | needs-work | 15 |  |
 | selfhost-compile.md | stale-fixed | 0 |  |
-| selfhost-findings.md | live-owned (not audited) | 241 |  |
+| selfhost-findings.md | live-owned (not audited) | 247 |  |
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 17 |  |
 | state-handoff.md | needs-work | 22 |  |
-| stdlib-2.0.md | current | 66 | yes |
-| stdlib-json.md | needs-work | 22 |  |
+| stdlib-2.0.md | current | 80 | yes |
+| stdlib-json.md | needs-work | 41 |  |
 | stdlib-list.md | current | 14 |  |
-| stdlib-str.md | current | 11 |  |
-| stdlib-value.md | current | 24 |  |
+| stdlib-str.md | current | 16 |  |
+| stdlib-value.md | current | 25 |  |
+| stdlib-version.md | needs-work | 11 |  |
 | strings.md | needs-work | 39 |  |
-| swap.md | needs-work | 11 |  |
-| syntax-2.0.md | needs-work | 87 |  |
+| swap.md | needs-work | 19 |  |
+| syntax-2.0.md | needs-work | 10 |  |
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
-| truc.md | needs-work | 43 |  |
-| v2.0-roadmap.md | needs-work | 851 | yes |
+| truc.md | needs-work | 47 |  |
+| ts-runtime-contract.md | needs-work | 0 |  |
 | verified-canary.md | needs-work | 22 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |
-| wasm-capabilities.md | needs-work | 20 | yes |
+| wasm-capabilities.md | needs-work | 35 | yes |
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |
+| witnessed-fs.md | needs-work | 0 |  |
+<!-- docgen:doc-status end -->

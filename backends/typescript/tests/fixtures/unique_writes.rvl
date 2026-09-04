@@ -1,0 +1,93 @@
+// The self-rebind (unique-ownership) lowering, roadmap item 435 (d) on item
+// 445's frontend `unique` marker. EXECUTED value correctness, because a wrong
+// answer here is a silent aliasing bug and not a crash: every function below is
+// run by tests/unique_writes.test.ts and its result compared against what the
+// persistent (copying) semantics require.
+//
+// `built`/`counted`/`dropped`/`moved` are the four shapes the marker turns on
+// (push / set / remove / record update). `snapshots`, `chunked` and `appended`
+// are the ones where the copy IS observable, and each would produce a visibly
+// wrong value if the rewrite fired.
+
+type Pt = { x: Int, y: Int }
+
+// ---- owned: the object is born here and nothing else can reach it ----------
+
+fn built(n: Int) -> List[Int] {
+  var xs = []
+  var i = 0
+  while (i < n) {
+    xs = xs.push(i)
+    i = i + 1
+  }
+  return xs
+}
+
+fn counted(keys: List[Str]) -> Map[Str, Int] {
+  var m = Map.empty()
+  for (k of keys) { m = m.set(k, 1) }
+  return m
+}
+
+fn dropped(keys: List[Str], gone: Str) -> Map[Str, Int] {
+  var m = Map.empty()
+  for (k of keys) { m = m.set(k, 1) }
+  m = m.remove(gone)
+  return m
+}
+
+// a SWAP: both updates must be computed before either is written, exactly as
+// the `{ ...p, .. }` spread computed them
+fn moved(n: Int) -> Pt {
+  var p = { x: 1, y: 2 }
+  var i = 0
+  while (i < n) {
+    p = { p | x = p.y, y = p.x }
+    i = i + 1
+  }
+  return p
+}
+
+// ---- NOT owned: the copy is observable and must survive --------------------
+
+// each iteration hands the CURRENT list to `out`, so every later push has to
+// build a new one — in place, every element of `out` would be the same array
+fn snapshots(n: Int) -> List[List[Int]] {
+  var xs = [0]
+  var out = []
+  var i = 1
+  while (i < n) {
+    out = out.push(xs)
+    xs = xs.push(i)
+    i = i + 1
+  }
+  return out
+}
+
+// the flow-sensitive win (item 445 (a)): `res` escapes into `out` at the end of
+// each outer pass, but the NEXT pass re-declares it from a fresh literal, so the
+// pushes ARE owned while the chunks stay distinct objects
+fn chunked(n: Int) -> List[List[Int]] {
+  var out = []
+  var i = 0
+  while (i < n) {
+    var res = []
+    var j = 0
+    while (j < 2) {
+      res = res.push(i * 2 + j)
+      j = j + 1
+    }
+    out = out.push(res)
+    i = i + 1
+  }
+  return out
+}
+
+// born off a PARAMETER: the object belongs to the caller. The frontend marks
+// this `unique: "copy"`, conditional on a birth copy this tier does not
+// materialise, so the write keeps the spread and the caller's list is untouched
+fn appended(xs: List[Int], v: Int) -> List[Int] {
+  var ys = xs
+  ys = ys.push(v)
+  return ys
+}

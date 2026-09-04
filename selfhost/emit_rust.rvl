@@ -71,8 +71,12 @@
 //     `Pool`/`Map`/`Job` host stubs (`_emit_host_stubs`), and the serde derives;
 //   * async coloring (async methods / `await` / `plugin_async`), spawn/instances
 //     (`_v3_spawn`/`instance-get`), realms (`isolate`/`intercept`/`routes`),
-//     externs, in-file `test`/lifecycle-test emission, and the canonical
-//     Float->Str `revl_ftoa` (so `${aFloat}` interpolation is excluded);
+//     in-file `test`/lifecycle-test emission, and the canonical Float->Str
+//     `revl_ftoa` (so `${aFloat}` interpolation is excluded);
+//   * of `_emit_v3_externs` (issue 275 ports the section; it used to be MISSING,
+//     a silent drop the oracle stayed green over): a `config`-schema extern
+//     (item 378 Stage 5's `_revl_extern_config` scaffold) and an extern with no
+//     `@rs` body (the reference RAISES) — each takes a loud marker;
 //   * rust-specific NUANCES beyond the core — the `impl Fn(..)` lowering of a
 //     declared function type and its escaping-position refusal, and the
 //     non-ASCII / `\u{..}` reaches of `_string` beyond the ASCII core (the
@@ -99,6 +103,9 @@ use "../stdlib/value.rvl" {
 // `record_by_fields` key; `str_lt` is its comparator, reused by the in-file
 // tests. Both are byte-fuzz-pinned against Python `sorted()` — no re-hand-roll.
 use "../stdlib/list.rvl" { list_sort, str_lt }
+// `trim` is Python `str.strip()` for ASCII — the reference `.strip()`s an
+// extern's `@rs` body before splicing it. No re-hand-roll (item 194).
+use "../stdlib/str.rvl" { trim }
 
 // ------------------------------------------------- host formatting (kept @py)
 // `string_lit` is backends/rust/emit.py::_string for a `str` input, verbatim: a
@@ -1183,6 +1190,88 @@ fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
   return out
 }
 
+// ==================================================================== externs
+// `_emit_v3_externs`: each `extern` as a Rust `fn` carrying its verbatim `@rs`
+// body, blank-line separated, in declaration order and BEFORE the free
+// functions (the reference's `_emit_v3` section order: types, externs,
+// functions). Issue 275: this section used to be missing entirely — the
+// self-host emitted a call to `shout(..)` with no `fn shout` anywhere, silently,
+// and the byte-agreement oracle stayed GREEN because no corpus fixture declared
+// an extern (item 429's trap: an oracle catches DIVERGENCE, not ABSENCE).
+//
+// Two reference shapes are OUT of this slice and take a LOUD marker rather than
+// a guess, so a fixture that reaches one diverges visibly instead of shipping
+// wrong Rust: an extern with no `@rs` body (the reference RAISES — a portability
+// boundary, not a silent skip), and an extern carrying a `config` schema (item
+// 378 Stage 5: the reference prepends the `_revl_extern_config` scaffold and
+// binds `_revl_config` as the first body line). The body splice itself is
+// LF-only: the reference splits with Python `splitlines()`, which also breaks on
+// CR and on the Unicode separators, so a body carrying one of those takes the
+// marker too rather than splitting differently.
+
+// Every code point Python `str.splitlines()` breaks on that a plain
+// `split("\n")` does not: VT, FF, CR, the three file/group/record separators,
+// NEL, and the two Unicode line/paragraph separators.
+fn is_extra_linebreak(code: Int) -> Bool {
+  if (code >= 11 && code <= 13) { return true }
+  if (code >= 28 && code <= 30) { return true }
+  if (code == 133) { return true }
+  return code == 8232 || code == 8233
+}
+
+fn has_extra_linebreak(s: Str) -> Bool {
+  let n = s.length()
+  var i = 0
+  while (i < n) {
+    if (is_extra_linebreak(s.charCodeAt(i))) { return true }
+    i = i + 1
+  }
+  return false
+}
+
+// The out-of-slice reason for this extern, or "" when it is in-slice.
+fn extern_body_defer(ext: Any, body: Str) -> Str {
+  if (!value_is_null(value_field(ext, "config"))) { return "config" }
+  if (has_extra_linebreak(body)) { return "linebreak" }
+  return ""
+}
+
+fn emit_v3_externs(externs: List[Any], tnames: Map[Str, Str]) -> List[Str] {
+  var out = []
+  for (ext of externs) {
+    let name = mangle(value_str(value_field(ext, "name")))
+    var ps = []
+    for (p of value_list(value_field(ext, "params"))) {
+      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_pos(value_field(p, "type"), tnames)}`)
+    }
+    let returns = rust_type_pos(value_field(ext, "returns"), tnames)
+    let rs_body = value_field(value_field(ext, "bodies"), "rs")
+    if (value_is_null(rs_body)) {
+      // The reference RAISES here (`extern ... has no @rs body`). This slice has
+      // no refusal channel, so the marker stands in — loud, never silent.
+      out = out.push(`<<EXTERN-NO-RS-BODY:${name}>>`)
+      out = out.push("")
+    } else {
+      let body = trim(value_str(rs_body))
+      let defer = extern_body_defer(ext, body)
+      if (defer != "") {
+        out = out.push(`<<DEFER-EXTERN-${defer}:${name}>>`)
+        out = out.push("")
+      } else {
+        out = out.push(`fn ${name}(${ps.join(", ")}) -> ${returns} {`)
+        if (body == "") {
+          out = out.push(line(1, "// (empty @rs body)"))
+        } else {
+          for (bl of body.split(newline())) { out = out.push(ind(1).concat(bl)) }
+        }
+        out = out.push("}")
+        out = out.push("")
+      }
+    }
+  }
+  return out
+}
+
 // ============================================================ components/services
 // The COMPONENT/SERVICE surface (roadmap item 207): a `service` trait, the
 // `_emit_component` SIMPLE provider path (no isolate/intercept/effect), and the
@@ -2101,9 +2190,9 @@ fn module_header(version: Int) -> List[Str] {
 // The document assembly for a TYPES + FUNCTIONS v3 document (`_emit_v3`, subset):
 // the module header, then the user `type` items, then the free functions —
 // joined with newlines, right-stripped, and closed with a single trailing
-// newline, in the reference's section order (types precede functions). Components,
-// services, externs, and tests are DEFERRED — the covered corpus declares none,
-// so the reference's `_emit_components`/`_emit_v3_externs`/… contribute nothing.
+// newline, in the reference's section order (types, externs, functions). In-file
+// `test`/lifecycle-test emission is still DEFERRED — the covered corpus declares
+// none, so the reference's `_emit_v3_tests` contributes nothing.
 // Named `emit_rust_src` (not a bare `emit_src`) so the self-host pipeline can
 // `use` emit_rust.rvl BESIDE emit_py.rvl in one composition: private decls no
 // longer leak (item 228), but the merge still flattens both modules' PUBLIC decls
@@ -2113,10 +2202,27 @@ pub fn emit_rust_src(ir: Any) -> Str {
   let types = value_field(ir, "types")
   let tables = build_type_tables(types)
   let functions = value_list(value_field(ir, "functions"))
+  let externs = value_list(value_field(ir, "externs"))
   var fr: Map[Str, Str] = Map.empty()
+  var fnames: Map[Str, Str] = Map.empty()
   for (fnode of functions) {
+    let fname = value_str(value_field(fnode, "name"))
+    fnames = fnames.set(fname, "1")
     let r = value_field(fnode, "returns")
-    if (!value_is_null(r)) { fr = fr.set(value_str(value_field(fnode, "name")), value_str(r)) }
+    if (!value_is_null(r)) { fr = fr.set(fname, value_str(r)) }
+  }
+  // `_V3Ctx.fn_returns` seeds from the free functions AND then `setdefault`s the
+  // externs: an extern's DECLARED return types a `let` bound to a call on it, so
+  // a later by-value use knows to clone (issue 275 — without this the self-host
+  // emitted `tag(p)` where the reference emits `tag(p.clone())`, an E0382 away
+  // from the reference's own output). `setdefault`, so a free function of the
+  // same name wins — including one whose declared return is absent.
+  for (ext of externs) {
+    let ename = value_str(value_field(ext, "name"))
+    if (map_get(fnames, ename) == "") {
+      let er = value_field(ext, "returns")
+      if (!value_is_null(er)) { fr = fr.set(ename, value_str(er)) }
+    }
   }
   // item 217: the reference dispatches on `ir_version` (`_emit_v1`/`_emit_v2`/
   // `_emit_v3`); across those paths only the module header differs for the
@@ -2126,9 +2232,10 @@ pub fn emit_rust_src(ir: Any) -> Str {
   let ver = value_int(value_opt(ir, "ir_version") ?? 3)
   var out = module_header(ver)
   if (value_keys(types).length() > 0) { out = out.concat(emit_v3_types(types, tables.tn)) }
+  if (externs.length() > 0) { out = out.concat(emit_v3_externs(externs, tables.tn)) }
   if (functions.length() > 0) { out = out.concat(emit_v3_functions(functions, fr, tables)) }
-  // `_emit_components`, run unconditionally in `_emit_v3` (after types/functions,
-  // and after the DEFERRED externs/tests sections). Empty when the document
+  // `_emit_components`, run unconditionally in `_emit_v3` (after the
+  // types/externs/functions and the DEFERRED tests sections). Empty when the document
   // declares no service/comp — so a types+functions-only document is
   // unchanged — and byte-exact for the covered service/comp subset:
   // service traits, host stubs (empty here), each comp (simple path), then

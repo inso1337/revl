@@ -1,0 +1,54 @@
+// issue 275 / item 429: the `_emit_v3_externs` section. Before this fixture NO
+// document in this corpus declared an `extern`, so the byte-agreement oracle was
+// GREEN while `selfhost/emit_rust.rvl` emitted no externs section AT ALL — the
+// self-host produced a call to `shout(..)` with no `fn shout` anywhere in the
+// module, silently. An oracle catches DIVERGENCE, not ABSENCE; this fixture makes
+// the absence reachable so it cannot silently reopen.
+//
+// Covered here: the section itself (emitted BEFORE the free functions, after the
+// types), the `@rs` body spliced verbatim at one indent level, a Rust-keyword
+// extern name through `_mangle`, a multi-line body, an EMPTY body (the
+// `// (empty @rs body)` placeholder), the `Unit` return, generic and user-record
+// param/return lowering at the `param`/`return` position, and — the second half
+// of 275 — the `_V3Ctx.fn_returns` seeding from the externs, so a `let` bound to
+// an extern call carries its DECLARED type and a later by-value use CLONES
+// (`tag(p.clone())`, not the E0382 `tag(p)` the self-host used to emit).
+//
+// Deliberately out: a `config`-schema extern and one with no `@rs` body — both
+// take a loud marker in the port (the reference RAISES on the latter).
+type Point = { x: Int, y: Int }
+
+extern pure fn shout(s: Str) -> Str = @rs { s.to_uppercase() }
+
+// a Rust keyword as the declared name -> `impl_` through `_mangle`
+extern pure fn impl(n: Int) -> Bool = @rs { n > 0 }
+
+// a multi-line body, spliced verbatim (the reference does NOT dedent it)
+extern pure fn twice(a: Int, b: Int) -> Int = @rs {
+    let t = a + b;
+    t * 2
+}
+
+// an EMPTY body and a `Unit` return -> `-> ()` plus the placeholder comment
+extern pure fn noop(tag: Str) -> Unit = @rs { }
+
+// generic param/return lowering at the `param`/`return` position
+extern pure fn pick(xs: List[Int], i: Int) -> Opt[Int] = @rs { xs.get(i as usize).copied() }
+
+// a user record in both positions
+extern pure fn nudge(p: Point, dx: Int) -> Point = @rs { Point { x: p.x + dx, y: p.y } }
+
+// the extern-seeded `let` inference: `p` and `up` are typed by the DECLARED
+// extern returns, so each by-value use clones.
+fn relabel(seed: Str, p: Point) -> Str {
+  let up = shout(seed)
+  let moved = nudge(p, 1)
+  noop(up)
+  return shout(up)
+}
+
+fn total(xs: List[Int]) -> Bool {
+  let n = twice(2, 3)
+  let hit = pick(xs, n)
+  return impl(n)
+}

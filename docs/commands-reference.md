@@ -8,13 +8,15 @@ flags.
 
 The verb set, in the order the parser declares it:
 
+<!-- docgen:cli-verbs begin -->
 ```text
-compile  explain  doctor  scaffold  composition  audit  diff  version
-contract  erase-report  plan  apply  undo  canary  query  fmt  quarantine
-test
-mcp  import  export  serve  run  recover  estop  why  metrics  profile  attest
-dash  repair  truc
+compile  explain  grammar  adapt  doctor  scaffold  composition  layer
+audit  policy  diff  changelog  version  contract  erase-report  plan
+apply  undo  canary  query  fmt  quarantine  test  mcp  import  export
+serve  run  recover  estop  branch  compare  why  metrics  trace
+profile  attest  dash  repair  bundle  emit  verify  truc
 ```
+<!-- docgen:cli-verbs end -->
 
 Conventions used below:
 
@@ -64,6 +66,19 @@ the built-in guarantee/fix table (`src/revl/diagnostics.py`).
 ```bash
 revl explain G4
 revl explain t3 --json
+```
+
+### `revl grammar`
+
+Print the language surface, sized for a prompt. No sources; it renders the
+built-in grammar.
+
+- `--prompt` - the dense, complete, prompt-pinnable grammar (also shipped as
+  `docs/syntax-2.0.prompt.txt`) instead of the short human summary.
+
+```bash
+revl grammar              # the short summary
+revl grammar --prompt     # the full surface, to pin in a system prompt
 ```
 
 ### `revl doctor`
@@ -158,6 +173,75 @@ the component does not declare or a value that does not fit its type, or a
 revl composition base.rvl --admit
 ```
 
+### `revl adapt`
+
+Check whether a candidate's provided service can stand in for a required one,
+and optionally synthesize the adapter that makes it so.
+
+- `need` - the `.rvl` file declaring the required service (required).
+- `candidate` - the `.rvl` file declaring the candidate's provided service
+  (required).
+- `--need-service NAME` / `--candidate-service NAME` - name the service on
+  each side (default: the sole one in the file).
+- `--adapt JSON_FILE` - the opt-in map `D` of defaults, drops, merges and
+  pairings. Without it, only a structural match is accepted.
+- `--emit` - also render the synthesized adapter `.rvl` source, the artifact
+  you commit.
+- `--name NAME` - component name for `--emit` (default: `Adapter`).
+- `--provide-key KEY` - provided key for `--emit` (default: the need service
+  name, lowercased).
+- `--require-key KEY` - the alias the candidate is required under for
+  `--emit` (default: `backing`).
+
+```bash
+revl adapt need.rvl candidate.rvl
+revl adapt need.rvl candidate.rvl --adapt map.json --emit
+```
+
+### `revl layer check`
+
+Resolve every row id in a layered composition and render the folded table with
+each row's layer provenance, without lowering any component body. `layer` has
+one subcommand, `check`.
+
+- `file` - the `.rvl` document declaring the base composition (required).
+- `--json` - the folded row table as JSON, provenance included.
+- `--root DIR` - the project root that provenance and origins are recorded
+  against.
+- `--set @ROW.FIELD=VALUE` - the invocation overlay, the same syntax
+  `revl composition` accepts.
+
+```bash
+revl layer check app.rvl
+revl layer check app.rvl --json --set @db.pool=8
+```
+
+### `revl policy evaluate`
+
+Dry-run a boundary policy over a composition and report, per rule, which
+clauses pass or fail and why (a fact against a threshold). `policy` has one
+subcommand, `evaluate`. See [boundary-policy.md](boundary-policy.md) for the
+DSL.
+
+- `POLICY` - the boundary policy file, DSL or JSON (required).
+- `PROGRAM.rvl ...` - the composition source(s) to evaluate against.
+- `--json` - machine-readable per-clause verdicts.
+- `--component NAME` - narrow the report to one component.
+- `--evidence DIR` - a component entry directory holding an `evidence/`
+  bundle, for a bare-source component.
+- `--registry DIR` with `--candidate NAME` - evaluate a published registry
+  entry instead of a bare source.
+- `--trusted-publisher ID` - a publisher id in the operator trust set
+  (repeatable).
+- `--key PATH` - an attestation verification key.
+- `--mcp-scope COMPONENT` - treat COMPONENT as MCP/agent-admitted; `*` means
+  every component.
+
+```bash
+revl policy evaluate prod.policy app.rvl
+revl policy evaluate prod.policy app.rvl --json --component Billing
+```
+
 ### `revl audit`
 
 The composition manifest plus the G8 boundary surface: which emissions each
@@ -220,6 +304,32 @@ measurement of the change, not a policy choice.
 - `--emit-manifest` - print the compiled composition document (the diff input
   a later `--against` reads) and exit, instead of deriving a bump.
 - `--json` - machine-readable derivation.
+
+### `revl changelog`
+
+Derive a release note from the interface, structural and authority delta
+between two compositions. The semver headline comes from the same interface
+diff `revl version` uses.
+
+- `--from OLD` - the earlier composition: a compiled IR/interchange JSON
+  document (`revl compile -o`, `revl audit --json`) or a `.rvl` source
+  (required).
+- `--to NEW` - the later composition, same accepted forms (required).
+- `--format {markdown,json,plain}` - `markdown` is the stable release-note
+  skeleton (default), `json` the structured document a registry or bot
+  consumes, `plain` the skeleton with no markup.
+- `--json` - alias for `--format json`.
+- `--no-semver` - skip the semver headline (structural + authority changelog
+  only); implied when an input carries no interface table.
+- `--current-version X.Y.Z` - the earlier composition's declared version; with
+  it, the computed next version is printed in the headline.
+- `--title TEXT` - an opaque header line for the Markdown note. It never
+  enters a derived line.
+
+```bash
+revl changelog --from v1.ir.json --to v2.ir.json --current-version 1.4.0
+revl changelog --from old.rvl --to new.rvl --json
+```
 
 ### `revl contract`
 
@@ -409,7 +519,12 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
 - `--estop-latch FILE` - watch FILE for an operator E-Stop, so `revl estop
   --latch FILE` from another terminal halts this run immediately
   ([443-estop.md](design/443-estop.md)). Unarmed by default; an unarmed run
-  checks nothing.
+  checks nothing. With `--placement` the CONDUCTOR watches the latch too and
+  halts every process: a py child reads the latch itself, names its in-flight
+  inventory and dies without unwinding; a child on any other tier is SIGKILLed,
+  because that tier has no E-Stop seam. The halt report names every component
+  left un-torn-down, one line each, and marks the residue it cannot enumerate
+  UNKNOWN rather than omitting it.
 - `--trace FILE` - write a causal lifecycle trace (JSONL); every transition
   carries the cause chain, queryable with `revl why` ([why-runtime.md](why-runtime.md)).
 - `--withdraw COMPONENT` - one-shot: boot, withdraw this live component while
@@ -429,12 +544,15 @@ Under `--placement` the conductor waits for each child's own `[<name>] DOWN`
 line - the runner's statement that its LIFO unwind covered every registered
 entry and its no-residue proof printed - rather than for a fixed number of
 seconds. A wedged child is still SIGKILLed after a backstop, so the conductor
-cannot hang, but that kill is **reported and the run exits non-zero**: a child
-killed mid-unwind leaves its entries STRANDED and its residue UNKNOWN, the same
-verdict [`revl estop`](design/443-estop.md) gives a halted session, and it is
-never a clean exit. Reconcile a durable run with `revl recover --wal FILE`. Set
-`REVL_TEARDOWN_GRACE=<seconds>` (default 30) when a teardown is legitimately
-long rather than wedged.
+cannot hang. **Any child that exits before saying `DOWN` is reported and the
+run exits non-zero**, whichever signal ended it - the SIGKILL backstop, the
+SIGTERM that asked it to stop, or a crash inside the unwind. Which signal it
+died on says nothing about whether it finished unwinding; the `DOWN` line is
+the only thing that does. Such a child leaves its entries STRANDED and its
+residue UNKNOWN, the same verdict [`revl estop`](design/443-estop.md) gives a
+halted session, and it is never a clean exit. Reconcile a durable run with
+`revl recover --wal FILE`. Set `REVL_TEARDOWN_GRACE=<seconds>` (default 30)
+when a teardown is legitimately long rather than wedged.
 
 `run --record` opens the replay REPL (`:timeline`, `:back`, `:forward`,
 `:inspect`, `:bisect`; see [replay.md](replay.md)).
@@ -485,6 +603,25 @@ resume, and the way back is `revl recover --wal FILE`.
 Exit status follows the residue, as `revl recover` does: 0 when nothing is
 outstanding, 1 when a halt is engaged and entries are owed. An E-Stop is never
 clean.
+
+**Across a placement.** `revl run --placement P --estop-latch FILE` arms the
+same latch for a composition split across processes, and `revl estop --latch
+FILE` halts all of them. The two populations are different and the report says
+which one each component got:
+
+- a process on a tier that HONORS the latch (today: `py`) refuses new crossings
+  at its own seams from the instant the latch appears, prints its inventory —
+  the entries it stranded and the at-most-one crossing that was already
+  dispatched — and dies where it stands, running no teardown;
+- a process on any other tier (`node`, `rust`, `go`, `java`, `wasm`) has no
+  E-Stop seam, so the only halt available for it is a SIGKILL. It may have
+  dispatched a crossing microseconds before it died and nothing recorded that,
+  so its residue is **UNKNOWN** and the report says so by name.
+
+`REVL_ESTOP_HALT_WINDOW` (default 2 seconds) bounds how long a latch-honoring
+child gets to name its inventory before it is killed anyway. It is not a
+teardown grace and must never grow into one: by the time it starts the child is
+already refusing crossings, so it buys the inventory and nothing else.
 ### `revl branch`
 
 Session branch lineage over durable write-ahead logs (roadmap item 250): what a
@@ -560,6 +697,22 @@ emitted, flagging over-declaration ([revl-profile.md](revl-profile.md)).
 - `--json` - machine-readable profile document.
 - `--strict` - least-privilege gate: exit nonzero if any component
   over-declares an emission the run never exercised.
+
+### `revl trace`
+
+The causal trace of a recorded run: which component caused which hop, in
+order. Reads the JSONL that `revl run --trace` writes.
+
+- `FILE` - a JSONL causal trace written by `revl run --trace` (required).
+- `--json` - the machine-readable trace document instead of the human view.
+- `--component NAME` - only that component's hops.
+- `--model` - only model hops (the LLM view).
+- `--otel` - emit the trace through the OTel SDK, delegating to `revl.otel`.
+
+```bash
+revl run app.rvl --trace run.jsonl
+revl trace run.jsonl --component Billing
+```
 
 ### `revl attest`
 
@@ -662,6 +815,61 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 
 ---
 
+## Emitting and packaging
+
+### `revl emit`
+
+Render one backend's source for a composition, without the IR round-trip
+`revl compile` does. This is the emitter surface the conformance matrix
+measures.
+
+- `files` - one or more `.rvl` sources (required).
+- `--backend {python,typescript,rust,java,go,wasm}` - the emitter to render
+  (default: `typescript`).
+- `--target TARGET` - a rendering of that backend's emitter, orthogonal to
+  `--backend`. `temporal` renders the TypeScript emitter for the Temporal TS
+  SDK; omit for the backend's native runtime.
+- `-o`, `--output PATH` - output path (default: stdout).
+
+```bash
+revl emit app.rvl --backend rust -o app.rs
+revl emit app.rvl --backend typescript --target temporal
+```
+
+### `revl bundle`
+
+Emit a whole composition into a portable bundle directory: every backend's
+source plus the runtime manifest, so one artifact carries every tier.
+
+- `files` - the `.rvl` sources to bundle, the whole composition (required).
+- `--out DIR` - the bundle directory to write, e.g. `app.revlbundle`
+  (required).
+- `--backend BACKEND` - a backend to emit into the bundle; repeatable. Omit to
+  emit every backend (python, typescript, rust, java, go, wasm). An emitter
+  that refuses this IR is recorded as skipped, not as a failure.
+- `--topology PLACEMENT` - a placement/topology map (TOML or JSON) carried in
+  the bundle as `topology.json`; omit for a single-process bundle.
+- `--json` - print the bundle path and its runtime manifest as JSON.
+
+```bash
+revl bundle app.rvl --out app.revlbundle
+revl bundle app.rvl --out app.revlbundle --backend rust --backend wasm
+```
+
+### `revl verify`
+
+Check a bundle: that each tier in it is present, well-formed and agrees with
+the manifest. Exits nonzero when a tier fails, so it is usable as a release
+gate.
+
+- `BUNDLE` - a bundle directory written by `revl bundle` (required).
+- `--json` - machine-readable tier-by-tier report.
+
+```bash
+revl verify app.revlbundle
+revl verify app.revlbundle --json    # CI: parse the per-tier verdict
+```
+
 ## Interop: MCP, import, export, serve
 
 ### `revl mcp`
@@ -761,6 +969,12 @@ subcommands.
 - `--service NAME` - generated service name (default: from the card's `name`).
 - `--allow-plaintext` - import a card whose `url` is plaintext `http`; refused
   without it, and the generated header records that the flag was used.
+- `--follow-redirects` - let the generated crossing follow a **same-origin**
+  307 or 308. Off by default: the endpoint is part of what the file declares
+  and what the composition admits, so a redirect is refused rather than
+  followed. A 301, 302 or 303 stays refused even with the flag, because it
+  re-issues the `POST` as a `GET` and drops the body
+  ([import-a2a.md](import-a2a.md) §3a).
 - `-o`, `--output PATH` - output path (default: stdout).
 - `--json-diagnostics` - structured diagnostic on rejection.
 
@@ -806,7 +1020,9 @@ serves the compiler itself.
 
 ---
 
-## The component manager: `revl truc`
+## The component manager
+
+### `revl truc`
 
 `revl truc <verb> ...` is the namespaced form of the standalone `truc <verb>`
 (roadmap item 136, [truc.md](truc.md)). It is a pure passthrough: the tail

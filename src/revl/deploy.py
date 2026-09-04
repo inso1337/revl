@@ -1,5 +1,5 @@
 """`revl deploy` — attested admission, correlated seams, coordinated rollback
-(roadmap item 118, Slice 1: single host / local multiprocess).
+(roadmap item 118, Slice 1 + Slice 2a).
 
 The design (docs/design/118-revl-deploy.md) leads with a finding that reshapes
 everything built here: **the LIFO rollback theorem `apply` proves is an
@@ -11,8 +11,8 @@ comes with it.
 
 Slice 1 is the cut that is landable on today's tree: every seam is a LOCAL
 process seam (a UDS bridge, item 56's transport reused unchanged), so the
-control plane a cross-machine deploy would need — SSH/container launch, a
-replicated WAL, a quorum coordinator — is deliberately absent (Slice 2+).
+control plane a cross-machine deploy would need — a replicated WAL, a quorum
+coordinator, a remote runner — is deliberately absent (Slice 2b+).
 What Slice 1 does build, in the four pieces the design names:
 
 1. **the attestation chain, verified at admission** (§2). `chain_bindings`
@@ -39,14 +39,17 @@ What Slice 1 does build, in the four pieces the design names:
    a peer cannot forge another peer's identity or replay its envelope.
    :class:`CorrelationGuard` is what `bridge.serve` runs before dispatch.
 
-   A **network** seam cannot carry that property: the per-process secret is
+   A **network** seam cannot carry the SEALING half: the per-process secret is
    minted per boot by one conductor and a cross-composition peer runs under
    another, so demanding a sealed envelope there refuses the legitimate caller.
    What mTLS *does* give is a proven peer identity, and what was missing was a
-   closed set to check it against — :class:`PeerAllowlist` (§1.4b). The
-   achieved level is recorded per seam as :class:`SeamAdmission`
-   (`sealed` / `peer-pinned` / `unverified`), because a weaker property under
-   the same name would be the lie this module is written not to tell.
+   closed set to check it against — :class:`PeerAllowlist` (§1.4b). It also
+   gives the dedup scope for free: the identity a replay check keys on is the
+   one the handshake proved, so :class:`TransportReplayGuard` refuses a replay
+   there with no shared secret at all. The achieved level is recorded per seam
+   as :class:`SeamAdmission` (`sealed` / `peer-bound` / `peer-pinned` /
+   `unverified`), because a weaker property under the same name would be the
+   lie this module is written not to tell.
 
 3. **coordinated cross-process rollback** (§3). :func:`run_deploy` drives a
    two-phase PREPARE/COMMIT over :class:`Participant`s that are *other
@@ -69,9 +72,26 @@ What Slice 1 does build, in the four pieces the design names:
    `recovery.py`'s existing rule VERBATIM — record present, roll forward;
    absent, roll back — and fails closed on a guess (:func:`settle_stranded`).
 
+**Slice 2a** (§5) adds the written form of a deploy and the plan-time
+admission of it. Slice 1 had no way to WRITE a deploy down — the caller built
+`Participant`s in Python — and so no way to refuse one before things started
+being spawned. §5 reads the item-56 placement map's new per-process `[deploy]`
+table, and admits it against the one question that decides what a deploy can
+promise: **which boundary does this target sit behind?** `process` (Slice 1's
+own child), `container` (a separate namespace set on this machine), or
+`machine` (a different kernel). :data:`TEARDOWN_PROMISE` answers what teardown
+is worth across each, because G7 is LIFO-complete over the *registered* entries
+of an accumulator and each boundary changes which set outlives the failure.
+Only the first two are opened here: a `machine` boundary is REFUSED, not
+best-efforted. §5b then puts a real participant behind a container boundary
+(:func:`launch_container_participant`), reusing item 411's container driver and
+speaking the same stdio control channel — because the protocol in §3 never held
+an inverse, it does not care what kind of boundary the other end is behind.
+
 Deliberately NOT here, and named so the boundary is explicit: cross-machine
-orchestration (SSH/container launch), a replicated WAL, a quorum coordinator,
-and the Ed25519 upgrade to `attest.py`. The last one is a HARD prerequisite for
+orchestration (bundle staging, a remote `deploy-admit` runner, a load-measured
+signed COMMIT receipt, a pinned SSH host key), a replicated WAL, a quorum
+coordinator, and the Ed25519 upgrade to `attest.py`. The last one is a HARD prerequisite for
 a cross-trust-domain deploy (§2.4/§5-A1): a symmetric HMAC verifier is also a
 forger, so "signer untrusted" would be a fiction. Slice 1 is single-host, where
 signer and host are the same trust domain, so HMAC is honest here — and
@@ -85,8 +105,11 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
+import subprocess
 import time
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
@@ -1054,12 +1077,22 @@ class Correlation:
 
     @classmethod
     def from_wire(cls, wire: Mapping) -> "Correlation":
+        key = wire.get("idempotency_key")
+        if key is not None and not isinstance(key, str):
+            # The idempotency key is half of a dedup scope, and a scope is a
+            # dict key. A peer-supplied list or object would raise
+            # `unhashable type` inside the ledger — past every caller written
+            # to read an `(ok, reason)` verdict, taking the seam down instead
+            # of refusing one envelope (roadmap 428 F10's class). It has no
+            # scope, so it is malformed, and both guards already turn a
+            # `TypeError` here into that refusal.
+            raise TypeError("idempotency_key must be a string or absent")
         return cls(composition_id=str(wire["composition_id"]),
                    generation=int(wire["generation"]),
                    peer_identity=str(wire["peer_identity"]),
                    effect_id=str(wire["effect_id"]),
                    realm=wire.get("realm"),
-                   idempotency_key=wire.get("idempotency_key"),
+                   idempotency_key=key,
                    parent_effect=wire.get("parent_effect"))
 
     def dedup_key(self) -> tuple:
@@ -1214,10 +1247,6 @@ class CorrelationGuard:
 #     from a peer that cannot produce one does not harden the seam, it refuses
 #     the legitimate caller — the same mistake as installing the guard in front
 #     of a consumer tier whose bridge cannot seal.
-#   * The freshness gate needs an envelope to dedup, so it goes with the secret.
-#     (Over mTLS an off-path attacker cannot replay a record anyway; a
-#     re-delivery by the key holder itself is item 309's idempotency question,
-#     not something a transport can answer.)
 #
 # What a network seam CAN carry is the gate the UDS seam cannot: the mTLS
 # handshake proves the peer's identity with a CA-signed private key, per
@@ -1230,8 +1259,31 @@ class CorrelationGuard:
 # needs nothing from the caller's bridge, which is why it works for a py
 # consumer, a node consumer and a cross-composition stranger alike.
 #
-# So the network seam gets a STRICTLY WEAKER property than the UDS seam, and
-# the vocabulary below says so rather than calling both "guarded".
+# The FRESHNESS gate is the part of this section that used to read "goes with
+# the secret", and that was wrong. Re-derive it from what each gate needs:
+#
+#   * dedup needs a KEY that names one crossing, and an IDENTITY to scope that
+#     key by, so one caller's idempotency-key namespace is not another's;
+#   * the HMAC exists to bind a CLAIMED identity to a real caller, which is
+#     load-bearing on UDS precisely because `bridge.peer_identity` is None
+#     there — the claim is otherwise unchecked;
+#   * on TCP+mTLS the transport has ALREADY bound that identity, per session,
+#     with a CA-signed private key. So the scoping identity is available
+#     without any shared secret: it is read off the peer certificate, not off
+#     the request body.
+#
+# :class:`TransportReplayGuard` is that gate. It keys dedup on
+# `(TRANSPORT identity, composition_id, generation, idempotency_key)` — the
+# first member from the handshake, never from the payload, because a replayer
+# controls its payload and does not control the mTLS session it speaks in. It
+# holds NO secret, so it needs no distribution channel and refuses no
+# cross-composition caller: an item-151 consumer under another conductor
+# already holds the one credential this gate reads.
+#
+# It is still weaker than sealing in one direction, and the vocabulary says so:
+# a crossing that declares no `idempotency_key` is not deduplicated (item 309 —
+# nothing declares it re-deliverable), and the ledger is BOUNDED, so the window
+# is finite. See :class:`BoundedReplayLedger` for exactly what that costs.
 
 #: The transport proved no identity at all (no TLS, or a session with no peer
 #: certificate). Distinct from :data:`REJECT_UNKNOWN_PEER`, which is a peer that
@@ -1242,12 +1294,20 @@ REJECT_UNAUTHENTICATED_PEER = "unauthenticated-peer"
 #: vocabulary is `bundle.verify`'s OK / cannot-verify: a surface that cannot
 #: prove its property says so.
 ADMISSION_SEALED = "sealed"
+#: mTLS identity checked against a declared allowlist AND keyed crossings
+#: replay-checked against that transport-proven identity. Stronger than
+#: :data:`ADMISSION_PEER_PINNED`, weaker than :data:`ADMISSION_SEALED` (an
+#: unkeyed crossing is not deduplicated, and the ledger window is finite).
+ADMISSION_PEER_BOUND = "peer-bound"
 ADMISSION_PEER_PINNED = "peer-pinned"
 ADMISSION_UNVERIFIED = "unverified"
 
 #: Rendered for the level, so a reader never has to remember which is stronger.
 ADMISSION_MEANING = {
     ADMISSION_SEALED: "peer authenticated by per-process secret, replays refused",
+    ADMISSION_PEER_BOUND: "mTLS peer identity checked against a declared allowlist, "
+                          "and a keyed crossing replay-checked against that proven "
+                          "identity over a bounded window",
     ADMISSION_PEER_PINNED: "mTLS peer identity checked against a declared allowlist; "
                            "NOT replay-checked",
     ADMISSION_UNVERIFIED: "cannot verify who may call",
@@ -1280,6 +1340,164 @@ class PeerAllowlist:
 
     def __len__(self) -> int:
         return len(self.identities)
+
+
+#: The verdict a :class:`TransportReplayGuard` returns for a crossing it
+#: admitted and DID dedup, and for one it admitted without deduping because the
+#: caller declared no idempotency key. Two spellings, because they are two
+#: different properties and a caller reading the verdict should not have to
+#: guess which one it got.
+ADMITTED_REPLAY_CHECKED = "replay-checked"
+ADMITTED_UNKEYED = "admitted-unkeyed"
+
+#: Default bound on :class:`BoundedReplayLedger`: keys remembered per peer, and
+#: peers remembered at once. The product is the hard ceiling on entries, so the
+#: state a long-lived provider carries is bounded by construction rather than by
+#: hoping the seam goes quiet.
+REPLAY_WINDOW_PER_PEER = 1024
+REPLAY_WINDOW_PEERS = 64
+
+
+class BoundedReplayLedger:
+    """Seen `(composition_id, generation, idempotency_key)` scopes, per peer,
+    with a HARD bound on both dimensions.
+
+    :class:`DedupLedger` is an unbounded `set`, which is correct for the process
+    seam it was written for (one boot, a known handful of local children) and
+    wrong for a network provider that may answer a peer for weeks. So this one
+    is two nested LRUs:
+
+      * at most `per_peer` scopes remembered for one identity, oldest evicted
+        first;
+      * at most `max_peers` identities remembered at once, least-recently-used
+        evicted first.
+
+    **What eviction costs, stated rather than hidden.** A replay is refused only
+    while the original crossing is still remembered. Past `per_peer` keyed
+    crossings from the same identity, the oldest scope ages out and a replay of
+    *that* crossing would be admitted again. :attr:`evicted` counts every
+    forgotten scope, so an operator can see the window was exceeded instead of
+    inferring it.
+
+    The alternative — refusing everything once full — is not fail-closed, it is
+    a self-service denial of service: any peer could fill the window and take
+    the seam down for everyone. Bounded memory with a counted, finite window is
+    the honest trade, and it is per-identity so a chatty peer cannot age out a
+    quiet peer's history (which would otherwise hand a stolen-key replayer a
+    way to make room for its own replay).
+    """
+
+    def __init__(self, per_peer: int = REPLAY_WINDOW_PER_PEER,
+                 max_peers: int = REPLAY_WINDOW_PEERS) -> None:
+        if per_peer < 1 or max_peers < 1:
+            raise ValueError("a replay window of zero remembers nothing and "
+                             "would admit every replay; give a positive bound")
+        self.per_peer = int(per_peer)
+        self.max_peers = int(max_peers)
+        self.evicted = 0
+        self._peers: "OrderedDict[str, OrderedDict[tuple, None]]" = OrderedDict()
+
+    def admit(self, identity: str, scope: tuple) -> bool:
+        """True the first time `scope` is seen for `identity`, False on a
+        replay. Records the scope either way (a refused replay does not need
+        re-recording; it is already there)."""
+        seen = self._peers.get(identity)
+        if seen is None:
+            seen = OrderedDict()
+            self._peers[identity] = seen
+            while len(self._peers) > self.max_peers:
+                _, dropped = self._peers.popitem(last=False)
+                self.evicted += len(dropped)
+        self._peers.move_to_end(identity)
+        if scope in seen:
+            return False
+        seen[scope] = None
+        while len(seen) > self.per_peer:
+            seen.popitem(last=False)
+            self.evicted += 1
+        return True
+
+    def seen(self, identity: str, scope: tuple) -> bool:
+        return scope in self._peers.get(identity, ())
+
+    def __len__(self) -> int:
+        return sum(len(seen) for seen in self._peers.values())
+
+
+class TransportReplayGuard:
+    """Replay protection for a NETWORK seam, keyed on the identity the mTLS
+    handshake proved (§1.4b).
+
+    :class:`CorrelationGuard` cannot run here: its per-process secret is minted
+    by one conductor for its own children, and an item-151 cross-composition
+    caller can never hold it. This guard holds NO secret. It reads the scoping
+    identity off the peer certificate — `bridge.peer_identity`, the value the
+    transport proved — so it needs no distribution channel and refuses no
+    legitimate caller that mTLS already admitted.
+
+    Three gates:
+
+      1. **a proven identity** — no transport identity means nothing to scope a
+         key by, and scoping by a caller-asserted name would dedup in a
+         namespace the caller chooses. Refused as
+         :data:`REJECT_UNAUTHENTICATED_PEER` rather than keyed on the payload.
+      2. **agreement** — when the crossing names a `peer_identity`, it must be
+         the one the handshake proved. This is what stops peer B from replaying
+         a captured envelope of peer A: verbatim it is a
+         :data:`REJECT_PEER_MISMATCH`, and rewritten to B's own name it is
+         simply B's own first crossing, in B's own namespace, which B was
+         allowed to make anyway.
+      3. **freshness** — a repeat of an already-seen `(transport identity,
+         composition_id, generation, idempotency_key)` is
+         :data:`REJECT_DUPLICATE`. The first member comes from the transport;
+         only the last three are read off the envelope, and a caller varying
+         those is not defeating the gate, it is declaring a different crossing
+         (which it could do anyway by minting a fresh key — dedup answers
+         re-DELIVERY, not a caller that means to call twice).
+
+    A request with no correlation member, or one that declares no
+    `idempotency_key`, is ADMITTED and not deduplicated: nothing declares it
+    re-deliverable (item 309), and refusing it would refuse every caller built
+    before this envelope existed — the cross-composition failure mode this
+    plane exists to avoid. The verdict says which of the two it was
+    (:data:`ADMITTED_REPLAY_CHECKED` / :data:`ADMITTED_UNKEYED`), so a seam
+    never reports a freshness check it did not run.
+    """
+
+    def __init__(self, ledger: Optional[BoundedReplayLedger] = None, *,
+                 per_peer: int = REPLAY_WINDOW_PER_PEER,
+                 max_peers: int = REPLAY_WINDOW_PEERS) -> None:
+        self.ledger = (ledger if ledger is not None
+                       else BoundedReplayLedger(per_peer, max_peers))
+
+    def admit(self, wire: Any, *, transport_identity: str | None = None
+              ) -> tuple[bool, str]:
+        if not transport_identity:
+            return False, REJECT_UNAUTHENTICATED_PEER
+        if wire is None:
+            return True, ADMITTED_UNKEYED
+        if not isinstance(wire, Mapping):
+            return False, REJECT_MALFORMED
+        try:
+            correlation = Correlation.from_wire(wire)
+        except (KeyError, TypeError, ValueError):
+            return False, REJECT_MALFORMED
+        if correlation.peer_identity != transport_identity:
+            return False, REJECT_PEER_MISMATCH
+        if correlation.idempotency_key is None:
+            return True, ADMITTED_UNKEYED
+        # NOTE the identity in this key: the one the handshake proved, not
+        # `correlation.peer_identity`. They are equal here only because gate 2
+        # just required it; keying on the transport value is what keeps that
+        # true if gate 2 ever loosens.
+        scope = (correlation.composition_id, int(correlation.generation),
+                 correlation.idempotency_key)
+        if not self.ledger.admit(transport_identity, scope):
+            return False, REJECT_DUPLICATE
+        return True, ADMITTED_REPLAY_CHECKED
+
+    def __len__(self) -> int:
+        return len(self.ledger)
 
 
 @dataclass(frozen=True)
@@ -1968,3 +2186,539 @@ class ProcessParticipant(Participant):
             proc.wait(timeout=self.timeout)
         except Exception:  # noqa: BLE001 — best-effort teardown
             proc.kill()
+
+
+# ---------------------------------------------------------------------------
+# §5. the deploy map, and the boundary a deploy may actually cross
+#     (roadmap item 118, Slice 2a)
+# ---------------------------------------------------------------------------
+#
+# Slice 1 built the protocol and handed the caller the job of constructing
+# `Participant`s in Python. There was no way to WRITE a deploy down, and so no
+# way for the conductor to refuse one before it started spawning things.
+#
+# Slice 2a adds the written form — the item-56 placement map with one new
+# per-process `[deploy]` table (design §1.2) — and, more importantly, the
+# plan-time admission of it. The order matters: the deploy map is
+# **unauthenticated operator input** (design R4). It is not inside the attested
+# bundle, nothing signs it, and it is the file that says which machine gets to
+# run the composition. So every question it can get wrong is asked before any
+# boundary is opened, and every one of them fails in the refusing direction.
+#
+# The boundary vocabulary is the point of this section. `via` names a launch
+# mechanism; what a deploy can PROMISE is a function of the boundary that
+# mechanism crosses, not of the mechanism:
+#
+#   process    — the conductor's own child on this kernel. Slice 1's case.
+#   container  — a separate namespace set on THIS machine, on this filesystem.
+#   machine    — a different kernel, reached over a network.
+#
+# Only the first two are crossable here, and :data:`TEARDOWN_PROMISE` says what
+# each one is worth when the deploy has to come back down.
+
+
+VIA_LOCAL = "local"
+VIA_CONTAINER = "container"
+VIA_SSH = "ssh"
+
+#: Every `via` this build knows how to reason about. A `via` outside this set is
+#: REFUSED, never treated as `local`: "the operator wrote a word we do not
+#: implement" and "the operator wants a plain child process" are different
+#: statements, and guessing the second from the first is the fail-open shape.
+KNOWN_VIA = (VIA_LOCAL, VIA_CONTAINER, VIA_SSH)
+
+BOUNDARY_PROCESS = "process"
+BOUNDARY_CONTAINER = "container"
+BOUNDARY_MACHINE = "machine"
+
+#: `via` -> the boundary it crosses. The teardown promise is keyed off the
+#: boundary, so two mechanisms that cross the same boundary cannot accidentally
+#: acquire different guarantees.
+VIA_BOUNDARY = {
+    VIA_LOCAL: BOUNDARY_PROCESS,
+    VIA_CONTAINER: BOUNDARY_CONTAINER,
+    VIA_SSH: BOUNDARY_MACHINE,
+}
+
+#: What a deploy can and cannot promise about TEARDOWN across each boundary.
+#:
+#: G7 (DESIGN.md §4) is LIFO-complete over the **registered** entries of an
+#: accumulator. That quantifier is the whole answer here: completeness is a
+#: statement about a set, and each boundary changes which set survives long
+#: enough to be unwound.
+TEARDOWN_PROMISE = {
+    BOUNDARY_PROCESS: (
+        "the participant runs its own G7 unwind, newest-first, over the entries "
+        "IT registered, and reports clean or names its residue. The conductor "
+        "never substitutes its own unwind: a participant it cannot reach is "
+        "`unresolved`, never `rolled-back`."),
+    BOUNDARY_CONTAINER: (
+        "identical to a process boundary while the container is alive — the "
+        "control channel is stdio and the participant unwinds in there. When "
+        "the container is DESTROYED, the accumulator and every closure-only "
+        "inverse die with it, so the conductor's verdict is `unresolved` and "
+        "never `rolled-back`. What the container boundary adds over a machine "
+        "one is that the WAL is on a mount the conductor ALSO holds, so the "
+        "target is still SETTLE-able: `recovery.py` reads that WAL and applies "
+        "its existing rule over the RECORDED entries, reporting each "
+        "closure-only inverse as residue. Settling is a separate step from the "
+        "deploy verdict, and the deploy never claims it happened."),
+    BOUNDARY_MACHINE: (
+        "nothing. A machine that goes away takes the accumulator, the closures "
+        "AND the WAL with it: there is no set on this side for G7 to be "
+        "complete over, and the conductor holds no inverse it could run. The "
+        "only honest verdict is `unresolved`, naming the target for a human. "
+        "That is why this slice REFUSES a machine boundary outright instead of "
+        "shipping a best-effort one — a deploy that cannot promise teardown "
+        "must not be the thing that quietly discovers it."),
+}
+
+
+def teardown_promise(boundary: str) -> str:
+    """What teardown is worth across `boundary`. Unknown boundaries raise: a
+    silent default here would be a promise nobody wrote down."""
+    try:
+        return TEARDOWN_PROMISE[boundary]
+    except KeyError:
+        raise RevlError(
+            f"no teardown promise is recorded for boundary {boundary!r}; the "
+            f"known boundaries are {', '.join(sorted(TEARDOWN_PROMISE))}") from None
+
+
+@dataclass(frozen=True)
+class DeployTarget:
+    """One `[processes.<p>.deploy]` table, parsed.
+
+    `raw` keeps the operator's table verbatim so a diagnostic can quote what was
+    actually written rather than a normalized shadow of it.
+    """
+
+    process: str
+    via: str
+    image: Optional[str] = None
+    host: Optional[str] = None
+    runner: Optional[str] = None
+    trust: Optional[str] = None
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def boundary(self) -> str:
+        return VIA_BOUNDARY.get(self.via, BOUNDARY_MACHINE)
+
+    @property
+    def crosses_boundary(self) -> bool:
+        return self.boundary != BOUNDARY_PROCESS
+
+
+#: The `[deploy]` keys this build reads. An unrecognized key is refused for the
+#: same reason an unknown `via` is: an operator who writes `hostkey` meaning
+#: `host_key` must not silently get an unpinned deploy.
+DEPLOY_KEYS = ("via", "image", "host", "runner", "trust")
+
+
+def parse_deploy_map(placement: Mapping) -> tuple[dict, Optional[str]]:
+    """Read every `[processes.<p>.deploy]` table out of an item-56 placement
+    mapping. Returns `(targets, None)` or `({}, diagnostic)`.
+
+    A placement with no `[deploy]` table anywhere parses to `{}` and is a
+    perfectly good deploy map: it says "every process is my own child", which is
+    exactly what `run_placement` does today. That back-compat is deliberate —
+    a deploy map is a placement map, byte-identical when nothing is remote.
+    """
+    processes = placement.get("processes") or {}
+    if not isinstance(processes, Mapping):
+        return {}, "placement `[processes]` is not a table"
+    targets: dict[str, DeployTarget] = {}
+    for pname in sorted(processes):
+        pconf = processes[pname] or {}
+        raw = pconf.get("deploy")
+        if raw is None:
+            continue
+        if not isinstance(raw, Mapping):
+            return {}, f"[processes.{pname}.deploy] is not a table"
+        unknown = sorted(set(raw) - set(DEPLOY_KEYS))
+        if unknown:
+            return {}, (
+                f"[processes.{pname}.deploy] has unrecognized key(s) "
+                f"{', '.join(repr(k) for k in unknown)}; this build reads "
+                f"{', '.join(DEPLOY_KEYS)}. A misspelled key is refused rather "
+                f"than ignored — an ignored key in a deploy map is an operator "
+                f"believing they configured something they did not.")
+        via = raw.get("via")
+        if via is None:
+            return {}, (
+                f"[processes.{pname}.deploy] gives no `via`; say which launch "
+                f"mechanism this target uses ({', '.join(KNOWN_VIA)})")
+        targets[pname] = DeployTarget(
+            process=pname, via=str(via),
+            image=(str(raw["image"]) if raw.get("image") is not None else None),
+            host=(str(raw["host"]) if raw.get("host") is not None else None),
+            runner=(str(raw["runner"]) if raw.get("runner") is not None else None),
+            trust=(str(raw["trust"]) if raw.get("trust") is not None else None),
+            raw=dict(raw))
+    return targets, None
+
+
+@dataclass(frozen=True)
+class DeployMapVerdict:
+    """The plan-time verdict on a whole deploy map.
+
+    `ok` is true only when EVERY target was admitted. There is no partial
+    admission: a deploy map that half-admits is a deploy that opens some
+    boundaries and then discovers it cannot open the rest, which is the
+    partial-deploy state §3 exists to avoid entering.
+    """
+
+    ok: bool
+    targets: dict
+    refusals: tuple
+    boundaries: dict
+
+    def render(self) -> list[str]:
+        lines: list[str] = []
+        for pname in sorted(self.targets):
+            target = self.targets[pname]
+            lines.append(
+                f"  deploy target {pname} via {target.via}: crosses the "
+                f"{target.boundary} boundary")
+        for refusal in self.refusals:
+            lines.append(
+                f"  deploy REFUSED [{refusal['rule']}] {refusal['process']}: "
+                f"{refusal['reason']}")
+        for boundary in sorted({t.boundary for t in self.targets.values()}):
+            lines.append(f"  teardown across the {boundary} boundary: "
+                         f"{teardown_promise(boundary)}")
+        return lines
+
+
+def _map_refusal(process: str, rule: str, reason: str) -> dict:
+    return {"process": process, "rule": rule, "reason": reason}
+
+
+def admit_deploy_map(placement: Mapping, *,
+                     seams: Optional[Mapping] = None) -> DeployMapVerdict:
+    """Admit a deploy map BEFORE any boundary is opened.
+
+    `seams` maps a process name to the seam keys it carries across a process
+    boundary (what `run_placement` already computes as a process's proxied +
+    served keys). It is not optional for a container target: a container target
+    must be PROVEN seam-free, and "the conductor did not tell me" is not a
+    proof. Omitting it refuses those targets rather than assuming the happy
+    case — this is the same shape as :func:`federation_admission` refusing an
+    unknown provider instead of skipping it.
+
+    Every refusal below is a refusal, not a downgrade. The ones that would
+    otherwise be tempting to soften:
+
+    * a **machine** boundary is refused outright. Not "best effort", not
+      "unpinned but warned". There is no landed cross-machine control plane
+      (no staged bundle, no remote ``deploy-admit``, no load-measured signed
+      receipt, no pinned SSH host key), and per :data:`TEARDOWN_PROMISE` there
+      is no teardown to promise across it either.
+    * a **container** target that carries a cross-boundary seam is refused with
+      the measured fact behind it, the same one
+      `sandbox_runtime.ContainerDriver.preflight` refuses on: the seam is a
+      Unix socket and a Unix socket does not cross a container bind mount
+      portably.
+    * a target that serves a **network** seam is refused, because the address it
+      binds is a contract other machines hold. `revl swap` already refuses to
+      re-tier a network provider for exactly this reason; a deploy that moved
+      one across a boundary would be that same re-tier by another route.
+    """
+    targets, error = parse_deploy_map(placement)
+    if error:
+        return DeployMapVerdict(False, {}, (_map_refusal("-", "map", error),), {})
+
+    processes = placement.get("processes") or {}
+    admitted: dict[str, DeployTarget] = {}
+    refusals: list[dict] = []
+
+    for pname in sorted(targets):
+        target = targets[pname]
+        pconf = processes.get(pname) or {}
+
+        if target.via not in KNOWN_VIA:
+            refusals.append(_map_refusal(
+                pname, "unknown-via",
+                f"`via = {target.via!r}` is not a launch mechanism this build "
+                f"implements ({', '.join(KNOWN_VIA)}). An unimplemented `via` "
+                f"is refused, never quietly run as a local child: the boundary "
+                f"the operator asked for would not be the boundary they got."))
+            continue
+
+        if target.boundary == BOUNDARY_MACHINE:
+            refusals.append(_map_refusal(
+                pname, "machine-boundary",
+                f"`via = {target.via}` crosses a MACHINE boundary, which this "
+                f"slice does not open. The cross-machine control plane is "
+                f"absent by design: no bundle staging, no remote `deploy-admit` "
+                f"runner, no load-measured signed COMMIT receipt for the "
+                f"conductor to compare, and no pinned SSH host key (without "
+                f"which impersonating the target costs sitting on the network "
+                f"path rather than owning the machine). Teardown across it "
+                f"promises nothing: {TEARDOWN_PROMISE[BOUNDARY_MACHINE]}"))
+            continue
+
+        if target.via == VIA_LOCAL:
+            stray = sorted(k for k in ("image", "host", "trust")
+                           if (target.raw or {}).get(k) is not None)
+            if stray:
+                refusals.append(_map_refusal(
+                    pname, "local-with-remote-fields",
+                    f"`via = local` is the conductor's own child process, but "
+                    f"the table also gives {', '.join(stray)}. Those describe a "
+                    f"boundary this target does not cross; a deploy map is "
+                    f"refused rather than run with half of it ignored."))
+                continue
+            admitted[pname] = target
+            continue
+
+        # --- from here: a target that crosses a boundary (container).
+        if pconf.get("address"):
+            addr = pconf["address"]
+            refusals.append(_map_refusal(
+                pname, "network-provider",
+                f"process {pname!r} serves a NETWORK seam "
+                f"({addr.get('host')}:{addr.get('port')}), and its address is a "
+                f"contract other machines already hold. Moving it across the "
+                f"{target.boundary} boundary is a re-tier of a network provider "
+                f"— the operation `revl swap` refuses for this exact reason — "
+                f"so a deploy map may not do it either. Deploy the process that "
+                f"CONSUMES the seam, or stand the provider up in its own "
+                f"placement."))
+            continue
+
+        if not target.trust:
+            refusals.append(_map_refusal(
+                pname, "no-trust-store",
+                f"a target across the {target.boundary} boundary needs `trust` "
+                f"(the signer trust store the far side verifies the attestation "
+                f"chain against). Without one there is nothing for `admit` to "
+                f"check the staged bytes against, and a deploy whose receiver "
+                f"cannot verify the chain is a copy, not a deploy."))
+            continue
+
+        if target.via == VIA_CONTAINER:
+            if not target.image:
+                refusals.append(_map_refusal(
+                    pname, "container-without-image",
+                    "`via = container` needs an `image`; an image resolved "
+                    "later turns a missing image into a dead child instead of "
+                    "a refusal."))
+                continue
+            if seams is None:
+                refusals.append(_map_refusal(
+                    pname, "seam-set-unknown",
+                    f"a container target must be PROVEN seam-free, and the "
+                    f"conductor supplied no seam set for {pname!r}. "
+                    f"\"Not told\" is not \"none\": the map refuses rather than "
+                    f"assuming the target carries no seam."))
+                continue
+            carried = sorted(seams.get(pname) or ())
+            if carried:
+                refusals.append(_map_refusal(
+                    pname, "container-seam",
+                    f"process {pname!r} is deployed into a container but "
+                    f"carries cross-boundary seam(s) ({', '.join(carried)}): "
+                    f"the seam is a Unix socket in the placement directory, and "
+                    f"a Unix socket does not cross a container bind mount "
+                    f"portably (measured non-functional in both directions on a "
+                    f"Docker Desktop bind mount; `sandbox_runtime` refuses the "
+                    f"same shape). The per-rung seam transport is the "
+                    f"prerequisite; until it lands a container target must be "
+                    f"seam-free. Co-locate {pname!r} with the process it talks "
+                    f"to, or deploy it `via = local`."))
+                continue
+            admitted[pname] = target
+            continue
+
+        refusals.append(_map_refusal(  # pragma: no cover — KNOWN_VIA is exhausted above
+            pname, "unhandled-via",
+            f"`via = {target.via!r}` is known but has no admission rule in this "
+            f"build; refusing rather than falling through."))
+
+    ok = not refusals
+    return DeployMapVerdict(
+        ok=ok,
+        targets=(admitted if ok else {}),
+        refusals=tuple(refusals),
+        boundaries={p: t.boundary for p, t in admitted.items()} if ok else {})
+
+
+# ---------------------------------------------------------------------------
+# §5b. a participant on the far side of a container boundary
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ContainerParticipant(ProcessParticipant):
+    """A :class:`Participant` running inside a container, spoken to over the
+    container's own stdio.
+
+    It is a :class:`ProcessParticipant` and nothing more, which is the finding:
+    the coordinated protocol §3 defines does not care what kind of boundary the
+    other end is behind, because it never held an inverse in the first place.
+    What the boundary changes is TEARDOWN, and that lives in
+    :data:`TEARDOWN_PROMISE`, not in the protocol.
+
+    `container` is the runtime's name for the container, so an operator (or an
+    incident) can find it, and so :meth:`stop` can force-remove one that `--rm`
+    did not reap.
+    """
+
+    container: str = ""
+    docker: str = "docker"
+
+    def stop(self) -> None:
+        super().stop()
+        # `--rm` normally reaps it; a wedged or killed container may survive,
+        # and a leaked container is a boundary nobody is watching any more.
+        if self.container:
+            try:
+                subprocess.run([self.docker, "rm", "-f", self.container],
+                               capture_output=True, timeout=30, check=False)
+            except (OSError, subprocess.SubprocessError):  # pragma: no cover
+                pass
+
+
+
+def _spec_paths_reachable(target: "DeployTarget", spec_path: Path,
+                          state_dir: Path) -> Optional[str]:
+    """Refuse a spec whose state paths will not exist inside the boundary.
+
+    Mounts are identity-mapped, so a path in the spec resolves inside the
+    container only if it resolves to the same string on this side. A spec that
+    names `/var/...` on a host where `/var` is a symlink to `/private/var` gets
+    a mount at the canonical path and a participant looking at the other one:
+    PREPARE succeeds (it reads nothing), and the participant dies MID-COMMIT
+    with a FileNotFoundError, which the conductor can only report as
+    `unresolved`. Turning that into a refusal before the boundary opens is the
+    same discipline as resolving the image up front.
+    """
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return (f"target {target.process!r}: the participant spec {spec_path} "
+                f"is unreadable ({error})")
+    for key in ("world", "wal"):
+        raw = spec.get(key)
+        if not raw:
+            return (f"target {target.process!r}: the participant spec names no "
+                    f"{key!r}; a participant across a boundary must own a "
+                    f"durable {key} inside the mounted state directory")
+        given = Path(str(raw))
+        resolved = given.resolve()
+        if str(given) != str(resolved):
+            return (
+                f"target {target.process!r}: the spec's {key} path {str(given)!r} "
+                f"is not canonical (it resolves to {str(resolved)!r}). Container "
+                f"mounts are identity-mapped, so a non-canonical path names a "
+                f"file that does not exist inside the boundary — and it would "
+                f"not fail until the participant tried to write it, mid-COMMIT, "
+                f"where the only verdict left is `unresolved`. Write canonical "
+                f"paths into the spec.")
+        if state_dir not in resolved.parents:
+            return (
+                f"target {target.process!r}: the spec's {key} path "
+                f"{str(resolved)!r} is outside the mounted state directory "
+                f"{str(state_dir)!r}, so it is not writable inside the boundary. "
+                f"The participant owns its world and its WAL; both live in the "
+                f"one read-write mount.")
+    return None
+
+
+def launch_container_participant(
+        target: DeployTarget, *, spec_path: Path | str, state_dir: Path | str,
+        participant_module: Optional[Path | str] = None,
+        docker: Optional[str] = None,
+        timeout: float = 30.0) -> tuple[Optional[ContainerParticipant], Optional[str]]:
+    """Open a container boundary and put one participant behind it.
+
+    Returns `(participant, None)` or `(None, diagnostic)`. A diagnostic is a
+    REFUSAL and the caller must not proceed: every way this can fail — no
+    runtime, an unreachable daemon, an image that does not resolve — is a
+    boundary that was not established, and Slice 1's rule that a declared
+    isolation is never downgraded to an unconfined process holds here too.
+
+    `state_dir` is mounted READ-WRITE and holds the participant's world file and
+    its WAL. That the conductor can also read that directory is what makes the
+    container boundary's teardown promise better than the machine boundary's:
+    when the container is destroyed the accumulator dies with it, but the WAL
+    is still on this filesystem and `recovery.py` can roll back what it
+    RECORDED. It does not make the destroyed container `rolled-back`.
+    """
+    from . import sandbox_runtime  # noqa: PLC0415 — optional, runtime-only
+
+    if target.via != VIA_CONTAINER:
+        return None, (f"target {target.process!r} is `via = {target.via}`, not "
+                      f"`{VIA_CONTAINER}`; this launcher opens container "
+                      f"boundaries only")
+    if not target.image:
+        return None, f"target {target.process!r} has no `image`"
+
+    exe = docker or shutil.which("docker")
+    if not exe:
+        return None, (
+            f"target {target.process!r} deploys into a container, but no "
+            f"container runtime is on PATH (`docker`). The boundary cannot be "
+            f"established, and a deploy never falls back to running the "
+            f"participant unconfined on the conductor's own kernel.")
+    rc, out, err = sandbox_runtime._run([exe, "version", "--format",
+                                         "{{.Server.Version}}"])
+    if rc != 0:
+        return None, (
+            f"target {target.process!r}: the container runtime is not usable "
+            f"(`{Path(exe).name} version` failed: "
+            f"{sandbox_runtime._tail(err) or sandbox_runtime._tail(out)}). Is "
+            f"the daemon running? The deploy refuses rather than opening a "
+            f"boundary it cannot see.")
+    if subprocess.run([exe, "image", "inspect", target.image],
+                      capture_output=True, timeout=timeout,
+                      check=False).returncode != 0:
+        pull = subprocess.run([exe, "pull", target.image], capture_output=True,
+                              text=True, timeout=max(timeout, 300), check=False)
+        if pull.returncode != 0:
+            return None, (
+                f"target {target.process!r}: image {target.image!r} is neither "
+                f"present locally nor pullable "
+                f"({sandbox_runtime._tail(pull.stderr)}). Pin an image that "
+                f"exists (by digest); the deploy refuses rather than launching "
+                f"into an image it could not resolve.")
+
+    module = Path(participant_module) if participant_module is not None else (
+        Path(__file__).resolve().parent / "_deploy_participant.py")
+    if not module.is_file():  # pragma: no cover — a broken checkout/wheel
+        return None, (f"the participant runner {module} is missing, so nothing "
+                      f"can be put behind the boundary")
+
+    spec_path = Path(spec_path).resolve()
+    state_dir = Path(state_dir).resolve()
+    spec_problem = _spec_paths_reachable(target, spec_path, state_dir)
+    if spec_problem:
+        return None, spec_problem
+    name = f"revl-deploy-{target.process}-{os.urandom(4).hex()}"
+    # Identity-mapped mounts (the same rule `sandbox_runtime` uses): a path the
+    # conductor wrote into the spec resolves to the same file inside. The
+    # participant runner and the spec are read-only; only the state directory
+    # the participant OWNS is writable.
+    mounts = [(str(state_dir), "rw"), (str(module), "ro")]
+    if spec_path.parent != state_dir:
+        mounts.append((str(spec_path.parent), "ro"))
+    env = {"isolation": VIA_CONTAINER, "image": target.image, "fs": [],
+           # the participant speaks stdio and owns a local file; it needs no
+           # network, and a deploy participant that could reach one would be a
+           # seam this boundary is refused for carrying.
+           "net": "none"}
+    argv = ([exe, "run"]
+            + sandbox_runtime.container_flags(env, name=name, mounts=mounts,
+                                              interactive=True)
+            + [target.image, "python3", str(module), str(spec_path)])
+    try:
+        process = subprocess.Popen(  # noqa: S603 — argv built above, no shell
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+    except OSError as error:
+        return None, (f"target {target.process!r}: could not start the "
+                      f"container ({error})")
+    return ContainerParticipant(identity=target.process, process=process,
+                                container=name, docker=exe), None
