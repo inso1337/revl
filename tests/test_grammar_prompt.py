@@ -1,8 +1,8 @@
 """The prompt-pinnable grammar artifact (roadmap item 346).
 
 `docs/syntax-2.0.prompt.txt` is meant for direct injection into an LLM
-authoring system prompt: dense, complete, and small (roughly a hundred
-lines). The content is duplicated as `grammar_summary.PROMPT_GRAMMAR` because
+authoring system prompt: dense, complete, and small. The content is duplicated
+as `grammar_summary.PROMPT_GRAMMAR` because
 `docs/` is not packaged into the wheel (pyproject.toml's wheel target only
 maps in `src/revl`, `backends/` and `stdlib/`) — this test is the drift guard between the two
 copies, and the CLI (`revl grammar --prompt`) reads the Python constant, never
@@ -29,9 +29,23 @@ def test_prompt_file_matches_the_shipped_constant():
     assert PROMPT_FILE.read_text() == PROMPT_GRAMMAR
 
 
-def test_prompt_grammar_is_roughly_a_hundred_lines():
-    lines = PROMPT_GRAMMAR.splitlines()
-    assert 60 <= len(lines) <= 145, f"{len(lines)} lines — outside the prompt budget"
+def test_prompt_grammar_fits_the_authoring_context_character_budget():
+    # Keep the injected grammar below 12,000 characters (~3,000 tokens at the
+    # usual four characters per token), leaving the rest of a 16k-token
+    # authoring context for instructions and the user's source.
+    budget = 12_000
+    size = len(PROMPT_GRAMMAR)
+    assert size <= budget, (
+        f"{size} characters — exceeds the 12,000-character grammar budget "
+        "for a 16k-token authoring context"
+    )
+
+
+def test_prompt_grammar_budget_allows_dense_growth_but_rejects_doubling():
+    budget = 12_000
+    dense_growth = PROMPT_GRAMMAR + "\n" + "\n".join("x" * 100 for _ in range(3))
+    assert len(dense_growth) <= budget
+    assert len(PROMPT_GRAMMAR + PROMPT_GRAMMAR) > budget
 
 
 def test_prompt_grammar_covers_every_construct_in_the_delta_grammar():
