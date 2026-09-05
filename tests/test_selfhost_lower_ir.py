@@ -305,6 +305,43 @@ def test_native_ir_infers_nominal_record_field_operands(lower_to_ir):
     assert native == reference
 
 
+@pytest.mark.parametrize("source", [
+    "fn caller(x: Int) -> Int { let f = later return f(x) + 1 }\n"
+    "pub fn later(x: Int) -> Int { return x }\n",
+    "fn caller(f: ((Int) -> Int) -> Int, g: (Int) -> Int) -> Int {\n"
+    "  return f(g) + g(1)\n"
+    "}\n",
+    "fn caller(f: () -> (() -> Int)) -> Int { return f()() + 1 }\n",
+    "type Handler = { run: () -> Int }\n"
+    "fn caller(h: Handler) -> Int { let f = h.run return f() + 1 }\n",
+])
+def test_native_ir_infers_callable_results(lower_to_ir, source):
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][-1]["expr"]["operands"] == "Int"
+    assert native == reference
+
+
+@pytest.mark.parametrize("actual,expected", [
+    ("Int", "Float"), ("Int32", "Float"), ("Int32", "Int"),
+])
+def test_native_ir_marks_numeric_return_widening(lower_to_ir, actual, expected):
+    source = f"fn widened(x: {actual}) -> {expected} {{ return x }}"
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][0]["expr"]["widen"] == expected
+    assert native == reference
+
+
+@pytest.mark.parametrize("body", [
+    "return Map.empty()",
+    "let m: Map[Str, Int] = Map.empty() return m",
+])
+def test_native_ir_lowers_empty_map(lower_to_ir, body):
+    source = f"fn empty_map() -> Map[Str, Int] {{ {body} }}"
+    assert json.loads(lower_to_ir(source))["functions"] == compile_source(source)["functions"]
+
+
 @pytest.mark.parametrize("modifiers", [
     "emission idempotent", "idempotent emission",
     "async emission idempotent", "idempotent emission[db] async",
