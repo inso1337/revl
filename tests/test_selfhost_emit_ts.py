@@ -8,7 +8,8 @@ This is the TypeScript instance of the self-host emit oracle — the exact shape
 tests/test_selfhost_emit_py.py. Two independent implementations of one lowering
 (the reference backend and its revl port) are forced to agree, and the agreement
 is the strongest kind an emitter can be held to: the emitted TypeScript source
-must be identical to the last byte. The reference is ground truth; any divergence
+must be identical to the last byte. The reference defines the byte contract for
+admitted corpus inputs; deferred shapes are audited separately rather than waived.
 is a defect in the slice.
 
 Navigation reads the IR in PURE revl through stdlib/value.rvl's ``value_*`` (item
@@ -182,6 +183,29 @@ CORPUS = [
     # astral-aware `revlCharCodeAt` redirect. Added red, exactly as on the py
     # tier: no ts corpus document called any of them.
     "classify.rvl",
+    "../../../backends/typescript/tests/fixtures/unique_writes.rvl",
+    "../../../bench/results/gpt-oss-20b-oneshot/03-user-cache/v1/attempt-1.rvl",
+    "../../../stdlib/str.rvl",
+    "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+    "../../../examples/java_match.rvl",
+    "../emit_wasm_corpus/forloop.rvl",
+    "../../../bench/codegen/python/programs/maps.rvl",
+    "../emit_wasm_corpus/builtins.rvl",
+    "../emit_py_corpus/floats.rvl",
+    "../emit_wasm_corpus/strlit.rvl",
+    "unique_writes.rvl",
+    "../../../bench/codegen/java/cases/map_keys/case.rvl",
+    "../../../stdlib/value.rvl",
+    "../emit_py_corpus/optionals.rvl",
+    # Corpus-first regressions: host property spelling, assertions and async
+    # calls from provide methods were absent from the original slice corpus.
+    "../emit_py_corpus/hostroots.rvl",
+    "../emit_java_corpus/control.rvl",
+    "../../../backends/typescript/tests/fixtures/async_http.rvl",
+    "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
+    "branch_edges.rvl",
+    "../emit_go_corpus/variants.rvl",
+    "../emit_py_corpus/services_method_effects.rvl",
 ]
 
 def _load_reference_emit():
