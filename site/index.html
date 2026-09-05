@@ -615,8 +615,8 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
       <div class="cc-head">quickstart</div>
       <pre><code><span class="t-prompt">$</span> git clone https://github.com/inso1337/revl && cd revl
 <span class="t-prompt">$</span> uv venv && uv pip install -e ".[test]"
-<span class="t-prompt">$</span> python -m revl compile examples/user_cache.rvl   <span class="tok-com"># source → checked IR</span>
-<span class="t-prompt">$</span> python -m revl mcp serve                         <span class="tok-com"># the compiler as an agent gate</span></code></pre>
+<span class="t-prompt">$</span> revl compile examples/user_cache.rvl   <span class="tok-com"># source → checked IR</span>
+<span class="t-prompt">$</span> revl mcp serve                         <span class="tok-com"># the compiler as an agent gate</span></code></pre>
     </div>
   </div>
 </section>
