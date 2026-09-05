@@ -141,11 +141,50 @@ def _boundary(ir: dict) -> dict:
         fns = list(fns.values())
     fn_caps_map = _emitting_capabilities(fns, ir.get("externs") or [])
 
+    def _collect_arrows(node, out):
+        # every `let <name> = (…) => …` binding in scope, keyed by the safe IR
+        # name the application's callee resolves to. A component/method body is
+        # a flat statement list plus nested arms, so one recursive pass finds
+        # them all regardless of position.
+        if isinstance(node, dict):
+            if node.get("step") == "let" and isinstance(node.get("value"), dict) \
+                    and node["value"].get("kind") == "arrow":
+                out[node.get("name")] = node["value"]
+            for value in node.values():
+                _collect_arrows(value, out)
+        elif isinstance(node, list):
+            for value in node:
+                _collect_arrows(value, out)
+
+    def _param_emission_methods(body, param):
+        # the emission methods called on `param` inside an arrow body — the
+        # receiver lowers to a `name` node bound to the parameter (`t.run(s)` ->
+        # target {name: t}), the same shape whether or not it is `emit`-marked
+        # (the marker leaves no residue on the node). Yields (method, node).
+        found = []
+
+        def walk(n):
+            if isinstance(n, dict):
+                tgt = n.get("target")
+                if n.get("kind") == "call" and isinstance(tgt, dict) \
+                        and tgt.get("kind") == "name" and tgt.get("id") == param:
+                    found.append(n.get("method"))
+                for v in n.values():
+                    walk(v)
+            elif isinstance(n, list):
+                for v in n:
+                    walk(v)
+
+        walk(body)
+        return found
+
     report: dict[str, dict] = {}
     for comp in ir.get("components") or []:
         stats = {"emissions": set(), "compensated": 0, "awaits": 0, "capabilities": {}}
+        arrow_defs: dict = {}
+        _collect_arrows(comp.get("body") or [], arrow_defs)
 
-        def walk_expr(node, comp=comp, stats=stats):
+        def walk_expr(node, comp=comp, stats=stats, arrow_defs=arrow_defs):
             if isinstance(node, dict):
                 target = node.get("target")
                 if node.get("kind") == "call" and isinstance(target, dict) and target.get("kind") == "req":
@@ -181,6 +220,43 @@ def _boundary(ir: dict) -> dict:
                                 declared = spec.get("capabilities")
                                 stats["capabilities"][label] = (
                                     sorted(declared) if declared is not None else ["*"])
+                # the arrow-parameter seam (GHSA-wg4v-r47x-52p2 residual): a
+                # provision handed in as an argument to a local arrow whose
+                # parameter is service-typed crosses the boundary through the
+                # parameter. Resolve the crossing to the provision's key +
+                # spawned service method — the same label the direct spelling
+                # `w.<key>.<method>` produces — so a granted-service emission
+                # routed through a service-typed arrow parameter is enumerated
+                # at C's boundary, matching the G4 marker demand at compile.
+                callee = node.get("callee")
+                if node.get("kind") == "call" and isinstance(callee, dict) \
+                        and callee.get("kind") == "name" \
+                        and callee.get("id") in arrow_defs:
+                    arrow = arrow_defs[callee["id"]]
+                    svc_params = arrow.get("service_params") or {}
+                    params = arrow.get("params") or []
+                    call_args = node.get("args") or []
+                    for i, param in enumerate(params):
+                        service = svc_params.get(param)
+                        if service is None or i >= len(call_args):
+                            continue
+                        arg = call_args[i]
+                        if not (isinstance(arg, dict)
+                                and arg.get("kind") == "instance-get"):
+                            continue
+                        key = arg.get("key")
+                        svc_name = arg.get("service") or service
+                        methods = (((ir.get("services") or {}).get(svc_name) or {})
+                                   .get("methods") or {})
+                        for mname in _param_emission_methods(arrow.get("body"), param):
+                            spec = methods.get(mname) or {}
+                            if not spec.get("emission"):
+                                continue
+                            label = f"{key}.{mname}"
+                            stats["emissions"].add(label)
+                            declared = spec.get("capabilities")
+                            stats["capabilities"][label] = (
+                                sorted(declared) if declared is not None else ["*"])
                 for value in node.values():
                     walk_expr(value)
             elif isinstance(node, list):
