@@ -17,6 +17,7 @@ closed it is taken away.
 """
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -139,3 +140,24 @@ def test_every_recorded_blind_spot_carries_a_reason(tool):
                 f"{tier}: `{reason}` is not a reason, it is a label")
             assert constructs, f"{tier}: reason with no constructs: {reason}"
 
+
+def test_generic_baseline_cannot_masquerade_as_closure(tool, monkeypatch, tmp_path):
+    ledger = {tier: {"blind": {"NOT TRIAGED": ["kind=lit"]},
+                     "unported": {"deliberate decision": ["kind=var"]}}
+              for tier in TIERS}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(tool, "LEDGER", path)
+    problems = tool.check({tier: {"blind": [], "unported": []} for tier in TIERS})
+    assert any("generic reason" in problem for problem in problems)
+
+
+def test_construct_closure_rejects_duplicates_and_missing_tiers(tool, monkeypatch, tmp_path):
+    ledger = {"py": {"blind": {"specific decision": ["kind=lit"]},
+                      "unported": {"another decision": ["kind=lit"]}}}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(tool, "LEDGER", path)
+    problems = tool.check({"py": {"blind": [], "unported": []}})
+    assert any("classified more than once" in problem for problem in problems)
+    assert any("missing construct ledger tier" in problem for problem in problems)
