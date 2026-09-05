@@ -5,6 +5,8 @@ type Switch = Enabled(Int) | Disabled
 
 fn empty() {}
 fn bare() { return }
+fn empty_string() -> Str { return `` }
+fn __(____: Int) -> Int { return ____ }
 fn bytes(x: Bytes) -> Bytes { return x }
 fn widen(x: Int) -> Float { return x }
 fn double(x: Int) -> Int { return x }

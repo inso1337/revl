@@ -624,8 +624,23 @@ def _metadata_lit(value: object) -> str:
     if isinstance(value, float):
         return f"{value}d"
     if isinstance(value, list):
-        return "java.util.List.of(" + ", ".join(_metadata_lit(v) for v in value) + ")"
+        items = ", ".join(_metadata_lit(v) for v in value)
+        if any(v is None for v in value):
+            return (
+                "java.util.Collections.unmodifiableList("
+                f"java.util.Arrays.<Object>asList({items}))"
+            )
+        return "java.util.List.of(" + items + ")"
     if isinstance(value, dict):
+        if any(v is None for v in value.values()):
+            puts = " ".join(
+                f"put({_string(k)}, {_metadata_lit(v)});" for k, v in value.items()
+            )
+            return (
+                "java.util.Collections.unmodifiableMap("
+                "new java.util.LinkedHashMap<String, Object>() {{ "
+                f"{puts} }}}})"
+            )
         entries = ", ".join(
             f"{_string(k)}, {_metadata_lit(v)}" for k, v in value.items()
         )
@@ -5933,7 +5948,6 @@ def _main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_main(sys.argv))
-
 
 
 

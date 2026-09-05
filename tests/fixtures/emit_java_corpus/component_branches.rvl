@@ -7,7 +7,9 @@ component Branches requires sink: Sink provides empty: Empty {
     count: Int, small: Int32, ratio: Float, enabled: Bool,
     defaultRatio: Float = 1.5, defaultEnabled: Bool = false
   }
-  intercept sink with { enabled: false, ratio: 2.5 }
+  intercept sink with { enabled: false, ratio: 2.5, absent: null }
+  effect seed() undo seed()
+  emit sink.send("start") compensate sink.send("stop")
   if (config.enabled) {
     fail "yes"
   } else {
@@ -24,13 +26,23 @@ component Terminal {
 
 service BackgroundApi {
   emission fn run()
+  fn limit() -> Int
+  fn first() -> Int
 }
-component Background provides background: BackgroundApi {
+service Ready {
+  async fn ready() -> Str
+  fn cells() -> List[Int]
+}
+component Background requires ready: Ready provides background: BackgroundApi {
+  config { limit: Opt[Int] }
   let job = effect Job.run("background") undo Job.run("stop")
   await Job.run("foreground")
+  await ready.ready()
   provide background {
     fn run() {
       effect job.run("start") undo job.run("stop")
     }
+    fn limit() = config.limit ?? 0
+    fn first() = ready.cells()[0]
   }
 }
