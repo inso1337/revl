@@ -70,7 +70,7 @@ import sys
 from dataclasses import dataclass, replace
 
 from ..admit_profile import AdmissionProfile
-from ..compiler import compile_files, compile_source
+from ..compiler import compile_files, compile_source, escaping_use_path
 from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
 from . import fillspec
@@ -248,11 +248,12 @@ def _escaping_use(path: str) -> bool:
     the one the operator sanctioned — or, when nothing sits there, through the
     OPERATOR's own search path (`REVL_IMPORT_PATH`, then the installed stdlib),
     which is why `use "stdlib/str.rvl"` keeps working untouched.
+
+    The predicate itself is `compiler.escaping_use_path`, shared with the
+    in-compiler admission confinement that covers the library doors
+    (`Session.admit`, `Gate.propose`), so both refuse the same shapes.
     """
-    if os.path.isabs(path):
-        return True
-    normalized = os.path.normpath(path)
-    return normalized == ".." or normalized.startswith(".." + os.sep)
+    return escaping_use_path(path)
 
 
 def _transport_use_escapes(arguments: dict) -> list[str]:
