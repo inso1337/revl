@@ -15,6 +15,8 @@ this oracle's slice, not byte agreement.
 
 --select-cover traces both emitters and greedily selects extra AGREEING documents
 by their union of reached statements beyond the oracle's own CORPUS list.
+For WASM, documents with component output are retained in survey results but
+excluded from automatic selection because the oracle compares only ``functions``.
 Reference and emitted-port line identities are separate; port source-line
 provenance is not available. Suggestions never edit corpora or ledgers.
 
@@ -132,16 +134,25 @@ def compare(ir: dict, tier: str, reference, port) -> dict:
     return result
 
 
+def selection_exclusion(tier: str, ir: dict) -> str | None:
+    """Explain why a successful survey row cannot provide selection evidence."""
+    if tier == "wasm" and ir.get("components"):
+        return "wasm_functions_projection_discards_component_output"
+    return None
+
+
 def select_cover(rows: list[dict], baseline: list[dict]) -> dict:
     """Deterministic greedy set cover, with lexical tie-breaking (not optimal)."""
     def reached(row):
         return {(side, number) for side, numbers in row["reached"].items()
                 for number in numbers}
 
-    covered = set().union(*(reached(row) for row in baseline)) if baseline else set()
+    covered = set().union(*(reached(row) for row in baseline
+                            if not row.get("selection_excluded"))) if baseline else set()
     initial = len(covered)
     candidates = {row["document"]: reached(row) for row in rows
-                  if row["status"] == "byte_agreement" and not row["in_corpus"]}
+                  if row["status"] == "byte_agreement" and not row["in_corpus"]
+                  and not row.get("selection_excluded")}
     selected = []
     while candidates:
         name = min(candidates, key=lambda n: (-len(candidates[n] - covered), n))
@@ -210,6 +221,9 @@ def survey(tiers=None, documents=None, *, select=False) -> dict:
                            else compare(ir, tier, references[tier], ports[tier]))
                 row = {"tier": tier, "document": identity,
                        "in_corpus": document in corpus[tier], **outcome}
+                excluded = selection_exclusion(tier, ir) if isinstance(ir, dict) else None
+                if excluded:
+                    row["selection_excluded"] = excluded
                 contexts.append((context, row))
                 if document in requested:
                     results.append(row)
