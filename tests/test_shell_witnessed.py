@@ -99,9 +99,11 @@ def test_every_named_witnessed_op_exists_in_the_fs_catalog():
 # ---------------------------------------------------------------------------
 
 def test_shell_module_sh_is_a_plain_emission():
-    from revl.compiler import compile_source
-
-    ir = compile_source((_ROOT / "stdlib" / "shell.rvl").read_text(), "shell.rvl")
+    # shell.rvl's `sh` @py body imports a backend module (revl_shell_host), which
+    # the #302 confinement refuses for a context-free / user-origin compile. It is
+    # first-party stdlib, so compile it through the stdlib-aware path (its real
+    # path under stdlib_root()) where the install-origin exemption applies.
+    ir = compile_files([str(_ROOT / "stdlib" / "shell.rvl")])
     sh = next(e for e in ir["externs"] if e["name"] == "sh")
     assert sh["class"] == "emission"
     # a plain emission carries no declared `undo` — nothing transactional.
@@ -109,9 +111,9 @@ def test_shell_module_sh_is_a_plain_emission():
 
 
 def test_shell_classify_is_pure():
-    from revl.compiler import compile_source
-
-    ir = compile_source((_ROOT / "stdlib" / "shell.rvl").read_text(), "shell.rvl")
+    # compile via the stdlib-aware path so the #302 backend-import exemption for
+    # first-party stdlib applies (see test_shell_module_sh_is_a_plain_emission).
+    ir = compile_files([str(_ROOT / "stdlib" / "shell.rvl")])
     cl = next(e for e in ir["externs"] if e["name"] == "classify")
     assert cl["class"] == "pure"
 
