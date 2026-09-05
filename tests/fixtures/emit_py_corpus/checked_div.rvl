@@ -1,0 +1,19 @@
+// docs/arithmetic.md's TOTAL division forms (self-host port, item 391):
+// `checked_div_trunc` / `checked_div_floor` / `checked_div_euclid` /
+// `checked_mod`. A pure fn cannot `fail`, so a zero divisor travels as
+// `Err(reason)` — which means the emitted module needs BOTH the per-form
+// `_revl_checked_*` preamble helper AND the built-in `Ok`/`Err` classes the
+// helper constructs. `selfhost/lower.rvl` already lowered these as `builtin`
+// nodes, but no corpus document called one, so the emit oracle stayed green
+// while `selfhost/emit_py.rvl` rendered `<<UNSUPPORTED-BUILTIN:...>>` and
+// emitted no helper at all: the self-host emitted a module that does not run.
+fn safe_trunc(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_trunc(b) }
+fn safe_floor(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_floor(b) }
+fn safe_euclid(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_euclid(b) }
+fn safe_mod(a: Int, b: Int) -> Result[Int, Str] { return a.checked_mod(b) }
+
+// A call site that consumes the Result, so the Ok/Err classes are reached by a
+// `match` as well as by the helper bodies.
+fn quotient_or(a: Int, b: Int, fallback: Int) -> Int {
+  return match a.checked_div_trunc(b) { Ok(q) => q, Err(e) => fallback }
+}

@@ -173,6 +173,12 @@ def test_dynamic_realm_label_is_refused():
         compile_source(_consumer("isolate db in realms(w1, w2)"), "dyn.rvl")
 
 
+@pytest.mark.parametrize("label", ["bad\\\\label", "../escape", "é"])
+def test_realm_label_namespace_syntax_is_refused(label):
+    with pytest.raises(RevlError, match="invalid realm label"):
+        compile_source(_consumer(f'isolate db in realm("{label}")'), "bad-label.rvl")
+
+
 # ------------------------------------------------------- semantic rejections
 
 

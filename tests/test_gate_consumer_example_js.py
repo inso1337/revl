@@ -360,11 +360,41 @@ def test_every_rejection_is_a_real_reference_refusal(records):
         assert record["message"] == ref_message, record["name"]
 
 
+# The one frontier trigger a candidate can still demonstrate.
+#
+# `digit_tool.rvl` used to be the batch's `outside-frontier` arm: it calls
+# `.is_digit()`, a reference stdlib builtin the self-host lowering did not carry,
+# so the packaged gate's GENERATED frontier table declined to decide it. Item 391
+# ported that builtin (and every other one the table named), which emptied both
+# lexical rows. What is left is the SIZE bound, exercised here with an oversized
+# candidate written beside the committed ones rather than committed at 256 KB.
+def _max_source_bytes() -> int:
+    src = (ROOT / "crates" / "revl-gate" / "src" / "frontier.rs").read_text(
+        encoding="utf-8")
+    return int(re.search(r"MAX_SOURCE_BYTES: usize = (\d+);", src).group(1))
+
+
 @needs_js
-def test_escalations_cover_both_non_refusing_arms(records):
+def test_escalations_cover_both_non_refusing_arms(packaged):
     """A consumer that only ever saw `no-objection` would not learn that
     `outside-frontier` exists and is equally not an acceptance."""
-    arms = {r["kind"] for r in records["results"] if r["decision"] == "ESCALATE"}
+    bound = _max_source_bytes()
+    # a source over the bound that the REFERENCE admits: one tiny `fn` behind a
+    # comment long enough to cross it. Admitted-by-the-reference is the point —
+    # the gate declining it is a frontier gap, not a refusal.
+    # a directory of its own, so the shared `records` batch (and every test that
+    # reads it) still sees exactly the committed candidate set
+    batch_dir = packaged["project"] / "candidates_frontier"
+    batch_dir.mkdir(exist_ok=True)
+    for path in CANDIDATES.glob("*.rvl"):
+        shutil.copy(path, batch_dir / path.name)
+    (batch_dir / "oversized_tool.rvl").write_text(
+        "// " + ("padding " * (bound // 8 + 8))
+        + "\nfn id(x: Int) -> Int { return x }\n", encoding="utf-8")
+    proc = _node(packaged, "prefilter.mjs", "candidates_frontier/", "--json")
+    assert proc.returncode == 0, proc.stderr
+    batch = json.loads(proc.stdout)
+    arms = {r["kind"] for r in batch["results"] if r["decision"] == "ESCALATE"}
     assert {"no-objection", "outside-frontier"} <= arms, sorted(arms)
 
 

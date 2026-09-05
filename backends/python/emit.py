@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import copy
 import keyword
+import math
 import re
 import textwrap
 from typing import Any, Optional
@@ -112,6 +113,21 @@ _CONTEXT_MEMBERS = {
 
 class EmitError(ValueError):
     """The IR document cannot be lowered by this backend."""
+
+
+def _finite_float(value):
+    """The literal's value, refused when a `Float` is not finite (issue #312).
+
+    A non-finite `Float` has no literal spelling in revl and no uniform one
+    across the tiers — the host repr renders `inf`, which is an UNBOUND NAME
+    in this target's source, not a number. The frontend refuses such a literal
+    at the checker (`typecheck._reject_float_literal_range`), so this is the
+    backend's own belt: an IR handed straight to the emitter still cannot make
+    it print a name nothing binds.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EmitError(f"non-finite Float literal {value!r} has no representation in this tier")
+    return value
 
 
 # Dispatcher conformance (roadmap item 76a). This file carries TWO expression
@@ -1234,7 +1250,7 @@ class _ComponentEmitter:
             # `Map.empty()` (docs/stdlib-2.0.md §Map)
             return "{}"
         if kind == "lit":
-            return repr(expr.get("value"))
+            return repr(_finite_float(expr.get("value")))
         if kind == "name":
             return _ident(expr.get("id"), f"{where}: name")
         if kind == "config":
@@ -3027,7 +3043,7 @@ def _expr(node: dict) -> str:
         return f"float({_expr(inner)})"
     kind = node["kind"]
     if kind == "lit":
-        return repr(node["value"])
+        return repr(_finite_float(node["value"]))
     if kind == "adt":
         # tagged ADT value: `Case(payload)` / `Case()`. The case class is
         # either a user variant (emitted by _emit_types) or the built-in

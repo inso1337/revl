@@ -74,7 +74,7 @@ reuses the gauntlet verbatim, then adds the substrate battery:
 | `passed` | admissible, and every substrate probe returned cleanly | eligible |
 | `trapped` | admissible, but a probe **trapped in the sandbox** — contained, host untouched | **not** eligible |
 | `rejected` | admission refused; the candidate never reached the substrate | — |
-| `deferred` | no Str-surface boundary function (the aggregate follow-on) | — |
+| `deferred` | no canonical-ABI-emittable boundary function: every boundary signature carries a type the canonical boundary still cannot lower (Float, Map, resource, function-value) | — |
 | `unavailable` | `wasm-tools`/`wasmtime` absent; grade + lowering still ran | — |
 
 A `trapped` verdict is the tier's whole point: the candidate's fault would have
@@ -133,18 +133,19 @@ nothing to fail on), `1` when it was trapped or rejected, and — with
 `--require-runtime` — `3` when the toolchain is absent so the candidate could
 not actually be proven.
 
-## Scope: Str-surface this slice, aggregates next
+## Scope: what the boundary carries
 
-The canonical ABI slice that landed (41-3) presents the pure functions whose
-**whole signature is `Str`** — one `Str`-taking, `Str`-returning function is the
-minimal standard component a host loads and runs. So this tier targets the
-**Str-surface candidate**: a common untrusted-transform shape (sanitizers,
-formatters, templaters, redactors).
+The canonical ABI presents the pure functions whose whole signature (params and
+result) is canonically representable: scalars (`Int` / `Bool` / `Str`),
+**records, lists, and variants / `Opt` / `Result`**. The aggregate follow-on
+landed; `canonical_aggregates.core.wat` and its `.wit` are committed goldens.
+So this tier presents any such candidate, not only the `Str`-surface shape
+(sanitizers, formatters, templaters, redactors) it started with.
 
-A candidate that needs **records / lists / variants across the quarantine
-boundary** cannot yet be lowered — those types lift/lower at the canonical
-boundary in a **follow-on slice**, gated on the parallel aggregate canonical
-work. Such a candidate is reported `deferred` with a reason that names the
-follow-on. It is **refused honestly, never faked** through a boundary that
-cannot carry it — the same discipline the canonical emitter itself uses when it
-leaves a non-`Str` function off the component interface.
+What is still un-lowerable at the canonical boundary is **Float, Map, resource
+handles and function-values**. A candidate whose EVERY boundary signature
+carries one of those has no function to present, and is reported `deferred`
+with a reason that names the type. It is **refused honestly, never faked**
+through a boundary that cannot carry it, the same discipline the canonical
+emitter uses when it leaves an un-lowerable function off the component
+interface (`backends/wasm/canonical.py`, `src/revl/mcp/quarantine.py`).

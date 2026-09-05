@@ -107,6 +107,8 @@ python3 emit.py ../../examples/user_cache.ir.json > Components.java
 javac -cp cordis4j-core.jar Components.java
 ```
 
-The stubs are the emitter's declared API assumption — validating them
-against the real cordis4j jar (and porting the A1/G7 runtime scenarios) is
-tracked in docs/v2.0-roadmap.md.
+The stubs are the emitter's declared API assumption, and they are validated
+against the real thing: `test_runtime_scenarios_on_real_cordis4j` in
+`backends/java/test_emit_java.py` drives the A1/G7 runtime scenarios, and CI's
+`backend-java` job clones cordis4j and compiles `cordis4j-core` from source on
+every push.

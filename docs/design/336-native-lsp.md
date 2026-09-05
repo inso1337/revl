@@ -1,6 +1,10 @@
 # 336. Native single-binary tooling (LSP + checker as a rust binary)
 
-Status: DESIGN. Doc only. Depends on item 332 (embeddable-gate API) and
+Status: PARTLY IMPLEMENTED. Slices 1 and 2 ship as `crates/revl-lsp`, against
+the `crates/revl-gate` crate this note treats as absent; `crates/revl-lsp/README.md`
+is the current account of what is native and what is not. Slice 3 is still gated on
+item 391. The §"Honest status" block below carries the same correction inline.
+Originally: DESIGN, doc only. Depends on item 332 (embeddable-gate API) and
 native-run on rust (item 266/270/278 lineage). Reference source this design is
 grounded in: `src/revl/lsp/` (the Python LSP the binary must match),
 `selfhost/*.rvl` (the front end the binary embeds), `backends/rust/emit.py`
@@ -159,22 +163,30 @@ exactly that.
 
 ### Honest status
 
-332 is `◑ PY IMPL LANDED`: the PYTHON library facade (`src/revl/gate.py`)
-exists and is tested, but its own status line and `gate_version().frontier`
-record that the rust `revl-gate` crate is DEFERRED and NOT built ("A native
-(rust) layer-1 gate is a separate, larger deliverable (the `revl-gate` crate)
-and is NOT part of this module", gate.py:26-28). Therefore:
+> **Superseded in part.** This section was written when 332 was python-only.
+> `crates/revl-gate` has since landed, generated from the self-host sources by
+> `tools/build_gate_crate.py`, and `crates/revl-lsp` slices 1 and 2 ship against
+> it. The first blocker below is resolved; the second is not. The current status
+> lives in `crates/revl-lsp/README.md`, which is written against what the binary
+> actually does.
 
-- **Blocked on 332's rust half.** 336 cannot ship a binary that "depends only
-  on the published crate" until the crate exists. Until then, 336 can only
-  inline the emitted self-host directly into the binary (the bench-harness
-  path), which duplicates the packaging 332 owns and should be treated as a
-  temporary integration, not the deliverable.
-- **Blocked on a widened verdict shape.** Even with the py 332 landed, the
-  positioned/multi-error diagnostic the LSP needs is not on 332's surface yet
-  (above). 336 must drive that addition, and it belongs on 332's tier-agnostic
-  boundary (so the wasm gate in 335 inherits it) rather than being invented
-  privately inside the LSP binary.
+332 was `◑ PY IMPL LANDED` when this was written: the PYTHON library facade
+(`src/revl/gate.py`) existed and was tested, while the rust `revl-gate` crate
+was deferred and not built. Therefore:
+
+- ~~**Blocked on 332's rust half.**~~ **Resolved.** `crates/revl-gate` exists and
+  the binary depends on it (`revl_gate::symbols` answers `definition` and the
+  signature half of `hover` with no interpreter on the path). No inlining of the
+  emitted self-host was needed.
+- **Blocked on a widened verdict shape.** STILL TRUE. The positioned,
+  multi-error diagnostic the LSP needs is not on 332's surface: `revl.gate`
+  exports `admit` / `admit_into` / `compile_to` / `gate_version` and no
+  `diagnose`, and the crate's non-refusing arm is `NoObjection`, which says only
+  that this gate found nothing it could refuse. So the checker in
+  `crates/revl-lsp` is still the reference front end, forwarded verbatim, and a
+  native refusal is ADDED to the publish rather than replacing it. 336 must drive
+  that addition, and it belongs on 332's tier-agnostic boundary (so the wasm gate
+  in 335 inherits it) rather than being invented privately inside the LSP binary.
 
 ---
 
