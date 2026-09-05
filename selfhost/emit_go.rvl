@@ -1570,6 +1570,9 @@ pub fn emit_src(ir: Any) -> Str {
   // 434 (f)), so read them off the rendered lines rather than re-deriving the
   // inference in the structural `collect_flags` pass.
   var module_reserved = collect_reserved(types, Map.empty())
+  for (type_name of value_keys(types)) {
+    module_reserved = module_reserved.set(v3_ident(type_name), "1")
+  }
   module_reserved = collect_reserved(functions, module_reserved)
   module_reserved = collect_reserved(externs, module_reserved)
   var strings_alias = "strings"
