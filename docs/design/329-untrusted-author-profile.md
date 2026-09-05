@@ -81,6 +81,41 @@ as `demo/evolve_bridge.propose` never swaps synchronously. The crossing is
 additive-only: a turn that would replace a running component is refused (hot-swap
 is a separate, operator-gated verb).
 
+## Admission confinement of `use` (library doors)
+
+The profile bounds what an untrusted turn may declare and reach; it also has
+to bound what the compile itself touches on the turn's behalf. A `use` path is
+followed by the loader: `_ModuleLoader.resolve_use` joins it to the importing
+directory and parses whatever sits there, so for an untrusted author every
+`use "<path>"` was a probe of the admitting process's filesystem, and the
+refusal handed back as the verdict said whether the path exists and what it
+starts with. The MCP transport refused these shapes at its dispatch layer
+(roadmap 425 F2) for source that arrived over the wire; the library doors that
+admit the same source with no transport in front of them (`Session.admit` and
+the in-language `admit` crossing, `Gate.propose`, `compile_under_authoring`
+called as a library) compiled under the profile and followed the path.
+
+The confinement now lives in the compile, keyed on `profile.untrusted`, the
+one fact every door already states (`_ModuleLoader._confine_use`). Under an
+untrusted profile a `use` written in an in-memory module (the admitted root,
+or a `modules=` entry supplied beside it) may not name an absolute path or
+traverse upward out of the admitting directory. The refusal runs before any
+stat or read, so it is byte-identical whether or not the file exists. What
+keeps working: a path the caller also supplies in-memory (resolved from the
+sources map, no filesystem involved), the search-path spelling of an
+installed module (`use "stdlib/str.rvl"`, or a `REVL_IMPORT_PATH` entry), a
+relative import that stays inside the admitting directory, and every import
+written in a file read from disk, which a human put there. A trusted author's
+compile of the same source (`profile=None`, the CLI, `over_the_transport=
+False`) is untouched. The transport predicate `_escaping_use` delegates to
+`compiler.escaping_use_path`, so the two doors cannot drift apart. Evidence:
+`tests/test_admission_use_confinement.py`.
+
+The same change normalises `_ModuleLoader`'s sources keys to abspath. Lookups
+were already by abspath, so a relative key never matched and the loader fell
+through to the on-disk file of the same name, admitting text the caller never
+submitted (`gate_service.admit` passed its keys through verbatim).
+
 ## DEFERRED — the wasm-import path (item 45's confinement)
 
 The no-extern cut forbids host code for the untrusted author. The fuller answer
