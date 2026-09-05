@@ -229,7 +229,8 @@ def test_match_edges_runtime(emitted, reference, tmp_path, side):
         '  if scalar_wildcard(1) != 42 || record_wildcard(Box{Value: 2}) != 43 || '
         'list_wildcard([]int64{3}) != 44 || constructed(9) != 9 || '
         'discarded(TreeNode{Value: 4}) != 45 || inverted(0) != -1 || '
-        'escaped() != "a\\nb\\tcd\\u00e9" { t.Fatal("match edge result") }\n'
+        'escaped() != "a\\nb\\tcd\\u00e9" || '
+        'astral() != "\\U0001f600" { t.Fatal("match edge result") }\n'
         '}\n',
         encoding="utf-8",
     )
@@ -254,6 +255,8 @@ func TestAccumulatorHygiene(t *testing.T) {
     xs := []string{"a", "b"}
     if got := reserved(xs); got != "xx" { t.Fatalf("reserved: %q", got) }
     if got := shadowed(xs); got != "!!" { t.Fatalf("shadowed: %q", got) }
+    if got := appendSelf(0); got != "x" { t.Fatalf("appendSelf(0): %q", got) }
+    if got := appendSelf(3); got != "xxxxxxxx" { t.Fatalf("appendSelf(3): %q", got) }
 }
 """
     for name, source in (("reference", reference.emit(ir)),
@@ -285,6 +288,11 @@ def test_arrow_container_parameter_inference_runtime(emitted, reference, tmp_pat
         '  if listArrow()[0] != 3 { t.Fatal("list arrow") }\n'
         '  if recordArrow().Value != 4 { t.Fatal("record arrow") }\n'
         '  if nestedArrow()[0][0] != 5 { t.Fatal("nested arrow") }\n'
+        '  if constantArrow() != 1 { t.Fatal("constant arrow") }\n'
+        '  if reverseArrow() != 3 { t.Fatal("reverse arrow") }\n'
+        '  if callField() != 4 { t.Fatal("call field") }\n'
+        '  callback := func(xs []int64, n int64) int64 { return xs[0] + n }\n'
+        '  if nestedCallback(callback, []int64{6}) != 7 { t.Fatal("callback") }\n'
         '}\n',
         encoding="utf-8",
     )

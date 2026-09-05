@@ -219,7 +219,9 @@ def test_selfhosted_emitter_output_scaffold(emitted):
     assert src.endswith(")\n")
 
 
-@pytest.mark.parametrize("rel", ["widening.rvl", "folding.rvl", "variants.rvl", "scratch_names.rvl"])
+@pytest.mark.parametrize("rel", [
+    "widening.rvl", "folding.rvl", "variants.rvl", "scratch_names.rvl", "residuals.rvl",
+])
 def test_supported_corpus_compiles_as_wasm(emitted, reference, tmp_path, rel):
     compiler = shutil.which("wat2wasm")
     if compiler is None:

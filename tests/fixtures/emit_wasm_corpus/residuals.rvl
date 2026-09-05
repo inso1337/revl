@@ -12,6 +12,7 @@ fn inferredSome() -> Int {
   let value = Some(4)
   return 3
 }
+fn bareSome() { Some(1) }
 fn elseControl(n: Int) -> Int {
   var i = n
   while (i > 0) {
