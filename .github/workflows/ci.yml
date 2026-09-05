@@ -218,6 +218,11 @@ jobs:
       # the other generated-artifact gates. Emit-only + self-host are pure
       # Python, so this needs no backend toolchain and runs here.
       - run: python3 tools/conformance.py --check-readme
+      - run: python3 tools/selfhost_coverage.py --check
+      # Issue #301: differential oracles only prove the constructs their corpus
+      # spells. Keep a named reach report for every oracle, including lower_ir and
+      # compile, so a new reference construct cannot hide behind a green oracle.
+      - run: python3 tools/oracle_construct_reach.py --check
       # issue #255: five docs carried source-derived content (the MCP verb
       # table, the CLI subcommand list, the guarantee tables, the DOC-STATUS
       # inventory, a test count) with nothing to keep them honest, and the one
