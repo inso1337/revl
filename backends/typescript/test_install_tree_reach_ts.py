@@ -77,6 +77,24 @@ pub extern pure fn base(s: Str) -> Str
 test "getBuiltinModule" { assert base("/a/b.txt") == "b.txt" }
 """
 
+# A body that only NAMES `createRequire`/`require(...)` in a comment to say it is
+# NOT using them, while actually taking the sanctioned #382 door. This is the
+# shape of the `examples/ts_host_body.rvl` conformance case; the scan must scrub
+# comments, so it must NOT fire. (A `//`-comment inside a URL string must also
+# not confuse the scrubber, hence the `https://` literal.)
+_COMMENT_MENTION_ONLY = """
+pub extern pure fn scope() -> Str
+  = @ts {
+      // `createRequire` is NOT in scope here, and require("../x.ts") is refused.
+      /* nor a block-comment require("somepkg") mention */
+      const os = process.getBuiltinModule("node:os")
+      const u = "https://example.test/a//b"
+      return typeof os.EOL === "string" ? "ESM " + u : "CJS"
+    }
+
+test "comment mention only" { assert scope() != "" }
+"""
+
 
 def _assert_named_rule(exc: Exception) -> None:
     msg = str(exc)
@@ -103,6 +121,15 @@ def test_node_builtin_reach_is_not_diagnosed(src):
     m = _emit()
     out = m.emit(compile_source(src, "ok.rvl"))
     assert "function base(" in out
+
+
+def test_comment_mention_of_reach_is_not_diagnosed():
+    """A body that names `createRequire`/`require(...)` only in a comment (to say
+    it is NOT reaching) while taking the sanctioned door must emit — the scan
+    scrubs comments first. This is the `examples/ts_host_body.rvl` shape."""
+    m = _emit()
+    out = m.emit(compile_source(_COMMENT_MENTION_ONLY, "ok.rvl"))
+    assert "function scope(" in out
 
 
 def test_the_295_bare_require_document_still_emits():
