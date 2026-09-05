@@ -77,6 +77,8 @@ Fact rows in (tab-separated, one fact per line):
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
   U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context
+  I <file> <comp> <index> <pure|effect|emit|raw> <heads-csv> <inverse-csv>
+                                              reconstructed RevL.Syntax.Stmt
   T <file> <comp> <kind>                     statement class (census)
   X <file> <code>                            revl refused the file at parse
   N <file>                                   parsed, no component
@@ -837,6 +839,31 @@ structure XRow where
   path : String
   code : String
 
+structure IRow where
+  path : String
+  comp : String
+  index : String
+  kind : String
+  heads : List String
+  inverse : List String
+
+def parseI (f : List String) : Option IRow :=
+  match f with
+  | ["I", path, comp, index, kind, heads, inverse] =>
+      some ⟨path, comp, index, kind, splitKeys heads, splitKeys inverse⟩
+  | _ => none
+
+def exprOfHeads : List String → Expr
+  | [] => .lit "unit"
+  | h :: _ => .call h []
+
+def stmtOf (r : IRow) : RevL.Syntax.Stmt :=
+  match r.kind with
+  | "effect" => .effect (exprOfHeads r.heads) (exprOfHeads r.inverse)
+  | "emit" => .emit (exprOfHeads r.heads)
+  | "raw" => .raw (exprOfHeads r.heads)
+  | _ => .pure (exprOfHeads r.heads)
+
 /-- `key=realm` pairs from a component's `isolate` clauses. -/
 def parseRealms (s : String) : List (String × String) :=
   (splitKeys s).filterMap fun chunk =>
@@ -1054,12 +1081,14 @@ def main (args : List String) : IO UInt32 := do
     let krows := fields.filterMap parseK
     let srows := fields.filterMap parseS
     let xrows := fields.filterMap parseX
+    let irows := fields.filterMap parseI
     let erows := fields.filterMap parseE
     let jrows := fields.filterMap parseJ
     let lrecs := fields.filterMap parseL
     let lruns := fields.filterMap parseLRun
     let lfails := fields.filterMap parseLFail
     let capTable := buildCapTable (fields.filterMap parseZ) (fields.filterMap parseY)
+    let _statementTerms := irows.map stmtOf
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
     let allCaps := ((arows.map (·.cap)) ++ (frows.map (·.cap))

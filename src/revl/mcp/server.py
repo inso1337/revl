@@ -533,10 +533,19 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     if modules:
         merged.update({k: v for k, v in modules.items() if k not in merged})
 
+    # every in-memory module, keyed the way `compile_files` resolves a `use`:
+    # by absolute path. The agent's own modules ride here in BOTH compiles of
+    # the two-compile shape, and in the `files` branch, so a candidate that
+    # `use`s its own module resolves for the composition compile exactly as it
+    # did for the decision compile (issue #316: the composition compile built
+    # its virtual filesystem from the providers alone, so an agent module that
+    # resolved for the decision failed the compile that loads).
+    in_memory = {os.path.abspath(p): text for p, text in merged.items()}
+
     def _compile_once(prof, co_roots: dict) -> dict:
         if co_roots:
-            virtual = {os.path.abspath(p): text for p, text in co_roots.items()}
-            paths = list(virtual)
+            virtual = dict(in_memory)
+            paths = [os.path.abspath(p) for p in co_roots]
             if source is not None:
                 candidate = os.path.abspath("<candidate>.rvl")
                 virtual[candidate] = source
@@ -553,7 +562,8 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
                                   profile=prof)
         if files:
             return compile_files(list(files), manifest=manifest,
-                                 replacing=replacing, profile=prof)
+                                 replacing=replacing, profile=prof,
+                                 sources=in_memory or None)
         raise ValueError("provide `source` or `files`")
 
     if providers and profile is not None:
@@ -562,14 +572,32 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
     return _compile_once(profile, providers)
 
 
+def _candidate_of(arguments: dict) -> tuple:
+    """The candidate a tool call carries, as the `(source, files, modules)`
+    triple `_compile` takes positionally. Read here ONCE, so a verb cannot
+    pick two of the three and drop the third the way `revl_admit`, `revl_audit`
+    and `revl_tools` did (issue #316): each hand-copied `source` and `files`
+    out of its arguments and forgot `modules`, so a candidate `revl_check`
+    accepted with its own `use` module was refused by the verb that decides
+    whether it may enter the composition. Same per-verb-wiring shape as the
+    authority checks PR #328 made positional, same fix: one reader, and a
+    `_compile` signature that has no slot to leave empty."""
+    return (arguments.get("source"), arguments.get("files"),
+            arguments.get("modules"))
+
+
 def _compile(source: str | None, files: list[str] | None,
-             manifest: dict | None = None, modules: dict | None = None,
-             replacing: tuple = ()) -> dict:
+             modules: dict | None, *,
+             manifest: dict | None = None, replacing: tuple = ()) -> dict:
     """`compile_under_authoring` for the verbs THIS module dispatches, plus the
     one side effect only they want: remembering the host bodies the compile
     carried, so a class-(c) approval ticket cannot understate what a yes lets
     run. The sibling modules call `compile_under_authoring` directly — their
-    scratch compiles must not overwrite what the live session authored."""
+    scratch compiles must not overwrite what the live session authored.
+
+    `modules` is POSITIONAL and has no default: a verb passes the whole
+    candidate, `*_candidate_of(arguments)`, or it does not compile. The
+    keyword-with-default it used to be is how three verbs dropped it."""
     ir = compile_under_authoring(source, files, manifest=manifest,
                                  modules=modules, replacing=replacing)
     over_the_transport = source is not None or bool(modules)
@@ -768,8 +796,7 @@ def _remember_live_host_bodies() -> None:
 def _tool_load(arguments: dict) -> dict:
     """Boot a composition in memory (nothing is written to disk)."""
     try:
-        ir = _compile(arguments.get("source"), arguments.get("files"),
-                      modules=arguments.get("modules"))
+        ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
         return report(error)
     try:
@@ -840,9 +867,8 @@ def _tool_swap(arguments: dict) -> dict:
         return _swap_server_side(replacing)
 
     try:
-        _compile(arguments.get("source"), arguments.get("files"),
-                 manifest=SESSION.ir, modules=arguments.get("modules"),
-                 replacing=replacing)
+        _compile(*_candidate_of(arguments),
+                 manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = False
@@ -853,8 +879,7 @@ def _tool_swap(arguments: dict) -> dict:
     # admitted: recompile the whole composition so the swap is a full
     # generation (the same shape `revl run --watch` reloads)
     try:
-        full = _compile(arguments.get("source"), arguments.get("files"),
-                        modules=arguments.get("modules"))
+        full = _compile(*_candidate_of(arguments))
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = True
@@ -1398,7 +1423,10 @@ def _tool_canary(arguments: dict) -> dict:
     realm, and prove the revert clean (survivors + residue). Decides; the swap
     acts. Reuses the swap admission gate, realms, replay and erase_report."""
     from . import canary as _canary  # noqa: PLC0415 — keep the module boundary
-    baseline = _compile(arguments.get("baseline"), arguments.get("baselineFiles"))
+    # the baseline takes no `modules` argument (see `TOOLS`): `None` is the
+    # whole in-memory module set here, not a dropped one
+    baseline = _compile(arguments.get("baseline"), arguments.get("baselineFiles"),
+                        None)
     realm = arguments.get("realm")
     if not realm:
         return {"ok": False, "error": "`realm` (the designated slice) is required"}
@@ -1489,8 +1517,7 @@ def _tool_history_lifetime(arguments: dict) -> dict:
 
 def _tool_check(arguments: dict) -> dict:
     try:
-        ir = _compile(arguments.get("source"), arguments.get("files"),
-                      modules=arguments.get("modules"))
+        ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
         return report(error)
     # `holes` is the agent's own remaining work on this draft: every
@@ -1524,7 +1551,7 @@ def _tool_admit(arguments: dict) -> dict:
     # candidates at all). A genuine G2 — the candidate colliding with a
     # NON-replaced provider — still surfaces here.
     try:
-        ir = _compile(arguments.get("source"), arguments.get("files"),
+        ir = _compile(*_candidate_of(arguments),
                       manifest=running, replacing=replacing)
     except RevlError as error:
         rejected = report(error)
@@ -1594,7 +1621,7 @@ def _tool_ship(arguments: dict) -> dict:
 
 def _tool_audit(arguments: dict) -> dict:
     try:
-        ir = _compile(arguments.get("source"), arguments.get("files"))
+        ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
         return report(error)
     return {
@@ -1607,7 +1634,7 @@ def _tool_audit(arguments: dict) -> dict:
 
 def _tool_tools(arguments: dict) -> dict:
     try:
-        ir = _compile(arguments.get("source"), arguments.get("files"))
+        ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
         return report(error)
     composition = arguments.get("composition") or "revl"
