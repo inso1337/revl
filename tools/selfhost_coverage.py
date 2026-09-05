@@ -365,10 +365,55 @@ def _reasoned(entry: dict) -> dict[str, str]:
     return flat
 
 
+_GENERIC_REASONS = (
+    "NOT TRIAGED",
+    "UNDECLARED GAP",
+    "NEVER ENTERED",
+    "PARTIALLY EXERCISED",
+)
+
+
+def _closure_problems(ledger: dict) -> list[str]:
+    """Reject a baseline that records shape without recording a decision."""
+    problems: list[str] = []
+    for tier in TIERS:
+        entry = ledger.get(tier)
+        if not isinstance(entry, dict):
+            problems.append(f"{tier}: missing construct ledger tier")
+            continue
+        seen: dict[str, str] = {}
+        for classification in ("blind", "unported"):
+            reasons = entry.get(classification)
+            if not isinstance(reasons, dict):
+                problems.append(f"{tier}: missing `{classification}` reason map")
+                continue
+            for reason, constructs in reasons.items():
+                if not isinstance(reason, str) or not reason.strip():
+                    problems.append(f"{tier}/{classification}: missing reason")
+                elif any(marker in reason.upper() for marker in _GENERIC_REASONS):
+                    problems.append(f"{tier}/{classification}: generic reason `{reason}`")
+                if not isinstance(constructs, list) or not constructs:
+                    problems.append(f"{tier}/{classification}: reason has no constructs")
+                    continue
+                for construct in constructs:
+                    previous = seen.get(construct)
+                    if previous is not None:
+                        problems.append(
+                            f"{tier}: `{construct}` is classified more than once "
+                            f"({previous}, {classification})")
+                    else:
+                        seen[construct] = classification
+    return problems
+
+
 def check(data: dict) -> list[str]:
     ledger = _ledger()
-    problems: list[str] = []
-    for tier, found in data.items():
+    problems = _closure_problems(ledger)
+    for tier in TIERS:
+        found = data.get(tier)
+        if not isinstance(found, dict):
+            problems.append(f"{tier}: survey did not produce a tier")
+            continue
         recorded = ledger.get(tier, {})
         waived = _reasoned(recorded.get("blind", {}))
         baseline = set(_reasoned(recorded.get("unported", {})))
