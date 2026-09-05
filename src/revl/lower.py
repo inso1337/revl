@@ -506,8 +506,9 @@ def _key_binding(key: str) -> str:
     return key.rsplit(KEY_NAMESPACE_SEP, 1)[-1]
 
 # A3: identifiers that must never appear verbatim in emitted code on either
-# host. Python keywords come from the keyword module; the rest is a curated
-# union of TS reserved words and backend-adapter names.
+# host. This is deliberately frontend-owned: a legal revl identifier must have
+# one spelling that is safe on every backend, rather than being rejected or
+# renamed differently after a backend has been selected.
 #
 # item 406 (cross-tier consistency): every name the TS emitter reserves for its
 # own scaffolding (backends/typescript/emit.py `EMITTER_RESERVED` = ctx, config,
@@ -528,19 +529,57 @@ _HOST_RESERVED = {
     "delete", "in", "of", "instanceof", "void", "export", "default",
     "require", "module", "exports", "import", "yield", "async", "await",
     "true", "false", "null", "undefined", "NaN",
+    # Python runtime builtins and result constructors referenced verbatim by
+    # emitted expressions.
+    "len", "str", "int", "float", "bool", "bytes", "isinstance", "type",
+    "Some", "None", "Ok", "Err",
+    # TypeScript globals, test/runtime imports, and generated helper names.
+    "String", "Number", "Boolean", "Object", "Array", "JSON", "Math",
+    "RegExp", "Date", "Promise", "Error", "TypeError", "Map", "Set",
+    "WeakMap", "Symbol", "BigInt", "eval", "arguments", "expect", "it",
+    "revlLen", "revlStrLen", "revlEq",
+    # Go keywords, predeclared identifiers, and packages used by generated code.
+    "break", "case", "chan", "continue", "default", "defer", "fallthrough",
+    "for", "func", "go", "goto", "if", "interface", "map", "package",
+    "range", "return", "select", "struct", "switch", "type", "var",
+    "bool", "byte", "complex64", "complex128", "error", "float32", "float64",
+    "imag", "int", "int8", "int16", "int32", "int64", "len", "make", "new",
+    "panic", "print", "println", "real", "recover", "string", "uint", "uint8",
+    "uint16", "uint32", "uint64", "uintptr", "iota", "nil", "strconv", "testing",
+    "init",
+    # Rust names that are legal revl identifiers but collide with predeclared
+    # enum variants or emitter scaffolding.
+    "Some", "Ok", "Err", "drop", "alloc",
+    # Java's underscore keyword and names supplied by the wasm runtime helpers.
+    "_", "memory", "f64_to_str", "refuse", "Pool", "Map", "Job", "Stream",
 }
 
 
 def _safe_name(name: str, taken: set[str]) -> str:
     candidate = name
-    while (
-        candidate in _HOST_RESERVED
-        or keyword.iskeyword(candidate)
-        or keyword.issoftkeyword(candidate)
-        or candidate in taken
-    ):
+    root = candidate.rstrip("_") or "_"
+    needs_escape = (
+        root in _HOST_RESERVED
+        or keyword.iskeyword(root)
+        or keyword.issoftkeyword(root)
+    )
+    while (needs_escape and candidate == name) or candidate in taken:
         candidate += "_"
     return candidate
+
+
+_PURE_SAFE_NAMES = "__revl_safe_names__"
+
+
+def _pure_safe_name(scope: dict, name: str) -> str:
+    return scope.get(_PURE_SAFE_NAMES, {}).get(name, name)
+
+
+def _bind_pure_name(scope: dict, name: str, taken: set[str]) -> str:
+    safe = _safe_name(name, taken)
+    scope.setdefault(_PURE_SAFE_NAMES, {})[name] = safe
+    taken.add(safe)
+    return safe
 
 
 # item 274: a minimal profile marker `navigate.is_untrusted` reads as the
@@ -1554,12 +1593,14 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         sig = (types.get(FNS_KEY) or {}).get(decl.name) or {}
         marked_params = sig.get("params") or [p.type for p in decl.params]
         marked_returns = sig.get("returns", decl.returns)
-        scope: dict[str, bool] = {}
+        scope: dict[str, bool] = {_PURE_SAFE_NAMES: {}}
         type_env: dict[str, str] = {}
+        taken: set[str] = set()
         for param, marked in zip(decl.params, marked_params):
             if param.name in scope:
                 raise RevlError(decl_file, param.line,
                                 f"duplicate parameter `{param.name}` in fn {decl.name}")
+            _bind_pure_name(scope, param.name, taken)
             scope[param.name] = False
             type_env[param.name] = marked
         module_callables = program.fn_scopes.get(id(decl), default_callables)
@@ -1587,7 +1628,7 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
             # whether a composition can mint the `confidential` origin anywhere.
             # Additive: absent unless the author wrote `Secret[T]`, so every
             # existing IR document stays byte-identical.
-            "params": _ir_params(((p.name, p.type) for p in decl.params),
+            "params": _ir_params(((_pure_safe_name(scope, p.name), p.type) for p in decl.params),
                                  getattr(decl, "secret_params", ())),
             "returns": decl.returns,
             "public": decl.public,
@@ -2134,10 +2175,12 @@ def _lift_block_arm(expr, scope: dict, callables: set, alias_fns: dict,
                 f"a match block arm reads `{cap}`, whose type is not known here",
                 hint="annotate the binding this arm reads so the lifted arm "
                      "helper can type its parameter (docs/records.md §4)")
-        params.append({"name": cap, "type": ctype})
+        safe_cap = _pure_safe_name(scope, cap)
+        params.append({"name": safe_cap, "type": ctype})
         # a captured `var` enters the helper as an immutable parameter: reading
         # it is fine, assigning to it is refused, which is exactly the purity a
         # value-producing block owes its enclosing scope.
+        arm_scope.setdefault(_PURE_SAFE_NAMES, {})[cap] = safe_cap
         arm_scope[cap] = "host" if scope.get(cap) == "host" else False
         arm_type_env[cap] = ctype
 
@@ -2170,7 +2213,7 @@ def _lift_block_arm(expr, scope: dict, callables: set, alias_fns: dict,
     })
     return {"kind": "call",
             "callee": {"kind": "var", "name": name},
-            "args": [{"kind": "var", "name": cap} for cap in captures]}
+            "args": [{"kind": "var", "name": _pure_safe_name(scope, cap)} for cap in captures]}
 
 
 class _LaxScope(dict):
@@ -4467,8 +4510,9 @@ def _lower_tests(program: Program, filename: str, types: dict,
                                               callables, types),
             })
             continue
-        scope: dict[str, bool] = {}
+        scope: dict[str, bool] = {_PURE_SAFE_NAMES: {}}
         type_env: dict[str, str] = {}
+        taken: set[str] = set()
         body: list[dict] = []
         for stmt in decl.body:
             _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
@@ -4573,6 +4617,7 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
         for param in decl.params:
             check_type_wellformed(filename, param.line, param.type)
             _check_generatable(filename, param.line, param.type, types, decl.name)
+            _bind_pure_name(scope, param.name, taken)
             scope[param.name] = False
             type_env[param.name] = param.type
         body: list[dict] = []
@@ -4580,7 +4625,7 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
             _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
         units.append({
             "name": decl.name,
-            "params": [{"name": p.name, "type": p.type} for p in decl.params],
+            "params": [{"name": _pure_safe_name(scope, p.name), "type": p.type} for p in decl.params],
             "body": body,
         })
     return units
@@ -4919,7 +4964,9 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         # an annotated `let x: Float = 3` is a coercion site too (docs/arithmetic.md)
         _mark_widen(declared, actual_declared, lowered_value)
         _pin_empty_literal(declared, lowered_value)
-        body.append({"step": "let", "name": stmt.name,
+        safe_name = _bind_pure_name(scope, stmt.name,
+                                    set(scope.get(_PURE_SAFE_NAMES, {}).values()))
+        body.append({"step": "let", "name": safe_name,
                      "value": lowered_value,
                      "mutable": stmt.mutable})
     elif isinstance(stmt, LetPatternStmt):
@@ -4967,7 +5014,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         lowered_value = _lower_pure_expr(value, scope, callables, alias_fns, filename, type_env, types)
         # assigning into a `Float`-declared variable is a coercion site too
         _mark_widen(declared, inferred, lowered_value)
-        body.append({"step": "assign", "name": stmt.name,
+        body.append({"step": "assign", "name": _pure_safe_name(scope, stmt.name),
                      "value": lowered_value})
     elif isinstance(stmt, ReturnStmt):
         if stmt.expr is not None:
@@ -5032,6 +5079,8 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         iterable = _lower_pure_expr(stmt.iterable, scope, callables, alias_fns, filename, type_env, types)
         inner_scope = dict(scope)
         inner_type_env = dict(type_env)
+        _bind_pure_name(inner_scope, stmt.bind,
+                        set(inner_scope.get(_PURE_SAFE_NAMES, {}).values()))
         inner_scope[stmt.bind] = False
         iter_type = _expr_static_type(stmt.iterable, type_env, types)
         element_type = _type_arg(iter_type, "List")
@@ -5040,7 +5089,8 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         inner_body = []
         for s in stmt.body:
             _lower_pure_stmt(s, inner_scope, callables, alias_fns, inner_body, filename, inner_type_env, types, expected_return)
-        body.append({"step": "for", "bind": stmt.bind, "iterable": iterable, "body": inner_body})
+        body.append({"step": "for", "bind": _pure_safe_name(inner_scope, stmt.bind),
+                    "iterable": iterable, "body": inner_body})
     elif isinstance(stmt, ExprStmt):
         infer_ast(stmt.expr, type_env, types, filename)
         body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
@@ -5097,14 +5147,16 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                 f"record destructuring requires a record, but `{render_type(value_type)}` is not a record",
             )
         value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
+        safe_names = scope.get(_PURE_SAFE_NAMES, {})
         for name in names:
+            _bind_pure_name(scope, name, set(safe_names.values()))
             scope[name] = stmt.mutable
             if spec is not None:
                 type_env[name] = spec.get("fields", {})[name]
         body.append({
             "step": "let_pattern",
             "pattern": "record",
-            "names": names,
+            "names": [_pure_safe_name(scope, name) for name in names],
             "value": value_ir,
             "mutable": stmt.mutable,
         })
@@ -5137,20 +5189,24 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                 f"list destructuring requires a `List[...]`, but `{render_type(value_type)}` is not a list",
             )
         value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
+        safe_names = scope.get(_PURE_SAFE_NAMES, {})
         element_type = _type_arg(value_type, "List")
         for name in pattern.binds:
+            _bind_pure_name(scope, name, set(safe_names.values()))
             scope[name] = stmt.mutable
             if element_type is not None:
                 type_env[name] = element_type
         if pattern.rest is not None:
+            _bind_pure_name(scope, pattern.rest, set(safe_names.values()))
             scope[pattern.rest] = stmt.mutable
             if value_type is not None:
                 type_env[pattern.rest] = value_type
         body.append({
             "step": "let_pattern",
             "pattern": "list",
-            "names": pattern.binds,
-            "rest": pattern.rest,
+            "names": [_pure_safe_name(scope, name) for name in pattern.binds],
+            "rest": (_pure_safe_name(scope, pattern.rest)
+                     if pattern.rest is not None else None),
             "value": value_ir,
             "mutable": stmt.mutable,
         })
@@ -5393,7 +5449,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             _reject_foreign_name(expr.name, filename, expr.line)  # item 384
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
                             hint="declare it with `let`/`var` or add it as a parameter (G1)")
-        return {"kind": "var", "name": expr.name}
+        return {"kind": "var", "name": _pure_safe_name(scope, expr.name)}
     if isinstance(expr, ExprBin):
         node = {"kind": "bin", "op": expr.op,
                 "left": _lower_pure_expr(expr.left, scope, callables, alias_fns, filename, type_env, types),
@@ -5610,7 +5666,11 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         inner = dict(scope)
         inner_type_env = dict(type_env)
         param_types = _arrow_param_types(expr)
+        taken = set(inner.get(_PURE_SAFE_NAMES, {}).values())
+        arrow_params = []
         for param, ptype in zip(expr.params, param_types):
+            safe_param = _bind_pure_name(inner, param, taken)
+            arrow_params.append(safe_param)
             inner[param] = False
             if ptype:
                 inner_type_env[param] = ptype
@@ -5618,7 +5678,8 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 inner_type_env.pop(param, None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
         _b1_capture_check(expr, type_env, types, filename, expr.line)
-        node = {"kind": "arrow", "params": expr.params, "captures": captures,
+        node = {"kind": "arrow", "params": arrow_params,
+                "captures": [_pure_safe_name(scope, cap) for cap in captures],
                 "body": _lower_pure_expr(expr.body, inner, callables, alias_fns, filename, inner_type_env, types)}
         # IR v3: an arrow whose signature the checker knows *completely* carries
         # it, so a backend can declare it instead of guessing
@@ -5653,13 +5714,16 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             inner_type_env = dict(type_env)
             payload_type = _arm_payload_type(scrutinee_type, pattern, types)
             if bind is not None:
+                _bind_pure_name(inner_scope, bind,
+                                set(inner_scope.get(_PURE_SAFE_NAMES, {}).values()))
                 inner_scope[bind] = False
                 inner_type_env.pop(bind, None)
                 if payload_type is not None:
                     inner_type_env[bind] = payload_type
             arm = {
                 "pattern": pattern,
-                "bind": bind,
+                "bind": (_pure_safe_name(inner_scope, bind)
+                         if bind is not None else None),
                 "body": _lower_pure_expr(body, inner_scope, callables, alias_fns, filename, inner_type_env, types),
             }
             # payload type helps backends that must cast (e.g. Java's tagged

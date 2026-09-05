@@ -508,6 +508,20 @@ def test_ts_emitter_scaffolding_names_are_renamed_cross_tier():
     assert [s["bind"] for s in ir["components"][0]["body"]] == ["store"]
 
 
+def test_a3_reserved_union_applies_to_pure_function_bindings():
+    from revl import compile_source
+
+    ir = compile_source(
+        "fn f(len: Int) -> Int { let str = len return str }"
+    )
+    fn = ir["functions"][0]
+    assert fn["params"] == [{"name": "len_", "type": "Int"}]
+    assert fn["body"] == [
+        {"step": "let", "name": "str_", "value": {"kind": "var", "name": "len_"}, "mutable": False},
+        {"step": "return", "expr": {"kind": "var", "name": "str_"}},
+    ]
+
+
 def test_foreign_hash_comment_redirects():
     """item 384: `#` (Python/shell line comment) is redirected to `//` at the
     lexer. It cannot be a corpus rejection fixture because `#` is
