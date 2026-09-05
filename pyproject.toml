@@ -1,6 +1,8 @@
 # API stability (roadmap item 338, docs/gate-dependency-contract.md): the
-# ONLY promised dependency surface for `pip install revl` is `revl.gate`
-# (its `__all__`, pinned exactly by tests/test_gate_compat.py). Every other
+# primary promised dependency surface for `pip install revl` is `revl.gate`
+# (its `__all__`, pinned exactly by tests/test_gate_compat.py). The narrow
+# `revl.fs_workspace` Python root-binding bootstrap has its own capability
+# version and contract in docs/witnessed-fs.md. Every other
 # `revl.*` module is importable — a wheel cannot hide its modules — but
 # UNVERSIONED, and may change on any release including a patch. Within
 # `revl.gate`, `gate_version().api` (see src/revl/gate.py) is the semver of

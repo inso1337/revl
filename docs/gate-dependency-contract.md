@@ -24,6 +24,12 @@ compile-time judgment scoped to `gate_version().frontier`, not a runtime
 confinement. The runtime half is a separate, py-only dependency you adopt
 explicitly. The gate never confines its host.**
 
+The optional Python `revl.fs_workspace` bootstrap is a separate supported
+runtime capability, versioned independently of `revl.gate`. Its process-lifetime
+physical-root binding and limits are specified in
+[witnessed-fs.md](witnessed-fs.md#python-process-lifetime-physical-root-binding-api-1).
+It neither changes a gate admission nor confines arbitrary host code.
+
 That sentence, not "revl as a safety kernel," is what you are allowed to
 build on. "Safety kernel" describes an aspiration for the full stack — admit,
 plus the py-only revertible runtime, plus operator-configured confinement —
