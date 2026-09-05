@@ -98,7 +98,7 @@ was corrected by hand and had drifted back within a day.
 | capability-realm-placement.md | needs-work | 11 |  |
 | closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
-| commands-reference.md | current | 5 |  |
+| commands-reference.md | current | 7 |  |
 | component-leases.md | needs-work | 26 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |
@@ -127,8 +127,8 @@ was corrected by hand and had drifted back within a day.
 | gauntlet.md | needs-work | 18 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 10 |  |
-| guide-ai-agents.md | stale-fixed | 2 |  |
-| guide-humans.md | stale-fixed | 0 | yes |
+| guide-ai-agents.md | stale-fixed | 3 |  |
+| guide-humans.md | stale-fixed | 1 | yes |
 | harness-gate-guide.md | needs-work | 2 |  |
 | holes.md | needs-work | 29 |  |
 | import-a2a.md | current | 11 |  |

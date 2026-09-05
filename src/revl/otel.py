@@ -40,8 +40,12 @@ Design notes
 
 * **Off the hot path.** Nothing here runs during ``revl run``; it consumes an
   already-recorded trace post hoc. Turn it on by pointing it at a trace:
-  ``python -m revl.otel run.jsonl`` (or call :func:`export_trace_file` /
-  :func:`export_to_otel` from your own code and pass any span exporter).
+  ``python -P -m revl.otel run.jsonl`` (the `-P` is the PYTHONSAFEPATH
+  safety bit: `-m` puts the CWD at `sys.path[0]`, and the otel subcommand
+  imports ``opentelemetry`` from bare name so a sibling ``opentelemetry.py``
+  in a composition's directory would shadow the real package; issue #317),
+  or call :func:`export_trace_file` / :func:`export_to_otel` from your own
+  code and pass any span exporter).
 """
 
 from __future__ import annotations
@@ -487,7 +491,8 @@ def export_trace_file(path: str, **kwargs) -> dict:
 
 
 # --------------------------------------------------------------------------
-# opt-in CLI: `python -m revl.otel <trace.jsonl>`
+# opt-in CLI: `python -P -m revl.otel <trace.jsonl>` (the `-P` is the
+# PYTHONSAFEPATH safety bit, issue #317)
 # --------------------------------------------------------------------------
 
 
@@ -515,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
     import sys
 
     parser = argparse.ArgumentParser(
-        prog="python -m revl.otel",
+        prog="python -P -m revl.otel",  # PYTHONSAFEPATH safety bit (issue #317)
         description="Export a revl causal lifecycle trace to OpenTelemetry.")
     parser.add_argument("trace", help="path to a why_runtime JSONL trace")
     parser.add_argument("--json", action="store_true",

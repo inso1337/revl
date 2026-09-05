@@ -1,5 +1,8 @@
 //! The item-336 exit test: the native binary's `publishDiagnostics`, `hover`
-//! and `definition` are byte-identical to `python -m revl.lsp` over a corpus.
+//! and `definition` are byte-identical to `python -P -m revl.lsp` over a
+//! corpus (the `-P` is the PYTHONSAFEPATH safety bit; the test script
+//! `tools/affected_tests.py` runs both halves under `-P` so the CWD-shadowing
+//! window issue #317 names cannot drift a result).
 //!
 //! The corpus is the load-bearing part. Design A1 (the CRITICAL) says a binary
 //! whose diagnostics come from the NATIVE self-host front end silently returns
@@ -204,7 +207,7 @@ fn binary_matches_the_reference_byte_for_byte() {
 
     if native != reference {
         panic!(
-            "the binary and `python -m revl.lsp` disagree.\nfirst divergence:\n{}",
+            "the binary and `python -P -m revl.lsp` disagree (the `-P` is the\nPYTHONSAFEPATH safety bit, issue #317).\nfirst divergence:\n{}",
             first_divergence(&native, &reference)
         );
     }
@@ -316,7 +319,8 @@ fn the_gate_version_is_reachable_for_a_skew_check() {
 }
 
 /// The missing-squiggle rule, as a test. The binary may show MORE than
-/// `python -m revl.lsp`; it may never show fewer, and a native result with
+/// `python -P -m revl.lsp` (the `-P` is the PYTHONSAFEPATH safety bit,
+/// issue #317); it may never show fewer, and a native result with
 /// fewer diagnostics than the reference on the same input is release-blocking.
 #[test]
 fn the_binary_never_shows_fewer_squiggles_than_the_reference() {

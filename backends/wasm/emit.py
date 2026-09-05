@@ -105,6 +105,51 @@ def _wat_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
+# A realm label is not decoration on this tier: it is a component of the
+# capability ADDRESS. `coeffect:<realm>/<key>` is the import module a host binds
+# a provider to, and `provide:<realm>/<key>.<method>` is the export name a host
+# resolves a provision through, so the label's grammar has to be narrower than a
+# general `Str`. Mirrors `revl.parser._REALM_LABEL_RE` — restated here because
+# an IR document reaches this emitter through `emit()` without necessarily
+# having passed the frontend (`revl compile --from-ir`, a hand-written IR, a
+# third-party lowering), and the address grammar is this tier's own invariant.
+_REALM_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+_REALM_LABEL_RULE = ("a realm label must start with an ASCII letter or digit and "
+                     "contain only ASCII letters, digits, `.`, `_` or `-`")
+
+# The composed address, after `<prefix>:[<realm>/]<key>[.<method>]`. `:` and `/`
+# are the composition's own separators (`coeffect:revl:wal` is the reserved WAL
+# channel), `.` joins a provide method. Nothing else may appear: an address that
+# does not match this cannot be a name the host resolves by, whatever the WAT
+# escaper renders it as.
+_CAPABILITY_ADDRESS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*\Z")
+
+# The reserved durable-WAL framing channel (item 322 Slice 2). A first-party
+# HOST binding rather than a declared capability, so it is keyed by no realm and
+# named in no `requires`; the address check below lets it through by name rather
+# than by widening the grammar every other address is held to.
+_WAL_IMPORT_MODULE = "coeffect:revl:wal"
+
+
+def _assert_realm_label(where: str, key: str, realm: str) -> None:
+    """Refuse a realm label that cannot be a capability address on this tier.
+
+    A refusal, not a repair. `_wat_string` would render a hostile label as
+    *data* — the WAT stays well-formed and the module still assembles — but the
+    result is an import module name nobody can bind and an authority address
+    nobody wrote on purpose. Escaping is the belt; this is the rule the author
+    can see.
+    """
+    if not isinstance(realm, str) or not _REALM_LABEL_RE.fullmatch(realm):
+        raise EmitError(
+            f"{where}: key {key!r} names realm {realm!r}, which is not a valid "
+            f"capability address on this tier -- {_REALM_LABEL_RULE}. The label "
+            f"is part of the `coeffect:<realm>/<key>` import namespace and the "
+            f"`provide:<realm>/<key>.<method>` export namespace, so it is an "
+            f"authority address, not free text")
+
+
 class EmitError(ValueError):
     """The IR document cannot be lowered to the wasm tier."""
 
@@ -286,6 +331,7 @@ class _ComponentEmitter:
             realm = self.isolate[key]
             if not isinstance(realm, str) or not realm:
                 raise EmitError(f"{self.name}: isolate key {key!r} has a non-static realm {realm!r}")
+            _assert_realm_label(self.name, key, realm)
         for key in self.intercept:
             if key not in self.requires:
                 raise EmitError(f"{self.name}: intercept key {key!r} is not a requirement")
@@ -315,6 +361,12 @@ class _ComponentEmitter:
             if not realms:
                 raise EmitError(
                     f"{self.name}: routed key {key!r} names no realms")
+            # the substrate resolves `route:<key>.<op>(index, …)` to
+            # `realms[index] + "/" + key` — the SAME address space the plain
+            # coeffect imports live in, so a routed realm is held to the same
+            # grammar as an isolated one.
+            for realm in realms:
+                _assert_realm_label(self.name, key, realm)
         # routed (key, op) -> (param wasm types, result wasm type or None): the
         # `route:<key>.<op>` dispatch ABI, kept out of `self.imports` so no plain
         # coeffect import is emitted for a routed key.
@@ -1932,7 +1984,7 @@ class _ComponentEmitter:
             # that reads the three Str pointers back and drains a JSONL record to
             # the durable host WAL. Emitted ONLY in record mode, so a normal
             # module's import section is byte-identical.
-            lines.append('  (import "coeffect:revl:wal" "record" '
+            lines.append(f'  (import "{_WAL_IMPORT_MODULE}" "record" '
                          '(func $revl_wal_record (param i32 i32 i32 i32)))')
         if self.uses_job:
             # the job id is an interned compile-time *tag*, not an Int value:
@@ -1970,10 +2022,18 @@ class _ComponentEmitter:
         # emitter regression becomes a named refusal rather than an ungranted
         # host import. This leg is decidable only here: the wasm import set is
         # statically knowable, where a @py/@ts host body is G8-opaque.
+        # the RENDERED addresses, not just their keys: `import_keys` below sees
+        # `kv`, but what a host binds is `coeffect:<realm>/kv`, and the realm
+        # half of the authority address exists in no key set the emitter keeps.
+        import_modules = {self._import_module(key) for (key, _op) in self.imports}
+        import_modules |= {f"route:{key}" for key in self.route_ops}
+        if self._needs_record_import:
+            import_modules.add(_WAL_IMPORT_MODULE)
         _assert_imports_within_requires(
             self.name,
             {key for (key, _op) in self.imports} | set(self.route_ops),
             set(self.requires),
+            import_modules,
         )
         if needs_memory:
             lines.append('  (memory (export "memory") 1)')
@@ -2487,7 +2547,8 @@ def _wat_bytes(data: bytes) -> str:
     return "".join(parts)
 
 
-def _assert_imports_within_requires(name: str, import_keys: set, require_keys: set) -> None:
+def _assert_imports_within_requires(name: str, import_keys: set, require_keys: set,
+                                    import_modules) -> None:
     """Item 289: `host imports subset-of declared caps` at the wasm tier.
 
     Every capability-bearing host import a component emits names a key it
@@ -2496,6 +2557,14 @@ def _assert_imports_within_requires(name: str, import_keys: set, require_keys: s
     capability surface BY CONSTRUCTION; this re-asserts the invariant against
     the finished set. A failure is an emitter regression, not an author error,
     so it names the leg that broke rather than pointing at the source.
+
+    `import_modules` is the set of RENDERED import module names — the strings
+    that actually land in the module's import section. The key check alone can
+    only see `kv`; the address a host binds is `coeffect:<realm>/kv`, and the
+    realm half never appears in `import_keys`. Checking the composed address is
+    what makes this assertion cover the whole authority surface it claims to,
+    rather than the half of it the emitter happens to key its own bookkeeping
+    on.
     """
     extra = sorted(import_keys - require_keys)
     if extra:
@@ -2504,6 +2573,39 @@ def _assert_imports_within_requires(name: str, import_keys: set, require_keys: s
             f"capability {extra[0]!r} it does not declare in `requires` -- the "
             f"wasm import set must be a subset of the declared capabilities "
             f"(host imports subset-of declared caps)")
+    for module in sorted(import_modules):
+        if not _CAPABILITY_ADDRESS_RE.fullmatch(module):
+            raise EmitError(
+                f"least-authority (289): component {name!r} would import host "
+                f"capability under the address {module!r}, which is not a "
+                f"capability address -- an address is "
+                f"`<prefix>:[<realm>/]<key>` over ASCII letters, digits, `.`, "
+                f"`_`, `-`, `:` and `/`, and {_REALM_LABEL_RULE}")
+        prefix, _, rest = module.partition(":")
+        if prefix not in ("coeffect", "route"):
+            raise EmitError(
+                f"least-authority (289): component {name!r} would import host "
+                f"capability under the address {module!r}, whose prefix is "
+                f"neither `coeffect:` nor `route:` -- only those two namespaces "
+                f"carry a declared capability at this tier")
+        if module == _WAL_IMPORT_MODULE:
+            # the reserved durable-WAL framing channel (item 322 Slice 2): a
+            # first-party host binding, not a declared capability, so it is not
+            # in `requires` and is not keyed by a realm.
+            continue
+        realm, sep, key = rest.partition("/")
+        if not sep:
+            realm, key = "", rest
+        elif not _REALM_LABEL_RE.fullmatch(realm):
+            raise EmitError(
+                f"least-authority (289): component {name!r} would import host "
+                f"capability {key!r} in realm {realm!r} -- {_REALM_LABEL_RULE}")
+        if key not in require_keys:
+            raise EmitError(
+                f"least-authority (289): component {name!r} would import host "
+                f"capability {key!r} it does not declare in `requires` (address "
+                f"{module!r}) -- the wasm import set must be a subset of the "
+                f"declared capabilities (host imports subset-of declared caps)")
 
 
 def test_export_names(tests: list) -> list[tuple[str, str]]:

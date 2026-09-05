@@ -7,7 +7,8 @@ seam, and the consumer rebuilds them as native case instances.
   consumer (Python, this process):     DirUser, requires `dir` via a proxy
 
 Both sides compile the *same* examples/outcome.rvl. The provider runs under
-`python -m revl._process_runner` (the shipped placement path); the consumer is
+`python -P -m revl._process_runner` (the shipped placement path; the `-P`
+is the PYTHONSAFEPATH safety bit, issue #317); the consumer is
 driven here, in-process, so the checks can look at the value itself rather than
 at a `repr` — that is what makes "the payload survived" a real assertion and
 not a string match on a log line.
