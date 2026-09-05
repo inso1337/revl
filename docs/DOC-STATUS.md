@@ -80,6 +80,7 @@ was corrected by hand and had drifted back within a day.
 | doc | status | em-dashes | tier-limit notes |
 |---|---|---|---|
 | README.md | needs-work | 48 |  |
+| analyze-liveness.md | needs-work | 15 |  |
 | apply.md | needs-work | 19 |  |
 | arithmetic.md | needs-work | 69 |  |
 | audit-diff.md | needs-work | 14 |  |
@@ -98,7 +99,7 @@ was corrected by hand and had drifted back within a day.
 | capability-realm-placement.md | needs-work | 11 |  |
 | closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
-| commands-reference.md | current | 7 |  |
+| commands-reference.md | current | 9 |  |
 | component-leases.md | needs-work | 26 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |

@@ -1,0 +1,74 @@
+type Choice = Absent | Present(Int)
+type Item = { amount: Int }
+type Batch = { items: List[Int] }
+type Bundle = Packed(List[Int])
+fn localVariant(n: Int) -> Choice {
+  let value = Present(n)
+  return value
+}
+fn conditional(a: Int, b: Int, flag: Bool) -> Int {
+  let chosen = flag ? a : b
+  let difference = a - b
+  let product = a * b
+  let remainder = a % b
+  let negative = -a
+  let invert = !flag
+  let comparison = a < b
+  return chosen
+}
+fn floats(a: Float, b: Float, n: Int, small: Int32) -> Float {
+  let literal = 1.25
+  let negated = -a
+  let ratio = a / b
+  let mixed = n + a
+  let widened: Int = small
+  return mixed + literal + negated + ratio
+}
+fn choose(value: Choice) -> Int {
+  return match value { Present(n) => n, _ => 0 }
+}
+fn names(chan: Int, chan_: Int, chan__: Int) -> Int {
+  return chan + chan_ + chan__
+}
+fn anyValue(x: Any) -> Any { return x }
+fn bytes(x: Bytes) -> Bytes { return x }
+fn unicode() -> Str { return "\u{1f600}\u{2028}\u{1}" }
+fn emptyList() -> List[Int] { let xs: List[Int] = []; return xs }
+fn floatProduct(a: Float, b: Float) -> Float { let product = a * b; return product }
+fn localBits(a: Int32, b: Int32) -> Int32 { let bits = a | b; return bits }
+fn arrowEqual(n: Int) -> Bool { let f = (x) => x == n; return f(n) }
+fn arrowRight(n: Int) -> Bool { let f = (x) => n == x; return f(n) }
+fn arrowNested(n: Int) -> Bool { let f = (x) => !(n == x); return f(n) }
+fn mixed(n: Int, x: Float) -> Float { return n + x }
+fn localValues(n: Int32, xs: List[Int]) -> Str {
+  let yes = true
+  let no = false
+  let text = "ok"
+  let entry = xs[0]
+  let record = { amount: entry }
+  let sum = n + n
+  let greeting = text + text
+  let rendered = `${yes}/${no}/${n}/${record.amount}/${greeting}%`
+  return rendered
+}
+fn unknownText(x: Any) -> Str { return `value=${x}%` }
+fn onlyText(x: Str) -> Str { return `${x}` }
+fn negative32(n: Int32) -> Int32 { return -n }
+fn conditionalIndex(b: Bool, xs: List[Int], ys: List[Int]) -> Int { return (b ? xs : ys)[0] }
+fn conditionalField(b: Bool, x: Item, y: Item) -> Int { return (b ? x : y).amount }
+fn localMatch(x: Choice) -> Int { let n = match x { Absent => 0, Present(v) => v }; return n }
+fn noValue() { return }
+fn floatTarget(n: Int, small: Int32) -> Float {
+  let first: Float = n
+  let second: Float = small
+  return first + second
+}
+fn widenReturn(n: Int) -> Float { return n }
+fn widenRight(n: Int, x: Float) -> Float { return x + n }
+fn widenRightSubtract(n: Int, x: Float) -> Float { return x - n }
+fn listIdentity(xs: List[Int]) -> List[Int] { return xs }
+fn emptyArgument() -> List[Int] { return listIdentity([]) }
+fn nestedEmpty() -> List[List[Int]] { return [[]] }
+fn emptyRecord() -> Batch { return { items: [] } }
+fn emptyVariant() -> Bundle { return Packed([]) }
+fn escapes() -> Str { return "\"\\\n\r\t" }

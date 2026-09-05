@@ -284,13 +284,16 @@ mod tests {
 
     #[test]
     fn an_undecided_document_resolves_nothing() {
-        // `pub` is not a declaration the self-host front end parses, so the
-        // whole document is handed back to the reference
-        let source = "pub fn f() -> Int {\n  return 1\n}\n";
+        // `verified fn` is lexed but is not a declaration the self-host front
+        // end parses (the front end records a parse problem and the gate fails
+        // closed), so the whole document is handed back to the reference. (`pub
+        // fn` used to sit here, but the self-host front end now parses `pub`
+        // visibility, so it decides such a document rather than declining it.)
+        let source = "verified fn f() -> Int {\n  return 1\n}\n";
         let table = table_for(source);
         assert!(table.is_undecided(), "{table:?}");
-        assert!(definition(&table, source, &json!("file:///a.rvl"), 0, 8).is_none());
-        assert!(hover(&table, source, 0, 8).is_none());
+        assert!(definition(&table, source, &json!("file:///a.rvl"), 0, 12).is_none());
+        assert!(hover(&table, source, 0, 12).is_none());
     }
 
     #[test]

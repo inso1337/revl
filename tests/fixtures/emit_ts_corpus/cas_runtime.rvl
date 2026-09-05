@@ -1,0 +1,16 @@
+service CasOps {
+  fn run() -> Int
+}
+
+component CasProvider provides ops: CasOps {
+  let ledger = effect Map.new() undo ledger.drop()
+  let fresh = effect ledger.insert_if_absent("boot", 1) undo ledger.remove("boot")
+  provide ops {
+    fn run() {
+      var key = "method"
+      let token = effect ledger.insert_if_absent(key, 2) undo ledger.remove(key)
+      key = "later"
+      return 2
+    }
+  }
+}

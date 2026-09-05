@@ -21,10 +21,7 @@
    "backends/go/testdata/opt_gaps_280.rvl",
    "backends/go/testdata/result_ctor_302.rvl",
    "backends/java/scenarios/method_witnessed.rvl",
-   "backends/java/scenarios/runtime_values.rvl",
    "backends/typescript/tests/fixtures/a2a_agent.rvl",
-   "backends/typescript/tests/fixtures/match_sync_arms.rvl",
-   "backends/typescript/tests/fixtures/str_scan.rvl",
    "backends/wasm/scenarios/crashproof/crashproof.rvl",
    "examples/async_timer.rvl",
    "examples/budget_attenuation.rvl",
@@ -34,19 +31,7 @@
    "examples/lifecycle_timer.rvl",
    "examples/lifecycle_wasm.rvl",
    "examples/prop_test.rvl",
-   "examples/regressions/fuzz_go_6be27824.rvl",
-   "examples/regressions/fuzz_go_915660b0.rvl",
-   "examples/regressions/fuzz_go_ddb42280.rvl",
-   "examples/regressions/fuzz_go_e6afacd3.rvl",
-   "examples/regressions/fuzz_go_ead437e4.rvl",
-   "examples/regressions/fuzz_go_f4963252.rvl",
    "examples/regressions/fuzz_go_letbind_valuetype.rvl",
-   "examples/regressions/fuzz_go_matchlit_typeswitch.rvl",
-   "examples/regressions/fuzz_go_vet_redundant_bool.rvl",
-   "examples/regressions/fuzz_rust_3c147169.rvl",
-   "examples/regressions/fuzz_rust_ca5feca4.rvl",
-   "examples/regressions/fuzz_wasm_ad4e66e8.rvl",
-   "examples/regressions/fuzz_wasm_af371f9d.rvl",
    "examples/ts_host_body.rvl",
    "examples/uxprobe2_fault.rvl",
    "examples/uxprobe2_jobs.rvl",
@@ -57,11 +42,8 @@
    "stdlib/list.rvl",
    "stdlib/render.rvl",
    "stdlib/shell.rvl",
-   "stdlib/str.rvl",
    "stdlib/value.rvl",
-   "stdlib/version.rvl",
    "tests/fixtures/emit_py_corpus/witnessed.rvl",
-   "tests/fixtures/query_mesh.rvl",
    "tests/fixtures/v2_math_lib.rvl"
   ],
   "false-reject/G1": [
@@ -206,18 +188,6 @@
     "tag": ""
    }
   },
-  "backends/java/scenarios/runtime_values.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
   "backends/rust/scenarios/stream.rvl": {
    "bucket": "false-reject/G1",
    "gate": {
@@ -236,30 +206,6 @@
     "code": "BAD",
     "kind": "refused",
     "message": "expected fn after extern"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/typescript/tests/fixtures/match_sync_arms.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/typescript/tests/fixtures/str_scan.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
    },
    "reference": {
     "message": "",
@@ -374,156 +320,12 @@
     "tag": ""
    }
   },
-  "examples/regressions/fuzz_go_6be27824.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_go_915660b0.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_go_ddb42280.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_go_e6afacd3.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_go_ead437e4.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_go_f4963252.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
   "examples/regressions/fuzz_go_letbind_valuetype.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
     "kind": "refused",
     "message": "unexpected token at top level"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_go_matchlit_typeswitch.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_go_vet_redundant_bool.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_rust_3c147169.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_rust_ca5feca4.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_wasm_ad4e66e8.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "examples/regressions/fuzz_wasm_af371f9d.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
    },
    "reference": {
     "message": "",
@@ -727,7 +529,7 @@
    "gate": {
     "code": "BAD",
     "kind": "refused",
-    "message": "unexpected declaration"
+    "message": "expected { after fn signature"
    },
    "reference": {
     "message": "",
@@ -758,31 +560,7 @@
     "tag": ""
    }
   },
-  "stdlib/str.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
   "stdlib/value.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "stdlib/version.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
@@ -800,18 +578,6 @@
     "code": "BAD",
     "kind": "refused",
     "message": "expected fn after extern"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "tests/fixtures/query_mesh.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
    },
    "reference": {
     "message": "",

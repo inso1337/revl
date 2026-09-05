@@ -1,0 +1,28 @@
+type Narrow = { value: Int32 }
+
+fn identity(n: Int32) -> Int32 { return n }
+
+fn conditional(b: Bool, n: Int32, m: Int32) -> Int {
+  let result: Int = b ? n : m
+  return result
+}
+
+fn called(n: Int32) -> Int {
+  let result: Int = identity(n)
+  return result
+}
+
+fn field(r: Narrow) -> Int {
+  let result: Int = r.value
+  return result
+}
+
+fn indexed(xs: List[Int32]) -> Int {
+  let result: Int = xs[0]
+  return result
+}
+
+fn builtin(n: Int) -> Int {
+  let result: Int = n.to_int32()
+  return result
+}

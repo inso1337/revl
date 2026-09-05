@@ -61,6 +61,9 @@ lifecycle, and the astral reaches of ``_go_string`` beyond the ASCII/BMP core.
 """
 
 import importlib.util
+import os
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -74,6 +77,17 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_go_corpus"
 CORPUS = [
+    "arrow_containers.rvl",
+    "match_edges.rvl",
+    "accumulator_hygiene.rvl",
+    "accumulators.rvl",
+    "builder_literal.rvl",
+    "../emit_rust_corpus/perf_shapes.rvl",
+    "identifiers.rvl",
+    "../emit_java_corpus/records.rvl",
+    "../emit_wasm_corpus/loopctrl.rvl",
+    "../emit_wasm_corpus/strlit.rvl",
+    "inference.rvl",
     "arith.rvl",     # trapping int/int32 + - *, / widening, %, comparisons, unary
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # var/let/assign, if/else, while, for, bare-expr, assert
@@ -177,3 +191,159 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+@pytest.mark.parametrize("rel", [
+    "inference.rvl", "accumulators.rvl", "../emit_rust_corpus/perf_shapes.rvl",
+])
+def test_supported_corpus_compiles_as_go(emitted, reference, tmp_path, rel):
+    """Agreement alone cannot catch a type error shared by both emitters."""
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("Go compiler not installed")
+    ir = compile_files([str(CORPUS_DIR / rel)])
+    for name, source in (("reference", reference.emit(ir)),
+                         ("selfhost", emitted["emit_src"](ir))):
+        path = tmp_path / f"{name}.go"
+        path.write_text(source)
+        result = subprocess.run(
+            [go, "test", str(path)], capture_output=True, text=True,
+            env={**os.environ, "GO111MODULE": "off"}, timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("side", ["reference", "selfhost"])
+def test_match_edges_runtime(emitted, reference, tmp_path, side):
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("Go compiler not installed")
+    ir = compile_files([str(CORPUS_DIR / "match_edges.rvl")])
+    source = reference.emit(ir) if side == "reference" else emitted["emit_src"](ir)
+    module = tmp_path / "matches.go"
+    module.write_text(source, encoding="utf-8")
+    test = tmp_path / "matches_test.go"
+    test.write_text(
+        'package emitted\nimport "testing"\n'
+        'func TestMatches(t *testing.T) {\n'
+        '  if scalar_wildcard(1) != 42 || record_wildcard(Box{Value: 2}) != 43 || '
+        'list_wildcard([]int64{3}) != 44 || constructed(9) != 9 || '
+        'discarded(TreeNode{Value: 4}) != 45 || inverted(0) != -1 || '
+        'escaped() != "a\\nb\\tcd\\u00e9" || '
+        'astral() != "\\U0001f600" { t.Fatal("match edge result") }\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [go, "test", str(module), str(test)], capture_output=True, text=True,
+        env={**os.environ, "GO111MODULE": "off"}, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_accumulator_generated_names_compile_and_run(
+    emitted, reference, tmp_path,
+):
+    """Builder locals and their package alias must not collide with user names."""
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("Go compiler not installed")
+    ir = compile_files([str(CORPUS_DIR / "accumulator_hygiene.rvl")])
+    test_source = """package emitted
+import "testing"
+func TestAccumulatorHygiene(t *testing.T) {
+    xs := []string{"a", "b"}
+    if got := reserved(xs); got != "xx" { t.Fatalf("reserved: %q", got) }
+    if got := shadowed(xs); got != "!!" { t.Fatalf("shadowed: %q", got) }
+    if got := appendSelf(0); got != "x" { t.Fatalf("appendSelf(0): %q", got) }
+    if got := appendSelf(3); got != "xxxxxxxx" { t.Fatalf("appendSelf(3): %q", got) }
+}
+"""
+    for name, source in (("reference", reference.emit(ir)),
+                         ("selfhost", emitted["emit_src"](ir))):
+        case = tmp_path / name
+        case.mkdir()
+        (case / "emitted.go").write_text(source)
+        (case / "emitted_test.go").write_text(test_source)
+        result = subprocess.run(
+            [go, "test", "."], cwd=case, capture_output=True, text=True,
+            env={**os.environ, "GO111MODULE": "off"}, timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("side", ["reference", "selfhost"])
+def test_arrow_container_parameter_inference_runtime(emitted, reference, tmp_path, side):
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("Go compiler not installed")
+    ir = compile_files([str(CORPUS_DIR / "arrow_containers.rvl")])
+    source = reference.emit(ir) if side == "reference" else emitted["emit_src"](ir)
+    module = tmp_path / "arrows.go"
+    module.write_text(source, encoding="utf-8")
+    test = tmp_path / "arrows_test.go"
+    test.write_text(
+        'package emitted\nimport "testing"\n'
+        'func TestArrows(t *testing.T) {\n'
+        '  if listArrow()[0] != 3 { t.Fatal("list arrow") }\n'
+        '  if recordArrow().Value != 4 { t.Fatal("record arrow") }\n'
+        '  if nestedArrow()[0][0] != 5 { t.Fatal("nested arrow") }\n'
+        '  if constantArrow() != 1 { t.Fatal("constant arrow") }\n'
+        '  if reverseArrow() != 3 { t.Fatal("reverse arrow") }\n'
+        '  if callField() != 4 { t.Fatal("call field") }\n'
+        '  callback := func(xs []int64, n int64) int64 { return xs[0] + n }\n'
+        '  if nestedCallback(callback, []int64{6}) != 7 { t.Fatal("callback") }\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [go, "test", str(module), str(test)], capture_output=True, text=True,
+        env={**os.environ, "GO111MODULE": "off"}, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_builder_text_literal_does_not_import_strings(emitted, reference):
+    ir = compile_files([str(CORPUS_DIR / "builder_literal.rvl")])
+    want, got = reference.emit(ir), emitted["emit_src"](ir)
+    assert '"strings"' not in want
+    assert '"strings"' not in got
+
+
+@pytest.mark.parametrize("source, reference_token, port_token", [
+    pytest.param("fn f(x: Opt[Int]) -> Int { return x ?? 0 }",
+                 "RevlOpt", "<<DEFER-coalesce>>", id="opt-coalesce-runtime"),
+    pytest.param("fn f(x: Result[Int, Str]) -> Int { return match x { Ok(v) => v, Err(e) => 0 } }",
+                 "RevlResult", "<<DEFER-match-builtin>>", id="result-match-runtime"),
+    pytest.param("fn f() -> Map[Str, Int] { return Map.empty() }",
+                 "map[string]int64", "<<UNSUPPORTED-EXPR:", id="map-runtime"),
+    pytest.param("fn f(s: Str) -> Int { return s.length() }",
+                 "utf8.RuneCountInString", "<<UNSUPPORTED-EXPR:builtin>>", id="stdlib-runtime"),
+    pytest.param("fn f(a: List[Int], b: List[Int]) -> Bool { return a == b }",
+                 "reflect.DeepEqual", "<<DEFER-reflect-eq>>", id="structural-equality"),
+    pytest.param("fn f(x: Float) -> Str { return `x=${x}` }",
+                 "func revlFtoa", "revlFtoa(x)", id="float-format-helper"),
+    pytest.param('extern pure fn f() -> Str = @go {\n//revl:import strings\nreturn strings.ToUpper("x")\n}',
+                 '"strings"', "<<DEFER-EXTERN-import:f>>", id="extern-imports"),
+    pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
+                 "*testing.T", "func f()", id="in-file-tests"),
+    pytest.param("service S { fn f() -> Int }\ncomponent C provides s: S { provide s { fn f() = 1 } }",
+                 "stc-go", "pure typed-core tier", id="live-component"),
+])
+def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
+                                         reference_token, port_token):
+    """These witnesses are not byte-agreement CORPUS; a port closes the reason."""
+    path = tmp_path / "boundary.rvl"
+    path.write_text(source)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_src"](ir)
+    assert reference_token in want
+    assert port_token in got
+    assert got != want, "boundary is stale: move its witness into CORPUS"
+
+
+def test_record_update_is_a_reference_refusal(reference, tmp_path):
+    path = tmp_path / "record_update.rvl"
+    path.write_text("type R = { x: Int }\nfn f(r: R) -> R { return {r | x = 2} }")
+    with pytest.raises(reference.EmitError, match="record.update"):
+        reference.emit(compile_files([str(path)]))

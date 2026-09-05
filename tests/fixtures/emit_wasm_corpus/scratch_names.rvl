@@ -1,0 +1,15 @@
+type ScratchRecord = { xs: List[Int] }
+type ScratchBox = Full(List[Int]) | Empty
+
+fn scratchParam(__revl_tmp: Int) -> Int { return __revl_tmp }
+
+fn scratchNested(__revl_tmp: Int, __revl_tmp_1: Int) -> Int {
+  let __revl_tmp_2 = __revl_tmp + __revl_tmp_1
+  let rows = [[__revl_tmp_2], [__revl_tmp]]
+  let record: ScratchRecord = { xs: [__revl_tmp_1] }
+  return rows[0][0] + record.xs[0]
+}
+
+fn scratchTagged(__revl_tmp: Int) -> ScratchBox {
+  return Full([__revl_tmp])
+}

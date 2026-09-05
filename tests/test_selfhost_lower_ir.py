@@ -262,6 +262,98 @@ def test_selfhosted_lower_ir_in_file_tests_pass(ns):
         fn()  # the block's asserts fire here; a failure raises
 
 
+def test_native_ir_preserves_function_visibility(lower_to_ir):
+    source = (
+        "pub fn exported(n: Int) -> Int { return n + 1 }\n"
+        "fn internal(n: Int) -> Int { return n - 1 }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert [fn["public"] for fn in reference] == [True, False]
+    assert native == reference
+
+
+@pytest.mark.parametrize("prefix", ["", "pub "])
+@pytest.mark.parametrize("signature", ["(n: Int) -> Int", "()"])
+def test_native_ir_preserves_plain_function_cache(lower_to_ir, prefix, signature):
+    body = "return n + 1" if "n:" in signature else ""
+    source = (
+        f"{prefix}fn cached{signature} cache pure {{ {body} }}\n"
+        f"fn plain{signature} {{ {body} }}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["cache"] == {"class": "pure_fn"}
+    assert "cache" not in reference[1]
+    assert native == reference
+
+
+def test_native_ir_infers_nominal_record_field_operands(lower_to_ir):
+    source = (
+        "type Outer = { child: Pair, length: Float }\n"
+        "type Pair = { x: Int, y: Int }\n"
+        "fn sum(p: Outer, ps: List[Pair]) -> Int {\n"
+        "  let pair = p.child\n"
+        "  return pair.x + ps[0].y\n"
+        "}\n"
+        "fn widened(p: Outer) -> Float { return p.length + p.child.x }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][-1]["expr"]["operands"] == "Int"
+    assert reference[1]["body"][-1]["expr"]["operands"] == "Float"
+    assert native == reference
+
+
+@pytest.mark.parametrize("source", [
+    "fn caller(x: Int) -> Int { let f = later return f(x) + 1 }\n"
+    "pub fn later(x: Int) -> Int { return x }\n",
+    "fn caller(f: ((Int) -> Int) -> Int, g: (Int) -> Int) -> Int {\n"
+    "  return f(g) + g(1)\n"
+    "}\n",
+    "fn caller(f: () -> (() -> Int)) -> Int { return f()() + 1 }\n",
+    "type Handler = { run: () -> Int }\n"
+    "fn caller(h: Handler) -> Int { let f = h.run return f() + 1 }\n",
+])
+def test_native_ir_infers_callable_results(lower_to_ir, source):
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][-1]["expr"]["operands"] == "Int"
+    assert native == reference
+
+
+@pytest.mark.parametrize("actual,expected", [
+    ("Int", "Float"), ("Int32", "Float"), ("Int32", "Int"),
+])
+def test_native_ir_marks_numeric_return_widening(lower_to_ir, actual, expected):
+    source = f"fn widened(x: {actual}) -> {expected} {{ return x }}"
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][0]["expr"]["widen"] == expected
+    assert native == reference
+
+
+@pytest.mark.parametrize("body", [
+    "return Map.empty()",
+    "let m: Map[Str, Int] = Map.empty() return m",
+])
+def test_native_ir_lowers_empty_map(lower_to_ir, body):
+    source = f"fn empty_map() -> Map[Str, Int] {{ {body} }}"
+    assert json.loads(lower_to_ir(source))["functions"] == compile_source(source)["functions"]
+
+
+@pytest.mark.parametrize("modifiers", [
+    "emission idempotent", "idempotent emission",
+    "async emission idempotent", "idempotent emission[db] async",
+])
+def test_native_ir_preserves_idempotent_service_methods(lower_to_ir, modifiers):
+    source = f"service Store {{ {modifiers} fn put(value: Int) -> Int }}"
+    native = json.loads(lower_to_ir(source))
+    reference = compile_source(source)
+    assert native["services"] == reference["services"]
+    assert native["ir_version"] == reference["ir_version"] == 3
+
+
 @pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_services(lower_to_ir, rel):
     """The SERVICES table is byte-identical to the reference IR on every corpus

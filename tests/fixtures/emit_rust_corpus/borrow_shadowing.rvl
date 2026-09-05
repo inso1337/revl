@@ -1,0 +1,24 @@
+fn later_count(s: Str) -> Int { return s.length() }
+pub fn later_shadow() -> Int {
+  let f = later_count
+  let later_count = 0
+  return f("abc")
+}
+
+fn sibling_count(s: Str) -> Int { return s.length() }
+pub fn sibling_shadow(flag: Bool) -> Int {
+  if (flag) {
+    let sibling_count = 0
+    return sibling_count
+  } else {
+    let f = sibling_count
+    return f("abcd")
+  }
+}
+
+fn local_count(s: Str) -> Int { return s.length() }
+pub fn local_shadow() -> Int {
+  let local_count = "local"
+  let value = local_count
+  return value.length()
+}

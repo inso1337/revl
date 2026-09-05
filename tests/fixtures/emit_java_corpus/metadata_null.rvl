@@ -1,0 +1,7 @@
+service Sink {
+  emission fn send(message: Str)
+}
+
+component Metadata requires sink: Sink {
+  intercept sink with { absent: null, values: [null, "present"] }
+}
