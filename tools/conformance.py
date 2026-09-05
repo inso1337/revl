@@ -560,6 +560,24 @@ def execute(report: dict | None = None) -> dict:
             for label, _ in cases:
                 out["cases"][label][tier] = "-"
             continue
+        expected = {label for label, _ in cases}
+        missing = sorted(expected - set(results))
+        extra = sorted(set(results) - expected)
+        if missing or extra:
+            details = []
+            if missing:
+                details.append("missing: " + ", ".join(missing))
+            if extra:
+                details.append("unexpected: " + ", ".join(extra))
+            entry["status"] = "error"
+            entry["reason"] = (
+                "executor returned an incomplete result set ("
+                + "; ".join(details) + ")"
+            )
+            out["tiers"][tier] = entry
+            for label, _ in cases:
+                out["cases"][label][tier] = "-"
+            continue
         failures = {}
         for label, (status, detail) in results.items():
             agreed = status == "ok"
