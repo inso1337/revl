@@ -229,7 +229,7 @@
 
 use "./lexer.rvl" { Token, lex_src }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
-                    is_bad, expr_at, params_at, type_at }
+                    is_bad, expr_at, params_at, type_at, nesting_limit }
 
 // ================================================================ IR model
 //
@@ -4355,19 +4355,218 @@ pub fn foreign_scan(src: Str) -> Str {
 }
 
 // The admission entry. "" admits; "<tag>|<message>" refuses.
+// ----------------------------------------------------------- nesting bound
+//
+// How deep the front end would have to go to read this token stream, measured
+// WITHOUT going there: one pass, four integers and a small integer stack, no
+// recursion of its own.
+//
+// The front end is recursive over the expression tree twice over — once
+// descending to parse it (one nested level costs a full pass down the
+// precedence ladder) and again in every walk over the result. Neither descent
+// had a bound, so a short source could drive both arbitrarily deep. On the
+// python emission that surfaces as a `RecursionError`; on the rust and wasm
+// emissions behind `crates/revl-gate` it exhausts the stack, and a stack
+// exhaustion in rust ABORTS — `catch_unwind` cannot turn it back into a
+// verdict, so an embedder loses the process instead of getting an answer. For
+// a gate whose whole job is to decide sources it does not trust, an input that
+// kills it is the worst answer available.
+//
+// selfhost/parser.rvl now holds `nesting_limit()` on both descents itself, and
+// that is what makes the abort impossible. What it CANNOT do is say so: a
+// parse that stops early returns `Bad`, and an expression-level `Bad` is not
+// something `parse_prog` surfaces, so the program would come back with no
+// objection raised — the wrong thing to say about a source nobody can read. So
+// the bound is measured here too, ahead of any descent, where it is a verdict.
+//
+// Two quantities, each held against the same limit, because the two ways to
+// make the front end descend do not look alike in the token stream:
+//
+//   * BRACKET DEPTH — `(`/`[`/`{` open a nested expression and the ladder
+//     follows them one for one. This is the `((((...))))`, `f(f(f(...)))`,
+//     `[[[...]]]`, `{a:{a:...}}`, `List[List[...]]` family, plus the two forms
+//     that recurse without a bracket and so are counted alongside it: a prefix
+//     run (`!!!x`, `- -x`, `emit emit x`) and a right-associative `??`/`?`
+//     chain.
+//   * SPINE LENGTH — the operators at ONE bracket level. The parser reads
+//     `a + a + a + ...` and `x.f().f()...` with a loop, so they cost it no
+//     stack, but they build a tree one level taller per operator and every
+//     later walk over that tree pays for it. The count is saved and restored
+//     across brackets (so a `.concat()` chain still accumulates across the
+//     calls in it) and cleared by a statement or declaration keyword, which is
+//     where one expression ends and the next begins.
+//
+// Both are estimates and both can be off by a little in either direction — a
+// `${...}` interpolation is one flattened lexer token so a nested template
+// reads as flat here, and a `?` closing an optional type reads as a
+// conditional. Neither direction can produce an ABORT, which is the property
+// this exists for: under-counting leaves the parser's own bound to stop the
+// descent, and over-counting costs a refusal at a depth no program a human or
+// a generator writes ever reaches.
+
+// A `kw` token that ends whatever expression preceded it: every statement and
+// declaration head. The expression keywords (`true`/`false`/`null`, `match`,
+// `emit`, `await`, `hole`, `config`, `async`, `as`) are deliberately absent —
+// they continue an expression rather than starting a statement.
+fn ends_expr_kw(w: Str) -> Bool {
+  if (w == "let" || w == "var" || w == "return" || w == "if" || w == "else") { return true }
+  if (w == "while" || w == "for" || w == "of" || w == "break" || w == "continue") { return true }
+  if (w == "fn" || w == "pub" || w == "type" || w == "use" || w == "test") { return true }
+  if (w == "service" || w == "component" || w == "extern" || w == "provide") { return true }
+  if (w == "requires" || w == "provides" || w == "config" || w == "effect") { return true }
+  if (w == "assert" || w == "fail" || w == "compensate" || w == "undo") { return true }
+  return false
+}
+
+// A token that makes a NODE out of what precedes it, and so adds one level to
+// the tree the walkers will descend.
+fn extends_spine(k: Str, w: Str) -> Bool {
+  if (k == "kw") { return w == "emit" }
+  if (k == "." || k == "?." || k == "?") { return true }
+  if (k == "!" || k == "~") { return true }
+  if (k == "+" || k == "-" || k == "*" || k == "/" || k == "%") { return true }
+  if (k == "&&" || k == "||" || k == "??") { return true }
+  if (k == "&" || k == "|" || k == "^" || k == "<<" || k == ">>") { return true }
+  if (k == "==" || k == "!=" || k == "===" || k == "!==") { return true }
+  if (k == "<" || k == ">" || k == "<=" || k == ">=") { return true }
+  return false
+}
+
+// The `${` interpolation levels embedded in a template token's serialized
+// text. A NESTED template flattens to ONE token (the lexer does not descend
+// into `${...}`) whose `v:` body carries the inner template's source verbatim,
+// so each nesting level leaves a literal `${` in the text; SIBLING
+// interpolations (`` `${a}${b}` ``) are consumed into separate parts and leave
+// none. Counting `${` therefore measures the depth the reference parser
+// re-enters `pure_expr` for at each interpolation — the one nesting shape the
+// token walk below cannot otherwise see, because the whole nest is one flat
+// token, and so the one shape that reached `admit_src` with no objection while
+// the reference refused it at the bound (issue #310, template half).
+fn interp_levels(s: Str) -> Int {
+  var c = 0
+  var i = 0
+  let m = s.length()
+  while (i + 1 < m) {
+    if (s.codepoint_at(i) == 36 && s.codepoint_at(i + 1) == 123) { c += 1 }
+    i += 1
+  }
+  return c
+}
+
+fn nesting_depth(ts: List[Token]) -> Int {
+  var depth = 0        // open brackets
+  var run = 0          // consecutive prefix unaries at this point
+  var chain = 0        // `??` / `?` levels at this bracket level
+  var spine = 0        // operators in the expression being read
+  var sibs = 0         // the tallest expression finished at this level
+  var up_spine: List[Int] = []
+  var up_sibs: List[Int] = []
+  var worst = 0
+  var i = 0
+  let n = ts.length()
+  while (i < n) {
+    let k = ts[i].kind
+    let w = ts[i].text
+    if (k == "(" || k == "[" || k == "{") {
+      depth += 1
+      run = 0
+      chain = 0
+      up_spine = up_spine.push(spine)
+      up_sibs = up_sibs.push(sibs)
+      spine = 0
+      sibs = 0
+    } else if (k == ")" || k == "]" || k == "}") {
+      if (depth > 0) { depth -= 1 }
+      run = 0
+      chain = 0
+      var inner = sibs
+      if (spine > inner) { inner = spine }
+      var os = 0
+      var ob = 0
+      if (up_spine.length() > 0) {
+        os = up_spine[up_spine.length() - 1]
+        up_spine = up_spine.slice(0, up_spine.length() - 1)
+        ob = up_sibs[up_sibs.length() - 1]
+        up_sibs = up_sibs.slice(0, up_sibs.length() - 1)
+      }
+      // the closed group becomes ONE node at the level above — a call, an
+      // index, a list, a record, a block — sitting on top of whichever of its
+      // two sides is taller
+      spine = os
+      if (inner > spine) { spine = inner }
+      spine += 1
+      sibs = ob
+    } else if (k == ":") {
+      // a field or conditional `:` ends the expression before it, but NOT the
+      // `?`/`??` chain — the `:` of a conditional is that chain's own
+      // separator and `a ? b : c ? d : ...` keeps descending across it
+      if (spine > sibs) { sibs = spine }
+      spine = 0
+      run = 0
+    } else if (k == "," || k == ";" || k == "="
+               || (k == "kw" && ends_expr_kw(w))) {
+      // a sibling boundary — a separator, an assignment `=`, a statement or
+      // declaration keyword. The next expression starts from nothing, and the
+      // one that just ended only matters as far as it was the tallest
+      if (spine > sibs) { sibs = spine }
+      spine = 0
+      run = 0
+      chain = 0
+    } else {
+      if (k == "!" || k == "~" || k == "-" || (k == "kw" && w == "emit")) {
+        run += 1
+      } else {
+        run = 0
+      }
+      if (k == "??" || k == "?") { chain += 1 }
+      if (extends_spine(k, w)) { spine += 1 }
+    }
+    // a template's own `${` nesting sits on top of the bracket depth it is read
+    // at — one flat token, so it is measured from its text rather than walked
+    var tmpl = 0
+    if (k == "template") { tmpl = interp_levels(w) }
+    var here = depth + run + chain
+    if (spine > here) { here = spine }
+    if (sibs > here) { here = sibs }
+    if (depth + tmpl > here) { here = depth + tmpl }
+    if (here > worst) { worst = here }
+    // stop at the answer. Past the bound the verdict cannot change, and
+    // walking the rest of a hostile source is work an attacker chose the size
+    // of — the saved-spine stack in particular is copied on every close, so a
+    // deeply nested input would cost quadratic time to finish measuring.
+    if (worst > nesting_limit()) { return worst }
+    i += 1
+  }
+  return worst
+}
+
+// The refusal, worded as `revl.parser` words it so the two implementations
+// read the same when they refuse the same program.
+fn too_deep_msg() -> Str {
+  return `expression nesting is deeper than the parser's limit of ${nesting_limit().to_str()} levels`
+}
+
 pub fn admit_src(src: Str) -> Str {
   // item 384: the foreign-construct redirects run first — the reference's
   // parser half fires before any admission check, and no program that reaches
   // an admission refusal carries one of these spellings.
   let fgn = foreign_scan(src)
   if (fgn != "") { return tagged("FOREIGN", fgn) }
+  // ... and the nesting bound before any descent, so a source built to run the
+  // front end out of stack is refused rather than parsed. The token stream is
+  // read once here and handed to `type_ctors` below, which used to lex the
+  // source a second time of its own.
+  let ts0 = lex_src(src)
+  if (nesting_depth(ts0) > nesting_limit()) {
+    return tagged("BAD", too_deep_msg())
+  }
   let pg = parse_prog(src)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
   // the ADT constructors the program declares join the callable universe a bare
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
   // declarations structurally — see `type_ctors`.
-  let base = ctx_with_callables(build_maps(pg), type_ctors(lex_src(src)))
+  let base = ctx_with_callables(build_maps(pg), type_ctors(ts0))
   let cachev = check_cache_fns(pg.fns)
   if (cachev != "") { return cachev }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
@@ -5402,6 +5601,44 @@ fn type_args(t: Str) -> List[Str] {
   return split_top_commas(inner)
 }
 
+// Top-level comma split that tracks BOTH bracket and paren depth, so a
+// function-typed parameter (`(A, T) -> A`) in a signature's parameter list is
+// not split at its own comma.
+fn split_top_type_commas(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var cur = ""
+  var i = 0
+  while (i < s.length()) {
+    let c = s.charAt(i)
+    if (c == "[" || c == "(") { depth += 1  cur = cur.concat(c) }
+    else { if (c == "]" || c == ")") { depth -= 1  cur = cur.concat(c) }
+    else { if (c == "," && depth == 0) { out = out.push(ty_trim(cur))  cur = "" }
+    else { cur = cur.concat(c) } } }
+    i += 1
+  }
+  return out.push(ty_trim(cur))
+}
+
+// The parameter type list of a function type `(P1, P2, ..) -> R` ([] when `ty`
+// is not a function type). Mirrors `function_return_ty`'s outer-paren scan.
+fn fn_param_types(ty: Str) -> List[Str] {
+  if (ty.length() == 0 || ty.charAt(0) != "(") { return [] }
+  var depth = 0
+  var i = 0
+  var close = 0 - 1
+  while (i < ty.length() && close == 0 - 1) {
+    let c = ty.charAt(i)
+    if (c == "(") { depth += 1 }
+    if (c == ")") { depth -= 1  if (depth == 0) { close = i } }
+    i += 1
+  }
+  if (close <= 0) { return [] }
+  let inner = ty.slice(1, close)
+  if (inner == "") { return [] }
+  return split_top_type_commas(inner)
+}
+
 fn type_arg1(t: Str) -> Str {
   let a = type_args(t)
   if (a.length() == 0) { return "" }
@@ -5665,6 +5902,21 @@ fn lir_args(args: List[Expr], env: List[Bind]) -> Str {
   var i = 0
   while (i < args.length()) {
     let e = lir_expr(args[i], env)
+    out = i == 0 ? e : out.concat(",").concat(e)
+    i += 1
+  }
+  return out
+}
+
+// Like `lir_args`, but marks each argument's Int/Int32 -> Float / Int32 -> Int
+// widen against the callee's declared parameter types (`_mark_widen` at a call
+// site). A missing parameter type (defaults, varargs) leaves its argument bare.
+fn lir_call_args(args: List[Expr], ptypes: List[Str], env: List[Bind]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < args.length()) {
+    var e = lir_expr(args[i], env)
+    if (i < ptypes.length()) { e = apply_arg_markers(e, ptypes[i], infer(args[i], env)) }
     out = i == 0 ? e : out.concat(",").concat(e)
     i += 1
   }
@@ -5987,8 +6239,15 @@ fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
     _ => "",
   }
   if (builtin != "") { return builtin }
+  // A written free-function argument that widens Int/Int32 -> Float or
+  // Int32 -> Int is marked on the argument node (`_mark_widen`), so every tier
+  // emits the conversion. The callee's declared parameter types drive it; only
+  // a `Var` callee names a signature (the reference's `ExprVar` guard), so a
+  // higher-order callee keeps its arguments un-marked.
+  let ptypes = match callee { Var(n) => fn_param_types(tenv_get(env, n)), _ => [], }
+  let argsjs = ptypes.length() == 0 ? lir_args(args, env) : lir_call_args(args, ptypes, env)
   return "{\"kind\":\"call\",\"callee\":".concat(lir_expr(callee, env))
-    .concat(",\"args\":[").concat(lir_args(args, env)).concat("]}")
+    .concat(",\"args\":[").concat(argsjs).concat("]}")
 }
 
 fn is_host_root_recv(recv: Expr) -> Bool {
@@ -6098,6 +6357,18 @@ fn apply_ret_markers(node: Str, expected: Str, actual: Str) -> Str {
       && parse_head(actual) != "Opt") {
     return "{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"Some\"},\"args\":["
       .concat(node).concat("]}")
+  }
+  return node
+}
+
+// The numeric-widen half of `apply_ret_markers`, for a call ARGUMENT position:
+// `_mark_widen` marks Int/Int32 -> Float and Int32 -> Int on the argument node,
+// but (unlike a return) never injects `Some` — the reference's call branch calls
+// only `_mark_widen`, not `_inject_opt`.
+fn apply_arg_markers(node: Str, expected: Str, actual: Str) -> Str {
+  if ((expected == "Float" && (actual == "Int" || actual == "Int32"))
+      || (expected == "Int" && actual == "Int32")) {
+    return node.slice(0, node.length() - 1).concat(",\"widen\":").concat(jstr(expected)).concat("}")
   }
   return node
 }
@@ -6411,12 +6682,50 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind]) -> Str {
 // is omitted rather than emitted wrong.
 
 type ExAcc = { js: Str, ok: Bool }
+type CapR  = { js: Str, i: Int }
+
+// The capability scope after a `witnessed`/`emission` class (`[fs]`,
+// `[gateway.send]`, `[a, b]`, item 343). `i` points at the opening `[`; the
+// result carries the JSON array BODY (each token joined so a dotted
+// `gateway.send` renders as one string) and the index past the closing `]`,
+// matching the reference's `_capability_list`.
+fn ir_cap_list(ts: List[Token], i: Int) -> CapR {
+  var k = i + 1
+  var out = ""
+  var first = true
+  var cur = ""
+  while (k < ts.length() && !atk(ts, k, "]")) {
+    if (atk(ts, k, ",")) {
+      if (cur != "") { out = first ? jstr(cur) : out.concat(", ").concat(jstr(cur))  first = false }
+      cur = ""
+    } else {
+      cur = cur.concat(tkc(ts, k).text)
+    }
+    k += 1
+  }
+  if (cur != "") { out = first ? jstr(cur) : out.concat(", ").concat(jstr(cur)) }
+  return { js: out, i: k + 1 }
+}
 
 // One extern declaration -> its IR entry. `ok:false` when the declaration
-// reaches a form outside the covered surface (an `undo`/`compensate` slot).
+// reaches a form outside the covered surface. The `witnessed` class (item 243),
+// a capability scope (`witnessed[fs]`/`emission[net]`, item 343) and the
+// `undo`/`compensate` teardown slots (items 243/309/440) are all in the covered
+// surface and lower to the reference's `_lower_externs` shape.
 fn ir_extern(ts: List[Token], i: Int) -> IrRes {
+  // `witnessed` is a contextual keyword (an ident), so `.text` is the class for
+  // every classification. `pure`/`acquire`/`emission` are reserved keywords.
   let cls = tkc(ts, i + 1).text
   var j = i + 2
+  // Capability scope directly after the class (`witnessed[fs]`/`emission[net]`).
+  var capsJson = ""
+  var hasCaps = false
+  if (atk(ts, j, "[")) {
+    let cp = ir_cap_list(ts, j)
+    capsJson = cp.js
+    hasCaps = true
+    j = cp.i
+  }
   var isAsync = false
   if (atw(ts, j, "async")) { isAsync = true  j += 1 }
   if (!atw(ts, j, "fn")) { return mk_irres(false, "") }
@@ -6436,9 +6745,36 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
     retDecl = tr.ty
     k = tr.i
   }
-  // undo/compensate lower a pure expression in the extern scope — outside this
-  // projection; leave the covered surface so the section is omitted, not wrong.
-  if (atw(ts, k, "undo") || atw(ts, k, "compensate")) { return mk_irres(false, "") }
+  // Teardown slots. `undo [idempotent] [pure] <inverse>` (items 243/309/440) and
+  // `compensate <inverse>` lower their inverse EXPRESSION with the same
+  // `expr_at`/`lir_expr` ladder a fn body uses (the reference's
+  // `_lower_extern_expr` over a pure expression), so a `witnessed`/`acquire`
+  // inverse `unstash(result)` lowers to the same call node the reference emits.
+  var undoJson = ""
+  var hasUndo = false
+  var undoIdem = false
+  var undoRead = false
+  var compJson = ""
+  var hasComp = false
+  if (atw(ts, k, "undo")) {
+    var u = k + 1
+    while (atw(ts, u, "idempotent") || atw(ts, u, "pure")) {
+      if (atw(ts, u, "idempotent")) { undoIdem = true } else { undoRead = true }
+      u += 1
+    }
+    let r = expr_at(ts, u)
+    if (is_bad(r.e) || r.i <= u) { return mk_irres(false, "") }
+    undoJson = lir_expr(r.e, [])
+    hasUndo = true
+    k = r.i
+  }
+  if (atw(ts, k, "compensate")) {
+    let r = expr_at(ts, k + 1)
+    if (is_bad(r.e) || r.i <= k + 1) { return mk_irres(false, "") }
+    compJson = lir_expr(r.e, [])
+    hasComp = true
+    k = r.i
+  }
   var bodies = ""
   var bcount = 0
   while (atk(ts, k, "=") && atk(ts, k + 1, "hostbody")) {
@@ -6464,7 +6800,29 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
   // discharge descriptor records as its inverse's referent.
   if (taint_mentions_secret(retDecl)) { js = js.concat(", \"secret_return\": true") }
   if (taint_secret_witness(retDecl)) { js = js.concat(", \"secret_witness\": true") }
+  // item 309: the idempotency register the inverse-carrying slots stamp. Both
+  // flags are additive and the `register` tier is `read` for `undo pure`, else
+  // `declared` (a keyed emission is out of the covered extern surface).
+  if (undoIdem) { js = js.concat(", \"undo_idempotent\": true") }
+  if (undoRead) { js = js.concat(", \"undo_read\": true") }
+  if (undoIdem || undoRead) {
+    js = js.concat(", \"register\": ").concat(jstr(undoRead ? "read" : "declared"))
+  }
   if (isAsync) { js = js.concat(", \"async\": true") }
+  // item 243: the witnessed transactional descriptor. The witness is the `Ok`
+  // payload of the declared `Result[Witness, Error]` return, WAL-serializable
+  // data the auto-registered inverse is rebuilt from.
+  if (cls == "witnessed") {
+    js = js.concat(", \"entry_kind\": \"transactional\", \"revertible\": true")
+      .concat(", \"ok_conditional\": true, \"witness\": ").concat(jstr(type_arg1(retDecl)))
+  }
+  // item 343: the declared capability TOKEN a witnessed/emission crossing is
+  // keyed on (a bare `emission` writes none — name-as-capability).
+  if ((cls == "witnessed" || cls == "emission") && hasCaps) {
+    js = js.concat(", \"capabilities\": [").concat(capsJson).concat("]")
+  }
+  if (hasUndo) { js = js.concat(", \"undo\": ").concat(undoJson) }
+  if (hasComp) { js = js.concat(", \"compensate\": ").concat(compJson) }
   return mk_irres(true, js.concat("}"))
 }
 
