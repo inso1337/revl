@@ -547,6 +547,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="fail (exit 3) instead of exiting 0 when wasm-tools/wasmtime are "
              "absent, so the substrate battery could not actually run")
 
+    # `revl analyze` — Petri-net reachability liveness (roadmap item 438,
+    # docs/analyze-liveness.md). Report-only: derives a net from the composition
+    # IR (provisions as places, activations as transitions) and searches for a
+    # reachable dead state, naming the stranded activation. Own additive block.
+    analyze = sub.add_parser(
+        "analyze",
+        help="liveness: derive a Petri net from the composition and report any "
+             "reachable deadlock (report-only; docs/analyze-liveness.md)")
+    analyze.add_argument(
+        "files", nargs="*",
+        help="composition source(s) to compile and analyze")
+    analyze.add_argument(
+        "--ir", metavar="DOC.json", default=None,
+        help="analyze a precompiled composition IR document instead of "
+             "compiling sources (the analyzed unit is the IR, item 426)")
+    analyze.add_argument("--json", action="store_true",
+                         help="machine-readable output")
+    analyze.add_argument(
+        "--max-states", type=int, default=20000, metavar="N",
+        help="bounded-BFS state cap: a search that hits it reports "
+             "INCONCLUSIVE, never a false 'no deadlock' (item 418)")
+    analyze.add_argument(
+        "--max-tokens", type=int, default=64, metavar="N",
+        help="per-place token cap; exceeding it flags possible unboundedness")
+
     test = sub.add_parser("test", help="compile and run `test` blocks")
     test.add_argument("files", nargs="+")
     test.add_argument("--backend", default="py",
