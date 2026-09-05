@@ -164,7 +164,22 @@ async def activate_concurrent(
         emit("done", name)
         done[name].set()
 
-    await asyncio.gather(*(asyncio.create_task(run(n)) for n in order))
+    queue = asyncio.PriorityQueue()
+    for idx, name in enumerate(order):
+        queue.put_nowait((len(prereqs.get(name, [])), idx, name))
+
+    async def worker():
+        while not queue.empty():
+            _, _, name = await queue.get()
+            await run(name)
+            queue.task_done()
+
+    workers = [asyncio.create_task(worker()) for _ in range(min(4, len(order)))]
+    await queue.join()
+    for w in workers:
+        w.cancel()
+
+    # await asyncio.gather(*(asyncio.create_task(run(n)) for n in order))
     return completion, errors
 
 
