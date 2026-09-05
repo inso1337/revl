@@ -25,6 +25,7 @@ from .errors import RevlError, RevlErrors
 from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
     CASES_KEY,
+    _reject_float_literal_range,
     FN_HEAD,
     FNS_KEY,
     _SIZED_HEADS,
@@ -79,6 +80,8 @@ from .resources import (
     resource_taint,
 )
 from .parser import (
+    NESTING_LIMIT,
+    recursion_headroom,
     _describe_expr,
     missing_undo_refusal,
     AbortStmt,
@@ -5242,6 +5245,22 @@ def _str_literal_value(value):
     return value
 
 
+def _literal_value(value, filename: str | None, line: int):
+    """The IR form of a literal, carrying the refusals a literal value itself
+    can earn. Every `lit` node the frontend builds goes through here, so the
+    IR handed to a backend can never carry a value no tier can spell.
+
+    Two of them today: a lone surrogate in a `Str` (above, an upstream-defect
+    invariant) and a non-finite `Float`. The Float bound is also enforced in
+    the checker, where it produces the diagnostic a reader sees; this is the
+    choke point that makes it exhaustive, because a literal in a position the
+    checker never infers still lands here (issue #312).
+    """
+    if isinstance(value, float):
+        _reject_float_literal_range(filename, line, value)
+    return _str_literal_value(value)
+
+
 def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> dict | None:
     """Mark an implicit `Int` -> `Float` coercion site in the IR.
 
@@ -5368,7 +5387,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
     if isinstance(expr, ExprLit):
         if expr.value is None:
             raise null_error(filename, expr.line)
-        return {"kind": "lit", "value": _str_literal_value(expr.value)}
+        return {"kind": "lit", "value": _literal_value(expr.value, filename, expr.line)}
     if isinstance(expr, ExprVar):
         if expr.name not in scope and expr.name not in callables:
             _reject_foreign_name(expr.name, filename, expr.line)  # item 384
@@ -6109,7 +6128,30 @@ def check_and_lower(program: Program, ambient: dict | None = None,
     refusal carries the collapsed navigable verdict (no author-side declassify
     path exists under `no_declassify`). Purely additive: it changes only the
     optional `navigate` field of the refusal, never the verdict or the IR.
+
+    Issue #310: the checkers and lowerers here walk the tree recursively, so
+    they need the same stack the parser gave itself to accept it, and the same
+    promise on the way out — a `RecursionError` is an unhandled fault in a
+    library, and every caller of this one (`revl compile`, the LSP,
+    `revl.gate`) is entitled to a diagnostic instead.
     """
+    with recursion_headroom():
+        try:
+            return _check_and_lower(program, ambient, taint_strict, untrusted)
+        except RecursionError:
+            raise RevlError(
+                program.filename, 0,
+                "this program nests deeper than the compiler can check",
+                hint=f"expressions are bounded at {NESTING_LIMIT} levels "
+                     "(parser.NESTING_LIMIT) and the other nestings by the "
+                     "interpreter's stack; this is an implementation bound, not "
+                     "a language one — name the inner constructs with `let` "
+                     "bindings or helper functions",
+            ) from None
+
+
+def _check_and_lower(program: Program, ambient: dict | None = None,
+                     taint_strict: bool = False, untrusted: bool = False) -> dict:
     ambient = ambient or {}
 
     # Taint/provenance (roadmap item 249, Slice A). Read the `Untrusted[T]` /
@@ -6894,7 +6936,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
     if isinstance(expr, ExprLit):
         if expr.value is None:
             raise null_error(filename, line)
-        return {"kind": "lit", "value": _str_literal_value(expr.value)}
+        return {"kind": "lit", "value": _literal_value(expr.value, filename, line)}
     if isinstance(expr, Interp):
         return _lower_expr(expr, env, mode=getattr(env, "_expr_mode", "setup"))
     if isinstance(expr, ExprVar):
@@ -11028,7 +11070,7 @@ def _lower_expr(expr, env: Env, mode: str):
     if isinstance(expr, Lit):
         if expr.value is None:
             raise null_error(env.filename, expr.line)
-        return {"kind": "lit", "value": _str_literal_value(expr.value)}
+        return {"kind": "lit", "value": _literal_value(expr.value, env.filename, expr.line)}
     if isinstance(expr, Interp):
         template = []
         args = []

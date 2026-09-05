@@ -35,7 +35,7 @@ attacking the runtime's disposal ordering (a runtime property, verified by the
 backend scenarios, not the gate). Those are real threats owned by other tiers;
 naming them here keeps the gate's own promise honest.
 
-## What the gate defends (G1–G8, A1–A8)
+## What the gate defends (G1–G9, the `Secret` families, T1–T3, A1–A3/A5/A6/A8/A9)
 
 The guarantee families and where each is enforced are catalogued in
 docs/rejections.md; the executable spec is `examples/rejections/` +

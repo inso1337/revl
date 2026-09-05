@@ -1,0 +1,43 @@
+// item 233 / 276 (self-host port, item 391): the single-character ASCII
+// classification builtins (`is_digit`/`is_alpha`/`is_alnum`/`is_space`) and the
+// code-point scan (`codepoint_at`). No corpus document exercised any of them,
+// so the differential oracles stayed green while `selfhost/lower.rvl` lowered
+// them as plain CALLS (not `builtin` nodes) and `selfhost/emit_py.rvl` rendered
+// `<<UNSUPPORTED-BUILTIN:...>>` — the same blind-spot family as `hole` in the
+// lexer oracle. This is not a parity nicety: `selfhost/lexer.rvl` itself calls
+// all five, so before this fixture the self-host frontend could not compile its
+// own lexer.
+//
+// `is_alpha`/`is_alnum` read the receiver more than once, so the py tier binds
+// it with a walrus (`_rc`); `code(s, i)` pins the receiver as a non-trivial
+// expression so the render is exercised on more than a bare local.
+fn is_digit_ch(c: Str) -> Bool { return c.is_digit() }
+fn is_alpha_ch(c: Str) -> Bool { return c.is_alpha() }
+fn is_alnum_ch(c: Str) -> Bool { return c.is_alnum() }
+fn is_space_ch(c: Str) -> Bool { return c.is_space() }
+
+fn code(s: Str, i: Int) -> Int { return s.codepoint_at(i) }
+
+fn ident_len(source: Str, start: Int) -> Int {
+  var j = start
+  while (j < source.length() && (source.charAt(j).is_alnum() || source.charAt(j) == "_")) {
+    j += 1
+  }
+  return j - start
+}
+
+fn digits_value(source: Str) -> Int {
+  var total = 0
+  var i = 0
+  while (i < source.length()) {
+    if (source.charAt(i).is_digit()) { total = total * 10 + (source.codepoint_at(i) - 48) }
+    i += 1
+  }
+  return total
+}
+
+fn skip_space(source: Str, from: Int) -> Int {
+  var i = from
+  while (i < source.length() && source.slice(i, i + 1).is_space()) { i += 1 }
+  return i
+}

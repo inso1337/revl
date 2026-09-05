@@ -470,7 +470,7 @@ def _service_catalog(paths: list[str], root: str) -> dict:
     already names. Header-only, like everything else here: the service
     declaration is read out of the parse tree and no body is lowered."""
     catalog: dict = {}
-    for rel in paths:
+    for rel in dict.fromkeys(paths):
         program = parse_file(os.path.join(root, rel))
         for svc in program.services:
             catalog.setdefault(svc.name, (svc, rel))

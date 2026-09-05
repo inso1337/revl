@@ -247,9 +247,10 @@ Java and wasm still refuse at emit time (no JDK JSON API on the run classpath;
 no rich-enough value model on the substrate). For those two tiers **the string
 protocol remains the full-tier fallback**: a composition that flattens its
 wire format to `name arg1 arg2` runs on all six tiers, at the price of
-positional strings rather than a structured document. The ts tier also still
-carries a residual blocker for a *real* provider (item 80, async extern
-bodies: an HTTP call is a `Promise`, and extern bodies cannot yet `await`).
+positional strings rather than a structured document. Item 80 has since landed, so
+the ts tier's residual blocker for a *real* provider is gone: an extern body
+declared `async` emits an `async function` and may `await`
+(`backends/typescript/golden/async_http.ts`).
 
 ## Why externs, not builtins
 

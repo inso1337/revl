@@ -2,7 +2,8 @@
 
 Start with **[../DESIGN.md](../DESIGN.md)** for the guarantees and the checked
 table, or **[vision.md](vision.md)** for what this is *for*. The
-[project README](../README.md) is the front page; this is the full map.
+[project README](../README.md) is the front page; this is the curated map, not
+an exhaustive listing. `ls docs/` has more.
 
 ## Language
 
