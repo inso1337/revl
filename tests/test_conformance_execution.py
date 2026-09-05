@@ -103,6 +103,27 @@ def test_a_wrong_answer_is_caught():
     assert "41" in detail, f"the failure does not name the answer: {detail}"
 
 
+def test_incomplete_executor_results_are_not_reported_as_agreement(monkeypatch, programs):
+    """A broken executor must not turn an unrun case into a green comparison."""
+    class PartialExecutor:
+        depth = "test"
+
+        def unavailable(self):
+            return None
+
+        def check(self, cases):
+            label, _source = cases[0]
+            return {label: ("ok", "")}
+
+    import validate
+    monkeypatch.setitem(validate.EXECUTORS, "python", PartialExecutor())
+    result = conformance.execute()
+    entry = result["tiers"]["python"]
+    assert entry["status"] == "error"
+    assert "incomplete result set" in entry["reason"]
+    assert result["cases"][programs[0][0]]["python"] == "-"
+
+
 # ---------------------------------------------------------------------------
 # the claim column — the matrix must say which kind of claim each row makes
 # ---------------------------------------------------------------------------
