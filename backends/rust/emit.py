@@ -190,6 +190,10 @@ def _is_fn_type(name: object) -> bool:
 _RUST_COPY_TYPES = {"Int", "Bool", "Float"}
 
 
+def _is_list_type(ftype: object) -> bool:
+    return isinstance(ftype, str) and ftype.startswith("List[") and ftype.endswith("]")
+
+
 def _arg_ref_name(arg_node: object) -> str | None:
     """The identifier an argument names, when the argument is a bare variable
     reference (`var`/`name`/`req`) rather than a fresh-temporary expression.
@@ -337,6 +341,16 @@ def _borrow_str_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
         return lit
     name = _arg_ref_name(arg_node)
     if name is not None and name in ctx.borrowed_params:
+        return rendered
+    if isinstance(arg_node, dict) and arg_node.get("kind") in _ATOMIC_KINDS:
+        return f"&{rendered}"
+    return f"&({rendered})"
+
+
+def _borrow_list_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
+    """Lend a read-only list parameter as a slice instead of cloning it."""
+    name = _arg_ref_name(arg_node)
+    if name is not None and name in ctx.borrowed_list_params:
         return rendered
     if isinstance(arg_node, dict) and arg_node.get("kind") in _ATOMIC_KINDS:
         return f"&{rendered}"
@@ -871,11 +885,59 @@ def _compute_str_param_borrows(functions: list) -> "dict[str, frozenset]":
     return borrow
 
 
+def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
+    """Find internal List parameters used only by read-only operations."""
+    names = frozenset(fn.get("name") for fn in functions if fn.get("name"))
+    borrow = {
+        fn.get("name"): frozenset(
+            i for i, p in enumerate(fn.get("params") or [])
+            if not fn.get("public") and _is_list_type(p.get("type")))
+        for fn in functions
+    }
+
+    def escapes(node, candidates, safe):
+        if isinstance(node, dict):
+            kind = node.get("kind")
+            if kind in ("var", "name", "req"):
+                return (node.get("id") or node.get("name")) in candidates and not safe
+            if kind in ("len", "index"):
+                return escapes(node.get("target"), candidates, True)
+            if kind == "builtin":
+                read = node.get("method") in ("length", "at")
+                return (escapes(node.get("target"), candidates, True) or
+                        any(escapes(a, candidates, read) for a in node.get("args") or []))
+            cname, args = _free_fn_call(node, names)
+            if cname is not None:
+                allowed = borrow.get(cname, frozenset())
+                return any(escapes(a, candidates, i in allowed)
+                           for i, a in enumerate(args))
+            return any(escapes(v, candidates, False) for v in node.values())
+        if isinstance(node, list):
+            return any(escapes(v, candidates, safe) for v in node)
+        return False
+
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            current = borrow.get(fn.get("name"), frozenset())
+            params = fn.get("params") or []
+            candidates = {params[i].get("name") for i in current}
+            if escapes(fn.get("body") or [], candidates, False):
+                kept = frozenset(i for i in current if params[i].get("name") not in candidates)
+                if kept != current:
+                    borrow[fn.get("name")] = kept
+                    changed = True
+    return borrow
+
+
 def _render_param_type(borrowed: bool, ftype: object, types: dict) -> str:
     """The Rust type of a free-function parameter, `&str` when the borrow
     analysis lowered this read-only `Str` param to a borrow (item 282), else the
     owned lowering `_rust_type` gives it."""
     if borrowed:
+        if _is_list_type(ftype):
+            return f"&[{_rust_type(ftype[len('List['):-1].strip(), types, position='param')}]"
         return "&str"
     return _rust_type(ftype, types, position="param")
 
@@ -4438,11 +4500,14 @@ class _V3Ctx:
         # shared by every ctx (function bodies, tests, lifecycle tests).
         self.fn_borrow: dict[str, frozenset] = _compute_str_param_borrows(
             functions or [])
+        self.fn_list_borrow: dict[str, frozenset] = _compute_list_param_borrows(
+            functions or [])
         # Parameters of the function CURRENTLY being emitted that are borrowed
         # `&str` (a subset of its `Str` params). Set per fn by
         # `_emit_v3_functions`, empty in every other emit context, so a read of a
         # borrowed param renders as the `&str` it already is.
         self.borrowed_params: set[str] = set()
+        self.borrowed_list_params: set[str] = set()
         # Free function name -> parameter INDICES carrying a synthetic
         # `&[char]` view (item 277), so a call site knows the extra arguments
         # to append. Computed once from the whole function list, like
@@ -4733,10 +4798,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # component dialect: a free-function call `name(..)`.
         name = _ident(node.get("name"), "function")
         borrow = ctx.fn_borrow.get(node.get("name"), frozenset())
+        list_borrow = ctx.fn_list_borrow.get(node.get("name"), frozenset())
         fn_arg_nodes = node.get("args") or []
         fn_arg_exprs = [_render_expr(a, ctx, rename) for a in fn_arg_nodes]
         rendered = [
             _borrow_str_arg(a, r, ctx) if idx in borrow
+            else _borrow_list_arg(a, r, ctx) if idx in list_borrow
             else _by_value_arg(a, r, ctx)
             for idx, (a, r) in enumerate(zip(fn_arg_nodes, fn_arg_exprs))
         ]
@@ -4885,8 +4952,10 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # `Str` param the callee lowered to `&str` takes a borrow instead of
             # a clone (item 282), so its whole string is never copied at the call.
             borrow = ctx.fn_borrow.get(callee_name, frozenset())
+            list_borrow = ctx.fn_list_borrow.get(callee_name, frozenset())
             bv_args = [
                 _borrow_str_arg(a, r, ctx) if idx in borrow
+                else _borrow_list_arg(a, r, ctx) if idx in list_borrow
                 else _by_value_arg(a, r, ctx)
                 for idx, (a, r) in enumerate(zip(node.get("args") or [], arg_exprs))
             ]
@@ -5436,6 +5505,9 @@ def _stdlib_helper_traits() -> list[str]:
         "impl RevlStrListOps for Vec<String> {",
         "    fn revl_join(&self, sep: &str) -> String { self.join(sep) }",
         "}",
+        "impl RevlStrListOps for [String] {",
+        "    fn revl_join(&self, sep: &str) -> String { self.join(sep) }",
+        "}",
         "trait RevlListOps<T> {",
         "    fn revl_length(&self) -> i64;",
         "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T>;",
@@ -5461,6 +5533,18 @@ def _stdlib_helper_traits() -> list[str]:
         "    fn revl_push(&self, item: T) -> Vec<T> {",
         "        let mut _v = self.clone(); _v.push(item); _v",
         "    }",
+        "}",
+        "impl<T: Clone + PartialEq> RevlListOps<T> for [T] {",
+        "    fn revl_length(&self) -> i64 { self.len() as i64 }",
+        "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {",
+        "        let len = self.len();",
+        "        let a2 = (a.max(0) as usize).min(len);",
+        "        let b2 = (b.max(0) as usize).min(len).max(a2);",
+        "        self[a2..b2].to_vec()",
+        "    }",
+        "    fn revl_index_of(&self, needle: &T) -> i64 { self.iter().position(|x| x == needle).map_or(-1, |i| i as i64) }",
+        "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T> { let mut out = self.to_vec(); out.extend(other.iter().cloned()); out }",
+        "    fn revl_push(&self, item: T) -> Vec<T> { let mut out = self.to_vec(); out.push(item); out }",
         "}",
         "",
     ]
@@ -6017,9 +6101,13 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         ctx.borrowed_params = {
             param_list[idx].get("name") for idx in borrow
         }
+        list_borrow = ctx.fn_list_borrow.get(fn.get("name"), frozenset())
+        ctx.borrowed_list_params = {
+            param_list[idx].get("name") for idx in list_borrow
+        }
         rendered_params = [
             f"{_ident(p.get('name'), 'parameter name')}: "
-            f"{_render_param_type(idx in borrow, p.get('type'), types)}"
+            f"{_render_param_type(idx in borrow or idx in list_borrow, p.get('type'), types)}"
             for idx, p in enumerate(param_list)
         ]
         # item 277: the `&[char]` view. A non-`pub` fn takes it as a synthetic
