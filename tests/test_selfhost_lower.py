@@ -1403,6 +1403,44 @@ def test_rejected_programs_agree(admit, case):
     _agree(admit, src)
 
 
+@pytest.mark.parametrize("binding", ["let", "var"])
+@pytest.mark.parametrize("annotation", ["", ": Str"])
+def test_method_local_binding_captured_by_undo(admit, binding, annotation):
+    assignment = 'key = "later"' if binding == "var" else ""
+    source = f'''service CasOps {{ fn run() -> Int }}
+component CasProvider provides ops: CasOps {{
+  let ledger = effect Map.new() undo ledger.drop()
+  let fresh = effect ledger.insert_if_absent("boot", 1) undo ledger.remove("boot")
+  provide ops {{
+    fn run() {{
+      {binding} key{annotation} = "method"
+      let token = effect ledger.insert_if_absent(key, 2) undo ledger.remove(key)
+      {assignment}
+      return 2
+    }}
+  }}
+}}'''
+    assert _ref(source) == ("", "")
+    _agree(admit, source)
+
+
+@pytest.mark.parametrize("binding", ["let", "var"])
+@pytest.mark.parametrize("annotation", ["", ": Int"])
+def test_local_initializer_emission_is_not_skipped(admit, binding, annotation):
+    source = f'''service Db {{ emission fn write() -> Int }}
+service Api {{ fn run() -> Int }}
+component C requires db: Db provides api: Api {{
+  provide api {{
+    fn run() {{
+      {binding} value{annotation} = db.write()
+      return 0
+    }}
+  }}
+}}'''
+    assert _ref(source)[0] == "G4"
+    _agree(admit, source)
+
+
 # ---------------------------------------------------------------- G2 fuzz
 
 # A real differential over G2: random compositions of clean single-key
