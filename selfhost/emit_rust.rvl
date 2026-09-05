@@ -1020,8 +1020,37 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   if (kind == "list") { return render_list(node, ctx) }
   if (kind == "maplit") { return "std::collections::HashMap::new()" }
   if (kind == "arrow") { return render_arrow(node, ctx) }
+  if (kind == "len") {
+    let target = render_expr(value_field(node, "target"), ctx)
+    return `${target}.revl_length()`
+  }
+  if (kind == "builtin") { return render_builtin(node, ctx) }
   if (kind == "interp") { return render_interp(node, ctx) }
   return `<<UNSUPPORTED-EXPR:${kind}>>`
+}
+
+fn checked_div_expr(method: Str, target: Str, arg: Str) -> Str {
+  var ok = "a / b"
+  if (method == "checked_div_floor") { ok = "{ let q = a / b; if a % b != 0 && ((a < 0) != (b < 0)) { q - 1 } else { q } }" }
+  if (method == "checked_div_euclid") { ok = "a.div_euclid(b)" }
+  if (method == "checked_mod") { ok = "a.rem_euclid(b).abs()" }
+  return `{ let a = (${target}); let b = (${arg}); if b == 0 { Err::<i64, String>("revl: division by zero".to_string()) } else { Ok::<i64, String>(${ok}) } }`
+}
+
+fn render_builtin(node: Any, ctx: Ctx) -> Str {
+  let method = value_str(value_field(node, "method"))
+  let target_node = value_field(node, "target")
+  var target = render_expr(target_node, ctx)
+  if (!is_atomic(node_kind(target_node))) { target = `(${target})` }
+  let args = value_list(value_field(node, "args"))
+  var rendered = []
+  for (a of args) { rendered = rendered.push(render_expr(a, ctx)) }
+  if (method == "checked_div_trunc" || method == "checked_div_floor" || method == "checked_div_euclid" || method == "checked_mod") {
+    return checked_div_expr(method, target, rendered[0])
+  }
+  if (method == "to_str") { return `(${target}).to_string()` }
+  if (method == "length") { return `${target}.revl_length()` }
+  return `<<UNSUPPORTED-BUILTIN:${method}>>`
 }
 
 // The `widen` coercion markers (docs/arithmetic.md): render the conversion the
@@ -2188,6 +2217,28 @@ fn module_header(version: Int) -> List[Str] {
   return o
 }
 
+fn stdlib_helpers() -> List[Str] {
+  return [
+    "trait RevlStrOps {", "    fn revl_length(&self) -> i64;", "    fn revl_slice(&self, a: i64, b: i64) -> String;", "    fn revl_index_of(&self, needle: &str) -> i64;", "    fn revl_concat(&self, other: &str) -> String;", "    fn revl_split(&self, sep: &str) -> Vec<String>;", "    fn revl_repeat(&self, n: i64) -> String;", "    fn revl_starts_with(&self, prefix: &str) -> bool;", "    fn revl_ends_with(&self, suffix: &str) -> bool;", "}",
+    "impl RevlStrOps for str {", "    fn revl_length(&self) -> i64 { self.chars().count() as i64 }", "    fn revl_slice(&self, a: i64, b: i64) -> String {", "        self.chars().skip(a.max(0) as usize).take((b - a).max(0) as usize).collect()", "    }", "    fn revl_index_of(&self, needle: &str) -> i64 {", "        match self.find(needle) {", "            Some(b) => self[..b].chars().count() as i64,", "            None => -1,", "        }", "    }", "    fn revl_concat(&self, other: &str) -> String { format!(\"{}{}\", self, other) }", "    fn revl_split(&self, sep: &str) -> Vec<String> {", "        if sep.is_empty() {", "            self.chars().map(|c| c.to_string()).collect()", "        } else {", "            self.split(sep).map(|s| s.to_string()).collect()", "        }", "    }", "    fn revl_repeat(&self, n: i64) -> String { self.repeat(n.max(0) as usize) }", "    fn revl_starts_with(&self, prefix: &str) -> bool { self.starts_with(prefix) }", "    fn revl_ends_with(&self, suffix: &str) -> bool { self.ends_with(suffix) }", "}",
+    "trait RevlStrListOps {", "    fn revl_join(&self, sep: &str) -> String;", "}", "impl RevlStrListOps for Vec<String> {", "    fn revl_join(&self, sep: &str) -> String { self.join(sep) }", "}",
+    "trait RevlListOps<T> {", "    fn revl_length(&self) -> i64;", "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T>;", "    fn revl_index_of(&self, needle: &T) -> i64;", "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T>;", "    fn revl_push(&self, item: T) -> Vec<T>;", "}",
+    "impl<T: Clone + PartialEq> RevlListOps<T> for Vec<T> {", "    fn revl_length(&self) -> i64 { self.len() as i64 }", "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {", "        // JS slice semantics: out-of-range bounds clamp, never panic.", "        let len = self.len();", "        let a2 = (a.max(0) as usize).min(len);", "        let b2 = (b.max(0) as usize).min(len).max(a2);", "        self[a2..b2].to_vec()", "    }",     "    fn revl_index_of(&self, needle: &T) -> i64 {", "        self.iter().position(|x| x == needle).map(|i| i as i64).unwrap_or(-1)", "    }", "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T> {", "        let mut _v = self.clone(); _v.extend(other.iter().cloned()); _v", "    }", "    fn revl_push(&self, item: T) -> Vec<T> {", "        let mut _v = self.clone(); _v.push(item); _v", "    }", "}",
+  ]
+}
+
+fn contains_stdlib(v: Any) -> Bool {
+  if (value_is_null(v)) { return false }
+  if (node_kind(v) == "builtin" || node_kind(v) == "len") { return true }
+  for (k of value_keys(v)) {
+    if (contains_stdlib(value_field(v, k))) { return true }
+  }
+  for (x of value_list(v)) {
+    if (contains_stdlib(x)) { return true }
+  }
+  return false
+}
+
 // The document assembly for a TYPES + FUNCTIONS v3 document (`_emit_v3`, subset):
 // the module header, then the user `type` items, then the free functions —
 // joined with newlines, right-stripped, and closed with a single trailing
@@ -2235,6 +2286,9 @@ pub fn emit_rust_src(ir: Any) -> Str {
   if (value_keys(types).length() > 0) { out = out.concat(emit_v3_types(types, tables.tn)) }
   if (externs.length() > 0) { out = out.concat(emit_v3_externs(externs, tables.tn)) }
   if (functions.length() > 0) { out = out.concat(emit_v3_functions(functions, fr, tables)) }
+  if (contains_stdlib(functions) || contains_stdlib(types) || contains_stdlib(externs)) {
+    out = out.concat(stdlib_helpers())
+  }
   // `_emit_components`, run unconditionally in `_emit_v3` (after the
   // types/externs/functions and the DEFERRED tests sections). Empty when the document
   // declares no service/comp — so a types+functions-only document is
