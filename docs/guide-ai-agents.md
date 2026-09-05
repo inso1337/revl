@@ -278,9 +278,12 @@ returns nothing).
 
 ## Driving a running system (MCP)
 
-`python -m revl mcp serve` exposes the compiler over MCP, and the loop it
-enables is the point: a draft component never has to touch the filesystem. This
-is your primary interface.
+`revl mcp serve` exposes the compiler over MCP (the documented happy path;
+issue #317 / #336 — a script entry point is window-free by design). The
+absolute-interpreter fallback is `python -P -m revl mcp serve` (the `-P`
+is PYTHONSAFEPATH, the safety bit; without it, `-m` puts the CWD at
+`sys.path[0]`), and the loop it enables is the point: a draft component
+never has to touch the filesystem. This is your primary interface.
 
 <!-- docgen:agents-mcp-count begin -->
 The complete advertised verb set is 51 verbs, from
@@ -324,10 +327,11 @@ diagnostic tells you the rewrite, not just the rule. See
 [docs/mcp-bridge.md](mcp-bridge.md) for the shapes.
 
 MCP is your interface, but a human editing the same sources gets the same
-checker through a language server. `python -m revl.lsp` speaks LSP over stdio:
-diagnostics from the checker, hover from the diagnostic explanations, and
-go-to-definition from the resolver (`src/revl/lsp/`). Same admission gate, a
-different transport.
+checker through a language server. `revl lsp` speaks LSP over stdio (the
+absolute-interpreter fallback is `python -P -m revl.lsp`, again with the
+`-P`): diagnostics from the checker, hover from the diagnostic
+explanations, and go-to-definition from the resolver (`src/revl/lsp/`).
+Same admission gate, a different transport.
 
 ### The modern agent loop, scaffold → fill → resolve → admit
 

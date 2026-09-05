@@ -3,7 +3,8 @@
 Roadmap item 336, **slices 1 and 2**
 (`docs/design/336-native-single-binary-tooling.md`). An editor launches this
 binary and speaks LSP on its stdin/stdout, exactly as it would launch
-`python -m revl.lsp`, and gets the same answers — byte for byte.
+`python -P -m revl.lsp` (the `-P` is the PYTHONSAFEPATH safety bit, issue
+#317), and gets the same answers — byte for byte.
 
 ```
 cargo build --release
@@ -139,7 +140,8 @@ REVL_LSP_PYTHON=/path/to/python cargo test   # plus the reference oracle
 `tests/reference_agreement.rs` is the item's exit test:
 
 - `binary_matches_the_reference_byte_for_byte` drives this binary and
-  `python -m revl.lsp` with the identical framed byte stream — initialize,
+  `python -P -m revl.lsp` (the `-P` is the PYTHONSAFEPATH safety bit,
+  issue #317) with the identical framed byte stream — initialize,
   didOpen/didChange/didClose, hover and definition probes, code actions, an
   unknown method, shutdown/exit — and compares the two reply streams byte for
   byte, then asserts the compared stream is thick enough to prove something

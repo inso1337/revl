@@ -68,10 +68,17 @@ def _env() -> dict:
 
 
 def _revl(args: list[str], stdin: str = "", timeout: int = 180) -> subprocess.CompletedProcess:
-    """Run `python -m revl <args>` under this interpreter (which must carry the
-    cordis-py runtime for the live stages), capturing combined output."""
+    """Run `revl <args>` under this interpreter (which must carry the
+    cordis-py runtime for the live stages), capturing combined output. The
+    absolute-interpreter fallback `python -P -m revl <args>` is the form
+    actually used here — the `-P` is the PYTHONSAFEPATH safety bit, issue
+    #317 — because the demo driver is the harness's own interpreter, where
+    a console script would not be on PATH without going through the venv's
+    `bin/` directory explicitly. The subprocess call therefore always
+    passes `-P` alongside `-m`, the same shape `python -P -m revl …` in
+    docs spells."""
     proc = subprocess.run(
-        [sys.executable, "-m", "revl", *args],
+        [sys.executable, "-P", "-m", "revl", *args],
         input=stdin,
         cwd=str(ROOT),
         env=_env(),
@@ -228,8 +235,10 @@ def main() -> int:
         msg = ("SKIP: the cordis-py runtime is not installed, so the live "
                "migration demo cannot run.\n"
                "      set it up:  sh backends/python/setup.sh\n"
-               "      then:       backends/python/.venv/bin/python "
-               "demo/live_systems/run_demo.py")
+               "      then run as:  revl ...                                  # the documented happy path\n"
+               "                      backends/python/.venv/bin/python -P -m revl ...  # absolute-interpreter fallback\n"
+               "      OR re-run this demo under the venv:\n"
+               "                      backends/python/.venv/bin/python demo/live_systems/run_demo.py")
         if require:
             print("error: REVL_DEMO_REQUIRE=1 but " + msg, file=sys.stderr)
             return 1

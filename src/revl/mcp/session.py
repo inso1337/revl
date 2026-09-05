@@ -157,7 +157,11 @@ def _backend():
         raise SessionError(
             f"the cordis-py runtime is not installed ({exc.name!r} missing) — "
             f"set it up with `sh {backend_dir / 'setup.sh'}` and run the server "
-            f"under {backend_dir / '.venv' / 'bin' / 'python'}"
+            f"as `revl mcp …` (the `setup.sh`-installed console script, the "
+            f"documented happy path) or, with the venv's interpreter "
+            f"explicitly, `{backend_dir / '.venv' / 'bin' / 'python'} -m revl mcp …` "
+            f"(issue #317 closes most of `-m`'s CWD-shadowing window; `revl` "
+            f"closes the rest)"
         ) from exc
     return emit, runtime_mod, Context, FiberState
 
