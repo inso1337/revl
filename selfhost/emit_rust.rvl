@@ -755,7 +755,7 @@ fn str_param_readonly(node: Any, name: Str, safe: Bool, borrow: Map[Str, List[In
     let ok = op == "==" || op == "!=" || op == "+"
     return str_param_readonly(value_field(node, "left"), name, ok, borrow) && str_param_readonly(value_field(node, "right"), name, ok, borrow)
   }
-  if (k == "arrow") { return str_param_readonly(value_field(node, "body"), name, false, borrow) }
+  if (k == "arrow") { return !mentions_name(value_field(node, "body"), name) }
   var callee_name = ""
   if (k == "fn") { callee_name = value_str(value_field(node, "name")) }
   if (k == "call") {
@@ -777,18 +777,75 @@ fn str_param_readonly(node: Any, name: Str, safe: Bool, borrow: Map[Str, List[In
   return true
 }
 
+fn collect_fn_value_refs(node: Any, functions: Map[Str, Str], bound: Map[Str, Str], used: Map[Str, Str]) -> Map[Str, Str] {
+  var out = used
+  if (value_kind(node) == "record") {
+    let direct = node_kind(node) == "call" && functions.has(ref_name(value_field(node, "callee")))
+    let ident = ref_name(node)
+    if (ident != "") {
+      if (functions.has(ident) && !bound.has(ident)) { out = out.set(ident, "1") }
+      return out
+    }
+    var body_bound = bound
+    if (value_str(value_field(node, "step")) == "for") {
+      body_bound = body_bound.set(value_str(value_field(node, "bind")), "1")
+    }
+    if (node_kind(node) == "arrow") {
+      for (name of value_list(value_field(node, "params"))) { body_bound = body_bound.set(value_str(name), "1") }
+    }
+    for (key of value_keys(node)) {
+      if (!direct || key != "callee") {
+        var scope = bound
+        if (key == "body") { scope = body_bound }
+        out = collect_fn_value_refs(value_field(node, key), functions, scope, out)
+      }
+    }
+  }
+  if (value_kind(node) == "list") {
+    var local_bound = bound
+    for (item of value_list(node)) {
+      out = collect_fn_value_refs(item, functions, local_bound, out)
+      let step = value_str(value_field(item, "step"))
+      if (step == "let" || step == "let_pattern") {
+        local_bound = local_bound.set(value_str(value_field(item, "name")), "1")
+        for (name of value_list(value_field(item, "names"))) { local_bound = local_bound.set(value_str(name), "1") }
+        local_bound = local_bound.set(value_str(value_field(item, "rest")), "1")
+      }
+    }
+  }
+  return out
+}
+
+// `_fn_value_refs`: direct calls may borrow, but function values keep their
+// declared owned callback ABI. Shadowing follows lexical scope and statement
+// order, so a later or sibling binding cannot hide an escaping function value.
+fn fn_value_refs(functions: List[Any]) -> Map[Str, Str] {
+  var names: Map[Str, Str] = Map.empty()
+  for (f of functions) { names = names.set(value_str(value_field(f, "name")), "1") }
+  var used: Map[Str, Str] = Map.empty()
+  for (f of functions) {
+    var bound: Map[Str, Str] = Map.empty()
+    for (p of value_list(value_field(f, "params"))) { bound = bound.set(value_str(value_field(p, "name")), "1") }
+    let body = value_field(f, "body")
+    used = collect_fn_value_refs(body, names, bound, used)
+  }
+  return used
+}
+
 // `_compute_str_param_borrows`: start optimistically, then remove escaping slots
-// to a fixpoint (including mutually recursive calls). Public signatures and
-// modules without function-local stdlib use retain the owned ABI.
+// to a fixpoint (including mutually recursive calls). Public and address-taken
+// signatures and modules without function-local stdlib use retain the owned ABI.
 fn compute_str_param_borrows(functions: List[Any]) -> Map[Str, List[Int]] {
   var borrow: Map[Str, List[Int]] = Map.empty()
   let enabled = contains_stdlib(functions)
+  var value_refs: Map[Str, Str] = Map.empty()
+  if (enabled) { value_refs = fn_value_refs(functions) }
   for (f of functions) {
     var slots: List[Int] = []
     let params = value_list(value_field(f, "params"))
     var i = 0
     while (i < params.length()) {
-      if (enabled && !value_bool(value_field(f, "public")) && value_str(value_field(params[i], "type")) == "Str") {
+      if (enabled && !value_bool(value_field(f, "public")) && !value_refs.has(value_str(value_field(f, "name"))) && value_str(value_field(params[i], "type")) == "Str") {
         slots = slots.push(i)
       }
       i = i + 1
