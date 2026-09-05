@@ -1,0 +1,38 @@
+extern pure fn open(n: Int) -> Int = @ts { return n }
+extern pure fn close(n: Int) -> Int = @ts { return n }
+extern emission fn send(n: Int) -> Int = @ts { return n }
+extern pure fn empty() = @ts { }
+extern emission async fn later(n: Int) -> Int = @ts { return n }
+fn nothing() { }
+
+service EdgeOps {
+  emission fn run(x: Int) -> Int
+  emission async fn wait(x: Int)
+  fn bytes(x: Bytes, n: Int32, f: Float) -> Bytes
+}
+component Components provides ops: EdgeOps {
+  config { n: Int32, raw: Bytes, rows: List[Int] }
+  if (config.n > 0) {
+    fail "positive"
+  } else {
+    fail "nonpositive"
+  }
+  effect open(1) undo close(1)
+  emit send(1) compensate close(2)
+  let ledger = effect Map.new() undo ledger.drop()
+  let fresh = effect ledger.insert_if_absent("boot", 1) undo ledger.remove("boot")
+  provide ops {
+    fn run(x) {
+      var y = x
+      y = y + 1
+      let token = effect ledger.insert_if_absent("method", y) undo ledger.remove("method")
+      emit send(y) compensate close(y)
+      return y
+    }
+    async fn wait(x) {
+      await later(x)
+      return
+    }
+    fn bytes(x, n, f) = x
+  }
+}
