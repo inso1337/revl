@@ -240,6 +240,54 @@ def check_compiler(prober: Prober, version: str) -> Check:
     return Check("compiler (revl)", OK, version, "the running compiler")
 
 
+def check_invocation(prober: Prober, argv0: str | None = None,
+                     safe_path: bool | None = None) -> Check:
+    """Which revl invocation is in use, and whether it has the CWD-shadowing
+    window issue #317 closed (roadmap #336).
+
+    The `revl` and `truc` console scripts never had the CWD-shadowing window
+    (a script entry point puts its own directory on `sys.path`, never the
+    caller's). `python -P -m revl` (PYTHONSAFEPATH, 3.11+) is also window-free.
+    The unsafe shape is `python -m revl` (no `-P`) — that puts the CWD at
+    `sys.path[0]` ahead of site-packages, and a sibling `.py` (e.g. `cordis.py`
+    in a composition's directory) is importable ahead of the real module.
+
+    The check is purely informational: a WARN is the right status when running
+    under the unsafe shape, because the program still works for the operator
+    doing it on purpose (issue #317's `drop_cwd_entry` closes most of the
+    window), but a host reading the doctor output should know which invocation
+    they are under. The doctor's `--json` output carries the same fact
+    structured, so an automation can alert on the unsafe shape.
+
+    `argv0` and `safe_path` are explicit so a test can pin them; both default
+    to the values the running process saw (`sys.argv[0]` and
+    `sys.flags.safe_path`).
+    """
+    argv0 = sys.argv[0] if argv0 is None else argv0
+    if safe_path is None:
+        safe_path = bool(getattr(sys.flags, "safe_path", False))
+    # The console-script path ends in `revl` or `truc` (or the same with a
+    # `.exe` suffix on Windows); both land a directory on `sys.path` and
+    # never the caller's, so they are the safe shape.
+    if Path(argv0).name in ("revl", "truc", "revl.exe", "truc.exe"):
+        return Check("invocation", OK, None,
+                     f"console script: {argv0}")
+    # `python -P -m revl` (PYTHONSAFEPATH) and `python -P -m revl.lsp` are the
+    # safe `-m` shapes; `sys.flags.safe_path` is the canonical signal CPython
+    # sets for both spellings.
+    if safe_path:
+        return Check("invocation", OK, None,
+                     "python -P -m revl (PYTHONSAFEPATH)")
+    # The unsafe shape: `python -m revl` without `-P`. `argv[0]` is the
+    # interpreter's path, so the diagnostic points at the call the operator
+    # actually made, and tells them the three ways to close the window.
+    return Check("invocation", WARN, None,
+                 f"`{Path(sys.executable).name} -m revl` puts the CWD at "
+                 "sys.path[0] (issue #317) — use `revl` (the console script, "
+                 "installed by `setup.sh`), or `python -P -m revl` "
+                 "(PYTHONSAFEPATH)")
+
+
 def check_python(prober: Prober) -> Check:
     """The python backend: the interpreter running doctor. Always OK — it is the
     host. (cordis-py, the py runtime, is a separate line below.)"""
@@ -510,6 +558,7 @@ def diagnose(prober: Prober | None = None,
     version = revl_version()
     checks = [
         check_compiler(prober, version),
+        check_invocation(prober),
         check_python(prober),
         check_typescript(prober),
         check_rust(prober),

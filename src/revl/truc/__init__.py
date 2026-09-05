@@ -6,7 +6,8 @@ gate before composing them. The differentiator is not code truc implements — i
 is the host gate truc *calls* (`revl.compiler.compile_files`, in-process). See
 docs/truc.md (identity) and docs/design/truc-architecture.md (architecture).
 
-The console-script entry point is `main`; `python -m revl.truc` works too.
+The console-script entry point is `main`; `python -P -m revl.truc` works
+too (the `-P` is the PYTHONSAFEPATH safety bit, issue #317).
 """
 
 from ._launcher import main

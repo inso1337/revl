@@ -170,9 +170,14 @@ if (stepEls[0]) stepEls[0].classList.add("active");
 
 /* ---------- the gate: typed terminal ------------------------------------ */
 
-// Real compiler output, captured verbatim from `python -m revl compile`.
+// Real compiler output, captured verbatim from `revl compile`. The
+// `revl` console script is the documented happy path; a bare
+// `python -m revl` (no `-P`) still has the CWD-shadowing window issue
+// #317 names, and `python -P -m revl` (PYTHONSAFEPATH, 3.11+) is the
+// safe `-m` form for callers that need a venv's interpreter by its
+// full path.
 const TERM_SCRIPT = [
-  { cmd: "python -m revl compile rejections/g3_dependency_cycle.rvl" },
+  { cmd: "revl compile rejections/g3_dependency_cycle.rvl" },
   { out: [
     ['<span class="t-err">error</span><span class="t-dim">:</span> <span class="t-loc">g3_dependency_cycle.rvl:12</span><span class="t-dim">: dependency cycle: Alpha -&gt; Beta -&gt; Alpha</span> <span class="t-g">(G3)</span>'],
     ['<span class="t-dim">  why `Alpha` is in a dependency cycle:</span>'],
@@ -181,7 +186,7 @@ const TERM_SCRIPT = [
     ['<span class="t-dim">      Beta   </span><span class="t-loc">g3_dependency_cycle.rvl:16</span><span class="t-dim">  provides `b`</span>'],
     ['<span class="t-dim">      Alpha  </span><span class="t-loc">g3_dependency_cycle.rvl:12</span>'],
   ]},
-  { cmd: "python -m revl compile rejections/g4_missing_undo.rvl" },
+  { cmd: "revl compile rejections/g4_missing_undo.rvl" },
   { out: [
     ['<span class="t-err">error</span><span class="t-dim">:</span> <span class="t-loc">g4_missing_undo.rvl:13</span><span class="t-dim">: effect has no `undo` and `Pool.open` is not pure</span>'],
     ['<span class="t-dim">  write `</span><span class="t-ok">effect Pool.open(...) undo &lt;expr&gt;</span><span class="t-dim">`, or mark the call `</span><span class="t-g">emit</span><span class="t-dim">`</span>'],
