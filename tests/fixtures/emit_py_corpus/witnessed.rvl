@@ -71,3 +71,7 @@ extern witnessed[fs] fn stash(path: Str) -> Result[Stash, FsError] undo unstash(
 fn restore(path: Str, bak: Str) -> Unit {
   return unstash({ path: path, bak: bak })
 }
+
+component Stasher {
+  effect stash("payload")
+}
