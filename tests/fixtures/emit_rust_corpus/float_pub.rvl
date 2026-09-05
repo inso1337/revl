@@ -7,3 +7,17 @@ fn float_ops(a: Float, n: Int) -> Float {
 }
 
 pub fn public_float() -> Float { return 2.25 }
+
+// Argument-position numeric widening (issue #400 / docs/arithmetic.md's `ident(3)`
+// gap). The coercion is marked on the ARGUMENT node, so it must compose with the
+// by-value clone a free-function argument takes: `accept_int((x as i64).clone())`,
+// not `accept_int(x.clone())` (the widen dropped) — a bug the emit oracle cannot
+// see (both sides agree absent the marker) but the native-compile differential does.
+fn accept_int(v: Int) -> Int { return v }
+fn accept_float(f: Float) -> Float { return f }
+
+// Int32 -> Int widen on a cloned by-value argument.
+fn explicit_int_widen(x: Int32) -> Int { return accept_int(x) }
+
+// Int-literal -> Float widen on a fresh temporary (no clone).
+fn call_float() -> Float { return accept_float(3) }
