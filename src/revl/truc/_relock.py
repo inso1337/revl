@@ -1,9 +1,11 @@
 """Regenerate truc's own stage-0 lock, `src/revl/truc/truc.lock`.
 
-`python -m revl.truc._relock` rewrites the per-file `sha256` pins from the
+`python -P -m revl.truc._relock` rewrites the per-file `sha256` pins from the
 component sources on disk and leaves the file LIST alone — which components
 make up truc is a decision recorded in the lock, never something discovered by
-globbing `components/`. Run it after an intended edit to a
+globbing `components/`. The `-P` is the PYTHONSAFEPATH safety bit; without
+it, `-m` puts the CWD at `sys.path[0]` and a sibling `truc.py` would shadow
+truc's own launcher (issue #317). Run the relock after an intended edit to a
 `src/revl/truc/components/*.rvl` and commit the result; the regenerate-or-red
 test in `tests/test_truc_bootstrap.py` is what turns CI red if you do not.
 """

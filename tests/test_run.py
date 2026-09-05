@@ -3,8 +3,9 @@
 The MVP contract: `revl run <manifest> --backend py` boots a composition on
 the cordis-py tier and *streams* the lifecycle/host trace with no host-language
 driver — the CLI and the emitter are the whole host. These tests drive the
-real CLI (`python -m revl run`) as a subprocess with stdin closed, so the
-REPL hits EOF, the run tears down, proves no residue, and exits.
+real CLI (`revl run`, or `python -P -m revl run` as the absolute-interpreter
+fallback) as a subprocess with stdin closed, so the REPL hits EOF, the run
+tears down, proves no residue, and exits.
 
 Two honesty rules, the same ones `revl test` applies to its tiers:
 
@@ -245,14 +246,27 @@ def test_run_without_the_runtime_skips_like_the_other_backends(tmp_path):
     """No cordis installed: `revl run` is a conspicuous *skip*, mirroring
     `revl test`'s absent-tier handling — a clear setup diagnostic and a
     nonzero exit, never a feint at passing. A config-free manifest, so the
-    config preflight is not the thing failing."""
+    config preflight is not the thing failing.
+
+    Issue #336: the diagnostic must name `revl run …` as the lead (the
+    console script `setup.sh` installs) before the absolute-interpreter
+    fallback, not just carry the fallback somewhere. A test that only asserts
+    the `-m revl run` substring is the one regression that makes
+    "documented happy path" silently route everyone through the CWD-shadowing
+    window again.
+    """
     notes = tmp_path / "notes.rvl"
     notes.write_text(NOTES, encoding="utf-8")
     result = _run_cli([str(notes), "--backend", "py"])
     assert result.returncode == 3, result.stdout + result.stderr
     assert "cordis-py runtime is not installed" in result.stderr
     assert "setup.sh" in result.stderr
-    assert "-m revl run" in result.stderr
+    # documented happy path comes BEFORE the absolute-interpreter fallback
+    happy_idx = result.stderr.index("revl run")
+    fallback_idx = result.stderr.index("-m revl run")
+    assert happy_idx < fallback_idx, (
+        f"`revl run …` (the documented happy path) must appear before the "
+        f"`-m revl run …` fallback in the diagnostic; got stderr={result.stderr!r}")
 
 
 # ----------------------------------------------------- `revl test` preflight
@@ -262,7 +276,15 @@ def test_py_tier_preflights_the_missing_cordis_runtime(monkeypatch):
     document run under an interpreter without the cordis-py runtime used to
     FAIL per-test (`FAIL <name>: ModuleNotFoundError ...  0 of N passed`) —
     a stack-shaped verdict for an environment problem that has a one-line
-    remedy. The runner now preflights before any test runs and names it."""
+    remedy. The runner now preflights before any test runs and names it.
+
+    Issue #336: the diagnostic now names `revl test` as the documented happy
+    path (the console script the setup script installs) before the
+    absolute-interpreter fallback. A test that just asserts the
+    `.venv/bin/python -m revl test` substring would let a regression to "the
+    only documented path is the one with the CWD-shadowing window" pass
+    silently, so the lead-spell assertion is the load-bearing one.
+    """
     import revl.test as revl_test  # noqa: PLC0415
 
     monkeypatch.setattr(revl_test, "_cordis_available", lambda: False)
@@ -273,7 +295,18 @@ def test_py_tier_preflights_the_missing_cordis_runtime(monkeypatch):
     assert outcome == "skip"
     assert message.startswith("preflight:")
     assert "sh backends/python/setup.sh" in message
-    assert "backends/python/.venv/bin/python -m revl test" in message
+    # documented happy path is the LEAD line, not just present somewhere
+    # (issue #336: the absolute-interpreter form has the CWD-shadowing window
+    # issue #317 names; `revl` (a console script) is window-free by design).
+    assert "revl test" in message
+    rerun_idx = message.index("then rerun")
+    happy_idx = message.index("revl test", rerun_idx)
+    fallback_idx = message.index("backends/python/.venv/bin/python -P -m revl test",
+                                 rerun_idx)
+    assert happy_idx < fallback_idx, (
+        f"`revl test` (the documented happy path) must appear before the "
+        f"`backends/python/.venv/bin/python -m revl test` fallback in the "
+        f"diagnostic; got {message!r}")
     # none of the stack-shaped shape may leak through
     assert "ModuleNotFoundError" not in message
     assert "0 of" not in message

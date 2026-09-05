@@ -1,6 +1,6 @@
 # `revl plan` — a dry run for admission
 
-**Status:** implemented — `python -m revl plan <files...> [--manifest ir.json]
+**Status:** implemented — `revl plan <files...> [--manifest ir.json]
 [--replacing NAME] [--json]`, the library entry point `revl.plan.plan()`, and
 the MCP tool `revl_plan`. Tests: `tests/test_plan.py`.
 

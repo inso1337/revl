@@ -6,7 +6,9 @@ go-to-definition over the same compiler surfaces, spoken as LSP.
 
 Slice 1 is deliberately small: three capabilities, each reusing machinery
 `revl` already runs (`compile_source` for diagnostics, `diagnostics.explain`
-for hover text, the parser AST for symbols). Run it as `python -m revl.lsp`.
+for hover text, the parser AST for symbols). Run it as `revl lsp`; the
+absolute-interpreter fallback is `python -P -m revl.lsp` (the `-P` is the
+PYTHONSAFEPATH safety bit, issue #317).
 """
 
 from __future__ import annotations

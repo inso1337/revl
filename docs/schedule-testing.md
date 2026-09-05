@@ -127,8 +127,16 @@ with a reason*, never a pass, exactly as `--sweep` handles it:
 
 ```
 sh backends/python/setup.sh
-backends/python/.venv/bin/python -m revl test app.rvl --schedule-seeds 200
+revl test app.rvl --schedule-seeds 200        # the documented happy path (the
+                                              # setup script installs `revl` on
+                                              # PATH; issue #317 / #336)
 ```
+
+Where the absolute-interpreter fallback is needed (a venv's `python` is
+required by the call), use `backends/python/.venv/bin/python -P -m revl test …
+`. `-P` is the safety bit: without it, `-m` puts the CWD at `sys.path[0]`
+and a sibling `.py` in a composition's directory can shadow a real
+runtime import (issue #317).
 
 ## Relation to other items
 

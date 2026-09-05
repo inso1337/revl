@@ -30,8 +30,10 @@ Conventions used below:
   the per-command notes call out which.
 
 Two module entry points sit outside this subcommand tree and are documented at
-the end: `python -m revl.lsp` (the language server) and `python -m revl.otel`
-(the OpenTelemetry exporter).
+the end: `revl lsp` (the language server) and `python -P -m revl.otel` (the
+OpenTelemetry exporter — `-m` because the otel subcommand is reached by
+running a module directly, with the `-P` safety bit so a composition
+directory cannot shadow `opentelemetry` itself).
 
 ---
 
@@ -1087,17 +1089,22 @@ cordis-py runtime installed (`sh backends/python/setup.sh`); without it, any
 
 Two Python module entry points are not `revl` subcommands.
 
-`python -m revl.lsp` runs the human-facing language server over stdio: it
-pushes `textDocument/publishDiagnostics` from the checker, answers
-`textDocument/hover` from the diagnostic explanations and symbol info, and
-answers `textDocument/definition` from the resolver, reusing the compiler
-surfaces read-only (`src/revl/lsp/`).
+`revl lsp` runs the human-facing language server over stdio (the
+absolute-interpreter fallback is `python -P -m revl.lsp` — the `-P` is
+PYTHONSAFEPATH, the safety bit that closes the CWD-shadowing window
+issue #317 names). It pushes `textDocument/publishDiagnostics` from the
+checker, answers `textDocument/hover` from the diagnostic explanations and
+symbol info, and answers `textDocument/definition` from the resolver,
+reusing the compiler surfaces read-only (`src/revl/lsp/`).
 
-`python -m revl.otel run.jsonl` exports a `revl run --trace` lifecycle trace to
-OpenTelemetry spans, events, and links (a transition is a span, its cause an
-event, a causal edge a link), so a composition's causality shows up in Grafana,
-Datadog, Honeycomb, or Jaeger. The OTel SDK is the optional `revl[otel]` extra;
-`--json` prints the span model without it ([opentelemetry.md](opentelemetry.md)).
+`python -P -m revl.otel run.jsonl` exports a `revl run --trace` lifecycle
+trace to OpenTelemetry spans, events, and links (a transition is a span, its
+cause an event, a causal edge a link), so a composition's causality shows up
+in Grafana, Datadog, Honeycomb, or Jaeger. The OTel SDK is the optional
+`revl[otel]` extra; `--json` prints the span model without it
+([opentelemetry.md](opentelemetry.md)). `-P` is required: `-m` puts the
+CWD at `sys.path[0]` and the otel subcommand imports `opentelemetry` from
+bare name.
 
 ---
 
