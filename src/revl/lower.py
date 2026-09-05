@@ -19,6 +19,7 @@ import dataclasses
 import keyword
 import os
 import re
+from collections import deque
 
 from . import holes, ownership
 from .errors import RevlError, RevlErrors
@@ -11506,9 +11507,9 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
 
     # providers-first load order (Kahn, stable in entry order)
     order: list[str] = []
-    ready = [e["name"] for e in entries if indegree[e["name"]] == 0]
+    ready = deque(e["name"] for e in entries if indegree[e["name"]] == 0)
     while ready:
-        name = ready.pop(0)
+        name = ready.popleft()
         order.append(name)
         for succ in graph[name]:
             indegree[succ] -= 1
