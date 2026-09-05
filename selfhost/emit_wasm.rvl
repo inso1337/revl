@@ -502,6 +502,7 @@ fn adt_cell_ty(node: Any, s: Scope, expected: Str) -> Str {
 // annotation) — its result is both the local's width and the `expected` handed
 // to the renderer.
 fn infer_val_ty(node: Any, s: Scope) -> Str {
+  if (value_str(value_field(node, "widen")) == "Int") { return "Int" }
   let k = node_kind(node)
   if (k == "if") { return infer_val_ty(value_field(node, "then"), s) }
   if (k == "bin" && node_op(node) == "+") {
@@ -786,6 +787,7 @@ fn fold_const(op: Str, opnd: Str, left: Str, right: Str) -> Str {
 
 fn render_bin(node: Any, s: Scope, depth: Int) -> E {
   let op = node_op(node)
+  if (op == "??") { return { wat: "<<DEFER-coalesce>>", ty: "" } }
   let ln = value_field(node, "left")
   let rn = value_field(node, "right")
   let lty = infer_val_ty(ln, s)
