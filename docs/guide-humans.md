@@ -268,6 +268,7 @@ below; the exhaustive per-command flag reference is
 | `revl adapt NEED CANDIDATE` | can this candidate service stand in for the required one, and `--emit` the adapter that makes it so | [commands-reference.md](commands-reference.md#revl-adapt) |
 | `revl policy evaluate POLICY FILES` | dry-run a boundary policy: per rule, which clauses pass or fail and why (fact against threshold) | [boundary-policy.md](boundary-policy.md) |
 | `revl audit FILES` | manifest + G8 boundary surface (`--json`); `--diff PREV.json` is the authority-drift gate, `--accept`/`--accept-all` acknowledge added crossings | [interchange-format.md](interchange-format.md) · [audit-diff.md](audit-diff.md) |
+| `revl analyze FILES` | Petri-net reachability liveness: derive a net from the composition and report any reachable deadlock, naming the stranded activation (report-only; `--ir`, `--json`) | [analyze-liveness.md](analyze-liveness.md) |
 | `revl diff PREV CURR` | semantic composition diff: components added/removed/changed, emissions gained/lost, provide/require edges, the PR-review tool for agent-generated compositions | [revl-diff.md](revl-diff.md) |
 | `revl version PREV CURR` | derive the required semver bump from the interface diff against a previous composition | [derived-versioning.md](derived-versioning.md) |
 | `revl changelog --from OLD --to NEW` | the release note derived from the interface, structural and authority delta, with the semver headline | [derived-versioning.md](derived-versioning.md) |
