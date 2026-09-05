@@ -278,7 +278,8 @@ def test_the_committed_lock_is_current():
     assert json.loads(LOCK.read_text()) == lock_document(), (
         "src/revl/truc/truc.lock drifted from truc's components.\n"
         "If this change to truc's components is intended, regenerate the lock "
-        "(`python -m revl.truc._relock`) and commit it.")
+        "(`python -P -m revl.truc._relock`; the `-P` is the PYTHONSAFEPATH "
+        "safety bit, issue #317) and commit it.")
 
 
 def test_the_lock_pins_every_stage0_source(package):

@@ -57,10 +57,13 @@ the provider's `pool.close`), then asserts R1 (LIFO teardown tail) and R4
 ## Run a composition from the CLI (`revl run`)
 
 The same emitter + runtime, driven by the revl CLI with no host-language
-driver (roadmap §2; `docs/guide-humans.md` Tooling):
+driver (roadmap §2; `docs/guide-humans.md` Tooling). `setup.sh` installs the
+`revl` console script into this venv's `bin/`, so the documented happy path
+is `revl run …` (no `python -m`; issue #317 closes the CWD-shadowing window
+that the `-m` form still has):
 
 ```sh
-.venv/bin/python -m revl run ../../examples/user_cache.rvl --config cfg.toml
+revl run ../../examples/user_cache.rvl --config cfg.toml
 ```
 
 `revl run` compiles the manifest, boots the composition on a cordis `Context`,
