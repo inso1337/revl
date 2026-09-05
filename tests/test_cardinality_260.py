@@ -76,6 +76,78 @@ component App requires worklog: KV provides probe: Probe {
 
 
 # --------------------------------------------------------------------------
+# item 396 - the count fold follows a service-typed arrow-parameter alias.
+# The G4/G8/emission side of this crossing is closed by PR #395; #396 closes
+# the cardinality asymmetry: the `cardinality: ... per activation` line used to
+# appear for the direct spelling `emit w.task.run(s)` but NOT for the
+# arrow-param spelling `let f = (t: Task, s) => t.run(s); f(w.task, s)`, because
+# the count keyed on the direct `instance-get` and did not follow the arrow
+# application. The fix mirrors `_boundary`'s arrow-parameter arm.
+# --------------------------------------------------------------------------
+
+_ARROW_PARAM_PREAMBLE = """
+service Net { emission[net] fn send(msg: Str) -> Int }
+service Task {
+  emission[net] fn run(prompt: Str) -> Int
+  fn status() -> Int
+}
+component Worker requires net: Net provides task: Task {
+  provide task { fn run(prompt: Str) { emit net.send(prompt); return 1 }
+    fn status() = 0 }
+}
+service Sup { emission fn go(prompt: Str) -> Int }
+"""
+
+
+def test_arrow_param_alias_gets_the_same_bound_as_the_direct_spelling():
+    """The load-bearing #396 assertion: the emission that rides a service-typed
+    arrow PARAMETER is counted, and it reports the identical `net <= 1 per
+    activation` bound the direct `emit w.task.run(s)` spelling reports. Before
+    the fix the arrow-param component was absent from the report entirely (no
+    crossing seen), so no cardinality line was rendered for that spelling."""
+    direct = _card(_ARROW_PARAM_PREAMBLE + """
+component Supervisor provides sup: Sup {
+  provide sup { fn go(prompt: Str) {
+    let w = effect spawn Worker with { } undo w.dispose()
+    let r = emit w.task.run(prompt)
+    return r } }
+}
+""")
+    arrow = _card(_ARROW_PARAM_PREAMBLE + """
+component Supervisor provides sup: Sup {
+  provide sup { fn go(prompt: Str) {
+    let w = effect spawn Worker with { } undo w.dispose()
+    let f = (t: Task, s: Str) => emit t.run(s)
+    let r = f(w.task, prompt)
+    return r } }
+}
+""")
+    # the arrow-param spelling is no longer missing from the report...
+    assert "Supervisor" in arrow, arrow
+    # ...and its per-activation bound is byte-identical to the direct spelling.
+    assert arrow["Supervisor"] == direct["Supervisor"]
+    assert arrow["Supervisor"]["verdict"] == "bounded"
+    assert arrow["Supervisor"]["per_capability"]["net"] == {"bound": 1,
+                                                            "kind": "bounded"}
+
+
+def test_arrow_param_non_emission_method_is_not_counted():
+    """A service-typed parameter reached by a NON-emission method (`t.status()`)
+    crosses no boundary, so the component says nothing about cardinality and is
+    omitted — the direct-spelling precision (§1) holds for the alias too."""
+    arrow = _card(_ARROW_PARAM_PREAMBLE + """
+component Supervisor provides sup: Sup {
+  provide sup { fn go(prompt: Str) {
+    let w = effect spawn Worker with { } undo w.dispose()
+    let f = (t: Task) => t.status()
+    let r = f(w.task)
+    return r } }
+}
+""")
+    assert "Supervisor" not in arrow, arrow
+
+
+# --------------------------------------------------------------------------
 # §2.3 - unbounded for every loop and every recursion (Slice 1)
 # --------------------------------------------------------------------------
 
