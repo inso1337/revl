@@ -858,7 +858,7 @@
   },
   "selfhost": {
     "go": {
-      "statements": 1503,
+      "statements": 1486,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "flags_or": 1,
@@ -912,7 +912,7 @@
       "uncovered_statements": 173
     },
     "java": {
-      "statements": 2423,
+      "statements": 2412,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "emit_setup_stmt": 1,
@@ -1007,7 +1007,7 @@
       "uncovered_statements": 400
     },
     "py": {
-      "statements": 2089,
+      "statements": 2086,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "carrow": 5,
@@ -1024,7 +1024,7 @@
           "setup_step": 23
         },
         "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "arm_body_is_bind": 1,
+          "arm_body_is_bind": 2,
           "arm_body_mentions": 5,
           "birth_container": 2,
           "body_has_secret_param": 2,
@@ -1070,10 +1070,10 @@
           "checked_quotient": 7
         }
       },
-      "uncovered_statements": 274
+      "uncovered_statements": 275
     },
     "rust": {
-      "statements": 2106,
+      "statements": 2094,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "default_for_rust_type": 15,
@@ -1162,7 +1162,7 @@
       "uncovered_statements": 210
     },
     "ts": {
-      "statements": 2285,
+      "statements": 2273,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "expected_missing_adt": 1,
@@ -1248,7 +1248,7 @@
       "uncovered_statements": 349
     },
     "wasm": {
-      "statements": 1489,
+      "statements": 1472,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "align4": 1,
