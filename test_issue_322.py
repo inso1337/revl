@@ -8,7 +8,6 @@ invalid Python with `await` inside a sync generator.
 import pytest
 
 from revl.compiler import compile_source
-from revl.errors import RevlError
 
 
 def test_async_acquisition_in_provide_method_effect_refused():
