@@ -1,0 +1,14 @@
+fn reserved(xs: List[Str]) -> Str {
+  var out = ""
+  let _revlSB0 = "x"
+  for (x of xs) { out = out + _revlSB0 }
+  return out
+}
+
+fn shadowed(xs: List[Str]) -> Str {
+  var out = ""
+  let strings = "!"
+  let _revlStrings = "reserved alias"
+  for (x of xs) { out = out + strings }
+  return out
+}
