@@ -204,138 +204,316 @@
       "uncovered_statements": 3007
     },
     "java": {
-      "statements": 2482,
+      "statements": 2488,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
-          "_V3Ctx.next_gensym": 2,
-          "_arrow_repeatable": 10,
-          "_bind_decl_type": 7,
-          "_dedup_colour_erased_poly_externs._rewrite": 6,
-          "_emit_pool_runtime": 1,
-          "_emit_record_sink": 1,
-          "_emit_result_type": 1,
-          "_emit_setup_stmt": 53,
-          "_emit_v3_externs": 23,
-          "_emit_v3_tests": 20,
-          "_emit_witnessed_step": 21,
-          "_finite_float": 3,
-          "_format_java": 28,
-          "_inline_arrow": 12,
-          "_java_extern_config_bind": 5,
-          "_java_extern_config_constants": 17,
-          "_java_extern_config_schema": 6,
-          "_java_type_arg": 2,
-          "_main": 12,
-          "_name_uses": 4,
-          "_split_generic": 11,
-          "_subexprs": 9,
-          "_v3_builtin": 57,
-          "_v3_len": 1,
-          "_value_map_write_type": 6
+        "backends/java/emit.py::<module>: The __main__ CLI entry is not invoked by the emit(ir) API oracle.": {
+          "<module>": 1
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "<module>": 1,
-          "_V3Ctx.__init__": 1,
-          "_V3Ctx.record_type_for_fields": 3,
-          "_arrow_callee": 3,
-          "_bind_local_arrow": 11,
-          "_bind_type": 26,
-          "_call_label": 7,
-          "_check_fn_name_collisions": 2,
-          "_component_map_values": 1,
-          "_component_needs_frame.step_needs": 1,
-          "_component_needs_modern": 5,
-          "_contains_expr": 2,
-          "_core_imports": 2,
-          "_covers_variant": 1,
-          "_dedup_colour_erased_poly_externs": 14,
-          "_emit_component": 18,
-          "_emit_component_modern": 5,
-          "_emit_component_stmts": 20,
-          "_emit_host_stubs": 1,
-          "_emit_host_stubs.walk": 1,
-          "_emit_inverse_pins": 8,
-          "_emit_service_interfaces": 1,
-          "_emit_v3": 14,
-          "_emit_v3_functions": 1,
-          "_empty_map_decl_type": 2,
-          "_expr": 49,
-          "_fn_name": 3,
-          "_guard_frame_neutral_loop": 1,
-          "_host_of": 2,
-          "_ident": 2,
-          "_is_float_expr": 5,
-          "_is_fn_type": 10,
-          "_java_type": 12,
-          "_java_v3_type": 6,
-          "_let_keyword": 1,
-          "_lit": 5,
-          "_mangle": 2,
-          "_map_expr_inserts": 9,
-          "_map_insert_candidates": 13,
-          "_map_value_expr_type": 97,
-          "_map_value_surface_type": 1,
-          "_metadata_lit": 4,
-          "_method_body": 6,
-          "_method_body_lines": 37,
-          "_param_type": 1,
-          "_pin_value_map_locals": 6,
-          "_refuse_deferred_emissions": 10,
-          "_refuse_holes": 4,
-          "_refuse_holes.walk": 1,
-          "_refuse_missing_host_root": 1,
-          "_refuse_stream_host": 1,
-          "_reject_fn_type": 1,
-          "_scan_map_writes": 6,
-          "_uses_builtin_result": 1,
-          "_uses_builtin_result.walk": 3,
-          "_uses_float_interp.walk": 3,
-          "_v3_call": 24,
-          "_v3_component_hash": 2,
-          "_v3_match_expr": 21,
-          "_v3_stmt": 17,
-          "_v3_var": 5,
-          "_witnessed_extern_for": 3,
-          "_zero_java_value": 4,
-          "emit": 4
+        "backends/java/emit.py::_V3Ctx.__init__: Duplicate variant case names raise EmitError before output; build_ctx records <<AMBIG>>. This is reference refusal, not an impossible frontend declaration or an agreeing supported program.": {
+          "_V3Ctx.__init__": 1
         },
-        "declared out of every self-host slice: async coloring.": {
-          "_await_join": 1
+        "backends/java/emit.py::_V3Ctx.next_gensym: Temporary-name allocation is used by local-arrow capture/beta reduction and destructuring, explicitly deferred in the port header.": {
+          "_V3Ctx.next_gensym": 2
         },
-        "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
-          "_emit_lifecycle_no_residue_helper": 1,
-          "_emit_v3_lifecycle_tests": 31,
-          "_java_lifecycle_method_name": 11,
-          "_java_test_method_name": 11,
-          "_refuse_fault_tests": 2,
-          "_refuse_lifecycle_tests": 2,
+        "backends/java/emit.py::_V3Ctx.record_type_for_fields: The missing branches raise on absent or ambiguous record field sets. Unique record selection is covered; successful emission cannot take these refusal branches.": {
+          "_V3Ctx.record_type_for_fields": 3
+        },
+        "backends/java/emit.py::_arrow_callee: The remaining returns recognize inline arrows and locally bound arrow callees. Local arrows/beta reduction are an existing port boundary; control.rvl is a strict divergent regression.": {
+          "_arrow_callee": 3
+        },
+        "backends/java/emit.py::_arrow_repeatable: The recursive repeatability predicate is only called by _inline_arrow when deciding whether to pin multiply-used arguments. Local-arrow lowering is explicitly deferred.": {
+          "_arrow_repeatable": 10
+        },
+        "backends/java/emit.py::_bind_decl_type: Legacy effect-binding declaration types (including Map boxing and scalar host lookup) require nonsimple v1/v2 components, rejected by the port's simple-component gate; modern host Map bindings are covered separately.": {
+          "_bind_decl_type": 7
+        },
+        "backends/java/emit.py::_bind_local_arrow: The remaining capture-renaming and argument-pinning branches require a let-bound arrow. Local arrows are explicitly deferred; the simple non-arrow return is covered.": {
+          "_bind_local_arrow": 11
+        },
+        "backends/java/emit.py::_bind_type: Residual record/list/scalar acquire inference, its ambiguous-record catch and final Object fallback require nonhost let-effect, excluded by body_step_supported's host-only binding gate. Host Map/Job typing is covered.": {
+          "_bind_type": 24
+        },
+        "backends/java/emit.py::_call_label: Missing '?' returns require non-dict/unknown label nodes; the callee-name compatibility call lacks target, whereas lower.py emits target/method for service calls and kind=fn for free calls. Valid host, fn and service labels are covered.": {
+          "_call_label": 4
+        },
+        "backends/java/emit.py::_check_fn_name_collisions: The residual continue skips invalid names already rejected by _fn_name; the other branch raises on two callable names mapping to one Java name. Neither produces successful reference bytes.": {
+          "_check_fn_name_collisions": 2
+        },
+        "backends/java/emit.py::_component_needs_frame.step_needs: The remaining true branch detects witnessed extern acquire calls, explicitly deferred; compensation, abort/fail and ordinary bracket frames are covered.": {
+          "_component_needs_frame.step_needs": 1
+        },
+        "backends/java/emit.py::_component_needs_modern: The remaining true returns are routes and step setup. Routers and setup are explicitly outside the admitted component subset, unlike config, requirements and realm placement.": {
+          "_component_needs_modern": 2
+        },
+        "backends/java/emit.py::_contains_expr: The remaining true return detects call with callee in a component expression. Component direct calls lower to kind=fn or target/method; callee calls require the explicitly deferred local-arrow/first-class/value-builtin path. Non-v1 kind detection and ordinary traversal are covered.": {
+          "_contains_expr": 1
+        },
+        "backends/java/emit.py::_core_imports: Only Contexts for lifecycle tests and CordisException for routers remain. In-file lifecycle tests and routers are declared boundaries; fail/frame/core imports are covered.": {
+          "_core_imports": 2
+        },
+        "backends/java/emit.py::_covers_variant: The remaining false return is a missing user-variant case. lower.py rejects nonexhaustive user matches before emission; exhaustive and wildcard matches are covered.": {
+          "_covers_variant": 1
+        },
+        "backends/java/emit.py::_dedup_colour_erased_poly_externs._rewrite: Recursive callee-name rewriting runs only after an erased polymorphic extern collision is found; extern emission is explicitly deferred.": {
+          "_dedup_colour_erased_poly_externs._rewrite": 6
+        },
+        "backends/java/emit.py::_dedup_colour_erased_poly_externs: Grouping duplicate monomorphised externs by erased Java signature and choosing/replacing canonical names requires extern declarations, explicitly deferred.": {
+          "_dedup_colour_erased_poly_externs": 14
+        },
+        "backends/java/emit.py::_emit_checked_div_helpers: The returned checked-division helper text is demanded by Int checked division, whose Result-valued operation/runtime is explicitly deferred. Float division is covered and does not demand this helper.": {
+          "_emit_checked_div_helpers": 1
+        },
+        "backends/java/emit.py::_emit_component: Residual requirement/bind fields and constructor assignments, config fields, ctx.get and let-effect/effect/emit branches are the nonsimple legacy effect/bind path, excluded by component_simple_ok. The final unsupported-step raise is refusal. Empty and provide-only legacy components are now covered.": {
+          "_emit_component": 17
+        },
+        "backends/java/emit.py::_emit_component_modern: Missing branches reject invalid isolate/intercept keys, bind a routed requirement and emit the router class. Frontend validates placement keys; routers remain an explicit boundary, not general realm exclusion.": {
+          "_emit_component_modern": 5
+        },
+        "backends/java/emit.py::_emit_component_stmts: Residual setup delegation and nonhost/witnessed or Map.compare_and_set let-effect acquisition are excluded by the host-only binding/setup gate. Body return raises (methods only); unknown body steps delegate to deferred setup lowering.": {
+          "_emit_component_stmts": 15
+        },
+        "backends/java/emit.py::_emit_ftoa_helper: Only the Float-to-Str formatter text is missing, an explicit port boundary reproduced by strict floats.rvl divergence; Float literals, arithmetic and widening are covered.": {
+          "_emit_ftoa_helper": 1
+        },
+        "backends/java/emit.py::_emit_host_stubs.walk: The missing walk addition recognizes a host used as call target (rather than kind=host dotted fn). lower.py's host-effect lowering materializes dotted host fn nodes; Map/Job acquisition and uses are covered in that canonical form.": {
+          "_emit_host_stubs.walk": 1
+        },
+        "backends/java/emit.py::_emit_host_stubs: Only Pool runtime insertion remains: emit_host_stubs emits <<DEFER-host-stub:Pool>>, reproduced by the strict pg-pool regression. Map and Job stubs are covered.": {
+          "_emit_host_stubs": 1
+        },
+        "backends/java/emit.py::_emit_inverse_pins: The remaining inverse expression rewrites require witnessed acquisition or Map CAS binding in provided methods. Witnessed externs and method let-effect are explicit port boundaries.": {
+          "_emit_inverse_pins": 8
+        },
+        "backends/java/emit.py::_emit_java_router_class: Route-provider construction, candidate ordering and dispatch runtime are only emitted when requires.routes is populated. Routers were explicitly deferred; router.rvl is a strict divergent regression.": {
+          "_emit_java_router_class": 51
+        },
+        "backends/java/emit.py::_emit_lifecycle_no_residue_helper: The no-residue helper text is emitted only for lifecycle assert_no_residue tests, explicitly deferred with in-file tests.": {
+          "_emit_lifecycle_no_residue_helper": 1
+        },
+        "backends/java/emit.py::_emit_pool_runtime: The Pool host runtime text is only requested by Pool roots, explicitly deferred and reproduced by the strict pg-pool regression.": {
+          "_emit_pool_runtime": 1
+        },
+        "backends/java/emit.py::_emit_record_sink: Record sink support belongs to emit(ir, record=True), not the oracle's default emit(ir) API. This optional instrumentation mode was not part of the port contract.": {
+          "_emit_record_sink": 1
+        },
+        "backends/java/emit.py::_emit_result_type: Built-in Result wrapper text is demanded by Ok/Err and checked division, explicitly deferred; result_ctor_302.rvl is a strict divergent regression. User variants and Opt are covered.": {
+          "_emit_result_type": 1
+        },
+        "backends/java/emit.py::_emit_service_interfaces: The missing idempotent annotation is in the legacy service path: lower.py version selection forces v3 for any idempotent/async/commutative method (6567-6571), so source input cannot reach that legacy branch.": {
+          "_emit_service_interfaces": 1
+        },
+        "backends/java/emit.py::_emit_setup_stmt: Setup-local declarations/assignments, destructuring, loop lowering and its rejection guards are behind component setup, explicitly rejected by body_step_supported. Pure-function loops are independently covered.": {
+          "_emit_setup_stmt": 53
+        },
+        "backends/java/emit.py::_emit_spawn_handle: Instance token/provision lookup and unload support are emitted only when _uses_spawn/_uses_instance_get is true. Spawn/instance handles are explicitly deferred and instance_accessor.rvl reproduces the divergence.": {
+          "_emit_spawn_handle": 13
+        },
+        "backends/java/emit.py::_emit_stdlib_helpers: Residual source-group and transitive dependency emission needs builtin/len helpers, explicitly deferred; control.rvl/runtime_values.rvl reproduce missing stdlib output.": {
+          "_emit_stdlib_helpers": 5
+        },
+        "backends/java/emit.py::_emit_v1: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. The successful legacy component/service path is covered; Float-to-Str remains explicitly deferred.": {
+          "_emit_v1": 2
+        },
+        "backends/java/emit.py::_emit_v2: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. Legacy isolate/intercept assembly is covered; Float-to-Str remains explicitly deferred.": {
+          "_emit_v2": 2
+        },
+        "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers.": {
+          "_emit_v3": 14
+        },
+        "backends/java/emit.py::_emit_v3_externs: Extern method wrappers, witnessed signatures and config-schema bindings require extern declarations, explicitly deferred; strict extern_config and method_witnessed cases retain reproductions.": {
+          "_emit_v3_externs": 23
+        },
+        "backends/java/emit.py::_emit_v3_lifecycle_tests: Lifecycle test method assembly, load/unload state and conditional REVL_TESTS invocation require in-file lifecycle tests, explicitly deferred.": {
+          "_emit_v3_lifecycle_tests": 31
+        },
+        "backends/java/emit.py::_emit_v3_tests: Test-function generation and REVL_TESTS dispatch require in-file tests, explicitly deferred; records.rvl retains a strict divergent reproduction.": {
+          "_emit_v3_tests": 20
+        },
+        "backends/java/emit.py::_emit_witnessed_step: Witnessed Result acquisition, error propagation, witness secrecy/redaction and inverse registration require class=witnessed externs, explicitly deferred; method_witnessed.rvl is a strict divergent reproduction.": {
+          "_emit_witnessed_step": 21
+        },
+        "backends/java/emit.py::_empty_map_decl_type: Remaining branches read writer-inferred pins for an unannotated VALUE Map.empty local or use raw java.util.Map when unpinned. The port explicitly defers unannotated value-Map inference, distinct from covered host Map.new inference.": {
+          "_empty_map_decl_type": 2
+        },
+        "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, builtin/len and sized-length helpers, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered.": {
+          "_expr": 28
+        },
+        "backends/java/emit.py::_finite_float: The only missing branch raises for a non-finite literal; successful Java output cannot contain this value.": {
+          "_finite_float": 1
+        },
+        "backends/java/emit.py::_fn_name: Only invalid identifier refusal remains. Valid Java-keyword escaping and underscore-only names are covered.": {
+          "_fn_name": 1
+        },
+        "backends/java/emit.py::_guard_frame_neutral_loop: Only the refusal for loop-scoped registration remains. Frontend loop validation prohibits frame-mutating registration inside a loop; the guard cannot return successful emission on that path.": {
+          "_guard_frame_neutral_loop": 1
+        },
+        "backends/java/emit.py::_host_of: The missing branches are RevlSpawnHandle for spawn acquisitions and Object for nonhost acquisitions. Spawn and nonhost activation bindings are explicitly deferred by the port gate.": {
+          "_host_of": 2
+        },
+        "backends/java/emit.py::_ident: Only invalid/reserved non-callable identifier raises remain. They terminate reference emission rather than produce comparable bytes.": {
+          "_ident": 2
+        },
+        "backends/java/emit.py::_inline_arrow: Argument multiplicity, generated temporaries and capture substitution implement arrow beta reduction, explicitly deferred in the port header.": {
+          "_inline_arrow": 12
+        },
+        "backends/java/emit.py::_is_float_expr: The missing false return requires a non-dict expression. All frontend expression nodes supplied to arithmetic/interpolation scans are dictionaries; malformed input is outside the compiled-source oracle.": {
+          "_is_float_expr": 1
+        },
+        "backends/java/emit.py::_is_fn_type: Nested bracket scanning is entered only for function-type spellings. Function types are explicitly refused by the Java backend and covered by the separate refusal regression, not by successful CORPUS emission.": {
+          "_is_fn_type": 10
+        },
+        "backends/java/emit.py::_java_extern_config_bind: Runtime constant/config binding is called only from extern wrapper emission, explicitly deferred; extern_config/case.rvl reproduces it.": {
+          "_java_extern_config_bind": 5
+        },
+        "backends/java/emit.py::_java_extern_config_constants: Config schema discovery and constant emission traverse extern declarations, explicitly deferred, not component config (which is covered).": {
+          "_java_extern_config_constants": 17
+        },
+        "backends/java/emit.py::_java_extern_config_schema: Extern-only config parsing/validation requires extern declarations, explicitly deferred and reproduced by extern_config/case.rvl.": {
+          "_java_extern_config_schema": 6
+        },
+        "backends/java/emit.py::_java_lifecycle_method_name: Test-name sanitization/hash fallback is called only for lifecycle test methods, explicitly deferred.": {
+          "_java_lifecycle_method_name": 11
+        },
+        "backends/java/emit.py::_java_test_method_name: Test-name sanitization/hash fallback is called only for in-file unit test methods, explicitly deferred.": {
+          "_java_test_method_name": 11
+        },
+        "backends/java/emit.py::_java_type: Residual legacy Map generic splitting/boxing lies beyond the declared scalar v1/v2 signature slice. Null/missing type returns Object for hand-built IR; frontend signatures are typed. Modern generic boxing is covered by java_v3_type.": {
+          "_java_type": 4
+        },
+        "backends/java/emit.py::_java_v3_type: Residual Result boxing and undeclared host Pool Row-to-Object typing belong to the explicit Result/Pool boundaries. Unknown generic heads (user generics are monomorphized) and missing/non-string types are hand-built or invalid IR.": {
+          "_java_v3_type": 5
+        },
+        "backends/java/emit.py::_lit: Residual null and unsupported-value branches are outside source literals: lower.py rejects explicit null (5389/6938/11072); Opt None uses a var/constructor node. Unsupported Python values raise.": {
+          "_lit": 2
+        },
+        "backends/java/emit.py::_main: Argument parsing, file/stdin JSON input and output-file handling are CLI adapter behavior; the byte oracle calls emit(ir) directly.": {
+          "_main": 12
+        },
+        "backends/java/emit.py::_map_expr_inserts: Residual callee.field Map-write recognition is a compatibility IR shape; lower.py emits target/method for component receiver calls. Host Map writer inference through that canonical shape is covered.": {
+          "_map_expr_inserts": 7
+        },
+        "backends/java/emit.py::_map_insert_candidates: Residual setup recursion and local let/assign RHS scans are explicitly deferred; missing provision-service lookup is invalid typed IR because the frontend resolves provided services.": {
+          "_map_insert_candidates": 3
+        },
+        "backends/java/emit.py::_map_value_expr_type: Residual builtin return typing is the declared stdlib boundary; absent function declaration can be an extern (deferred). Compatibility callee.field req calls are not lower.py's target/method shape. Missing node/env/ctx/config/record metadata, ambiguous record catches and null literals require malformed or reference-refused IR. Supported host Map scalar/list/record/ADT/req/fn/config/field inference is covered.": {
+          "_map_value_expr_type": 36
+        },
+        "backends/java/emit.py::_metadata_lit: Only unsupported metadata values remain. parser.literal/record_literal admit JSON-like scalar/list metadata (including null, now covered), never arbitrary host objects; those raise rather than emit.": {
+          "_metadata_lit": 1
+        },
+        "backends/java/emit.py::_method_body: Residual empty/multistep effectful-body traps and nonvoid bare-return refusal are outside the simple legacy method gate; a value expression discarded by a void method requires the nonsimple legacy effect/call path. Void bare returns and scalar/name returns are covered.": {
+          "_method_body": 4
+        },
+        "backends/java/emit.py::_method_body_lines: Remaining method branches are witnessed or Map-CAS let-effect, local let/assign and arrow binding, all explicitly excluded by method_step_supported. Await/provide/unknown steps raise and cannot produce successful reference output.": {
+          "_method_body_lines": 34
+        },
+        "backends/java/emit.py::_name_uses: Recursive parameter-use counting is only called by _inline_arrow for pinning multiply-used arguments; local-arrow beta reduction is explicitly deferred.": {
+          "_name_uses": 4
+        },
+        "backends/java/emit.py::_pin_value_map_locals: Writer-based type inference for unannotated VALUE Map.empty locals is explicitly deferred; it is not the covered host Map.new inference.": {
+          "_pin_value_map_locals": 5
+        },
+        "backends/java/emit.py::_refuse_deferred_emissions: Residual standalone-import bootstrap is not taken in installed-package tests; residual policy-error handling raises on deferred emissions. Neither yields successful API bytes.": {
+          "_refuse_deferred_emissions": 10
+        },
+        "backends/java/emit.py::_refuse_fault_tests: The remaining fault-test branches raise before output; fault injection/refusal parity is outside the explicitly deferred in-file test slice.": {
+          "_refuse_fault_tests": 2
+        },
+        "backends/java/emit.py::_refuse_holes.walk: The missing true branch detects kind=hole and records its location before refusal; holes are explicitly rejected by the reference.": {
+          "_refuse_holes.walk": 1
+        },
+        "backends/java/emit.py::_refuse_holes: Remaining hole-position accumulation, diagnostic formatting and raising are source/IR refusal behavior, not successful byte output.": {
+          "_refuse_holes": 4
+        },
+        "backends/java/emit.py::_refuse_lifecycle_tests: Legacy v1/v2 lifecycle-test rejection cannot be entered by compiled source: lower.py assigns tests version3. In-file test emission is also explicitly deferred.": {
+          "_refuse_lifecycle_tests": 2
+        },
+        "backends/java/emit.py::_refuse_missing_host_root: The missing branch raises for unsupported host roots rather than emitting a stub. Supported Map and Job and explicitly deferred Pool are separate from this refusal.": {
+          "_refuse_missing_host_root": 1
+        },
+        "backends/java/emit.py::_refuse_stream_host: The residual branch rejects Stream types because the Java Stream runtime is not implemented. Refusal parity, not a supported emitter feature, is outside the successful corpus.": {
+          "_refuse_stream_host": 1
+        },
+        "backends/java/emit.py::_reject_fn_type: The only remaining branch raises the documented function-type refusal; a separate test asserts it. The successful-byte corpus intentionally cannot contain it.": {
+          "_reject_fn_type": 1
+        },
+        "backends/java/emit.py::_scan_map_writes: Remaining assignment/writer scanning belongs to unannotated VALUE Map.empty inference, explicitly deferred; host Map writers are scanned by _map_insert_candidates instead.": {
+          "_scan_map_writes": 6
+        },
+        "backends/java/emit.py::_split_generic: This helper is used by legacy _java_type's Map branch, beyond the explicitly scalar v1/v2 signatures. v3 generic splitting uses _split_v3_types and is covered.": {
+          "_split_generic": 11
+        },
+        "backends/java/emit.py::_stdlib_helpers_reached: The remaining frontier loop closes transitive dependencies once a stdlib helper is demanded. Builtin/len helpers are explicitly deferred; ordinary runtime helpers do not enter this group.": {
+          "_stdlib_helpers_reached": 5
+        },
+        "backends/java/emit.py::_subexprs: Recursive expression-child enumeration serves local-arrow repeatability/use counting, explicitly deferred.": {
+          "_subexprs": 9
+        },
+        "backends/java/emit.py::_uses_builtin_result.walk: Residual short-circuit true branches detect Result cases/types; user variants and Opt do not require this runtime. Built-in Result is explicitly deferred.": {
+          "_uses_builtin_result.walk": 3
+        },
+        "backends/java/emit.py::_uses_builtin_result: The residual true return indicates Result constructor/match/type usage, explicitly deferred and retained by strict result_ctor_302.rvl.": {
+          "_uses_builtin_result": 1
+        },
+        "backends/java/emit.py::_uses_checked_div.walk: Only setting found=True for checked integer division remains; this Result-valued arithmetic/runtime is explicitly deferred, unlike covered Float division.": {
+          "_uses_checked_div.walk": 1
+        },
+        "backends/java/emit.py::_uses_float_interp.walk: Residual found short-circuit and true assignment require Float-to-Str interpolation, explicitly deferred and reproduced by floats.rvl. Float arithmetic nodes alone do not satisfy this condition.": {
+          "_uses_float_interp.walk": 3
+        },
+        "backends/java/emit.py::_uses_instance_get.walk: Traversal and true detection only run on spawn/instance-get components after their feature gate; spawn/instances are explicitly deferred.": {
+          "_uses_instance_get.walk": 8
+        },
+        "backends/java/emit.py::_uses_instance_get: The scan invocation is reached only from _emit_spawn_handle(with_get=...) behind _uses_spawn. Spawn/instances are explicitly deferred and instance_accessor.rvl is a strict reproduction.": {
+          "_uses_instance_get": 1
+        },
+        "backends/java/emit.py::_uses_spawn.walk: Only the true assignment for kind=spawn remains, explicitly deferred and reproduced by instance_accessor.rvl.": {
+          "_uses_spawn.walk": 1
+        },
+        "backends/java/emit.py::_uses_stdlib.walk: Nested walk is reachable only from the uncalled _uses_stdlib definition; active helper selection uses _stdlib_helpers_reached instead.": {
+          "_uses_stdlib.walk": 12
+        },
+        "backends/java/emit.py::_uses_stdlib: Obsolete scan with no callers in backends/java/emit.py: active demand selection uses _stdlib_helpers_reached. This retained definition is unreachable from emit(ir).": {
+          "_uses_stdlib": 5
+        },
+        "backends/java/emit.py::_v3_builtin: List/string operation dispatch and invalid-method refusal are behind kind=builtin, explicitly deferred; strict runtime_values.rvl exercises missing push helper and control.rvl the related length/arrow family.": {
+          "_v3_builtin": 57
+        },
+        "backends/java/emit.py::_v3_call: Residual inline-arrow/field/apply dispatch belongs to deferred first-class/local functions. User-case/None compatibility call branches are lowered to adt/var by lower.py, and wrong constructor arities refuse. Raw named-call fallback is not canonical free-fn (kind=fn) or req (target/method) IR.": {
+          "_v3_call": 19
+        },
+        "backends/java/emit.py::_v3_instance_get: Instance token/type lookup and provision access require instance-get, explicitly deferred and reproduced by instance_accessor.rvl.": {
+          "_v3_instance_get": 8
+        },
+        "backends/java/emit.py::_v3_len: The length helper call is emitted for builtin/len or sized_length, explicitly deferred with stdlib; control.rvl reproduces its absence.": {
+          "_v3_len": 1
+        },
+        "backends/java/emit.py::_v3_lifecycle_step: Load/unload/advance/call/assert/no-residue lowering is invoked only by lifecycle-test emission, explicitly deferred. Unsupported step diagnostics share that boundary.": {
           "_v3_lifecycle_step": 32
         },
-        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
-          "_emit_java_router_class": 51,
-          "_emit_spawn_handle": 13,
-          "_uses_instance_get": 1,
-          "_uses_instance_get.walk": 8,
-          "_uses_spawn.walk": 1,
-          "_v3_instance_get": 8,
+        "backends/java/emit.py::_v3_match_expr: Residual Ok/Err Result switch emission is explicitly deferred. The other missing branch is the defensive nonexhaustive user-variant default; lower.py rejects nonexhaustive matches before emit.": {
+          "_v3_match_expr": 21
+        },
+        "backends/java/emit.py::_v3_spawn: Spawn bindings/requirements/config construction requires spawn expressions, explicitly deferred and reproduced by instance_accessor.rvl.": {
           "_v3_spawn": 18
         },
-        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
-          "_emit_checked_div_helpers": 1,
-          "_emit_ftoa_helper": 1,
-          "_emit_stdlib_helpers": 5,
-          "_stdlib_helpers_reached": 5,
-          "_uses_checked_div.walk": 1,
-          "_uses_stdlib": 5,
-          "_uses_stdlib.walk": 12,
-          "_v3_types_need_value_helpers": 1
+        "backends/java/emit.py::_v3_stmt: Remaining local-arrow early return and let_pattern record/list/rest destructuring are explicitly deferred. The final unknown-step raise is reference refusal; ordinary pure loops/statements are covered.": {
+          "_v3_stmt": 16
         },
-        "the v1/v2 live-component path: a component routes to the older runtime, not through the v3 emitter the self-host mirrors.": {
-          "_emit_v1": 4,
-          "_emit_v2": 27
+        "backends/java/emit.py::_v3_var: Remaining callable-as-value and renamed arrow-capture branches belong to first-class/local arrows, explicitly deferred. Raw user-case names are frontend-canonicalized to adt; an unbound arrow value raises.": {
+          "_v3_var": 4
+        },
+        "backends/java/emit.py::_value_map_write_type: This helper only types writers for unannotated VALUE Map.empty local inference, explicitly deferred, distinct from covered host Map inference.": {
+          "_value_map_write_type": 6
+        },
+        "backends/java/emit.py::_witnessed_extern_for: Residual named/target lookup of class=witnessed externs requires the explicitly deferred witnessed-extern surface; method_witnessed.rvl is a strict reproduction.": {
+          "_witnessed_extern_for": 3
+        },
+        "backends/java/emit.py::emit: The two missing branches reject a non-object document and an unsupported IR version. compile_files always supplies a supported versioned dict; successful API output cannot enter either.": {
+          "emit": 2
         }
       },
-      "uncovered_statements": 1105
+      "uncovered_statements": 886
     },
     "py": {
       "statements": 2342,
@@ -912,99 +1090,187 @@
       "uncovered_statements": 173
     },
     "java": {
-      "statements": 2423,
+      "statements": 2033,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
-          "emit_setup_stmt": 1,
-          "emitter_reserved": 1,
-          "exact_method": 5,
-          "host_method": 3,
-          "host_roots": 1,
-          "ind": 1,
-          "is_addsubmul": 1,
-          "is_builtin_ctor": 1,
-          "is_int_operand": 1,
+        "selfhost/emit_java.rvl::bind_type: The empty Map surface branch cannot occur: component_map_values always supplies at least Str. Remaining record/list/scalar inference requires nonhost let-effect, explicitly excluded by body_step_supported.": {
+          "bind_type": 27
+        },
+        "selfhost/emit_java.rvl::body_step_supported: Remaining false returns reject nonhost let-effect, nonempty setup, unsupported provided-method steps, invalid nested guards and other unsupported body steps. These are the existing admission boundaries, not missing accepted implementations.": {
+          "body_step_supported": 5
+        },
+        "selfhost/emit_java.rvl::build_ctx: The remaining assignment records duplicate variant case ownership as <<AMBIG>>. Reference _V3Ctx.__init__ rejects duplicates immediately; this is reference refusal, not a successful supported document.": {
+          "build_ctx": 1
+        },
+        "selfhost/emit_java.rvl::call_label: Residual '?' returns guard null/missing/unknown labels. The callee-name compatibility branch requires call without target; lower.py emits req target/method and kind=fn for free calls. Canonical host/req/fn labels are covered.": {
+          "call_label": 9
+        },
+        "selfhost/emit_java.rvl::collect_hosts: Residual addition recognizes kind=host as a call target; lower.py's host-effect node uses a dotted fn such as Map.new instead. The canonical Map/Job host scan is covered.": {
+          "collect_hosts": 1
+        },
+        "selfhost/emit_java.rvl::component_simple_ok: The remaining false return rejects non-provide legacy body steps. Those belong to the explicitly deferred nonsimple legacy effect/bind path, not modern host components.": {
+          "component_simple_ok": 1
+        },
+        "selfhost/emit_java.rvl::contains_expr: Residual true return detects call with non-null callee. Component direct calls lower to kind=fn or target/method; callee forms require the explicitly deferred local-arrow/first-class/value-builtin path. Other non-v1 expression detection is covered.": {
+          "contains_expr": 1
+        },
+        "selfhost/emit_java.rvl::covers_variant: Residual false returns require unknown variant, malformed case list or a missing case. The typed frontend supplies declared variants and rejects nonexhaustive matches (lower.py:1880).": {
+          "covers_variant": 3
+        },
+        "selfhost/emit_java.rvl::emit_component: Residual <<DEFER-component-nonsimple>> is the gate's rejection marker for setup, nonhost binds, unsupported methods and routers/spawn. Those predate this triage; strict boundary tests assert representative markers.": {
+          "emit_component": 1
+        },
+        "selfhost/emit_java.rvl::emit_component_stmts: Setup emission is unreachable after the no-setup admission check. The remaining flat compensation branch is also unreachable: any compensate expression makes component_needs_frame true, selecting the frame branch.": {
+          "emit_component_stmts": 4
+        },
+        "selfhost/emit_java.rvl::emit_host_stubs: Only <<DEFER-host-stub:Pool>> remains, the declared Pool boundary retained by the strict pg-pool regression. Map/Job stubs are covered.": {
+          "emit_host_stubs": 1
+        },
+        "selfhost/emit_java.rvl::emit_setup_stmt: Only the deferred setup-step marker remains; body_step_supported rejects nonempty setup before invoking this emitter.": {
+          "emit_setup_stmt": 1
+        },
+        "selfhost/emit_java.rvl::emitter_reserved: The emitted Python definition has no Name-call sites: the Python backend inlines this constant-list helper at all production callers. The retained wrapper is dead, not an untested Java identifier rule.": {
+          "emitter_reserved": 1
+        },
+        "selfhost/emit_java.rvl::exact_method: The Python backend inlines production +/-/* dispatch; emitted exact_method calls exist only in the emitter's own in-file tests, which the oracle does not run. Production checked arithmetic output is covered.": {
+          "exact_method": 5
+        },
+        "selfhost/emit_java.rvl::host_method: The emitted Python definition has zero Name-call sites; the backend inlines the new-to-create mapping into production callers. Map creation and ordinary host method names are covered there.": {
+          "host_method": 3
+        },
+        "selfhost/emit_java.rvl::host_of: Residual RevlSpawnHandle/Object branches require spawn or nonhost/malformed acquisitions. Spawn and nonhost activation binds are explicit admission boundaries; host Map/Job types are covered.": {
+          "host_of": 3
+        },
+        "selfhost/emit_java.rvl::host_root_of: The residual return requires a dotless host fn. lower.py materializes host effects as dotted roots/methods (Map.new, Job.run); dotless compatibility IR is not emitted by compile_files.": {
+          "host_root_of": 1
+        },
+        "selfhost/emit_java.rvl::host_roots: The emitted Python definition has zero Name-call sites because its constant host-name list is inlined; the retained wrapper cannot execute on the production emitter path.": {
+          "host_roots": 1
+        },
+        "selfhost/emit_java.rvl::ind: The emitted Python definition has zero Name-call sites: indentation multiplication is inlined at every caller. The emitted Java indentation itself is compared throughout the corpus.": {
+          "ind": 1
+        },
+        "selfhost/emit_java.rvl::is_addsubmul: The emitted Python definition has zero Name-call sites; its three-operator predicate is inlined into render_bin. Each arithmetic operator is covered at those callers.": {
+          "is_addsubmul": 1
+        },
+        "selfhost/emit_java.rvl::is_builtin_ctor: The emitted Python definition has zero Name-call sites; its constructor-name predicate is inlined at callers. Some/None are covered, while Result remains an explicit runtime boundary.": {
+          "is_builtin_ctor": 1
+        },
+        "selfhost/emit_java.rvl::is_postfix_safe: Only req and host true branches remain. They denote services/effect acquisition, not Optional or interpolated value receivers; lower.py types coalesce operands and interpolation values, so these nodes cannot reach those postfix-safe callers in the admitted subset.": {
+          "is_postfix_safe": 2
+        },
+        "selfhost/emit_java.rvl::java_bin_ops: Only the empty unmapped-operator return remains. Typed frontend operators are handled by render_bin's dedicated equality/coalesce branches or this table; unknown operators are invalid IR and reference refusal.": {
+          "java_bin_ops": 1
+        },
+        "selfhost/emit_java.rvl::java_lit: Only null/unsupported literal markers remain. lower.py rejects explicit null, Opt None is not a null literal, and typed source literals cannot contain arbitrary host objects.": {
+          "java_lit": 2
+        },
+        "selfhost/emit_java.rvl::java_v3_type: Residual null/empty type defaults require malformed type metadata; function types are explicitly refused; Result boxing is deferred. Unknown generic-head Object boxing cannot arise for a validated supported type.": {
+          "java_v3_type": 9
+        },
+        "selfhost/emit_java.rvl::let_keyword: Only <<DEFER-map-local-unpinned>> remains, the preexisting boundary for unannotated VALUE Map.empty inference. Annotated value Maps and inferred host Map.new are separate and covered.": {
+          "let_keyword": 1
+        },
+        "selfhost/emit_java.rvl::list_nonempty: Only the missing-list false return remains. Callers inspect component config lists; lower.py always materializes that list, including empty config.": {
+          "list_nonempty": 1
+        },
+        "selfhost/emit_java.rvl::lit_value: Only null/unsupported literal markers remain: lower.py rejects explicit null and typed literals have bool/int/float/string values. Opt None uses its own constructor path.": {
+          "lit_value": 2
+        },
+        "selfhost/emit_java.rvl::map_expr_inserts: Residual callee.field writer form is compatibility IR; lower.py emits target/method for component receiver calls. The canonical host Map put/compare-and-set value inference paths are covered.": {
+          "map_expr_inserts": 8
+        },
+        "selfhost/emit_java.rvl::map_insert_candidates: Residual setup recursion and local let/assign RHS scans are explicitly deferred by admission gates. Missing provided service requires invalid typed IR, since frontend provision resolution validates it.": {
+          "map_insert_candidates": 3
+        },
+        "selfhost/emit_java.rvl::map_value_expr_type: Residual builtin return typing is the explicit stdlib boundary; absent named function can be an extern (deferred). Compatibility callee.field req calls are not canonical target/method IR. Missing typed node/config/record/ctx data and null values cannot arise on valid admitted calls; supported host Map data cases are covered.": {
+          "map_value_expr_type": 30
+        },
+        "selfhost/emit_java.rvl::match_expr: Only nonexhaustive user-variant default generation remains. lower.py rejects nonexhaustive source matches; ignored binds, exhaustive cases and wildcard defaults are covered.": {
+          "match_expr": 1
+        },
+        "selfhost/emit_java.rvl::metadata_lit: Only the unsupported metadata marker remains. parser.literal/record_literal produce JSON-like scalar/list metadata (including null, now covered), never arbitrary host objects.": {
+          "metadata_lit": 1
+        },
+        "selfhost/emit_java.rvl::method_body: Residual effectful/multistep trap and nonvoid bare-return marker are outside method_simple_ok; the void value-expression branch requires nonsimple legacy calls. Scalar/name and bare void return cases are covered.": {
+          "method_body": 4
+        },
+        "selfhost/emit_java.rvl::method_body_lines: Only flat fx.track compensation remains. A provided-method compensation makes component_needs_frame true, so admitted emission necessarily selects the frame compensation branch.": {
+          "method_body_lines": 1
+        },
+        "selfhost/emit_java.rvl::method_simple_ok: Residual false returns reject multistep or nonreturn legacy methods, the documented simple-method admission boundary; valid bare void returns are now accepted and covered.": {
+          "method_simple_ok": 2
+        },
+        "selfhost/emit_java.rvl::modern_supported: Only the false return remains, propagating body_step_supported's existing rejection of setup, nonhost binds and unsupported methods/steps.": {
+          "modern_supported": 1
+        },
+        "selfhost/emit_java.rvl::needs_modern_subset: Residual final false corresponds to nonsimple legacy effect/bind components with no modern feature. This legacy path is explicitly deferred; modern configs/requirements/realms are covered.": {
+          "needs_modern_subset": 1
+        },
+        "selfhost/emit_java.rvl::newline: The emitted Python definition has zero Name-call sites; the newline constant is inlined into every production caller. Its retained wrapper is unreachable from emit_src.": {
           "newline": 1
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "acquire_is_witnessed": 1,
-          "bind_type": 29,
-          "body_step_supported": 6,
-          "box": 2,
-          "build_ctx": 2,
-          "call_label": 16,
-          "collect_hosts": 1,
-          "component_map_values": 1,
-          "component_simple_ok": 2,
-          "contains_expr": 4,
-          "covers_variant": 3,
-          "emit_component": 1,
-          "emit_component_modern": 1,
-          "emit_component_stmts": 22,
-          "emit_host_stubs": 1,
-          "emit_v3_functions": 1,
-          "fn_name": 3,
-          "host_of": 3,
-          "host_root_of": 1,
-          "is_atomic": 5,
-          "is_float_expr": 5,
-          "is_postfix_safe": 17,
-          "java_bin_ops": 4,
-          "java_lit": 5,
-          "java_v3_type": 10,
-          "let_keyword": 3,
-          "list_nonempty": 1,
-          "lit_value": 5,
-          "mangle": 3,
-          "map_expr_inserts": 8,
-          "map_insert_candidates": 15,
-          "map_value_expr_type": 91,
-          "map_value_surface_type": 1,
-          "match_expr": 1,
-          "metadata_lit": 4,
-          "method_body": 6,
-          "method_body_lines": 6,
-          "method_simple_ok": 3,
-          "modern_supported": 1,
-          "needs_modern_subset": 2,
-          "node_ref_name": 1,
-          "opt_arm_body": 4,
-          "opt_bind": 1,
-          "provide_methods": 1,
-          "render_adt": 3,
-          "render_bin": 2,
-          "render_call": 18,
-          "render_expr": 4,
-          "render_field": 1,
-          "render_index": 1,
-          "render_inner": 12,
-          "render_interp": 4,
-          "render_un": 5,
-          "render_var": 2,
-          "service_param_type": 1,
-          "starts_with": 1,
-          "step_forces_modern": 4,
-          "step_needs_frame": 4,
-          "type_map": 2,
-          "uses_equality": 2,
-          "uses_revl_frame": 1,
-          "v1_method_expr": 1,
-          "v3_component_hash": 2,
-          "v3_stmt": 2,
-          "witnessed_names": 2,
-          "zero_java_value": 4
+        "selfhost/emit_java.rvl::node_ref_name: Residual name-field fallback handles pure kind=var nodes. Host Map inference runs on component-lowered names with id fields; pure/value Map inference and arrow-local names are the explicitly deferred paths that would require the alternate name spelling.": {
+          "node_ref_name": 1
         },
-        "declared out of every self-host slice: async coloring.": {
-          "await_join": 1
+        "selfhost/emit_java.rvl::opt_arm_body: Only missing-arm empty text remains. Frontend exhaustiveness checks require Some/None or a wildcard, so valid Optional matches always supply the requested arm.": {
+          "opt_arm_body": 1
         },
-        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
-          "isolate_service": 1
+        "selfhost/emit_java.rvl::provide_methods: Residual empty result requires a provided key without a matching provide step; frontend resolves and validates every declared provision before emission.": {
+          "provide_methods": 1
         },
-        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
-          "v3_types_need_value_helpers": 1
+        "selfhost/emit_java.rvl::render_adt: Residual Ok/Err markers are the explicit Result boundary (strict result_ctor_302 reproduction). The final unknown-constructor marker requires invalid typed IR; valid user variants and Opt are covered.": {
+          "render_adt": 3
+        },
+        "selfhost/emit_java.rvl::render_bin: Only the unsupported-operator marker remains. Frontend operator validation plus dedicated render_bin/table dispatch covers all admitted operators; malformed IR has no successful reference bytes.": {
+          "render_bin": 1
+        },
+        "selfhost/emit_java.rvl::render_call: Residual field/apply forms belong to the deferred first-class/local-arrow surface. Raw user-case/None/Ok/Err compatibility call forms are frontend-canonicalized to adt/var; unknown raw named calls are not the canonical kind=fn or target/method req calls.": {
+          "render_call": 15
+        },
+        "selfhost/emit_java.rvl::render_format: Only out-of-range placeholder substitution remains. lower.py constructs each positional placeholder with the current len(args) while appending that argument, so valid source cannot reference a missing slot.": {
+          "render_format": 1
+        },
+        "selfhost/emit_java.rvl::render_inner: Only the final unsupported-expression marker remains. Explicitly deferred arrow/builtin/len/spawn/instance/extern forms reach it in strict boundary tests; malformed kinds are not a supported source branch.": {
+          "render_inner": 1
+        },
+        "selfhost/emit_java.rvl::render_interp: Only revlFtoa insertion remains, the explicitly deferred Float-to-Str boundary retained by floats.rvl. Empty segment-list interpolation is now covered.": {
+          "render_interp": 1
+        },
+        "selfhost/emit_java.rvl::render_un: Only the unsupported unary marker remains; frontend unary expressions are minus or logical-not, both covered, and rejects other operators.": {
+          "render_un": 1
+        },
+        "selfhost/emit_java.rvl::render_var: Only returning fn_name for a callable used as a value remains, part of the explicitly deferred first-class function/arrow boundary.": {
+          "render_var": 1
+        },
+        "selfhost/emit_java.rvl::starts_with: Residual length-too-short return is impossible at production callers: rendered string segments are nonempty before quote-prefix tests, and dotted host fn names are at least as long as Map. before host-prefix tests.": {
+          "starts_with": 1
+        },
+        "selfhost/emit_java.rvl::step_forces_modern: Only step=setup true remains, an explicitly deferred component feature rejected by body_step_supported.": {
+          "step_forces_modern": 1
+        },
+        "selfhost/emit_java.rvl::step_needs_frame: Residual true returns are witnessed acquire (explicit extern boundary) and recursive guard-arm frame needs. G6 guards permit fail/nested guards, not registering effects/compensations, so those recursion-true branches cannot occur in valid admitted guards.": {
+          "step_needs_frame": 3
+        },
+        "selfhost/emit_java.rvl::type_map: Only Unit-to-void remains. Its sole caller java_v3_type returns void for raw Unit before calling type_map, making this redundant table arm unreachable.": {
+          "type_map": 1
+        },
+        "selfhost/emit_java.rvl::uses_equality: Only equality found in the tests subtree remains. In-file tests are explicitly deferred; equality in functions and components is covered.": {
+          "uses_equality": 1
+        },
+        "selfhost/emit_java.rvl::uses_revl_frame: Only the missing-components early return remains. lower.py always materializes components, even when empty, in every versioned document (6637).": {
+          "uses_revl_frame": 1
+        },
+        "selfhost/emit_java.rvl::v1_method_expr: Only the deferred expression marker remains. method_simple_ok admits lit/name or a bare return before this helper is called; other legacy expressions are rejected by that existing gate.": {
+          "v1_method_expr": 1
+        },
+        "selfhost/emit_java.rvl::v3_stmt: Only unsupported-step output remains; local destructuring is explicitly deferred and unknown IR steps are invalid. Supported pure-function control flow is covered.": {
+          "v3_stmt": 1
+        },
+        "selfhost/emit_java.rvl::witnessed_names: Remaining class=witnessed filtering and name insertion require extern declarations, explicitly deferred and reproduced by method_witnessed.rvl.": {
+          "witnessed_names": 2
         }
       },
-      "uncovered_statements": 400
+      "uncovered_statements": 182
     },
     "py": {
       "statements": 2089,

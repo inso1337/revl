@@ -117,27 +117,14 @@
   },
   "java": {
     "blind": {
-      "declared out of the slice by the oracle's own docstring: spawn/instances, and externs (a witnessed extern is an extern).": [
-        "class=witnessed",
+      "Existing built-in Result boundary: render_call/render_adt mark Ok/Err deferred and _v3_call/_expr generate or validate Result constructors; strict result_ctor_302.rvl reproduces the runtime gap. Opt and user variants are covered.": [
+        "name=Err",
+        "name=Ok"
+      ],
+      "Existing spawn/instance boundary: _v3_spawn emits instance creation; the port only detects spawn to defer the component. Strict instance_accessor.rvl reproduces this, not supported host acquisition.": [
         "kind=spawn"
       ],
-      "declared out of the slice by the oracle's own docstring: the built-in Opt/Result constructor surface (`Ok`/`Err` and the Opt pair).": [
-        "name=Err",
-        "name=None",
-        "name=Ok",
-        "name=Some"
-      ],
-      "declared out of the slice by the oracle's own docstring: the canonical Float->Str helper, so float interpolation and float arithmetic are both out.": [
-        "operands=Float",
-        "widen=Float",
-        "widen=Int"
-      ],
-      "declared out of the slice by the oracle's own docstring: the component dialect outside the supported subset - a component that reaches these arms surfaces a loud `<<DEFER-component-nonsimple>>`.": [
-        "kind=fn",
-        "kind=format",
-        "kind=if"
-      ],
-      "declared out of the slice by the oracle's own docstring: the stdlib surface: every `builtin`/`len` node and `_emit_stdlib_helpers`.": [
+      "Existing stdlib boundary: _v3_builtin and map_value_expr_type dispatch list/string builtins; render_inner still rejects builtin nodes. Strict runtime_values.rvl/control.rvl reproduce it; Map inference's builtin recognition alone is not an implemented emitter.": [
         "kind=builtin",
         "method=charAt",
         "method=charCodeAt",
@@ -152,50 +139,59 @@
         "method=to_int",
         "method=to_str"
       ],
-      "unreachable from surface revl: `src/revl/parser.py::_CANONICAL_OPS` rewrites `===`/`!==` to `==`/`!=` before lowering, so no IR node can carry these ops.": [
+      "Existing witnessed-extern boundary: _emit_witnessed_step and witnessed_names inspect class=witnessed; strict method_witnessed.rvl reproduces missing Result/witness lowering.": [
+        "class=witnessed"
+      ],
+      "Unreachable canonical spelling: parser.py _CANONICAL_OPS rewrites === to == and !== to != before lowering; successful corpus reaches the canonical equality arms instead.": [
         "op=!==",
         "op===="
       ]
     },
     "unported": {
-      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
-        "bind=<true>",
-        "bind=_",
-        "body=<true>",
+      "Existing built-in Result boundary: _v3_match_expr emits Ok/Err switch arms and _uses_builtin_result inspects cases/patterns; the port has no Result runtime. Strict result_ctor_302.rvl preserves the family divergence.": [
         "case=Err",
         "case=Ok",
-        "else=<true>",
-        "entries=<true>",
-        "idempotent=<true>",
-        "intercept=<true>",
-        "isolate=<true>",
-        "items=<true>",
-        "kind=arrow",
-        "kind=hole",
-        "kind=instance-get",
-        "kind=len",
-        "kind=optcall",
-        "kind=optfield",
-        "kind=record_update",
-        "kind=stream-merge",
-        "kind=subscribe",
-        "lifecycle=<true>",
-        "method=codepoint_at",
-        "name=<true>",
         "pattern=Err",
-        "pattern=Ok",
+        "pattern=Ok"
+      ],
+      "Existing destructuring boundary: _v3_stmt/_emit_setup_stmt handle let_pattern record/list bindings; the port v3_stmt has no destructuring arm and setup is rejected by its component gate.": [
         "pattern=record",
-        "returns=<true>",
-        "routes=<true>",
-        "secret_witness=<true>",
-        "setup=<true>",
-        "sized_length=<true>",
+        "step=let_pattern"
+      ],
+      "Existing in-file/lifecycle-test boundary: _emit_v3_lifecycle_tests/_v3_lifecycle_step dispatch lifecycle, advance, assert_no_residue, call, load and unload. The port emits no tests; strict records.rvl retains the related in-file test divergence.": [
+        "lifecycle=<true>",
         "step=advance",
         "step=assert_no_residue",
         "step=call",
-        "step=let_pattern",
         "step=load",
         "step=unload"
+      ],
+      "Existing local-arrow/first-class-function boundary: _inline_arrow/_bind_local_arrow implement beta reduction/captures; port render_inner rejects arrows. Strict control.rvl reproduces this alongside stdlib demand.": [
+        "kind=arrow"
+      ],
+      "Existing spawn/instance boundary: _v3_instance_get emits provision lookup from a spawn handle; port render_inner has no instance-get arm. Strict instance_accessor.rvl reproduces the family.": [
+        "kind=instance-get"
+      ],
+      "Existing stdlib boundary: _v3_len emits revlLength and _v3_builtin/map-value inference recognizes Unicode codepoint_at. Strict control.rvl/runtime_values.rvl reproduce missing helper demand; host Map support does not implement these builtins.": [
+        "kind=len",
+        "method=codepoint_at"
+      ],
+      "Existing witnessed-extern boundary: _emit_witnessed_step consults secret_witness when recording/redacting inverse witnesses. Extern/witness lowering is not ported; strict method_witnessed.rvl retains a representative divergence, not a claim that secrecy is unnecessary.": [
+        "secret_witness=<true>"
+      ],
+      "Reference refusal in _expr/_refuse_stream_host: subscribe and stream-merge require the unimplemented Java Stream runtime. Refusal parity is outside the successful-byte contract.": [
+        "kind=stream-merge",
+        "kind=subscribe"
+      ],
+      "Reference refusal in _expr: optfield/optcall optional-chain nodes raise EmitError. This is not the supported Opt Some/None/coalesce/match surface, which is covered.": [
+        "kind=optcall",
+        "kind=optfield"
+      ],
+      "Reference refusal in _expr: record_update raises rather than producing Java bytes; record construction/field access are separately supported and covered.": [
+        "kind=record_update"
+      ],
+      "Reference refusal, not successful output: _refuse_holes.walk detects holes and _refuse_holes raises before assembly; a kind=hole cannot enter an agreeing successful-byte corpus.": [
+        "kind=hole"
       ]
     }
   },
