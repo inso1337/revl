@@ -3285,6 +3285,13 @@ fn check_module_fns(fns: List[FnD], i: Int, base: Ctx) -> Str {
 }
 
 fn check_cache_fns(fns: List[FnD]) -> Str {
+  var has_cache = false
+  var n = 0
+  while (n < fns.length()) {
+    if (fns[n].cachePure) { has_cache = true }
+    n += 1
+  }
+  if (!has_cache) { return "" }
   let caps = emit_caps_reach(fns, true)
   var i = 0
   while (i < fns.length()) {
