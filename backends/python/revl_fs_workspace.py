@@ -184,7 +184,9 @@ from __future__ import annotations
 
 import errno
 import functools
+import hashlib
 import os
+import re
 import stat
 import threading
 import uuid
@@ -257,6 +259,7 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 #: The supported host binding contract, also exported by `revl.fs_workspace`.
 PINNED_ROOT_API_VERSION = 1
+COMMITTED_SIDECAR_API_VERSION = 1
 
 
 class _PinnedRoot(NamedTuple):
@@ -564,6 +567,92 @@ def _resolve_bound(path: str) -> str:
     finally:
         os.close(fd)
     return real
+
+
+def finalize_committed_sidecar(path: str, expected_sha256: str, *,
+                               expected_dev: int, expected_ino: int) -> None:
+    """Delete one captured, committed preimage under exclusive metadata access.
+
+    Trusted host only: the caller must hold exclusive sidecar-directory write
+    ownership, drain cooperative actors/inverses, and possess both captured
+    witness ownership and durable acknowledgment of the actual session commit.
+    This helper proves none of those lifecycle facts. POSIX has no portable
+    inode-conditional unlink; external writers violating exclusivity can race
+    the final check and unlink. Detectable mismatch and missing evidence raise.
+    """
+    if _binding_for_use() is None:
+        raise ConfinementError(
+            "EWORKSPACE", "committed sidecar finalization requires a pinned root",
+            _sanitized(path))
+    if (not isinstance(expected_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+            or any(type(n) is not int or n < 0
+                   for n in (expected_dev, expected_ino))):
+        raise FsOpError(
+            "EINVAL", "finalization requires a lowercase SHA-256 digest and "
+            "captured nonnegative device/inode integers", _sanitized(path))
+    real = _bound_path(path)
+    parent, leaf = _split(real)
+    if (real != path
+            or parent != os.path.join(workspace_root(), PREIMAGE_DIRNAME)
+            or re.fullmatch(r"pre-[0-9a-f]{32}", leaf) is None):
+        raise ConfinementError(
+            "EOUTSIDE", "only an exact runtime preimage sidecar may be finalized",
+            real)
+    try:
+        dirfd = _open_dirfd(parent)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ConfinementError(
+                "EOUTSIDE", "preimage directory is not a no-follow directory",
+                real) from None
+        raise
+    try:
+        directory = os.fstat(dirfd)
+        if (directory.st_uid != os.geteuid()
+                or stat.S_IMODE(directory.st_mode) & 0o077):
+            raise ConfinementError(
+                "EOUTSIDE", "preimage directory must be owned by the caller "
+                "and private (no group/other permissions)", real)
+        try:
+            fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,
+                         dir_fd=dirfd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ConfinementError(
+                    "EOUTSIDE", "preimage sidecar may not be a symlink", real) from None
+            raise
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise ConfinementError(
+                    "EOUTSIDE", "preimage sidecar must be a regular file", real)
+            if ((before.st_dev, before.st_ino) != (expected_dev, expected_ino)
+                    or before.st_nlink != 1):
+                raise ConfinementError(
+                    "EIDENTITY", "preimage sidecar identity or link count changed",
+                    real)
+            digest = hashlib.sha256()
+            while chunk := os.read(fd, 1 << 20):
+                digest.update(chunk)
+            after = os.fstat(fd)
+            named = os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)
+
+            def identity(st: os.stat_result):
+                return (st.st_dev, st.st_ino, st.st_mode, st.st_nlink,
+                        st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+            if (digest.hexdigest() != expected_sha256
+                    or identity(before) != identity(after)
+                    or identity(after) != identity(named)):
+                raise ConfinementError(
+                    "EIDENTITY", "preimage sidecar contents or identity changed",
+                    real)
+            os.unlink(leaf, dir_fd=dirfd)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dirfd)
 
 
 # ---------------------------------------------------------------------------
@@ -1228,4 +1317,6 @@ for _family in PATH_FAMILIES.values():
         globals()[_entry] = _make_total(_entry, globals()[_entry])
 for _entry in READ_HELPERS:
     globals()[_entry] = _make_total(_entry, globals()[_entry])
+finalize_committed_sidecar = _make_total(
+    "finalize_committed_sidecar", finalize_committed_sidecar)
 del _family, _entry

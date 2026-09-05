@@ -177,6 +177,62 @@ preimage creation/copy, writes, inverse classification and rename/unlink/rmdir
 syscalls. The replacement tree stays unchanged across repeated write/abort
 cycles, while original preimages and garbage are consumed by real inverses.
 
+### Trusted committed-preimage cleanup (API 1)
+
+The Python-only host facade separately exports
+`COMMITTED_SIDECAR_API_VERSION = 1` and:
+
+```python
+finalize_committed_sidecar(
+    path: str, expected_sha256: str, *, expected_dev: int, expected_ino: int
+) -> None
+```
+
+This is **not** a Revl extern, agent/plugin tool, general deletion API, commit
+receipt, or proof that a witness has discharged. Before invoking it, the trusted
+host must capture authoritative ownership of the actual live witness's preimage
+(original-label path, SHA-256, device, inode), durably prepare its ledger, obtain
+and durably acknowledge a successful actual `Session.commit_confirm`, and retain
+exclusive actor/root lifecycle ownership. It must drain all cooperative
+filesystem actors and hold **exclusive sidecar-directory write ownership**
+through capture, commit, and finalization: no concurrent forward captures,
+inverses, or other sidecar mutations. No boolean argument can prove that premise.
+Unknown ownership or missing/lost commit acknowledgment never authorizes cleanup.
+
+Under that contract, the helper requires an active pinned root and accepts only
+the exact normalized original-label path
+`<root>/.revl-fs-preimage/pre-<32 lowercase hex digits>`. The directory must be
+caller-owned and private (no group/other permissions), as when the runtime
+creates it with mode `0700`; cleanup never repairs permissions. The leaf must
+be regular, no-follow, singly linked, match the captured device/inode, and have
+the supplied 64-lowercase-hex SHA-256 digest. Descriptor-relative traversal,
+reading, and unlink stay on the admitted physical root even if its label is
+renamed or replaced. No project paths, `.revl` metadata, garbage sidecars, nested
+paths, symlinks, or recursive/directory cleanup are accepted.
+
+Successful removal returns `None`. Refusals raise `FsOpError` (including
+`ConfinementError`): `EWORKSPACE` without binding, `EINVAL` for malformed digest
+or identity, `EOUTSIDE` for a forbidden target/type/directory, `EIDENTITY` for
+identity/link-count/content changes, and ordinary OS codes where applicable.
+**`ENOENT` is an error**, including a second call after successful removal.
+The helper cannot distinguish interrupted successful cleanup from evidence
+that went missing for another reason. Hosts must preserve that uncertainty,
+freeze/quarantine the lifecycle, and reconcile their durable ledger explicitly,
+not silently retry or clean unknown evidence after restart.
+
+The helper checks the opened file and final named entry for detectable changes
+before unlink; detected mismatch preserves evidence. **Portable POSIX unlink is
+not inode-conditional.** Arbitrary same-UID/native writers violating exclusive
+sidecar access can still replace the name between the final check and unlink.
+This is outside the supported finalizer concurrency contract, not a race this
+API claims to close. Exclusivity applies to reserved metadata cleanup only:
+root pinning and no-follow project-path confinement do not rely on it.
+
+`tests/test_fs_committed_sidecar.py` uses real files, identity/content corruption,
+syscall barriers for root replacement, and actual recorded write/commit/reopen/
+abort/reopen cycles. Sidecar-swap probes cover detectable stale evidence, not
+adversarial safety across the final check/unlink window.
+
 ## Observation: the read half, and the door it opens
 
 The four ops above mutate. A consumer also needs to *look*: read a workspace
