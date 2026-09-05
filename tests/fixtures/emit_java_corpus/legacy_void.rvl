@@ -1,0 +1,9 @@
+service Reset {
+  emission idempotent fn reset()
+}
+component Empty {}
+component ResetProvider provides reset: Reset {
+  provide reset {
+    fn reset() { return }
+  }
+}

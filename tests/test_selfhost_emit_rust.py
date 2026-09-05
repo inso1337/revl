@@ -6,8 +6,8 @@ backend, executed, and cross-checked BYTE-FOR-BYTE against the reference emitter
 This has the exact shape of tests/test_selfhost_emit_py.py: two independent
 implementations of one lowering — the reference Rust backend and its revl port —
 are forced to agree, and the agreement is the strongest an emitter can be held
-to: the emitted Rust source must be identical to the last byte. The reference is
-ground truth; any divergence is a defect in the slice.
+to on that corpus: the emitted Rust source must be identical to the last byte.
+A divergence needs triage; either implementation can be wrong (item 429).
 
 Every IR the frontend produces is ir_version 3, so the covered corpus is the
 corner of the reference's v3 path (``_emit_v3`` -> ``_emit_v3_functions`` ->
@@ -42,7 +42,11 @@ Covered subset (what emits byte-identical):
     Int/Int32, ``/`` as widened f64 true division, ``%``, comparisons,
     ``&&``/``||``, string ``+`` via ``format!``), un, the 2.0 ``callee``/``args``
     call with ``_by_value_arg`` cloning, the ``widen`` markers, index, list,
-    maplit, the sync arrow, and non-float ``${..}`` interpolation.
+    maplit, the sync arrow, and non-float ``${..}`` interpolation;
+  * the basic Str/List stdlib helpers and interprocedural read-only ``Str``
+    borrowing, with owned public/callback signatures and closure captures;
+    declared function types in parameter/return positions and nested-list
+    loop bindings are covered by compiler-and-runtime ownership regressions.
 
 Covered subset (slice 3, item 207) — the components/services + bridge surface:
   * ``_emit_service_traits`` — each ``service`` as a ``pub trait S: Send + Sync``
@@ -88,16 +92,16 @@ the remaining ``_emit_component_new`` surfaces — timers / routers (``routes``)
 (``Pool``/``Map``/``Job``) and the item-114 host-Map undo-reclone, body-level
 ``effect``/``timer``/``fail``/``if`` steps, and the ``host``/``format``
 component-dialect expression kinds; the host-object stubs (``Map``/``Pool``/
-``Job``) and every preamble helper (timer/stdlib/float/realm/spawn); and the
+``Job``) and the timer/float/realm/spawn preamble helpers; and the
 non-scalar bridge marshalling (Result/serde/``Vec<Value>``/opaque-``Value``
 params and returns); functional record-update ``{r | f = e}`` (the
 Rust reference itself *raises* on ``record_update`` — a structural exclusion, not
-merely un-ported); the stdlib surface (every ``builtin``/``len`` node and the
-``_stdlib_helper_traits`` it pulls in); the Value/serde erasure surface
+merely un-ported); the remaining stdlib families beyond the basic Str/List
+helpers; the Value/serde erasure surface
 (``_emit_bridge``, ``Pool``/``Map``/``Job`` host stubs); async coloring / spawn /
 instances / realms; in-file ``test``/lifecycle-test emission; the
 canonical Float->Str ``revl_ftoa`` (so float interpolation is excluded); the
-``impl Fn(..)`` lowering of a declared function type; the non-ASCII reaches of
+escaping function types in unsupported container/field positions; the non-ASCII reaches of
 ``_string`` beyond the ASCII core; and ``let_pattern`` (the list form names a
 temporary from the output-buffer length, which a second implementation cannot
 reproduce).
@@ -119,6 +123,14 @@ from revl import compile_files  # noqa: E402
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_rust_corpus"
 CORPUS = [
     "arith.rvl",     # bounded int/int32, / widening, %, comparisons, unary, ??
+    "float_pub.rvl", # finite Float literals/arithmetic, Int->Float widening, pub fn
+    "checked_div.rvl", # total checked division/modulo and Result matching
+    "str_borrows.rvl",  # fixpoint signatures, owned boundaries, &str call sites
+    "borrow_boundaries.rvl",  # callbacks, escaping captures, nested-list needles
+    "borrow_shadowing.rvl",  # later/sibling bindings cannot hide function values
+    "lengths.rvl",  # property length and scalar to_str, not just method length
+    "branch_edges.rvl",  # conditional targets, explicit widening, escape/void branches
+    "component_edges.rvl",  # pure blocks, idempotence, scalar config/Option bridge
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # let/var/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls + the by-value clone / Copy-scalar split
@@ -132,6 +144,7 @@ CORPUS = [
     # slice 2 — the v3 typed-core:
     "records.rvl",   # record `type` -> `pub struct`, record literal + field clone,
                      #   field access, a record-typed field, List[Point] lowering
+    "reserved_names.rvl",  # item 429(c): emitter-reserved names and underscore twins
     "variants.rvl",  # variant `type` -> serde-tagged `pub enum`, ADT construction
                      #   (nullary + payload), `match` (bind / nullary / `_` wildcard
                      #   vs `unreachable!()`), built-in Some/Ok coexisting
@@ -234,6 +247,246 @@ def test_selfhosted_emitter_is_byte_identical(emitted, reference, rel):
         f"self-hosted emitter diverged from the reference on {rel}\n"
         f"--- lengths ref={len(want)} got={len(got)} ---"
     )
+
+
+def test_str_borrow_fixpoint_and_owned_boundaries(emitted, reference):
+    ir = compile_files([str(CORPUS_DIR / "str_borrows.rvl")])
+    borrow = emitted["compute_str_param_borrows"](ir["functions"])
+    assert {name: frozenset(slots) for name, slots in borrow.items()} == (
+        reference._compute_str_param_borrows(ir["functions"]))
+    for name in ("forward", "middle", "count", "even", "odd", "append", "calls"):
+        assert borrow[name] == [0], name
+    for name in ("own_forward", "own_middle", "alias", "owned_list",
+                 "external", "public_count", "public_boundary"):
+        assert borrow[name] == [], name
+    assert borrow["list_find"] == [1]
+    src = emitted["emit_rust_src"](ir)
+    for fragment in (
+        "fn forward(s: &str)", "fn own_forward(s: String)",
+        "pub fn public_count(s: String)", "return forward(&s);",
+        "return middle(s);", "return own_middle(s.clone());",
+    ):
+        assert fragment in src
+    assert "forward(&local)" in src
+    assert 'forward("ß")' in src
+    assert 'forward(&show("é"))' in src
+    assert "xs.revl_index_of(&needle.to_string())" in src
+    assert 's.revl_index_of("é")' in src
+    assert 'xs.revl_index_of(&String::from("é"))' in src
+    assert "out.push_str(s);" in src
+
+
+@pytest.mark.parametrize("rel", ["calls.rvl", "strings.rvl", "perf_shapes.rvl"])
+def test_str_borrow_requires_function_stdlib_use(emitted, reference, rel):
+    ir = compile_files([str(CORPUS_DIR / rel)])
+    borrow = emitted["compute_str_param_borrows"](ir["functions"])
+    assert all(not slots for slots in borrow.values())
+    assert {name: frozenset(slots) for name, slots in borrow.items()} == (
+        reference._compute_str_param_borrows(ir["functions"]))
+
+
+def test_str_borrow_escape_propagates_through_recursive_cycle(emitted, reference):
+    ir = compile_files([str(CORPUS_DIR / "str_borrows.rvl")])
+    count = next(fn for fn in ir["functions"] if fn["name"] == "count")
+    count["body"] = [{"step": "return", "expr": {"kind": "var", "name": "s"}}]
+    got = emitted["compute_str_param_borrows"](ir["functions"])
+    assert {name: frozenset(slots) for name, slots in got.items()} == (
+        reference._compute_str_param_borrows(ir["functions"]))
+    for name in ("forward", "middle", "count", "even", "odd", "calls"):
+        assert got[name] == [], name
+
+
+def test_str_borrow_calls_from_component_methods(emitted, reference):
+    ir = compile_files([str(CORPUS_DIR / "service.rvl")])
+    helpers = compile_files([str(CORPUS_DIR / "str_borrows.rvl")])
+    ir["functions"] += [fn for fn in helpers["functions"] if fn["name"] in ("count", "show")]
+    method = ir["components"][0]["body"][0]["methods"][0]
+    method["body"][0]["expr"] = {
+        "kind": "fn", "name": "show", "args": [{"kind": "name", "id": "who"}]}
+    got = emitted["emit_rust_src"](ir)
+    assert got == reference.emit(ir)
+    assert "show(&who)" in got
+
+
+def test_str_borrow_callback_and_capture_boundaries(emitted, reference):
+    ir = compile_files([str(CORPUS_DIR / "borrow_boundaries.rvl")])
+    got = emitted["compute_str_param_borrows"](ir["functions"])
+    assert {name: frozenset(slots) for name, slots in got.items()} == (
+        reference._compute_str_param_borrows(ir["functions"]))
+    for name in ("count", "apply", "maker", "forwarded_maker"):
+        assert got[name] == [], name
+    assert got["read"] == got["constant_maker"] == [0]
+    assert got["nested_find"] == got["deep_find"] == [1]
+
+    ir = compile_files([str(CORPUS_DIR / "borrow_shadowing.rvl")])
+    got = emitted["compute_str_param_borrows"](ir["functions"])
+    assert {name: frozenset(slots) for name, slots in got.items()} == (
+        reference._compute_str_param_borrows(ir["functions"]))
+    assert got["later_count"] == got["sibling_count"] == []
+    assert got["local_count"] == [0]
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@pytest.mark.parametrize("backend", ["reference", "selfhost"])
+def test_str_borrow_boundaries_build_and_run(emitted, reference, tmp_path, backend):
+    ir = compile_files([str(CORPUS_DIR / rel) for rel in
+                        ("borrow_boundaries.rvl", "borrow_shadowing.rvl",
+                         "lengths.rvl", "branch_edges.rvl")])
+    src = (reference.emit(ir) if backend == "reference"
+           else emitted["emit_rust_src"](ir))
+    bench = _load_bench_rust()
+    reason = bench.rust_runtime_reason()
+    if reason is not None:
+        pytest.skip(f"cordis-rs runtime does not resolve here: {reason}")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        reference.cargo_toml("revl_borrow_boundaries"), encoding="utf-8")
+    (tmp_path / "src" / "main.rs").write_text(src + r"""
+fn main() {
+    assert_eq!(alias_count(), 3);
+    assert_eq!(callback_count(), 4);
+    let captured = maker(String::from("abc"));
+    assert_eq!(captured(), 3);
+    assert_eq!(captured(), 3);
+    assert_eq!(forwarded_maker(String::from("four"))(), 4);
+    assert_eq!(constant_maker("ignored")(), 7);
+    let xs = vec![vec![String::from("no"), String::from("yes")]];
+    assert_eq!(nested_find(xs.clone(), "yes"), 1);
+    assert_eq!(nested_find(xs.clone(), "missing"), -1);
+    assert_eq!(deep_find(vec![xs], "yes"), 1);
+    assert_eq!(nested_find(vec![], "yes"), -1);
+    assert_eq!(later_shadow(), 3);
+    assert_eq!(sibling_shadow(false), 4);
+    assert_eq!(sibling_shadow(true), 0);
+    assert_eq!(local_shadow(), 5);
+    assert_eq!(property_lengths("é", vec![1, 2]), 3);
+    assert_eq!(scalar_text(-12), "-12");
+    assert_eq!(edge_wide(3), 3.0);
+    assert_eq!(edge_wider(4), 4);
+    assert_eq!(edge_bytes(vec![1, 2]), vec![1, 2]);
+    edge_bare();
+    assert_eq!(edge_escaped(), r#""\\n\r\t"#);
+    assert_eq!(edge_field(true, EdgeCell { text: "a".into() },
+                         EdgeCell { text: "b".into() }), "a");
+    assert_eq!(edge_index(false), 2);
+    assert_eq!(edge_coalesce(true, None, Some(3)), 0);
+    assert_eq!(edge_coalesce(false, None, Some(3)), 3);
+    assert_eq!(edge_direct(4), 5);
+    assert!(edge_borrow(true, "pre".into(), "other".into()));
+    assert_eq!(edge_self_reference("x".into()), "prefixxx");
+}
+""", encoding="utf-8")
+    result = bench._cargo("run", tmp_path, "--quiet")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+_S = {"kind": "var", "name": "s"}
+_LIT = {"kind": "lit", "value": "text"}
+_LEN = {"kind": "len", "target": _S}
+_READ = {"kind": "call", "callee": {"kind": "var", "name": "read"}, "args": [_S]}
+
+
+@pytest.mark.parametrize("node,safe", [
+    (_S, False),
+    ({"kind": "name", "id": "s"}, False),
+    ({"kind": "req", "name": "s"}, False),
+    (_LEN, True),
+    ({"kind": "builtin", "method": "length", "target": _S}, True),
+    *[({"kind": "builtin", "method": method, "target": _LIT, "args": [_S]}, True)
+      for method in ("concat", "indexOf", "split", "join", "startsWith", "endsWith")],
+    *[({"kind": "builtin", "method": method, "target": _LIT, "args": [_S]}, False)
+      for method in ("push", "set", "lookup", "has", "remove", "length", "unknown")],
+    *[({"kind": "bin", "op": op, "left": _S, "right": _LIT}, safe)
+      for op, safe in (("==", True), ("!=", True), ("+", True),
+                       ("<", False), ("??", False))],
+    ({"kind": "interp", "parts": [["expr", _S]]}, True),
+    ({"kind": "list", "items": [_S]}, False),
+    ({"kind": "list", "items": [_LEN]}, True),
+    ({"kind": "record", "fields": [["label", _S]]}, False),
+    ({"kind": "adt", "case": "Box", "args": [_S]}, False),
+    ({"kind": "field", "target": _S, "name": "label"}, False),
+    ({"kind": "index", "target": _S, "index": 0}, False),
+    ({"kind": "un", "op": "!", "operand": _S}, False),
+    ({"kind": "arrow", "params": [], "body": _S}, False),
+    ({"kind": "arrow", "params": [], "body": _LEN}, False),
+    ({"kind": "arrow", "params": [], "body": _READ}, False),
+    ({"kind": "arrow", "params": [], "body": _LIT}, True),
+    ({"kind": "arrow", "params": [], "body": {
+        "kind": "arrow", "params": [], "body": _LEN}}, False),
+    ({"kind": "if", "cond": True, "then": _S, "else": _LIT}, False),
+    ({"kind": "if", "cond": True, "then": _LEN, "else": _LEN}, True),
+    ({"step": "let", "name": "alias", "value": _S}, False),
+    ({"step": "assign", "name": "alias", "value": _S}, False),
+    ({"step": "assert", "expr": _S}, False),
+    ({"step": "while", "cond": True, "body": [{"step": "return", "expr": _S}]}, False),
+    ({"step": "for", "iterable": [], "body": [{"step": "expr", "expr": _LEN}]}, True),
+    (_READ, True),
+    ({"kind": "fn", "name": "read", "args": [_S]}, True),
+    ({"kind": "call", "callee": {"kind": "name", "id": "read"}, "args": [_S]}, False),
+    ({"kind": "call", "callee": {"kind": "var", "name": "extern"}, "args": [_S]}, False),
+    ({"kind": "call", "target": {"kind": "req", "name": "svc"},
+      "method": "read", "args": [_S]}, False),
+    ({"kind": "future-shape", "nested": [[{"value": _S}]]}, False),
+    ({"kind": "future-shape", "nested": [[{"value": _LEN}]]}, True),
+    ({"kind": "builtin", "method": "length", "target": {"kind": "list", "items": [_S]}}, False),
+])
+def test_str_borrow_escape_slots_match_reference(emitted, reference, node, safe):
+    functions = [
+        {"name": "probe", "params": [{"name": "s", "type": "Str"}], "body": [node]},
+        {"name": "read", "params": [{"name": "s", "type": "Str"}], "body": [_LEN]},
+    ]
+    got = emitted["compute_str_param_borrows"](functions)
+    assert got["probe"] == ([0] if safe else [])
+    assert {name: frozenset(slots) for name, slots in got.items()} == (
+        reference._compute_str_param_borrows(functions))
+
+
+def test_str_borrow_owned_conversion_safety_net(emitted, reference):
+    ctx = {"vt": {"s": "Str"}, "fr": {}, "ca": {}, "cp": {}, "rbf": {},
+           "rn": {}, "fb": {"read": [0]}, "bp": {"s": "1"}}
+    refctx = reference._V3Ctx({}, [], [])
+    refctx.var_types = ctx["vt"]
+    refctx.borrowed_params = {"s"}
+    refctx.fn_borrow = {"read": frozenset({0})}
+    for node, rendered in ((_S, "s"), ({"kind": "name", "id": "s"}, "s"),
+                           ({"kind": "req", "name": "s"}, "s")):
+        assert emitted["by_value_arg"](node, rendered, ctx) == (
+            reference._by_value_arg(node, rendered, refctx)) == "s.to_string()"
+        assert emitted["borrow_str_arg"](node, rendered, ctx) == (
+            reference._borrow_str_arg(node, rendered, refctx)) == "s"
+    node = {"kind": "if", "cond": {"kind": "lit", "value": True},
+            "then": _S, "else": _LIT}
+    assert emitted["render_expr"](node, ctx) == reference._render_expr(node, refctx)
+    assert emitted["render_expr"]({"kind": "fn", "name": "read", "args": [_S]}, ctx) == "read(s)"
+
+
+def test_selfhosted_mangle_covers_both_reserved_sets(emitted, reference):
+    reserved = reference._RUST_RESERVED | reference._EMITTER_RESERVED
+    for word in sorted(reserved):
+        ladder = [word + "_" * depth for depth in range(4)]
+        images = [emitted["mangle"](name) for name in ladder]
+        assert images == [name + "_" for name in ladder], word
+        assert images == [reference._mangle(name) for name in ladder], word
+        assert len(set(images)) == len(ladder), word
+        assert not set(images) & reserved, word
+    for name in ("value", "value_", "context", "rooted", "_ctx", "_"):
+        assert emitted["mangle"](name) == reference._mangle(name) == name
+
+
+def test_selfhosted_emitter_reserved_names_at_declarations_and_uses(emitted):
+    src = emitted["emit_rust_src"](
+        compile_files([str(CORPUS_DIR / "reserved_names.rvl")]))
+    assert "fn plugin_(root_: i64, root__: i64) -> ReservedNames {" in src
+    assert "fn plugin__(ctx_: i64, ctx__: i64) -> i64 {" in src
+    assert "let root_ = plugin_(ctx_, ctx__);" in src
+    for name in ("ctx", "config", "root", "plugin"):
+        for suffix in ("_", "__"):
+            assert f"    {name}{suffix}: i64," in src
+            assert f"{name}{suffix}:" in src.split("return ReservedNames {", 1)[1]
+            assert f"root_.{name}{suffix}" in src
+    for declaration in ("let ctx_ = root_;", "let ctx__ = root__;",
+                        "let config__ = ctx__;"):
+        assert declaration in src
 
 
 def test_selfhosted_emitter_output_scaffold(emitted):

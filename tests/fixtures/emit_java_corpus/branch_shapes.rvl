@@ -1,0 +1,46 @@
+type Cell = { value: Int }
+type UnusedCell = { value: Int }
+type OptionalCell = { item: Opt[Int] }
+type Switch = Enabled(Int) | Disabled
+
+fn empty() {}
+fn bare() { return }
+fn empty_string() -> Str { return `` }
+fn __(____: Int) -> Int { return ____ }
+fn bytes(x: Bytes) -> Bytes { return x }
+fn widen(x: Int) -> Float { return x }
+fn double(x: Int) -> Int { return x }
+fn double_(x: Int) -> Int { return double(x) }
+fn double__(x: Int) -> Int { return double_(x) }
+fn ctx(x: Int) -> Int { return double__(x) }
+fn ctx_(x: Int) -> Int { return ctx(x) }
+fn root(x: Int) -> Int { return ctx_(x) }
+fn config_(x: Int) -> Int { return root(x) }
+fn locals(class: Int, class_: Int, class__: Int, ordinary_: Int) -> Int {
+  return class + class_ + class__ + ordinary_
+}
+fn field(c: Bool, a: Cell, b: Cell) -> Int {
+  return (if (c) { a } else { b }).value
+}
+fn index(c: Bool, a: List[Int], b: List[Int]) -> Int {
+  return (if (c) { a } else { b })[0]
+}
+fn coalesce(c: Bool, a: Opt[Int], b: Opt[Int]) -> Int {
+  return (if (c) { a } else { b }) ?? 0
+}
+fn interpolation(x: Int, a: List[Int]) -> Str {
+  return `sum ${x + 1} at ${a[0]} call ${double(x)}`
+}
+fn anchored(x: Int, y: Int) -> Str { return `${x}${y}` }
+fn scalar_interpolation(x: Int, c: Bool) -> Str { return `${1}${-x}${!c}` }
+fn optional_field(x: OptionalCell) -> Int { return x.item ?? 0 }
+fn optional_index(xs: List[Opt[Int]]) -> Int { return xs[0] ?? 0 }
+fn nested_index(xs: List[List[Int]]) -> Int { return xs[0][0] }
+fn mutable_variant() -> Switch {
+  var s = Enabled(1)
+  s = Disabled
+  return s
+}
+fn empty_list() {
+  let values = []
+}

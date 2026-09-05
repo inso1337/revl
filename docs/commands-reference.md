@@ -12,8 +12,8 @@ The verb set, in the order the parser declares it:
 ```text
 compile  explain  grammar  adapt  doctor  scaffold  composition  layer
 audit  policy  diff  changelog  version  contract  erase-report  plan
-apply  undo  canary  query  fmt  quarantine  test  mcp  import  export
-serve  run  recover  estop  branch  compare  why  metrics  trace
+apply  undo  canary  query  fmt  quarantine  analyze  test  mcp  import
+export  serve  run  recover  estop  branch  compare  why  metrics  trace
 profile  attest  dash  repair  bundle  emit  verify  truc
 ```
 <!-- docgen:cli-verbs end -->
@@ -173,6 +173,30 @@ the component does not declare or a value that does not fit its type, or a
 
 ```bash
 revl composition base.rvl --admit
+```
+
+### `revl analyze`
+
+Derive a Petri net from the composition IR — provisions as places, activations
+as transitions — and search it by bounded reachability for a dead state, a
+marking from which some component can never activate. This is the REACHABILITY
+question G2/G3/G7 do not answer ([analyze-liveness.md](analyze-liveness.md), item
+438). Report-only: it names the deadlocked cycle, it does not refuse admission.
+
+- `FILE ...` - composition source(s) to compile and analyze.
+- `--ir DOC.json` - analyze a precompiled composition IR document instead of
+  compiling sources (the analyzed unit is the IR, item 426).
+- `--json` - the verdict and findings as JSON.
+- `--max-states N` - bounded-BFS state cap (default 20000). A search that hits
+  it reports INCONCLUSIVE, never a false "no deadlock" (item 418).
+- `--max-tokens N` - per-place token cap (default 64); exceeding it flags
+  possible unboundedness.
+
+Exits nonzero only on a PROVEN deadlock (so CI can consume it); zero on a live or
+bounded-inconclusive result.
+
+```bash
+revl analyze base.rvl
 ```
 
 ### `revl adapt`

@@ -81,6 +81,8 @@ with no expected type (the ``_anon`` counter path); and in-file ``test``/
 lifecycle-test emission."""
 
 import importlib.util
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -94,6 +96,13 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_wasm_corpus"
 CORPUS = [
+    "scratch_names.rvl",
+    "widening.rvl",
+    "residuals.rvl",
+    "folding.rvl",
+    "calls.rvl",
+    "inference.rvl",
+    "string_ops.rvl",
     "arith.rvl",    # checked int/int32 +-*, % (rem_s), i64/i32 cmp, &&/||, !, unary -
     "constfold.rvl",  # item 432(g): constant `+ - *` folded to one const, the
                       # overflowing ones declined so their checked helper (and
@@ -210,6 +219,38 @@ def test_selfhosted_emitter_output_scaffold(emitted):
     assert src.endswith(")\n")
 
 
+@pytest.mark.parametrize("rel", [
+    "widening.rvl", "folding.rvl", "variants.rvl", "scratch_names.rvl", "residuals.rvl",
+])
+def test_supported_corpus_compiles_as_wasm(emitted, reference, tmp_path, rel):
+    compiler = shutil.which("wat2wasm")
+    if compiler is None:
+        pytest.skip("wat2wasm compiler not installed")
+    ir = compile_files([str(CORPUS_DIR / rel)])
+    for name, source in (("reference", reference.emit(ir)["functions"]),
+                         ("selfhost", emitted["emit_src"](ir))):
+        path = tmp_path / f"{name}.wat"
+        path.write_text(source)
+        result = subprocess.run(
+            [compiler, str(path), "-o", str(tmp_path / f"{name}.wasm")],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_nested_scratch_names_sort_lexically(emitted, reference, tmp_path):
+    source = tmp_path / "deep.rvl"
+    source.write_text(
+        "fn deep(__revl_tmp: Int) -> " + "List[" * 12 + "Int" + "]" * 12
+        + " { return " + "[" * 12 + "__revl_tmp" + "]" * 12 + " }\n",
+        encoding="utf-8",
+    )
+    ir = compile_files([str(source)])
+    got = emitted["emit_src"](ir)
+    assert got == reference.emit(ir)["functions"]
+    assert got.index("(local $__revl_tmp_1_n10 ") < got.index("(local $__revl_tmp_1_n2 ")
+
+
 def test_selfhosted_emitter_in_file_tests_pass(emitted):
     """The .rvl file's own `test` blocks run under the python backend."""
     tests = emitted.get("REVL_TESTS")
@@ -233,3 +274,50 @@ def test_fn_type_param_refused(emitted, reference):
         reference.emit(ir)
     got = emitted["emit_src"](ir)
     assert "<<DEFER-fn-type>>" in got
+
+
+@pytest.mark.parametrize("source, reference_token, port_token", [
+    pytest.param("fn f(x: Opt[Int]) -> Int { return x ?? 0 }",
+                 "i64.load", "<<DEFER-coalesce>>", id="tagged-coalesce"),
+    pytest.param("fn f(x: Result[Int, Str]) -> Int { return match x { Ok(v) => v, Err(e) => 0 } }",
+                 "i64.load", "<<UNSUPPORTED-EXPR:match>>", id="tagged-match"),
+    pytest.param('fn f(s: Str) -> Int { return s.indexOf("x") }',
+                 "(func $str_index_of", "<<UNSUPPORTED-BUILTIN:indexOf>>", id="demand-index-of"),
+    pytest.param('fn f(s: Str) -> List[Str] { return s.split(",") }',
+                 "(func $str_split", "<<UNSUPPORTED-BUILTIN:split>>", id="demand-split"),
+    pytest.param('fn f(xs: List[Str]) -> Str { return xs.join(",") }',
+                 "(func $str_join", "<<UNSUPPORTED-BUILTIN:join>>", id="demand-join"),
+    pytest.param("fn f(x: Int) -> Str { return `n=${x}` }",
+                 "(call $str_concat)", "<<UNSUPPORTED-EXPR:interp>>", id="interpolation"),
+    pytest.param("fn f(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_trunc(b) }",
+                 "cdiv_", "<<UNSUPPORTED-BUILTIN:checked_div_trunc>>", id="checked-division"),
+    pytest.param("fn f(n: Int) -> Int { let add = (x: Int) => x + 1; return add(n) }",
+                 "$f", "<<UNSUPPORTED-EXPR:arrow>>", id="inline-arrow"),
+    pytest.param('fn f() -> Str { return "\u00e9" }',
+                 "\\c3\\a9", "(data", id="utf8-string-pool"),
+    pytest.param("extern pure fn f() -> Int = @wasm { (i64.const 7) }\nfn g() -> Int { return f() }",
+                 "(func $f", ";; Generated", id="wasm-extern"),
+    pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
+                 "$revl_test_probe", "$f", id="in-file-tests"),
+])
+def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
+                                         reference_token, port_token):
+    """Keep deferred witnesses separate from the byte-agreement workload."""
+    path = tmp_path / "boundary.rvl"
+    path.write_text(source)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir)["functions"], emitted["emit_src"](ir)
+    assert reference_token in want
+    assert port_token in got
+    assert got != want, "boundary is stale: move its witness into CORPUS"
+
+
+@pytest.mark.parametrize("source, reason", [
+    ("fn f(x: Float) -> Float { return x }", "Float"),
+    ("fn f(x: Map[Str, Int]) -> Map[Str, Int] { return x }", "Map"),
+])
+def test_reference_abi_refusals(reference, tmp_path, source, reason):
+    path = tmp_path / "abi.rvl"
+    path.write_text(source)
+    with pytest.raises(reference.EmitError, match=reason):
+        reference.emit(compile_files([str(path)]))

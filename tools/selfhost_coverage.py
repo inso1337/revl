@@ -106,6 +106,16 @@ TIERS = {
 
 TRUE = "<true>"  # the value side of a boolean-flag construct
 
+# Only these IR fields are schema booleans. Other fields are frequently used
+# in truthiness guards as collections, names, or nested records; treating those
+# guards as boolean constructs creates false blind spots when the value is
+# populated. Keep this list explicit rather than inferring types from Python.
+BOOLEAN_FIELDS = frozenset({
+    "async", "commutative", "deferred", "has_config", "idempotent",
+    "intercepted", "lifecycle", "public", "secret", "secret_return",
+    "secret_witness", "subscribe", "undo_idempotent", "validated",
+})
+
 
 # --------------------------------------------------------------- reference
 
@@ -214,7 +224,7 @@ def reference_constructs(path: Path) -> dict[str, int]:
         for condition in conditions:
             for test in _test_operands(condition):
                 field = _field_of(test)
-                if field:
+                if field in BOOLEAN_FIELDS:
                     record(field, TRUE, getattr(test, "lineno", 0))
     return out
 
@@ -358,6 +368,8 @@ def _ledger() -> dict:
 def _reasoned(entry: dict) -> dict[str, str]:
     """`blind` is stored reason-first (one reason, many constructs) so the
     ledger reads as an argument rather than as a list of strings."""
+    if not isinstance(entry, dict):
+        return {}
     flat: dict[str, str] = {}
     for reason, constructs in entry.items():
         for construct in constructs:
@@ -365,15 +377,67 @@ def _reasoned(entry: dict) -> dict[str, str]:
     return flat
 
 
+_GENERIC_REASONS = (
+    "NOT TRIAGED",
+    "UNDECLARED GAP",
+    "NEVER ENTERED",
+    "PARTIALLY EXERCISED",
+)
+
+
+def _closure_problems(ledger: dict) -> list[str]:
+    """Reject a baseline that records shape without recording a decision."""
+    problems: list[str] = []
+    for tier in TIERS:
+        entry = ledger.get(tier)
+        if not isinstance(entry, dict):
+            problems.append(f"{tier}: missing construct ledger tier")
+            continue
+        seen: dict[str, str] = {}
+        for classification in ("blind", "unported"):
+            reasons = entry.get(classification)
+            if not isinstance(reasons, dict):
+                problems.append(f"{tier}: missing `{classification}` reason map")
+                continue
+            for reason, constructs in reasons.items():
+                if not isinstance(reason, str) or not reason.strip():
+                    problems.append(f"{tier}/{classification}: missing reason")
+                elif any(marker in reason.upper() for marker in _GENERIC_REASONS):
+                    problems.append(f"{tier}/{classification}: generic reason `{reason}`")
+                if not isinstance(constructs, list) or not constructs:
+                    problems.append(f"{tier}/{classification}: reason has no constructs")
+                    continue
+                for construct in constructs:
+                    previous = seen.get(construct)
+                    if previous is not None:
+                        problems.append(
+                            f"{tier}: `{construct}` is classified more than once "
+                            f"({previous}, {classification})")
+                    else:
+                        seen[construct] = classification
+    return problems
+
+
 def check(data: dict) -> list[str]:
     ledger = _ledger()
-    problems: list[str] = []
-    for tier, found in data.items():
+    problems = _closure_problems(ledger)
+    for tier in TIERS:
+        found = data.get(tier)
+        if not isinstance(found, dict):
+            problems.append(f"{tier}: survey did not produce a tier")
+            continue
         recorded = ledger.get(tier, {})
+        if not isinstance(recorded, dict):
+            continue
         waived = _reasoned(recorded.get("blind", {}))
         baseline = set(_reasoned(recorded.get("unported", {})))
 
-        blind = set(found["blind"])
+        blind_value = found.get("blind")
+        unported_value = found.get("unported")
+        if not isinstance(blind_value, list) or not isinstance(unported_value, list):
+            problems.append(f"{tier}: survey construct populations must be lists")
+            continue
+        blind = set(blind_value)
         for construct in sorted(blind - set(waived)):
             problems.append(
                 f"{tier}: `{construct}` is mirrored in selfhost/{TIERS[tier][1]}.rvl "
@@ -387,7 +451,7 @@ def check(data: dict) -> list[str]:
                 f"not blind any more (the corpus reaches it, or the branch is "
                 f"gone). Delete the entry: this ledger only shrinks.")
 
-        unported = set(found["unported"])
+        unported = set(unported_value)
         for construct in sorted(unported - baseline):
             problems.append(
                 f"{tier}: `{construct}` is a NEW reference-only construct that no "

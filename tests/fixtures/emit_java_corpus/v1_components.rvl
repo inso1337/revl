@@ -9,10 +9,12 @@
 // which the v3-typed self-host path does not yet reproduce — deferred.)
 service Greeter {
   fn greet(who: Str) -> Str
+  fn equal(a: Str, b: Str) -> Bool
 }
 
 component Hello provides greeting: Greeter {
   provide greeting {
     fn greet(who) = "hi"
+    fn equal(a, b) = a == b
   }
 }

@@ -1,0 +1,25 @@
+type EdgeCell = { text: Str }
+
+fn edge_wide(n: Int) -> Float { return n }
+fn edge_wider(n: Int32) -> Int { return n }
+fn edge_bytes(value: Bytes) -> Bytes { return value }
+fn edge_bare() { return }
+fn edge_empty() {}
+fn edge_escaped() -> Str { return "\"\\\n\r\t" }
+fn edge_field(flag: Bool, a: EdgeCell, b: EdgeCell) -> Str {
+  return (flag ? a : b).text
+}
+fn edge_index(flag: Bool) -> Int { return (flag ? [1] : [2])[0] }
+fn edge_coalesce(flag: Bool, a: Opt[Int], b: Opt[Int]) -> Int {
+  return (flag ? a : b) ?? 0
+}
+fn edge_direct(n: Int) -> Int { return ((x: Int) => x + 1)(n) }
+fn edge_borrow(flag: Bool, a: Str, b: Str) -> Bool {
+  return "prefix".startsWith(flag ? a : b)
+}
+fn edge_self_reference(s: Str) -> Str {
+  var text = s
+  text = text + text
+  text = "prefix" + text
+  return text
+}

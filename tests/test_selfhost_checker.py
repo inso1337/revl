@@ -192,6 +192,24 @@ def test_rejected_expressions_agree(infer_src, src):
     assert infer_src(src) == "refuse", f"selfhost accepted {src!r}"
 
 
+@pytest.mark.parametrize("binding", ["let", "var"])
+@pytest.mark.parametrize("annotation", ["", ": Int"])
+def test_local_binding_type_reaches_service_call(check_src, binding, annotation):
+    source = f'''service Db {{ fn query(sql: Str) -> Int }}
+service Api {{ fn run() -> Int }}
+component C requires db: Db provides api: Api {{
+  provide api {{
+    fn run() {{
+      {binding} value{annotation} = 1
+      return db.query(value)
+    }}
+  }}
+}}'''
+    expected = "`db.query` argument `sql` expects `Str`, got `Int`"
+    assert _ref_check(source) == expected
+    assert check_src(source) == expected
+
+
 # ---------------------------------------------------------------- fuzz
 
 ATOMS = ["1", "0", "7", "2.5", "x", "y", "f", "s", "flag", "q",

@@ -7,8 +7,8 @@
 // It is one half of a differential BYTE oracle: this file and
 // backends/rust/emit.py's `emit()` are two independent implementations of the
 // same lowering, forced to produce BYTE-IDENTICAL Rust for every input in the
-// covered subset (tests/test_selfhost_emit_rust.py). The reference is ground
-// truth; any divergence is a defect in this slice.
+// covered subset (tests/test_selfhost_emit_rust.py). A divergence needs triage:
+// either implementation can be wrong (roadmap item 429).
 //
 // ============================================================ WHAT IT COVERS
 // Every IR the frontend produces is ir_version 3, so the covered slice mirrors
@@ -31,7 +31,8 @@
 //     that seeds `var_types` and picks a record literal's nominal struct;
 //   * `_emit_v3_functions` — each module fn as a Rust `fn`, with `_rust_type`
 //     for scalar/`List`/`Opt`/`Map`/`Result`/user-type parameter and return
-//     types, `pub` visibility, and `todo!()` for an empty body;
+//     types, `pub` visibility, and `todo!()` for an empty body; the stdlib-gated
+//     string-borrow fixpoint, shared borrowed call slots and owned conversions;
 //   * `_v3_stmt` for the base statement surface — let/assign (with the
 //     `var_types` seeding that drives by-value clone decisions), return,
 //     if/while/for, the bare-expr `let _ = ..;`, and assert;
@@ -64,9 +65,9 @@
 //     on `record_update` (only python/typescript emit it today), so it is a
 //     structural exclusion, not merely un-ported;
 //   * `let_pattern` (record/list destructuring) — see the structural note below;
-//   * the STDLIB surface — every `builtin`/`len` node and the `_stdlib_helper_traits`
-//     / `revl_length` it pulls in (a fixture with any builtin trips `_uses_stdlib`
-//     and grows the whole helper-trait block);
+//   * the STDLIB surface beyond length, checked division, `to_str`, and the six
+//     read-only string-argument builtins (including List `indexOf` conversion).
+//     The shared `_stdlib_helper_traits` block is emitted for these builtins;
 //   * the Value/serde ERASURE surface — `_emit_bridge` (the interop RPC proxy),
 //     `Pool`/`Map`/`Job` host stubs (`_emit_host_stubs`), and the serde derives;
 //   * async coloring (async methods / `await` / `plugin_async`), spawn/instances
@@ -141,8 +142,9 @@ extern pure fn string_lit(v: Any) -> Str = @py {
 extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
 // A real newline — the line SEPARATOR (`"\n".join(out)` in the reference).
 extern pure fn newline() -> Str = @py { return chr(10) }
-// `_mangle` verbatim: rename a Rust reserved word so a valid revl identifier
-// that is a Rust keyword emits and RUNS. INJECTIVE: escape a name iff the name
+// `_mangle` verbatim: mirror BOTH `_RUST_RESERVED` and `_EMITTER_RESERVED`
+// so user identifiers cannot collide with keywords or generated scaffolding.
+// INJECTIVE: escape a name iff the name
 // or any name reachable from it by dropping trailing `_` is reserved, by
 // exactly one `_`, so the whole `kw`/`kw_`/`kw__` ladder shifts up a rung
 // (`match` -> `match_`, `match_` -> `match__`) instead of collapsing two
@@ -155,7 +157,7 @@ extern pure fn mangle(name: Str) -> Str = @py {
                 "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
                 "self", "Self", "static", "struct", "super", "trait", "true",
                 "type", "unsafe", "use", "where", "while", "async", "await",
-                "dyn")
+                "dyn", "ctx", "config", "root", "plugin")
     root = name
     while root:
         if root in reserved:
@@ -304,7 +306,9 @@ fn is_builtin_ctor(name: Str) -> Bool {
 // (item 218) sets it per render. Carrying it ON THE CTX — which already threads
 // through every `render_*` — means match/interp/list/record subexpressions pick
 // up the active rename for free, exactly as the reference's `rename` recursion.
-type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rn: Map[Str, Str] }
+// `fb` holds the module-wide borrowed parameter indices; `bp` holds the borrowed
+// parameter names in the current function (empty in component methods).
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str] }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds `_V3Ctx` per function-list, reusing
 // the same type tables); paired with the type-NAME set for `rust_type`.
@@ -318,15 +322,15 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
 }
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
-  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rn: ctx.rn }
+  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp }
 }
 // Swap in a fresh rename map (the component-capture scope for one render).
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
-  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rn: rn }
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp }
 }
 // Swap in a fresh var_types map (a provide-method seeds params/map-bindings).
 fn set_vts(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
-  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rn: ctx.rn }
+  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp }
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
@@ -418,6 +422,11 @@ fn split_generic(inner: Str) -> List[Str] {
   }
   parts = parts.push(strip_spaces(inner.slice(start, inner.length())))
   return parts
+}
+
+fn list_element_type(t: Str) -> Str {
+  if (t.startsWith("List[") && t.endsWith("]")) { return t.slice(5, t.length() - 1) }
+  return ""
 }
 
 // `_rust_type`: scalars, the `List`/`Opt`/`Map`/`Result` generics, a user
@@ -623,13 +632,12 @@ fn eq_operand_borrowable(node: Any, ctx: Ctx) -> Bool {
 
 // `_borrow_str_arg`: an argument bound for a `&str` slot. A `Str` LITERAL fills
 // the slot as the bare `&'static str` (item 437b); every other string
-// expression is borrowed with `&`, parenthesized when it is not atomic. The
-// reference also passes a borrowed `&str` PARAM straight through, which has no
-// mirror here: this port carries no item-282 borrow analysis, so it never has
-// one to pass.
-fn borrow_str_arg(arg_node: Any, rendered: Str) -> Str {
+// expression is borrowed with `&`, parenthesized when it is not atomic. Already
+// borrowed parameters pass straight through.
+fn borrow_str_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
   let lit = borrowed_str_lit(arg_node)
   if (lit != "") { return lit }
+  if (ctx.bp.has(ref_name(arg_node))) { return rendered }
   if (is_atomic(node_kind(arg_node))) { return `&${rendered}` }
   return `&(${rendered})`
 }
@@ -680,7 +688,7 @@ fn self_append_plus(target: Str, recv: Str, valnode: Any, ctx: Ctx) -> Str {
   // path, so this fires on exactly the `+`s that build a String.
   if (!v3_is_str(ln, ctx) && !v3_is_str(rn, ctx)) { return "" }
   if (mentions_name(rn, target)) { return "" }
-  return `${recv}.push_str(${borrow_str_arg(rn, render_expr(rn, ctx))});`
+  return `${recv}.push_str(${borrow_str_arg(rn, render_expr(rn, ctx), ctx)});`
 }
 
 // `_by_value_arg`: wrap a by-value free-function/constructor argument so the call
@@ -690,12 +698,190 @@ fn self_append_plus(target: Str, recv: Str, valnode: Any, ctx: Ctx) -> Str {
 fn by_value_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
   let name = ref_name(arg_node)
   if (name == "") { return rendered }
+  if (ctx.bp.has(name)) { return `${rendered}.to_string()` }
   let ty = map_get(ctx.vt, name)
   if (ty == "") { return rendered }
   if (is_fn_type(ty)) { return "&".concat(rendered) }
   let head = strip_spaces(ty.split("[")[0])
   if (head == "Int" || head == "Bool" || head == "Float") { return rendered }
   return rendered.concat(".clone()")
+}
+
+fn str_readonly_arg_builtin(method: Str) -> Bool {
+  return method == "concat" || method == "indexOf" || method == "split" || method == "join" || method == "startsWith" || method == "endsWith"
+}
+
+fn borrow_slot(borrow: Map[Str, List[Int]], name: Str, index: Int) -> Bool {
+  let slots = borrow.lookup(name) ?? []
+  return slots.indexOf(index) >= 0
+}
+
+// `_str_param_escapes`, expressed as a proof for one candidate. Only the
+// immediate expression slot can permit a borrow; unknown records/steps recurse
+// in an owned position, while lists preserve their enclosing slot.
+fn str_param_readonly(node: Any, name: Str, safe: Bool, borrow: Map[Str, List[Int]]) -> Bool {
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) {
+      if (!str_param_readonly(item, name, safe, borrow)) { return false }
+    }
+
+    return true
+  }
+  if (value_kind(node) != "record") { return true }
+  let k = node_kind(node)
+  if (k == "var" || k == "name" || k == "req") {
+    var ident = value_str(value_field(node, "id"))
+    if (ident == "") { ident = value_str(value_field(node, "name")) }
+    if (ident == name) { return safe }
+    return true
+  }
+  if (k == "builtin") {
+    if (!str_param_readonly(value_field(node, "target"), name, true, borrow)) { return false }
+    let arg_safe = str_readonly_arg_builtin(value_str(value_field(node, "method")))
+    for (a of value_list(value_field(node, "args"))) {
+      if (!str_param_readonly(a, name, arg_safe, borrow)) { return false }
+    }
+    return true
+  }
+  if (k == "len") { return str_param_readonly(value_field(node, "target"), name, true, borrow) }
+  if (k == "interp") {
+    for (part of value_list(value_field(node, "parts"))) {
+      if (!str_param_readonly(value_at(part, 1), name, true, borrow)) { return false }
+    }
+    return true
+  }
+  if (k == "bin") {
+    let op = node_op(node)
+    let ok = op == "==" || op == "!=" || op == "+"
+    return str_param_readonly(value_field(node, "left"), name, ok, borrow) && str_param_readonly(value_field(node, "right"), name, ok, borrow)
+  }
+  if (k == "arrow") { return !mentions_name(value_field(node, "body"), name) }
+  var callee_name = ""
+  if (k == "fn") { callee_name = value_str(value_field(node, "name")) }
+  if (k == "call") {
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) == "var") { callee_name = value_str(value_field(callee, "name")) }
+  }
+  if (callee_name != "" && borrow.has(callee_name)) {
+    let args = value_list(value_field(node, "args"))
+    var i = 0
+    while (i < args.length()) {
+      if (!str_param_readonly(args[i], name, borrow_slot(borrow, callee_name, i), borrow)) { return false }
+      i = i + 1
+    }
+    return true
+  }
+  for (key of value_keys(node)) {
+    if (!str_param_readonly(value_field(node, key), name, false, borrow)) { return false }
+  }
+  return true
+}
+
+fn collect_fn_value_refs(node: Any, functions: Map[Str, Str], bound: Map[Str, Str], used: Map[Str, Str]) -> Map[Str, Str] {
+  var out = used
+  if (value_kind(node) == "record") {
+    let direct = node_kind(node) == "call" && functions.has(ref_name(value_field(node, "callee")))
+    let ident = ref_name(node)
+    if (ident != "") {
+      if (functions.has(ident) && !bound.has(ident)) { out = out.set(ident, "1") }
+      return out
+    }
+    var body_bound = bound
+    if (value_str(value_field(node, "step")) == "for") {
+      body_bound = body_bound.set(value_str(value_field(node, "bind")), "1")
+    }
+    if (node_kind(node) == "arrow") {
+      for (name of value_list(value_field(node, "params"))) { body_bound = body_bound.set(value_str(name), "1") }
+    }
+    for (key of value_keys(node)) {
+      if (!direct || key != "callee") {
+        var scope = bound
+        if (key == "body") { scope = body_bound }
+        out = collect_fn_value_refs(value_field(node, key), functions, scope, out)
+      }
+    }
+  }
+  if (value_kind(node) == "list") {
+    var local_bound = bound
+    for (item of value_list(node)) {
+      out = collect_fn_value_refs(item, functions, local_bound, out)
+      let step = value_str(value_field(item, "step"))
+      if (step == "let" || step == "let_pattern") {
+        local_bound = local_bound.set(value_str(value_field(item, "name")), "1")
+        for (name of value_list(value_field(item, "names"))) { local_bound = local_bound.set(value_str(name), "1") }
+        local_bound = local_bound.set(value_str(value_field(item, "rest")), "1")
+      }
+    }
+  }
+  return out
+}
+
+// `_fn_value_refs`: direct calls may borrow, but function values keep their
+// declared owned callback ABI. Shadowing follows lexical scope and statement
+// order, so a later or sibling binding cannot hide an escaping function value.
+fn fn_value_refs(functions: List[Any]) -> Map[Str, Str] {
+  var names: Map[Str, Str] = Map.empty()
+  for (f of functions) { names = names.set(value_str(value_field(f, "name")), "1") }
+  var used: Map[Str, Str] = Map.empty()
+  for (f of functions) {
+    var bound: Map[Str, Str] = Map.empty()
+    for (p of value_list(value_field(f, "params"))) { bound = bound.set(value_str(value_field(p, "name")), "1") }
+    let body = value_field(f, "body")
+    used = collect_fn_value_refs(body, names, bound, used)
+  }
+  return used
+}
+
+// `_compute_str_param_borrows`: start optimistically, then remove escaping slots
+// to a fixpoint (including mutually recursive calls). Public and address-taken
+// signatures and modules without function-local stdlib use retain the owned ABI.
+fn compute_str_param_borrows(functions: List[Any]) -> Map[Str, List[Int]] {
+  var borrow: Map[Str, List[Int]] = Map.empty()
+  let enabled = contains_stdlib(functions)
+  var value_refs: Map[Str, Str] = Map.empty()
+  if (enabled) { value_refs = fn_value_refs(functions) }
+  for (f of functions) {
+    var slots: List[Int] = []
+    let params = value_list(value_field(f, "params"))
+    var i = 0
+    while (i < params.length()) {
+      if (enabled && !value_bool(value_field(f, "public")) && !value_refs.has(value_str(value_field(f, "name"))) && value_str(value_field(params[i], "type")) == "Str") {
+        slots = slots.push(i)
+      }
+      i = i + 1
+    }
+    borrow = borrow.set(value_str(value_field(f, "name")), slots)
+  }
+  var changed = true
+  while (changed) {
+    changed = false
+    for (f of functions) {
+      let fname = value_str(value_field(f, "name"))
+      let slots = borrow.lookup(fname) ?? []
+      let params = value_list(value_field(f, "params"))
+      var kept: List[Int] = []
+      for (i of slots) {
+        let pname = value_str(value_field(params[i], "name"))
+        if (str_param_readonly(value_field(f, "body"), pname, false, borrow)) { kept = kept.push(i) }
+      }
+      if (kept.length() != slots.length()) {
+        borrow = borrow.set(fname, kept)
+        changed = true
+      }
+    }
+  }
+  return borrow
+}
+
+fn call_arg(callee: Str, index: Int, node: Any, rendered: Str, ctx: Ctx) -> Str {
+  if (borrow_slot(ctx.fb, callee, index)) { return borrow_str_arg(node, rendered, ctx) }
+  return by_value_arg(node, rendered, ctx)
+}
+
+fn owned_borrowed_tail(node: Any, ctx: Ctx) -> Str {
+  let rendered = render_expr(node, ctx)
+  if (ctx.bp.has(ref_name(node))) { return `${rendered}.to_string()` }
+  return rendered
 }
 
 // -------------------------------------------------------------- expressions
@@ -856,7 +1042,7 @@ fn render_call(node: Any, ctx: Ctx) -> Str {
   var bv = []
   var i = 0
   while (i < arg_nodes.length()) {
-    bv = bv.push(by_value_arg(arg_nodes[i], arg_exprs[i], ctx))
+    bv = bv.push(call_arg(callee_name, i, arg_nodes[i], arg_exprs[i], ctx))
     i = i + 1
   }
   return `${callee}(${bv.join(", ")})`
@@ -871,14 +1057,33 @@ fn render_index(node: Any, ctx: Ctx) -> Str {
 
 fn render_list(node: Any, ctx: Ctx) -> Str {
   var parts = []
-  for (it of value_list(value_field(node, "items"))) { parts = parts.push(render_expr(it, ctx)) }
+  for (it of value_list(value_field(node, "items"))) { parts = parts.push(owned_borrowed_tail(it, ctx)) }
   return "vec![".concat(parts.join(", ")).concat("]")
 }
 
 fn render_arrow(node: Any, ctx: Ctx) -> Str {
   var ps = []
-  for (p of value_list(value_field(node, "params"))) { ps = ps.push(mangle(value_str(p))) }
-  return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), ctx)} }`
+  let declared = value_list(value_field(node, "param_types"))
+  var vt = ctx.vt
+  var rn = ctx.rn
+  var bp = ctx.bp
+  var i = 0
+  for (p of value_list(value_field(node, "params"))) {
+    let name = value_str(p)
+    var ptype = ""
+    if (i < declared.length()) { ptype = value_str(declared[i]) }
+    vt = vt.set(name, ptype)
+    rn = rn.remove(name)
+    bp = bp.remove(name)
+    var param = mangle(name)
+    if (ptype != "" && !is_fn_type(ptype)) {
+      param = `${param}: ${rust_type_t(ptype, ctx.tn)}`
+    }
+    ps = ps.push(param)
+    i = i + 1
+  }
+  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp }
+  return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), inner)} }`
 }
 
 // `field`: `target.field`, the target parenthesized only when non-atomic.
@@ -994,11 +1199,16 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
     return `${base}.${mangle(value_str(value_field(node, "field")))}.clone()`
   }
   if (kind == "fn") {
-    // component dialect: a free-function call `name(..)`, arguments by value.
-    let fname = mangle(value_str(value_field(node, "name")))
+    // Component dialect: the same borrowed slots as a v3 `call`.
+    let raw = value_str(value_field(node, "name"))
+    let fname = mangle(raw)
     let anodes = value_list(value_field(node, "args"))
     var parts = []
-    for (a of anodes) { parts = parts.push(by_value_arg(a, render_expr(a, ctx), ctx)) }
+    var i = 0
+    while (i < anodes.length()) {
+      parts = parts.push(call_arg(raw, i, anodes[i], render_expr(anodes[i], ctx), ctx))
+      i = i + 1
+    }
     return `${fname}(${parts.join(", ")})`
   }
   if (kind == "adt") {
@@ -1014,13 +1224,67 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   if (kind == "match") { return render_match(node, ctx) }
   if (kind == "index") { return render_index(node, ctx) }
   if (kind == "if") {
-    return `if ${render_expr(value_field(node, "cond"), ctx)} { ${render_expr(value_field(node, "then"), ctx)} } else { ${render_expr(value_field(node, "else"), ctx)} }`
+    return `if ${render_expr(value_field(node, "cond"), ctx)} { ${owned_borrowed_tail(value_field(node, "then"), ctx)} } else { ${owned_borrowed_tail(value_field(node, "else"), ctx)} }`
   }
   if (kind == "list") { return render_list(node, ctx) }
   if (kind == "maplit") { return "std::collections::HashMap::new()" }
   if (kind == "arrow") { return render_arrow(node, ctx) }
+  if (kind == "len") {
+    let target = render_expr(value_field(node, "target"), ctx)
+    return `${target}.revl_length()`
+  }
+  if (kind == "builtin") { return render_builtin(node, ctx) }
   if (kind == "interp") { return render_interp(node, ctx) }
   return `<<UNSUPPORTED-EXPR:${kind}>>`
+}
+
+fn checked_div_expr(method: Str, target: Str, arg: Str) -> Str {
+  var ok = "a / b"
+  if (method == "checked_div_floor") { ok = "{ let q = a / b; if a % b != 0 && ((a < 0) != (b < 0)) { q - 1 } else { q } }" }
+  if (method == "checked_div_euclid") { ok = "a.div_euclid(b)" }
+  if (method == "checked_mod") { ok = "a.rem_euclid(b).abs()" }
+  return `{ let a = (${target}); let b = (${arg}); if b == 0 { Err::<i64, String>("revl: division by zero".to_string()) } else { Ok::<i64, String>(${ok}) } }`
+}
+
+fn render_builtin(node: Any, ctx: Ctx) -> Str {
+  let method = value_str(value_field(node, "method"))
+  let target_node = value_field(node, "target")
+  var target = render_expr(target_node, ctx)
+  if (!is_atomic(node_kind(target_node))) { target = `(${target})` }
+  let args = value_list(value_field(node, "args"))
+  if (str_readonly_arg_builtin(method)) {
+    let recv_type = v3_infer_type(target_node, ctx)
+    var refs = []
+    for (a of args) {
+      var r = render_expr(a, ctx)
+      if (method == "indexOf" && recv_type.startsWith("List[") && ctx.bp.has(ref_name(a))) {
+        // The List overload needs &String rather than the string overload's &str.
+        r = `${r}.to_string()`
+      }
+      let lit = borrowed_str_lit(a)
+      if (lit != "" && (method != "indexOf" || recv_type == "Str")) { refs = refs.push(lit) }
+      else { refs = refs.push(`&${r}`) }
+    }
+    var helper = method
+    if (method == "indexOf") { helper = "index_of" }
+    if (method == "startsWith") { helper = "starts_with" }
+    if (method == "endsWith") { helper = "ends_with" }
+    return `${target}.revl_${helper}(${refs.join(", ")})`
+  }
+  var rendered = []
+  for (a of args) {
+    var r = render_expr(a, ctx)
+    if (method != "lookup" && method != "has" && method != "remove" && ctx.bp.has(ref_name(a))) {
+      r = `${r}.to_string()`
+    }
+    rendered = rendered.push(r)
+  }
+  if (method == "checked_div_trunc" || method == "checked_div_floor" || method == "checked_div_euclid" || method == "checked_mod") {
+    return checked_div_expr(method, target, rendered[0])
+  }
+  if (method == "to_str") { return `(${target}).to_string()` }
+  if (method == "length") { return `${target}.revl_length()` }
+  return `<<UNSUPPORTED-BUILTIN:${method}>>`
 }
 
 // The `widen` coercion markers (docs/arithmetic.md): render the conversion the
@@ -1101,8 +1365,13 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   }
   if (step == "for") {
     let bind = mangle(value_str(value_field(node, "bind")))
-    var out = [line(indent, `for ${bind} in ${render_expr(value_field(node, "iterable"), ctx)} {`)]
-    let bodyR = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1)
+    let iterable_node = value_field(node, "iterable")
+    let iterable_type = v3_infer_type(iterable_node, ctx)
+    let element_type = list_element_type(iterable_type)
+    var loop_ctx = ctx
+    if (element_type != "") { loop_ctx = set_vt(ctx, value_str(value_field(node, "bind")), element_type) }
+    var out = [line(indent, `for ${bind} in ${render_expr(iterable_node, ctx)} {`)]
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), loop_ctx, indent + 1)
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
     return { lines: out, ctx: bodyR.ctx }
@@ -1124,21 +1393,35 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
 // `ctx.var_types = {p.name: p.type ..}`).
 fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables) -> List[Str] {
   var out = []
+  let borrow = compute_str_param_borrows(functions)
   for (fnode of functions) {
-    let name = mangle(value_str(value_field(fnode, "name")))
+    let raw = value_str(value_field(fnode, "name"))
+    let name = mangle(raw)
     let params = value_list(value_field(fnode, "params"))
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, rn: Map.empty() }
+    let body = value_list(value_field(fnode, "body"))
+    var bp: Map[Str, Str] = Map.empty()
     var ps = []
+    var i = 0
     for (p of params) {
-      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_pos(value_field(p, "type"), tables.tn)}`)
+      let pname = value_str(value_field(p, "name"))
+      var ptype = rust_type_pos(value_field(p, "type"), tables.tn)
+      if (borrow_slot(borrow, raw, i)) {
+        ptype = "&str"
+        bp = bp.set(pname, "1")
+      }
+      ps = ps.push(`${mangle(pname)}: ${ptype}`)
+      i = i + 1
     }
-    let returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: bp }
+    var returns = "()"
+    if (!value_is_null(value_field(fnode, "returns"))) {
+      returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
+    }
     var vis = ""
     if (value_bool(value_field(fnode, "public"))) { vis = "pub " }
     out = out.push(`${vis}fn ${name}(${ps.join(", ")}) -> ${returns} {`)
-    let body = value_list(value_field(fnode, "body"))
     if (body.length() == 0) {
       out = out.push(line(1, "todo!()"))
     } else {
@@ -1244,7 +1527,10 @@ fn emit_v3_externs(externs: List[Any], tnames: Map[Str, Str]) -> List[Str] {
     for (p of value_list(value_field(ext, "params"))) {
       ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_pos(value_field(p, "type"), tnames)}`)
     }
-    let returns = rust_type_pos(value_field(ext, "returns"), tnames)
+    var returns = "()"
+    if (!value_is_null(value_field(ext, "returns"))) {
+      returns = rust_type_pos(value_field(ext, "returns"), tnames)
+    }
     let rs_body = value_field(value_field(ext, "bodies"), "rs")
     if (value_is_null(rs_body)) {
       // The reference RAISES here (`extern ... has no @rs body`). This slice has
@@ -1698,7 +1984,7 @@ fn fr_map(ir: Any) -> Map[Str, Str] {
 // applies to method names; the simple path names them raw (mirrors the two
 // reference sites exactly). `effectful` gives the effectful body renderer +
 // the `self.ctx` field capture.
-fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], effectful: Bool, use_mname: Bool) -> List[Str] {
+fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool) -> List[Str] {
   let body = value_list(value_field(comp, "body"))
   let svc_methods = value_field(value_field(services, srv), "methods")
   var out = []
@@ -1718,7 +2004,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     var ret = "()"
     let r = value_field(svc_method, "returns")
     if (!value_is_null(r)) { ret = rust_type_t(r, tables.tn) }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, rn: Map.empty() }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty() }
     if (effectful && method_has_effectful_steps(method)) {
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} {`)
       let bl = method_body_lines(comp, method, services, ctx, 2)
@@ -1778,7 +2064,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
     out = out.push(`impl ${srv} for ${struct} {`)
-    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, false, false))
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), false, false))
     out = out.push("}")
     out = out.push("")
   }
@@ -1836,7 +2122,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     out = out.push("    ctx: Arc<cordis::Context>,")
     out = out.push("}")
     out = out.push(`impl ${srv} for ${struct} {`)
-    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, true, true))
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), true, true))
     out = out.push("}")
     out = out.push("")
   }
@@ -2187,6 +2473,28 @@ fn module_header(version: Int) -> List[Str] {
   return o
 }
 
+fn stdlib_helpers() -> List[Str] {
+  return [
+    "trait RevlStrOps {", "    fn revl_length(&self) -> i64;", "    fn revl_slice(&self, a: i64, b: i64) -> String;", "    fn revl_index_of(&self, needle: &str) -> i64;", "    fn revl_concat(&self, other: &str) -> String;", "    fn revl_split(&self, sep: &str) -> Vec<String>;", "    fn revl_repeat(&self, n: i64) -> String;", "    fn revl_starts_with(&self, prefix: &str) -> bool;", "    fn revl_ends_with(&self, suffix: &str) -> bool;", "}",
+    "impl RevlStrOps for str {", "    fn revl_length(&self) -> i64 { self.chars().count() as i64 }", "    fn revl_slice(&self, a: i64, b: i64) -> String {", "        self.chars().skip(a.max(0) as usize).take((b - a).max(0) as usize).collect()", "    }", "    fn revl_index_of(&self, needle: &str) -> i64 {", "        match self.find(needle) {", "            Some(b) => self[..b].chars().count() as i64,", "            None => -1,", "        }", "    }", "    fn revl_concat(&self, other: &str) -> String { format!(\"{}{}\", self, other) }", "    fn revl_split(&self, sep: &str) -> Vec<String> {", "        if sep.is_empty() {", "            self.chars().map(|c| c.to_string()).collect()", "        } else {", "            self.split(sep).map(|s| s.to_string()).collect()", "        }", "    }", "    fn revl_repeat(&self, n: i64) -> String { self.repeat(n.max(0) as usize) }", "    fn revl_starts_with(&self, prefix: &str) -> bool { self.starts_with(prefix) }", "    fn revl_ends_with(&self, suffix: &str) -> bool { self.ends_with(suffix) }", "}",
+    "trait RevlStrListOps {", "    fn revl_join(&self, sep: &str) -> String;", "}", "impl RevlStrListOps for Vec<String> {", "    fn revl_join(&self, sep: &str) -> String { self.join(sep) }", "}",
+    "trait RevlListOps<T> {", "    fn revl_length(&self) -> i64;", "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T>;", "    fn revl_index_of(&self, needle: &T) -> i64;", "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T>;", "    fn revl_push(&self, item: T) -> Vec<T>;", "}",
+    "impl<T: Clone + PartialEq> RevlListOps<T> for Vec<T> {", "    fn revl_length(&self) -> i64 { self.len() as i64 }", "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {", "        // JS slice semantics: out-of-range bounds clamp, never panic.", "        let len = self.len();", "        let a2 = (a.max(0) as usize).min(len);", "        let b2 = (b.max(0) as usize).min(len).max(a2);", "        self[a2..b2].to_vec()", "    }",     "    fn revl_index_of(&self, needle: &T) -> i64 {", "        self.iter().position(|x| x == needle).map(|i| i as i64).unwrap_or(-1)", "    }", "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T> {", "        let mut _v = self.clone(); _v.extend(other.iter().cloned()); _v", "    }", "    fn revl_push(&self, item: T) -> Vec<T> {", "        let mut _v = self.clone(); _v.push(item); _v", "    }", "}",
+  ]
+}
+
+fn contains_stdlib(v: Any) -> Bool {
+  if (value_is_null(v)) { return false }
+  if (node_kind(v) == "builtin" || node_kind(v) == "len") { return true }
+  for (k of value_keys(v)) {
+    if (contains_stdlib(value_field(v, k))) { return true }
+  }
+  for (x of value_list(v)) {
+    if (contains_stdlib(x)) { return true }
+  }
+  return false
+}
+
 // The document assembly for a TYPES + FUNCTIONS v3 document (`_emit_v3`, subset):
 // the module header, then the user `type` items, then the free functions —
 // joined with newlines, right-stripped, and closed with a single trailing
@@ -2243,6 +2551,10 @@ pub fn emit_rust_src(ir: Any) -> Str {
   let services = value_field(ir, "services")
   out = out.concat(emit_service_traits(services, tables.tn))
   out = out.concat(emit_host_stubs(ir))
+  if (contains_stdlib(functions) || contains_stdlib(types) || contains_stdlib(externs)) {
+    out = out.concat(stdlib_helpers())
+    out = out.push("")
+  }
   for (comp of value_list(value_field(ir, "components"))) {
     out = out.concat(emit_component_auto(comp, services, ir))
   }
@@ -2316,7 +2628,7 @@ test "constructor lowers user variants and built-ins" {
   cp = cp.set("Node", "y")
   ca = ca.set("Leaf", "Tree")
   cp = cp.set("Leaf", "n")
-  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), rn: Map.empty() }
+  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty() }
   assert constructor(ctx, "Node", ["x"]) == "Tree::Node(x)"
   assert constructor(ctx, "Leaf", []) == "Tree::Leaf"
   assert constructor(ctx, "Some", ["v"]) == "Some(v)"

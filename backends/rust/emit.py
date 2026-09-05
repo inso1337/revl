@@ -490,42 +490,12 @@ def _free_fn_calls(body: object,
     return calls
 
 
-def _bound_names(fn: dict) -> "set[str]":
-    """Every name `fn` binds locally: its parameters, `let`/`var` bindings
-    (destructuring included), loop bindings and closure parameters. A bare
-    reference to one of these names is a local read, not a reference to a
-    same-named free function."""
-    bound = {p.get("name") for p in (fn.get("params") or [])}
-
-    def walk(node: object) -> None:
-        if isinstance(node, dict):
-            if node.get("step") == "let":
-                bound.add(node.get("name"))
-                for nm in node.get("names") or []:
-                    bound.add(nm)
-            elif node.get("step") == "for":
-                bound.add(node.get("bind"))
-            elif node.get("kind") == "arrow":
-                for nm in node.get("params") or []:
-                    bound.add(nm)
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value)
-
-    walk(fn.get("body") or [])
-    bound.discard(None)
-    return bound
-
-
 def _fn_value_refs(functions: list,
                    function_names: "frozenset[str] | set") -> "set[str]":
     """Function names referenced as a VALUE (not in callee position). Growing a
     synthetic parameter would change such a function's type, so those are
-    excluded from the view entirely. A name the enclosing function binds locally
-    (`let step = ..` next to a free `fn step`) is a local read and does not
-    count — otherwise one shadowing local would disable the pass module-wide."""
+    excluded from the view entirely. Local bindings shadow only subsequent reads
+    in their lexical scope, never preceding reads or reads in sibling branches."""
     used: set[str] = set()
 
     def walk(node: object, bound: "set[str]") -> None:
@@ -542,14 +512,26 @@ def _fn_value_refs(functions: list,
                 if ident in function_names and ident not in bound:
                     used.add(ident)
                 return
-            for value in node.values():
-                walk(value, bound)
+            body_bound = bound
+            if node.get("step") == "for":
+                body_bound = bound | {node.get("bind")}
+            elif node.get("kind") == "arrow":
+                body_bound = bound | set(node.get("params") or [])
+            for key, value in node.items():
+                walk(value, body_bound if key == "body" else bound)
         elif isinstance(node, list):
+            local_bound = set(bound)
             for value in node:
-                walk(value, bound)
+                walk(value, local_bound)
+                if (isinstance(value, dict)
+                        and value.get("step") in ("let", "let_pattern")):
+                    local_bound.add(value.get("name"))
+                    local_bound.update(value.get("names") or [])
+                    local_bound.add(value.get("rest"))
 
     for fn in functions:
-        walk(fn.get("body") or [], _bound_names(fn))
+        walk(fn.get("body") or [],
+             {p.get("name") for p in fn.get("params") or []})
     return used
 
 
@@ -753,6 +735,13 @@ def _str_param_escapes(body: object, params: "set[str]",
                 if ident in params and not safe:
                     escaped.add(ident)
                 return
+            if kind == "arrow":
+                # A returned closure must own captured strings even if it only
+                # reads them; a read-only receiver does not prove a lifetime.
+                escaped.update(
+                    name for name in params
+                    if _v3_mentions_name(node.get("body"), name))
+                return
             if kind == "builtin":
                 walk(node.get("target"), True)
                 arg_safe = node.get("method") in _STR_READONLY_ARG_BUILTINS
@@ -831,20 +820,27 @@ def _compute_str_param_borrows(functions: list) -> "dict[str, frozenset]":
     helpers, which a `pub` entry still lends its owned string to by borrow.
 
     The pass is gated on the module actually using the stdlib (a `builtin`/`len`
-    node in some function): borrowing only reshapes the string-scanning surface,
-    which is exactly the surface the self-hosted `emit_rust.rvl` port leaves OUT,
-    so a stdlib-free module (`fn cat(a, b) = a + b`) still emits byte-identically
-    to that port. A module with no builtin has nothing item 282 speeds up anyway.
+    node in some function): a stdlib-free module retains its existing signatures.
+    The self-hosted emitter mirrors this gate and the owned callback/capture
+    boundaries.
     """
     if not _functions_use_stdlib(functions):
         return {fn.get("name"): frozenset() for fn in functions}
     function_names = frozenset(
         fn.get("name") for fn in functions if fn.get("name")
     )
+    # A function name used as a value has an owned callback ABI.  Rust cannot
+    # coerce `fn(&str)` to the declared `fn(String)`/closure slot, so keep every
+    # string parameter owned for such functions rather than emitting an invalid
+    # indirect call.
+    value_refs = _fn_value_refs(functions, function_names)
     borrow: dict[str, frozenset] = {}
     for fn in functions:
         name = fn.get("name")
         if fn.get("public"):
+            borrow[name] = frozenset()
+            continue
+        if name in value_refs:
             borrow[name] = frozenset()
             continue
         borrow[name] = frozenset(
@@ -5018,8 +5014,27 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         return "std::collections::HashMap::new()"
 
     if kind == "arrow":
-        params = ", ".join(_ident(p, "arrow parameter") for p in node.get("params") or [])
-        return f"move |{params}| {{ {_render_expr(node['body'], ctx, rename)} }}"
+        names = node.get("params") or []
+        declared = node.get("param_types") or []
+        params = []
+        saved_types, saved_borrows = ctx.var_types, ctx.borrowed_params
+        ctx.var_types = dict(saved_types)
+        ctx.borrowed_params = saved_borrows - set(names)
+        scope = {k: v for k, v in rename.items() if k not in names}
+        try:
+            for i, name in enumerate(names):
+                ptype = declared[i] if i < len(declared) else None
+                ctx.var_types[name] = ptype
+                param = _ident(name, "arrow parameter")
+                # Method resolution (e.g. checked_add) precedes call-site
+                # inference. Preserve the frontend's concrete parameter types.
+                if ptype and not _is_fn_type(ptype):
+                    param += f": {_rust_type(ptype, ctx.types)}"
+                params.append(param)
+            body = _render_expr(node["body"], ctx, scope)
+        finally:
+            ctx.var_types, ctx.borrowed_params = saved_types, saved_borrows
+        return f"move |{', '.join(params)}| {{ {body} }}"
 
     if kind == "len":
         target = _render_expr(node.get("target"), ctx, rename)
@@ -5808,6 +5823,10 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         # the body is unchanged -- unlike a `&v` borrow, which would retype `x`.
         iterable = _by_value_tail(
             node["iterable"], _render_expr(node["iterable"], ctx), ctx)
+        iterable_type = _v3_infer_type(node["iterable"], ctx)
+        element_type = _list_element_type(iterable_type)
+        if element_type is not None:
+            ctx.var_types[node.get("bind")] = element_type
         out.append(f"{pad}for {bind} in {iterable} {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
@@ -6023,7 +6042,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
                 ctx.char_view_vars[pname] = (view_id, view_id)
                 rendered_params.append(f"{view_id}: &[char]")
         params = ", ".join(rendered_params)
-        returns = _rust_type(fn.get("returns"), types, position="return")
+        returns = _rust_type(fn.get("returns") or "Unit", types, position="return")
         visibility = "pub " if is_public else ""
         out.append(f"{visibility}fn {name}({params}) -> {returns} {{")
         out.extend(view_prologue)
@@ -6158,7 +6177,7 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
             f"{_rust_type(p.get('type'), types, position='param')}"
             for p in ext.get("params") or []
         )
-        returns = _rust_type(ext.get("returns"), types, position="return")
+        returns = _rust_type(ext.get("returns") or "Unit", types, position="return")
         bodies = ext.get("bodies") or {}
         if "rs" not in bodies:
             raise EmitError(
@@ -7714,7 +7733,3 @@ def _main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_main(sys.argv))
-
-
-
-

@@ -1,0 +1,45 @@
+// Borrow propagation and escape propagation both need multiple passes in this
+// declaration order. Public/extern boundaries and let aliases stay owned.
+fn forward(s: Str) -> Int { return middle(s) }
+fn middle(s: Str) -> Int { return count(s) }
+fn count(s: Str) -> Int { return s.length() }
+
+fn own_forward(s: Str) -> Str { return own_middle(s) }
+fn own_middle(s: Str) -> Str { return alias(s) }
+fn alias(s: Str) -> Str { let value = s; return value }
+fn owned_list(s: Str) -> List[Str] { return [s] }
+
+fn even(s: Str, n: Int) -> Int {
+  if (n == 0) { return count(s) }
+  return odd(s, n - 1)
+}
+fn odd(s: Str, n: Int) -> Int {
+  if (n == 0) { return count(s) }
+  return even(s, n - 1)
+}
+
+extern pure fn owned_count(s: Str) -> Int = @rs { s.chars().count() as i64 }
+fn external(s: Str) -> Int { return owned_count(s) }
+pub fn public_count(s: Str) -> Int { return forward(s) }
+fn public_boundary(s: Str) -> Int { return public_count(s) }
+
+fn string_find(s: Str, needle: Str) -> Int { return s.indexOf(needle) }
+fn list_find(xs: List[Str], needle: Str) -> Int { return xs.indexOf(needle) }
+fn read_ops(s: Str, needle: Str) -> Bool {
+  return s.startsWith(needle) && s.endsWith(needle) && s != needle
+}
+fn split_join(s: Str, sep: Str) -> Str { return s.split(sep).join(sep) }
+fn concat(s: Str, suffix: Str) -> Str { return s.concat(suffix) }
+fn show(s: Str) -> Str { return `[${s}]` }
+fn append(s: Str) -> Str {
+  var out = ""
+  out = out + s
+  return out
+}
+fn literal_find(s: Str, xs: List[Str]) -> Int {
+  return s.indexOf("é") + xs.indexOf("é")
+}
+fn calls(s: Str) -> Int {
+  let local = "é"
+  return forward(s) + forward(local) + forward("ß") + forward(show("é"))
+}

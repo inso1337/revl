@@ -139,7 +139,7 @@ use "../stdlib/str.rvl" { split_top, rstrip, trim, str_tab }
 // The list kit (item 194): `list_sort` is the codepoint-lexicographic `sorted(..)`
 // the reference uses to canonicalise a record's field set into a `record_by_fields`
 // key — no re-hand-roll (byte-fuzz-pinned against Python `sorted()`).
-use "../stdlib/list.rvl" { list_sort }
+use "../stdlib/list.rvl" { list_sort, list_contains }
 
 // ------------------------------------------------- host formatting (kept @py)
 // A single tab / newline byte — the one genuine U+0009 / U+000A. Go indents with
@@ -303,17 +303,24 @@ fn is_scalar(t: Str) -> Bool {
 //     field access `r.f` infers its type (the `var z int64 =` let pin).
 type Ctx = {
   vt: Map[Str, Str], fr: Map[Str, Str], er: Map[Str, Str],
+  signatures: List[Any],
   ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
-  rt: Str
+  variants: List[Str],
+  rt: Str, builders: Map[Str, Str], builder_seq: Int,
+  reserved: Map[Str, Str], strings_alias: Str
 }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds one `_V3GoCtx` for the function list,
 // reusing the same type tables).
-type TypeTables = { ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str] }
+type TypeTables = {
+  ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
+  variants: List[Str]
+}
 // A statement-emission result: the lines produced AND the threaded ctx, since
 // revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
 // is visible to every later statement (the reference mutates one `ctx`).
 type Sout = { lines: List[Str], ctx: Ctx }
+type Fout = { lines: List[Str], uses_strings: Bool }
 
 fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
@@ -321,8 +328,37 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
   return {
     vt: ctx.vt.set(k, v), fr: ctx.fr, er: ctx.er,
-    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, rt: ctx.rt
+    signatures: ctx.signatures,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants, rt: ctx.rt,
+    builders: ctx.builders, builder_seq: ctx.builder_seq,
+    reserved: ctx.reserved, strings_alias: ctx.strings_alias
   }
+}
+
+fn collect_reserved(node: Any, reserved: Map[Str, Str]) -> Map[Str, Str] {
+  var out = reserved
+  if (value_kind(node) == "record") {
+    let name = value_field(node, "name")
+    let bind = value_field(node, "bind")
+    if (value_kind(name) == "str" && value_str(name) != "") {
+      out = out.set(v3_ident(value_str(name)), "1")
+    }
+    if (value_kind(bind) == "str" && value_str(bind) != "") {
+      out = out.set(v3_ident(value_str(bind)), "1")
+    }
+  }
+  for (child of value_children(node)) { out = collect_reserved(child, out) }
+  return out
+}
+
+fn fresh_ident(base: Str, reserved: Map[Str, Str]) -> Str {
+  var candidate = base
+  var suffix = 0
+  while (map_get(reserved, candidate) != "") {
+    candidate = `${base}${suffix}`
+    suffix = suffix + 1
+  }
+  return candidate
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
@@ -341,6 +377,7 @@ fn build_type_tables(types: Any) -> TypeTables {
   var cp: Map[Str, Str] = Map.empty()
   var rbf: Map[Str, Str] = Map.empty()
   var rf: Map[Str, Str] = Map.empty()
+  var variants: List[Str] = []
   for (name of value_keys(types)) {
     let spec = value_field(types, name)
     let kind = value_str(value_field(spec, "kind"))
@@ -354,6 +391,7 @@ fn build_type_tables(types: Any) -> TypeTables {
       }
     }
     if (kind == "variant") {
+      variants = variants.push(name)
       for (case of value_list(value_field(spec, "cases"))) {
         let cn = value_str(value_field(case, "name"))
         let payload = value_field(case, "payload")
@@ -362,7 +400,7 @@ fn build_type_tables(types: Any) -> TypeTables {
       }
     }
   }
-  return { ca: ca, cp: cp, rbf: rbf, rf: rf }
+  return { ca: ca, cp: cp, rbf: rbf, rf: rf, variants: variants }
 }
 
 // `_V3GoCtx.record_type_for_fields`: a record literal's nominal struct type, from
@@ -512,6 +550,16 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
   }
   if (k == "var" || k == "name") { return map_get(ctx.vt, ref_name(node)) }
   if (k == "interp") { return "Str" }
+  if (k == "list") {
+    let pin = value_str(value_field(node, "expected"))
+    if (pin.startsWith("List[") && pin.endsWith("]")) { return pin }
+    let items = value_list(value_field(node, "items"))
+    if (items.length() > 0) {
+      let elem = infer_type(items[0], ctx)
+      if (elem != "") { return `List[${elem}]` }
+    }
+    return ""
+  }
   if (k == "index") {
     let tt = infer_type(value_field(node, "target"), ctx)
     if (tt.startsWith("List[") && tt.endsWith("]")) { return tt.slice(5, tt.length() - 1) }
@@ -529,8 +577,10 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
   }
   if (k == "bin") {
     let op = node_op(node)
-    if (is_eq_op(op) || op == "&&" || op == "||") { return "Bool" }
+    if (is_eq_op(op) || op == "<" || op == ">" || op == "<=" || op == ">=" || op == "&&" || op == "||") { return "Bool" }
     if (node_operands(node) == "Int32" && is_addsubmul(op)) { return "Int32" }
+    if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") { return "Int32" }
+    if (node_operands(node) == "Float" && is_addsubmul(op)) { return "Float" }
     if (op == "+") {
       let lt = infer_type(value_field(node, "left"), ctx)
       let rt = infer_type(value_field(node, "right"), ctx)
@@ -539,7 +589,10 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
       return rt
     }
     if (op == "/") { return "Float" }
-    if (op == "-" || op == "*" || op == "%") { return "Int" }
+    if (op == "-" || op == "*" || op == "%") {
+      if (node_operands(node) == "Float") { return "Float" }
+      return "Int"
+    }
     return ""
   }
   if (k == "un") {
@@ -577,7 +630,6 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
 // `_infer_arrow_param`: recover an untyped lambda parameter's type from its
 // first use as a binary operand in the body (pre-order DFS), or "".
 fn arrow_param_hint(node: Any, name: Str, ctx: Ctx) -> Str {
-  if (value_kind(node) != "record") { return "" }
   if (node_kind(node) == "bin") {
     let l = value_field(node, "left")
     let r = value_field(node, "right")
@@ -612,9 +664,15 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
   if (op == "??") { return "<<DEFER-coalesce>>" }
   let goop = go_bin_op(op)
   if (goop == "") { return `<<UNSUPPORTED-BIN:${op}>>` }
-  let left = render_expr(value_field(node, "left"), ctx, "")
-  let right = render_expr(value_field(node, "right"), ctx, "")
+  var left = render_expr(value_field(node, "left"), ctx, "")
+  var right = render_expr(value_field(node, "right"), ctx, "")
   let opnd = node_operands(node)
+  if (opnd == "Float") {
+    let lt = infer_type(value_field(node, "left"), ctx)
+    let rt = infer_type(value_field(node, "right"), ctx)
+    if (lt == "Int" || lt == "Int32") { left = `float64(${left})` }
+    if (rt == "Int" || rt == "Int32") { right = `float64(${right})` }
+  }
   if (is_eq_op(op)) {
     let lt = infer_type(value_field(node, "left"), ctx)
     let rt = infer_type(value_field(node, "right"), ctx)
@@ -668,10 +726,29 @@ fn render_un(node: Any, ctx: Ctx) -> Str {
 fn render_call(node: Any, ctx: Ctx) -> Str {
   let callee = value_field(node, "callee")
   if (value_is_null(callee)) { return "<<DEFER-component-call>>" }
-  var args = []
-  for (a of value_list(value_field(node, "args"))) { args = args.push(render_expr(a, ctx, "")) }
+  let cn = value_str(value_field(callee, "name"))
+  var param_types = []
   if (node_kind(callee) == "var") {
-    let cn = value_str(value_field(callee, "name"))
+    if (resolved(map_get(ctx.ca, cn))) { param_types = [map_get(ctx.cp, cn)] }
+    else {
+      for (sig of ctx.signatures) {
+        if (value_str(value_field(sig, "name")) == cn) {
+          for (p of value_list(value_field(sig, "params"))) {
+            param_types = param_types.push(value_str(value_field(p, "type")))
+          }
+        }
+      }
+    }
+  }
+  var args = []
+  var i = 0
+  for (a of value_list(value_field(node, "args"))) {
+    var expected = ""
+    if (i < param_types.length()) { expected = param_types[i] }
+    args = args.push(render_expr(a, ctx, expected))
+    i = i + 1
+  }
+  if (node_kind(callee) == "var") {
     // A constructor arriving as `call(callee=var Case, ..)`: a user variant is
     // constructed here; a built-in Opt/Result ctor is DEFERRED (its preambles).
     if (resolved(map_get(ctx.ca, cn))) { return render_construct(ctx, cn, args) }
@@ -690,15 +767,16 @@ fn render_index(node: Any, ctx: Ctx) -> Str {
 
 fn render_list(node: Any, ctx: Ctx, expected: Str) -> Str {
   var elem = ""
-  if (expected.startsWith("List[") && expected.endsWith("]")) {
-    elem = expected.slice(5, expected.length() - 1)
+  let pin = expected == "" ? value_str(value_field(node, "expected")) : expected
+  if (pin.startsWith("List[") && pin.endsWith("]")) {
+    elem = pin.slice(5, pin.length() - 1)
   }
   let items = value_list(value_field(node, "items"))
   if (elem == "" && items.length() > 0) { elem = infer_type(items[0], ctx) }
   var goelem = "any"
   if (elem != "") { goelem = go_type(elem) }
   var parts = []
-  for (it of items) { parts = parts.push(render_expr(it, ctx, "")) }
+  for (it of items) { parts = parts.push(render_expr(it, ctx, elem)) }
   return `[]${goelem}{${parts.join(", ")}}`
 }
 
@@ -729,7 +807,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     ps = ps.push(`${v3_ident(value_str(names[i]))} ${gt}`)
     i = i + 1
   }
-  let body = render_expr(value_field(node, "body"), ctx, "")
+  let body = render_expr(value_field(node, "body"), bodyctx, "")
   let bodyt = go_type(infer_type(value_field(node, "body"), bodyctx))
   var ret = ""
   if (bodyt != "") { ret = " ".concat(bodyt) }
@@ -831,18 +909,18 @@ fn render_field(node: Any, ctx: Ctx) -> Str {
 
 // `_go_v3_expr` record branch: a nominal `Struct{f: v, ..}` literal. Go copies by
 // value, so there is no clone (unlike the rust tier); the struct name is inferred
-// from the (sorted) field set. Field values render with no `expected` pin, as the
-// reference does.
+// from the (sorted) field set. Declared field types pin empty nested collections.
 fn render_record(node: Any, ctx: Ctx) -> Str {
   let fields = value_list(value_field(node, "fields"))
   var names = []
   for (f of fields) { names = names.push(value_str(value_at(f, 0))) }
   let tn = record_type_for_fields(ctx, names)
+  let raw_type = map_get(ctx.rbf, sorted_key(names))
   var body = []
   for (f of fields) {
     let k = value_str(value_at(f, 0))
     let vnode = value_at(f, 1)
-    body = body.push(`${v3_field_ident(k)}: ${render_expr(vnode, ctx, "")}`)
+    body = body.push(`${v3_field_ident(k)}: ${render_expr(vnode, ctx, map_get(ctx.rf, `${raw_type}.${k}`))}`)
   }
   return `${tn}{${body.join(", ")}}`
 }
@@ -873,8 +951,35 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
     }
   }
   if (exp_t == "") { exp_t = "any" }
+  // Concrete Go values cannot be type-switch operands; evaluate and discard
+  // the scrutinee before the wildcard body instead.
+  if (st != "" && st != "any" && !list_contains(ctx.variants, st)) {
+    for (arm of arms) {
+      if (value_str(value_field(arm, "pattern")) == "_") {
+        var direct = [`func() ${exp_t} {`]
+        let bind = value_str(value_field(arm, "bind"))
+        var armctx = ctx
+        if (bind != "" && bind != "_") {
+          armctx = set_vt(ctx, bind, st)
+          direct = direct.push(line(1, `${v3_ident(bind)} := ${scrutinee}`))
+          direct = direct.push(line(1, `_ = ${v3_ident(bind)}`))
+        } else {
+          direct = direct.push(line(1, `_ = ${scrutinee}`))
+        }
+        direct = direct.push(line(1, `return ${render_expr(value_field(arm, "body"), armctx, expected)}`))
+        direct = direct.push("}()")
+        return direct.join(newline())
+      }
+    }
+  }
   var lines = [`func() ${exp_t} {`]
-  lines = lines.push(line(1, `switch _m := ${scrutinee}.(type) {`))
+  var switch_operand = scrutinee
+  if (node_kind(scrut_node) != "var" && node_kind(scrut_node) != "name") {
+    let iface_t = st == "" ? "any" : go_type(st)
+    lines = lines.push(line(1, `var _s ${iface_t} = ${scrutinee}`))
+    switch_operand = "_s"
+  }
+  lines = lines.push(line(1, `switch _m := ${switch_operand}.(type) {`))
   var hasWild = false
   for (arm of arms) {
     let pattern = value_str(value_field(arm, "pattern"))
@@ -889,7 +994,7 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
       lines = lines.push(line(1, `case ${v3_ident(adt)}${pattern}:`))
       let bindn = value_field(arm, "bind")
       var armctx = ctx
-      if (!value_is_null(bindn) && value_str(bindn) != "") {
+      if (!value_is_null(bindn) && value_str(bindn) != "" && value_str(bindn) != "_") {
         let bind = value_str(bindn)
         armctx = set_vt(ctx, bind, map_get(ctx.cp, pattern))
         lines = lines.push(line(2, `${v3_ident(bind)} := _m.Value`))
@@ -919,9 +1024,11 @@ fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
   if (kind == "lit") { return go_v3_lit(node) }
   if (kind == "var" || kind == "name") { return v3_ident(ref_name(node)) }
   if (kind == "adt") {
+    let case = value_str(value_field(node, "case"))
+    let payload = map_get(ctx.cp, case)
     var aa = []
-    for (a of value_list(value_field(node, "args"))) { aa = aa.push(render_expr(a, ctx, "")) }
-    return render_construct(ctx, value_str(value_field(node, "case")), aa)
+    for (a of value_list(value_field(node, "args"))) { aa = aa.push(render_expr(a, ctx, payload)) }
+    return render_construct(ctx, case, aa)
   }
   if (kind == "bin") { return render_bin(node, ctx) }
   if (kind == "un") { return render_un(node, ctx) }
@@ -970,6 +1077,97 @@ fn emit_stmts(nodes: List[Any], ctx: Ctx, indent: Int) -> Sout {
 // `_go_v3_stmt`: one fn-body step -> its emitted (indented) lines and threaded
 // ctx. `t` is the assert receiver — the reference uses "t" in a fn body (there
 // is no such binding in scope, but the byte-check holds it to the reference).
+// Only the leftmost self-reference is permitted: all appended pieces, loop
+// conditions and nested statements must remain independent of the accumulator.
+fn concat_pieces(node: Any, name: Str) -> List[Any] {
+  if (node_kind(node) == "bin" && node_op(node) == "+" &&
+      node_operands(node) != "Int" && node_operands(node) != "Int32" &&
+      node_operands(node) != "Float") {
+    let left = value_field(node, "left")
+    let right = value_field(node, "right")
+    if (node_kind(left) == "var" && value_str(value_field(left, "name")) == name) { return [right] }
+    let pieces = concat_pieces(left, name)
+    if (pieces.length() > 0) { return pieces.push(right) }
+  }
+  if (node_kind(node) == "builtin" && value_str(value_field(node, "method")) == "concat") {
+    let args = value_list(value_field(node, "args"))
+    if (args.length() == 1) {
+      let target = value_field(node, "target")
+      if (node_kind(target) == "var" && value_str(value_field(target, "name")) == name) { return args }
+      let pieces = concat_pieces(target, name)
+      if (pieces.length() > 0) { return pieces.concat(args) }
+    }
+  }
+  return []
+}
+
+fn builder_candidates(node: Any, ctx: Ctx) -> List[Str] {
+  var names = []
+  let name = value_str(value_field(node, "name"))
+  if (value_str(value_field(node, "step")) == "assign" && map_get(ctx.vt, name) == "Str" &&
+      concat_pieces(value_field(node, "value"), name).length() > 0) { names = names.push(name) }
+  for (child of value_children(node)) { names = names.concat(builder_candidates(child, ctx)) }
+  return names
+}
+
+fn builder_safe(node: Any, name: Str) -> Bool {
+  let step = value_str(value_field(node, "step"))
+  if (step == "return") { return false }
+  if (node_kind(node) == "var" && value_str(value_field(node, "name")) == name) { return false }
+  if ((step == "let" || step == "assign") && value_str(value_field(node, "name")) == name) {
+    if (step == "let") { return false }
+    let pieces = concat_pieces(value_field(node, "value"), name)
+    if (pieces.length() == 0) { return false }
+    for (piece of pieces) { if (!builder_safe(piece, name)) { return false } }
+    return true
+  }
+  for (child of value_children(node)) { if (!builder_safe(child, name)) { return false } }
+  return true
+}
+
+fn with_builders(ctx: Ctx, builders: Map[Str, Str], seq: Int) -> Ctx {
+  return {
+    vt: ctx.vt, fr: ctx.fr, er: ctx.er, signatures: ctx.signatures,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants, rt: ctx.rt,
+    builders: builders, builder_seq: seq,
+    reserved: ctx.reserved, strings_alias: ctx.strings_alias
+  }
+}
+
+fn open_builders(node: Any, ctx: Ctx, indent: Int) -> Sout {
+  var c = ctx
+  var out = []
+  for (name of builder_candidates(value_field(node, "body"), ctx)) {
+    if (map_get(c.builders, name) == "" && builder_safe(node, name)) {
+      var seq = c.builder_seq
+      var builder = `_revlSB${seq}`
+      while (map_get(c.reserved, builder) != "") {
+        seq = seq + 1
+        builder = `_revlSB${seq}`
+      }
+      out = out.push(line(indent, `var ${builder} ${c.strings_alias}.Builder`))
+      out = out.push(line(indent, `${builder}.WriteString(${v3_ident(name)})`))
+      c = with_builders(c, c.builders.set(name, builder), seq + 1)
+    }
+  }
+  return { lines: out, ctx: c }
+}
+
+fn close_builders(before: Ctx, current: Ctx, indent: Int) -> Sout {
+  var out = []
+  var seq = before.builder_seq
+  while (seq < current.builder_seq) {
+    let builder = `_revlSB${seq}`
+    for (name of current.builders.keys()) {
+      if (map_get(current.builders, name) == builder) {
+        out = out.push(line(indent, `${v3_ident(name)} = ${builder}.String()`))
+      }
+    }
+    seq = seq + 1
+  }
+  return { lines: out, ctx: with_builders(current, before.builders, current.builder_seq) }
+}
+
 fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   let step = node_step(node)
   if (step == "let") {
@@ -983,7 +1181,11 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     var got = ""
     if (inferred != "") { got = go_type(inferred) }
     var out = []
-    if (got == "int64" || got == "float64") {
+    var variant = false
+    for (case of ctx.ca.keys()) {
+      if (resolved(inferred) && map_get(ctx.ca, case) == inferred) { variant = true }
+    }
+    if (got == "int64" || got == "float64" || variant) {
       out = out.push(line(indent, `var ${nm} ${got} = ${value}`))
     } else {
       out = out.push(line(indent, `${nm} := ${value}`))
@@ -994,6 +1196,15 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   if (step == "assign") {
     let raw = value_str(value_field(node, "name"))
     let nm = v3_ident(raw)
+    let builder = map_get(ctx.builders, raw)
+    if (builder != "") {
+      let pieces = concat_pieces(value_field(node, "value"), raw)
+      if (pieces.length() > 0) {
+        var out = []
+        for (piece of pieces) { out = out.push(line(indent, `${builder}.WriteString(${render_expr(piece, ctx, "")})`)) }
+        return { lines: out, ctx: ctx }
+      }
+    }
     let value = render_expr(value_field(node, "value"), ctx, map_get(ctx.vt, raw))
     return { lines: [line(indent, `${nm} = ${value}`)], ctx: ctx }
   }
@@ -1018,11 +1229,13 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     return { lines: out, ctx: c }
   }
   if (step == "while") {
-    var out = [line(indent, `for ${render_expr(value_field(node, "cond"), ctx, "")} {`)]
-    let bodyR = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1)
+    let opened = open_builders(node, ctx, indent)
+    var out = opened.lines.push(line(indent, `for ${render_expr(value_field(node, "cond"), opened.ctx, "")} {`))
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), opened.ctx, indent + 1)
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
-    return { lines: out, ctx: bodyR.ctx }
+    let closed = close_builders(ctx, bodyR.ctx, indent)
+    return { lines: out.concat(closed.lines), ctx: closed.ctx }
   }
   if (step == "for") {
     let raw = value_str(value_field(node, "bind"))
@@ -1033,12 +1246,14 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     if (itt.startsWith("List[") && itt.endsWith("]")) {
       fctx = set_vt(ctx, raw, itt.slice(5, itt.length() - 1))
     }
-    var out = [line(indent, `for _, ${bind} := range ${render_expr(itnode, ctx, "")} {`)]
+    let opened = open_builders(node, fctx, indent)
+    var out = opened.lines.push(line(indent, `for _, ${bind} := range ${render_expr(itnode, opened.ctx, "")} {`))
     out = out.push(line(indent + 1, `_ = ${bind}`))
-    let bodyR = emit_stmts(value_list(value_field(node, "body")), fctx, indent + 1)
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), opened.ctx, indent + 1)
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
-    return { lines: out, ctx: bodyR.ctx }
+    let closed = close_builders(fctx, bodyR.ctx, indent)
+    return { lines: out.concat(closed.lines), ctx: closed.ctx }
   }
   if (step == "expr") {
     return { lines: [line(indent, `_ = ${render_expr(value_field(node, "expr"), ctx, "")}`)], ctx: ctx }
@@ -1202,15 +1417,17 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
 }
 
 // `_emit_v3_go_functions`: each module fn as a Go `func`, blank-line separated.
-fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables) -> List[Str] {
+fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables, signatures: List[Any], strings_alias: Str) -> Fout {
   var out = []
+  var uses_strings = false
   for (fnode of functions) {
     let name = v3_ident(value_str(value_field(fnode, "name")))
     let params = value_list(value_field(fnode, "params"))
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
     let rt = value_str(value_field(fnode, "returns"))
-    let ctx = { vt: vt, fr: fr, er: er, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, rt: rt }
+    let reserved = collect_reserved(fnode, Map.empty())
+    let ctx = { vt: vt, fr: fr, er: er, signatures: signatures, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, rt: rt, builders: Map.empty(), builder_seq: 0, reserved: reserved, strings_alias: strings_alias }
     var ps = []
     for (p of params) {
       ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"))}`)
@@ -1220,11 +1437,12 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
     if (ret != "") { sigret = " ".concat(ret) }
     out = out.push(`func ${name}(${ps.join(", ")})${sigret} {`)
     let r = emit_stmts(value_list(value_field(fnode, "body")), ctx, 1)
+    if (r.ctx.builder_seq > 0) { uses_strings = true }
     out = out.concat(r.lines)
     out = out.push("}")
     out = out.push("")
   }
-  return out
+  return { lines: out, uses_strings: uses_strings }
 }
 
 // ------------------------------------------------------------- feature flags
@@ -1350,10 +1568,22 @@ pub fn emit_src(ir: Any) -> Str {
   // depends on the operand types `render_interp` infers as it renders (item
   // 434 (f)), so read them off the rendered lines rather than re-deriving the
   // inference in the structural `collect_flags` pass.
-  let fnlines = emit_functions(functions, fr, er, tables)
+  var module_reserved = collect_reserved(types, Map.empty())
+  for (type_name of value_keys(types)) {
+    module_reserved = module_reserved.set(v3_ident(type_name), "1")
+  }
+  module_reserved = collect_reserved(functions, module_reserved)
+  module_reserved = collect_reserved(externs, module_reserved)
+  var strings_alias = "strings"
+  if (map_get(module_reserved, strings_alias) != "") {
+    strings_alias = fresh_ident("_revlStrings", module_reserved)
+  }
+  let emitted_functions = emit_functions(functions, fr, er, tables, functions.concat(externs), strings_alias)
+  let fnlines = emitted_functions.lines
   let rendered = fnlines.join(newline())
   let uses_fmt = rendered.indexOf("fmt.Sprintf(") >= 0
   let uses_strconv = rendered.indexOf("strconv.Format") >= 0
+  let uses_strings = emitted_functions.uses_strings
 
   var out = []
   out = out.push("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -1361,11 +1591,15 @@ pub fn emit_src(ir: Any) -> Str {
   out = out.push("package emitted")
   out = out.push("")
 
-  if (uses_fmt || uses_strconv) {
+  if (uses_fmt || uses_strconv || uses_strings) {
     out = out.push("import (")
     // `sorted(set(imports))` on the reference: "fmt" sorts before "strconv".
     if (uses_fmt) { out = out.push(line(1, `"fmt"`)) }
     if (uses_strconv) { out = out.push(line(1, `"strconv"`)) }
+    if (uses_strings) {
+      if (strings_alias == "strings") { out = out.push(line(1, `"strings"`)) }
+      else { out = out.push(line(1, `${strings_alias} "strings"`)) }
+    }
     out = out.push(")")
     out = out.push("")
   }
@@ -1435,7 +1669,9 @@ fn typed_ctx() -> Ctx {
   rbf = rbf.set("x,y", "Point")
   return {
     vt: Map.empty(), fr: Map.empty(), er: Map.empty(),
-    ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), rt: ""
+    ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), variants: ["Tree"], rt: "", signatures: [],
+    builders: Map.empty(), builder_seq: 0,
+    reserved: Map.empty(), strings_alias: "strings"
   }
 }
 
