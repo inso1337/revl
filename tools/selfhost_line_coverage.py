@@ -449,9 +449,14 @@ def _load_ledger() -> dict:
 
 
 def _flatten(entry: dict) -> dict[str, int]:
+    if not isinstance(entry, dict) or not isinstance(entry.get("uncovered"), dict):
+        return {}
     flat: dict[str, int] = {}
     for functions in entry.get("uncovered", {}).values():
-        flat.update(functions)
+        if isinstance(functions, dict):
+            for name, count in functions.items():
+                if isinstance(name, str) and isinstance(count, int) and count >= 0:
+                    flat[name] = count
     return flat
 
 
@@ -530,8 +535,21 @@ def check(data: dict) -> list[str]:
                 problems.append(f"{half}/{tier}: survey data is missing")
                 continue
             recorded = _flatten(recorded_half.get(tier, {}))
+            raw_entry = recorded_half.get(tier)
+            if isinstance(raw_entry, dict):
+                raw_reasons = raw_entry.get("uncovered")
+                if isinstance(raw_reasons, dict):
+                    for functions in raw_reasons.values():
+                        if isinstance(functions, dict):
+                            for name, count in functions.items():
+                                if not isinstance(count, int) or count < 0:
+                                    problems.append(
+                                        f"{half}/{tier}: invalid uncovered count for `{name}`")
             for name in sorted(set(found) | set(recorded)):
                 now, before = found.get(name, 0), recorded.get(name)
+                if not isinstance(now, int) or now < 0:
+                    problems.append(f"{half}/{tier}: invalid measured count for `{name}`")
+                    continue
                 if before is None:
                     problems.append(
                         f"{half}/{tier}: `{name}` has {now} statement(s) that no "
