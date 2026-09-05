@@ -841,10 +841,18 @@ def _compute_str_param_borrows(functions: list) -> "dict[str, frozenset]":
     function_names = frozenset(
         fn.get("name") for fn in functions if fn.get("name")
     )
+    # A function name used as a value has an owned callback ABI.  Rust cannot
+    # coerce `fn(&str)` to the declared `fn(String)`/closure slot, so keep every
+    # string parameter owned for such functions rather than emitting an invalid
+    # indirect call.
+    value_refs = _fn_value_refs(functions, function_names)
     borrow: dict[str, frozenset] = {}
     for fn in functions:
         name = fn.get("name")
         if fn.get("public"):
+            borrow[name] = frozenset()
+            continue
+        if name in value_refs:
             borrow[name] = frozenset()
             continue
         borrow[name] = frozenset(
@@ -5808,6 +5816,10 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         # the body is unchanged -- unlike a `&v` borrow, which would retype `x`.
         iterable = _by_value_tail(
             node["iterable"], _render_expr(node["iterable"], ctx), ctx)
+        iterable_type = _v3_infer_type(node["iterable"], ctx)
+        element_type = _list_element_type(iterable_type)
+        if element_type is not None:
+            ctx.var_types[node.get("bind")] = element_type
         out.append(f"{pad}for {bind} in {iterable} {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
@@ -7714,7 +7726,3 @@ def _main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_main(sys.argv))
-
-
-
-
