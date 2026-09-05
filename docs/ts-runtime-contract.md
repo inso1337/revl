@@ -85,9 +85,17 @@ An emitted ts module runs as an **ES module on plain node**, from inside
 `backends/typescript/` (or an install tree with the same shape). It may assume:
 
 1. **ESM only.** No `require`, no `module`, no `exports`, no `__dirname`, no
-   `__filename`. Reach for `import.meta.url` / `import.meta.dirname`, or
-   `createRequire` from `node:module` when a CommonJS host module is genuinely
-   required (this is what `emit.py` already does for a `@ts ref`).
+   `__filename`. Reach for `import.meta.url` / `import.meta.dirname`. To load a
+   node builtin from inside a verbatim `@ts` extern body — which sits in a
+   function and cannot add a module-level `import` — call
+   `process.getBuiltinModule` synchronously with no import:
+   `const fs = process.getBuiltinModule("node:fs")`. That works on plain node
+   (>= 22.3) and under vitest alike. `createRequire` from `node:module` is the
+   emitter-level machinery for a `@ts ref`, not something a body can reach:
+   `_revl_createRequire` is emitted only when some extern carries `= @ts ref`
+   (the `any(ext.get("refs", {}).get("ts") ...)` guard in `emit.py`), so in a
+   plain `@ts` body it is not in scope. Reach for it there and you get a
+   `ReferenceError`.
 2. **Explicit specifiers.** Relative imports carry their real extension
    (`./runtime.ts`). No extensionless imports, no `.js`-naming-a-`.ts`, no
    directory imports. JSON imports carry `with { type: 'json' }`.
@@ -95,7 +103,10 @@ An emitted ts module runs as an **ES module on plain node**, from inside
    `namespace`, no parameter properties, no `import x = require(...)`, no
    decorators. Everything type-level is fine.
 4. **Node builtins and resolvable bare packages.** `node:*` is always there;
-   a bare package must be resolvable from the module's own location.
+   a bare package must be resolvable from the module's own location. From a
+   verbatim `@ts` body, load a builtin with
+   `process.getBuiltinModule("node:...")` (rule 1) rather than a module-level
+   `import` the body cannot write.
 5. **No test-runner ambient state.** No `import.meta.env`, no
    `import.meta.vitest`, no `__vitest_worker__`, and no assumption about
    `NODE_ENV`, `VITEST` or `process.argv`.
