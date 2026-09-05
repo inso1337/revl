@@ -657,8 +657,9 @@ mod revl_item277_tests {
     #[test]
     fn char_view_indexes_the_same_code_points_as_the_front_walk() {
         // scan sums the first three code points of "abcdef" (97+98+99 = 294)
-        // through the threaded view; via_slice reads "bcd"[0] = 98 through the
-        // retained `chars().nth` walk. 294 + 98 = 392.
+        // through the threaded view; via_slice slices "bcd" through the same
+        // view and head reads "bcd"[0] = 98 through its retained `chars().nth`
+        // walk. 294 + 98 = 392.
         assert_eq!(run("abcdef".to_string()), 392);
         // multi-byte input: the view indexes Unicode SCALARS, exactly like
         // `chars().nth`, so a non-ASCII buffer agrees too.
@@ -687,13 +688,22 @@ def test_positional_index_threads_a_char_view_and_retracts_where_it_cannot():
     assert ("let src_revl_cs: std::vec::Vec<char> = src.chars().collect();"
             in run_body), run_body
     assert "scan(&src, 0i64, &src_revl_cs)" in run_body, run_body
-    # `head` is reached with a COMPUTED argument (`s.slice(1, 4)`), which no
-    # caller holds a view for, so its slot is retracted rather than paying a
-    # collect per call: the signature is unchanged and the walk stays.
+    # item 333: `via_slice` positionally SLICES its `s` param (`s.slice(1, 4)`),
+    # which on a `str` is `chars().skip(1)` — an O(offset) front walk — so the
+    # slice seeds the same `&[char]` view. `via_slice` grows the companion param
+    # and `run` threads its own view down for free; the slice reads the view.
+    assert "fn via_slice(s: &str, s_revl_cs: &[char]) -> i64" in src, src
+    via_body = src.split("fn via_slice(")[1].split("\n}")[0]
+    assert "s_revl_cs.iter().skip" in via_body, via_body
+    assert "revl_slice" not in via_body, via_body
+    assert "via_slice(&src, &src_revl_cs)" in run_body, run_body
+    # `head` is still reached with a COMPUTED argument (the materialised slice),
+    # which no caller holds a view for, so ITS slot is retracted rather than
+    # paying a collect per call: `head`'s signature is unchanged and its own
+    # `chars().nth` index walk stays.
     assert "fn head(s: &str) -> i64" in src, src
     head_body = src.split("fn head(")[1].split("\n}")[0]
     assert "chars().nth((0i64) as usize)" in head_body, head_body
-    assert "head(&(s.revl_slice(1i64, 4i64)))" in src.split("fn via_slice(")[1], src
 
 
 @needs_cargo
