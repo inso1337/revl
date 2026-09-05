@@ -202,12 +202,15 @@ fn bounded(operation: Str, width: Str) -> Str {
 // the read dispatches on the receiver's shape — but one `isinstance` needs no
 // python frame around it. `rereadable` says the caller already bound the target
 // to a name (the `?.` chain has), so no temp is needed.
-fn field_read(target: Str, name: Str, rereadable: Bool) -> Str {
+fn field_read(target: Str, name: Str, rereadable: Bool, opt: Bool) -> Str {
   var tmp = "_fv"
   var got = `(_fv := ${target})`
   if (rereadable) {
     tmp = target
     got = target
+  }
+  if (opt) {
+    return `(${tmp}.get(${name}) if isinstance(${got}, dict) else getattr(${tmp}, ${name}, None))`
   }
   return `(${tmp}[${name}] if isinstance(${got}, dict) else getattr(${tmp}, ${name}))`
 }
@@ -726,7 +729,8 @@ fn expr_inner(node: Any) -> Str {
     return `${callee}(${args})`
   }
   if (kind == "field") {
-    return field_read(expr(value_field(node, "target")), py_repr(value_field(node, "name")), false)
+    if (value_bool(value_field(node, "sized_length"))) { return `len(${expr(value_field(node, "target"))})` }
+    return field_read(expr(value_field(node, "target")), py_repr(value_field(node, "name")), false, value_bool(value_field(node, "opt")))
   }
   if (kind == "index") {
     return `${expr(value_field(node, "target"))}[${expr(value_field(node, "index"))}]`
@@ -763,7 +767,7 @@ fn expr_inner(node: Any) -> Str {
   if (kind == "optfield") {
     let tgt = value_field(node, "target")
     let t = expr(tgt)
-    return `(None if ${opt_binder(node, tgt, t)} is None else ${field_read(opt_reader(node, tgt, t), py_repr(value_field(node, "name")), true)})`
+    return `(None if ${opt_binder(node, tgt, t)} is None else ${field_read(opt_reader(node, tgt, t), py_repr(value_field(node, "name")), true, false)})`
   }
   if (kind == "optcall") {
     // the method is a STDLIB builtin (the checker types an optcall through
@@ -1411,6 +1415,17 @@ fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
 // The component/method-body expression dispatcher (`_ComponentEmitter._expr`).
 fn cexpr(node: Any) -> Str {
   let kind = node_kind(node)
+  if (kind == "do") {
+    var binds = []
+    for (s of value_list(value_field(node, "stmts"))) {
+      if (value_str(value_field(s, "step")) != "let") { return "<<UNSUPPORTED-COMPONENT-BLOCK-STEP>>" }
+      let name = mangle(value_str(value_field(s, "name")))
+      binds = binds.push(`(${name} := ${cexpr(value_field(s, "value"))})`)
+    }
+    let tail = cexpr(value_field(node, "tail"))
+    if (binds.length() > 0) { return `(${binds.join(", ")}, ${tail})[-1]` }
+    return `(${tail})`
+  }
   if (kind == "lit") { return py_repr(value_field(node, "value")) }
   if (kind == "var") {
     let nm = value_str(value_field(node, "name"))
@@ -1438,7 +1453,8 @@ fn cexpr(node: Any) -> Str {
     return `${callee}(${ccommajoin(call_args)})`
   }
   if (kind == "field") {
-    return field_read(cexpr(value_field(node, "target")), py_repr(value_field(node, "name")), false)
+    if (value_bool(value_field(node, "sized_length"))) { return `len(${cexpr(value_field(node, "target"))})` }
+    return field_read(cexpr(value_field(node, "target")), py_repr(value_field(node, "name")), false, value_bool(value_field(node, "opt")))
   }
   if (kind == "index") {
     return `${cexpr(value_field(node, "target"))}[${cexpr(value_field(node, "index"))}]`
@@ -1469,7 +1485,7 @@ fn cexpr(node: Any) -> Str {
   if (kind == "optfield") {
     let tgt = value_field(node, "target")
     let t = cexpr(tgt)
-    return `(None if ${opt_binder(node, tgt, t)} is None else ${field_read(opt_reader(node, tgt, t), py_repr(value_field(node, "name")), true)})`
+    return `(None if ${opt_binder(node, tgt, t)} is None else ${field_read(opt_reader(node, tgt, t), py_repr(value_field(node, "name")), true, false)})`
   }
   if (kind == "optcall") {
     let tgt = value_field(node, "target")
