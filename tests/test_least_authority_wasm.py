@@ -109,10 +109,12 @@ def test_import_exceeding_declared_is_refused():
 def test_emitter_reasserts_the_import_subset_invariant():
     _, emit_module = _emit(compile_source(STORE))
     # a subset passes silently...
-    emit_module._assert_imports_within_requires("W", {"kv"}, {"kv", "db"})
+    emit_module._assert_imports_within_requires(
+        "W", {"kv"}, {"kv", "db"}, {"coeffect:kv"})
     # ...an import for an unrequired key is a named emitter refusal.
     with pytest.raises(emit_module.EmitError) as excinfo:
-        emit_module._assert_imports_within_requires("W", {"kv", "net"}, {"kv"})
+        emit_module._assert_imports_within_requires(
+            "W", {"kv", "net"}, {"kv"}, {"coeffect:kv", "coeffect:net"})
     assert "least-authority (289)" in str(excinfo.value)
     assert "'net'" in str(excinfo.value)
 
