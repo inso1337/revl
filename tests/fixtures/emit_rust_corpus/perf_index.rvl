@@ -1,0 +1,38 @@
+// item 437d: a List index read in a READ-ONLY position borrows instead of
+// cloning the element. Exercises the two slots the emitter optimizes — an
+// `==`/`!=` operand (either operand order) and a builtin receiver — plus the
+// negative cases that MUST keep the owning clone (a `return`/`let` value).
+fn readonly_index(xs: List[Str], probe: Str) -> Int {
+  var hits = 0
+  var i = 0
+  let n = xs.length()
+  while (i < n) {
+    if (xs[i] == probe) { hits = hits + 1 }
+    if (probe != xs[i]) { hits = hits + 1 }
+    if (xs[i].startsWith("k")) { hits = hits + 1 }
+    if (xs[i].endsWith("z")) { hits = hits + 1 }
+    i = i + 1
+  }
+  return hits
+}
+
+fn int_index_eq(ns: List[Int], t: Int) -> Int {
+  var c = 0
+  var i = 0
+  let n = ns.length()
+  while (i < n) {
+    if (ns[i] == t) { c = c + 1 }
+    i = i + 1
+  }
+  return c
+}
+
+// Owned positions: the element is stored/returned, so the clone stays.
+fn owned_return(xs: List[Str]) -> Str {
+  return xs[0]
+}
+
+fn owned_let(xs: List[Str]) -> Int {
+  let first = xs[0]
+  return first.length()
+}
