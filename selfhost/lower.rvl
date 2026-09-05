@@ -4397,6 +4397,27 @@ fn extends_spine(k: Str, w: Str) -> Bool {
   return false
 }
 
+// The `${` interpolation levels embedded in a template token's serialized
+// text. A NESTED template flattens to ONE token (the lexer does not descend
+// into `${...}`) whose `v:` body carries the inner template's source verbatim,
+// so each nesting level leaves a literal `${` in the text; SIBLING
+// interpolations (`` `${a}${b}` ``) are consumed into separate parts and leave
+// none. Counting `${` therefore measures the depth the reference parser
+// re-enters `pure_expr` for at each interpolation — the one nesting shape the
+// token walk below cannot otherwise see, because the whole nest is one flat
+// token, and so the one shape that reached `admit_src` with no objection while
+// the reference refused it at the bound (issue #310, template half).
+fn interp_levels(s: Str) -> Int {
+  var c = 0
+  var i = 0
+  let m = s.length()
+  while (i + 1 < m) {
+    if (s.codepoint_at(i) == 36 && s.codepoint_at(i + 1) == 123) { c += 1 }
+    i += 1
+  }
+  return c
+}
+
 fn nesting_depth(ts: List[Token]) -> Int {
   var depth = 0        // open brackets
   var run = 0          // consecutive prefix unaries at this point
@@ -4465,9 +4486,14 @@ fn nesting_depth(ts: List[Token]) -> Int {
       if (k == "??" || k == "?") { chain += 1 }
       if (extends_spine(k, w)) { spine += 1 }
     }
+    // a template's own `${` nesting sits on top of the bracket depth it is read
+    // at — one flat token, so it is measured from its text rather than walked
+    var tmpl = 0
+    if (k == "template") { tmpl = interp_levels(w) }
     var here = depth + run + chain
     if (spine > here) { here = spine }
     if (sibs > here) { here = sibs }
+    if (depth + tmpl > here) { here = depth + tmpl }
     if (here > worst) { worst = here }
     // stop at the answer. Past the bound the verdict cannot change, and
     // walking the rest of a hostile source is work an attacker chose the size
