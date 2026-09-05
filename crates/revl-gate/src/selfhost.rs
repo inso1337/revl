@@ -37,6 +37,7 @@ pub struct Stmt {
     e: Expr,
     bind: String,
     spawnTarget: String,
+    awaited: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -846,19 +847,23 @@ fn mk_provkey(k: String, r: String) -> ProvKey {
 }
 
 fn mkstmt(kind: String, e: Expr) -> Stmt {
-    return Stmt { kind: kind.clone(), e: e.clone(), bind: String::from(""), spawnTarget: String::from("") };
+    return Stmt { kind: kind.clone(), e: e.clone(), bind: String::from(""), spawnTarget: String::from(""), awaited: false };
 }
 
 fn mkstmtb(kind: String, e: Expr, bind: String) -> Stmt {
-    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from("") };
+    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from(""), awaited: false };
+}
+
+fn mkstmt_aw(kind: String, e: Expr, bind: String, aw: bool) -> Stmt {
+    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from(""), awaited: aw };
 }
 
 fn mkstmt_spawn(bn: String, target: String) -> Stmt {
-    return Stmt { kind: String::from("effect"), e: int_lit0(), bind: bn.clone(), spawnTarget: target.clone() };
+    return Stmt { kind: String::from("effect"), e: int_lit0(), bind: bn.clone(), spawnTarget: target.clone(), awaited: false };
 }
 
 fn mkstmt_spawn_unbound(target: String) -> Stmt {
-    return Stmt { kind: String::from("spawn_unbound"), e: int_lit0(), bind: String::from(""), spawnTarget: target.clone() };
+    return Stmt { kind: String::from("spawn_unbound"), e: int_lit0(), bind: String::from(""), spawnTarget: target.clone(), awaited: false };
 }
 
 fn int_lit0() -> Expr {
@@ -872,13 +877,6 @@ fn operand_at(ts: Vec<Token>, k: i64) -> AwOperand {
     }
     let r2 = expr_at(ts.clone(), k);
     return AwOperand { e: r2.e.clone(), i: r2.i, aw: false };
-}
-
-fn await_marker(aw: bool, ss: Vec<Stmt>) -> Vec<Stmt> {
-    if aw {
-        return ss.revl_push(mkstmt(String::from("await"), int_lit0()));
-    }
-    return ss;
 }
 
 fn mk_srun(ss: Vec<Stmt>, i: i64) -> SRun {
@@ -930,11 +928,11 @@ fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
         if is_bad(r.e.clone()) {
             return mk_srun(vec![mkstmt(String::from("skip"), r.e.clone())], hi);
         }
-        let out = await_marker(r.aw, vec![mkstmtb(kd.clone(), r.e.clone(), bn.clone())]);
+        let out = vec![mkstmt_aw(kd.clone(), r.e.clone(), bn.clone(), r.aw)];
         if atw(ts.clone(), r.i, "undo") {
             let u = operand_at(ts.clone(), (r.i).checked_add(1i64).expect("revl: Int overflow"));
             if (!is_bad(u.e.clone())) {
-                return mk_srun(await_marker(u.aw, out.revl_push(mkstmt(String::from("undo"), u.e.clone()))), u.i);
+                return mk_srun(out.revl_push(mkstmt_aw(String::from("undo"), u.e.clone(), String::from(""), u.aw)), u.i);
             }
             return mk_srun(out.clone(), hi);
         }
@@ -952,11 +950,26 @@ fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
         if is_bad(re1.e.clone()) {
             return mk_srun(vec![mkstmt(String::from("skip"), re1.e.clone())], hi);
         }
-        let oute = await_marker(re1.aw, vec![mkstmt(String::from("emit"), re1.e.clone())]);
+        let oute = vec![mkstmt_aw(String::from("emit"), re1.e.clone(), String::from(""), re1.aw)];
         if atw(ts.clone(), re1.i, "compensate") {
             let uc = operand_at(ts.clone(), (re1.i).checked_add(1i64).expect("revl: Int overflow"));
             if (!is_bad(uc.e.clone())) {
-                return mk_srun(await_marker(uc.aw, oute.revl_push(mkstmt(String::from("compensate"), uc.e.clone()))), uc.i);
+                return mk_srun(oute.revl_push(mkstmt_aw(String::from("compensate"), uc.e.clone(), String::from(""), uc.aw)), uc.i);
+            }
+            return mk_srun(oute.clone(), hi);
+        }
+        return mk_srun(oute.clone(), re1.i);
+    }
+    if (((t.kind == "kw") && (t.text == "await")) && atw(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"), "emit")) {
+        let re1 = expr_at(ts.clone(), (lo).checked_add(2i64).expect("revl: Int overflow"));
+        if is_bad(re1.e.clone()) {
+            return mk_srun(vec![mkstmt(String::from("skip"), re1.e.clone())], hi);
+        }
+        let oute = vec![mkstmt_aw(String::from("emit"), re1.e.clone(), String::from(""), true)];
+        if atw(ts.clone(), re1.i, "compensate") {
+            let uc = operand_at(ts.clone(), (re1.i).checked_add(1i64).expect("revl: Int overflow"));
+            if (!is_bad(uc.e.clone())) {
+                return mk_srun(oute.revl_push(mkstmt_aw(String::from("compensate"), uc.e.clone(), String::from(""), uc.aw)), uc.i);
             }
             return mk_srun(oute.clone(), hi);
         }
@@ -1004,11 +1017,11 @@ fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
         if is_bad(rf.e.clone()) {
             return mk_srun(vec![mkstmt(String::from("skip"), rf.e.clone())], hi);
         }
-        let out2 = await_marker(rf.aw, vec![mkstmt(t.text.clone(), rf.e.clone())]);
+        let out2 = vec![mkstmt_aw(t.text.clone(), rf.e.clone(), String::from(""), rf.aw)];
         if atw(ts.clone(), rf.i, "undo") {
             let u2 = operand_at(ts.clone(), (rf.i).checked_add(1i64).expect("revl: Int overflow"));
             if (!is_bad(u2.e.clone())) {
-                return mk_srun(await_marker(u2.aw, out2.revl_push(mkstmt(String::from("undo"), u2.e.clone()))), u2.i);
+                return mk_srun(out2.revl_push(mkstmt_aw(String::from("undo"), u2.e.clone(), String::from(""), u2.aw)), u2.i);
             }
             return mk_srun(out2.clone(), hi);
         }
@@ -1873,16 +1886,18 @@ fn svc_of(cx: Ctx, svcName: String) -> SvcD {
 };
 }
 
+fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
+    let marked = ((s.kind == "emit") || (s.kind == "compensate"));
+    let scx = ctx_acq(cx.clone(), stmt_acq_where(&s.kind));
+    let root_ = acq_root_of(s.clone());
+    return if root_.hit { walk_exprs(root_.args.clone(), 0i64, marked.clone(), scx.clone(), a.clone()) } else { walk_expr(s.e.clone(), marked.clone(), scx.clone(), a.clone()) };
+}
+
 fn walk_stmts(ss: Vec<Stmt>, i: i64, cx: Ctx, a: Ac) -> Ac {
     if ((i >= ss.revl_length()) || (a.msg != "")) {
         return a;
     }
-    let s = (ss)[(i) as usize].clone();
-    let marked = ((s.kind == "emit") || (s.kind == "compensate"));
-    let scx = ctx_acq(cx.clone(), stmt_acq_where(&s.kind));
-    let root_ = acq_root_of(s.clone());
-    let na = if root_.hit { walk_exprs(root_.args.clone(), 0i64, marked.clone(), scx.clone(), a.clone()) } else { walk_expr(s.e.clone(), marked.clone(), scx.clone(), a.clone()) };
-    return walk_stmts(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), na);
+    return walk_stmts(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), walk_one_stmt((ss)[(i) as usize].clone(), cx.clone(), a.clone()));
 }
 
 fn walk_exprs(xs: Vec<Expr>, i: i64, marked: bool, cx: Ctx, a: Ac) -> Ac {
@@ -2373,7 +2388,31 @@ fn passed_async_verdict(svcName: &str, mname: &str, a: Ac, cx: Ctx) -> String {
     return (((((((String::from("`").revl_concat(&svcName)).revl_concat(".")).revl_concat(&mname)).revl_concat("` uses async ")).revl_concat(&kind)).revl_concat(" `")).revl_concat(&culprit)).revl_concat("` as a function value, but an async callable has no arrow type");
 }
 
-fn setup_async_verdict(comp: CompD, sa: Ac, cx: Ctx) -> String {
+fn setup_async_reach(ss: Vec<Stmt>, i: i64, cx: Ctx, skipTear: bool, acc: Ac) -> Ac {
+    if (i >= ss.revl_length()) {
+        return acc;
+    }
+    let s = (ss)[(i) as usize].clone();
+    if (s.kind == "await") {
+        return setup_async_reach(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), false, acc.clone());
+    }
+    if ((s.kind == "effect") || (s.kind == "emit")) {
+        if (s.awaited || (s.spawnTarget != "")) {
+            return setup_async_reach(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), true, acc.clone());
+        }
+        return setup_async_reach(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), false, walk_one_stmt(s.clone(), cx.clone(), acc.clone()));
+    }
+    if ((s.kind == "undo") || (s.kind == "compensate")) {
+        if skipTear {
+            return setup_async_reach(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), true, acc.clone());
+        }
+        return setup_async_reach(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), false, walk_one_stmt(s.clone(), cx.clone(), acc.clone()));
+    }
+    return setup_async_reach(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), false, walk_one_stmt(s.clone(), cx.clone(), acc.clone()));
+}
+
+fn setup_async_verdict(comp: CompD, ss: Vec<Stmt>, scx: Ctx, cx: Ctx) -> String {
+    let sa = setup_async_reach(ss.clone(), 0i64, scx.clone(), false, empty_ac());
     let reached = union_into(sa.areach.clone(), sa.avals.clone());
     if (reached.revl_length() == 0i64) {
         return String::from("");
@@ -2381,6 +2420,57 @@ fn setup_async_verdict(comp: CompD, sa: Ac, cx: Ctx) -> String {
     let culprit = (sort_strs(reached.clone()))[(0i64) as usize].clone();
     let kind = if contains(cx.asyncExterns, &culprit) { String::from("extern") } else { String::from("function") };
     return (((((String::from("component `").revl_concat(&comp.name)).revl_concat("` reaches async ")).revl_concat(&kind)).revl_concat(" `")).revl_concat(&culprit)).revl_concat("` in a setup/activation body, which cannot suspend a fiber (A1)");
+}
+
+fn stmt_a1_check(comp: CompD, s: Stmt, cx: Ctx) -> String {
+    if (s.spawnTarget != "") {
+        return String::from("");
+    }
+    if (s.kind == "effect") {
+        let na = walk_one_stmt(s.clone(), cx.clone(), empty_ac());
+        let hasReach = (((na.aops.revl_length() > 0i64) || (na.areach.revl_length() > 0i64)) || (na.avals.revl_length() > 0i64));
+        if ((na.aops.revl_length() > 0i64) && (!s.awaited)) {
+            return ((((String::from("component `").revl_concat(&comp.name)).revl_concat("` acquires through async operation `")).revl_concat(&(na.aops)[(0i64) as usize].clone())).revl_concat("` but the effect is not awaited; the binding would hold ")).revl_concat("the in-flight value, not the result (A1)");
+        }
+        if (s.awaited && (!hasReach)) {
+            return String::from("`effect await` on an acquisition that reaches nothing async — an ").revl_concat("`await` in an activation body is a real divert window (A1)");
+        }
+        return String::from("");
+    }
+    if (s.kind == "emit") {
+        let na = walk_one_stmt(s.clone(), cx.clone(), empty_ac());
+        let hasReach = (((na.aops.revl_length() > 0i64) || (na.areach.revl_length() > 0i64)) || (na.avals.revl_length() > 0i64));
+        if ((na.aops.revl_length() > 0i64) && (!s.awaited)) {
+            return (((String::from("`emit` step reaches async operation `").revl_concat(&(na.aops)[(0i64) as usize].clone())).revl_concat("` but the emission is not awaited; py would build a coroutine ")).revl_concat("it never awaits (the emission never fires) and ts a floating ")).revl_concat("unordered Promise (A1)");
+        }
+        if (s.awaited && (!hasReach)) {
+            return String::from("`await emit` on an emission that reaches nothing async — an ").revl_concat("`await` in an activation body is a real divert window (A1)");
+        }
+        return String::from("");
+    }
+    if ((s.kind == "undo") || (s.kind == "compensate")) {
+        let na = walk_one_stmt(s.clone(), cx.clone(), empty_ac());
+        let culprit = if (na.aops.revl_length() > 0i64) { (na.aops)[(0i64) as usize].clone() } else { if (union_into(na.areach.clone(), na.avals.clone()).revl_length() > 0i64) { (sort_strs(union_into(na.areach.clone(), na.avals.clone())))[(0i64) as usize].clone() } else { String::from("") } };
+        if (culprit == "") {
+            return String::from("");
+        }
+        if (s.kind == "undo") {
+            return ((String::from("`undo` reaches async operation `").revl_concat(&culprit)).revl_concat("`, but teardown is synchronous on every tier — a suspension ")).revl_concat("there would be a teardown that can hang or silently no-op (A1)");
+        }
+        return ((String::from("`compensate` reaches async operation `").revl_concat(&culprit)).revl_concat("`, but teardown is synchronous on every tier — a suspension ")).revl_concat("there would be a compensation that can hang or silently no-op (A1)");
+    }
+    return String::from("");
+}
+
+fn stmt_a1_verdict(comp: CompD, ss: Vec<Stmt>, i: i64, scx: Ctx) -> String {
+    if (i >= ss.revl_length()) {
+        return String::from("");
+    }
+    let r = stmt_a1_check(comp.clone(), (ss)[(i) as usize].clone(), scx.clone());
+    if (r != "") {
+        return r;
+    }
+    return stmt_a1_verdict(comp.clone(), ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), scx.clone());
 }
 
 fn async_sig_msg(key: &str, mname: &str, svc: &str, mAsync: bool, dAsync: bool) -> String {
@@ -2391,7 +2481,7 @@ fn has_await(ss: Vec<Stmt>, i: i64) -> bool {
     if (i >= ss.revl_length()) {
         return false;
     }
-    if ((ss)[(i) as usize].clone().kind == "await") {
+    if (((ss)[(i) as usize].clone().kind == "await") || (ss)[(i) as usize].clone().awaited) {
         return true;
     }
     return has_await(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
@@ -2974,6 +3064,10 @@ fn check_component(comp: CompD, cx: Ctx) -> String {
     if (sa.msg != "") {
         return tagged(&sa.tag, &sa.msg);
     }
+    let sA1 = stmt_a1_verdict(comp.clone(), comp.setup.clone(), 0i64, scx.clone());
+    if (sA1 != "") {
+        return tagged("A1", &sA1);
+    }
     let pcx = cx.clone();
     let mut pi = 0i64;
     while (pi < comp.provs.revl_length()) {
@@ -3016,7 +3110,7 @@ fn check_component(comp: CompD, cx: Ctx) -> String {
         }
         pi = (pi).checked_add(1i64).expect("revl: Int overflow");
     }
-    let su = setup_async_verdict(comp.clone(), sa.clone(), cx.clone());
+    let su = setup_async_verdict(comp.clone(), comp.setup.clone(), scx.clone(), cx.clone());
     if (su != "") {
         return tagged("A1", &su);
     }

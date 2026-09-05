@@ -734,6 +734,23 @@ boot component B2 provides e2: Env2 {
      _fixture("a1_async_extern_sync_method"), "A1"),
     ("a1 async op via sync ternary",
      _fixture("a1_async_op_sync_ternary"), "A1"),
+    # item 131 §3, the per-STATEMENT effect-composition rules the gate's
+    # name-based async fence could not express (GHSA-p5c5-fhrh-6mqp): the exact
+    # `await`/async pairing on a forward `effect`/`emit`, and a suspending
+    # `undo`/`compensate` teardown. Each was a gate false-admit until the
+    # statement carried its own `await` marker.
+    ("a1 async effect not awaited",
+     _fixture("a1_async_effect_not_awaited"), "A1"),
+    ("a1 async emit step not awaited",
+     _fixture("a1_async_emit_step_not_awaited"), "A1"),
+    ("a1 await emit on sync emission",
+     _fixture("a1_await_emit_sync"), "A1"),
+    ("a1 effect await on sync acquisition",
+     _fixture("a1_effect_await_sync"), "A1"),
+    ("a1 async undo suspends",
+     _fixture("a1_async_undo_suspends"), "A1"),
+    ("a1 async compensate suspends",
+     _fixture("a1_async_compensate_suspends"), "A1"),
     ("g2 provision conflict", _fixture("g2_provision_conflict"), "G2"),
     ("g4 multi-hop named-call chain", """extern emission fn audit_write(msg: Str) -> Int = @py { return 1 }
 fn audit_log(msg: Str) -> Int { return audit_write(msg) }
