@@ -3969,6 +3969,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
             return "Int32"  # Int32 arithmetic stays Int32 (docs/arithmetic.md)
         if op in ("&", "|", "^", "<<", ">>"):
             return "Int32"  # bitwise ops are Int32-only (docs/arithmetic.md)
+        if node.get("operands") == "Float" and op in ("+", "-", "*"):
+            return "Float"
         if op == "+":
             lt = _go_v3_infer_type(node.get("left"), ctx)
             rt = _go_v3_infer_type(node.get("right"), ctx)
@@ -4190,7 +4192,8 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
 
     if kind == "adt":
         arg_nodes = node.get("args") or []
-        args = [_go_v3_expr(a, ctx) for a in arg_nodes]
+        payload = ctx.case_payload.get(node["case"])
+        args = [_go_v3_expr(a, ctx, payload) for a in arg_nodes]
         return _go_v3_construct(ctx, node["case"], args, expected,
                                 arg_nodes=arg_nodes)
 
@@ -4241,6 +4244,11 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         # recovery threaded into both sides.)
         left = _go_v3_expr(node["left"], ctx)
         right = _go_v3_expr(node["right"], ctx)
+        if node.get("operands") == "Float":
+            if _go_v3_infer_type(node["left"], ctx) in ("Int", "Int32"):
+                left = f"float64({left})"
+            if _go_v3_infer_type(node["right"], ctx) in ("Int", "Int32"):
+                right = f"float64({right})"
         if op in ("+", "-", "*") and node.get("operands") == "Int":
             # Int overflow traps (docs/arithmetic.md). Go has no checked
             # arithmetic in the standard library, so the helpers detect it.
@@ -4299,7 +4307,9 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         # erased default (item 280). Constructor args take their type from the
         # construction's own expected instead.
         param_types = None
-        if cname and not is_ctor:
+        if cname in ctx.case_adt:
+            param_types = [ctx.case_payload.get(cname)]
+        elif cname and not is_ctor:
             param_types = (ctx.function_params.get(cname)
                            or ctx.extern_params.get(cname))
         arg_renders = []
@@ -4347,8 +4357,11 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
     if kind == "record":
         fields = node.get("fields") or []
         type_name = ctx.record_type_for_fields([k for k, _ in fields])
+        raw_type = ctx.record_by_fields[tuple(sorted(k for k, _ in fields))]
+        field_types = ctx.types[raw_type].get("fields") or {}
         body = ", ".join(
-            f"{_v3_field_ident(k)}: {_go_v3_expr(v, ctx)}" for k, v in fields
+            f"{_v3_field_ident(k)}: {_go_v3_expr(v, ctx, field_types.get(k))}"
+            for k, v in fields
         )
         return f"{type_name}{{{body}}}"
 
@@ -4365,7 +4378,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         if elem is None and items:
             elem = _go_v3_infer_type(items[0], ctx)
         go_elem = _go_v3_type(elem, ctx.types) if elem else "any"
-        rendered = ", ".join(_go_v3_expr(it, ctx) for it in items)
+        rendered = ", ".join(_go_v3_expr(it, ctx, elem) for it in items)
         return f"[]{go_elem}{{{rendered}}}"
 
     if kind == "maplit":
