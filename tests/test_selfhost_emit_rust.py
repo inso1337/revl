@@ -122,6 +122,7 @@ CORPUS = [
     "float_pub.rvl", # finite Float literals/arithmetic, Int->Float widening, pub fn
     "checked_div.rvl", # total checked division/modulo and Result matching
     "lengths.rvl",  # Str/List length builtin and len expression helper paths
+    "str_borrows.rvl",  # fixpoint signatures, owned boundaries, &str call sites
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # let/var/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls + the by-value clone / Copy-scalar split
@@ -238,6 +239,141 @@ def test_selfhosted_emitter_is_byte_identical(emitted, reference, rel):
         f"self-hosted emitter diverged from the reference on {rel}\n"
         f"--- lengths ref={len(want)} got={len(got)} ---"
     )
+
+
+def test_str_borrow_fixpoint_and_owned_boundaries(emitted, reference):
+    ir = compile_files([str(CORPUS_DIR / "str_borrows.rvl")])
+    borrow = emitted["compute_str_param_borrows"](ir["functions"])
+    assert {name: frozenset(slots) for name, slots in borrow.items()} == (
+        reference._compute_str_param_borrows(ir["functions"]))
+    for name in ("forward", "middle", "count", "even", "odd", "append", "calls"):
+        assert borrow[name] == [0], name
+    for name in ("own_forward", "own_middle", "alias", "owned_list",
+                 "external", "public_count", "public_boundary"):
+        assert borrow[name] == [], name
+    assert borrow["list_find"] == [1]
+    src = emitted["emit_rust_src"](ir)
+    for fragment in (
+        "fn forward(s: &str)", "fn own_forward(s: String)",
+        "pub fn public_count(s: String)", "return forward(&s);",
+        "return middle(s);", "return own_middle(s.clone());",
+    ):
+        assert fragment in src
+    assert "forward(&local)" in src
+    assert 'forward("ß")' in src
+    assert 'forward(&show("é"))' in src
+    assert "xs.revl_index_of(&needle.to_string())" in src
+    assert 's.revl_index_of("é")' in src
+    assert 'xs.revl_index_of(&String::from("é"))' in src
+    assert "out.push_str(s);" in src
+
+
+@pytest.mark.parametrize("rel", ["calls.rvl", "strings.rvl", "perf_shapes.rvl"])
+def test_str_borrow_requires_function_stdlib_use(emitted, reference, rel):
+    ir = compile_files([str(CORPUS_DIR / rel)])
+    borrow = emitted["compute_str_param_borrows"](ir["functions"])
+    assert all(not slots for slots in borrow.values())
+    assert {name: frozenset(slots) for name, slots in borrow.items()} == (
+        reference._compute_str_param_borrows(ir["functions"]))
+
+
+def test_str_borrow_escape_propagates_through_recursive_cycle(emitted, reference):
+    ir = compile_files([str(CORPUS_DIR / "str_borrows.rvl")])
+    count = next(fn for fn in ir["functions"] if fn["name"] == "count")
+    count["body"] = [{"step": "return", "expr": {"kind": "var", "name": "s"}}]
+    got = emitted["compute_str_param_borrows"](ir["functions"])
+    assert {name: frozenset(slots) for name, slots in got.items()} == (
+        reference._compute_str_param_borrows(ir["functions"]))
+    for name in ("forward", "middle", "count", "even", "odd", "calls"):
+        assert got[name] == [], name
+
+
+def test_str_borrow_calls_from_component_methods(emitted, reference):
+    ir = compile_files([str(CORPUS_DIR / "service.rvl")])
+    helpers = compile_files([str(CORPUS_DIR / "str_borrows.rvl")])
+    ir["functions"] += [fn for fn in helpers["functions"] if fn["name"] in ("count", "show")]
+    method = ir["components"][0]["body"][0]["methods"][0]
+    method["body"][0]["expr"] = {
+        "kind": "fn", "name": "show", "args": [{"kind": "name", "id": "who"}]}
+    got = emitted["emit_rust_src"](ir)
+    assert got == reference.emit(ir)
+    assert "show(&who)" in got
+
+
+_S = {"kind": "var", "name": "s"}
+_LIT = {"kind": "lit", "value": "text"}
+_LEN = {"kind": "len", "target": _S}
+_READ = {"kind": "call", "callee": {"kind": "var", "name": "read"}, "args": [_S]}
+
+
+@pytest.mark.parametrize("node,safe", [
+    (_S, False),
+    ({"kind": "name", "id": "s"}, False),
+    ({"kind": "req", "name": "s"}, False),
+    (_LEN, True),
+    ({"kind": "builtin", "method": "length", "target": _S}, True),
+    *[({"kind": "builtin", "method": method, "target": _LIT, "args": [_S]}, True)
+      for method in ("concat", "indexOf", "split", "join", "startsWith", "endsWith")],
+    *[({"kind": "builtin", "method": method, "target": _LIT, "args": [_S]}, False)
+      for method in ("push", "set", "lookup", "has", "remove", "length", "unknown")],
+    *[({"kind": "bin", "op": op, "left": _S, "right": _LIT}, safe)
+      for op, safe in (("==", True), ("!=", True), ("+", True),
+                       ("<", False), ("??", False))],
+    ({"kind": "interp", "parts": [["expr", _S]]}, True),
+    ({"kind": "list", "items": [_S]}, False),
+    ({"kind": "list", "items": [_LEN]}, True),
+    ({"kind": "record", "fields": [["label", _S]]}, False),
+    ({"kind": "adt", "case": "Box", "args": [_S]}, False),
+    ({"kind": "field", "target": _S, "name": "label"}, False),
+    ({"kind": "index", "target": _S, "index": 0}, False),
+    ({"kind": "un", "op": "!", "operand": _S}, False),
+    ({"kind": "arrow", "params": [], "body": _S}, False),
+    ({"kind": "arrow", "params": [], "body": _LEN}, True),
+    ({"kind": "if", "cond": True, "then": _S, "else": _LIT}, False),
+    ({"kind": "if", "cond": True, "then": _LEN, "else": _LEN}, True),
+    ({"step": "let", "name": "alias", "value": _S}, False),
+    ({"step": "assign", "name": "alias", "value": _S}, False),
+    ({"step": "assert", "expr": _S}, False),
+    ({"step": "while", "cond": True, "body": [{"step": "return", "expr": _S}]}, False),
+    ({"step": "for", "iterable": [], "body": [{"step": "expr", "expr": _LEN}]}, True),
+    (_READ, True),
+    ({"kind": "fn", "name": "read", "args": [_S]}, True),
+    ({"kind": "call", "callee": {"kind": "name", "id": "read"}, "args": [_S]}, False),
+    ({"kind": "call", "callee": {"kind": "var", "name": "extern"}, "args": [_S]}, False),
+    ({"kind": "call", "target": {"kind": "req", "name": "svc"},
+      "method": "read", "args": [_S]}, False),
+    ({"kind": "future-shape", "nested": [[{"value": _S}]]}, False),
+    ({"kind": "future-shape", "nested": [[{"value": _LEN}]]}, True),
+    ({"kind": "builtin", "method": "length", "target": {"kind": "list", "items": [_S]}}, False),
+])
+def test_str_borrow_escape_slots_match_reference(emitted, reference, node, safe):
+    functions = [
+        {"name": "probe", "params": [{"name": "s", "type": "Str"}], "body": [node]},
+        {"name": "read", "params": [{"name": "s", "type": "Str"}], "body": [_LEN]},
+    ]
+    got = emitted["compute_str_param_borrows"](functions)
+    assert got["probe"] == ([0] if safe else [])
+    assert {name: frozenset(slots) for name, slots in got.items()} == (
+        reference._compute_str_param_borrows(functions))
+
+
+def test_str_borrow_owned_conversion_safety_net(emitted, reference):
+    ctx = {"vt": {"s": "Str"}, "fr": {}, "ca": {}, "cp": {}, "rbf": {},
+           "rn": {}, "fb": {"read": [0]}, "bp": {"s": "1"}}
+    refctx = reference._V3Ctx({}, [], [])
+    refctx.var_types = ctx["vt"]
+    refctx.borrowed_params = {"s"}
+    refctx.fn_borrow = {"read": frozenset({0})}
+    for node, rendered in ((_S, "s"), ({"kind": "name", "id": "s"}, "s"),
+                           ({"kind": "req", "name": "s"}, "s")):
+        assert emitted["by_value_arg"](node, rendered, ctx) == (
+            reference._by_value_arg(node, rendered, refctx)) == "s.to_string()"
+        assert emitted["borrow_str_arg"](node, rendered, ctx) == (
+            reference._borrow_str_arg(node, rendered, refctx)) == "s"
+    node = {"kind": "if", "cond": {"kind": "lit", "value": True},
+            "then": _S, "else": _LIT}
+    assert emitted["render_expr"](node, ctx) == reference._render_expr(node, refctx)
+    assert emitted["render_expr"]({"kind": "fn", "name": "read", "args": [_S]}, ctx) == "read(s)"
 
 
 def test_selfhosted_mangle_covers_both_reserved_sets(emitted, reference):
