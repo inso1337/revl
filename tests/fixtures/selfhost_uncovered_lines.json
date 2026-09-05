@@ -138,9 +138,6 @@
           "_key_var": 1,
           "_realm_helper_name": 1
         },
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
-          "_go_v3_match_opt": 54
-        },
         "Only carriage-return escaping remains: parser.parse_file normalizes literal CR to LF, and the lexer preserves backslash-r verbatim rather than interpreting it. This file-corpus input boundary cannot produce a CR string literal. Newline, tab, BMP and astral scalar escaping are covered.": {
           "_go_string": 1
         },
@@ -248,6 +245,9 @@
           "_spawn_expr": 9,
           "_spawn_targets": 5,
           "_uses_spawn": 1
+        },
+        "The non-boxing Opt[T] match discriminator (item 434(d), #114): `_go_v3_match_opt` renders the `.Ok` if/else for a v3 Opt match; the go v3 module byte-agreement corpus has no Opt-match program, so the oracle never enters it. Reachable in principle, not exercised by the corpus.": {
+          "_go_v3_match_opt": 54
         },
         "emit calls this Secret-marking scan only after the pure-module early return, to select component record/WAL redaction. The corpus already exercises a pure extern Secret return, but service secret parameters, config secrets and secret_witness descriptors remain a separate roadmap 421F6 runtime/redaction gap; pure wrapping is not evidence of runtime parity.": {
           "_declares_secret": 16
@@ -768,7 +768,7 @@
       "uncovered_statements": 627
     },
     "rust": {
-      "statements": 3227,
+      "statements": 3240,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and stream refusal. Those require the live plugin/frame runtime that the self-host component slice explicitly marks DEFER.": {
           "_emit_step": 95,
@@ -851,7 +851,7 @@
           "_v3_builtin": 29,
           "_v3_empty_vec_elem_types": 66,
           "_v3_empty_vec_elem_types.collect": 1,
-          "_v3_infer_type": 20,
+          "_v3_infer_type": 15,
           "_v3_inplace_persistent": 12,
           "_v3_interp": 3,
           "_v3_is_float": 4,
@@ -940,7 +940,7 @@
           "_witnessed_extern_for": 3
         }
       },
-      "uncovered_statements": 1218
+      "uncovered_statements": 1213
     },
     "ts": {
       "statements": 1979,
@@ -1666,7 +1666,7 @@
       "uncovered_statements": 94
     },
     "rust": {
-      "statements": 1953,
+      "statements": 1966,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "component_uses_await": 1,
