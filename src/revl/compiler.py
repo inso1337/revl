@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import os
+import textwrap
 from dataclasses import dataclass, field
 
 from . import parser as _ast
-from ._paths import stdlib_root
+from ._paths import backends_root, stdlib_root
 from .admit_profile import AdmissionProfile
 from .admit_profile import check_no_extern as _check_no_extern
 from .admit_profile import check_no_host_extern_reach as _check_no_host_extern_reach
@@ -44,6 +46,52 @@ def _default_search_path() -> list[str]:
             path.append(entry)
     path.append(str(stdlib_root().parent))
     return path
+
+
+def _backend_python_module_names() -> set[str]:
+    """Return importable top-level names from the Python backend tree.
+
+    Inline Python in user modules must not be able to turn the runtime's
+    backend search path into an undeclared host dependency.  The compiler
+    checks names rather than relying on the runtime path layout, so the refusal
+    also applies to generated artifacts loaded by another process.
+    """
+    root = backends_root() / "python"
+    return {path.stem for path in root.glob("*.py") if path.stem != "__init__"}
+
+
+def _check_user_py_body_imports(program: Program, install_origin: bool) -> None:
+    """Refuse backend imports in inline `@py` bodies from user modules."""
+    if install_origin:
+        return
+    backend_names = _backend_python_module_names()
+    for extern in program.externs:
+        for body in extern.bodies:
+            if not isinstance(body, _ast.HostBody) or body.backend != "py":
+                continue
+            try:
+                tree = ast.parse(textwrap.dedent(body.text), mode="exec")
+            except SyntaxError:
+                # The Python backend reports body syntax errors at emission;
+                # do not replace that diagnostic with an import-policy error.
+                continue
+            for node in ast.walk(tree):
+                imported: list[str] = []
+                if isinstance(node, ast.Import):
+                    imported = [alias.name.split(".", 1)[0] for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported = [node.module.split(".", 1)[0]]
+                offender = next((name for name in imported if name in backend_names), None)
+                if offender is not None:
+                    raise RevlError(
+                        program.filename,
+                        body.line + max(node.lineno - 1, 0),
+                        f"user-origin @py body for extern `{extern.name}` imports "
+                        f"backend module `{offender}`",
+                        hint="the user @py backend-import rule refuses ambient "
+                             "backends/python access; declare trusted host code "
+                             "with `@py ref` instead",
+                    )
 
 
 @dataclass
@@ -359,6 +407,9 @@ class _ModuleLoader:
             _resolve_refs(program, os.path.dirname(abs_path),
                           self._root_dirs(), self._sources, virtual is not None,
                           install_root=self._origin_install_root(abs_path))
+            _check_user_py_body_imports(
+                program, self._origin_install_root(abs_path) is not None
+                or _contained(abs_path, os.path.realpath(str(stdlib_root()))))
             module = _LoadedModule(abs_path, os.path.dirname(abs_path), program)
             for fn in program.fn_decls:
                 if fn.public:
@@ -458,6 +509,7 @@ def compile_source(source: str, filename: str = "<string>",
         # no-extern refusal first (structural, no IO), so an untrusted author's
         # refusal is unchanged and precedes any body-file concern (item 396).
         _enforce_source([program], profile)
+        _check_user_py_body_imports(program, False)
         # item 396: a bare in-memory source has no module directory and no
         # sources map, so a body file cannot resolve without opening disk, which
         # the `compile_source` contract forbids. Refuse structurally (no IO),
@@ -651,6 +703,11 @@ def compile_files(paths: list[str], manifest: dict | None = None,
 
     # Build checker scopes for every emitted function so a module-private
     # declaration from another module is not accidentally callable.
+    for module in included:
+        _check_user_py_body_imports(
+            module.program,
+            loader._origin_install_root(module.path) is not None
+            or _contained(module.path, os.path.realpath(str(stdlib_root()))))
     for module in included:
         own_fns = {fn.name for fn in module.program.fn_decls}
         callables = own_fns | set(module.named_fns)
