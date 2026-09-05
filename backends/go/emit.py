@@ -3812,6 +3812,9 @@ class _V3GoCtx:
         module_idents = _go_v3_reserved_idents([
             types, functions, externs, tests or [],
         ])
+        module_idents.update(
+            _v3_ident(name, "type name") for name in (types or {})
+        )
         self.strings_alias = (
             _go_v3_fresh_ident("_revlStrings", module_idents)
             if "strings" in module_idents else "strings"
