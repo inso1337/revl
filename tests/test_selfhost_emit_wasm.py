@@ -94,6 +94,7 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_wasm_corpus"
 CORPUS = [
+    "residuals.rvl",
     "folding.rvl",
     "calls.rvl",
     "inference.rvl",
