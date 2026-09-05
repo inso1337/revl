@@ -836,12 +836,14 @@ fn append_stmts(a: List[Stmt], bs: List[Stmt]) -> List[Stmt] {
 // binding name for the checker's environment.
 fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
   let t = tkc(ts, lo)
-  if (t.kind == "kw" && t.text == "let") {
+  if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
     let nm = tkc(ts, lo + 1).text
-    if (!atk(ts, lo + 2, "=")) {
+    var eq = lo + 2
+    if (atk(ts, eq, ":")) { eq = type_at(ts, eq + 1).i }
+    if (!atk(ts, eq, "=")) {
       return [mk_stmt3("skip", nm, int_lit0())]
     }
-    var j = lo + 3
+    var j = eq + 1
     var kd = "expr"
     if (atw(ts, j, "emit")) {
       kd = "emit"
@@ -1285,16 +1287,14 @@ fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
   let s = ss[i]
   if (s.kind == "skip") { return check_stmts(ss, i + 1, ck) }
   var next = ck
-  if (s.kind == "let") {
+  if (s.bind != "") {
     // calls in the value count even though the statement also binds
     next = walk_expr(s.e, s.kind == "emit", ck)
     if (next.msg != "") { return next }
     let inf = infer(s.e, next.env)
     if (!inf.ok) { return refuse_ck(next, inf.msg) }
-    if (s.bind != "") {
-      next = { ctx: next.ctx, env: next.env.push({ name: s.bind, ty: inf.ty }),
-                ev: next.ev, msg: "" }
-    }
+    next = { ctx: next.ctx, env: next.env.push({ name: s.bind, ty: inf.ty }),
+              ev: next.ev, msg: "" }
     return check_stmts(ss, i + 1, next)
   }
   next = walk_expr(s.e, s.kind == "emit", ck)

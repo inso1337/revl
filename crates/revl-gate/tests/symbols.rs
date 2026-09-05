@@ -104,9 +104,7 @@ fn an_unclassified_extern_gets_no_signature() {
 
 #[test]
 fn a_construct_the_front_end_cannot_parse_makes_the_whole_document_undecided() {
-    // `pub` is not a declaration the self-host front end reads
     for source in [
-        "pub fn f() -> Int {\n  return 1\n}\n",
         "verified fn f() -> Int {\n  return 1\n}\n",
         "fn broken( {\n",
     ] {
@@ -114,6 +112,20 @@ fn a_construct_the_front_end_cannot_parse_makes_the_whole_document_undecided() {
         assert!(found.is_undecided(), "{source:?} produced {found:?}");
         assert!(found.get("f").is_none());
         assert!(found.rows().is_empty());
+    }
+}
+
+#[test]
+fn public_and_cached_functions_preserve_reference_signatures() {
+    for (source, expected) in [
+        ("pub fn f() -> Int { return 1 }\n", "pub fn f() -> Int"),
+        ("fn f() -> Int cache pure { return 1 }\n", "fn f() -> Int"),
+        ("pub fn f() -> Int cache pure { return 1 }\n", "pub fn f() -> Int"),
+    ] {
+        let found = table(source);
+        let symbol = found.get("f").unwrap();
+        assert_eq!(symbol.line, 1);
+        assert_eq!(symbol.detail.as_deref(), Some(expected));
     }
 }
 

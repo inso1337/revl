@@ -436,7 +436,13 @@ fn signature(tokens: &[Tok], raw: &[selfhost::Token], decl: &Decl) -> Option<Str
         // exact by construction.
         SymbolKind::Service => Some(format!("service {}", decl.name)),
         SymbolKind::Component => Some(format!("component {}", decl.name)),
-        SymbolKind::Fn => Some(format!("fn {}", callable_tail(tokens, raw, decl)?)),
+        SymbolKind::Fn => {
+            let public = decl.fn_at.checked_sub(1)
+                .and_then(|index| tokens.get(index))
+                .is_some_and(|token| token.kind == "kw" && token.text == "pub");
+            let prefix = if public { "pub " } else { "" };
+            Some(format!("{prefix}fn {}", callable_tail(tokens, raw, decl)?))
+        }
         SymbolKind::Extern => {
             // The reference spells the classification first and `async` after
             // it, whatever order the source used.

@@ -8,8 +8,8 @@ This is the TypeScript instance of the self-host emit oracle — the exact shape
 tests/test_selfhost_emit_py.py. Two independent implementations of one lowering
 (the reference backend and its revl port) are forced to agree, and the agreement
 is the strongest kind an emitter can be held to: the emitted TypeScript source
-must be identical to the last byte. The reference is ground truth; any divergence
-is a defect in the slice.
+must be identical to the last byte. The reference defines the byte contract for
+admitted corpus inputs; deferred shapes are audited separately rather than waived.
 
 Navigation reads the IR in PURE revl through stdlib/value.rvl's ``value_*`` (item
 180). Only host FORMATTING stays ``@py``: ``json_dumps`` (the reference renders
@@ -81,24 +81,22 @@ closed by verification. ``components_await.rvl`` (already v1 in the corpus) cove
 the async-generator body on this path; the three new fixtures add the config /
 saga / provide-method v1 body and the isolate/intercept-only v2 dispatch.
 
-Deliberately OUT (deferred to a follow-on slice): the component-dialect async
-call surface — an async callable reached through the ``fn`` expr kind or from an
-async PROVIDE method (its ``async_names`` are threaded empty, byte-safe because no
-covered component body names one); the component-body ``timer`` step, VARIANT
-type declarations (so an async ``match`` is exercised over Opt/built-in
-``Result`` only, never a declared variant), in-file
-``test``/``fault_test``/``lifecycle test`` emission, ROUTED requires
+Declared boundaries tracked by the coverage ledgers include the component-body
+``timer`` step, in-file ``test``/``fault_test``/``lifecycle test`` emission,
+witnessed transactions, deferred holes/streams, temporal expressions, and ROUTED requires
 (item 167 — a routed require, ``requires <k> in realms(...) strategy(...)``, also
 lowers to ir_version 2 but additionally needs the ``_TS_ROUTER_SRC`` runtime
-literal, the ``realmLabel`` runtime import, the ``inject_keys = requires − routes``
+literal, the ``realmLabel`` runtime import, the ``inject_keys = requires - routes``
 gate, the per-key ``revlRouter`` proxy, and the routed-``req`` read; the router
 literal embeds backtick templates and ``${…}`` the revl lexer reserves, so it is
 kept out to stay byte-VERIFIED — a routed v2 doc must NOT enter this corpus until
-that lands), the canonical ABI, and ``assert``/``let_pattern`` statements — all
-kept out so the slice stays byte-VERIFIED rather than byte-guessed.
+that lands). These remain explicit source-backed boundaries rather than implied
+full compiler parity.
 """
 
 import importlib.util
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -142,6 +140,7 @@ CORPUS = [
     "services_async.rvl",       # async op `Promise<T>` sigs, `async` methods, the item-141
                                 # await-seed (direct `fetch` + nested ternary arm `pick`)
     "components_await.rvl",     # activation-body `await` -> `async function*` + iteration boundary
+    "async_effects.rvl",        # awaited activation acquisition + emission (`async: true` steps)
     # slice 5 (item 226) — the MODULE-FN async path, byte-exact:
     "async_module_extern.rvl",  # async extern (`export async function …: Promise<T>` + verbatim
                                 # @ts body) + a colored fn awaiting it (`var`-callee, let + return)
@@ -182,6 +181,33 @@ CORPUS = [
     # astral-aware `revlCharCodeAt` redirect. Added red, exactly as on the py
     # tier: no ts corpus document called any of them.
     "classify.rvl",
+    "../../../backends/typescript/tests/fixtures/unique_writes.rvl",
+    "../../../bench/results/gpt-oss-20b-oneshot/03-user-cache/v1/attempt-1.rvl",
+    "../../../stdlib/str.rvl",
+    "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+    "../../../examples/java_match.rvl",
+    "../emit_wasm_corpus/forloop.rvl",
+    "../../../bench/codegen/python/programs/maps.rvl",
+    "../emit_wasm_corpus/builtins.rvl",
+    "../emit_py_corpus/floats.rvl",
+    "../emit_wasm_corpus/strlit.rvl",
+    "unique_writes.rvl",
+    "../../../bench/codegen/java/cases/map_keys/case.rvl",
+    "../../../stdlib/value.rvl",
+    "../emit_py_corpus/optionals.rvl",
+    # Corpus-first regressions: host property spelling, assertions and async
+    # calls from provide methods were absent from the original slice corpus.
+    "../emit_py_corpus/hostroots.rvl",
+    "../emit_java_corpus/control.rvl",
+    "../../../backends/typescript/tests/fixtures/async_http.rvl",
+    "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
+    "branch_edges.rvl",
+    "destructuring.rvl",
+    "property_edges.rvl",
+    "component_edges.rvl",
+    "cas_runtime.rvl",
+    "../emit_go_corpus/variants.rvl",
+    "../emit_py_corpus/services_method_effects.rvl",
 ]
 
 def _load_reference_emit():
@@ -269,3 +295,108 @@ def test_selfhosted_ts_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+@pytest.mark.parametrize("side", ["reference", "selfhost"])
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("reserved({class: 7n, class_: 9n})", "79"),
+        ("mutable_record({class: 3n, class_: 9n})", "7"),
+        ("mutable_list([1n, 2n, 3n])", "15"),
+        ("immutable_list([4n])", "4"),
+    ],
+)
+def test_destructuring_runtime(emitted, reference, tmp_path, side, expression, expected):
+    if shutil.which("node") is None:
+        pytest.skip("node not on PATH")
+    ir = compile_files([str(CORPUS_DIR / "destructuring.rvl")])
+    src = reference.emit(ir) if side == "reference" else emitted["emit_ts_src"](ir)
+    (tmp_path / "runtime.ts").write_text("export const host = {};\n", encoding="utf-8")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    module = pkg / "mod.ts"
+    module.write_text(src + f"\nconsole.log(String({expression}));\n", encoding="utf-8")
+    proc = subprocess.run(["node", str(module)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("side", ["reference", "selfhost"])
+def test_structural_assertion_runtime(emitted, reference, tmp_path, side):
+    if shutil.which("node") is None:
+        pytest.skip("node not on PATH")
+    ir = compile_files([str(CORPUS_DIR / "property_edges.rvl")])
+    # Keep the runtime probe function-only; component output is checked by the oracle.
+    ir = {**ir, "components": [], "services": []}
+    src = reference.emit(ir) if side == "reference" else emitted["emit_ts_src"](ir)
+    (tmp_path / "runtime.ts").write_text("export const host = {};\n", encoding="utf-8")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    module = pkg / "mod.ts"
+    module.write_text(
+        src + "\nconsole.log(list_equal() && record_equal());\n", encoding="utf-8"
+    )
+    proc = subprocess.run(["node", str(module)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "true"
+
+
+@pytest.mark.parametrize("side", ["reference", "selfhost"])
+@pytest.mark.parametrize(("insert_result", "expected"), [(False, ""), (True, "method,boot")])
+def test_map_cas_inverse_result_and_capture(
+    emitted, reference, tmp_path, side, insert_result, expected
+):
+    if shutil.which("node") is None:
+        pytest.skip("node not on PATH")
+    ir = compile_files([str(CORPUS_DIR / "cas_runtime.rvl")])
+    src = reference.emit(ir) if side == "reference" else emitted["emit_ts_src"](ir)
+    runtime = """
+export const removals: string[] = []
+const ledger = {
+  insert_if_absent(_key: string, _value: bigint) { return INSERT_RESULT },
+  remove(key: string) { removals.push(key) },
+  drop() {},
+}
+export const host = {
+  Map: { new() { return ledger } },
+  applyConfigDefaults(_name: string, config: unknown) { return config },
+}
+export class Frame {
+  begin = undefined
+  drain = undefined
+  constructor(_ctx: unknown, _name: string) {}
+  bracket(_crossing: unknown, _method: string, dispose: () => void) { return dispose }
+}
+export function record() {}
+""".replace("INSERT_RESULT", str(insert_result).lower())
+    (tmp_path / "runtime.ts").write_text(runtime, encoding="utf-8")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    module = pkg / "mod.ts"
+    probe = """
+import { removals } from "../runtime.ts"
+const disposers: Array<() => void> = []
+const ctx: any = {
+  effect(run: () => any) {
+    const result = run()
+    if (result && typeof result.next === "function") {
+      for (const disposer of result) if (typeof disposer === "function") disposers.push(disposer)
+    } else if (typeof result === "function") {
+      disposers.push(result)
+    }
+  },
+  provide(name: string, value: unknown) {
+    this[name] = value
+    return () => {}
+  },
+}
+CasProvider.apply(ctx, {})
+if (ctx.ops.run() !== 2n) throw new Error("method did not run")
+for (const dispose of disposers.reverse()) dispose()
+console.log(removals.join(","))
+"""
+    module.write_text(src + probe, encoding="utf-8")
+    proc = subprocess.run(["node", str(module)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expected

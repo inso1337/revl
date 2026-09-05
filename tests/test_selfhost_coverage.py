@@ -17,6 +17,7 @@ closed it is taken away.
 """
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -103,6 +104,26 @@ def test_the_corpus_survey_is_not_empty(tool, tier):
     assert {"kind=lit", "kind=var", "kind=bin"} <= exhibited
 
 
+def test_reference_truthiness_only_records_schema_boolean_fields(tool, tmp_path):
+    source = tmp_path / "emit.py"
+    source.write_text("""
+def emit(node):
+    if node.get('entries'):
+        pass
+    if node.get('name'):
+        pass
+    if node.get('idempotent'):
+        pass
+    if node.get('secret'):
+        pass
+""")
+    found = tool.reference_constructs(source)
+    assert "entries=<true>" not in found
+    assert "name=<true>" not in found
+    assert "idempotent=<true>" in found
+    assert "secret=<true>" in found
+
+
 def test_the_gate_reproduces_the_item_429d_secret_gap(tool, monkeypatch):
     """The load-bearing proof.
 
@@ -110,19 +131,23 @@ def test_the_gate_reproduces_the_item_429d_secret_gap(tool, monkeypatch):
     that `selfhost/emit_py.rvl` could emit NEITHER end of the `Secret[T]`
     redaction markings — a self-hosted emitter producing a program that does not
     redact, invisible because the corpus contained no `Secret[` at all. Take
-    that document back out and this gate must NAME the two markings. A gate that
-    stays green under the ablation would be decoration.
+    that document and its later nested-secret companion back out and this gate
+    must NAME the two markings. A gate that stays green under the ablation would
+    be decoration.
     """
     keep = tool.corpus_documents
 
     def without_secrets(tier):
-        return [p for p in keep(tier) if p.name != "secrets.rvl"]
+        if tier != "py":
+            return keep(tier)
+        return [p for p in keep(tier)
+                if p.name not in {"secrets.rvl", "secrets_nested.rvl"}]
 
     monkeypatch.setattr(tool, "corpus_documents", without_secrets)
     problems = tool.check(tool.survey())
     named = [p for p in problems if "secret" in p]
     assert len(named) >= 2, (
-        "dropping secrets.rvl from the py corpus must make the `secret` and "
+        "dropping the secret fixtures from the py corpus must make `secret` and "
         f"`secret_return` markings blind again; the gate said: {problems}")
     assert any("secret_return=<true>" in p for p in named)
     assert any("secret=<true>" in p for p in named)
@@ -139,3 +164,35 @@ def test_every_recorded_blind_spot_carries_a_reason(tool):
                 f"{tier}: `{reason}` is not a reason, it is a label")
             assert constructs, f"{tier}: reason with no constructs: {reason}"
 
+
+def test_generic_baseline_cannot_masquerade_as_closure(tool, monkeypatch, tmp_path):
+    ledger = {tier: {"blind": {"NOT TRIAGED": ["kind=lit"]},
+                     "unported": {"deliberate decision": ["kind=var"]}}
+              for tier in TIERS}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(tool, "LEDGER", path)
+    problems = tool.check({tier: {"blind": [], "unported": []} for tier in TIERS})
+    assert any("generic reason" in problem for problem in problems)
+
+
+def test_construct_closure_rejects_duplicates_and_missing_tiers(tool, monkeypatch, tmp_path):
+    ledger = {"py": {"blind": {"specific decision": ["kind=lit"]},
+                      "unported": {"another decision": ["kind=lit"]}}}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(tool, "LEDGER", path)
+    problems = tool.check({"py": {"blind": [], "unported": []}})
+    assert any("classified more than once" in problem for problem in problems)
+    assert any("missing construct ledger tier" in problem for problem in problems)
+
+
+def test_construct_check_fails_closed_on_malformed_maps(tool, monkeypatch, tmp_path):
+    ledger = {tier: {"blind": None, "unported": []} for tier in TIERS}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(tool, "LEDGER", path)
+    data = {tier: {"blind": None, "unported": []} for tier in TIERS}
+    problems = tool.check(data)
+    assert any("missing `blind` reason map" in problem for problem in problems)
+    assert any("construct populations must be lists" in problem for problem in problems)

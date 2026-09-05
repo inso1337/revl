@@ -5,16 +5,16 @@ backend, executed, and cross-checked BYTE-FOR-BYTE against the reference emitter
 
 This has the exact shape of tests/test_selfhost_emit_rust.py: two independent
 implementations of one lowering — the reference Java backend and its revl port —
-are forced to agree, and the agreement is the strongest an emitter can be held
-to: the emitted Java source must be identical to the last byte. The reference is
-ground truth; any divergence is a defect in the slice. There is no JRE in play —
-the check compares the EMITTED SOURCE STRINGS (a pure-Python comparison), so it
-needs no Java toolchain.
+are forced to agree on emitted Java source, down to the last byte. A divergence
+requires inspecting both implementations, not assuming reference correctness.
+This byte oracle alone does not prove runtime semantics: it compares the EMITTED
+SOURCE STRINGS (a pure-Python comparison), so it needs no Java toolchain. A
+focused activation test below separately checks null-bearing metadata on a JVM.
 
-Every IR the frontend produces is ir_version 3, so the covered corpus is the
-corner of the reference's v3 path (``_emit_v3`` -> ``_emit_v3_functions`` ->
-``_expr`` / ``_v3_stmt``) that emits byte-identical with only the module scaffold
-and the free-function bodies.
+The frontend selects v1/v2/v3 according to document features. The corpus covers
+scalar legacy providers, the v3 typed core, and the modern component subset
+below. Float arithmetic/widening and Opt are supported; only Float-to-string
+formatting and built-in Result runtime emission remain outside that core.
 
 Covered subset (what emits byte-identical):
   * slice 1 — the module scaffold (banner comments, ``package revl;``, the five
@@ -74,7 +74,7 @@ Covered subset (what emits byte-identical):
     <meta>)`` (service through ``requires``) with ``_metadata_lit`` rendering nested
     map/list/int/float/bool/string metadata byte-for-byte. Both make the component
     ``needs_modern`` and are admitted so long as the body/method shapes stay inside
-    the slice-3 subset; async/await/spawn placements are NOT (see below).
+    the supported subset. Activation async/await is covered by slice 5.
 
   * slice 5 (item 238) — the ASYNC activation body + host Map/Job stubs: a
     body-level ``let-effect`` host bind (``_emit_host_stubs`` Map runtime, the
@@ -100,7 +100,7 @@ Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 6+):
     and ``match``, ``_emit_result_type``, ``_emit_checked_div_helpers``);
   * functional record-update ``{r | f = e}`` (the Java reference itself RAISES on
     ``record_update`` — a structural exclusion);
-  * async coloring / spawn / instances / externs / in-file ``test`` /
+  * externs / in-file ``test`` /
     lifecycle-test emission; the canonical Float->Str ``revlFtoa`` (float
     interpolation excluded); the ``_reject_fn_type`` refusal; local ``let``-bound
     arrows and their ``_inline_arrow`` beta-reduction; and ``let_pattern`` (its
@@ -109,6 +109,7 @@ Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 6+):
 """
 
 import importlib.util
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -209,6 +210,34 @@ CORPUS = [
     # `Long`/`Integer` form — vs v3's `java.lang.Long` — is out of this slice's
     # byte-checked surface; the fixture keeps signatures scalar.)
     "v1_components.rvl",
+    "legacy_void.rvl",
+    "legacy_realms.rvl",
+    "metadata_null.rvl",
+    # Item 429: existing agreeing documents with measured additional coverage.
+    "../../../examples/tenants.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl",
+    "../emit_ts_corpus/services_async.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
+    "../emit_wasm_corpus/constfold.rvl",
+    "../../../backends/go/scenarios/tagger.rvl",
+    "../../../examples/ecosystem-consumer-js/candidates/double_tool.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl",
+    "../emit_go_corpus/variants.rvl",
+    "../emit_go_corpus/records.rvl",
+    "../emit_ts_corpus/realm_intercept.rvl",
+    "../emit_py_corpus/services_config.rvl",
+    "../emit_py_corpus/services_method_effects.rvl",
+    "../emit_ts_corpus/components_mixed.rvl",
+    "../emit_wasm_corpus/listmem.rvl",
+    "../erase_realms.rvl",
+    "../realm_conformance/provider_a.rvl",
+    "match_ignored.rvl",
+    "float_numeric.rvl",
+    "component_format.rvl",
+    "branch_shapes.rvl",
+    "component_branches.rvl",
+    "map_inference.rvl",
 ]
 
 
@@ -309,3 +338,87 @@ def test_fn_type_param_refused(emitted, reference):
         reference.emit(ir)
     got = emitted["emit_src"](ir)
     assert "<<DEFER-fn-type>>" in got
+
+
+def test_null_intercept_metadata_activates_on_jvm(reference, tmp_path):
+    """Java immutable collection factories reject null before intercept runs."""
+    backend = ROOT / "backends" / "java"
+    if str(backend) not in sys.path:
+        sys.path.insert(0, str(backend))
+    import javac_gate
+
+    if javac_gate.JAVAC is None or javac_gate.JAVA is None:
+        pytest.skip(javac_gate.NO_JDK)
+    source = reference.emit(compile_files([str(CORPUS_DIR / "metadata_null.rvl")]))
+    out = javac_gate.compile_unit(tmp_path, source)
+    harness = tmp_path / "revl" / "Harness.java"
+    harness.write_text(
+        """package revl;
+public final class Harness {
+    public static void main(String[] args) {
+        io.cordis4j.core.Context ctx = new io.cordis4j.core.Context();
+        ctx.provide(io.cordis4j.core.ServiceKey.of(Components.Sink.class),
+                message -> {});
+        new Components.MetadataPlugin().apply(ctx).dispose();
+        System.out.println("ok");
+    }
+}
+""",
+        encoding="utf-8",
+    )
+    compiled = subprocess.run(
+        [javac_gate.JAVAC, "--release", javac_gate.RELEASE, "-cp", str(out),
+         "-d", str(out), str(harness)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    ran = subprocess.run(
+        [javac_gate.JAVA, "-cp", str(out), "revl.Harness"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout == "ok\n"
+
+
+@pytest.mark.parametrize(
+    "rel, reference_fragment, port_fragment",
+    [
+        ("backends/java/scenarios/instance_accessor.rvl",
+         "static final class RevlSpawnHandle", "<<DEFER-component-nonsimple:Supervisor>>"),
+        ("backends/go/scenarios/router.rvl",
+         "class RevlRouter", "<<DEFER-component-nonsimple:Router>>"),
+        ("bench/results/baseline-deepseek-v4-pro/02-pg-pool/v1/attempt-1.rvl",
+         "class Pool", "<<DEFER-host-stub:Pool>>"),
+        ("backends/go/testdata/result_ctor_302.rvl",
+         "new RevlResult.Ok<>", "<<DEFER-result-ctor:Ok>>"),
+        ("tests/fixtures/emit_py_corpus/control.rvl",
+         "revlLength(", "<<UNSUPPORTED-EXPR:arrow>>"),
+        ("backends/java/scenarios/runtime_values.rvl",
+         "revlPush(", "<<UNSUPPORTED-EXPR:builtin>>"),
+        ("tests/fixtures/emit_py_corpus/floats.rvl",
+         "private static String revlFtoa(double x)", None),
+        ("bench/codegen/java/cases/extern_config/case.rvl",
+         "_revlExternConfig(", None),
+        ("backends/java/scenarios/method_witnessed.rvl",
+         "instanceof RevlResult.Ok<?, ?>", "<<UNSUPPORTED-EXPR:>>"),
+        ("backends/go/scenarios/records.rvl", "REVL_TESTS", None),
+    ],
+)
+@pytest.mark.xfail(
+    strict=True, raises=AssertionError,
+    reason="Declared Java Path B boundary; promote to CORPUS when byte parity lands",
+)
+def test_declared_boundary_still_diverges(
+    emitted, reference, rel, reference_fragment, port_fragment,
+):
+    """Keep executable evidence for deferred families, outside agreeing CORPUS."""
+    ir = compile_files([str(ROOT / rel)])
+    want = reference.emit(ir)
+    got = emitted["emit_src"](ir)
+    if reference_fragment not in want:
+        pytest.fail(f"{rel} no longer exercises its reference boundary")
+    if port_fragment is not None and port_fragment not in got:
+        pytest.fail(f"{rel} no longer exercises its port boundary")
+    if port_fragment is None and reference_fragment in got:
+        pytest.fail(f"{rel} gained its missing block; review and promote the case")
+    assert got == want

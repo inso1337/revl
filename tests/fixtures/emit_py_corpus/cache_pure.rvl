@@ -1,0 +1,11 @@
+// Plain cache-pure function: the Python backend must emit the structural memo
+// prelude and route the public name through its private uncached body.
+type Pair = { x: Int, y: Int }
+
+fn twice(n: Int) -> Int cache pure {
+  return n * 2
+}
+
+fn cached_record(r: Pair) -> Int cache pure {
+  return r.x + r.y
+}

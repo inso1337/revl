@@ -50,20 +50,30 @@
 // does — pinned by `tests/fixtures/emit_py_corpus/secrets{,_nested}.rvl` in both
 // the emit_py oracle and the fully-native compile corpus.
 //
+// Item 429 also cross-checks cache-pure memo wrappers, pure-function inlining,
+// witnessed activation/provide effects (shared registration numbering and setup),
+// ADT construction, Float widening, optional record reads, and pure-let match
+// blocks. The literal CORPUS is the shared construct/line measurement workload.
+//
 // ============================================================ WHAT IT DEFERS
 // Reported for a follow-on slice 5, deliberately OUT of this file:
 //   * async coloring (colored fns / async externs' await-seed / awaited call
 //     sites), realm placements (`isolate`/`intercept`/`routes`/router),
 //     spawn/instances, in-file `test`/`fault_test`/`lifecycle test` emission,
-//     `adt` construction (a user-variant constructor call), and the ABI;
+//     and the ABI;
 //   * method-body `let-effect` — EMITTED (the `_revl_frame.acquire` form) but not
-//     yet cross-checked: the surface admits only a `spawn` acquire there, whose
-//     `cexpr` lands in slice 5;
+//     yet cross-checked: admitted bound acquisitions use spawn or result-declared
+//     host verbs (Map/Pool), whose component runtime lowering lands in slice 5.
+//     Bound witnessed acquisition in a provide method is frontend-rejected;
 //   * `let_pattern` (record/list destructuring): still unimplemented here, but no
 //     longer a PERMANENT exclusion — item 179 replaced the reference's
 //     `__revl_destructure_{id(node)}` (a nondeterministic Python object id) with a
 //     per-`_Lines` monotonic counter in deterministic emission order, so its bytes
 //     are now reproducible and a future slice CAN port + cross-check it.
+// Exact residual conditions and reproducing inputs, including runtime streams,
+// approval/deferred/validated dispatch and full model-flow provenance, live in
+// the Python entries of selfhost_{blind_spots,uncovered_lines}.json. These are
+// measured limitations, not a claim of whole-emitter parity.
 //
 // ------------------------------------------------------ the erased-IR boundary
 // revl has no dynamic `dict[str, Any]`, and the checker refuses stdlib methods
@@ -202,12 +212,15 @@ fn bounded(operation: Str, width: Str) -> Str {
 // the read dispatches on the receiver's shape — but one `isinstance` needs no
 // python frame around it. `rereadable` says the caller already bound the target
 // to a name (the `?.` chain has), so no temp is needed.
-fn field_read(target: Str, name: Str, rereadable: Bool) -> Str {
+fn field_read(target: Str, name: Str, rereadable: Bool, opt: Bool) -> Str {
   var tmp = "_fv"
   var got = `(_fv := ${target})`
   if (rereadable) {
     tmp = target
     got = target
+  }
+  if (opt) {
+    return `(${tmp}.get(${name}) if isinstance(${got}, dict) else getattr(${tmp}, ${name}, None))`
   }
   return `(${tmp}[${name}] if isinstance(${got}, dict) else getattr(${tmp}, ${name}))`
 }
@@ -446,7 +459,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "div_trunc") {
     return bounded(`_revl_div_trunc(${target}, ${args[0]})`, "64")
   }
-  if (method == "div_floor") { return bounded(`${target} // ${args[0]}`, "64") }
+  if (method == "div_floor") { return bounded(target.concat(" // ").concat(args[0]), "64") }
   if (method == "div_euclid") {
     return bounded(`_revl_div_euclid(${target}, ${args[0]})`, "64")
   }
@@ -727,7 +740,8 @@ fn expr_inner(node: Any) -> Str {
     return `${callee}(${args})`
   }
   if (kind == "field") {
-    return field_read(expr(value_field(node, "target")), py_repr(value_field(node, "name")), false)
+    if (value_bool(value_field(node, "sized_length"))) { return `len(${expr(value_field(node, "target"))})` }
+    return field_read(expr(value_field(node, "target")), py_repr(value_field(node, "name")), false, value_bool(value_field(node, "opt")))
   }
   if (kind == "index") {
     return `${expr(value_field(node, "target"))}[${expr(value_field(node, "index"))}]`
@@ -764,7 +778,7 @@ fn expr_inner(node: Any) -> Str {
   if (kind == "optfield") {
     let tgt = value_field(node, "target")
     let t = expr(tgt)
-    return `(None if ${opt_binder(node, tgt, t)} is None else ${field_read(opt_reader(node, tgt, t), py_repr(value_field(node, "name")), true)})`
+    return `(None if ${opt_binder(node, tgt, t)} is None else ${field_read(opt_reader(node, tgt, t), py_repr(value_field(node, "name")), true, false)})`
   }
   if (kind == "optcall") {
     // the method is a STDLIB builtin (the checker types an optcall through
@@ -962,17 +976,54 @@ fn fn_params(params: List[Any]) -> Str {
   return ps.join(", ")
 }
 
+fn is_cache_pure_fn(fnode: Any) -> Bool {
+  let cache = value_field(fnode, "cache")
+  if (value_is_null(cache)) { return false }
+  return value_str(value_field(cache, "class")) == "pure_fn"
+}
+
+fn memo_source() -> List[Str] {
+  return ["_REVL_MEMO = {}", "_REVL_NOMEMO = object()", "_REVL_MISS = object()", "",
+    "", "def _revl_memo_key(v):", "    \"\"\"A hashable STRUCTURAL key for a revl value, or `_REVL_NOMEMO`.\"\"\"", "    if v is None or isinstance(v, (bool, int, float, str, bytes)):",
+    "        return (type(v).__name__, v)", "    if isinstance(v, (list, tuple)):",
+    "        parts = []", "        for item in v:", "            key = _revl_memo_key(item)",
+    "            if key is _REVL_NOMEMO:", "                return _REVL_NOMEMO", "            parts.append(key)",
+    "        return (\"seq\", tuple(parts))", "    if isinstance(v, dict):", "        parts = []",
+    "        for name in v:", "            if not isinstance(name, str):", "                return _REVL_NOMEMO",
+    "            key = _revl_memo_key(v[name])", "            if key is _REVL_NOMEMO:", "                return _REVL_NOMEMO",
+    "            parts.append((name, key))", "        parts.sort()", "        return (\"rec\", tuple(sorted(parts)))",
+    "    if callable(v) or getattr(v, \"__dict__\", None):", "        return _REVL_NOMEMO",
+    "    slots = getattr(type(v), \"__slots__\", None)",     "    if slots == ():", "        return (\"adt\", type(v).__name__)",
+    "    if slots == (\"value\",):", "        key = _revl_memo_key(v.value)",
+    "        if key is _REVL_NOMEMO:", "            return _REVL_NOMEMO", "        return (\"adt\", type(v).__name__, key)",
+    "    return _REVL_NOMEMO", ""]
+}
+
+fn emit_memo_wrapper(name: Str, params: List[Any]) -> List[Str] {
+  let args = fn_params(params)
+  let inner = "_revl_uncached_".concat(name)
+  var out = [`def ${name}(${args}):`, "    \"\"\"item 310 `cache pure`: memoized on the structural args key.\"\"\"",
+    `    _revl_k = _revl_memo_key((${py_repr(name)}${if (args == "") { "" } else { ", " }}${args},))`,
+    "    if _revl_k is _REVL_NOMEMO:", `        return ${inner}(${args})`,
+    "    _revl_v = _REVL_MEMO.get(_revl_k, _REVL_MISS)", "    if _revl_v is _REVL_MISS:",
+    `        _revl_v = ${inner}(${args})`, "        _REVL_MEMO[_revl_k] = _revl_v", "    return _revl_v", ""]
+  return out
+}
+
 // `_emit_functions`: each module fn as a Python `def`, blank-line separated.
 fn emit_functions(functions: List[Any]) -> List[Str] {
   var out = []
   for (fnode of functions) {
     let name = mangle(value_str(value_field(fnode, "name")))
     let params = fn_params(value_list(value_field(fnode, "params")))
-    out = out.push(`def ${name}(${params}):`)
+    let memoized = is_cache_pure_fn(fnode)
+    let body_name = memoized ? "_revl_uncached_".concat(name) : name
+    out = out.push(`def ${body_name}(${params}):`)
     let body = value_list(value_field(fnode, "body"))
     if (body.length() == 0) { out = out.push(line(1, "pass")) }
     for (s of body) { out = out.concat(fn_stmt(s, 1)) }
     out = out.push("")
+    if (memoized) { out = out.concat(emit_memo_wrapper(name, value_list(value_field(fnode, "params")))) }
   }
   return out
 }
@@ -1245,12 +1296,12 @@ fn comp_names(ir: Any) -> Str {
 // Slice 4 (item 206) added the `config` cexpr, config (`ConfigSchema`), and the
 // method-body `effect`/`let-effect`/compensated-`emit` accumulator (the
 // `_revl_frame.adopt`/`.acquire` + `_label`/`_effect_N`/`_emit_N` counter, now
-// threaded through provides/methods). STILL DEFERRED to slice 5 (a divergence,
-// not a bug, if fed one): async coloring (async methods / await bodies / the
+// threaded through provides/methods). STILL DEFERRED to slice 5: async coloring
+// (async methods / await bodies / the
 // await-seed), host roots (`Pool`/`Map`/`Job`) in COMPONENT bodies (fn/test
 // bodies already covered), realm placements (`isolate`/`intercept`/`routes`/the
 // router), spawn/instances, lifecycle TESTS (the `plug`/`set_trace`/`Clock`/
-// `asyncio` driver), and the `adt`/`format`/`host`/`spawn`/`instance-get` cexpr
+// `asyncio` driver), and the `format`/`host`/`spawn`/`instance-get` cexpr
 // kinds.
 
 // A body-emission result: the lines produced AND the running timer counter (the
@@ -1375,6 +1426,17 @@ fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
 // The component/method-body expression dispatcher (`_ComponentEmitter._expr`).
 fn cexpr(node: Any) -> Str {
   let kind = node_kind(node)
+  if (kind == "do") {
+    var binds = []
+    for (s of value_list(value_field(node, "stmts"))) {
+      if (value_str(value_field(s, "step")) != "let") { return "<<UNSUPPORTED-COMPONENT-BLOCK-STEP>>" }
+      let name = mangle(value_str(value_field(s, "name")))
+      binds = binds.push(`(${name} := ${cexpr(value_field(s, "value"))})`)
+    }
+    let tail = cexpr(value_field(node, "tail"))
+    if (binds.length() > 0) { return `(${binds.join(", ")}, ${tail})[-1]` }
+    return `(${tail})`
+  }
   if (kind == "lit") { return py_repr(value_field(node, "value")) }
   if (kind == "var") {
     let nm = value_str(value_field(node, "name"))
@@ -1402,7 +1464,8 @@ fn cexpr(node: Any) -> Str {
     return `${callee}(${ccommajoin(call_args)})`
   }
   if (kind == "field") {
-    return field_read(cexpr(value_field(node, "target")), py_repr(value_field(node, "name")), false)
+    if (value_bool(value_field(node, "sized_length"))) { return `len(${cexpr(value_field(node, "target"))})` }
+    return field_read(cexpr(value_field(node, "target")), py_repr(value_field(node, "name")), false, value_bool(value_field(node, "opt")))
   }
   if (kind == "index") {
     return `${cexpr(value_field(node, "target"))}[${cexpr(value_field(node, "index"))}]`
@@ -1433,7 +1496,7 @@ fn cexpr(node: Any) -> Str {
   if (kind == "optfield") {
     let tgt = value_field(node, "target")
     let t = cexpr(tgt)
-    return `(None if ${opt_binder(node, tgt, t)} is None else ${field_read(opt_reader(node, tgt, t), py_repr(value_field(node, "name")), true)})`
+    return `(None if ${opt_binder(node, tgt, t)} is None else ${field_read(opt_reader(node, tgt, t), py_repr(value_field(node, "name")), true, false)})`
   }
   if (kind == "optcall") {
     let tgt = value_field(node, "target")
@@ -1486,13 +1549,15 @@ fn setup_step(step: Any, indent: Int) -> List[Str] {
 // `let-effect` (the spawn form — its `spawn` acquire cexpr lands in slice 5, so
 // it is implemented but not yet cross-checked), saga `emit ... compensate`,
 // plain `emit`, and `return`. (`await` stays slice 5.)
-fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int) -> Emit {
+fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> Emit {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let" || kind == "assign") {
     var out = [line(indent, `${mangle(value_str(value_field(step, "name")))} = ${cexpr(value_field(step, "value"))}`)]
     return { lines: out, counter: counter }
   }
   if (kind == "effect") {
+    let wit = witnessed_extern(value_field(step, "acquire"), externs)
+    if (!value_is_null(wit)) { return witnessed_step(step, indent, wit, counter, true) }
     let fname = `_effect_${counter}`
     var out = [line(indent, `def ${fname}():`)]
     out = out.push(line(indent + 1, cexpr(value_field(step, "acquire"))))
@@ -1503,6 +1568,8 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     return { lines: out, counter: c }
   }
   if (kind == "let-effect") {
+    let wit = witnessed_extern(value_field(step, "acquire"), externs)
+    if (!value_is_null(wit)) { return witnessed_step(step, indent, wit, counter, true) }
     let bind = mangle(value_str(value_field(step, "bind")))
     let acq = cexpr(value_field(step, "acquire"))
     let inv = cexpr(value_field(step, "undo"))
@@ -1562,7 +1629,7 @@ fn method_secret_params(m: Any, specs: Any) -> List[Str] {
 
 // `_method`: one provide-method as a Python `def` (sync only in this slice),
 // threading the shared timer/effect counter across its body steps.
-fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any) -> Emit {
+fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any, externs: List[Any]) -> Emit {
   let name = mangle(value_str(value_field(m, "name")))
   var head = `def ${name}(self`
   for (p of value_list(value_field(m, "params"))) { head = head.concat(", ").concat(mangle(value_str(p))) }
@@ -1588,7 +1655,7 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
   }
   var c = counter
   for (s of body) {
-    let se = method_step(s, indent + 1, provide_name, name, comp_name, c)
+    let se = method_step(s, indent + 1, provide_name, name, comp_name, c, externs)
     out = out.concat(se.lines)
     c = se.counter
   }
@@ -1598,7 +1665,7 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
 // `_provide`: the provision class, its methods, and the runtime-derived
 // revertible provision (yield the disposer, then populate). Threads the counter
 // across its methods (a method-body effect shares the component's counter).
-fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any) -> Emit {
+fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
   let name = mangle(value_str(value_field(step, "name")))
   let svc = value_str(value_field(step, "service"))
   // item 421 F6: the provided service's method specs, the only place the
@@ -1613,7 +1680,7 @@ fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services:
   var c = counter
   for (m of methods) {
     out = out.push("")
-    let me = method_lines(m, indent + 1, name, comp_name, c, specs)
+    let me = method_lines(m, indent + 1, name, comp_name, c, specs, externs)
     out = out.concat(me.lines)
     c = me.counter
   }
@@ -1645,11 +1712,47 @@ fn timer_emit(step: Any, indent: Int, counter: Int) -> Emit {
 
 // `_body_step`: one activation-body step -> its lines (with the reference's
 // trailing blank), threading the timer counter.
-fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any) -> Emit {
+fn witnessed_extern(expr: Any, externs: List[Any]) -> Any {
+  if (node_kind(expr) != "fn") { return None }
+  let name = value_str(value_field(expr, "name"))
+  for (ext of externs) {
+    if (value_str(value_field(ext, "name")) == name && value_str(value_field(ext, "class")) == "witnessed") { return ext }
+  }
+  return None
+}
+
+fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) -> Emit {
+  let c = counter + 1
+  let tmp = `_revl_wit${c}`
+  let call_expr = cexpr(value_field(step, "acquire"))
+  let inverse_expr = cexpr(value_field(ext, "undo"))
+  var out = []
+  out = out.push(line(indent, tmp.concat(" = ").concat(call_expr)))
+  out = out.push(line(indent, "if isinstance(".concat(tmp).concat(", Ok):")))
+  let register = method ? "_revl_frame.transactional_method" : "yield _revl_frame.transactional"
+  var kwargs = ""
+  if (!method) {
+    if (value_bool(value_field(ext, "undo_idempotent"))) { kwargs = kwargs.concat(", undo_idempotent=True") }
+    if (!value_is_null(value_field(ext, "register"))) { kwargs = kwargs.concat(", register=").concat(py_repr(value_str(value_field(ext, "register")))) }
+    if (!value_is_null(value_field(ext, "idempotency_key"))) { kwargs = kwargs.concat(", idempotency=").concat(py_repr(value_str(value_field(ext, "idempotency_key")))) }
+  }
+  out = out.push(line(indent + 1, register.concat("((lambda result: ").concat(inverse_expr).concat("), ").concat(tmp).concat(".value").concat(kwargs).concat(")")))
+  if (value_str(value_field(step, "step")) == "let-effect") {
+    out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${tmp}`))
+  }
+  return { lines: out, counter: c }
+}
+
+fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect") {
     var out = []
     for (su of value_list(value_field(step, "setup"))) { out = out.concat(setup_step(su, indent)) }
+    let wit = witnessed_extern(value_field(step, "acquire"), externs)
+    if (!value_is_null(wit)) {
+      let e = witnessed_step(step, indent, wit, counter, false)
+      return { lines: out.concat(e.lines).push(""), counter: e.counter }
+    }
     out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${cexpr(value_field(step, "acquire"))}`))
     out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
     out = out.push("")
@@ -1658,8 +1761,14 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   if (kind == "effect") {
     var out = []
     for (su of value_list(value_field(step, "setup"))) { out = out.concat(setup_step(su, indent)) }
-    out = out.push(line(indent, cexpr(value_field(step, "acquire"))))
-    out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
+    let wit = witnessed_extern(value_field(step, "acquire"), externs)
+    if (!value_is_null(wit)) {
+      let e = witnessed_step(step, indent, wit, counter, false)
+      return { lines: out.concat(e.lines).push(""), counter: e.counter }
+    } else {
+      out = out.push(line(indent, cexpr(value_field(step, "acquire"))))
+      out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
+    }
     out = out.push("")
     return { lines: out, counter: counter }
   }
@@ -1687,13 +1796,13 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   if (kind == "if") {
     var out = [line(indent, `if ${cexpr(value_field(step, "cond"))}:`)]
     var c = counter
-    let te = emit_body_steps(value_list(value_field(step, "then")), indent + 1, comp_name, c, services)
+    let te = emit_body_steps(value_list(value_field(step, "then")), indent + 1, comp_name, c, services, externs)
     out = out.concat(te.lines)
     c = te.counter
     let els = value_list(value_field(step, "else"))
     if (els.length() > 0) {
       out = out.push(line(indent, "else:"))
-      let ee = emit_body_steps(els, indent + 1, comp_name, c, services)
+      let ee = emit_body_steps(els, indent + 1, comp_name, c, services, externs)
       out = out.concat(ee.lines)
       c = ee.counter
     }
@@ -1707,7 +1816,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     return { lines: out, counter: e.counter }
   }
   if (kind == "provide") {
-    let pe = provide_lines(step, indent, comp_name, counter, services)
+    let pe = provide_lines(step, indent, comp_name, counter, services, externs)
     var out = pe.lines
     out = out.push("")
     return { lines: out, counter: pe.counter }
@@ -1717,11 +1826,11 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   return { lines: out, counter: counter }
 }
 
-fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int, services: Any) -> Emit {
+fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
   var out = []
   var c = counter
   for (s of steps) {
-    let e = body_step(s, indent, comp_name, c, services)
+    let e = body_step(s, indent, comp_name, c, services, externs)
     out = out.concat(e.lines)
     c = e.counter
   }
@@ -1764,7 +1873,7 @@ fn body_has_secret_param(steps: List[Any], services: Any) -> Bool {
 }
 
 // One component: the `_<snake>_apply` closure and its plugin dict.
-fn component_body(comp: Any, services: Any) -> List[Str] {
+fn component_body(comp: Any, services: Any, externs: List[Any]) -> List[Str] {
   let name = mangle(value_str(value_field(comp, "name")))
   let sn = snake(name)
   var out = []
@@ -1814,7 +1923,7 @@ fn component_body(comp: Any, services: Any) -> List[Str] {
   // post-activation abort's activation-body offsets are drained after Phase 1
   // instead of lost. Mirrors backends/python/emit.py (byte-agreement oracle).
   out = out.push(line(2, "yield _revl_frame.begin"))
-  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0, services)
+  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0, services, externs)
   out = out.concat(e.lines)
   out = out.push(line(2, "yield _revl_frame.drain"))
   out = out.push("")
@@ -2210,13 +2319,212 @@ fn ir_uses_host_root(ir: Any, root: Str) -> Bool {
   return false
 }
 
+// Safe pure-function templates mirror the reference's evaluation-preserving
+// substitution. All rebuilt objects are fresh maps/lists; the caller's IR is
+// never mutated.
+fn inline_bound(node: Any) -> List[Str] {
+  var names = []
+  if (!value_is_null(value_field(node, "step"))) {
+    for (key of ["name", "bind", "rest"]) {
+      let v = value_field(node, key)
+      if (value_kind(v) == "str") { names = names.push(value_str(v)) }
+    }
+    for (v of value_list(value_field(node, "names"))) {
+      if (value_kind(v) == "str") { names = names.push(value_str(v)) }
+    }
+  } else if (node_kind(node) == "arrow") {
+    for (v of value_list(value_field(node, "params"))) {
+      if (value_kind(v) == "str") { names = names.push(value_str(v)) }
+    }
+  } else if (node_kind(node) == "match") {
+    for (arm of value_list(value_field(node, "arms"))) {
+      let v = value_field(arm, "bind")
+      if (value_kind(v) == "str") { names = names.push(value_str(v)) }
+    }
+  }
+  for (child of value_children(node)) { names = names.concat(inline_bound(child)) }
+  return names
+}
+
+fn inline_free(node: Any) -> List[Str] {
+  var names = []
+  let kind = node_kind(node)
+  if (kind == "var") { names = names.push(value_str(value_field(node, "name"))) }
+  if (kind == "name") { names = names.push(value_str(value_field(node, "id"))) }
+  for (child of value_children(node)) { names = names.concat(inline_free(child)) }
+  return names
+}
+
+fn inline_nodes(node: Any) -> Int {
+  var n = value_is_object(node) ? 1 : 0
+  for (child of value_children(node)) { n += inline_nodes(child) }
+  return n
+}
+
+fn inline_impure(node: Any) -> Bool {
+  if (list_contains(["call", "optcall", "req", "spawn", "instance-get", "host"], node_kind(node))) { return true }
+  for (child of value_children(node)) { if (inline_impure(child)) { return true } }
+  return false
+}
+
+fn inline_uses(node: Any, name: Str) -> Int {
+  var n = node_kind(node) == "var" && value_str(value_field(node, "name")) == name ? 1 : 0
+  for (child of value_children(node)) { n += inline_uses(child, name) }
+  return n
+}
+
+fn inline_eager(node: Any, name: Str) -> Bool {
+  let kind = node_kind(node)
+  if (kind == "var") { return value_str(value_field(node, "name")) == name }
+  if (kind == "bin") {
+    let left = inline_eager(value_field(node, "left"), name)
+    if (list_contains(["&&", "||", "??"], value_str(value_field(node, "op")))) { return left }
+    return left || inline_eager(value_field(node, "right"), name)
+  }
+  if (kind == "un") { return inline_eager(value_field(node, "operand"), name) }
+  if (kind == "if") {
+    return inline_eager(value_field(node, "cond"), name) || (inline_eager(value_field(node, "then"), name) && inline_eager(value_field(node, "else"), name))
+  }
+  if (kind == "builtin" || kind == "field" || kind == "optfield") { return inline_eager(value_field(node, "target"), name) }
+  if (kind == "index") { return inline_eager(value_field(node, "target"), name) || inline_eager(value_field(node, "index"), name) }
+  if (kind == "list") {
+    for (item of value_list(value_field(node, "items"))) { if (inline_eager(item, name)) { return true } }
+  }
+  if (kind == "match") { return inline_eager(value_field(node, "scrutinee"), name) }
+  return false
+}
+
+fn inline_replace(node: Any, name: Str, arg: Any) -> Any {
+  if (value_is_object(node)) {
+    if (node_kind(node) == "var" && value_str(value_field(node, "name")) == name) { return arg }
+    var fields: Map[Str, Any] = Map.empty()
+    for (key of value_keys(node)) { fields = fields.set(key, inline_replace(value_field(node, key), name, arg)) }
+    return fields
+  }
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(inline_replace(item, name, arg)) }
+    return items
+  }
+  return node
+}
+
+fn inline_substitute(param: Str, template: Any, arg: Any) -> Any {
+  if (param == "") { return template }
+  if (inline_eager(template, param)) {
+    if (inline_uses(template, param) != 1 && inline_impure(arg)) { return None }
+  } else {
+    if (!list_contains(["var", "name", "lit", "config", "maplit"], node_kind(arg))) { return None }
+  }
+  return inline_replace(template, param, arg)
+}
+
+fn inline_template(fnode: Any) -> Any {
+  if (value_bool(value_field(fnode, "async")) || is_cache_pure_fn(fnode)) { return None }
+  let params = value_list(value_field(fnode, "params"))
+  let body = value_list(value_field(fnode, "body"))
+  if (params.length() > 1 || body.length() == 0) { return None }
+  let last = value_at(body, body.length() - 1)
+  if (value_str(value_field(last, "step")) != "return" || value_is_null(value_field(last, "expr"))) { return None }
+  var expr = value_field(last, "expr")
+  var i = body.length() - 2
+  while (i >= 0) {
+    let guard = value_at(body, i)
+    let yes = value_list(value_field(guard, "then"))
+    if (value_str(value_field(guard, "step")) != "if" || value_list(value_field(guard, "else")).length() > 0) { return None }
+    if (yes.length() != 1 || value_str(value_field(value_at(yes, 0), "step")) != "return") { return None }
+    let ret = value_field(value_at(yes, 0), "expr")
+    let cond = value_field(guard, "cond")
+    if (value_is_null(ret) || value_is_null(cond)) { return None }
+    var folded: Map[Str, Any] = Map.empty()
+    folded = folded.set("kind", "if").set("cond", cond).set("then", ret).set("else", expr)
+    expr = folded
+    i -= 1
+  }
+  let param = params.length() == 0 ? "" : value_str(value_field(value_at(params, 0), "name"))
+  return { param: param, expr: expr }
+}
+
+fn inline_rewrite(node: Any, templates: Map[Str, Any], stack: List[Str], bound: List[Str], expanding: Bool) -> Any {
+  if (value_is_object(node)) {
+    var fields: Map[Str, Any] = Map.empty()
+    for (key of value_keys(node)) { fields = fields.set(key, inline_rewrite(value_field(node, key), templates, stack, bound, expanding)) }
+    let callee = value_field(fields, "callee")
+    let name = value_str(value_field(callee, "name"))
+    if (node_kind(fields) == "call" && node_kind(callee) == "var" && templates.has(name) && !list_contains(stack, name) && !list_contains(bound, name)) {
+      var tmpl = value_field(templates, name)
+      if (expanding) { tmpl = inline_expand(name, templates, stack) }
+      if (!value_is_null(tmpl)) {
+        let param = value_str(value_field(tmpl, "param"))
+        let args = value_list(value_field(fields, "args"))
+        if ((param == "") == (args.length() == 0)) {
+          let sub = inline_substitute(param, value_field(tmpl, "expr"), value_at(args, 0))
+          if (!value_is_null(sub)) { return sub }
+        }
+      }
+    }
+    return fields
+  }
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(inline_rewrite(item, templates, stack, bound, expanding)) }
+    return items
+  }
+  return node
+}
+
+fn inline_expand(name: Str, raw: Map[Str, Any], stack: List[Str]) -> Any {
+  let tmpl = value_field(raw, name)
+  let param = value_str(value_field(tmpl, "param"))
+  let expr = value_field(tmpl, "expr")
+  let bound = inline_bound(expr).push(param)
+  let result = inline_rewrite(expr, raw, stack.push(name), bound, true)
+  for (free of inline_free(result)) { if (free != param) { return None } }
+  if (inline_impure(result) || inline_nodes(result) > 24) { return None }
+  return { param: param, expr: result }
+}
+
+fn inline_pure_fns(ir: Any) -> Any {
+  let functions = value_list(value_field(ir, "functions"))
+  var raw: Map[Str, Any] = Map.empty()
+  for (fnode of functions) {
+    let tmpl = inline_template(fnode)
+    if (!value_is_null(tmpl)) { raw = raw.set(value_str(value_field(fnode, "name")), tmpl) }
+  }
+  var templates: Map[Str, Any] = Map.empty()
+  for (name of raw.keys()) {
+    let tmpl = inline_expand(name, raw, [])
+    if (!value_is_null(tmpl)) { templates = templates.set(name, tmpl) }
+  }
+  if (templates.size() == 0) { return ir }
+  var rewritten: List[Any] = []
+  for (fnode of functions) {
+    let body = value_field(fnode, "body")
+    var bound = inline_bound(body)
+    for (p of value_list(value_field(fnode, "params"))) { bound = bound.push(value_str(value_field(p, "name"))) }
+    var fields: Map[Str, Any] = Map.empty()
+    for (key of value_keys(fnode)) {
+      if (key == "body") { fields = fields.set(key, inline_rewrite(body, templates, [], bound, false)) }
+      else { fields = fields.set(key, value_field(fnode, key)) }
+    }
+    rewritten = rewritten.push(fields)
+  }
+  var result: Map[Str, Any] = Map.empty()
+  for (key of value_keys(ir)) {
+    if (key == "functions") { result = result.set(key, rewritten) }
+    else { result = result.set(key, value_field(ir, key)) }
+  }
+  return result
+}
+
 // The document assembly, mirroring `emit()` for functions + components/services.
 // Named `emit_py_src` (not a bare `emit_src`) so the whole self-host pipeline can
 // `use` emit_py.rvl BESIDE emit_rust.rvl in one composition: a `use`d module's
 // PRIVATE decls no longer leak (item 228), but the merge still flattens both
 // modules' PUBLIC decls by bare name, so the two emitter entrypoints must differ
 // (roadmap item 230 — enables the fully-native `compile.rvl`).
-pub fn emit_py_src(ir: Any) -> Str {
+pub fn emit_py_src(source_ir: Any) -> Str {
+  let ir = inline_pure_fns(source_ir)
   var out = []
   let ver = value_int(value_opt(ir, "ir_version") ?? 1)
   out = out.push(`"""Generated by the revl cordis-py backend (ir_version ${ver}) — do not edit.`)
@@ -2298,6 +2606,9 @@ pub fn emit_py_src(ir: Any) -> Str {
     }
   }
   if (uses_float_interp(ir)) { out = out.concat(ftoa_block()) }
+  var has_cache_pure = false
+  for (f of value_list(value_field(ir, "functions"))) { if (is_cache_pure_fn(f)) { has_cache_pure = true } }
+  if (has_cache_pure) { out = out.concat(memo_source()) }
   // Built-in Result classes (gated), each suppressed if a user variant case
   // shadows the name.
   let types = value_field(ir, "types")
@@ -2326,7 +2637,7 @@ pub fn emit_py_src(ir: Any) -> Str {
   out = out.push("")
   out = out.push("")
   for (c of components) {
-    out = out.concat(component_body(c, value_field(ir, "services")))
+    out = out.concat(component_body(c, value_field(ir, "services"), externs))
     out = out.push("")
     out = out.push("")
   }

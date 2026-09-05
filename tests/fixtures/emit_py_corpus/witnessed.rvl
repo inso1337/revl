@@ -13,35 +13,12 @@
 // have dropped the clause and emitted a module referencing names it never
 // defined, with every byte-agreement oracle still green.
 //
-// WHAT IT DELIBERATELY DOES NOT HOLD THEM TO: the witnessed EFFECT STEP. A
-// component `effect stash(...)` renders on the reference as the transactional
-// registration (`_revl_wit1 = stash(..)`, `if isinstance(_revl_wit1, Ok):`,
-// `yield _revl_frame.transactional(..)`), and selfhost/emit_py.rvl has no port
-// of it — measured, it emits the bare call plus
-// `yield lambda: <<UNSUPPORTED-CEXPR:>>`, which is a bracket-shaped nothing
-// where a transaction belongs. That gap is a PORT, not a corpus case, and it is
-// not hidden by this document: it stays named on the reference side of
-// tests/fixtures/selfhost_uncovered_lines.json as
-// `_ComponentEmitter._witnessed_step` / `_method_witnessed_step`, NEVER
-// ENTERED, and in the roadmap under item 429.
+// The effect sites below additionally exercise transactional registration in
+// activation and provide-method bodies, including shared temp numbering across
+// multiple sites.
 //
-// WHAT ADDING THIS DOCUMENT FOUND, which is the whole argument of item 429 in
-// miniature. It reddened two gates nobody was aiming at, both in the SELF-HOST
-// FRONTEND (`selfhost/lower.rvl`), both invisible while the corpus's only
-// externs were two `pure` declarations with no `undo` and no capability tag:
-//   * the admission gate REFUSES a program the reference compiles — `BAD|
-//     expected fn after extern` — because the extern grammar knows
-//     `pure`/`acquire`/`emission` untagged and neither the `witnessed` class nor
-//     a capability tag on any class (`witnessed[fs]`, `emission[net]`);
-//   * `lower_to_ir` drops the WHOLE `externs` section to `null`, silently, for
-//     any extern carrying an `undo` clause or a capability tag. Not a refusal:
-//     a document with a full extern table lowers to one with none, which reads
-//     downstream exactly like a document that declared no externs.
-// Both are recorded where they bite, as ratchets rather than skips:
-// tests/test_selfhost_compile.py's `NATIVE_GATE_GAPS` pins the exact refusal
-// string, and tests/test_selfhost_lower_ir.py's `EXTERN_DECL_GAP` marks this
-// document strict-xfail, so the day the grammar lands both go red on the stale
-// entry instead of outliving it.
+// This fixture originally exposed native extern admission/lowering omissions;
+// those frontend repairs are maintained separately from the emitter oracle.
 
 type Stash = { path: Str, bak: Str }
 type FsError = { code: Str }
@@ -58,7 +35,7 @@ extern pure fn unstash(w: Stash) -> Unit = @py {
 // The witnessed mutation: rename `path` aside, returning the two paths as its
 // data witness. Ok-conditional at the call site — an `Err` touched nothing and
 // registers no rollback.
-extern witnessed[fs] fn stash(path: Str) -> Result[Stash, FsError] undo unstash(result) = @py {
+extern witnessed[fs] fn stash(path: Str) -> Result[Stash, FsError] undo idempotent unstash(result) = @py {
     import os
     bak = path + '.bak'
     os.replace(path, bak)
@@ -66,8 +43,33 @@ extern witnessed[fs] fn stash(path: Str) -> Result[Stash, FsError] undo unstash(
 }
 
 // A call site for the inverse, so the extern pair is wired into a function the
-// way externs.rvl wires its own (the witnessed extern itself is effect-position
-// only, and the effect step is the shape held out above).
+// way externs.rvl wires its own (the witnessed extern is effect-position only).
 fn restore(path: Str, bak: Str) -> Unit {
   return unstash({ path: path, bak: bak })
+}
+
+component Stasher {
+  effect stash("payload")
+  let saved = effect {
+    var path = "initial"
+    if (true) { path = "second" } else { path = "unused" }
+    assert path != ""
+    path
+    stash(path)
+  }
+}
+
+service Stashing {
+  emission fn save(path: Str)
+}
+
+component MethodStasher provides stashing: Stashing {
+  effect stash("activation")
+  provide stashing {
+    fn save(path) {
+      effect stash(path)
+      effect stash(path)
+      return
+    }
+  }
 }
