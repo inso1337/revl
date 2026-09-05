@@ -53,8 +53,46 @@ public final class RealPlacementRunner {
     static String name = "?";
     static final String STOP = "__stop__";
 
+    // The one choke point every console line passes through: a declared
+    // Secret[T] is scrubbed HERE, never at each printer.
     static void log(String channel, String subject, String detail) {
-        System.out.println(("[" + name + "] " + pad(channel, 8) + "| " + pad(subject, 16) + "| " + detail).stripTrailing());
+        System.out.println(("[" + name + "] " + pad(channel, 8) + "| " + pad(redactSecrets(subject), 16)
+                + "| " + redactSecrets(detail)).stripTrailing());
+    }
+
+    // --- the declared Secret[T] registry (item 421 F6): PlacementRunner's twin --
+    //
+    // The emitted Components registers every declared `Secret[T]` value with a
+    // registry of its own (revlMarkSecret in a plugin constructor for a config
+    // field, at the head of a provide method for a parameter, revlSecretResult
+    // around an extern's return) and exposes revlRedactText over it. This
+    // runner keeps no registry: it BINDS to the container's, reflectively, so
+    // a Components emitted for a document that declares no Secret[T] (which
+    // carries no registry, byte-identical to before) binds nothing and the
+    // funnel is the identity. Every line this process prints and every failure
+    // it sends back across the seam passes through it, so a sink added later
+    // reads an already-redacted line.
+    static volatile java.util.function.UnaryOperator<String> secretRedactor = text -> text;
+
+    static void bindSecretRegistry(String container) {
+        Method redact;
+        try {
+            redact = Class.forName(container).getMethod("revlRedactText", String.class);
+        } catch (ReflectiveOperationException absent) {
+            return; // no declared Secret[T] in this document: nothing to redact
+        }
+        secretRedactor = text -> {
+            try {
+                return (String) redact.invoke(null, text);
+            } catch (ReflectiveOperationException failure) {
+                // A funnel that cannot run must not let the text through.
+                throw new IllegalStateException("secret redaction failed", failure);
+            }
+        };
+    }
+
+    static String redactSecrets(String text) {
+        return text == null ? null : secretRedactor.apply(text);
     }
 
     static String pad(String s, int n) {
@@ -68,6 +106,7 @@ public final class RealPlacementRunner {
         Map<String, Object> spec = (Map<String, Object>) Json.parse(Files.readString(Path.of(argv[0])));
         name = (String) spec.get("name");
         String container = (String) spec.getOrDefault("module", "revl.Components");
+        bindSecretRegistry(container); // before the first line is printed
         Map<String, Object> ifaces = (Map<String, Object>) spec.getOrDefault("ifaces", Map.of());
         Map<String, Object> config = (Map<String, Object>) spec.getOrDefault("config", Map.of());
         Map<String, Object> proxies = (Map<String, Object>) spec.getOrDefault("proxies", Map.of());
@@ -255,7 +294,14 @@ public final class RealPlacementRunner {
             Object value = m.invoke(service, coerceArgs(m, args));
             log("probe", expr, "=> " + render(value));
         } catch (Exception ex) {
-            log("probe", expr, "ERROR " + ex.getMessage());
+            // The probe dispatches reflectively, so without the unwrap every
+            // failure read "ERROR null". `log` funnels the text through the
+            // registry; a seam reply arrives already redacted.
+            Throwable failure = ex;
+            while (failure instanceof java.lang.reflect.InvocationTargetException wrapped && wrapped.getCause() != null) {
+                failure = wrapped.getCause();
+            }
+            log("probe", expr, "ERROR " + failure.getClass().getSimpleName() + ": " + failure.getMessage());
         }
     }
 

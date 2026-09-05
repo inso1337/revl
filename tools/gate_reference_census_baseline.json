@@ -21,6 +21,7 @@
    "backends/go/testdata/opt_gaps_280.rvl",
    "backends/go/testdata/result_ctor_302.rvl",
    "backends/java/scenarios/method_witnessed.rvl",
+   "backends/java/scenarios/secret_registry.rvl",
    "backends/typescript/tests/fixtures/a2a_agent.rvl",
    "backends/wasm/scenarios/crashproof/crashproof.rvl",
    "examples/async_timer.rvl",
@@ -41,7 +42,6 @@
    "stdlib/json.rvl",
    "stdlib/list.rvl",
    "stdlib/render.rvl",
-   "stdlib/shell.rvl",
    "stdlib/value.rvl",
    "tests/fixtures/emit_py_corpus/witnessed.rvl",
    "tests/fixtures/v2_math_lib.rvl"
@@ -177,6 +177,18 @@
    }
   },
   "backends/java/scenarios/method_witnessed.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/java/scenarios/secret_registry.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
@@ -537,18 +549,6 @@
    }
   },
   "stdlib/render.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "stdlib/shell.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",

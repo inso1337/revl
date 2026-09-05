@@ -51,7 +51,7 @@ for _p in (str(_ROOT / "src"), str(_BACKEND_PY)):
         sys.path.insert(0, _p)
 
 import revl_shell_classify as _sc  # noqa: E402  (py classifier, the oracle)
-from revl.compiler import compile_files, compile_source  # noqa: E402
+from revl.compiler import compile_files  # noqa: E402
 
 
 def _load_ts_emit():
@@ -129,7 +129,11 @@ def _emit_ts_classifier(dest: Path) -> None:
     """Emit the real `stdlib/shell.rvl` (its `classify` + accessors) to ts, into
     the generated dir so its `import ... from '../../runtime.ts'` resolves."""
     tsemit = _load_ts_emit()
-    ir = compile_source((_ROOT / "stdlib" / "shell.rvl").read_text(encoding="utf-8"), "shell.rvl")
+    # shell.rvl's `classify` @py body imports a backend module; #302 refuses that
+    # for a context-free / user-origin compile. It is first-party stdlib, so
+    # compile it through the stdlib-aware path (its real path under stdlib_root())
+    # where the install-origin exemption applies. The ts emission is unchanged.
+    ir = compile_files([str(_ROOT / "stdlib" / "shell.rvl")])
     dest.write_text(tsemit.emit(ir, runtime_import="../../runtime.ts"), encoding="utf-8")
 
 
