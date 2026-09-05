@@ -1727,6 +1727,22 @@ def _arrow_param_types(expr) -> list:
     return resolved[:len(expr.params)]
 
 
+def _arrow_declared_param_types(expr) -> list:
+    """An arrow's parameter types, preferring the checker-resolved
+    `param_types` and falling back to the author's own annotations
+    (`written_param_types`) where the checker never resolved the arrow.
+
+    A stratum-3 arrow (in a provide-method or component body) is not checked,
+    so `param_types` stays None even when every parameter was annotated; the
+    annotations survive on `written_param_types`. This reads the type the
+    author declared regardless of stratum, without moving what goes into the
+    IR (that stays gated on `_arrow_signature_known`)."""
+    resolved = _arrow_param_types(expr)
+    written = list(getattr(expr, "written_param_types", None) or [])
+    written += [None] * (len(expr.params) - len(written))
+    return [r if r is not None else written[i] for i, r in enumerate(resolved)]
+
+
 def _arrow_signature_known(expr) -> bool:
     """May this arrow's signature go into the IR?
 
@@ -7024,6 +7040,16 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
     if isinstance(expr, ExprCall):
         args = [_lower_component_pure_expr(a, env, scope, callables, pure_only)
                 for a in expr.args]
+        # A spawn-handle provision flowing in as an ARGUMENT to a local arrow
+        # whose parameter carries the service type is the same boundary crossing
+        # as calling the provision directly; follow it across the parameter
+        # binding so the arrow body's `emit`-marker discipline matches the direct
+        # spelling (GHSA-wg4v-r47x-52p2 residual — the sibling of #331's alias).
+        if isinstance(expr.callee, ExprVar) \
+                and expr.callee.name in (getattr(env, "local_arrows", None) or {}):
+            _check_arrow_param_crossings(
+                env.local_arrows[expr.callee.name], args, env, scope,
+                callables, pure_only)
         # A method call whose receiver is a NAME takes the var-root fast paths
         # below (host family, required service, stdlib builtin, opaque local) —
         # except when that name is a spawn-handle provision alias. Those must
@@ -7262,14 +7288,27 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         # snapshotted by value (unchanged).
         inner = dict(scope)
         param_types = _arrow_param_types(expr)
-        for param, ptype in zip(expr.params, param_types):
+        # A stratum-3 arrow (a provide-method / component-body arrow) is not
+        # checked yet, so `param_types` is None even when the author annotated
+        # every parameter; the annotations survive on `written_param_types`.
+        # For a parameter the author declared as a SERVICE type, carry that type
+        # into `type_env` so a boundary crossing through the parameter is judged
+        # as the emission it is (GHSA-wg4v-r47x-52p2 residual). Scoped to service
+        # types so no other inference (stdlib-method pinning, field reads) sees a
+        # type it did not see before — the IR node keys stay gated on the full
+        # checked signature (`_arrow_signature_known`), so the IR is unmoved.
+        declared = _arrow_declared_param_types(expr)
+        for param, ptype, dtype in zip(expr.params, param_types, declared):
             # the component path resolves names through `id` (unlike the
             # pure-fn path's raw `var`), so the arrow parameter maps to its
             # own name — the emitted lambda binds params positionally, and a
             # `name` node for the parameter must render to exactly that.
             inner[param] = param
+            svc_head, _ = parse_type(dtype or "")
             if ptype:
                 env.type_env[param] = ptype
+            elif dtype and svc_head in env.services:
+                env.type_env[param] = dtype
             else:
                 env.type_env.pop(param, None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
@@ -7285,6 +7324,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         if _arrow_signature_known(expr):
             node["param_types"] = param_types
             node["returns"] = expr.returns or "Any"
+        # G8 audit provenance (GHSA-wg4v-r47x-52p2 residual): which parameters
+        # are boundary handles (service-typed), so `_boundary` can enumerate a
+        # crossing routed through the parameter when the arrow is applied to a
+        # provision — the audit-surface twin of the G4 marker demand above.
+        # Present only when a parameter carries a service type (the new case),
+        # so no existing arrow node moves; ignored by every emitter (they read
+        # params/body/captures/param_types/returns).
+        svc_params = {p: d for p, d in zip(expr.params, declared)
+                      if d and parse_type(d)[0] in env.services}
+        if svc_params:
+            node["service_params"] = svc_params
         return node
     if isinstance(expr, ExprOptField):
         return {
@@ -10821,6 +10871,73 @@ def _note_provision_alias(safe: str, value, env) -> None:
         env.provision_locals[safe] = value
 
 
+def _check_arrow_param_crossings(arrow, args: list, env: Env,
+                                 scope: dict, callables, pure_only: bool) -> None:
+    """Follow a spawn-handle provision across an ARROW PARAMETER binding at the
+    application site (GHSA-wg4v-r47x-52p2 residual).
+
+    #331 resolved a boundary crossing reached through a `let`/capture binding of
+    a spawn handle by mapping the safe IR name back to the provision
+    (`provision_locals`) so every consumer judges the aliased spelling exactly
+    as the direct one. This is the sibling one indirection further: the handle
+    does not name the receiver lexically — it flows in as a call ARGUMENT to a
+    local arrow whose PARAMETER carries the service type
+    (`let f = (t: Task, s: Str) => t.run(s); f(w.task, p)`). The parameter's
+    declared service type IS the provenance the emission analysis has to follow.
+
+    The resolution is #331's, extended to the parameter binding: bind each
+    service-typed parameter that receives a provision argument into
+    `provision_locals`, then re-lower the arrow body. The receiver `t` then
+    lowers back to the provision's `instance-get`, and the SAME instance-get
+    consumer that guards the direct handle call (`_instance_get_call`, the G4
+    `emit`-marker check at the generic call fall-through) judges `t.run(s)`
+    exactly as `w.task.run(s)`: an unmarked crossing is refused naming the real
+    subject `w.task.run`, a marked one passes, and a non-emission method or an
+    arrow never applied to a provision installs no binding and is untouched.
+
+    A pure check: the re-lowered body is discarded (the emitted arrow is left
+    byte-identical), and `provision_locals` / `type_env` are restored."""
+    params = list(getattr(arrow, "params", None) or [])
+    if not params:
+        return
+    ptypes = _arrow_declared_param_types(arrow)
+    bindings: dict[str, dict] = {}
+    for param, ptype, arg in zip(params, ptypes, args):
+        if not ptype or not isinstance(arg, dict):
+            continue
+        head, _ = parse_type(ptype)
+        if head not in env.services:
+            continue
+        resolved = _resolve_provision_alias(arg, env)
+        if isinstance(resolved, dict) and resolved.get("kind") == "instance-get":
+            bindings[param] = resolved
+    if not bindings:
+        return
+    saved_prov = dict(env.provision_locals)
+    type_env = getattr(env, "type_env", None)
+    saved_types = {p: type_env.get(p) for p in params} if type_env is not None else {}
+    inner = dict(scope)
+    try:
+        for param, ptype in zip(params, ptypes):
+            inner[param] = param
+            if type_env is not None:
+                if ptype:
+                    type_env[param] = ptype
+                else:
+                    type_env.pop(param, None)
+        for param, inst in bindings.items():
+            env.provision_locals[param] = inst
+        _lower_component_pure_expr(arrow.body, env, inner, callables, pure_only)
+    finally:
+        env.provision_locals = saved_prov
+        if type_env is not None:
+            for param, prev in saved_types.items():
+                if prev is None:
+                    type_env.pop(param, None)
+                else:
+                    type_env[param] = prev
+
+
 def _instance_get_call(node: dict, env: Env):
     """If `node` is a method call whose receiver is a provision read off a
     spawn handle (`s.<key>.<method>(...)`), return `(instance_get, decl)`:
@@ -10862,6 +10979,22 @@ def _is_emission_call(node: dict, env: Env) -> bool:
         # there rather than assuming a `req` target (which KeyError'd here)
         inst = _instance_get_call(node, env)
         return inst is not None and inst[1].emission
+    if target.get("kind") == "name":
+        # a call whose receiver is a service-typed local or parameter. A value
+        # of a service type is a boundary handle — only a provision read or a
+        # required binding yields one — so an `emission` method reached through
+        # it crosses the boundary exactly as the `req`/handle spellings do. This
+        # is what lets a correctly `emit`-marked call through a service-typed
+        # ARROW PARAMETER validate (`(t: Task) => emit t.run(p)`), the same way
+        # #331 made the aliased handle's `emit t.run(p)` validate rather than
+        # refusing the marked form as "not declared emission". The UNMARKED
+        # demand is raised where the provision flows into the parameter (the
+        # application, `_check_arrow_param_crossings`); this predicate only
+        # decides emission-ness (GHSA-wg4v-r47x-52p2 residual).
+        head, _ = parse_type((getattr(env, "type_env", None) or {}).get(target.get("id")) or "")
+        svc = env.services.get(head)
+        decl = svc.methods.get(node.get("method")) if svc is not None else None
+        return decl is not None and decl.emission
     if target.get("kind") != "req":
         return False
     svc = env.services[env.requires[target["name"]]]
