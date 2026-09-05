@@ -306,7 +306,8 @@ type Ctx = {
   signatures: List[Any],
   ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
   variants: List[Str],
-  rt: Str, builders: Map[Str, Str], builder_seq: Int
+  rt: Str, builders: Map[Str, Str], builder_seq: Int,
+  reserved: Map[Str, Str], strings_alias: Str
 }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds one `_V3GoCtx` for the function list,
@@ -319,6 +320,7 @@ type TypeTables = {
 // revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
 // is visible to every later statement (the reference mutates one `ctx`).
 type Sout = { lines: List[Str], ctx: Ctx }
+type Fout = { lines: List[Str], uses_strings: Bool }
 
 fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
@@ -328,8 +330,35 @@ fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
     vt: ctx.vt.set(k, v), fr: ctx.fr, er: ctx.er,
     signatures: ctx.signatures,
     ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants, rt: ctx.rt,
-    builders: ctx.builders, builder_seq: ctx.builder_seq
+    builders: ctx.builders, builder_seq: ctx.builder_seq,
+    reserved: ctx.reserved, strings_alias: ctx.strings_alias
   }
+}
+
+fn collect_reserved(node: Any, reserved: Map[Str, Str]) -> Map[Str, Str] {
+  var out = reserved
+  if (value_kind(node) == "record") {
+    let name = value_field(node, "name")
+    let bind = value_field(node, "bind")
+    if (value_kind(name) == "str" && value_str(name) != "") {
+      out = out.set(v3_ident(value_str(name)), "1")
+    }
+    if (value_kind(bind) == "str" && value_str(bind) != "") {
+      out = out.set(v3_ident(value_str(bind)), "1")
+    }
+  }
+  for (child of value_children(node)) { out = collect_reserved(child, out) }
+  return out
+}
+
+fn fresh_ident(base: Str, reserved: Map[Str, Str]) -> Str {
+  var candidate = base
+  var suffix = 0
+  while (map_get(reserved, candidate) != "") {
+    candidate = `${base}${suffix}`
+    suffix = suffix + 1
+  }
+  return candidate
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
@@ -1101,7 +1130,8 @@ fn with_builders(ctx: Ctx, builders: Map[Str, Str], seq: Int) -> Ctx {
   return {
     vt: ctx.vt, fr: ctx.fr, er: ctx.er, signatures: ctx.signatures,
     ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants, rt: ctx.rt,
-    builders: builders, builder_seq: seq
+    builders: builders, builder_seq: seq,
+    reserved: ctx.reserved, strings_alias: ctx.strings_alias
   }
 }
 
@@ -1110,10 +1140,15 @@ fn open_builders(node: Any, ctx: Ctx, indent: Int) -> Sout {
   var out = []
   for (name of builder_candidates(value_field(node, "body"), ctx)) {
     if (map_get(c.builders, name) == "" && builder_safe(node, name)) {
-      let builder = `_revlSB${c.builder_seq}`
-      out = out.push(line(indent, `var ${builder} strings.Builder`))
+      var seq = c.builder_seq
+      var builder = `_revlSB${seq}`
+      while (map_get(c.reserved, builder) != "") {
+        seq = seq + 1
+        builder = `_revlSB${seq}`
+      }
+      out = out.push(line(indent, `var ${builder} ${c.strings_alias}.Builder`))
       out = out.push(line(indent, `${builder}.WriteString(${v3_ident(name)})`))
-      c = with_builders(c, c.builders.set(name, builder), c.builder_seq + 1)
+      c = with_builders(c, c.builders.set(name, builder), seq + 1)
     }
   }
   return { lines: out, ctx: c }
@@ -1383,15 +1418,17 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
 }
 
 // `_emit_v3_go_functions`: each module fn as a Go `func`, blank-line separated.
-fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables, signatures: List[Any]) -> List[Str] {
+fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables, signatures: List[Any], strings_alias: Str) -> Fout {
   var out = []
+  var uses_strings = false
   for (fnode of functions) {
     let name = v3_ident(value_str(value_field(fnode, "name")))
     let params = value_list(value_field(fnode, "params"))
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
     let rt = value_str(value_field(fnode, "returns"))
-    let ctx = { vt: vt, fr: fr, er: er, signatures: signatures, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, rt: rt, builders: Map.empty(), builder_seq: 0 }
+    let reserved = collect_reserved(fnode, Map.empty())
+    let ctx = { vt: vt, fr: fr, er: er, signatures: signatures, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, rt: rt, builders: Map.empty(), builder_seq: 0, reserved: reserved, strings_alias: strings_alias }
     var ps = []
     for (p of params) {
       ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"))}`)
@@ -1401,11 +1438,12 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
     if (ret != "") { sigret = " ".concat(ret) }
     out = out.push(`func ${name}(${ps.join(", ")})${sigret} {`)
     let r = emit_stmts(value_list(value_field(fnode, "body")), ctx, 1)
+    if (r.ctx.builder_seq > 0) { uses_strings = true }
     out = out.concat(r.lines)
     out = out.push("}")
     out = out.push("")
   }
-  return out
+  return { lines: out, uses_strings: uses_strings }
 }
 
 // ------------------------------------------------------------- feature flags
@@ -1531,11 +1569,19 @@ pub fn emit_src(ir: Any) -> Str {
   // depends on the operand types `render_interp` infers as it renders (item
   // 434 (f)), so read them off the rendered lines rather than re-deriving the
   // inference in the structural `collect_flags` pass.
-  let fnlines = emit_functions(functions, fr, er, tables, functions.concat(externs))
+  var module_reserved = collect_reserved(types, Map.empty())
+  module_reserved = collect_reserved(functions, module_reserved)
+  module_reserved = collect_reserved(externs, module_reserved)
+  var strings_alias = "strings"
+  if (map_get(module_reserved, strings_alias) != "") {
+    strings_alias = fresh_ident("_revlStrings", module_reserved)
+  }
+  let emitted_functions = emit_functions(functions, fr, er, tables, functions.concat(externs), strings_alias)
+  let fnlines = emitted_functions.lines
   let rendered = fnlines.join(newline())
   let uses_fmt = rendered.indexOf("fmt.Sprintf(") >= 0
   let uses_strconv = rendered.indexOf("strconv.Format") >= 0
-  let uses_strings = rendered.indexOf(" strings.Builder") >= 0
+  let uses_strings = emitted_functions.uses_strings
 
   var out = []
   out = out.push("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -1548,7 +1594,10 @@ pub fn emit_src(ir: Any) -> Str {
     // `sorted(set(imports))` on the reference: "fmt" sorts before "strconv".
     if (uses_fmt) { out = out.push(line(1, `"fmt"`)) }
     if (uses_strconv) { out = out.push(line(1, `"strconv"`)) }
-    if (uses_strings) { out = out.push(line(1, `"strings"`)) }
+    if (uses_strings) {
+      if (strings_alias == "strings") { out = out.push(line(1, `"strings"`)) }
+      else { out = out.push(line(1, `${strings_alias} "strings"`)) }
+    }
     out = out.push(")")
     out = out.push("")
   }
@@ -1619,7 +1668,8 @@ fn typed_ctx() -> Ctx {
   return {
     vt: Map.empty(), fr: Map.empty(), er: Map.empty(),
     ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), variants: ["Tree"], rt: "", signatures: [],
-    builders: Map.empty(), builder_seq: 0
+    builders: Map.empty(), builder_seq: 0,
+    reserved: Map.empty(), strings_alias: "strings"
   }
 }
 
