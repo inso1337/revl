@@ -269,6 +269,9 @@
       "The self-host analyzer recognizes Map `remove` only to preserve borrowed key ownership, but render_builtin still returns the explicit UNSUPPORTED-BUILTIN marker; the reference implementation's persistent Map removal therefore remains outside the mirrored stdlib subset.": [
         "method=remove"
       ],
+      "The read-only List-parameter borrow analysis (item 333) mirrors the reference escape walk's read-method set `(\"length\", \"at\")` so a candidate list threaded through such a read is not forced back to owned. `length` is exercised by the corpus; `at` is not a stdlib method at all (the surface is charAt/codepoint_at/index/..., there is no bare `at` in _BUILTIN_SIG), so no legal document can produce a `method=at` node. It is mirrored only to keep the port's read-set byte-identical to the reference's, and no byte ever depends on it.": [
+        "method=at"
+      ],
       "The reference emits record/list destructuring in _v3_let_pattern, including a temporary name derived from output position. The self-host emitter tracks let_pattern names for lexical analysis but deliberately has no matching statement renderer.": [
         "step=let_pattern"
       ]
