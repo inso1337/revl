@@ -273,6 +273,38 @@ def test_native_ir_preserves_function_visibility(lower_to_ir):
     assert native == reference
 
 
+@pytest.mark.parametrize("prefix", ["", "pub "])
+@pytest.mark.parametrize("signature", ["(n: Int) -> Int", "()"])
+def test_native_ir_preserves_plain_function_cache(lower_to_ir, prefix, signature):
+    body = "return n + 1" if "n:" in signature else ""
+    source = (
+        f"{prefix}fn cached{signature} cache pure {{ {body} }}\n"
+        f"fn plain{signature} {{ {body} }}\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["cache"] == {"class": "pure_fn"}
+    assert "cache" not in reference[1]
+    assert native == reference
+
+
+def test_native_ir_infers_nominal_record_field_operands(lower_to_ir):
+    source = (
+        "type Outer = { child: Pair, length: Float }\n"
+        "type Pair = { x: Int, y: Int }\n"
+        "fn sum(p: Outer, ps: List[Pair]) -> Int {\n"
+        "  let pair = p.child\n"
+        "  return pair.x + ps[0].y\n"
+        "}\n"
+        "fn widened(p: Outer) -> Float { return p.length + p.child.x }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert reference[0]["body"][-1]["expr"]["operands"] == "Int"
+    assert reference[1]["body"][-1]["expr"]["operands"] == "Float"
+    assert native == reference
+
+
 @pytest.mark.parametrize("modifiers", [
     "emission idempotent", "idempotent emission",
     "async emission idempotent", "idempotent emission[db] async",

@@ -150,7 +150,7 @@ PY_FUNCTION_DOCS = [
     "classify.rvl", "checked_div.rvl",
     # item 391: tagged ADT construction, native end to end (the case table is
     # built by `lower.rvl` and the constructor call rendered by `emit_py.rvl`).
-    "adt.rvl",
+    "adt.rvl", "cache_pure.rvl",
 ]
 RUST_FUNCTION_DOCS = [
     "arith.rvl", "control.rvl", "lists.rvl", "strings.rvl", "variants.rvl",
@@ -363,6 +363,36 @@ def test_native_gate_refuses_idempotency_without_emission(admit, modifiers):
     with pytest.raises(RevlError, match="only meaningful on an `emission` operation"):
         compile_source(source)
     assert admit(source).startswith("BAD|")
+
+
+@pytest.mark.parametrize("clause", [
+    "cache", "cache external", "cache capability",
+    "cache pure ttl 5m", "cache pure invalidated_by db", "cache pure cache pure",
+])
+def test_native_gate_refuses_invalid_plain_function_cache(admit, clause):
+    source = f"fn f(n: Int) -> Int {clause} {{ return n }}"
+    with pytest.raises(RevlError):
+        compile_source(source)
+    assert admit(source).startswith("BAD|")
+
+
+@pytest.mark.parametrize("body", [
+    "return write(n)",
+    "return helper(n)",
+    "let f = write\nreturn f(n)",
+    "return apply(write, n)",
+])
+def test_native_cache_pure_preserves_emission_refusal(admit, body):
+    source = (
+        "extern emission fn write(n: Int) -> Int = @py { return n }\n"
+        "fn helper(n: Int) -> Int { return write(n) }\n"
+        "fn apply(f: (Int) -> Int, n: Int) -> Int { return f(n) }\n"
+        f"fn cached(n: Int) -> Int cache pure {{ {body} }}\n"
+    )
+    with pytest.raises(RevlError) as refused:
+        compile_source(source)
+    assert refused.value.code == "G4"
+    assert admit(source) == "G4|the reach of fn `cached` crosses write: a crossing result is not pure"
 
 
 # item 429: documents the reference admits and the native gate does NOT. A FALSE
