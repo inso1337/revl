@@ -580,7 +580,7 @@
       "uncovered_statements": 886
     },
     "py": {
-      "statements": 2348,
+      "statements": 2354,
       "uncovered": {
         "Activation residuals: Map.cas conditional undo belongs to component host runtime; non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). Deferred/approval/await/stream paths belong to the named runtime boundaries. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms.": {
           "_ComponentEmitter._body_step": 16
@@ -629,8 +629,8 @@
         "Existing async-coloring boundary: _py_yields_coroutine recognizes required async services, instance handles, colored functions/externs/locals; _py_reaches_coroutine walks children but stops at nested async arrows; _py_async_arrow passes through a single coroutine or wraps a sync lambda and rejects compound suspension. _is_async_fn_type's remaining false return rejects a non-string type. async_module_local.rvl/services_async.rvl/async_arrow_emission.rvl in emit_ts_corpus reproduce this gap; named boundary tests pin it.": {
           "_is_async_fn_type": 1,
           "_py_async_arrow": 7,
-          "_py_reaches_coroutine": 9,
-          "_py_yields_coroutine": 21
+          "_py_reaches_coroutine": 2,
+          "_py_yields_coroutine": 9
         },
         "Existing deterministic-destructuring boundary: _let_pattern_stmt allocates a numbered temp, emits record field extraction, exact/single/rest list unpacking, or rejects a foreign pattern. _Lines.next_destructure_seq increments that temp. selfhost fn_stmt has no let_pattern arm. Representative let {a} and let [a, ...rest] source cases are in tests/test_v2_language.py; item 179 removed id-based naming, not this port omission.": {
           "_Lines.next_destructure_seq": 2,
@@ -702,7 +702,7 @@
           "_ComponentEmitter._method": 2
         },
         "Method residuals: assign emits the same name/value form as the covered let path (port combines them); bound acquisition uses spawn/host runtime, with the witnessed bind specifically frontend-rejected; Map.cas undo checks the acquired boolean; deferred/await use retained runtime paths. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration.": {
-          "_ComponentEmitter._method_step": 22
+          "_ComponentEmitter._method_step": 26
         },
         "Module emit residuals: non-dict/version/empty-document/duplicate-component errors; idempotent map and commutative/async/idempotent service metadata; inspect/ref cache; asyncio timer/lifecycle imports; test/fault trailers; async-arrow adapter; router runtime source. Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions.": {
           "emit": 33
@@ -748,7 +748,7 @@
           "_ComponentEmitter._witnessed_extern": 1
         }
       },
-      "uncovered_statements": 643
+      "uncovered_statements": 628
     },
     "rust": {
       "statements": 3176,
