@@ -18,6 +18,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import RevlError, compile_files, compile_source  # noqa: E402
 from revl.__main__ import _boundary, main  # noqa: E402
+from revl.lower import _link  # noqa: E402
+from revl.parser import Program  # noqa: E402
 
 EXAMPLES = ROOT / "examples"
 DEMO = ROOT / "demo"
@@ -37,6 +39,48 @@ def test_manifest_is_cordisc_shaped():
 def test_components_carry_provenance():
     ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
     assert all(c["source"].endswith("user_cache.rvl") for c in ir["components"])
+
+
+@pytest.mark.parametrize("count", [0, 1, 256, 4096])
+def test_link_preserves_entry_order_for_independent_components(count):
+    entries = [
+        {"name": f"Node{i}", "file": "", "inject": [], "provides": []}
+        for i in reversed(range(count))
+    ]
+    manifest = _link(Program("<test>"), [], entries)
+    assert manifest == {
+        "components": entries,
+        "loadOrder": [entry["name"] for entry in entries],
+    }
+
+
+def test_link_appends_newly_ready_components_after_waiting_roots():
+    entries = [
+        {"name": "Child", "inject": ["first", "second"], "provides": ["child"]},
+        {"name": "Join", "inject": ["child", "other"], "provides": []},
+        {"name": "Root", "inject": [], "provides": ["first", "second"]},
+        {"name": "Other", "inject": [], "provides": ["other"]},
+        {"name": "Independent", "inject": [], "provides": []},
+    ]
+    manifest = _link(Program("<test>"), [], entries)
+    assert manifest["loadOrder"] == ["Root", "Other", "Independent", "Child", "Join"]
+
+
+@pytest.mark.parametrize("width", [1, 256, 4096])
+def test_link_preserves_fifo_order_across_wide_dependency_layers(width):
+    branches = [
+        {"name": f"Branch{i}", "inject": ["root"], "provides": [f"key{i}"]}
+        for i in reversed(range(width))
+    ]
+    entries = [
+        {"name": "Sink", "inject": [f"key{i}" for i in range(width)], "provides": []},
+        *branches,
+        {"name": "Root", "inject": [], "provides": ["root"]},
+    ]
+    manifest = _link(Program("<test>"), [], entries)
+    assert manifest["loadOrder"] == [
+        "Root", *(entry["name"] for entry in branches), "Sink",
+    ]
 
 
 # ---------------------------------------------------------------- admission

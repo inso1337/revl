@@ -405,6 +405,61 @@ def test_e_leaves_a_number_with_one_block_alone():
 
 
 # --------------------------------------------------------------------------
+# (E, one level down) THE SAME F-BLOCK WRITTEN TWICE INSIDE ONE ITEM. The
+# per-NUMBER check above sees an item number that opens two entries; it is
+# blind to the identical merge-both-sides shape one level down, a single item
+# whose body carries the same F-labelled finding twice. Merge `9e7e551b` kept
+# both sides of item 428's finding-set hunk, so F5-F13 were written twice;
+# item 433 carried F1-F10 twice, the measured verdicts beside the original
+# audit text. The escape hatch is the same reading job every check here leaves
+# to a human: fold each label back to one block.
+# --------------------------------------------------------------------------
+_E_FBLOCK = SECTION + """428. **SUPPLY-CHAIN AND ATTESTATION AUDIT (2026-09-02).** Findings below.
+    **F5 MED-HIGH, ✅ FIXED 2026-09-02** (`f2a38301`, with F3). The reconciled entry.
+    **F6 MED-HIGH, ✅ FIXED 2026-09-02** (`f2a38301`, with F3). The reconciled entry.
+    **F5 MED-HIGH, ✅ FIXED 2026-09-02** (`f2a38301`). The original audit text, kept as filed; the reconciled entry above says the same thing, because the merge kept both sides of the hunk.
+    **F6 MED-HIGH, ✅ FIXED 2026-09-02** (`f2a38301`). The original audit text, kept as filed.
+"""
+
+
+def test_e_fblock_written_twice_inside_one_item_bites():
+    """Item 428 exactly: the same F-labels open two blocks under one item,
+    the finding-level twin of item 106's merge residue one level up."""
+    found = gate.duplicate_finding_blocks(_E_FBLOCK)
+    assert len(found) == 1, _labels(found)
+    assert "item 428" in found[0]
+    assert "F5" in found[0] and "F6" in found[0]
+    assert "same finding block more than once" in found[0]
+
+
+def test_e_fblock_passes_once_the_second_copy_is_gone():
+    text = SECTION + """428. **SUPPLY-CHAIN AND ATTESTATION AUDIT (2026-09-02).** Findings below.
+    **F5 MED-HIGH, ✅ FIXED 2026-09-02** (`f2a38301`, with F3). The reconciled entry.
+    **F6 MED-HIGH, ✅ FIXED 2026-09-02** (`f2a38301`, with F3). The reconciled entry.
+"""
+    assert gate.duplicate_finding_blocks(text) == []
+
+
+def test_e_fblock_leaves_a_lettered_sub_finding_alone():
+    """Item 421's F6 sits beside its own F6(b), a DISTINCT block. `units()`
+    labels both "F6" because UNIT_LABEL_RE's capture stops before the "(b)";
+    the sub-part must be kept attached so the pair is not read as a duplicate."""
+    text = SECTION + """421. **CAPABILITY-TOKEN AUDIT (2026-09-02).** Findings below.
+    **F6 HIGH, ✅ FIXED 2026-09-02** (`fix/421-f5f6-seam-value-leaks`). The scrub is placed at the one choke point.
+    **F6(b), the declared `Secret[T]` config field reaching the checker. ✅ LANDED 2026-09-02 via PR #211.** A distinct sub-finding, one level down from F6.
+"""
+    assert gate.duplicate_finding_blocks(text) == []
+
+
+def test_e_fblock_leaves_distinct_labels_alone():
+    text = SECTION + """428. **SUPPLY-CHAIN AND ATTESTATION AUDIT.** Findings below.
+    **F1 HIGH, ✅ FIXED 2026-09-02** (`a358278c`). One.
+    **F2 HIGH, ✅ FIXED 2026-09-02** (`a358278c`). Two.
+"""
+    assert gate.duplicate_finding_blocks(text) == []
+
+
+# --------------------------------------------------------------------------
 # (F) A MARKER NAMING THE PR'S OWN HEAD BRANCH, in in-flight phrasing. Rules 1
 # to 3 catch a marker that is already stale; this catches the one that is
 # about to become stale. A PR adding "FIXING on `fix/277-rust-vec-char`" is

@@ -104,7 +104,14 @@ against the tree, which is where the remaining decay lives.
       block inside one section, and says which of the three shapes it is:
       merge residue, conflicting statuses, or two different items sharing a
       number. Numbers restart per section by design, so cross-section reuse
-      is never reported. See duplicate_header_findings.
+      is never reported. See duplicate_header_findings. It also asks the same
+      question one level down, inside a single item: an F-labelled finding
+      block written twice, the identical merge-both-sides shape below the item
+      header. Item 428 carries F5-F13 twice and item 433 carries F1-F10 twice,
+      each kept in duplicate when a merge resolved the finding-set hunk by
+      keeping both sides, and again the first copy is the one a reader
+      believes. A lettered sub-finding (item 421's F6 beside its F6(b)) is a
+      distinct block and is not reported. See duplicate_finding_blocks.
 
   --check-tier-parity     (D) CROSS-TIER PARITY, the shape only. Three
       defects were fixed on the python tier on 2026-09-02 and left live
@@ -1452,6 +1459,72 @@ def duplicate_header_findings(text: str) -> list[str]:
     return findings
 
 
+# The finding label at the head of a block, with its sub-part kept ATTACHED so
+# a genuine sub-finding does not read as a duplicate of its parent. `units()`
+# splits on UNIT_LABEL_RE, whose capture stops at `F6` and so labels both the
+# `F6` finding and its `F6(b)` sub-finding "F6" (item 421 carries exactly that
+# pair). Re-reading the label off the block's own opening text, this time
+# keeping the `(b)`, is what tells the two apart: item 421's F6 and F6(b) are
+# DISTINCT blocks, while item 428's two `F5` blocks are the same block twice.
+FINDING_LABEL_RE = re.compile(r"\A\s*\*\*(F\d+(?:\([0-9a-z]+\))?[a-z]?)")
+
+
+def duplicate_finding_blocks(text: str) -> list[str]:
+    """(E, one level down) One item whose body carries the same F-block twice.
+
+    `duplicate_header_findings` asks its question per item NUMBER, so it sees a
+    number that opens two entries (item 106's merge residue) and is blind to
+    the identical shape one level down: a single item whose body carries the
+    same F-labelled finding block twice. It is the same cause, a merge that
+    resolved a roadmap hunk by keeping BOTH sides, one level below the item
+    header, and prose still has no syntax that makes it a build error.
+
+    Two instances on main, both from 2026-09-02. Item 428's F5-F13 are written
+    twice, the reconciliation pass beside `fix/428-attestation-tail`'s own
+    updates; item 433's F1-F10 are written twice, the measured verdicts beside
+    the original audit text. Both read consistent today, but a reader still
+    meets every finding twice and the FIRST copy is the one believed, which is
+    the cost item 106 paid one level up: its stale F7/F8/F10/F11/F13 copies
+    said STILL OPEN for findings that had already been fixed and merged.
+
+    Decidable from the file alone: within one item, an F label that opens more
+    than one block is a duplicate. A lettered SUB-finding is not, and telling
+    the two apart is the whole subtlety here (see FINDING_LABEL_RE): item 421's
+    F6 sits beside its own F6(b), a distinct block, and must not be reported.
+
+    Like every other check here it cannot decide WHICH copy to keep. That is a
+    reading job: fold each label back to one block, keeping the copy that is
+    current and the evidence from both.
+    """
+    findings: list[str] = []
+    for it in items(text):
+        by_label: dict[str, list[dict]] = {}
+        for unit in units(it):
+            if unit["label"] == "header":
+                continue
+            m = FINDING_LABEL_RE.match(unit["text"])
+            if m is None:
+                continue
+            by_label.setdefault(m.group(1), []).append(unit)
+        dupes = [(lbl, us) for lbl, us in by_label.items() if len(us) > 1]
+        if not dupes:
+            continue
+        dupes.sort(key=lambda kv: kv[1][0]["line"])
+        where = "; ".join(
+            f"{lbl} at " + "/".join(f"L{u['line']}" for u in us)
+            for lbl, us in dupes)
+        findings.append(
+            f"L{it['line']}: item {it['number']} carries the same finding block "
+            f"more than once: {where}.\n"
+            f"    A merge that kept both sides of a roadmap hunk duplicated a "
+            f"finding below the item header, where prose has no syntax to catch "
+            f"it, and the FIRST copy is the one a reader believes. Fold each "
+            f"label back to a single block, keeping the copy that is current "
+            f"and the evidence from both. Like the per-number check above, this "
+            f"does not decide which copy that is.")
+    return findings
+
+
 def _tiers_named(text: str) -> set[str]:
     """Every tier this block names, by path or by prose alias."""
     named = set(TIER_PATH_RE.findall(text))
@@ -1593,7 +1666,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="(E) ALSO fail when one item NUMBER carries more than "
                          "one block inside one section: merge residue, "
                          "conflicting statuses, or two different items sharing "
-                         "a number. The item 106 shape.")
+                         "a number (the item 106 shape); and, one level down, "
+                         "when an F-labelled finding block is written twice "
+                         "inside a single item (item 428's F5-F13, item 433's "
+                         "F1-F10).")
     ap.add_argument("--check-all", action="store_true",
                     help="turn on A, B, C, D and E. Does NOT turn on "
                          "--require-issue, which waits on the issue migration.")
@@ -1648,7 +1724,7 @@ def main(argv: list[str] | None = None) -> int:
         (args.check_orphan, "--check-orphan",
          lambda: orphan_findings(text, dirs, namespaces, heads)),
         (args.check_duplicate_headers, "--check-duplicate-headers",
-         lambda: duplicate_header_findings(text)),
+         lambda: duplicate_header_findings(text) + duplicate_finding_blocks(text)),
         (args.check_tier_parity, "--check-tier-parity",
          lambda: tier_parity_findings(
              text, {p.name for p in (ROOT / "backends").iterdir() if p.is_dir()}
