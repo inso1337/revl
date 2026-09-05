@@ -562,3 +562,82 @@ def test_f_is_off_when_no_head_branch_is_known():
     """A push to main passes an empty `--head-branch`. Nothing is a self-name
     then, and main's own behaviour is unchanged."""
     assert gate.self_branch_findings(_markers(_F_BITES), "") == []
+
+
+# --------------------------------------------------------------------------
+# (require-issue) STATE LIVES IN THE TRACKER. Every open or partial top-level
+# item cites its GitHub issue, so the roadmap stops being the state-of-record
+# that rots. A security item is the exception the migration turned on: its
+# finding must NOT be a public issue on this public repo (CONTRIBUTING.md rule
+# 4 routes it to a private GitHub Security Advisory), so it cites that advisory
+# instead. Both are a tracked record a reader can follow; neither is prose.
+# --------------------------------------------------------------------------
+_ISSUE_BITES = SECTION + """451. **AN OPEN WORK ITEM (2026-09-05).** It names a
+real gap and a plan, but nothing a tracker holds: no issue, no advisory.
+"""
+
+_ISSUE_PASSES = _ISSUE_BITES.replace(
+    "451. **AN OPEN WORK ITEM", "451. (issue #451) **AN OPEN WORK ITEM")
+
+
+def test_require_issue_open_item_citing_nothing_bites():
+    found = gate.issue_findings(_ISSUE_BITES)
+    assert len(found) == 1, _labels(found)
+    assert "item 451" in found[0]
+    assert "no GitHub issue or security advisory" in found[0]
+
+
+def test_require_issue_passes_once_the_item_cites_its_issue():
+    assert gate.issue_findings(_ISSUE_PASSES) == []
+
+
+def test_require_issue_accepts_an_issue_url():
+    text = _ISSUE_BITES.replace(
+        "no issue, no advisory.",
+        "see github.com/inso1337/revl/issues/451.")
+    assert gate.issue_findings(text) == []
+
+
+def test_require_issue_a_security_item_cites_a_private_advisory_ghsa():
+    """A soundness/audit-surface escape must not be a public issue. Its tracked
+    record is a private GitHub Security Advisory, and a GHSA id satisfies the
+    check the same way an issue does."""
+    text = SECTION + ("428. **SUPPLY-CHAIN AUDIT (2026-09-02).** F12: `truc "
+                      "@version` is recorded but is still not a pin. Tracked in "
+                      "GHSA-4gmc-jm9p-68xj.\n")
+    assert gate.issue_findings(text) == []
+
+
+def test_require_issue_a_security_item_cites_the_advisory_by_words():
+    text = SECTION + ("425. (private security advisories, see SECURITY.md) "
+                      "**MCP SERVER AUDIT (2026-09-02).** The authoring verbs "
+                      "trust the driving agent.\n")
+    assert gate.issue_findings(text) == []
+
+
+def test_require_issue_bare_advisory_is_not_enough():
+    """The escape hatch is 'SECURITY advisory', not the word 'advisory' the
+    roadmap uses for a different thing all over the file ('the needs gate is
+    advisory'). A bare 'advisory' must still bite, or an ordinary item skips
+    the requirement by accident."""
+    text = SECTION + ("451. **AN OPEN WORK ITEM.** Slice 1 launches no jail and "
+                      "the needs gate is advisory, so nothing is bound yet.\n")
+    found = gate.issue_findings(text)
+    assert len(found) == 1, _labels(found)
+    assert "item 451" in found[0]
+
+
+def test_require_issue_leaves_closed_and_dropped_items_alone():
+    """State is the tracker's job only while the item is open. A done or
+    declined item is history and cites nothing by design."""
+    text = SECTION + (
+        "10. ✅ **A LANDED ITEM.** Done, cites no issue.\n\n"
+        "11. ➖ **A DECLINED ITEM.** Dropped, cites no issue.\n")
+    assert gate.issue_findings(text) == []
+
+
+def test_require_issue_leaves_untracked_sections_alone():
+    """The historical-record sections are not tracked work."""
+    text = ("## " + gate.UNTRACKED_SECTIONS[0] + "\n\n"
+            "3. **AN ITEM OF RECORD.** Built long ago, cites no issue.\n")
+    assert gate.issue_findings(text) == []
