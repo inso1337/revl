@@ -69,8 +69,10 @@ would be out of slice on the selfhost side, so those are excluded and the test
 asserts, per case, that the reference's refusal classifies into {G2, G4, A1}.
 """
 
+import contextlib
 import importlib.util
 import random
+import re
 import sys
 import types
 from pathlib import Path
@@ -1882,3 +1884,137 @@ def test_which_refusal_wins_diverges_when_a_program_has_several(admit):
     # the gate picks the earlier PHASE (the component loop precedes the link).
     assert _ref(_MULTI_REFUSAL)[1].startswith("provision conflict")
     assert "must be marked `emit`" in got
+
+
+# ============================================================ nesting bound
+#
+# The emitted front end is recursive twice over: once descending to parse an
+# expression (one nested level costs a full pass down the precedence ladder)
+# and again in every walk over the tree that comes back. Neither descent had a
+# bound, so a SHORT source could drive both arbitrarily deep. Here that is a
+# `RecursionError`; behind `crates/revl-gate` it is a rust stack overflow,
+# which ABORTS — `catch_unwind` cannot turn an abort back into a verdict, so
+# an embedder of the gate lost the process instead of getting an answer.
+#
+# `selfhost/parser.rvl` now carries a depth through its ladder and refuses past
+# `nesting_limit()`, and `admit_src` measures the same bound over the token
+# stream ahead of any descent, which is where it can be an actual verdict.
+
+def _nesting_limit() -> int:
+    """Read out of `selfhost/parser.rvl` rather than restated, so a change to
+    the bound cannot leave this file asserting the old number."""
+    text = (ROOT / "selfhost" / "parser.rvl").read_text(encoding="utf-8")
+    match = re.search(r"fn nesting_limit\(\) -> Int \{ return (\d+) \}", text)
+    assert match, "selfhost/parser.rvl no longer states a nesting_limit()"
+    return int(match.group(1))
+
+
+NESTING_LIMIT = _nesting_limit()
+_TOO_DEEP = (f"BAD|expression nesting is deeper than the parser's limit of "
+             f"{NESTING_LIMIT} levels")
+
+# Every shape that makes the front end go deeper — the ones that nest through
+# a bracket, the ones that recurse without one (a prefix run, a `??` chain, a
+# right-associative conditional), and the ones the parser reads with a loop but
+# that still build a tree one level taller per operator.
+_NESTED = {
+    "groups":      lambda n: _fn("(" * n + "1" + ")" * n),
+    "calls":       lambda n: _fn("g(" * n + "1" + ")" * n),
+    "lists":       lambda n: _fn("[" * n + "1" + "]" * n),
+    "records":     lambda n: _fn("{ a: " * n + "1" + " }" * n),
+    "indexes":     lambda n: _fn("a" + "[0]" * n),
+    "matches":     lambda n: _fn("match x { A => " * n + "1" + " }" * n),
+    "arrows":      lambda n: _fn("() => " * n + "1"),
+    "templates":   lambda n: _fn("`" + "${`" * n + "x" + "`}" * n + "`"),
+    "not":         lambda n: _fn("!" * n + "true"),
+    "negate":      lambda n: _fn("-" * n + "1"),
+    "complement":  lambda n: _fn("~" * n + "1"),
+    "conditional": lambda n: _fn("true ? 1 : " * n + "1"),
+    "nullish":     lambda n: _fn("a ?? " * n + "1"),
+    "blocks":      lambda n: "fn f() -> Int { " + "{ " * n + " " + "} " * n + " return 1 }",
+    "ifs":         lambda n: "fn f() -> Int { " + "if (true) { " * n + " " + "} " * n + " return 1 }",
+    "types":       lambda n: "fn f() -> " + "List[" * n + "Int" + "]" * n + " { return 1 }",
+    "add spine":   lambda n: _fn("1 + " * n + "1"),
+    "and spine":   lambda n: _fn("a && " * n + "b"),
+    "field spine": lambda n: _fn("a" + ".b" * n),
+    "call spine":  lambda n: _fn("a" + "()" * n),
+    "method spine": lambda n: _fn('"a"' + '.concat("b")' * n),
+}
+
+
+def _fn(expr: str) -> str:
+    return "fn f() -> Int { return " + expr + " }"
+
+
+@contextlib.contextmanager
+def _frames(budget: int):
+    """Run with a stated frame budget, restoring the interpreter's own.
+
+    The number is the interesting part: `crates/revl-gate` was measured to
+    abort at roughly seven thousand frames of the emitted parser, so a descent
+    that stays inside this budget here is one the crate has the stack for.
+    """
+    previous = sys.getrecursionlimit()
+    sys.setrecursionlimit(budget)
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(previous)
+
+
+_FRAME_BUDGET = 6000
+
+
+@pytest.mark.parametrize("shape", sorted(_NESTED))
+def test_a_deeply_nested_program_is_refused_by_the_bound(admit, shape):
+    """5000 levels of every construct that nests, refused by name.
+
+    Not "does not crash": the gate has to SAY the bound. A resource failure an
+    embedder cannot distinguish from a verdict is the thing being fixed.
+    """
+    with _frames(_FRAME_BUDGET):
+        assert admit(_NESTED[shape](5000)) == _TOO_DEEP
+
+
+@pytest.mark.parametrize("shape", sorted(_NESTED))
+def test_ordinary_nesting_is_not_refused_by_the_bound(admit, shape):
+    """The other half: the bound sits above anything a program means. The
+    deepest program in the whole census corpus measures 74 and the deepest one
+    the gate will decide at all measures 42."""
+    with _frames(_FRAME_BUDGET):
+        for depth in (1, 2, 5, 20, 40):
+            assert admit(_NESTED[shape](depth)) != _TOO_DEEP, (shape, depth)
+
+
+def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
+    """The fuzz the size bound was standing in for.
+
+    `MAX_SOURCE_BYTES` is a byte count and nesting is not: 1 KB of parentheses
+    was enough to abort the crate, at 0.4% of that bound. So the descent is
+    fuzzed on its own terms — random compositions of every nesting shape, grown
+    to the size bound — and the property is that NONE of them exhausts the
+    stack. A `RecursionError` here is an abort there.
+    """
+    max_bytes = int(re.search(
+        r"MAX_SOURCE_BYTES: usize = (\d+);",
+        (ROOT / "crates" / "revl-gate" / "src" / "frontier.rs")
+        .read_text(encoding="utf-8")).group(1))
+    rng = random.Random(20260905)
+    shapes = sorted(_NESTED)
+    refused = 0
+    with _frames(_FRAME_BUDGET):
+        for _ in range(300):
+            shape = rng.choice(shapes)
+            # from just under the bound to a source that fills the size bound
+            depth = rng.choice([
+                rng.randint(1, NESTING_LIMIT),
+                rng.randint(NESTING_LIMIT, 4 * NESTING_LIMIT),
+                rng.randint(1000, 20000),
+            ])
+            src = _NESTED[shape](depth)
+            if len(src) > max_bytes:
+                continue
+            verdict = admit(src)           # must not raise
+            if verdict == _TOO_DEEP:
+                refused += 1
+    assert refused > 0, "the fuzz never reached the bound"

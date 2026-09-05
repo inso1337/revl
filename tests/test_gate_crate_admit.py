@@ -462,6 +462,44 @@ def test_an_oversized_source_is_declined_not_decided(consumer):
     assert verdict["code"] == "FRONTIER"
 
 
+# --------------------------------------------------------------- nesting bound
+#
+# The size bound above is not a nesting bound, and nesting is what the emitted
+# front end spends stack on. Both probes here are far below `MAX_SOURCE_BYTES`
+# and both used to take the process down: a rust stack overflow ABORTS, and
+# `catch_unwind` cannot turn an abort back into a verdict, so an embedder got
+# no answer, no log and no process. `selfhost/parser.rvl` now bounds its own
+# descent and `admit_src` measures the bound ahead of the descent, which is
+# what turns these from an abort into a refusal that names the limit.
+
+_NESTING_PROBES = [
+    # the descent's own shape: one level per bracket, a full pass down the
+    # precedence ladder each time
+    ("nested groups", "fn f() -> Int { return " + "(" * 500 + "1" + ")" * 500 + " }"),
+    # read with a LOOP, so it costs the parser no stack — but it builds a tree
+    # one level taller per operator, and every later walk over that tree
+    # descends all of it
+    ("operator spine", "fn f() -> Int { return " + "1 + " * 700 + "1 }"),
+]
+
+
+@pytest.mark.parametrize("name,source", _NESTING_PROBES,
+                         ids=[n for n, _ in _NESTING_PROBES])
+def test_a_deeply_nested_source_is_refused_rather_than_aborting(
+        consumer, name, source):
+    meta = json.loads((CRATE / "GENERATED.json").read_text(encoding="utf-8"))
+    assert len(source) < meta["max_source_bytes"] // 10, (
+        "the point of this probe is that it is far below the size bound")
+    verdict = _crate_verdicts(consumer, [source])[0]
+    assert verdict["admitted"] is False
+    assert verdict["verdict"] == "refused", (
+        f"{name}: expected a refusal, got {verdict['verdict']}")
+    assert verdict["code"] == "BAD"
+    # the refusal states the bound rather than describing a resource failure
+    assert "nesting" in verdict["message"] and "200" in verdict["message"], (
+        verdict["message"])
+
+
 def test_ill_formed_sources_are_refused_not_waved_through(consumer):
     """The native front end refuses what it cannot parse; nothing in the shim
     may soften that into a wave-through. Checked against the reference rather

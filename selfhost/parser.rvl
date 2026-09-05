@@ -96,6 +96,36 @@ pub fn is_bad(e: Expr) -> Bool {
 
 fn bad(msg: Str) -> PR { return { i: 0 - 1, e: Bad(msg) } }
 
+// ------------------------------------------------------------ nesting bound
+//
+// This ladder is recursive descent, and one nested expression costs a full
+// pass down it (`p_ternary` -> `p_or` -> ... -> `p_primary`), roughly fifteen
+// frames per level. Unbounded, that is an input that makes the front end run
+// out of STACK rather than answer, and the stack is not a resource the answer
+// can be recovered from: on the python emission it surfaces as a
+// `RecursionError`, and on the rust/wasm emission behind `crates/revl-gate` it
+// ABORTS the host process, which no `catch_unwind` can turn back into a
+// refusal. A gate whose job is to decide UNTRUSTED candidate sources must
+// answer, or refuse, and never die.
+//
+// So the depth is stated rather than discovered: `d` is how many expression
+// levels deep the cursor is, carried down the ladder and checked at the three
+// places the descent can re-enter itself — the head of the ladder
+// (`p_ternary`, which every nested expression goes through), and the two
+// prefix forms that recurse without passing through it (`p_nullish`,
+// `p_unary`). Past the bound the parser returns `Bad`, which is a value here,
+// so the refusal travels the ordinary verdict path and names the bound.
+//
+// 200 is the reference compiler's `revl.parser.NESTING_LIMIT` (issue #310),
+// and the two are kept equal on purpose: the gate and the reference are
+// measured against each other program by program, and a gate that refused at a
+// different depth would disagree with the reference on a whole band of inputs.
+pub fn nesting_limit() -> Int { return 200 }
+
+fn too_deep() -> PR {
+  return bad(`expression nesting is deeper than the parser's limit of ${nesting_limit().to_str()} levels`)
+}
+
 // ---------------------------------------------------------------- render
 
 fn join_exprs(xs: List[Expr]) -> Str {
@@ -199,13 +229,18 @@ pub fn render(e: Expr) -> Str {
 
 // `IDENT ['[' type (',' type)* ']'] ['?']`, plus the parenthesised group /
 // function form. Rendered exactly as parser.py's `type_()` returns it.
-fn p_type(ts: List[Token], i: Int) -> TyR {
+fn p_type(ts: List[Token], i: Int, d: Int) -> TyR {
+  // types nest too (`List[List[...]]`, `(A) -> (B) -> C`), on their own
+  // descent rather than the expression ladder's. `TyR` has no message channel
+  // — a type that does not parse is reported by the caller — so the bound is
+  // held as an ordinary parse failure here.
+  if (d > nesting_limit()) { return { i: 0 - 1, ty: "", ok: false } }
   if (at(ts, i, "(")) {
     var j = i + 1
     var inner = []
     var ok = true
     while (ok && !at(ts, j, ")") && !at(ts, j, "eof")) {
-      let t = p_type(ts, j)
+      let t = p_type(ts, j, d + 1)
       if (!t.ok) { ok = false }
       if (t.ok) {
         inner = inner.push(t.ty)
@@ -217,7 +252,7 @@ fn p_type(ts: List[Token], i: Int) -> TyR {
     if (!at(ts, j, ")")) { return { i: 0 - 1, ty: "", ok: false } }
     j += 1
     if (at(ts, j, "arrow")) {
-      let r = p_type(ts, j + 1)
+      let r = p_type(ts, j + 1, d + 1)
       if (!r.ok) { return { i: 0 - 1, ty: "", ok: false } }
       let params_s = inner.join(", ")
       return { i: r.i, ty: "(".concat(params_s).concat(") -> ").concat(r.ty), ok: true }
@@ -234,7 +269,7 @@ fn p_type(ts: List[Token], i: Int) -> TyR {
     var k = j2 + 1
     var ok2 = true
     while (ok2 && !at(ts, k, "]") && !at(ts, k, "eof")) {
-      let a = p_type(ts, k)
+      let a = p_type(ts, k, d + 1)
       if (!a.ok) { ok2 = false }
       if (a.ok) {
         args = args.push(a.ty)
@@ -297,27 +332,34 @@ fn canon(op: Str) -> Str {
   return op
 }
 
-pub fn p_expr(ts: List[Token], i: Int) -> PR { return p_ternary(ts, i) }
+pub fn p_expr(ts: List[Token], i: Int) -> PR { return p_ternary(ts, i, 0) }
 
-fn p_ternary(ts: List[Token], i: Int) -> PR {
-  let c = p_or(ts, i)
+// The same ladder, re-entered at a stated depth (see `nesting_limit`).
+fn p_expr_d(ts: List[Token], i: Int, d: Int) -> PR { return p_ternary(ts, i, d) }
+
+fn p_ternary(ts: List[Token], i: Int, d: Int) -> PR {
+  // the one place every NESTED expression re-enters the ladder — a
+  // parenthesised group, a call argument, a list or record element, an index,
+  // a match scrutinee or arm, a lambda body, a `${...}` interpolation
+  if (d > nesting_limit()) { return too_deep() }
+  let c = p_or(ts, i, d)
   if (is_bad(c.e)) { return c }
   if (at(ts, c.i, "?")) {
-    let t = p_ternary(ts, c.i + 1)
+    let t = p_ternary(ts, c.i + 1, d + 1)
     if (is_bad(t.e)) { return t }
     if (!at(ts, t.i, ":")) { return bad("expected :") }
-    let f = p_ternary(ts, t.i + 1)
+    let f = p_ternary(ts, t.i + 1, d + 1)
     if (is_bad(f.e)) { return f }
     return { i: f.i, e: If({ cond: c.e, then_: t.e, els: f.e }) }
   }
   return c
 }
 
-fn p_or(ts: List[Token], i: Int) -> PR {
-  var acc = p_nullish(ts, i)
+fn p_or(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_nullish(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   while (at(ts, acc.i, "||")) {
-    let r = p_nullish(ts, acc.i + 1)
+    let r = p_nullish(ts, acc.i + 1, d)
     if (is_bad(r.e)) { return r }
     if (mixes("||", acc.e, r.e)) { return bad("|| mixed with ??") }
     acc = { i: r.i, e: mk_bin("||", acc.e, r.e) }
@@ -326,11 +368,14 @@ fn p_or(ts: List[Token], i: Int) -> PR {
 }
 
 // right-associative, unlike every other binary level
-fn p_nullish(ts: List[Token], i: Int) -> PR {
-  let l = p_and(ts, i)
+fn p_nullish(ts: List[Token], i: Int, d: Int) -> PR {
+  // right-associative, so an `a ?? b ?? c ...` chain recurses HERE rather than
+  // through `p_ternary`, and has to be counted here too
+  if (d > nesting_limit()) { return too_deep() }
+  let l = p_and(ts, i, d)
   if (is_bad(l.e)) { return l }
   if (at(ts, l.i, "??")) {
-    let r = p_nullish(ts, l.i + 1)
+    let r = p_nullish(ts, l.i + 1, d + 1)
     if (is_bad(r.e)) { return r }
     if (mixes("??", l.e, r.e)) { return bad("?? mixed with &&/||") }
     return { i: r.i, e: mk_bin("??", l.e, r.e) }
@@ -338,11 +383,11 @@ fn p_nullish(ts: List[Token], i: Int) -> PR {
   return l
 }
 
-fn p_and(ts: List[Token], i: Int) -> PR {
-  var acc = p_bor(ts, i)
+fn p_and(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_bor(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   while (at(ts, acc.i, "&&")) {
-    let r = p_bor(ts, acc.i + 1)
+    let r = p_bor(ts, acc.i + 1, d)
     if (is_bad(r.e)) { return r }
     if (mixes("&&", acc.e, r.e)) { return bad("&& mixed with ??") }
     acc = { i: r.i, e: mk_bin("&&", acc.e, r.e) }
@@ -355,33 +400,33 @@ fn p_and(ts: List[Token], i: Int) -> PR {
 // exactly as TS parses it (item 366, docs/arithmetic.md). This parser has no
 // record-update base form, so a top-level `|` is always the operator (no
 // `_suppress_bor` counterpart is needed).
-fn p_bor(ts: List[Token], i: Int) -> PR {
-  var acc = p_bxor(ts, i)
+fn p_bor(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_bxor(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   while (at(ts, acc.i, "|")) {
-    let r = p_bxor(ts, acc.i + 1)
+    let r = p_bxor(ts, acc.i + 1, d)
     if (is_bad(r.e)) { return r }
     acc = { i: r.i, e: mk_bin("|", acc.e, r.e) }
   }
   return acc
 }
 
-fn p_bxor(ts: List[Token], i: Int) -> PR {
-  var acc = p_band(ts, i)
+fn p_bxor(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_band(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   while (at(ts, acc.i, "^")) {
-    let r = p_band(ts, acc.i + 1)
+    let r = p_band(ts, acc.i + 1, d)
     if (is_bad(r.e)) { return r }
     acc = { i: r.i, e: mk_bin("^", acc.e, r.e) }
   }
   return acc
 }
 
-fn p_band(ts: List[Token], i: Int) -> PR {
-  var acc = p_eq(ts, i)
+fn p_band(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_eq(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   while (at(ts, acc.i, "&")) {
-    let r = p_eq(ts, acc.i + 1)
+    let r = p_eq(ts, acc.i + 1, d)
     if (is_bad(r.e)) { return r }
     acc = { i: r.i, e: mk_bin("&", acc.e, r.e) }
   }
@@ -396,15 +441,15 @@ fn eq_op(ts: List[Token], i: Int) -> Str {
   return ""
 }
 
-fn p_eq(ts: List[Token], i: Int) -> PR {
-  var acc = p_cmp(ts, i)
+fn p_eq(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_cmp(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   var go = true
   while (go) {
     let op = eq_op(ts, acc.i)
     if (op == "") { go = false }
     if (op != "") {
-      let r = p_cmp(ts, acc.i + 1)
+      let r = p_cmp(ts, acc.i + 1, d)
       if (is_bad(r.e)) { return r }
       acc = { i: r.i, e: mk_bin(canon(op), acc.e, r.e) }
     }
@@ -420,15 +465,15 @@ fn cmp_op(ts: List[Token], i: Int) -> Str {
   return ""
 }
 
-fn p_cmp(ts: List[Token], i: Int) -> PR {
-  var acc = p_shift(ts, i)
+fn p_cmp(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_shift(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   var go = true
   while (go) {
     let op = cmp_op(ts, acc.i)
     if (op == "") { go = false }
     if (op != "") {
-      let r = p_shift(ts, acc.i + 1)
+      let r = p_shift(ts, acc.i + 1, d)
       if (is_bad(r.e)) { return r }
       acc = { i: r.i, e: mk_bin(op, acc.e, r.e) }
     }
@@ -444,15 +489,15 @@ fn shift_op(ts: List[Token], i: Int) -> Str {
 
 // The Int32 shifts bind tighter than the relational operators and looser than
 // additive — C/TypeScript order, so `a + b << c` is `(a + b) << c` (item 366).
-fn p_shift(ts: List[Token], i: Int) -> PR {
-  var acc = p_add(ts, i)
+fn p_shift(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_add(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   var go = true
   while (go) {
     let op = shift_op(ts, acc.i)
     if (op == "") { go = false }
     if (op != "") {
-      let r = p_add(ts, acc.i + 1)
+      let r = p_add(ts, acc.i + 1, d)
       if (is_bad(r.e)) { return r }
       acc = { i: r.i, e: mk_bin(op, acc.e, r.e) }
     }
@@ -466,15 +511,15 @@ fn add_op(ts: List[Token], i: Int) -> Str {
   return ""
 }
 
-fn p_add(ts: List[Token], i: Int) -> PR {
-  var acc = p_mul(ts, i)
+fn p_add(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_mul(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   var go = true
   while (go) {
     let op = add_op(ts, acc.i)
     if (op == "") { go = false }
     if (op != "") {
-      let r = p_mul(ts, acc.i + 1)
+      let r = p_mul(ts, acc.i + 1, d)
       if (is_bad(r.e)) { return r }
       acc = { i: r.i, e: mk_bin(op, acc.e, r.e) }
     }
@@ -489,15 +534,15 @@ fn mul_op(ts: List[Token], i: Int) -> Str {
   return ""
 }
 
-fn p_mul(ts: List[Token], i: Int) -> PR {
-  var acc = p_unary(ts, i)
+fn p_mul(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_unary(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   var go = true
   while (go) {
     let op = mul_op(ts, acc.i)
     if (op == "") { go = false }
     if (op != "") {
-      let r = p_unary(ts, acc.i + 1)
+      let r = p_unary(ts, acc.i + 1, d)
       if (is_bad(r.e)) { return r }
       acc = { i: r.i, e: mk_bin(op, acc.e, r.e) }
     }
@@ -505,31 +550,34 @@ fn p_mul(ts: List[Token], i: Int) -> PR {
   return acc
 }
 
-fn p_unary(ts: List[Token], i: Int) -> PR {
+fn p_unary(ts: List[Token], i: Int, d: Int) -> PR {
+  // a prefix run (`!!!x`, `- - x`, `emit emit x`) recurses here without
+  // passing through `p_ternary`, so it is counted here too
+  if (d > nesting_limit()) { return too_deep() }
   // `~` is the Int32 bitwise complement, grouped with the other prefix
   // unaries `!`/`-` (item 366, docs/arithmetic.md).
   if (at(ts, i, "!") || at(ts, i, "-") || at(ts, i, "~")) {
     let op = tk(ts, i).kind
-    let r = p_unary(ts, i + 1)
+    let r = p_unary(ts, i + 1, d + 1)
     if (is_bad(r.e)) { return r }
     return { i: r.i, e: Un({ op: op, e: r.e }) }
   }
   if (at_kw(ts, i, "emit")) {
-    let em = p_unary(ts, i + 1)
+    let em = p_unary(ts, i + 1, d + 1)
     if (is_bad(em.e)) { return em }
     return { i: em.i, e: Emit({ op: "emit", e: em.e }) }
   }
-  return p_postfix(ts, i)
+  return p_postfix(ts, i, d)
 }
 
 // A comma-separated expression list up to `close`.
-fn p_seq(ts: List[Token], i: Int, close: Str) -> Seq {
+fn p_seq(ts: List[Token], i: Int, close: Str, d: Int) -> Seq {
   var j = i
   var xs = []
   var ok = true
   var msg = ""
   while (ok && !at(ts, j, close) && !at(ts, j, "eof")) {
-    let a = p_expr(ts, j)
+    let a = p_expr_d(ts, j, d)
     if (is_bad(a.e)) {
       ok = false
       msg = "bad element"
@@ -551,8 +599,8 @@ fn p_seq(ts: List[Token], i: Int, close: Str) -> Seq {
   return { i: jj + 1, xs: items, ok: fin, msg: why }
 }
 
-fn p_postfix(ts: List[Token], i: Int) -> PR {
-  var acc = p_primary(ts, i)
+fn p_postfix(ts: List[Token], i: Int, d: Int) -> PR {
+  var acc = p_primary(ts, i, d)
   if (is_bad(acc.e)) { return acc }
   // Once `?.` is taken only another `?.` may follow: a plain `.f`/call/index
   // on a possibly-None result would not short-circuit.
@@ -568,7 +616,7 @@ fn p_postfix(ts: List[Token], i: Int) -> PR {
       if (!at(ts, acc.i + 1, "ident")) { return bad("expected ident after ?.") }
       let nm2 = tk(ts, acc.i + 1).text
       if (at(ts, acc.i + 2, "(")) {
-        let s = p_seq(ts, acc.i + 3, ")")
+        let s = p_seq(ts, acc.i + 3, ")", d + 1)
         if (!s.ok) { return bad(s.msg) }
         acc = { i: s.i, e: OptCall({ target: acc.e, name: nm2, args: s.xs }) }
       } else {
@@ -577,12 +625,12 @@ fn p_postfix(ts: List[Token], i: Int) -> PR {
       optional = true
     } else if (at(ts, acc.i, "(")) {
       if (optional) { return bad("call after ?.") }
-      let s2 = p_seq(ts, acc.i + 1, ")")
+      let s2 = p_seq(ts, acc.i + 1, ")", d + 1)
       if (!s2.ok) { return bad(s2.msg) }
       acc = { i: s2.i, e: Call({ target: acc.e, args: s2.xs }) }
     } else if (at(ts, acc.i, "[")) {
       if (optional) { return bad("index after ?.") }
-      let x = p_expr(ts, acc.i + 1)
+      let x = p_expr_d(ts, acc.i + 1, d + 1)
       if (is_bad(x.e)) { return x }
       if (!at(ts, x.i, "]")) { return bad("expected ]") }
       acc = { i: x.i + 1, e: Index({ target: acc.e, idx: x.e }) }
@@ -637,7 +685,7 @@ fn record_update_ahead(ts: List[Token], i: Int) -> Bool {
   return false
 }
 
-fn p_params(ts: List[Token], i: Int) -> Pars {
+fn p_params(ts: List[Token], i: Int, d: Int) -> Pars {
   var j = i
   var xs = []
   var ok = true
@@ -648,7 +696,7 @@ fn p_params(ts: List[Token], i: Int) -> Pars {
       var ty = ""
       j += 1
       if (at(ts, j, ":")) {
-        let t = p_type(ts, j + 1)
+        let t = p_type(ts, j + 1, d)
         if (!t.ok) { ok = false }
         if (t.ok) {
           ty = t.ty
@@ -669,7 +717,7 @@ fn p_params(ts: List[Token], i: Int) -> Pars {
   return { i: jj + 1, xs: ps, ok: fin, msg: "" }
 }
 
-fn p_arms(ts: List[Token], i: Int) -> Arms {
+fn p_arms(ts: List[Token], i: Int, d: Int) -> Arms {
   var j = i
   var xs = []
   var ok = true
@@ -690,7 +738,7 @@ fn p_arms(ts: List[Token], i: Int) -> Arms {
       }
       if (ok && !at(ts, j, "=>")) { ok = false }
       if (ok) {
-        let b = p_expr(ts, j + 1)
+        let b = p_expr_d(ts, j + 1, d)
         if (is_bad(b.e)) { ok = false }
         if (!is_bad(b.e)) {
           let bnd = bind
@@ -710,7 +758,7 @@ fn p_arms(ts: List[Token], i: Int) -> Arms {
   return { i: jj + 1, xs: arms, ok: fin, msg: "" }
 }
 
-fn p_inits(ts: List[Token], i: Int) -> Inits {
+fn p_inits(ts: List[Token], i: Int, d: Int) -> Inits {
   var j = i
   var xs = []
   var ok = true
@@ -720,7 +768,7 @@ fn p_inits(ts: List[Token], i: Int) -> Inits {
       let nm = tk(ts, j).text
       if (!at(ts, j + 1, ":")) { ok = false }
       if (at(ts, j + 1, ":")) {
-        let v = p_expr(ts, j + 2)
+        let v = p_expr_d(ts, j + 2, d)
         if (is_bad(v.e)) { ok = false }
         if (!is_bad(v.e)) {
           xs = xs.push({ name: nm, value: v.e })
@@ -759,7 +807,7 @@ fn unesc(s: Str) -> Str {
 
 // Template token text is "t:<text>" / "v:<raw source>" joined by "|"; each
 // interpolation body is re-parsed as a full expression (§3.2).
-fn p_template(text: Str) -> Expr {
+fn p_template(text: Str, d: Int) -> Expr {
   let raw = text.split("|")
   var parts = []
   var i = 0
@@ -770,7 +818,7 @@ fn p_template(text: Str) -> Expr {
     let body = unesc(seg.slice(2, seg.length()))
     if (tag == "t:") { parts = parts.push({ kind: "t", text: body, e: NullLit }) }
     if (tag == "v:") {
-      let sub = parse_expr_str(body)
+      let sub = parse_expr_str_d(body, d)
       if (is_bad(sub)) { ok = false }
       if (!is_bad(sub)) { parts = parts.push({ kind: "e", text: "", e: sub }) }
     }
@@ -782,13 +830,15 @@ fn p_template(text: Str) -> Expr {
   return Templ({ parts: ps })
 }
 
-fn p_primary(ts: List[Token], i: Int) -> PR {
+fn p_primary(ts: List[Token], i: Int, d: Int) -> PR {
   let t = tk(ts, i)
   if (t.kind == "int") { return { i: i + 1, e: IntLit(t.text) } }
   if (t.kind == "float") { return { i: i + 1, e: FloatLit(t.text) } }
   if (t.kind == "string") { return { i: i + 1, e: StrLit(t.text) } }
   if (t.kind == "template") {
-    let e = p_template(t.text)
+    // a `${...}` body is parsed by a SECOND pass over its own source, so the
+    // depth is handed across — otherwise a nested template resets the count
+    let e = p_template(t.text, d + 1)
     if (is_bad(e)) { return bad("bad template") }
     return { i: i + 1, e: e }
   }
@@ -798,7 +848,7 @@ fn p_primary(ts: List[Token], i: Int) -> PR {
   if (t.kind == "kw" && t.text == "null") { return { i: i + 1, e: NullLit } }
   if (t.kind == "ident") {
     if (at(ts, i + 1, "=>")) {
-      let b = p_expr(ts, i + 2)
+      let b = p_expr_d(ts, i + 2, d + 1)
       if (is_bad(b.e)) { return b }
       let one = [{ name: t.text, ty: "" }]
       return { i: b.i, e: Arrow({ params: one, body: b.e }) }
@@ -811,7 +861,7 @@ fn p_primary(ts: List[Token], i: Int) -> PR {
     var j = i + 1
     var ty = ""
     if (at(ts, j, "[")) {
-      let ty_ = p_type(ts, j + 1)
+      let ty_ = p_type(ts, j + 1, d + 1)
       if (!ty_.ok) { return bad("bad hole type") }
       if (!at(ts, ty_.i, "]")) { return bad("expected ]") }
       ty = ty_.ty
@@ -828,23 +878,23 @@ fn p_primary(ts: List[Token], i: Int) -> PR {
     return { i: jj, e: Hole({ ty: tt, msg: mm }) }
   }
   if (t.kind == "kw" && t.text == "match") {
-    let scr = p_expr(ts, i + 1)
+    let scr = p_expr_d(ts, i + 1, d + 1)
     if (is_bad(scr.e)) { return scr }
     if (!at(ts, scr.i, "{")) { return bad("expected { after match scrutinee") }
-    let a = p_arms(ts, scr.i + 1)
+    let a = p_arms(ts, scr.i + 1, d + 1)
     if (!a.ok) { return bad("bad match arm") }
     return { i: a.i, e: Match({ scrut: scr.e, arms: a.xs }) }
   }
   if (t.kind == "(") {
     if (arrow_ahead(ts, i)) {
-      let ps = p_params(ts, i + 1)
+      let ps = p_params(ts, i + 1, d + 1)
       if (!ps.ok) { return bad("bad arrow params") }
       if (!at(ts, ps.i, "=>")) { return bad("expected =>") }
-      let ab = p_expr(ts, ps.i + 1)
+      let ab = p_expr_d(ts, ps.i + 1, d + 1)
       if (is_bad(ab.e)) { return ab }
       return { i: ab.i, e: Arrow({ params: ps.xs, body: ab.e }) }
     }
-    let inner = p_expr(ts, i + 1)
+    let inner = p_expr_d(ts, i + 1, d + 1)
     if (is_bad(inner.e)) { return inner }
     if (!at(ts, inner.i, ")")) { return bad("expected )") }
     return { i: inner.i + 1, e: mark_paren(inner.e) }
@@ -862,12 +912,12 @@ fn p_primary(ts: List[Token], i: Int) -> PR {
     if (record_update_ahead(ts, i)) {
       return bad("record update `{base | f = e}` is not supported here")
     }
-    let fs = p_inits(ts, i + 1)
+    let fs = p_inits(ts, i + 1, d + 1)
     if (!fs.ok) { return bad("bad record field") }
     return { i: fs.i, e: Rec({ fields: fs.xs }) }
   }
   if (t.kind == "[") {
-    let ls = p_seq(ts, i + 1, "]")
+    let ls = p_seq(ts, i + 1, "]", d + 1)
     if (!ls.ok) { return bad(ls.msg) }
     return { i: ls.i, e: Lst({ items: ls.xs }) }
   }
@@ -884,9 +934,11 @@ fn mark_paren(e: Expr) -> Expr {
 // ---------------------------------------------------------------- entry
 
 // Parse one expression and require it to consume the whole input.
-pub fn parse_expr_str(src: Str) -> Expr {
+pub fn parse_expr_str(src: Str) -> Expr { return parse_expr_str_d(src, 0) }
+
+fn parse_expr_str_d(src: Str, d: Int) -> Expr {
   let ts = lex_src(src)
-  let r = p_expr(ts, 0)
+  let r = p_expr_d(ts, 0, d)
   if (is_bad(r.e)) { return r.e }
   if (!at(ts, r.i, "eof")) { return Bad("trailing tokens") }
   return r.e
@@ -915,14 +967,14 @@ pub fn expr_at(ts: List[Token], i: Int) -> AtExpr {
 
 // Parse a parameter list whose opening `(` sits at index `i`.
 pub fn params_at(ts: List[Token], i: Int) -> AtPars {
-  let r = p_params(ts, i)
+  let r = p_params(ts, i, 0)
   return { i: r.i, ps: r.xs, ok: r.ok }
 }
 
 // Parse one type spelling starting at index `i`, rendered as the reference
 // renders it.
 pub fn type_at(ts: List[Token], i: Int) -> AtTy {
-  let t = p_type(ts, i)
+  let t = p_type(ts, i, 0)
   return { i: t.i, ty: t.ty, ok: t.ok }
 }
 
