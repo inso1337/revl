@@ -258,7 +258,7 @@ use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
 // into the fixed point exactly as the reference does.
 type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
              callees: List[Str], asyncSlots: List[Int], asyncParams: List[Str],
-             body: List[Stmt] }
+             body: List[Stmt], cachePure: Bool }
 
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
@@ -654,7 +654,7 @@ fn mk_step(p: Prog, i: Int) -> PStep { return { pg: p, i: i } }
 fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
           aps: List[Str], bd: List[Stmt]) -> FnD {
   return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs,
-           asyncSlots: slots, asyncParams: aps, body: bd }
+           asyncSlots: slots, asyncParams: aps, body: bd, cachePure: false }
 }
 
 fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
@@ -1129,7 +1129,9 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, i + 1).text
   let ps = params_at(ts, i + 3)
-  let rti = ret_at(ts, ps.i)
+  var rti = ret_at(ts, ps.i)
+  let cachePure = ati(ts, rti, "cache") && atw(ts, rti + 1, "pure")
+  if (cachePure) { rti += 2 }
   if (!atk(ts, rti, "{")) {
     return mk_step(bad_prog(pg, "expected { after fn signature"), rti)
   }
@@ -1143,7 +1145,7 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
                               callees: body_callees(body, 0, []),
                               asyncSlots: async_slots_of(ps.ps),
                               asyncParams: async_params_of(ps.ps),
-                              body: body }), bend)
+                              body: body, cachePure: cachePure }), bend)
 }
 
 type MethsR = { xs: List[MSig], i: Int, ok: Bool }
@@ -1764,7 +1766,12 @@ fn reached_caps(called: List[Str], caps: CapsT, i: Int,
 }
 
 fn emit_caps(fs: List[FnD]) -> CapsT {
+  return emit_caps_reach(fs, false)
+}
+
+fn emit_caps_reach(fs: List[FnD], include_values: Bool) -> CapsT {
   var caps: CapsT = Map.empty()
+  let names = fn_names_of(fs)
   var i = 0
   while (i < fs.length()) {
     if (fs[i].isEmExtern) { caps = caps.set(fs[i].name, [fs[i].name]) }
@@ -1776,7 +1783,8 @@ fn emit_caps(fs: List[FnD]) -> CapsT {
     i = 0
     while (i < fs.length()) {
       let f = fs[i]
-      let reached = reached_caps(f.callees, caps, 0, [])
+      let refs = include_values ? col_values_body(f.body, 0, names, f.callees) : f.callees
+      let reached = reached_caps(refs, caps, 0, [])
       let cur = caps_of(caps, f.name)
       if (reached.length() > 0 && !subset_of(reached, cur)) {
         caps = caps.set(f.name, union_into(cur, reached))
@@ -3007,38 +3015,38 @@ fn leaky_body(ss: List[Stmt], i: Int, cx: Ctx, cr: Bool) -> Str {
 // The value refusal is checked before the arrow leak, per fn, in declaration
 // order, exactly as the reference's single loop does.
 
-fn col_exprs(xs: List[Expr], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+fn col_exprs(xs: List[Expr], i: Int, names: List[Str], acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return col_exprs(xs, i + 1, cx, col_values(xs[i], cx, acc))
+  return col_exprs(xs, i + 1, names, col_values(xs[i], names, acc))
 }
 
-fn col_inits(xs: List[InitN], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+fn col_inits(xs: List[InitN], i: Int, names: List[Str], acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return col_inits(xs, i + 1, cx, col_values(xs[i].value, cx, acc))
+  return col_inits(xs, i + 1, names, col_values(xs[i].value, names, acc))
 }
 
-fn col_arms(xs: List[ArmN], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+fn col_arms(xs: List[ArmN], i: Int, names: List[Str], acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return col_arms(xs, i + 1, cx, col_values(xs[i].body, cx, acc))
+  return col_arms(xs, i + 1, names, col_values(xs[i].body, names, acc))
 }
 
-fn col_parts(xs: List[PartN], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+fn col_parts(xs: List[PartN], i: Int, names: List[Str], acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return col_parts(xs, i + 1, cx, col_values(xs[i].e, cx, acc))
+  return col_parts(xs, i + 1, names, col_values(xs[i].e, names, acc))
 }
 
 // The call HEAD var is the callee, not a flowing value (mirrors `_calls_in`,
 // which records it in `found`, never `values`); a non-var head is walked.
-fn col_call(tg: Expr, args: List[Expr], cx: Ctx, acc: List[Str]) -> List[Str] {
-  let a2 = match tg { Var(_) => acc, _ => col_values(tg, cx, acc) }
-  return col_exprs(args, 0, cx, a2)
+fn col_call(tg: Expr, args: List[Expr], names: List[Str], acc: List[Str]) -> List[Str] {
+  let a2 = match tg { Var(_) => acc, _ => col_values(tg, names, acc) }
+  return col_exprs(args, 0, names, a2)
 }
 
-// First-class async-colored names referenced as VALUES in an expression tree
-// (mirrors `_calls_in(values=…)` intersected with the colored set).
-fn col_values(e: Expr, cx: Ctx, acc: List[Str]) -> List[Str] {
+// Named callables referenced as VALUES (mirrors `_calls_in(values=…)`).
+// Async admission supplies the colored set; cache reach supplies all callables.
+fn col_values(e: Expr, names: List[Str], acc: List[Str]) -> List[Str] {
   return match e {
-    Var(n)      => contains(cx.colored, n) ? union_into(acc, [n]) : acc,
+    Var(n)      => contains(names, n) ? union_into(acc, [n]) : acc,
     IntLit(_)   => acc,
     FloatLit(_) => acc,
     StrLit(_)   => acc,
@@ -3046,26 +3054,26 @@ fn col_values(e: Expr, cx: Ctx, acc: List[Str]) -> List[Str] {
     NullLit     => acc,
     Hole(_)     => acc,
     Bad(_)      => acc,
-    Bin(b)      => col_values(b.r, cx, col_values(b.l, cx, acc)),
-    Un(u)       => col_values(u.e, cx, acc),
-    Emit(u)     => col_values(u.e, cx, acc),
-    Call(c)     => col_call(c.target, c.args, cx, acc),
-    Field(f)    => col_values(f.target, cx, acc),
-    OptField(f) => col_values(f.target, cx, acc),
-    OptCall(c)  => col_call(c.target, c.args, cx, acc),
-    Index(x)    => col_values(x.idx, cx, col_values(x.target, cx, acc)),
-    If(x)       => col_values(x.els, cx, col_values(x.then_, cx, col_values(x.cond, cx, acc))),
-    Rec(r)      => col_inits(r.fields, 0, cx, acc),
-    Lst(l)      => col_exprs(l.items, 0, cx, acc),
-    Arrow(ar)   => col_values(ar.body, cx, acc),
-    Match(m)    => col_arms(m.arms, 0, cx, col_values(m.scrut, cx, acc)),
-    Templ(t)    => col_parts(t.parts, 0, cx, acc),
+    Bin(b)      => col_values(b.r, names, col_values(b.l, names, acc)),
+    Un(u)       => col_values(u.e, names, acc),
+    Emit(u)     => col_values(u.e, names, acc),
+    Call(c)     => col_call(c.target, c.args, names, acc),
+    Field(f)    => col_values(f.target, names, acc),
+    OptField(f) => col_values(f.target, names, acc),
+    OptCall(c)  => col_call(c.target, c.args, names, acc),
+    Index(x)    => col_values(x.idx, names, col_values(x.target, names, acc)),
+    If(x)       => col_values(x.els, names, col_values(x.then_, names, col_values(x.cond, names, acc))),
+    Rec(r)      => col_inits(r.fields, 0, names, acc),
+    Lst(l)      => col_exprs(l.items, 0, names, acc),
+    Arrow(ar)   => col_values(ar.body, names, acc),
+    Match(m)    => col_arms(m.arms, 0, names, col_values(m.scrut, names, acc)),
+    Templ(t)    => col_parts(t.parts, 0, names, acc),
   }
 }
 
-fn col_values_body(ss: List[Stmt], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+fn col_values_body(ss: List[Stmt], i: Int, names: List[Str], acc: List[Str]) -> List[Str] {
   if (i >= ss.length()) { return acc }
-  return col_values_body(ss, i + 1, cx, col_values(ss[i].e, cx, acc))
+  return col_values_body(ss, i + 1, names, col_values(ss[i].e, names, acc))
 }
 
 // The module-fn value + leaky-arrow verdict for one fn (lower.py's fn loop).
@@ -3258,7 +3266,7 @@ fn check_reachable_fn_acquire(pg: Prog) -> Str {
 }
 
 fn fn_a1_verdict(f: FnD, base: Ctx) -> Str {
-  let vals = sort_strs(col_values_body(f.body, 0, base, []))
+  let vals = sort_strs(col_values_body(f.body, 0, base.colored, []))
   if (vals.length() > 0) {
     return tagged("A1", "function `".concat(f.name)
       .concat("` uses async callable `").concat(vals[0])
@@ -3274,6 +3282,21 @@ fn check_module_fns(fns: List[FnD], i: Int, base: Ctx) -> Str {
   let v = fn_a1_verdict(fns[i], base)
   if (v != "") { return v }
   return check_module_fns(fns, i + 1, base)
+}
+
+fn check_cache_fns(fns: List[FnD]) -> Str {
+  let caps = emit_caps_reach(fns, true)
+  var i = 0
+  while (i < fns.length()) {
+    let f = fns[i]
+    let crossed = sort_strs(caps_of(caps, f.name))
+    if (f.cachePure && crossed.length() > 0) {
+      return tagged("G4", "the reach of fn `".concat(f.name).concat("` crosses ")
+        .concat(crossed[0]).concat(": a crossing result is not pure"))
+    }
+    i += 1
+  }
+  return ""
 }
 
 // G4 + A1 over one component. "" = admitted, else a tagged refusal.
@@ -4335,6 +4358,8 @@ pub fn admit_src(src: Str) -> Str {
   // stream rather than out of `Prog`, because `p_top` steps over `type`
   // declarations structurally — see `type_ctors`.
   let base = ctx_with_callables(build_maps(pg), type_ctors(lex_src(src)))
+  let cachev = check_cache_fns(pg.fns)
+  if (cachev != "") { return cachev }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
   // the whole program before any body is gated, exactly where `check_and_lower`
   // places `_refuse_host_acquire_in_component_reachable_fn` — after the fn
@@ -5501,12 +5526,13 @@ fn join_ty(a: Str, b: Str) -> Str {
   return ""
 }
 
-fn infer_field(t: Str, name: Str) -> Str {
+fn infer_field(t: Str, name: Str, env: List[Bind]) -> Str {
   if (name == "length") {
     let h = parse_head(t)
     if (h == "Str" || h == "Bytes" || h == "List") { return "Int" }
   }
-  return struct_field(t, name)
+  let structural = struct_field(t, name)
+  return structural != "" ? structural : tenv_get(env, "field ".concat(t).concat(".").concat(name))
 }
 
 fn infer_index(t: Str) -> Str {
@@ -5575,7 +5601,7 @@ fn infer(e: Expr, env: List[Bind]) -> Str {
     Un(u)       => u.op == "!" ? "Bool" : infer(u.e, env),
     Emit(u)     => "",
     Call(c)     => infer_callee(c.target, env),
-    Field(f)    => infer_field(infer(f.target, env), f.name),
+    Field(f)    => infer_field(infer(f.target, env), f.name, env),
     OptField(f) => "",
     OptCall(c)  => "",
     Index(x)    => infer_index(infer(x.target, env)),
@@ -5776,7 +5802,22 @@ fn decl_cases(ts: List[Token], i: Int, a: CaseAcc) -> CaseStep {
   j += 1
   if (atk(ts, j, "{")) {
     let bend = close_brace(ts, j)
-    return { a: a, i: bend == 0 - 1 ? lineHi : bend }
+    if (bend == 0 - 1 || atk(ts, i + 2, "[")) {
+      return { a: a, i: bend == 0 - 1 ? lineHi : bend }
+    }
+    var binds = a.binds
+    var k = j + 1
+    while (k < bend - 1) {
+      if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
+        let tr = type_at(ts, k + 2)
+        if (!tr.ok || tr.i <= k + 2) { break }
+        binds = tenv_put(binds, "field ".concat(nm).concat(".").concat(tkc(ts, k).text),
+                         taint_strip(tr.ty))
+        k = tr.i
+      } else { k += 1 }
+    }
+    let fields = binds
+    return { a: { binds: fields, amb: a.amb }, i: bend }
   }
   if (!is_variant_rhs(ts, j, lineHi)) { return { a: a, i: lineHi } }
   var k = j
@@ -6271,6 +6312,8 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool) -> 
     retTy = taint_strip(tr.ty)
     reti = tr.i
   }
+  let cache_pure = ati(ts, reti, "cache") && atw(ts, reti + 1, "pure")
+  if (cache_pure) { reti += 2 }
   if (!atk(ts, reti, "{")) { return { js: "", i: skip_line(ts, i) } }
   let bend = close_brace(ts, reti)
   if (bend == 0 - 1) { return { js: "", i: ts.length() } }
@@ -6279,7 +6322,8 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool) -> 
   let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_params_json(ps.ps))
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
-    .concat(bodyjs).concat("]}")
+    .concat(bodyjs).concat("]")
+    .concat(cache_pure ? ",\"cache\":{\"class\":\"pure_fn\"}" : "").concat("}")
   return { js: js, i: bend }
 }
 
