@@ -379,6 +379,7 @@ def test_native_gate_refuses_invalid_plain_function_cache(admit, clause):
 @pytest.mark.parametrize("body", [
     "return write(n)",
     "return helper(n)",
+    "let f = write\nreturn n",
     "let f = write\nreturn f(n)",
     "return apply(write, n)",
 ])
@@ -393,6 +394,18 @@ def test_native_cache_pure_preserves_emission_refusal(admit, body):
         compile_source(source)
     assert refused.value.code == "G4"
     assert admit(source) == "G4|the reach of fn `cached` crosses write: a crossing result is not pure"
+
+
+@pytest.mark.parametrize("source", [
+    "fn cached(f: (Int) -> Int) -> Int cache pure { return f(1) }",
+    "fn pure_value(n: Int) -> Int { return n }\n"
+    "fn cached(n: Int) -> Int cache pure { let f = pure_value\nreturn f(n) }",
+    "extern emission fn write(n: Int) -> Int = @py { return n }\n"
+    "fn plain(n: Int) -> Int { return write(n) }",
+])
+def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit, source):
+    compile_source(source)
+    assert admit(source) == ""
 
 
 # item 429: documents the reference admits and the native gate does NOT. A FALSE
