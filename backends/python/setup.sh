@@ -46,6 +46,7 @@ git -C "$CORDIS_PY" checkout --quiet "$CORDIS_PY_PIN"
 # --allow-existing: re-running setup on an existing venv must work, since the
 # `revl run` diagnostic tells people to run exactly this line.
 uv venv --allow-existing .venv
+uv pip install --python .venv/bin/python pip
 # `coverage` is here for the same reason `pytest` is: this venv runs the WHOLE
 # `tests/` root in the `frontend-cordis` job, and that root includes the item
 # 429 self-host coverage ratchets, which need a real tracer. The names are

@@ -1728,7 +1728,6 @@ def run_command(args) -> int:
         from cordis import Context  # noqa: PLC0415
         from cordis.fiber import FiberState  # noqa: PLC0415
     except ModuleNotFoundError as exc:
-        venv = backend_dir / ".venv" / "bin" / "python"
         # The fix the setup script installs is the `revl` console script on
         # PATH (issue #336). The `.venv/bin/python -P -m revl run …` spelling
         # is only kept as a fallback because some agents always run a venv's
