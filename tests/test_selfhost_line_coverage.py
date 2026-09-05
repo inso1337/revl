@@ -108,3 +108,18 @@ def test_line_closure_rejects_duplicates_and_missing_sides(lines, monkeypatch, t
     problems = lines.check({"reference": {}, "selfhost": {}})
     assert any("appears in multiple reasons" in problem for problem in problems)
     assert any("missing line-coverage side" in problem for problem in problems)
+
+
+def test_line_check_fails_closed_on_malformed_maps_and_counts(lines, monkeypatch, tmp_path):
+    ledger = {half: {tier: {"uncovered": None} for tier in TIERS}
+              for half in ("reference", "selfhost")}
+    ledger["reference"]["py"]["uncovered"] = {"specific decision": {"f": "bad"}}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(lines, "LEDGER", path)
+    data = {half: {tier: {"functions": {"f": "bad"}, "sizes": {}}
+                   for tier in TIERS}
+            for half in ("reference", "selfhost")}
+    problems = lines.check(data)
+    assert any("invalid uncovered count" in problem for problem in problems)
+    assert any("invalid measured count" in problem for problem in problems)
