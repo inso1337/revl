@@ -103,31 +103,25 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # accident: `--record` would happily write a new one into the baseline, and this
 # is what stops that from passing unnoticed.
 #
-# The whole list is ONE reference family, item 131 §3's effect-composition
-# `await`/async pairing over `effect` / `emit` steps (lower.py
-# `_admit_effect_async` / `_admit_emit_async`, rules 1-3), plus the type-layer
-# arrow-colour refusal. The gate decides A1 by NAME REACH over a whole body
-# (`setup_async_verdict`); these rules are per-STATEMENT and read the `await`
-# marker and the `undo`/`compensate` slots separately, which the gate's
-# statement model does not carry. Closing them is a statement-model change, not
-# a predicate fix.
+# Item 131 §3's effect-composition `await`/async pairing over `effect` / `emit`
+# steps (lower.py `_admit_effect_async` / `_admit_emit_async`, rules 1-3) is
+# CLOSED: the statement now carries its own `await` marker (`Stmt.awaited`), so
+# `stmt_a1_verdict` decides the exact pairing and the suspending-teardown rule
+# per statement, and the name fence (`setup_async_verdict`) prunes the awaited
+# steps it must not see. The two entries that remain are each in a layer this
+# gate deliberately does not run:
 KNOWN_BYPASSES = {
-    # rule 3, `compensate` reaches a suspension
-    "examples/rejections/a1_async_compensate_suspends.rvl",
-    # rule 1, `effect` acquires through an async op without `await`
-    "examples/rejections/a1_async_effect_not_awaited.rvl",
-    # rule 1, `emit` step reaches an async op without `await`
-    "examples/rejections/a1_async_emit_step_not_awaited.rvl",
-    # rule 2, `await emit` on an emission that reaches nothing async
-    "examples/rejections/a1_await_emit_sync.rvl",
-    # rule 2, `effect await` on an acquisition that reaches nothing async
-    "examples/rejections/a1_effect_await_sync.rvl",
     # typecheck.py's `an arrow may not declare its own async colour` — carried
     # with `code="A1"`, so the oracle classifier reads it in-slice, but it is
-    # decided in the reference TYPE layer, which this gate does not run at all
+    # decided in the reference TYPE layer, which this gate does not run at all.
+    # Closing it means porting a type-checker rule, not a statement-model fix.
     "examples/rejections/t34_arrow_self_declared_async.rvl",
-    # `_check_spawn_attenuation`'s capability-widening refusal over a spawn's
-    # `with { ... }` config block, which the gate skips structurally
+    # `_check_spawn_attenuation`'s PARAMETERIZED capability-widening refusal
+    # (item 294): `fs.write(path="/etc")` is not within the held
+    # `fs.write(path="/tmp")` cone. The gate's capability model is token-level
+    # (`fs`, `*`), so a same-token narrower/wider valuation is invisible to it.
+    # Closing it needs the `cap_order` (T,P)-pair cone/ceiling algebra ported
+    # into the gate, a much larger change than a `with { ... }` reader.
     "examples/rejections/g4_spawn_widens_parameter.rvl",
 }
 
