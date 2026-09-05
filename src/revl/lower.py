@@ -618,6 +618,17 @@ _PREDECLARED_CANDIDATES: frozenset[str] = frozenset({
     # verbatim (issue #320's typescript list).
     "Number", "String", "Object", "JSON", "Array", "TypeError",
     "eval", "arguments", "revlLen", "revlEq", "revlStrLen",
+    # vitest harness global the TS emitter injects INTO a `test` block body:
+    # an in-file `test` lowers `assert a == b` to `expect(revlEq(...)).toBe(...)`
+    # (backends/typescript/emit.py `_v3_stmt` "assert"). A user binding named
+    # `expect` in that scope (`let expect = 2`) would shadow the vitest import
+    # and the harness's own `expect(...)` call fails with "expect is not a
+    # function". Renamed here so the binding is safe and the harness call is
+    # untouched. `it` is the other vitest import, but it is only ever *called*
+    # around the block, never referenced from inside a body, so a binding named
+    # `it` cannot shadow it — `it` stays a fn-NAME-position remainder only (see
+    # tests/test_reserved_lexicon_sweep.py::KNOWN_FNNAME_REMAINDER).
+    "expect",
     # go predeclared / imported package names (issue #320's go list).
     "strconv", "float64", "int64",
     # host roots and ADT constructors — legal identifiers a user may bind, but

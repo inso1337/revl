@@ -127,8 +127,32 @@ def test_host_keyword_predicate_covers_python_and_backends():
 
 # ---------------------------------------------------------------- the sweep ---
 
-# fn-NAME position cells that need item 320's second half (backends dropping
-# their keyword rename). Everything else must be safe verbatim.
+# fn-NAME position cells that need item 320's second half. The frontend renames
+# a colliding user name only in BINDING positions (`_predeclared_mangle` runs on
+# params/locals/lets/captures, never on a fn's own name); making a fn *name* safe
+# verbatim needs each backend to drop its own keyword/scaffolding rename so the
+# frontend can own naming end to end. Until then a fn whose NAME spells a host
+# construct the emitter also emits at module scope collides. Everything else
+# (every binding position, every other name) must be safe verbatim.
+#
+# The families here, all module-scope collisions the emitter injects next to the
+# user's top-level `function`/`func`/`(func ...)`:
+#   * constructor spellings (`Some`/`None`) the emitter constructs directly;
+#   * go predeclared/import/builtin names — `int64`/`strconv`/`float64` (already
+#     listed) plus `panic` (a Go builtin the runtime helpers call), `testing`
+#     (the imported test package, `testing.T`), and `init` (Go's reserved
+#     package-init function, which the go backend already emits as `func init()`
+#     for WAL setup — two `func init` with a signature is a compile error);
+#   * TS globals/imports/helpers the emitted test harness names at module scope —
+#     `eval`/`arguments` (illegal as a `function` name in strict-mode modules),
+#     the vitest imports `expect`/`it` (`function expect`/`it` redeclares the
+#     import), and `revlEq` (a `fn revlEq` whose in-file `test` asserts equality
+#     forces the emitter's own `function revlEq` helper — duplicate declaration).
+#     `expect`/`it`/`revlEq` are safe in BINDING position (renamed by the
+#     frontend, or never referenced from a body); only the fn-NAME spelling is
+#     deferred;
+#   * wasm scaffolding the module always defines — `alloc`/`memory`/`f64_to_str`
+#     — which a same-named exported `(func ...)` redefines.
 KNOWN_FNNAME_REMAINDER = {
     ("python", "fnname", "Job"), ("python", "fnname", "Map"),
     ("python", "fnname", "Pool"), ("python", "fnname", "Stream"),
@@ -136,8 +160,15 @@ KNOWN_FNNAME_REMAINDER = {
     ("go", "fnname", "None"), ("go", "fnname", "Some"),
     ("go", "fnname", "int64"), ("go", "fnname", "strconv"),
     ("go", "fnname", "float64"),
+    ("go", "fnname", "init"), ("go", "fnname", "panic"),
+    ("go", "fnname", "testing"),
+    ("typescript", "fnname", "eval"), ("typescript", "fnname", "expect"),
+    ("typescript", "fnname", "it"), ("typescript", "fnname", "revlEq"),
+    ("typescript", "fnname", "arguments"),
     ("rust", "fnname", "None"), ("rust", "fnname", "Some"),
     ("wasm", "fnname", "Some"),
+    ("wasm", "fnname", "alloc"), ("wasm", "fnname", "f64_to_str"),
+    ("wasm", "fnname", "memory"),
 }
 
 
