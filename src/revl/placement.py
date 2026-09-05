@@ -2264,9 +2264,6 @@ def _stranded_teardown_report(names: list[str]) -> str:
         "  Reconcile a durable run with `revl recover --wal <file>`. If the\n"
         "  teardown is legitimately slow rather than wedged, give it room with\n"
         f"  REVL_TEARDOWN_GRACE=<seconds> (currently {_teardown_grace():g}).\n"
-        "  Consider dynamically adjusting the grace period based on the teardown\n"
-        "  characteristics to improve performance and reliability.\n"
-        "  For example, use historical teardown data to set an adaptive value."
     )
 
 
