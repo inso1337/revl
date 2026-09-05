@@ -1,0 +1,33 @@
+// Bind results before using them: return-only examples bypass local inference.
+fn methods(s: Str, xs: List[Int], n: Int, small: Int32) -> Int {
+  let length = s.length()
+  let widened = small.to_int()
+  let narrowed = n.to_int32()
+  let pushed = xs.push(n)
+  let joined = pushed.concat(xs)
+  let sliced = joined.slice(0, 1)
+  let char = s.charAt(0)
+  let code = char.charCodeAt(0)
+  let text = n.to_str()
+  let prefix = text.startsWith("1")
+  let suffix = text.endsWith("2")
+  let parsed = text.to_int()
+  let q = n.div_trunc(2)
+  let floor = n.div_floor(2)
+  let euclid = n.div_euclid(2)
+  let mod = n.mod(2)
+  let cell = Some(n)
+  let none: Opt[Int] = None
+  return length + widened + code + q + floor + euclid + mod
+}
+fn emptyLocal(n: Int) -> List[Int] {
+  let xs: List[Int] = []
+  return xs.push(n)
+}
+fn point(s: Str, n: Int) -> Int {
+  let cp = s.codepoint_at(n)
+  return cp
+}
+fn negate(n: Int) -> Int { return -n }
+fn negate32(n: Int32) -> Int32 { return -n }
+fn widen(n: Int32) -> Int { let x: Int = n; return x }
