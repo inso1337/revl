@@ -626,100 +626,117 @@
       "uncovered_statements": 1559
     },
     "ts": {
-      "statements": 1972,
+      "statements": 1979,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
-          "_emit_temporal": 14,
+        "Standalone transport only: `<module>` calls `_main`; `_main` parses `--runtime`, stdin/file JSON, usage and missing-argument errors, then writes `emit`. The oracle imports and calls `emit` directly, so these statements do not represent an emitter branch": {
+          "<module>": 1,
+          "_main": 17
+        },
+        "Malformed binding and identifier guards: `_Scope.bind` rejects rebinding; `_ident` and `_raw_field` reject empty/non-string or emitter-reserved names. Frontend-lowered bindings and record fields satisfy those invariants; reserved TypeScript words are valid and exercised through mangling/quoted properties": {
+          "_Scope.bind": 1,
+          "_ident": 2,
+          "_raw_field": 2
+        },
+        "Witness-call decoding fallbacks: `_bind_call_temps` returns None for a non-object compensation expression; `_call_method_name` falls back to `undo` for malformed host/fn/call nodes; `_crossing_key_name` uses `?` for absent name/var identifiers; `_replay_call` rejects a foreign node after its call/fn/host arms. Legal witnessed inputs are the separately excluded witnessed transaction family; call, fn, host and generic expression compensation are covered": {
+          "_bind_call_temps": 1,
+          "_call_method_name": 6,
+          "_crossing_key_name": 5,
+          "_replay_call": 1
+        },
+        "Component header residuals: `_component` rejects unknown service/provision/isolate/intercept/route keys and emits routed requirement realm/strategy metadata; `_context_augmentation` rejects one Context key bound to conflicting services; `_provide_impl` rejects unknown services, undeclared methods and arity mismatch. The frontend enforces these relationships; routed requires are the declared router-runtime boundary": {
+          "_component": 10,
+          "_context_augmentation": 2,
+          "_provide_impl": 3
+        },
+        "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), emits sync/async timer scheduling and in-flight tracking, and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards and fail are covered; witnessed transactions and timers are declared port boundaries": {
+          "_component_step": 42
+        },
+        "Extern residuals: `_emit_ts_externs` selects plug-time config scaffolding/binding, lazy `ref` thunks, absent-target rejection and empty-body comments. Verbatim @ts bodies and Secret config/result marking are covered; ref/config installation is the declared extern ABI boundary": {
+          "_emit_ts_externs": 8,
+          "_ts_extern_config_bind": 4
+        },
+        "Module-v3 residuals: `_emit_v3` rejects empty/duplicate documents and conditionally imports/emits vitest tests, ref-runtime support, lifecycle settle/runtime helpers, and ref/config extern support. The byte corpus exercises ordinary module/component output; those conditional branches are classified by the test/ref/config boundaries": {
+          "_emit_v3": 15,
+          "_runtime_imports": 2
+        },
+        "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the explicitly refused subscribe/stream family. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered": {
+          "_expr": 20,
+          "_fn_call": 2,
+          "_ts_builtin": 1
+        },
+        "Literal and Float-shape invariants: `_finite_float` rejects NaN/Infinity; `_float_literal` returns None for non-float values; `_is_float_expr`'s unstamped literal/unary inference handles legacy IR; `_literal` maps null and rejects foreign Python values. Typed finite source literals carry canonical stamps and are covered": {
+          "_finite_float": 1,
+          "_float_literal": 1,
+          "_is_float_expr": 3,
+          "_literal": 2
+        },
+        "Provide-method residuals: `_method_body` retains witnessed acquisition, generic non-call compensation snapshots, empty-list `any[]` fallback, nested-provide rejection and unknown-step rejection. Mutable/immutable locals, returns, await, Map CAS and call compensation are covered; witnessed transactions remain the named boundary": {
+          "_method_body": 17
+        },
+        "Canonical type parser fallbacks: `_split_fn_type` rejects missing arrows/unclosed parameter lists; `_split_ts_types` tracks nested generic bracket depth; `_ts_type` and `_ts_v3_type` erase unknown nominal/generic arguments; `_v3_surface_type` retains legacy unstamped literal/name/list inference. Frontend canonical type strings and stamped expressions exercise the supported paths": {
+          "_split_fn_type": 2,
+          "_split_ts_types": 2,
+          "_ts_type": 1,
+          "_ts_v3_type": 2,
+          "_v3_surface_type": 8
+        },
+        "Owned-write malformed-shape returns: `_ts_inplace_write` declines assignment nodes without a supported owned list/map operation or valid target/value dictionaries. The corpus covers admitted unique list/map set/remove/push updates; these None returns preserve fallback to ordinary assignment": {
+          "_ts_inplace_write": 3
+        },
+        "Emission and match helper false branches: `_v3_emission_call_node` rejects non-call, targeted-call and unknown-callee shapes; `_v3_match_expr` retains the `undefined` optional-payload guard. Covered emission calls and exhaustive Some/None/Result/variant matches take the normal branches": {
+          "_v3_emission_call_node": 3,
+          "_v3_match_expr": 1
+        },
+        "Test-mode statement rendering only: `_v3_stmt`'s remaining structural/truthy assertion lines emit vitest `expect` calls when `test_mode=True`, plus the final unknown-step rejection. Runtime function assertions use the covered throwing form; in-file test harness generation is a separate declared boundary": {
+          "_v3_stmt": 8
+        },
+        "Top-level emitter dispatch: `emit` rejects non-object/unsupported versions, delegates temporal IR, and rejects mixed temporal documents. The corpus supplies valid v1/v2/v3 objects; temporal delegation is a declared separate backend": {
+          "emit": 4
+        },
+        "Temporal backend delegation: `_emit_temporal` adjusts import paths, installs an `emit` proxy, imports `emit_temporal`, and delegates the document. Temporal IR is rejected from mixed v3 emission and is not implemented by the self-host TypeScript emitter": {
+          "_emit_temporal": 14
+        },
+        "Extern host-ref ABI boundary: `_emit_ts_ref_runtime` emits path/cache helpers; `_emit_ts_ref_thunk` emits lazy sync/async import, cache, symbol/type checks and calls; `_mark` wraps secret results; `_ts_extern_config_scaffold` installs extern config. `root=stdlib` and ref/config extern documents reproduce this family; the port intentionally refuses rather than fabricating it": {
           "_emit_ts_ref_runtime": 1,
           "_emit_ts_ref_thunk": 31,
           "_emit_ts_ref_thunk._mark": 2,
+          "_ts_extern_config_scaffold": 1
+        },
+        "In-file test harness boundary: `_emit_ts_tests` emits vitest cases and test-mode statements; `_emit_ts_lifecycle_tests` builds Context/fibers and lowers load, unload, call, assert, advance and no-residue steps. The self-host emitter produces application/library modules only; lifecycle constructs and steps are recorded unported": {
           "_emit_ts_tests": 14,
-          "_finite_float": 3,
-          "_float_literal": 3,
-          "_main": 17,
+          "_emit_ts_lifecycle_tests": 60
+        },
+        "Witnessed transaction boundary: `_witnessed_extern` looks up declared witnessed fn acquisitions; `_witnessed_step` and `_method_witnessed_step` bind call arguments, replay acquisition, test Result.Ok, register undo crossings and optionally bind the result. The self-host emitter refuses `class=witnessed` instead of emitting partial frame semantics": {
           "_method_witnessed_step": 19,
-          "_pinned_arrow": 5,
-          "_ts_extern_config_scaffold": 1,
-          "_v3_do_expr": 22,
+          "_witnessed_extern": 3,
           "_witnessed_step": 19
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "<module>": 1,
-          "_Ctx.__init__": 2,
-          "_Scope.bind": 1,
-          "_bind_call_temps": 10,
-          "_bracket_yield": 1,
-          "_call_method_name": 7,
-          "_component": 10,
-          "_component_step": 58,
-          "_context_augmentation": 2,
-          "_crossing_key_name": 5,
-          "_emit_ts_externs": 9,
-          "_emit_ts_functions": 1,
-          "_emit_ts_types": 19,
-          "_emit_v3": 16,
-          "_expr": 52,
-          "_float_operand": 3,
-          "_fn_call": 4,
-          "_guard_frame_neutral_loop": 1,
-          "_has_bracket.walk": 3,
-          "_ident": 2,
-          "_is_float_expr": 5,
-          "_literal": 5,
-          "_mangle": 2,
-          "_member": 2,
-          "_method_body": 54,
-          "_method_body_needs_frame": 2,
-          "_needs_frame.walk": 3,
-          "_prop_key": 1,
-          "_provide_impl": 3,
-          "_raw_field": 2,
-          "_refuse_deferred_emissions": 10,
-          "_refuse_holes": 4,
-          "_refuse_holes.walk": 1,
-          "_refuse_missing_host_root": 1,
-          "_replay_call": 5,
-          "_runtime_imports": 2,
-          "_split_fn_type": 2,
-          "_split_ts_types": 2,
-          "_ts_builtin": 9,
-          "_ts_extern_config_bind": 4,
-          "_ts_inplace_stmt": 5,
-          "_ts_inplace_write": 4,
-          "_ts_type": 2,
-          "_ts_v3_type": 4,
-          "_uses_assert": 1,
-          "_uses_bounded_int": 1,
-          "_uses_bounded_int32": 2,
-          "_uses_parse_int": 1,
-          "_uses_str_methods": 2,
-          "_v3_arm_body": 3,
-          "_v3_emission_call_node": 3,
-          "_v3_empty_list_types": 10,
-          "_v3_match_expr": 6,
-          "_v3_stmt": 33,
-          "_v3_surface_type": 24,
-          "_v3_var": 3,
-          "_witnessed_extern": 3,
-          "emit": 4
-        },
-        "declared out of every self-host slice: async coloring.": {
-          "_await_statement": 1,
+        "Unselected async-call shapes: `_is_async_fn_type` returns false for non-string legacy types; `_ts_emission_is_async` distinguishes malformed/non-call, required-service target calls, ordinary target calls and colored local callees. Corpus async functions/provide methods and awaited activation effects cover admitted await output, but timer emission and routed required-service coloring remain declared runtime boundaries": {
           "_is_async_fn_type": 1,
           "_ts_emission_is_async": 11
         },
-        "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
-          "_emit_ts_lifecycle_tests": 60,
-          "_refuse_fault_tests": 2
+        "Frame allocation invariants and declared transaction paths: `_bracket_yield`'s bare-arrow branch requires a bracket while `_has_bracket` reported false, which cannot occur for lowered activation effects; `_guard_frame_neutral_loop` rejects frame-owning loop steps, but G6 keeps activation effects out of source loop bodies. `_has_bracket.walk`'s timer return is the declared timer boundary and its recursive true return requires an effect inside a component guard, which G6 rejects. `_needs_frame.walk`'s remaining true returns require a witnessed acquisition or compensation nested in such a guard; `_method_body_needs_frame`'s remaining true return requires a witnessed method acquisition. Witnessed transactions are explicitly refused by the port": {
+          "_bracket_yield": 1,
+          "_guard_frame_neutral_loop": 1,
+          "_has_bracket.walk": 3,
+          "_method_body_needs_frame": 1,
+          "_needs_frame.walk": 2
         },
-        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
-          "_revl_helpers": 2
+        "Explicit refusal adapters: `_refuse_deferred_emissions` loads native session-commit validation and translates its RevlError; `_refuse_fault_tests` names and rejects fault tests; `_refuse_holes` walks, formats/truncates locations and rejects unresolved holes; `_refuse_missing_host_root` rejects host calls without a declared root. These inputs cannot produce positive oracle bytes": {
+          "_refuse_deferred_emissions": 10,
+          "_refuse_fault_tests": 2,
+          "_refuse_holes": 4,
+          "_refuse_holes.walk": 1,
+          "_refuse_missing_host_root": 1
         },
-        "the v1/v2 live-component path: a component routes to the older runtime, not through the v3 emitter the self-host mirrors.": {
+        "`do` expression boundary: `_v3_do_expr` requires component/method context, permits only let statements, computes empty-list annotations, renders mutable/immutable bindings and an async-or-sync IIFE tail. The port has no frame-aware `do` arm and records `kind=do` unported": {
+          "_v3_do_expr": 22
+        },
+        "v1/v2 live-component routing is selected before the v3 emitter mirrored by `selfhost/emit_ts.rvl`; the remaining statements are the legacy runtime branch": {
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 672
+      "uncovered_statements": 434
     },
     "wasm": {
       "statements": 2662,
@@ -1162,90 +1179,82 @@
       "uncovered_statements": 210
     },
     "ts": {
-      "statements": 2285,
+      "statements": 2086,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+        "compiler-inlined definitions and emitter self-checks: the Python self-host compiler substitutes `ind`, `sync_acx`, `renders_await`, and `optcall_result_is_int` at compile time, while the `expected_*` and indentation predicates are source assertions rather than paths entered by corpus emission": {
+          "expected_instance_get": 1,
           "expected_missing_adt": 1,
           "expected_ok_adt": 1,
           "expected_result_type": 1,
           "ind": 1,
           "indentation_is_two_spaces": 1,
-          "is_bool_op": 1,
           "optcall_result_is_int": 1,
+          "renders_await": 1,
           "sync_acx": 1
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "body_has_bracket": 4,
-          "body_needs_frame": 2,
-          "call_method_name": 14,
-          "component_step": 36,
-          "config_ts_type": 9,
+        "Crossing-label fallbacks: `call_method_name` returns `undo` for absent/empty method, fn, host or variable-callee names and unknown call shapes; `crossing_key_name` returns `?` for absent/empty requirement/name/variable identifiers or unknown targets. Lowered acquisition/undo calls carry the names used by the covered Frame bracket and compensation fixtures": {
+          "call_method_name": 11,
+          "crossing_key_name": 12
+        },
+        "Unsupported-node sentinels: `component_step`, `method_body`, `expr_inner`, `render_builtin`, `render_un`, and `v3_stmt` produce explicit `<<UNSUPPORTED-*>>` output only after every mirrored step/expression/operator/method arm misses. Positive corpus input is frontend-lowered to the covered arms; unported witnessed/do/stream/timer/lifecycle families are refused before this renderer": {
+          "component_step": 1,
+          "expr_inner": 1,
+          "method_body": 1,
+          "render_builtin": 1,
+          "render_un": 1,
+          "v3_stmt": 1
+        },
+        "Async emission-node negative tests: `emission_call_node` returns false for a non-call, a call whose target is not `req`, or a requirement method absent from the component's async operation keys. Async req calls and async arrows exercise its true branch": {
+          "emission_call_node": 3
+        },
+        "Extern-body and context empty cases: `emit_externs` writes `<<EXTERN-NO-TS-BODY>>` for a declared extern without an @ts target, while `context_augmentation` returns no declaration for a document with no provided/required keys. Admitted extern fixtures carry @ts bodies; function-only documents bypass component context output at the module gate": {
           "context_augmentation": 1,
-          "crossing_key_name": 12,
-          "emission_call_node": 3,
-          "emit_externs": 2,
-          "emit_functions": 1,
-          "emit_ts_types": 1,
+          "emit_externs": 1
+        },
+        "Empty-list conservative fallbacks: `empty_list_ann` uses `any[]` when no element evidence was inferred, and `list_element` returns empty for non-List or malformed List syntax. Typed empty-list bindings and inferred persistent pushes cover the evidence-bearing paths; the frontend rejects unconstrained empty lists": {
           "empty_list_ann": 1,
-          "empty_list_types": 10,
-          "expr": 4,
-          "expr_inner": 7,
-          "float_operand": 5,
+          "list_element": 1
+        },
+        "Type-string parser sentinels: `fn_type_arrow_index` returns -2 for a leading parenthesis not followed by `->` or with no closing parenthesis; `last_index` reaches -1 when a generic close bracket is missing. Canonical type strings originate in the frontend and exercise balanced function/generic forms": {
           "fn_type_arrow_index": 2,
-          "inplace_stmt": 11,
+          "last_index": 2
+        },
+        "Legacy expression-type inference: `is_float_expr` handles unstamped literal Float and returns false for non-minus unary expressions; `surface_type` retains widen-Int, legacy name-id, Float/Str/Int/Bool literals, unknown literal/list element, and recursive index inference. Current typed IR carries operand/expected stamps on the covered forms": {
+          "is_float_expr": 2,
+          "surface_type": 9
+        },
+        "Canonical TypeScript type fallbacks: `ts_type` handles an empty type and erases each argument of an unknown generic; `ts_bin_op` retains parser-canonicalized `===`/`!==` aliases and unknown-op empty return. Ordinary scalar (including Bytes, Unit and Never), collection, Result, function and arithmetic types are covered": {
+          "ts_bin_op": 3,
+          "ts_type": 5
+        },
+        "Lexical scan rejection edges: `is_digit` rejects non-ASCII digits; `is_word_ch` rejects non-ASCII letters/punctuation and accepts digits/underscore only after its covered ASCII-letter branch; `is_word` rejects an empty string or one containing such a character. Frontend identifier tokens are nonempty ASCII words; covered interpolation and binding fixtures exercise their admitted path": {
           "is_digit": 1,
-          "is_float_expr": 5,
-          "is_inplace_write": 8,
-          "is_js_reserved": 1,
           "is_word": 2,
-          "is_word_ch": 4,
-          "last_index": 2,
-          "list_element": 2,
-          "literal_of": 4,
-          "mangle": 3,
-          "match_expr": 6,
-          "method_body": 38,
-          "optcall_arg_is_int": 5,
-          "render_arrow": 8,
-          "render_bin": 6,
-          "render_builtin": 12,
-          "render_call": 2,
-          "render_format": 5,
-          "render_optcall": 3,
-          "render_record_update": 1,
-          "render_un": 8,
-          "render_var": 3,
-          "service_interfaces": 1,
-          "surface_type": 25,
-          "ts_bin_op": 6,
-          "ts_return_type": 1,
-          "ts_scalar_type": 4,
-          "ts_type": 6,
-          "type_map": 3,
-          "uses_assert": 2,
-          "uses_bounded_int": 1,
-          "uses_bounded_int32": 2,
-          "uses_parse_int": 2,
-          "uses_str_methods": 1,
-          "v3_stmt": 4
+          "is_word_ch": 4
         },
-        "declared out of every self-host slice: async coloring.": {
-          "body_is_async": 1,
-          "renders_await": 1
+        "Legacy v1 format escape: `render_format` consumes `$$` as one literal dollar before scanning `$N` argument placeholders. Current `compile_files` lowers backtick interpolation to v3 `kind=interp` with explicit text/expr parts (including literal dollar text), never to `kind=format`; v1 component routing is retained only in the Python reference emitter": {
+          "render_format": 5
         },
-        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
-          "expected_instance_get": 1
+        "Owned-write negative shapes: `is_inplace_write` returns false when an assignment's value is neither record-update nor builtin, when uniqueness is absent, and when the builtin is not push/set/remove with the required arity. Covered unique collection updates take the optimization; all other assignments remain on the normal renderer": {
+          "is_inplace_write": 3
         },
-        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
-          "revl_helpers": 4,
-          "revl_parse_int_helper": 8,
-          "revl_show_helper": 12
+        "Literal and match optional guards: `literal_of` maps a null host value, which source literals do not expose; `match_expr`'s no-binding Some arm checks payload against `undefined`, while lowered source Some patterns bind their payload. None/Some and Result/variant match output is otherwise covered": {
+          "literal_of": 1,
+          "match_expr": 1
         },
-        "the v1/v2 live-component path: a component routes to the older runtime, not through the v3 emitter the self-host mirrors.": {
-          "ts_type_v1": 2
+        "Parenthesization and empty-update forms: `render_call` wraps a non-atomic call target and `render_record_update` emits a spread-only object when updates are empty. The frontend emits direct var/field call targets and requires at least one source record update field": {
+          "render_call": 1,
+          "render_record_update": 1
+        },
+        "Nested component-guard frame tests: the remaining `body_has_bracket` and `body_needs_frame` statements are the true returns from recursively scanning an `if` arm. Source component guards admit only `fail` and nested guards (G6), so an arm cannot contain the effect/compensation needed to make either recursive call true; top-level effects and provide-method compensation exercise the reachable true paths": {
+          "body_has_bracket": 4,
+          "body_needs_frame": 2
+        },
+        "v1 component type fallback is outside the mirrored v3 contract; routing selects the legacy reference emitter before self-host emission": {
+          "ts_type_v1": 1
         }
       },
-      "uncovered_statements": 349
+      "uncovered_statements": 94
     },
     "wasm": {
       "statements": 1489,
