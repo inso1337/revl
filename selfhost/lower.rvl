@@ -5601,6 +5601,44 @@ fn type_args(t: Str) -> List[Str] {
   return split_top_commas(inner)
 }
 
+// Top-level comma split that tracks BOTH bracket and paren depth, so a
+// function-typed parameter (`(A, T) -> A`) in a signature's parameter list is
+// not split at its own comma.
+fn split_top_type_commas(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var cur = ""
+  var i = 0
+  while (i < s.length()) {
+    let c = s.charAt(i)
+    if (c == "[" || c == "(") { depth += 1  cur = cur.concat(c) }
+    else { if (c == "]" || c == ")") { depth -= 1  cur = cur.concat(c) }
+    else { if (c == "," && depth == 0) { out = out.push(ty_trim(cur))  cur = "" }
+    else { cur = cur.concat(c) } } }
+    i += 1
+  }
+  return out.push(ty_trim(cur))
+}
+
+// The parameter type list of a function type `(P1, P2, ..) -> R` ([] when `ty`
+// is not a function type). Mirrors `function_return_ty`'s outer-paren scan.
+fn fn_param_types(ty: Str) -> List[Str] {
+  if (ty.length() == 0 || ty.charAt(0) != "(") { return [] }
+  var depth = 0
+  var i = 0
+  var close = 0 - 1
+  while (i < ty.length() && close == 0 - 1) {
+    let c = ty.charAt(i)
+    if (c == "(") { depth += 1 }
+    if (c == ")") { depth -= 1  if (depth == 0) { close = i } }
+    i += 1
+  }
+  if (close <= 0) { return [] }
+  let inner = ty.slice(1, close)
+  if (inner == "") { return [] }
+  return split_top_type_commas(inner)
+}
+
 fn type_arg1(t: Str) -> Str {
   let a = type_args(t)
   if (a.length() == 0) { return "" }
@@ -5864,6 +5902,21 @@ fn lir_args(args: List[Expr], env: List[Bind]) -> Str {
   var i = 0
   while (i < args.length()) {
     let e = lir_expr(args[i], env)
+    out = i == 0 ? e : out.concat(",").concat(e)
+    i += 1
+  }
+  return out
+}
+
+// Like `lir_args`, but marks each argument's Int/Int32 -> Float / Int32 -> Int
+// widen against the callee's declared parameter types (`_mark_widen` at a call
+// site). A missing parameter type (defaults, varargs) leaves its argument bare.
+fn lir_call_args(args: List[Expr], ptypes: List[Str], env: List[Bind]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < args.length()) {
+    var e = lir_expr(args[i], env)
+    if (i < ptypes.length()) { e = apply_arg_markers(e, ptypes[i], infer(args[i], env)) }
     out = i == 0 ? e : out.concat(",").concat(e)
     i += 1
   }
@@ -6186,8 +6239,15 @@ fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
     _ => "",
   }
   if (builtin != "") { return builtin }
+  // A written free-function argument that widens Int/Int32 -> Float or
+  // Int32 -> Int is marked on the argument node (`_mark_widen`), so every tier
+  // emits the conversion. The callee's declared parameter types drive it; only
+  // a `Var` callee names a signature (the reference's `ExprVar` guard), so a
+  // higher-order callee keeps its arguments un-marked.
+  let ptypes = match callee { Var(n) => fn_param_types(tenv_get(env, n)), _ => [], }
+  let argsjs = ptypes.length() == 0 ? lir_args(args, env) : lir_call_args(args, ptypes, env)
   return "{\"kind\":\"call\",\"callee\":".concat(lir_expr(callee, env))
-    .concat(",\"args\":[").concat(lir_args(args, env)).concat("]}")
+    .concat(",\"args\":[").concat(argsjs).concat("]}")
 }
 
 fn is_host_root_recv(recv: Expr) -> Bool {
@@ -6297,6 +6357,18 @@ fn apply_ret_markers(node: Str, expected: Str, actual: Str) -> Str {
       && parse_head(actual) != "Opt") {
     return "{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"Some\"},\"args\":["
       .concat(node).concat("]}")
+  }
+  return node
+}
+
+// The numeric-widen half of `apply_ret_markers`, for a call ARGUMENT position:
+// `_mark_widen` marks Int/Int32 -> Float and Int32 -> Int on the argument node,
+// but (unlike a return) never injects `Some` — the reference's call branch calls
+// only `_mark_widen`, not `_inject_opt`.
+fn apply_arg_markers(node: Str, expected: Str, actual: Str) -> Str {
+  if ((expected == "Float" && (actual == "Int" || actual == "Int32"))
+      || (expected == "Int" && actual == "Int32")) {
+    return node.slice(0, node.length() - 1).concat(",\"widen\":").concat(jstr(expected)).concat("}")
   }
   return node
 }
