@@ -136,11 +136,16 @@
       "properties": {
         "name": { "type": "string" },
         "class": {
-          "description": "The extern's class: pure, acquire, emission, or the pseudo-class \"first-class dispatch\" for an unnameable reach. May be null when unknown.",
+          "description": "The extern's classification, one of the four G4 boundary classes: \"pure\" (no observable effect), \"acquire\" (takes a resource that must be released), \"emission\" (an irreversible crossing out of the system), or \"witnessed\" (a reversible host mutation that names its inverse). The pseudo-class \"first-class dispatch\" appears (with name \"*\") for a reach through a value whose target is not statically nameable. May be null when unknown.",
           "type": ["string", "null"]
         },
+        "capabilities": {
+          "description": "The declared capability scope of a scoped `emission[...]`/`witnessed[...]` extern, as a sorted list of tokens (e.g. [\"fs\"]). This token — not the extern name — is what a `capability <glob>` policy rule and the register floor key on. Absent for an unscoped extern, whose token is its own name. This is the machine-readable form of the ` [fs]` clause on the human render's `host code:` line.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
         "backends": {
-          "description": "Backend tiers this extern has a body for (sorted).",
+          "description": "Backend tiers this extern has a body for (sorted), e.g. [\"py\"]. This is the machine-readable form of the tier the human render prints after the class, as in `(witnessed, py)`.",
           "type": "array",
           "items": { "type": "string" }
         }
