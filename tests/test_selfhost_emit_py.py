@@ -189,6 +189,12 @@ CORPUS = [
     "witnessed.rvl",
     "branches.rvl",
     "inline.rvl",
+    # item 306: the `arm_body_mentions` / `arm_body_is_bind` binder-scan
+    # branches the corpus reached only through value-read binders — the
+    # conservative object-KEY retention, the exhausted-LIST walk and the
+    # `Some`/`None`-binder short-circuit. Each was emitted on both sides but run
+    # by no document, so the byte-agreement oracle graded them trivially (#306).
+    "match_binder_scan.rvl",
     # Whole-tree differential survey's greedy joint-line selection: each input
     # reaches a distinct branch on at least one side, with no copied fixtures.
     "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
