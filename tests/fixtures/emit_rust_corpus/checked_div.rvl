@@ -1,0 +1,8 @@
+// Total checked arithmetic must lower identically on both Rust emitters.
+fn safe_trunc(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_trunc(b) }
+fn safe_floor(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_floor(b) }
+fn safe_euclid(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_euclid(b) }
+fn safe_mod(a: Int, b: Int) -> Result[Int, Str] { return a.checked_mod(b) }
+fn quotient_or(a: Int, b: Int, fallback: Int) -> Int {
+  return match a.checked_div_trunc(b) { Ok(q) => q, Err(e) => fallback }
+}
