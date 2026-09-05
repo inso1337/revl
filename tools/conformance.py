@@ -373,8 +373,8 @@ PROBES: dict[str, tuple[str, str]] = {
 # cases whose answer a pure call cannot reach, and saying so is the whole point
 # of the claim column.
 COMPILE_ONLY_REASONS = {
-    "signature": ("declares a type or service shape and computes no value — "
-                  "there is no answer to compare"),
+    "signature": ("declares a type or service shape and computes no value, "
+                  "so there is no answer to compare"),
     "activation": ("its value is produced inside a component provide-method (or "
                    "during activation), so reaching it means booting the "
                    "composition on each tier's runtime, not calling a pure fn"),
@@ -970,7 +970,7 @@ def _deliberate_cell(items: list[dict]) -> str:
     string — the staleness gate diffs this text byte for byte.
     """
     if not items:
-        return "—"
+        return "–"
     counts: dict[str, int] = {}
     for item in items:
         reason = refusal_reason(item["message"])

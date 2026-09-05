@@ -104,7 +104,7 @@ was corrected by hand and had drifted back within a day.
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 11 |  |
 | composition-rows.md | needs-work | 15 |  |
-| conformance.md | needs-work | 5 |  |
+| conformance.md | needs-work | 0 |  |
 | contract-errata.md | needs-work | 0 | yes |
 | crash-recovery.md | needs-work | 44 |  |
 | dash.md | current | 11 |  |
