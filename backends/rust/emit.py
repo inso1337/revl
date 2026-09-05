@@ -765,13 +765,6 @@ def _str_param_escapes(body: object, params: "set[str]",
             if kind == "len":
                 walk(node.get("target"), True)
                 return
-            if kind == "index":
-                # Indexing reads an element without consuming the list. This is
-                # especially important for token-stream helpers, which otherwise
-                # force every `List[Token]` parameter back to an owned Vec.
-                walk(node.get("target"), True)
-                walk(node.get("index"), False)
-                return
             if kind == "interp":
                 for _pk, pv in node.get("parts") or []:
                     walk(pv, True)
