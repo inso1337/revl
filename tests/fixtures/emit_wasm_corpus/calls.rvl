@@ -1,0 +1,11 @@
+fn identity(n: Int) -> Int { return n }
+fn invoke(n: Int) -> Int { let value = identity(n); return value }
+fn choose(b: Bool, a: Int, c: Int) -> Int { let value = b ? a : c; return value }
+fn chooseList(b: Bool, xs: List[Int]) -> List[Int] { return b ? xs : [] }
+fn listIdentity(xs: List[Int]) -> List[Int] { return xs }
+fn emptyArgument() -> List[Int] { return listIdentity([]) }
+fn noValue() { return }
+fn callNoValue() { noValue() }
+fn nestedIdentity(xs: List[List[Int]]) -> List[List[Int]] { return xs }
+fn nestedArgument() -> List[List[Int]] { return nestedIdentity([[1]]) }
+fn nestedConditional(b: Bool) -> List[List[Int]] { return b ? [[1]] : [[2]] }

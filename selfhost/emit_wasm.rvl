@@ -222,7 +222,7 @@ type E = { wat: Str, ty: Str }
 // typename -> its spec, from which `_record_fields` reads the DECLARED field
 // order/types. It is document-global and constant like the string pool, so it
 // rides in the scope too rather than a separate parameter threaded everywhere.
-type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str], rectypes: Any }
+type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str], rectypes: Any, functions: List[Any] }
 // A statement-emission result: the emitted lines, the threaded scope, and the
 // accumulated local-width map (the reference's function-global `_local_types`).
 // `loop` is the running pre-order `for`-loop counter (the reference's
@@ -265,7 +265,7 @@ fn loop_control_targets(nodes: List[Any], include_continue: Bool) -> Bool {
 }
 
 fn scope_bind(s: Scope, name: Str, slot: Str, ty: Str) -> Scope {
-  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs, rectypes: s.rectypes }
+  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs, rectypes: s.rectypes, functions: s.functions }
 }
 
 // ==================================================== the value/memory ABI (slice 3)
@@ -446,10 +446,11 @@ fn payload_ty_of(layout: List[TagCase], case: Str) -> Str {
   return ""
 }
 
-// `_list_type`: an expected `List[T]` wins; otherwise infer `List[<first item>]`
-// (the empty positional literal needs an expected type — out of subset).
+// `_list_type`: the flow target or frontend annotation pins an empty list.
 fn list_type_of(node: Any, s: Scope, expected: Str) -> Str {
   if (expected != "" && is_list_type(expected)) { return expected }
+  let pin = value_str(value_field(node, "expected"))
+  if (expected == "" && is_list_type(pin)) { return pin }
   let items = value_list(value_field(node, "items"))
   if (items.length() == 0) { return "" }
   return "List[".concat(infer_val_ty(items[0], s)).concat("]")
@@ -468,7 +469,7 @@ fn builtin_type(node: Any, s: Scope) -> Str {
   if (method == "concat") { return tty }
   if (method == "slice") { return tty }
   if (method == "charAt") { return "Str" }
-  if (method == "charCodeAt") { return "Int" }
+  if (method == "charCodeAt" || method == "codepoint_at") { return "Int" }
   if (method == "to_str") { return "Str" }
   if (method == "startsWith" || method == "endsWith") { return "Bool" }
   if (method == "to_int" && tty == "Str") { return "Opt[Int]" }
@@ -502,6 +503,11 @@ fn adt_cell_ty(node: Any, s: Scope, expected: Str) -> Str {
 // to the renderer.
 fn infer_val_ty(node: Any, s: Scope) -> Str {
   let k = node_kind(node)
+  if (k == "if") { return infer_val_ty(value_field(node, "then"), s) }
+  if (k == "bin" && node_op(node) == "+") {
+    let left = infer_val_ty(value_field(node, "left"), s)
+    if (left == "Str" || is_list_type(left)) { return left }
+  }
   if (k == "list") { return list_type_of(node, s, "") }
   if (k == "record") { return record_type_of(node, s, "") }
   if (k == "field") {
@@ -530,6 +536,8 @@ fn infer_val_ty(node: Any, s: Scope) -> Str {
       }
       return "Opt[".concat(inner).concat("]")
     }
+    let sig = function_sig(value_str(value_field(callee, "name")), s)
+    return value_str(value_field(sig, "returns"))
     return ""
   }
   return infer_ty(node, s.types)
@@ -645,6 +653,17 @@ fn expr_max_depth(node: Any, base: Int) -> Int {
     var m = expr_max_depth(value_field(node, "target"), base)
     for (a of value_list(value_field(node, "args"))) { m = max_i(m, expr_max_depth(a, base)) }
     return m
+  }
+  if (k == "call") {
+    var m = -1
+    for (a of value_list(value_field(node, "args"))) { m = max_i(m, expr_max_depth(a, base)) }
+    return m
+  }
+  if (k == "if") {
+    let cond = expr_max_depth(value_field(node, "cond"), base)
+    let then = expr_max_depth(value_field(node, "then"), base)
+    let otherwise = expr_max_depth(value_field(node, "else"), base)
+    return max_i(cond, max_i(then, otherwise))
   }
   return -1
 }
@@ -772,6 +791,16 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> E {
   let rn = value_field(node, "right")
   let lty = infer_val_ty(ln, s)
   let rty = infer_val_ty(rn, s)
+  if (lty == "Str" && rty == "Str" && (op == "+" || op == "==" || op == "!=" || op == "===" || op == "!==")) {
+    let left = render_expr(ln, s, "Str", depth)
+    let right = render_expr(rn, s, "Str", depth)
+    let helper = op == "+" ? "$str_concat" : "$str_eq"
+    var wat = `${left.wat}
+      ${right.wat}
+      (call ${helper})`
+    if (op == "!=" || op == "!==") { wat = wat.concat(`${newline()}      (i32.eqz)`) }
+    return { wat: wat, ty: op == "+" ? "Str" : "Bool" }
+  }
   // `expected` is the OPERAND type, which also picks the instruction width.
   var opnd = "Int"
   if (is_bool_op(op)) { opnd = "Bool" }
@@ -944,7 +973,7 @@ fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> E {
       ${arg.wat}
       (call ${helper})`, ty: "Str" }
   }
-  if (method == "charCodeAt") {
+  if (method == "charCodeAt" || method == "codepoint_at") {
     let t = render_expr(tnode, s, tty, depth)
     let arg = render_expr(args[0], s, "Int", depth)
     var helper = """$str_char_code_at"""
@@ -1020,6 +1049,46 @@ fn render_adt(node: Any, s: Scope, expected: Str, depth: Int) -> E {
   return make_tagged(ty, value_str(value_field(node, "case")), payload, s, depth)
 }
 
+fn function_sig(name: Str, s: Scope) -> Any {
+  for (f of s.functions) {
+    if (value_str(value_field(f, "name")) == name) { return f }
+  }
+  return value_field(s.rectypes, "")
+}
+
+fn render_direct_call(node: Any, s: Scope, depth: Int) -> E {
+  let callee = value_field(node, "callee")
+  let name = value_str(value_field(callee, "name"))
+  let sig = function_sig(name, s)
+  if (node_kind(callee) != "var" || value_is_null(sig)) {
+    return { wat: `<<UNSUPPORTED-CALL:${name}>>`, ty: "" }
+  }
+  let args = value_list(value_field(node, "args"))
+  let params = value_list(value_field(sig, "params"))
+  if (args.length() != params.length()) { return { wat: "<<UNSUPPORTED-CALL-ARITY>>", ty: "" } }
+  var parts = []
+  var i = 0
+  while (i < args.length()) {
+    parts = parts.push(render_expr(args[i], s, value_str(value_field(params[i], "type")), depth).wat)
+    i = i + 1
+  }
+  parts = parts.push(`(call $${name})`)
+  return { wat: parts.join(`${newline()}      `), ty: value_str(value_field(sig, "returns")) }
+}
+
+fn render_if(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+  let cond = render_expr(value_field(node, "cond"), s, "Bool", depth)
+  let then = render_expr(value_field(node, "then"), s, expected, depth)
+  let otherwise = render_expr(value_field(node, "else"), s, expected, depth)
+  if (then.ty != otherwise.ty || then.ty == "Unit" || then.ty == "") {
+    return { wat: "<<UNSUPPORTED-IF-TYPE>>", ty: "" }
+  }
+  return { wat: `${cond.wat}
+      (if (result ${wty(then.ty)})
+        (then ${then.wat})
+        (else ${otherwise.wat}))`, ty: then.ty }
+}
+
 fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> E {
   let k = node_kind(node)
   if (k == "lit") {
@@ -1060,7 +1129,7 @@ fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> E {
       }
       return make_tagged(ty, "Some", payload, s, depth)
     }
-    return { wat: `<<UNSUPPORTED-EXPR:call>>`, ty: "" }
+    return render_direct_call(node, s, depth)
   }
   if (k == "bin") { return render_bin(node, s, depth) }
   if (k == "un") { return render_un(node, s, depth) }
@@ -1071,6 +1140,7 @@ fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> E {
   if (k == "len") { return render_len(node, s, depth) }
   if (k == "builtin") { return render_builtin(node, s, expected, depth) }
   if (k == "adt") { return render_adt(node, s, expected, depth) }
+  if (k == "if") { return render_if(node, s, expected, depth) }
   return { wat: `<<UNSUPPORTED-EXPR:${k}>>`, ty: "" }
 }
 
@@ -1361,7 +1431,7 @@ fn diverges(nodes: List[Any]) -> Bool {
 }
 
 // `_emit_function`: one v3 function -> its `(func $name (export "name") ..)` block.
-fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any) -> Str {
+fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any, functions: List[Any]) -> Str {
   let name = value_str(value_field(fnode, "name"))
   let params = value_list(value_field(fnode, "params"))
   var sig = []
@@ -1395,7 +1465,7 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any) -> Str {
   raw = collect_locals(body, raw)
   let names = list_sort(list_dedup(raw))
   var localOrder = []
-  var scope: Scope = { slots: slots, types: types, strs: strs, rectypes: rectypes }
+  var scope: Scope = { slots: slots, types: types, strs: strs, rectypes: rectypes, functions: functions }
   for (nm of names) {
     if (!scope.types.has(nm)) {
       localOrder = localOrder.push(`l_${nm}`)
@@ -2147,7 +2217,7 @@ pub fn emit_src(ir: Any) -> Str {
   // item 432(b): the bodies are rendered BEFORE the preamble is placed, because
   // which helpers survive the sweep is read off what the bodies actually call.
   var blocks = []
-  for (f of functions) { blocks = blocks.push(emit_function(f, strs, rectypes)) }
+  for (f of functions) { blocks = blocks.push(emit_function(f, strs, rectypes, functions)) }
   let pruned = prune_preamble(helper_preamble(), blocks.join(newline()))
   if (pruned != "") { lines = lines.push(pruned) }
   for (c of type_comments(rectypes)) { lines = lines.push(c) }

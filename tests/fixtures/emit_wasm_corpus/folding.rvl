@@ -1,0 +1,23 @@
+fn sum() -> Int { return 2 + 3 }
+fn difference() -> Int { return 2 - 3 }
+fn product() -> Int { return 2 * 3 }
+fn zeroProduct() -> Int { return 0 * 3 }
+fn negativeProduct() -> Int { return -2 * 3 }
+fn overflowingSum() -> Int { return 9223372036854775807 + 1 }
+fn overflowingDifference() -> Int { return (-9223372036854775807 - 1) - 1 }
+fn overflowingProduct() -> Int { return 9223372036854775807 * 2 }
+fn minLeft() -> Int { return (-9223372036854775807 - 1) * 1 }
+fn minRight() -> Int { return 1 * (-9223372036854775807 - 1) }
+fn bools(a: Bool, b: Bool) -> Bool {
+  let yes = true
+  let no = false
+  let same = a == b
+  let inverse = !a
+  return same && inverse || yes && no
+}
+fn int32ops(a: Int32, b: Int32) -> Int32 {
+  let inverted = ~a
+  let negative = -b
+  return inverted + negative
+}
+fn bytesOps(b: Bytes) -> Int { let part = b.slice(0, 1); return part.length() }
