@@ -364,43 +364,62 @@
   },
   "ts": {
     "blind": {
-      "lowering represents `Ok(...)` and `Err(...)` as `adt` constructors, not first-class `name` expressions; `tests/fixtures/emit_ts_corpus/branch_edges.rvl` exercises both constructors through the reachable ADT arm, leaving only the emitters' defensive name checks unreachable": [
-        "name=Err",
-        "name=Ok"
-      ],
-      "unreachable from surface revl: `src/revl/parser.py::_CANONICAL_OPS` rewrites JavaScript-spelled strict equality and inequality to Revl `==`/`!=` before lowering; the emitters' strict-op arms accept legacy IR only": [
+      "NOT TRIAGED - both sides implement this and no corpus document reaches it. Recorded by `--write`; say WHY, or add the corpus case.": [
+        "kind=maplit",
+        "method=remove",
         "op=!==",
+        "op=>="
+      ],
+      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the Str-receiver specialisation (`recv=Str`) and Int/Float widening on a mixed-operand binary.": [
+        "recv=Str",
+        "widen=Float",
+        "widen=Int"
+      ],
+      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the `len`/`maplit`/`optfield` expression kinds and the `assert`/bare-`expr` statement steps - the same five the py corpus misses, in a corpus of 31 documents.": [
+        "kind=len",
+        "kind=optfield",
+        "step=assert",
+        "step=expr"
+      ],
+      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the built-in Opt/Result constructors read as variables (`Some`/`None`/`Ok`/`Err`) and the `??` operator.": [
+        "name=Err",
+        "name=None",
+        "name=Ok",
+        "name=Some",
+        "op=??"
+      ],
+      "declared out of the slice by the oracle's own docstring: async methods and their `idempotent` retry metadata.": [
+        "idempotent=<true>"
+      ],
+      "unreachable from surface revl: `src/revl/parser.py::_CANONICAL_OPS` rewrites `===`/`!==` to `==`/`!=` before lowering, so no IR node can carry this op. The reference arm is defensive; no corpus document can reach it.": [
         "op===="
       ]
     },
     "unported": {
-      "transactional witnessed steps use the reference-only undo/frame/replay protocol (`_witnessed_step`, `_method_witnessed_step`, and `_witnessed_extern`); the self-host v3 slice deliberately refuses this component class rather than emitting an unsound partial transaction": [
-        "class=witnessed"
-      ],
-      "v3 TypeScript rejects deferred runtime facilities before expression emission: holes and stream subscribe/merge require the runtime refusal channel that is not present in the mirrored emitter": [
+      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
+        "body=<true>",
+        "class=witnessed",
+        "else=<true>",
+        "kind=do",
         "kind=hole",
         "kind=stream-merge",
-        "kind=subscribe"
-      ],
-      "the reference routes `do` through `_v3_do_expr`, whose frame-neutral control-transfer protocol is not mirrored; the self-host emitter keeps this expression outside its declared v3 subset": [
-        "kind=do"
-      ],
-      "in-file lifecycle tests are emitted by reference-only `_emit_ts_lifecycle_tests`; corpus oracle documents compile library/application output and the port intentionally has no test-runner generation path": [
-        "lifecycle=<true>"
-      ],
-      "temporal `every` and component timer/advance/assert-no-residue steps are handled by reference-only `_emit_temporal` and runtime scheduler hooks, outside the self-host emitter's synchronous component subset": [
+        "kind=subscribe",
+        "kind=variant",
+        "lifecycle=<true>",
         "mode=every",
+        "pattern=record",
+        "returns=<true>",
+        "root=stdlib",
+        "sized_length=<true>",
         "step=advance",
         "step=assert_no_residue",
-        "step=timer"
-      ],
-      "reference roots named `stdlib` enter `_emit_ts_ref_runtime`/`_emit_ts_ref_thunk`; the self-host corpus contract requires ordinary host roots and refuses missing host roots instead of synthesizing reference-runtime thunks": [
-        "root=stdlib"
-      ],
-      "component `call`, `load`, and `unload` steps require routed instance/reference lifecycle machinery rather than the mirrored provide/guard/effect subset; their source branches terminate in the reference component runtime, not v3 statement emission": [
         "step=call",
+        "step=let_pattern",
         "step=load",
-        "step=unload"
+        "step=timer",
+        "step=unload",
+        "strategy=<true>",
+        "type=<true>"
       ]
     }
   },
