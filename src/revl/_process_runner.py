@@ -542,7 +542,6 @@ async def run(spec: dict, spec_path=None) -> None:
     import runtime as runtime_mod  # noqa: PLC0415
     from cordis import Context  # noqa: PLC0415
     from cordis.fiber import FiberState  # noqa: PLC0415
-    sys.path.remove(backend_dir)
 
     # item 443: arm the operator E-Stop BEFORE the composition is compiled, let
     # alone activated. Armed here, every crossing this process ever makes is
@@ -568,6 +567,15 @@ async def run(spec: dict, spec_path=None) -> None:
     # 337, `_repoint_decision`); it also feeds the emitter for this slice.
     running_ir = compile_files(spec["files"])
     module = _load_module(running_ir)
+    # The backend directory is a trusted LOADER path for the runtime's own
+    # first-party modules (`emit`, `runtime`, `bridge`), not an ambient import
+    # capability for user-authored `@py` bodies. Keep it on sys.path through the
+    # emit + module load above so `emit` resolves, then drop it before any user
+    # body runs at call time. (User `@py` bodies are refused a backend import
+    # statically at compile time by `_check_user_py_body_imports`; this removal
+    # keeps the ambient path from being a second, dynamic door.)
+    if backend_dir in sys.path:
+        sys.path.remove(backend_dir)
     root = Context()
     root.on("internal/status", lambda _this, fiber, old:
             log("fiber", fiber.name, f"{FiberState(old).name} -> {FiberState(fiber.state).name}"))
