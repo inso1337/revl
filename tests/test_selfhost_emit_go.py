@@ -61,6 +61,9 @@ lifecycle, and the astral reaches of ``_go_string`` beyond the ASCII/BMP core.
 """
 
 import importlib.util
+import os
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -178,3 +181,20 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+def test_inference_corpus_compiles_as_go(emitted, reference, tmp_path):
+    """Agreement alone cannot catch a type error shared by both emitters."""
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("Go compiler not installed")
+    ir = compile_files([str(CORPUS_DIR / "inference.rvl")])
+    for name, source in (("reference", reference.emit(ir)),
+                         ("selfhost", emitted["emit_src"](ir))):
+        path = tmp_path / f"{name}.go"
+        path.write_text(source)
+        result = subprocess.run(
+            [go, "test", str(path)], capture_output=True, text=True,
+            env={**os.environ, "GO111MODULE": "off"}, timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr

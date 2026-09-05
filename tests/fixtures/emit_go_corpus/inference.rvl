@@ -1,5 +1,7 @@
 type Choice = Absent | Present(Int)
 type Item = { amount: Int }
+type Batch = { items: List[Int] }
+type Bundle = Packed(List[Int])
 fn localVariant(n: Int) -> Choice {
   let value = Present(n)
   return value
@@ -56,3 +58,17 @@ fn conditionalIndex(b: Bool, xs: List[Int], ys: List[Int]) -> Int { return (b ? 
 fn conditionalField(b: Bool, x: Item, y: Item) -> Int { return (b ? x : y).amount }
 fn localMatch(x: Choice) -> Int { let n = match x { Absent => 0, Present(v) => v }; return n }
 fn noValue() { return }
+fn floatTarget(n: Int, small: Int32) -> Float {
+  let first: Float = n
+  let second: Float = small
+  return first + second
+}
+fn widenReturn(n: Int) -> Float { return n }
+fn widenRight(n: Int, x: Float) -> Float { return x + n }
+fn widenRightSubtract(n: Int, x: Float) -> Float { return x - n }
+fn listIdentity(xs: List[Int]) -> List[Int] { return xs }
+fn emptyArgument() -> List[Int] { return listIdentity([]) }
+fn nestedEmpty() -> List[List[Int]] { return [[]] }
+fn emptyRecord() -> Batch { return { items: [] } }
+fn emptyVariant() -> Bundle { return Packed([]) }
+fn escapes() -> Str { return "\"\\\n\r\t" }

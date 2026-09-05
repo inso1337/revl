@@ -303,6 +303,7 @@ fn is_scalar(t: Str) -> Bool {
 //     field access `r.f` infers its type (the `var z int64 =` let pin).
 type Ctx = {
   vt: Map[Str, Str], fr: Map[Str, Str], er: Map[Str, Str],
+  signatures: List[Any],
   ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
   rt: Str
 }
@@ -321,6 +322,7 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
   return {
     vt: ctx.vt.set(k, v), fr: ctx.fr, er: ctx.er,
+    signatures: ctx.signatures,
     ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, rt: ctx.rt
   }
 }
@@ -542,6 +544,7 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
     if (is_eq_op(op) || op == "<" || op == ">" || op == "<=" || op == ">=" || op == "&&" || op == "||") { return "Bool" }
     if (node_operands(node) == "Int32" && is_addsubmul(op)) { return "Int32" }
     if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") { return "Int32" }
+    if (node_operands(node) == "Float" && is_addsubmul(op)) { return "Float" }
     if (op == "+") {
       let lt = infer_type(value_field(node, "left"), ctx)
       let rt = infer_type(value_field(node, "right"), ctx)
@@ -626,9 +629,15 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
   if (op == "??") { return "<<DEFER-coalesce>>" }
   let goop = go_bin_op(op)
   if (goop == "") { return `<<UNSUPPORTED-BIN:${op}>>` }
-  let left = render_expr(value_field(node, "left"), ctx, "")
-  let right = render_expr(value_field(node, "right"), ctx, "")
+  var left = render_expr(value_field(node, "left"), ctx, "")
+  var right = render_expr(value_field(node, "right"), ctx, "")
   let opnd = node_operands(node)
+  if (opnd == "Float") {
+    let lt = infer_type(value_field(node, "left"), ctx)
+    let rt = infer_type(value_field(node, "right"), ctx)
+    if (lt == "Int" || lt == "Int32") { left = `float64(${left})` }
+    if (rt == "Int" || rt == "Int32") { right = `float64(${right})` }
+  }
   if (is_eq_op(op)) {
     let lt = infer_type(value_field(node, "left"), ctx)
     let rt = infer_type(value_field(node, "right"), ctx)
@@ -682,10 +691,29 @@ fn render_un(node: Any, ctx: Ctx) -> Str {
 fn render_call(node: Any, ctx: Ctx) -> Str {
   let callee = value_field(node, "callee")
   if (value_is_null(callee)) { return "<<DEFER-component-call>>" }
-  var args = []
-  for (a of value_list(value_field(node, "args"))) { args = args.push(render_expr(a, ctx, "")) }
+  let cn = value_str(value_field(callee, "name"))
+  var param_types = []
   if (node_kind(callee) == "var") {
-    let cn = value_str(value_field(callee, "name"))
+    if (resolved(map_get(ctx.ca, cn))) { param_types = [map_get(ctx.cp, cn)] }
+    else {
+      for (sig of ctx.signatures) {
+        if (value_str(value_field(sig, "name")) == cn) {
+          for (p of value_list(value_field(sig, "params"))) {
+            param_types = param_types.push(value_str(value_field(p, "type")))
+          }
+        }
+      }
+    }
+  }
+  var args = []
+  var i = 0
+  for (a of value_list(value_field(node, "args"))) {
+    var expected = ""
+    if (i < param_types.length()) { expected = param_types[i] }
+    args = args.push(render_expr(a, ctx, expected))
+    i = i + 1
+  }
+  if (node_kind(callee) == "var") {
     // A constructor arriving as `call(callee=var Case, ..)`: a user variant is
     // constructed here; a built-in Opt/Result ctor is DEFERRED (its preambles).
     if (resolved(map_get(ctx.ca, cn))) { return render_construct(ctx, cn, args) }
@@ -713,7 +741,7 @@ fn render_list(node: Any, ctx: Ctx, expected: Str) -> Str {
   var goelem = "any"
   if (elem != "") { goelem = go_type(elem) }
   var parts = []
-  for (it of items) { parts = parts.push(render_expr(it, ctx, "")) }
+  for (it of items) { parts = parts.push(render_expr(it, ctx, elem)) }
   return `[]${goelem}{${parts.join(", ")}}`
 }
 
@@ -846,18 +874,18 @@ fn render_field(node: Any, ctx: Ctx) -> Str {
 
 // `_go_v3_expr` record branch: a nominal `Struct{f: v, ..}` literal. Go copies by
 // value, so there is no clone (unlike the rust tier); the struct name is inferred
-// from the (sorted) field set. Field values render with no `expected` pin, as the
-// reference does.
+// from the (sorted) field set. Declared field types pin empty nested collections.
 fn render_record(node: Any, ctx: Ctx) -> Str {
   let fields = value_list(value_field(node, "fields"))
   var names = []
   for (f of fields) { names = names.push(value_str(value_at(f, 0))) }
   let tn = record_type_for_fields(ctx, names)
+  let raw_type = map_get(ctx.rbf, sorted_key(names))
   var body = []
   for (f of fields) {
     let k = value_str(value_at(f, 0))
     let vnode = value_at(f, 1)
-    body = body.push(`${v3_field_ident(k)}: ${render_expr(vnode, ctx, "")}`)
+    body = body.push(`${v3_field_ident(k)}: ${render_expr(vnode, ctx, map_get(ctx.rf, `${raw_type}.${k}`))}`)
   }
   return `${tn}{${body.join(", ")}}`
 }
@@ -934,9 +962,11 @@ fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
   if (kind == "lit") { return go_v3_lit(node) }
   if (kind == "var" || kind == "name") { return v3_ident(ref_name(node)) }
   if (kind == "adt") {
+    let case = value_str(value_field(node, "case"))
+    let payload = map_get(ctx.cp, case)
     var aa = []
-    for (a of value_list(value_field(node, "args"))) { aa = aa.push(render_expr(a, ctx, "")) }
-    return render_construct(ctx, value_str(value_field(node, "case")), aa)
+    for (a of value_list(value_field(node, "args"))) { aa = aa.push(render_expr(a, ctx, payload)) }
+    return render_construct(ctx, case, aa)
   }
   if (kind == "bin") { return render_bin(node, ctx) }
   if (kind == "un") { return render_un(node, ctx) }
@@ -1221,7 +1251,7 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
 }
 
 // `_emit_v3_go_functions`: each module fn as a Go `func`, blank-line separated.
-fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables) -> List[Str] {
+fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables, signatures: List[Any]) -> List[Str] {
   var out = []
   for (fnode of functions) {
     let name = v3_ident(value_str(value_field(fnode, "name")))
@@ -1229,7 +1259,7 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
     let rt = value_str(value_field(fnode, "returns"))
-    let ctx = { vt: vt, fr: fr, er: er, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, rt: rt }
+    let ctx = { vt: vt, fr: fr, er: er, signatures: signatures, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, rt: rt }
     var ps = []
     for (p of params) {
       ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"))}`)
@@ -1369,7 +1399,7 @@ pub fn emit_src(ir: Any) -> Str {
   // depends on the operand types `render_interp` infers as it renders (item
   // 434 (f)), so read them off the rendered lines rather than re-deriving the
   // inference in the structural `collect_flags` pass.
-  let fnlines = emit_functions(functions, fr, er, tables)
+  let fnlines = emit_functions(functions, fr, er, tables, functions.concat(externs))
   let rendered = fnlines.join(newline())
   let uses_fmt = rendered.indexOf("fmt.Sprintf(") >= 0
   let uses_strconv = rendered.indexOf("strconv.Format") >= 0
@@ -1454,7 +1484,7 @@ fn typed_ctx() -> Ctx {
   rbf = rbf.set("x,y", "Point")
   return {
     vt: Map.empty(), fr: Map.empty(), er: Map.empty(),
-    ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), rt: ""
+    ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), rt: "", signatures: []
   }
 }
 
