@@ -277,7 +277,14 @@ type SvcD = { name: Str, methods: List[MSig] }
 // parser.rvl's expression grammar has no spawn form, so the statement reader
 // recognises `spawn` at the token level (below) and records the target here,
 // while `bind` carries the handle name. Every non-spawn statement leaves it "".
-type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str }
+// `awaited` is the item-131 boundary marker: the surface spelled `effect await`
+// / `await emit` (or an `await`-marked `undo`/`compensate`). It rides the
+// forward statement it modifies rather than a separate marker statement, so the
+// per-statement effect-composition rules (`stmt_a1_verdict`) can decide the
+// exact await/async pairing the whole-body name fence cannot express, and
+// `_async_reached_outside_provide`'s prune of an await-marked step is a flag
+// read rather than a positional guess.
+type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool }
 
 // A provide method: its parameters feed the G1 scope (a param is a declared
 // name in the method body), and its body is walked for G4/A1/G1. `isAsync` is
@@ -675,11 +682,19 @@ fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
 // yields two statements.
 
 fn mkstmt(kind: Str, e: Expr) -> Stmt {
-  return { kind: kind, e: e, bind: "", spawnTarget: "" }
+  return { kind: kind, e: e, bind: "", spawnTarget: "", awaited: false }
 }
 
 fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
-  return { kind: kind, e: e, bind: bind, spawnTarget: "" }
+  return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: false }
+}
+
+// A forward `effect`/`emit`/`undo`/`compensate` statement carrying its item-131
+// `await` marker (`aw`). Replaces the free-standing `await` marker statement:
+// the marker belongs to the acquisition/emission it pairs with, not the
+// position after it, so per-statement pairing can read it directly.
+fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
+  return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: aw }
 }
 
 // A `spawn <target>` acquisition bound to handle `bn`. It is an `effect`
@@ -687,7 +702,8 @@ fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
 // an inert placeholder — the spawn's admission is decided from `spawnTarget`,
 // not by walking an expression parser.rvl cannot produce.
 fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
-  return { kind: "effect", e: int_lit0(), bind: bn, spawnTarget: target }
+  return { kind: "effect", e: int_lit0(), bind: bn, spawnTarget: target,
+           awaited: false }
 }
 
 // An UNBOUND `effect spawn <target>` (no `let` handle). A spawn's inverse is the
@@ -696,7 +712,8 @@ fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
 // "spawn_unbound" keeps it out of the template/handle tables (it never
 // composes); the post-parse `spawn_form_verdict` reports it.
 fn mkstmt_spawn_unbound(target: Str) -> Stmt {
-  return { kind: "spawn_unbound", e: int_lit0(), bind: "", spawnTarget: target }
+  return { kind: "spawn_unbound", e: int_lit0(), bind: "", spawnTarget: target,
+           awaited: false }
 }
 
 fn int_lit0() -> Expr { return IntLit("0") }
@@ -708,10 +725,10 @@ fn int_lit0() -> Expr { return IntLit("0") }
 // suspension is exactly where a component reaches outside itself, that is the
 // last operand a gate should decline to read.
 //
-// `aw` is reported rather than folded away because `has_await` decides the A1
-// await-placement surface off a statement of kind "await"; `await_marker`
-// appends that statement so the placement rule sees the suspension it always
-// saw, while the operand itself is now walked like any other.
+// `aw` is reported rather than folded away because the item-131 pairing rules
+// read it: the marker rides the forward statement it pairs with (`mkstmt_aw`),
+// so `has_await` sees an awaited effect/emit exactly as it sees a standalone
+// `await` statement, and the operand itself is walked like any other.
 type AwOperand = { e: Expr, i: Int, aw: Bool }
 
 fn operand_at(ts: List[Token], k: Int) -> AwOperand {
@@ -721,11 +738,6 @@ fn operand_at(ts: List[Token], k: Int) -> AwOperand {
   }
   let r2 = expr_at(ts, k)
   return { e: r2.e, i: r2.i, aw: false }
-}
-
-fn await_marker(aw: Bool, ss: List[Stmt]) -> List[Stmt] {
-  if (aw) { return ss.push(mkstmt("await", int_lit0())) }
-  return ss
 }
 
 // One statement run and the index just PAST the tokens it consumed. Item 168:
@@ -783,11 +795,11 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
     }
     let r = operand_at(ts, j)
     if (is_bad(r.e)) { return mk_srun([mkstmt("skip", r.e)], hi) }
-    let out: List[Stmt] = await_marker(r.aw, [mkstmtb(kd, r.e, bn)])
+    let out: List[Stmt] = [mkstmt_aw(kd, r.e, bn, r.aw)]
     if (atw(ts, r.i, "undo")) {
       let u = operand_at(ts, r.i + 1)
       if (!is_bad(u.e)) {
-        return mk_srun(await_marker(u.aw, out.push(mkstmt("undo", u.e))), u.i)
+        return mk_srun(out.push(mkstmt_aw("undo", u.e, "", u.aw)), u.i)
       }
       return mk_srun(out, hi)
     }
@@ -810,11 +822,30 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   if (t.kind == "kw" && t.text == "emit") {
     let re1 = operand_at(ts, lo + 1)
     if (is_bad(re1.e)) { return mk_srun([mkstmt("skip", re1.e)], hi) }
-    let oute: List[Stmt] = await_marker(re1.aw, [mkstmt("emit", re1.e)])
+    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", re1.aw)]
     if (atw(ts, re1.i, "compensate")) {
       let uc = operand_at(ts, re1.i + 1)
       if (!is_bad(uc.e)) {
-        return mk_srun(await_marker(uc.aw, oute.push(mkstmt("compensate", uc.e))), uc.i)
+        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw)), uc.i)
+      }
+      return mk_srun(oute, hi)
+    }
+    return mk_srun(oute, re1.i)
+  }
+  // `await emit <call> [compensate <e>]` — an AWAITED emission step (item 131,
+  // parser.py's `_emit_stmt(is_async=True)`): the boundary marker sits outermost
+  // (design §2), so `await` heads the statement and the payload is an emission.
+  // Recognised here at the token level because parser.rvl has no `await` in its
+  // expression grammar; the awaited emit rides `awaited: true` so the pairing
+  // rule 2 sees the marker even when the emission reaches nothing async.
+  if (t.kind == "kw" && t.text == "await" && atw(ts, lo + 1, "emit")) {
+    let re1 = expr_at(ts, lo + 2)
+    if (is_bad(re1.e)) { return mk_srun([mkstmt("skip", re1.e)], hi) }
+    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", true)]
+    if (atw(ts, re1.i, "compensate")) {
+      let uc = operand_at(ts, re1.i + 1)
+      if (!is_bad(uc.e)) {
+        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw)), uc.i)
       }
       return mk_srun(oute, hi)
     }
@@ -872,11 +903,11 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
                         || t.text == "compensate")) {
     let rf = operand_at(ts, lo + 1)
     if (is_bad(rf.e)) { return mk_srun([mkstmt("skip", rf.e)], hi) }
-    let out2: List[Stmt] = await_marker(rf.aw, [mkstmt(t.text, rf.e)])
+    let out2: List[Stmt] = [mkstmt_aw(t.text, rf.e, "", rf.aw)]
     if (atw(ts, rf.i, "undo")) {
       let u2 = operand_at(ts, rf.i + 1)
       if (!is_bad(u2.e)) {
-        return mk_srun(await_marker(u2.aw, out2.push(mkstmt("undo", u2.e))), u2.i)
+        return mk_srun(out2.push(mkstmt_aw("undo", u2.e, "", u2.aw)), u2.i)
       }
       return mk_srun(out2, hi)
     }
@@ -1905,7 +1936,7 @@ type Ctx = { svcs: Map[Str, SvcD], reqMap: Map[Str, Str], caps: CapsT,
              fnAsyncSlots: Map[Str, List[Int]],
              underArrow: Bool, handles: Map[Str, Str],
              provKeySvc: Map[Str, Str], provAlias: Map[Str, Str],
-             acqWhere: Str }
+             localArrows: Map[Str, ArrowN], acqWhere: Str }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -1948,19 +1979,23 @@ fn svc_of(cx: Ctx, svcName: Str) -> SvcD {
 // eighty-five programs in this repo's own corpus that the reference admits —
 // a compensation that reverses a write is the ordinary shape, not the exotic
 // one.
-fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
-  if (i >= ss.length() || a.msg != "") { return a }
-  let s = ss[i]
+// Walk ONE statement's expression into the accumulator, honouring the
+// host-acquire position and the one exemption: an `effect` bracket's own root
+// acquisition. Walking that root's ARGUMENTS rather than the root call itself
+// is what makes the exemption identity-shaped (see `acq_root_of`). Factored out
+// so the per-statement A1 rules and the setup async-name fence measure a
+// statement's reach the same way `walk_stmts` accumulates it.
+fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   let marked = s.kind == "emit" || s.kind == "compensate"
-  // the host-acquire position this statement puts its expression in, and the
-  // one exemption: an `effect` bracket's own root acquisition. Walking that
-  // root's ARGUMENTS rather than the root call itself is what makes the
-  // exemption identity-shaped (see `acq_root_of`).
   let scx = ctx_acq(cx, stmt_acq_where(s.kind))
   let root = acq_root_of(s)
-  let na = root.hit ? walk_exprs(root.args, 0, marked, scx, a)
-                    : walk_expr(s.e, marked, scx, a)
-  return walk_stmts(ss, i + 1, cx, na)
+  return root.hit ? walk_exprs(root.args, 0, marked, scx, a)
+                  : walk_expr(s.e, marked, scx, a)
+}
+
+fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
+  if (i >= ss.length() || a.msg != "") { return a }
+  return walk_stmts(ss, i + 1, cx, walk_one_stmt(ss[i], cx, a))
 }
 
 fn walk_exprs(xs: List[Expr], i: Int, marked: Bool, cx: Ctx, a: Ac) -> Ac {
@@ -2314,14 +2349,74 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
   return walk_exprs(args, 0, marked, cx, na)
 }
 
+// The `<handle>#<key>` a provision-read ARGUMENT names, else "". A direct read
+// `h.<key>` off a known spawn handle, or a local that already aliases one
+// (`provAlias`) — the same two provenance shapes `alias_note` records.
+fn provision_ref(e: Expr, cx: Ctx) -> Str {
+  return match e {
+    Field(fl) => match fl.target {
+      Var(h) => cx.handles.has(h) ? h.concat("#").concat(fl.name) : "",
+      _      => "",
+    },
+    Var(v) => match cx.provAlias.lookup(v) { Some(r) => r, None => "" },
+    _      => "",
+  }
+}
+
+// Does any argument carry a spawn-handle provision into a parameter?
+fn has_provision_arg(args: List[Expr], i: Int, cx: Ctx) -> Bool {
+  if (i >= args.length()) { return false }
+  if (provision_ref(args[i], cx) != "") { return true }
+  return has_provision_arg(args, i + 1, cx)
+}
+
+// Map each parameter that receives a provision argument to the `<handle>#<key>`
+// that argument names, extending `provAlias` positionally.
+fn arrow_param_alias(ps: List[ParamN], args: List[Expr], i: Int, cx: Ctx,
+                     m: Map[Str, Str]) -> Map[Str, Str] {
+  if (i >= ps.length() || i >= args.length()) { return m }
+  let ref = provision_ref(args[i], cx)
+  let m2 = ref != "" ? m.set(ps[i].name, ref) : m
+  return arrow_param_alias(ps, args, i + 1, cx, m2)
+}
+
+// The arrow-parameter provision seam (GHSA-wg4v-r47x-52p2 residual): a spawn-
+// handle provision passed as an ARGUMENT to a local arrow whose parameter is
+// service-typed crosses the boundary through the parameter exactly as the
+// direct `w.<key>.<op>` spelling does. #331 followed the crossing through a
+// `let`/capture binding of the handle; this follows it through the parameter
+// binding at the application. Each parameter that receives a provision argument
+// is mapped into `provAlias` as `<handle>#<key>`, and the arrow BODY is walked
+// under that map with the parameters in scope — so `t.run(s)` takes the same
+// `alias_call` -> `handle_emit` path the direct handle call takes: refused
+// unmarked (naming `w.task.run`), admitted marked. When no provision flows in
+// (an arrow not applied to one, or a non-emission op through it), nothing is
+// followed — the accepting twin.
+fn arrow_apply_check(ar: ArrowN, args: List[Expr], marked: Bool,
+                     cx: Ctx, a: Ac) -> Ac {
+  if (!has_provision_arg(args, 0, cx)) { return a }
+  let pal = arrow_param_alias(ar.params, args, 0, cx, cx.provAlias)
+  let bcx = ctx_bind(ctx_alias(cx, pal), param_names(ar.params))
+  return walk_expr(ar.body, marked, bcx, a)
+}
+
 // A bare named call `name(...)`. The head must resolve to a callable (or a
 // declared local, an Upper-cased constructor, or `config`) — an unresolved
 // head is a G1 undeclared access, exactly as a `req` receiver is. G4 evidence:
 // reaching an emitting name labels `f()` with its caps. A1: reaching an
-// async-colored name records it for the reach verdict.
+// async-colored name records it for the reach verdict. A local arrow applied to
+// a spawn-handle provision is resolved through its parameter first (GHSA
+// residual), before its own name is judged.
 fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
   if (!call_head_declared(cx, name)) { return g1_refuse(cx, name, a) }
   var na = a
+  if (cx.localArrows.has(name)) {
+    na = match cx.localArrows.lookup(name) {
+      Some(ar) => arrow_apply_check(ar, args, marked, cx, na),
+      None     => na,
+    }
+    if (na.msg != "") { return na }
+  }
   if (contains(cx.emittingNames, name)) {
     // deduped, as `_method_emissions`'s `note` is — see `req_call`
     na = { msg: "", tag: "", labels: union_into(na.labels, [name.concat("()")]),
@@ -2391,7 +2486,8 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, acqWhere: cx.acqWhere }
+           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           acqWhere: cx.acqWhere }
 }
 
 // The same context carrying the host-acquire position phrase of the statement
@@ -2403,7 +2499,8 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, acqWhere: where }
+           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           acqWhere: where }
 }
 
 // The same context carrying a body's provision-alias map.
@@ -2414,7 +2511,20 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: al, acqWhere: cx.acqWhere }
+           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere }
+}
+
+// The same context carrying the local arrows one body binds (`let f = (…) =>
+// …`), so an application `f(w.task, …)` can be resolved to the crossing its
+// body performs through a service-typed parameter (GHSA-wg4v-r47x-52p2).
+fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
+  return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -2426,7 +2536,8 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, acqWhere: cx.acqWhere }
+           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           acqWhere: cx.acqWhere }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -2594,7 +2705,8 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
-           provAlias: Map.empty(), acqWhere: "this position" }
+           provAlias: Map.empty(), localArrows: Map.empty(),
+           acqWhere: "this position" }
 }
 
 // The same context with extra callable names — the program's own ADT
@@ -2607,7 +2719,7 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           acqWhere: cx.acqWhere }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -2629,7 +2741,8 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            fnNames: base.fnNames, compName: comp.name,
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc,
-           provAlias: Map.empty(), acqWhere: "this position" }
+           provAlias: Map.empty(), localArrows: Map.empty(),
+           acqWhere: "this position" }
 }
 
 // The spawn handles a component binds: every `let h = effect spawn C …` in its
@@ -2697,6 +2810,22 @@ fn alias_in(ss: List[Stmt], i: Int, handles: Map[Str, Str],
   return alias_in(ss, i + 1, handles, m2)
 }
 
+// The local ARROWS one body binds (`let f = (t: Task, s) => t.run(s)`), keyed
+// by name, in statement order. Scoped per body exactly as `alias_in` is (and
+// for the same reason — the reference saves/restores `Env.local_arrows` around
+// every provide method), so an arrow bound in one method is never resolved
+// against an application in another. Used by `arrow_apply_check` to follow a
+// spawn-handle provision across the parameter binding at the application.
+fn arrows_in(ss: List[Stmt], i: Int, m: Map[Str, ArrowN]) -> Map[Str, ArrowN] {
+  if (i >= ss.length()) { return m }
+  let s = ss[i]
+  let m2 = match s.e {
+    Arrow(ar) => s.bind != "" ? m.set(s.bind, ar) : m,
+    _         => m,
+  }
+  return arrows_in(ss, i + 1, m2)
+}
+
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
 
 // The A1 first-class-value verdict (lower.py's `passed_async`): a provide
@@ -2711,12 +2840,40 @@ fn passed_async_verdict(svcName: Str, mname: Str, a: Ac, cx: Ctx) -> Str {
     .concat("` as a function value, but an async callable has no arrow type")
 }
 
-// The A1 setup/activation async-reach verdict (lower.py's
+// The A1 setup/activation async-reach NAME FENCE (lower.py's
 // `_async_reached_outside_provide` at the composition loop): a setup body that
-// reaches an async callable — by call (`areach`) or as a value (`avals`) —
-// cannot suspend a fiber, so it is refused. (Reaching an async service OP in
-// setup is deliberately NOT refused by the reference, so `aops` is excluded.)
-fn setup_async_verdict(comp: CompD, sa: Ac, cx: Ctx) -> Str {
+// reaches an async CALLABLE — an async extern or a phase-2 colored fn, by call
+// (`areach`) or as a value (`avals`) — in a forward, non-awaited position
+// cannot suspend a fiber, so it is refused with this legacy message.
+//
+// The reach it measures PRUNES the positions that carry their own in-flight
+// window or admission gate, exactly as the reference does: an AWAIT-marked
+// `effect`/`emit` step (its suspension is admitted, and its teardown is owned
+// by the per-statement rule 3 below) and a standalone `await` step. The req-op
+// family (`aops`) is owned by `stmt_a1_verdict`'s rules 1/3, so it is excluded
+// here — this fence keeps only the async-callable-name refusal. `skipTear`
+// carries a pruned forward step's teardown out with it (the reference prunes
+// the whole step dict, undo/compensate included).
+fn setup_async_reach(ss: List[Stmt], i: Int, cx: Ctx, skipTear: Bool,
+                     acc: Ac) -> Ac {
+  if (i >= ss.length()) { return acc }
+  let s = ss[i]
+  if (s.kind == "await") { return setup_async_reach(ss, i + 1, cx, false, acc) }
+  if (s.kind == "effect" || s.kind == "emit") {
+    if (s.awaited || s.spawnTarget != "") {
+      return setup_async_reach(ss, i + 1, cx, true, acc)
+    }
+    return setup_async_reach(ss, i + 1, cx, false, walk_one_stmt(s, cx, acc))
+  }
+  if (s.kind == "undo" || s.kind == "compensate") {
+    if (skipTear) { return setup_async_reach(ss, i + 1, cx, true, acc) }
+    return setup_async_reach(ss, i + 1, cx, false, walk_one_stmt(s, cx, acc))
+  }
+  return setup_async_reach(ss, i + 1, cx, false, walk_one_stmt(s, cx, acc))
+}
+
+fn setup_async_verdict(comp: CompD, ss: List[Stmt], scx: Ctx, cx: Ctx) -> Str {
+  let sa = setup_async_reach(ss, 0, scx, false, empty_ac())
   let reached = union_into(sa.areach, sa.avals)
   if (reached.length() == 0) { return "" }
   let culprit = sort_strs(reached)[0]
@@ -2724,6 +2881,82 @@ fn setup_async_verdict(comp: CompD, sa: Ac, cx: Ctx) -> Str {
   return "component `".concat(comp.name).concat("` reaches async ").concat(kind)
     .concat(" `").concat(culprit)
     .concat("` in a setup/activation body, which cannot suspend a fiber (A1)")
+}
+
+// The per-statement effect-composition A1 rules (item 131 §3, lower.py's
+// `_admit_effect_async` / `_admit_emit_async`): the EXACT await/async pairing
+// on a forward `effect`/`emit`, and a suspending `undo`/`compensate` teardown.
+// The whole-body name fence above decides async-reach by NAME over a body; it
+// cannot see the req-target async service ops (`aops`, the silent-leak family
+// item 131 names) nor the await marker per statement, so these three rules own
+// that surface, statement by statement, first refusal winning in body order.
+//
+//   * rule 1 (async without `await`): a forward acquisition/emission that
+//     reaches a req-target async op (`aops`) but was not awaited — the binding
+//     would hold the in-flight value, not the landed result. The async-callable
+//     family stays with the name fence and its legacy message.
+//   * rule 2 (`await` without async): an awaited forward step that reaches NO
+//     suspension of any family — the marker names a divert window that is not
+//     there.
+//   * rule 3 (suspending teardown): an `undo`/`compensate` that reaches any
+//     suspension — teardown is synchronous on every tier.
+fn stmt_a1_check(comp: CompD, s: Stmt, cx: Ctx) -> Str {
+  if (s.spawnTarget != "") { return "" }
+  if (s.kind == "effect") {
+    let na = walk_one_stmt(s, cx, empty_ac())
+    let hasReach = na.aops.length() > 0 || na.areach.length() > 0
+                || na.avals.length() > 0
+    if (na.aops.length() > 0 && !s.awaited) {
+      return "component `".concat(comp.name)
+        .concat("` acquires through async operation `").concat(na.aops[0])
+        .concat("` but the effect is not awaited; the binding would hold ")
+        .concat("the in-flight value, not the result (A1)")
+    }
+    if (s.awaited && !hasReach) {
+      return "`effect await` on an acquisition that reaches nothing async — an "
+        .concat("`await` in an activation body is a real divert window (A1)")
+    }
+    return ""
+  }
+  if (s.kind == "emit") {
+    let na = walk_one_stmt(s, cx, empty_ac())
+    let hasReach = na.aops.length() > 0 || na.areach.length() > 0
+                || na.avals.length() > 0
+    if (na.aops.length() > 0 && !s.awaited) {
+      return "`emit` step reaches async operation `".concat(na.aops[0])
+        .concat("` but the emission is not awaited; py would build a coroutine ")
+        .concat("it never awaits (the emission never fires) and ts a floating ")
+        .concat("unordered Promise (A1)")
+    }
+    if (s.awaited && !hasReach) {
+      return "`await emit` on an emission that reaches nothing async — an "
+        .concat("`await` in an activation body is a real divert window (A1)")
+    }
+    return ""
+  }
+  if (s.kind == "undo" || s.kind == "compensate") {
+    let na = walk_one_stmt(s, cx, empty_ac())
+    let culprit = na.aops.length() > 0 ? na.aops[0]
+      : (union_into(na.areach, na.avals).length() > 0
+          ? sort_strs(union_into(na.areach, na.avals))[0] : "")
+    if (culprit == "") { return "" }
+    if (s.kind == "undo") {
+      return "`undo` reaches async operation `".concat(culprit)
+        .concat("`, but teardown is synchronous on every tier — a suspension ")
+        .concat("there would be a teardown that can hang or silently no-op (A1)")
+    }
+    return "`compensate` reaches async operation `".concat(culprit)
+      .concat("`, but teardown is synchronous on every tier — a suspension ")
+      .concat("there would be a compensation that can hang or silently no-op (A1)")
+  }
+  return ""
+}
+
+fn stmt_a1_verdict(comp: CompD, ss: List[Stmt], i: Int, scx: Ctx) -> Str {
+  if (i >= ss.length()) { return "" }
+  let r = stmt_a1_check(comp, ss[i], scx)
+  if (r != "") { return r }
+  return stmt_a1_verdict(comp, ss, i + 1, scx)
 }
 
 // The services-2.0 signature-parity verdict (lower.py's `method.async_ !=
@@ -2737,11 +2970,13 @@ fn async_sig_msg(key: Str, mname: Str, svc: Str, mAsync: Bool,
     .concat(dAsync ? "async" : "not async")
 }
 
-// Whether a method body contains an `await` statement (the await-outside-body
-// A1 surface — the statement reader tags these `await`).
+// Whether a method body contains an `await` (the await-outside-body A1
+// surface): a standalone `await <expr>` statement, or a forward
+// `effect`/`emit`/teardown statement that carried the `await` marker (now on
+// the statement itself rather than a separate marker statement).
 fn has_await(ss: List[Stmt], i: Int) -> Bool {
   if (i >= ss.length()) { return false }
-  if (ss[i].kind == "await") { return true }
+  if (ss[i].kind == "await" || ss[i].awaited) { return true }
   return has_await(ss, i + 1)
 }
 
@@ -3321,9 +3556,18 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
   // provide method (the reference lowers setup first and restores to that map
   // after each method), a method's own are not visible to the next one.
   let setupAlias = alias_in(comp.setup, 0, cx.handles, Map.empty())
-  let scx = ctx_alias(cx, setupAlias)
+  // local arrows are scoped per body exactly as provision aliases are: setup's
+  // are visible to every provide method, a method's own are not visible to the
+  // next (GHSA-wg4v-r47x-52p2 residual — the arrow-parameter provision seam).
+  let setupArrows = arrows_in(comp.setup, 0, Map.empty())
+  let scx = ctx_arrows(ctx_alias(cx, setupAlias), setupArrows)
   let sa = walk_stmts(comp.setup, 0, scx, empty_ac())
   if (sa.msg != "") { return tagged(sa.tag, sa.msg) }
+  // the per-statement effect-composition A1 rules over the activation body
+  // (`_admit_effect_async` / `_admit_emit_async`, run during lowering): the
+  // exact await/async pairing and a suspending teardown, statement by statement.
+  let sA1 = stmt_a1_verdict(comp, comp.setup, 0, scx)
+  if (sA1 != "") { return tagged("A1", sA1) }
   let pcx = cx
   var pi = 0
   while (pi < comp.provs.length()) {
@@ -3340,7 +3584,9 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
         return tagged("A1", async_sig_msg(pv.key, pm.name, pv.svcName,
                                           pm.isAsync, decl.isAsync))
       }
-      let mcx = ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias))
+      let mcx = ctx_arrows(
+        ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
+        arrows_in(pm.body, 0, setupArrows))
       let a = walk_stmts(pm.body, 0, mcx, empty_ac())
       if (a.msg != "") { return tagged(a.tag, a.msg) }
       // `await` outside a component body (lower.py's method-lowering AwaitStmt
@@ -3368,9 +3614,10 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
     }
     pi += 1
   }
-  // the setup/activation async-reach refusal runs after every provide method
-  // (the reference checks it once the whole component is lowered).
-  let su = setup_async_verdict(comp, sa, cx)
+  // the setup/activation async-reach name fence runs after every provide method
+  // (the reference checks it once the whole component is lowered). It recomputes
+  // reach over the activation body, pruning await-marked / await steps.
+  let su = setup_async_verdict(comp, comp.setup, scx, cx)
   if (su != "") { return tagged("A1", su) }
   return ""
 }

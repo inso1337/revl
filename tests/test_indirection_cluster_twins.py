@@ -112,6 +112,95 @@ component Supervisor provides sup: Sup {
     assert any("task.run" in e for e in stats["emissions"]), stats
 
 
+# ----------------------------------------- G4, arrow-parameter provision
+
+def test_arrow_param_provision_emission_compiles_when_marked():
+    """Twin of `g4_arrow_param_emission.rvl` (GHSA-wg4v-r47x-52p2 residual).
+
+    The provision flows in as an argument to a local arrow whose parameter is
+    service-typed; following it across the parameter binding is wrong in both
+    directions until fixed, exactly as the alias was — the unmarked call was
+    admitted, and this correctly `emit`-marked one was refused as
+    "`emit` on a call to `run`, which is not declared `emission`". So this test
+    would have failed before the refusal existed."""
+    _ok(WORKER + """
+service Sup { emission fn go(prompt: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(prompt: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let f = (t: Task, s: Str) => emit t.run(s)
+      let r = f(w.task, prompt)
+      return r
+    }
+  }
+}
+""")
+
+
+def test_arrow_param_provision_non_emission_needs_no_marker():
+    """A non-emission operation reached through the service-typed parameter is
+    not a crossing and takes no marker, even though the provision flows in."""
+    _ok(WORKER + """
+service Sup { emission fn go(prompt: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(prompt: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let f = (t: Task) => t.status()
+      let r = f(w.task)
+      return r
+    }
+  }
+}
+""")
+
+
+def test_arrow_with_service_param_not_applied_to_provision_compiles():
+    """The load-bearing accepting twin: the crossing is followed across the
+    parameter binding only when a provision actually flows in at an
+    application. A service-typed-parameter arrow that is never applied to a
+    provision names no concrete crossing and must still compile — the refusal
+    is a dataflow judgment at the application, not a ban on the arrow shape."""
+    _ok(WORKER + """
+service Sup { emission fn go(prompt: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(prompt: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let f = (t: Task, s: Str) => t.run(s)
+      return 0
+    }
+  }
+}
+""")
+
+
+def test_arrow_param_provision_emission_reaches_the_audit_surface():
+    """G8: the marked crossing through the service-typed parameter appears on
+    the component's boundary, identical to the direct `w.task.run` spelling —
+    the half a refusal alone would not prove. The audit used to report this
+    component as "fully revertible" with the emission running inside it."""
+    from revl.__main__ import _boundary
+
+    ir = compile_source(WORKER + """
+service Sup { emission fn go(prompt: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(prompt: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let f = (t: Task, s: Str) => emit t.run(s)
+      let r = f(w.task, prompt)
+      return r
+    }
+  }
+}
+""")
+    stats = _boundary(ir)["Supervisor"]
+    assert any("task.run" in e for e in stats["emissions"]), stats
+    assert stats["capabilities"].get("task.run") == ["net"], stats
+
+
 # ------------------------------------------------- G4, host acquisition
 
 def test_bracketed_host_acquisition_still_compiles():

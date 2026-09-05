@@ -271,6 +271,13 @@ REJECTIONS = {
     # judgment, in both directions (the marked spelling `emit t.run(p)` was
     # itself refused before, as "not declared `emission`").
     "g4_unmarked_alias_emission.rvl": "call to emission `w.task.run` must be marked `emit` (G4)",
+    # The provision reached through an ARROW PARAMETER, one indirection past
+    # the alias (GHSA-wg4v-r47x-52p2 residual): the handle flows in as a call
+    # argument `f(w.task, p)` to `(t: Task, s) => t.run(s)`, and the crossing is
+    # followed across the parameter binding — refused unmarked, and (marked)
+    # carried onto the `revl audit` boundary surface, in both directions like
+    # the alias.
+    "g4_arrow_param_emission.rvl": "call to emission `w.task.run` must be marked `emit` (G4)",
     # A host acquire verb is legal only as the acquisition of an `effect …
     # undo …` bracket, which is the only construct that registers its release
     # with the teardown accumulator. Three positions that had no rule: a `fn`
