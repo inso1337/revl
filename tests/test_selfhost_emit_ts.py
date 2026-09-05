@@ -10,7 +10,6 @@ tests/test_selfhost_emit_py.py. Two independent implementations of one lowering
 is the strongest kind an emitter can be held to: the emitted TypeScript source
 must be identical to the last byte. The reference defines the byte contract for
 admitted corpus inputs; deferred shapes are audited separately rather than waived.
-is a defect in the slice.
 
 Navigation reads the IR in PURE revl through stdlib/value.rvl's ``value_*`` (item
 180). Only host FORMATTING stays ``@py``: ``json_dumps`` (the reference renders
@@ -82,21 +81,17 @@ closed by verification. ``components_await.rvl`` (already v1 in the corpus) cove
 the async-generator body on this path; the three new fixtures add the config /
 saga / provide-method v1 body and the isolate/intercept-only v2 dispatch.
 
-Deliberately OUT (deferred to a follow-on slice): the component-dialect async
-call surface — an async callable reached through the ``fn`` expr kind or from an
-async PROVIDE method (its ``async_names`` are threaded empty, byte-safe because no
-covered component body names one); the component-body ``timer`` step, VARIANT
-type declarations (so an async ``match`` is exercised over Opt/built-in
-``Result`` only, never a declared variant), in-file
-``test``/``fault_test``/``lifecycle test`` emission, ROUTED requires
+Declared boundaries tracked by the coverage ledgers include the component-body
+``timer`` step, in-file ``test``/``fault_test``/``lifecycle test`` emission,
+witnessed transactions, deferred holes/streams, temporal expressions, and ROUTED requires
 (item 167 — a routed require, ``requires <k> in realms(...) strategy(...)``, also
 lowers to ir_version 2 but additionally needs the ``_TS_ROUTER_SRC`` runtime
-literal, the ``realmLabel`` runtime import, the ``inject_keys = requires − routes``
+literal, the ``realmLabel`` runtime import, the ``inject_keys = requires - routes``
 gate, the per-key ``revlRouter`` proxy, and the routed-``req`` read; the router
 literal embeds backtick templates and ``${…}`` the revl lexer reserves, so it is
 kept out to stay byte-VERIFIED — a routed v2 doc must NOT enter this corpus until
-that lands), the canonical ABI, and ``assert``/``let_pattern`` statements — all
-kept out so the slice stays byte-VERIFIED rather than byte-guessed.
+that lands). These remain explicit source-backed boundaries rather than implied
+full compiler parity.
 """
 
 import importlib.util
@@ -209,6 +204,7 @@ CORPUS = [
     "destructuring.rvl",
     "property_edges.rvl",
     "component_edges.rvl",
+    "cas_runtime.rvl",
     "../emit_go_corpus/variants.rvl",
     "../emit_py_corpus/services_method_effects.rvl",
 ]
@@ -337,7 +333,66 @@ def test_structural_assertion_runtime(emitted, reference, tmp_path, side):
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     module = pkg / "mod.ts"
-    module.write_text(src + "\nconsole.log(list_equal());\n", encoding="utf-8")
+    module.write_text(
+        src + "\nconsole.log(list_equal() && record_equal());\n", encoding="utf-8"
+    )
     proc = subprocess.run(["node", str(module)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "true"
+
+
+@pytest.mark.parametrize("side", ["reference", "selfhost"])
+def test_failed_map_cas_registers_noop_inverse(emitted, reference, tmp_path, side):
+    if shutil.which("node") is None:
+        pytest.skip("node not on PATH")
+    ir = compile_files([str(CORPUS_DIR / "cas_runtime.rvl")])
+    src = reference.emit(ir) if side == "reference" else emitted["emit_ts_src"](ir)
+    runtime = """
+export const removals: string[] = []
+const ledger = {
+  insert_if_absent(_key: string, _value: bigint) { return false },
+  remove(key: string) { removals.push(key) },
+  drop() {},
+}
+export const host = {
+  Map: { new() { return ledger } },
+  applyConfigDefaults(_name: string, config: unknown) { return config },
+}
+export class Frame {
+  begin = undefined
+  drain = undefined
+  constructor(_ctx: unknown, _name: string) {}
+  bracket(_crossing: unknown, _method: string, dispose: () => void) { return dispose }
+}
+export function record() {}
+"""
+    (tmp_path / "runtime.ts").write_text(runtime, encoding="utf-8")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    module = pkg / "mod.ts"
+    probe = """
+import { removals } from "../runtime.ts"
+const disposers: Array<() => void> = []
+const ctx: any = {
+  effect(run: () => any) {
+    const result = run()
+    if (result && typeof result.next === "function") {
+      for (const disposer of result) if (typeof disposer === "function") disposers.push(disposer)
+    } else if (typeof result === "function") {
+      disposers.push(result)
+    }
+  },
+  provide(name: string, value: unknown) {
+    this[name] = value
+    return () => {}
+  },
+}
+CasProvider.apply(ctx, {})
+if (ctx.ops.run() !== 2n) throw new Error("method did not run")
+for (const dispose of disposers.reverse()) dispose()
+console.log(removals.length)
+"""
+    module.write_text(src + probe, encoding="utf-8")
+    proc = subprocess.run(["node", str(module)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "0"
