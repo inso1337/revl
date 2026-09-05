@@ -626,81 +626,100 @@
       "uncovered_statements": 1559
     },
     "ts": {
-      "statements": 1979,
+      "statements": 1972,
       "uncovered": {
-        "residual dispatcher sites: `_component` retains routed-require output plus service/key validation; `_component_step` retains witnessed, awaited-acquisition, generic-compensation, timer, and invalid-step arms; `_method_body` retains witnessed/generic-compensation and forbidden-step arms; `_emit_v3`/`_emit_ts_externs` retain test/ref/config imports and empty/error gates. The other listed statements are CLI exits, duplicate/invalid IR guards, parenthesization/type fallbacks, and unsupported expression/operator/builtin sites that typechecked corpus IR cannot select": {
-          "<module>": 1,
-          "_Scope.bind": 1,
-          "_bind_call_temps": 2,
-          "_call_method_name": 6,
-          "_component": 10,
-          "_component_step": 54,
-          "_context_augmentation": 2,
-          "_crossing_key_name": 5,
-          "_emit_ts_externs": 8,
-          "_emit_v3": 15,
-          "_expr": 23,
-          "_finite_float": 1,
-          "_float_literal": 1,
-          "_fn_call": 2,
-          "_ident": 2,
-          "_is_float_expr": 3,
-          "_literal": 2,
-          "_main": 17,
-          "_method_body": 17,
-          "_provide_impl": 3,
-          "_raw_field": 2,
-          "_replay_call": 3,
-          "_runtime_imports": 2,
-          "_split_fn_type": 2,
-          "_split_ts_types": 2,
-          "_ts_builtin": 1,
-          "_ts_extern_config_bind": 4,
-          "_ts_inplace_write": 3,
-          "_ts_type": 1,
-          "_ts_v3_type": 2,
-          "_v3_emission_call_node": 3,
-          "_v3_match_expr": 1,
-          "_v3_stmt": 8,
-          "_v3_surface_type": 8,
-          "emit": 4
-        },
-        "reference-runtime, temporal, test-runner, and transactional boundaries excluded by the mirrored v3 slice: these source functions emit stdlib ref thunks, scheduler operations, in-file tests, or witnessed undo/frame/replay code rather than ordinary v3 TypeScript": {
+        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_emit_temporal": 14,
           "_emit_ts_ref_runtime": 1,
           "_emit_ts_ref_thunk": 31,
           "_emit_ts_ref_thunk._mark": 2,
           "_emit_ts_tests": 14,
-          "_emit_ts_lifecycle_tests": 60,
+          "_finite_float": 3,
+          "_float_literal": 3,
+          "_main": 17,
           "_method_witnessed_step": 19,
+          "_pinned_arrow": 5,
           "_ts_extern_config_scaffold": 1,
-          "_witnessed_extern": 3,
+          "_v3_do_expr": 22,
           "_witnessed_step": 19
         },
-        "async coloring is performed before this self-host emission slice: no admitted corpus IR asks these helpers to infer an async function or emission after native normalization": {
+        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+          "<module>": 1,
+          "_Ctx.__init__": 2,
+          "_Scope.bind": 1,
+          "_bind_call_temps": 10,
+          "_bracket_yield": 1,
+          "_call_method_name": 7,
+          "_component": 10,
+          "_component_step": 58,
+          "_context_augmentation": 2,
+          "_crossing_key_name": 5,
+          "_emit_ts_externs": 9,
+          "_emit_ts_functions": 1,
+          "_emit_ts_types": 19,
+          "_emit_v3": 16,
+          "_expr": 52,
+          "_float_operand": 3,
+          "_fn_call": 4,
+          "_guard_frame_neutral_loop": 1,
+          "_has_bracket.walk": 3,
+          "_ident": 2,
+          "_is_float_expr": 5,
+          "_literal": 5,
+          "_mangle": 2,
+          "_member": 2,
+          "_method_body": 54,
+          "_method_body_needs_frame": 2,
+          "_needs_frame.walk": 3,
+          "_prop_key": 1,
+          "_provide_impl": 3,
+          "_raw_field": 2,
+          "_refuse_deferred_emissions": 10,
+          "_refuse_holes": 4,
+          "_refuse_holes.walk": 1,
+          "_refuse_missing_host_root": 1,
+          "_replay_call": 5,
+          "_runtime_imports": 2,
+          "_split_fn_type": 2,
+          "_split_ts_types": 2,
+          "_ts_builtin": 9,
+          "_ts_extern_config_bind": 4,
+          "_ts_inplace_stmt": 5,
+          "_ts_inplace_write": 4,
+          "_ts_type": 2,
+          "_ts_v3_type": 4,
+          "_uses_assert": 1,
+          "_uses_bounded_int": 1,
+          "_uses_bounded_int32": 2,
+          "_uses_parse_int": 1,
+          "_uses_str_methods": 2,
+          "_v3_arm_body": 3,
+          "_v3_emission_call_node": 3,
+          "_v3_empty_list_types": 10,
+          "_v3_match_expr": 6,
+          "_v3_stmt": 33,
+          "_v3_surface_type": 24,
+          "_v3_var": 3,
+          "_witnessed_extern": 3,
+          "emit": 4
+        },
+        "declared out of every self-host slice: async coloring.": {
           "_await_statement": 1,
           "_is_async_fn_type": 1,
           "_ts_emission_is_async": 11
         },
-        "explicit slice refusals and frame-only control flow: deferred emissions, holes, fault tests, absent host roots, bracket yields, frame-neutral loop rejection, pinned arrows, and `do` frame transfer stop before byte comparison rather than being silently emitted": {
-          "_bracket_yield": 1,
-          "_guard_frame_neutral_loop": 1,
-          "_has_bracket.walk": 3,
-          "_method_body_needs_frame": 1,
-          "_needs_frame.walk": 2,
-          "_pinned_arrow": 2,
-          "_refuse_deferred_emissions": 10,
-          "_refuse_fault_tests": 2,
-          "_refuse_holes": 4,
-          "_refuse_holes.walk": 1,
-          "_refuse_missing_host_root": 1,
-          "_v3_do_expr": 22
+        "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
+          "_emit_ts_lifecycle_tests": 60,
+          "_refuse_fault_tests": 2
         },
-        "v1/v2 live-component routing is selected before the v3 emitter mirrored by `selfhost/emit_ts.rvl`; the remaining statements are the legacy runtime branch": {
+        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
+          "_revl_helpers": 2
+        },
+        "the v1/v2 live-component path: a component routes to the older runtime, not through the v3 emitter the self-host mirrors.": {
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 455
+      "uncovered_statements": 672
     },
     "wasm": {
       "statements": 2662,
@@ -1143,65 +1162,90 @@
       "uncovered_statements": 210
     },
     "ts": {
-      "statements": 2065,
+      "statements": 2285,
       "uncovered": {
-        "compiler-inlined definitions and emitter self-checks: the Python self-host compiler substitutes `ind`, `sync_acx`, `renders_await`, and `optcall_result_is_int` at compile time, while the `expected_*` and indentation predicates are source assertions rather than paths entered by corpus emission": {
-          "expected_instance_get": 1,
+        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "expected_missing_adt": 1,
           "expected_ok_adt": 1,
           "expected_result_type": 1,
           "ind": 1,
           "indentation_is_two_spaces": 1,
+          "is_bool_op": 1,
           "optcall_result_is_int": 1,
-          "renders_await": 1,
           "sync_acx": 1
         },
-        "typechecked-IR invariants and defensive renderer fallbacks: empty/malformed names, unknown scalar/type/operator/builtin/expression/statement kinds, invalid word/digit scans, exhausted arrow/list searches, and record-update/call parenthesization defaults are retained for diagnostics but cannot be selected by admitted corpus input": {
-          "call_method_name": 11,
-          "component_step": 1,
+        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+          "body_has_bracket": 4,
+          "body_needs_frame": 2,
+          "call_method_name": 14,
+          "component_step": 36,
+          "config_ts_type": 9,
           "context_augmentation": 1,
           "crossing_key_name": 12,
           "emission_call_node": 3,
-          "emit_externs": 1,
+          "emit_externs": 2,
+          "emit_functions": 1,
+          "emit_ts_types": 1,
           "empty_list_ann": 1,
-          "expr_inner": 1,
+          "empty_list_types": 10,
+          "expr": 4,
+          "expr_inner": 7,
+          "float_operand": 5,
           "fn_type_arrow_index": 2,
+          "inplace_stmt": 11,
           "is_digit": 1,
-          "is_float_expr": 2,
-          "is_inplace_write": 3,
+          "is_float_expr": 5,
+          "is_inplace_write": 8,
+          "is_js_reserved": 1,
           "is_word": 2,
           "is_word_ch": 4,
           "last_index": 2,
-          "list_element": 1,
-          "literal_of": 1,
-          "match_expr": 1,
-          "method_body": 1,
-          "render_builtin": 1,
-          "render_call": 1,
+          "list_element": 2,
+          "literal_of": 4,
+          "mangle": 3,
+          "match_expr": 6,
+          "method_body": 38,
+          "optcall_arg_is_int": 5,
+          "render_arrow": 8,
+          "render_bin": 6,
+          "render_builtin": 12,
+          "render_call": 2,
           "render_format": 5,
+          "render_optcall": 3,
           "render_record_update": 1,
-          "render_un": 1,
-          "surface_type": 9,
-          "ts_bin_op": 3,
-          "ts_scalar_type": 3,
-          "ts_type": 5,
-          "v3_stmt": 1
+          "render_un": 8,
+          "render_var": 3,
+          "service_interfaces": 1,
+          "surface_type": 25,
+          "ts_bin_op": 6,
+          "ts_return_type": 1,
+          "ts_scalar_type": 4,
+          "ts_type": 6,
+          "type_map": 3,
+          "uses_assert": 2,
+          "uses_bounded_int": 1,
+          "uses_bounded_int32": 2,
+          "uses_parse_int": 2,
+          "uses_str_methods": 1,
+          "v3_stmt": 4
         },
-        "frame/bracket analysis branches require nested frame-transfer control flow (`do`, witnessed, or deferred paths) that this emitter refuses before byte emission; ordinary admitted loops and provides exercise the neutral branches": {
-          "body_has_bracket": 4,
-          "body_needs_frame": 2
+        "declared out of every self-host slice: async coloring.": {
+          "body_is_async": 1,
+          "renders_await": 1
         },
-        "compensation coverage exercises target-method and bare-function inverses; `emit_compensated`'s remaining statements are the host-call inverse arm and defensive eager snapshot for an unrecognised compensation IR shape": {
-          "emit_compensated": 9
+        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
+          "expected_instance_get": 1
         },
-        "async coloring is normalized by the native frontend for the admitted TypeScript slice, so `body_is_async`'s fallback detection branch is not entered by lowered corpus bodies": {
-          "body_is_async": 1
+        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
+          "revl_helpers": 4,
+          "revl_parse_int_helper": 8,
+          "revl_show_helper": 12
         },
-        "v1 component type fallback is outside the mirrored v3 contract; routing selects the legacy reference emitter before self-host emission": {
-          "ts_type_v1": 1
+        "the v1/v2 live-component path: a component routes to the older runtime, not through the v3 emitter the self-host mirrors.": {
+          "ts_type_v1": 2
         }
       },
-      "uncovered_statements": 107
+      "uncovered_statements": 349
     },
     "wasm": {
       "statements": 1489,
