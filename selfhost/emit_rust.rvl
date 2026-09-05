@@ -424,6 +424,11 @@ fn split_generic(inner: Str) -> List[Str] {
   return parts
 }
 
+fn list_element_type(t: Str) -> Str {
+  if (t.startsWith("List[") && t.endsWith("]")) { return t.slice(5, t.length() - 1) }
+  return ""
+}
+
 // `_rust_type`: scalars, the `List`/`Opt`/`Map`/`Result` generics, a user
 // record/variant NAME mapped to its emitted struct/enum name (when in `tnames`,
 // exactly the reference's `name in types` branch), and the opaque `Value`
@@ -719,6 +724,7 @@ fn str_param_readonly(node: Any, name: Str, safe: Bool, borrow: Map[Str, List[In
     for (item of value_list(node)) {
       if (!str_param_readonly(item, name, safe, borrow)) { return false }
     }
+
     return true
   }
   if (value_kind(node) != "record") { return true }
@@ -749,6 +755,7 @@ fn str_param_readonly(node: Any, name: Str, safe: Bool, borrow: Map[Str, List[In
     let ok = op == "==" || op == "!=" || op == "+"
     return str_param_readonly(value_field(node, "left"), name, ok, borrow) && str_param_readonly(value_field(node, "right"), name, ok, borrow)
   }
+  if (k == "arrow") { return str_param_readonly(value_field(node, "body"), name, false, borrow) }
   var callee_name = ""
   if (k == "fn") { callee_name = value_str(value_field(node, "name")) }
   if (k == "call") {
@@ -1282,8 +1289,13 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   }
   if (step == "for") {
     let bind = mangle(value_str(value_field(node, "bind")))
-    var out = [line(indent, `for ${bind} in ${render_expr(value_field(node, "iterable"), ctx)} {`)]
-    let bodyR = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1)
+    let iterable_node = value_field(node, "iterable")
+    let iterable_type = v3_infer_type(iterable_node, ctx)
+    let element_type = list_element_type(iterable_type)
+    var loop_ctx = ctx
+    if (element_type != "") { loop_ctx = set_vt(ctx, value_str(value_field(node, "bind")), element_type) }
+    var out = [line(indent, `for ${bind} in ${render_expr(iterable_node, ctx)} {`)]
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), loop_ctx, indent + 1)
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
     return { lines: out, ctx: bodyR.ctx }
