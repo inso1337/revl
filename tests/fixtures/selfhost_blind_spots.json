@@ -21,96 +21,20 @@
   ],
   "go": {
     "blind": {
-      "declared out of the slice by the oracle's own docstring: Float (excluded from interpolation and from arithmetic) and the stdlib surface that carries `.to_int()` widening.": [
+      "Built-in Opt/Result/Map and coalescing use the generic tagged/runtime preambles that this pure Go port intentionally does not emit; `op=??` is a named refusal.": [
+        "op=??"
+      ],
+      "Float arithmetic/interpolation and stdlib widening are outside the pure Go slice: `operands=Float` and `widen` are emitted only through the Float/stdlib paths; their reference guards are retained and tested separately.": [
         "widen=Float",
         "widen=Int"
       ],
-      "declared out of the slice by the oracle's own docstring: the built-in Opt/Result/Map surface, `??` included.": [
-        "op=??"
-      ],
-      "declared out of the slice by the oracle's own docstring: the go LIVE-COMPONENT world - a component routes to the v1/v2 stc-go runtime, not through this emitter, so its dialect expression kinds are unreachable here.": [
+      "Live v1/v2 component IR is dispatched to the stc-go runtime, not the pure typed-core emitter mirrored by selfhost/emit_go.rvl.": [
         "kind=if",
         "kind=name"
       ]
     },
     "unported": {
-      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
-        "args=<true>",
-        "bind=_",
-        "case=Err",
-        "case=None",
-        "case=Ok",
-        "case=Some",
-        "class=witnessed",
-        "components=<true>",
-        "config=<true>",
-        "else=<true>",
-        "event=<true>",
-        "fn=Map.new",
-        "has_config=<true>",
-        "idempotent=<true>",
-        "kind=bool",
-        "kind=builtin",
-        "kind=config",
-        "kind=fn",
-        "kind=format",
-        "kind=hole",
-        "kind=host",
-        "kind=instance-get",
-        "kind=int",
-        "kind=len",
-        "kind=maplit",
-        "kind=optcall",
-        "kind=optfield",
-        "kind=record_update",
-        "kind=req",
-        "kind=spawn",
-        "kind=str",
-        "kind=stream-merge",
-        "kind=subscribe",
-        "lifecycle=<true>",
-        "method=checked_div_trunc",
-        "method=concat",
-        "method=length",
-        "method=next",
-        "method=push",
-        "method=set",
-        "mode=every",
-        "name=<true>",
-        "name=Err",
-        "name=None",
-        "name=Ok",
-        "name=Some",
-        "name=length",
-        "op=!==",
-        "op====",
-        "operands=Float",
-        "pattern=Err",
-        "pattern=None",
-        "pattern=Ok",
-        "pattern=Some",
-        "secret_witness=<true>",
-        "stages=<true>",
-        "step=<true>",
-        "step=advance",
-        "step=assert_no_residue",
-        "step=await",
-        "step=call",
-        "step=effect",
-        "step=emit",
-        "step=fail",
-        "step=intercept",
-        "step=let-effect",
-        "step=load",
-        "step=provide",
-        "step=stream-iter",
-        "step=timer",
-        "step=unload",
-        "step=var",
-        "subscribe=<true>",
-        "value=<true>"
-      ],
-      "item 421 F6 CROSSED TIERS AND THE PORT DID NOT FOLLOW - a live 429(d) recurrence, verified in source on this branch. backends/typescript/emit.py now mentions `secret` 17 times and backends/go/emit.py 20 times, marking `Secret[T]` at both ends; selfhost/emit_ts.rvl and selfhost/emit_go.rvl mention it ZERO times, and neither tier's corpus contains a single `Secret[`, so both oracles are green over a self-hosted emitter that DOES NOT REDACT. This falsifies the (5) sibling survey in the roadmap, which recorded on 2026-09-02 that the marking was python-tier only. Recorded, not fixed: porting it is 421 F6 cross-tier work, and the corpus family must be added FIRST and seen to fail, per exit (3).": [
+      "Secret receiver/config marking belongs to live component emission (`revlMarkSecret`/`hostRecord`), while pure extern-origin marking is now ported and covered.": [
         "secret=<true>"
       ]
     }
@@ -425,13 +349,13 @@
   },
   "wasm": {
     "blind": {
-      "declared out of the slice by the oracle's own docstring: Float end to end, and `.to_int()` widening (which arrives as a `builtin`, itself excluded).": [
+      "Float ABI and builtin widening are refused by the WASM scalar/data emitter; `operands=Float` and `widen` require the excluded f64/helper ABI.": [
         "operands=Float",
         "widen=Int"
       ]
     },
     "unported": {
-      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
+      "WASM reference dispatches these constructs to component/runtime, tagged-cell, stdlib, or explicit refusal paths; the pure self-host slice has no corresponding ABI, and each marker is retained as a named source witness.": [
         "args=<true>",
         "async=<true>",
         "bind=<true>",

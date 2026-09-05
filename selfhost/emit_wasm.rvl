@@ -786,6 +786,7 @@ fn fold_const(op: Str, opnd: Str, left: Str, right: Str) -> Str {
 
 fn render_bin(node: Any, s: Scope, depth: Int) -> E {
   let op = node_op(node)
+  if (op == "??") { return { wat: "<<DEFER-coalesce>>", ty: "" } }
   let ln = value_field(node, "left")
   let rn = value_field(node, "right")
   let lty = infer_val_ty(ln, s)

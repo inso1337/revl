@@ -26,153 +26,67 @@
   ],
   "reference": {
     "go": {
-      "statements": 4020,
+      "statements": 4032,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
-          "_Env.__init__": 7,
-          "_Env._prefix": 1,
+        "Async coloring/erasure is performed by the frontend/component pipeline; pure v3 function emission receives no async-colored function body.": {
+          "_erase_async": 1
+        },
+        "Canonical bridge/marshalling helpers are selected only for component host crossings; the pure typed-core emitter does not emit that runtime ABI.": {
+          "_bridge_decode_expr": 16,
+          "_bridge_encode_expr": 16,
+          "_emit_go_bridge": 117,
+          "_emit_v3_bridge_helpers": 52,
+          "_go_bridge_arg_expr": 4
+        },
+        "In-file test/fault/lifecycle emission is intentionally outside the pure emitter oracle; these lines dispatch only from test blocks and are not part of module-function output.": {
+          "_default_lit": 6,
+          "_emit_stc_lifecycle_tests": 128,
+          "_emit_v3_go_tests": 17,
+          "_go_lifecycle_arg": 7,
+          "_go_lifecycle_assert": 28,
+          "_go_v3_test_name": 14
+        },
+        "Pure v3 oracle excludes component/service dispatch: these functions are called only by `_emit_v1`/`_emit_component` and the stc-go/WASM component runtime, not by function-only self-host `emit_src`.": {
           "_Env.config_ref": 2,
-          "_Env.ctx_ref": 1,
-          "_Env.name_ref": 7,
           "_Env.req_ref": 1,
-          "_acquire_value_go_type": 17,
-          "_bind_field": 1,
-          "_bind_is_ptr": 1,
-          "_bind_star": 1,
-          "_body_needs_frame": 12,
-          "_call_descriptor": 15,
           "_collect_host_calls": 10,
-          "_collect_refs": 10,
           "_comp_builtin": 57,
+          "_comp_checked_div_expr": 9,
           "_comp_infer": 60,
           "_component_config_fields": 4,
           "_component_has_config": 4,
           "_config_fields_flag": 1,
-          "_construction_case": 15,
-          "_dedup_colour_erased_poly_externs._rewrite": 6,
-          "_default_lit": 6,
           "_emit_component": 85,
           "_emit_component_step": 124,
           "_emit_config_struct": 18,
           "_emit_effect_step": 11,
           "_emit_go_dispatch": 18,
           "_emit_go_dispatch_encode": 30,
-          "_emit_go_proxy_decode": 49,
-          "_emit_go_proxy_method": 15,
           "_emit_host_stubs": 12,
-          "_emit_keys": 10,
-          "_emit_method_body": 56,
           "_emit_method_witnessed_step": 45,
-          "_emit_pins": 4,
           "_emit_provide_impl": 37,
-          "_emit_return": 26,
           "_emit_services": 16,
-          "_emit_v3_go_externs": 4,
-          "_emit_v3_go_tests": 17,
           "_emit_witnessed_step": 53,
-          "_expr": 160,
-          "_finite_float": 3,
           "_flag_stream": 1,
-          "_format": 50,
-          "_format.flush_text": 4,
           "_go_comp_match": 52,
           "_go_comp_match_tuple": 72,
           "_go_extern_config_bind": 5,
-          "_go_literal": 13,
-          "_go_opt_inner": 4,
-          "_go_result_inner": 5,
-          "_go_return": 9,
-          "_go_type": 19,
-          "_go_v3_builtin": 68,
-          "_go_v3_infer_ctor": 7,
-          "_go_v3_optchain": 19,
-          "_go_v3_scan_read": 14,
-          "_go_widen_int": 1,
-          "_go_zero": 10,
-          "_hoist_go_imports": 4,
           "_host_of_bind": 1,
           "_host_runtime": 10,
           "_host_type_of_acquire": 9,
-          "_infer_map_value_go_type": 20,
-          "_is_map_cas": 1,
           "_is_stream_next": 7,
-          "_key_var": 1,
-          "_lower_camel": 2,
-          "_map_insert_value_types": 14,
-          "_method_body_has_compensate": 4,
           "_method_body_has_witnessed": 4,
-          "_method_ret": 1,
-          "_method_returns_value": 1,
-          "_needs_sync": 1,
           "_provide_has_method_frame": 1,
+          "_refuse_dropped_stream_component": 5,
           "_refuse_unlowered_stream_surface": 7,
           "_req_field": 1,
-          "_revl_decode_fn": 1,
-          "_revl_encode_fn": 1,
-          "_safe_local": 9,
-          "_scan_step_for_inserts": 20,
           "_service_of_req": 1,
           "_stream_head": 4,
-          "_v3_builtin_ret_type": 34,
-          "_v3_case_layout": 9,
-          "_v3_case_payload": 5,
           "_v3_comp_construct": 15,
-          "_v3_declared_variant": 4,
-          "_v3_has_any": 1,
-          "_v3_is_lit": 1,
-          "_v3_own_continue": 12,
-          "_v3_record_type_for_fields": 10,
-          "_wal_referent": 3,
           "_witnessed_extern": 5,
-          "_witnessed_result_types": 5,
-          "main": 10
+          "_witnessed_result_types": 5
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "<module>": 1,
-          "_V3GoCtx.record_type_for_fields": 1,
-          "_dedup_colour_erased_poly_externs": 11,
-          "_emit_v3_go": 63,
-          "_emit_v3_go_types": 2,
-          "_go_string": 8,
-          "_go_v3_close_builders": 2,
-          "_go_v3_construct": 29,
-          "_go_v3_expr": 67,
-          "_go_v3_infer_type": 43,
-          "_go_v3_interp": 13,
-          "_go_v3_is_interface": 3,
-          "_go_v3_lit": 7,
-          "_go_v3_match": 28,
-          "_go_v3_open_builders": 8,
-          "_go_v3_self_rebind": 13,
-          "_go_v3_stmt": 17,
-          "_go_v3_type": 5,
-          "_guard_frame_neutral_loop": 1,
-          "_infer_arrow_param.walk": 3,
-          "_infer_arrow_param.walk_any": 2,
-          "_refuse_deferred_emissions": 10,
-          "_refuse_dropped_stream_component": 5,
-          "_refuse_holes": 4,
-          "_refuse_holes.walk": 1,
-          "_v3_ident": 3,
-          "_v3_len_receiver": 2,
-          "_v3_scan_loops": 1,
-          "_v3_scan_shape": 32,
-          "_v3_split_fn_type": 2,
-          "_v3_split_generic": 2,
-          "_v3_str_accumulators": 4,
-          "_v3_str_concat_pieces": 11,
-          "emit": 101
-        },
-        "declared out of every self-host slice: async coloring.": {
-          "_erase_async": 1
-        },
-        "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
-          "_emit_stc_lifecycle_tests": 128,
-          "_go_lifecycle_arg": 7,
-          "_go_lifecycle_assert": 28,
-          "_go_v3_test_name": 14
-        },
-        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
+        "Realm/placement/spawn/instance dispatch is a component-runtime path; pure function documents cannot produce these IR nodes and the self-host slice has no corresponding ABI.": {
           "_emit_go_router_struct": 82,
           "_emit_realm_helper": 21,
           "_emit_spawn_support": 89,
@@ -185,23 +99,105 @@
           "_uses_spawn": 1,
           "emit_placement": 16
         },
-        "declared out of every self-host slice: the bridge / marshalling / canonical-ABI surface.": {
-          "_bridge_decode_expr": 16,
-          "_bridge_encode_expr": 16,
-          "_emit_go_bridge": 117,
-          "_emit_v3_bridge_helpers": 52,
-          "_go_bridge_arg_expr": 4
+        "The enclosing pure-emitter dispatch is exercised, but this residual branch handles a distinct refusal/invalid-input condition or fallback that valid frontend IR cannot enter; its guard is preserved to fail loudly.": {
+          "<module>": 1,
+          "_V3GoCtx.record_type_for_fields": 1,
+          "_dedup_colour_erased_poly_externs": 11,
+          "_emit_v3_go": 61,
+          "_emit_v3_go_types": 2,
+          "_go_string": 6,
+          "_go_v3_construct": 29,
+          "_go_v3_expr": 47,
+          "_go_v3_infer_type": 16,
+          "_go_v3_interp": 6,
+          "_go_v3_is_interface": 3,
+          "_go_v3_lit": 3,
+          "_go_v3_match": 24,
+          "_go_v3_self_rebind": 13,
+          "_go_v3_stmt": 12,
+          "_go_v3_type": 4,
+          "_guard_frame_neutral_loop": 1,
+          "_infer_arrow_param.walk_any": 2,
+          "_refuse_deferred_emissions": 10,
+          "_refuse_holes": 4,
+          "_refuse_holes.walk": 1,
+          "_v3_ident": 1,
+          "_v3_len_receiver": 2,
+          "_v3_scan_loops": 1,
+          "_v3_scan_shape": 32,
+          "_v3_split_fn_type": 2,
+          "_v3_split_generic": 2,
+          "_v3_str_concat_pieces": 6,
+          "emit": 101
         },
-        "item 421 F6 CROSSED TIERS AND THE PORT DID NOT FOLLOW (a live 429(d) recurrence, verified in source). The reference now marks `Secret[T]` at both ends in the ts and go tiers; selfhost/emit_ts.rvl and selfhost/emit_go.rvl mention `secret` ZERO times and neither tier's corpus contains a single `Secret[`, so both oracles are green over a self-hosted emitter that DOES NOT REDACT. Not a triage bucket: this is a named, open security divergence. Porting it is 421 F6 cross-tier work; the corpus family goes in first and is seen to fail.": {
-          "_declares_secret": 16
+        "This branch handles an unsupported, malformed, or absent typed-core construct (unknown type/case/field, invalid literal, or refusal guard); the frontend invariant keeps it out of valid oracle inputs.": {
+          "_Env.__init__": 7,
+          "_Env._prefix": 1,
+          "_Env.ctx_ref": 1,
+          "_Env.name_ref": 7,
+          "_acquire_value_go_type": 17,
+          "_bind_field": 1,
+          "_bind_is_ptr": 1,
+          "_bind_star": 1,
+          "_body_needs_frame": 12,
+          "_call_descriptor": 15,
+          "_collect_refs": 10,
+          "_construction_case": 15,
+          "_declares_secret": 16,
+          "_dedup_colour_erased_poly_externs._rewrite": 6,
+          "_emit_go_proxy_decode": 49,
+          "_emit_go_proxy_method": 15,
+          "_emit_keys": 10,
+          "_emit_method_body": 56,
+          "_emit_pins": 4,
+          "_emit_return": 26,
+          "_emit_v3_go_externs": 3,
+          "_expr": 160,
+          "_finite_float": 1,
+          "_format": 50,
+          "_format.flush_text": 4,
+          "_go_literal": 13,
+          "_go_opt_inner": 4,
+          "_go_result_inner": 5,
+          "_go_return": 9,
+          "_go_type": 19,
+          "_go_v3_builtin": 68,
+          "_go_v3_infer_ctor": 7,
+          "_go_v3_optchain": 19,
+          "_go_v3_scan_read": 14,
+          "_go_widen_int": 1,
+          "_go_zero": 10,
+          "_hoist_go_imports": 4,
+          "_infer_map_value_go_type": 20,
+          "_is_map_cas": 1,
+          "_key_var": 1,
+          "_lower_camel": 2,
+          "_map_insert_value_types": 14,
+          "_method_body_has_compensate": 4,
+          "_method_ret": 1,
+          "_method_returns_value": 1,
+          "_needs_sync": 1,
+          "_revl_decode_fn": 1,
+          "_revl_encode_fn": 1,
+          "_safe_local": 9,
+          "_scan_step_for_inserts": 20,
+          "_v3_builtin_ret_type": 34,
+          "_v3_case_layout": 9,
+          "_v3_case_payload": 5,
+          "_v3_declared_variant": 4,
+          "_v3_has_any": 1,
+          "_v3_is_lit": 1,
+          "_v3_own_continue": 12,
+          "_v3_record_type_for_fields": 10,
+          "_wal_referent": 3,
+          "main": 10
         },
-        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
-          "_comp_checked_div_expr": 9,
+        "This is a demand-pulled runtime helper or guard for stdlib/checked-division/string conversion; its source dispatch is outside the exercised scalar/data subset and is retained as an explicit named boundary.": {
           "_emit_load_helpers": 27,
           "_teardown_preamble": 8
         }
       },
-      "uncovered_statements": 3007
+      "uncovered_statements": 2908
     },
     "java": {
       "statements": 2482,
@@ -233,7 +229,7 @@
           "_v3_len": 1,
           "_value_map_write_type": 6
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+        "Builder candidate analysis is reached for loop self-rebinds, but these residual branches reject non-concatenation children or nested unsafe reads; `builder_safe` and `concat_pieces` conservatively preserve ordinary assignment in those cases.": {
           "<module>": 1,
           "_V3Ctx.__init__": 1,
           "_V3Ctx.record_type_for_fields": 3,
@@ -371,7 +367,7 @@
           "_transactional_register_kwargs": 8,
           "_walrus_temp": 1
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+        "WASM self-host function/call/conditional rendering is exercised; these residual statements are defensive branches for unsupported function signatures, non-direct calls, and non-constant conditional layouts that the supported scalar/data corpus does not produce.": {
           "<module>": 4,
           "_ComponentEmitter.__init__": 6,
           "_ComponentEmitter._assigned_in": 1,
@@ -504,7 +500,7 @@
           "_var_ident": 3,
           "cargo_toml": 1
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+        "Builder candidate analysis is reached for loop self-rebinds, but these residual branches reject non-concatenation children or nested unsafe reads; `builder_safe` and `concat_pieces` conservatively preserve ordinary assignment in those cases.": {
           "<module>": 1,
           "_V3Ctx.__init__": 1,
           "_V3Ctx._disambiguate_record": 7,
@@ -643,7 +639,7 @@
           "_v3_do_expr": 22,
           "_witnessed_step": 19
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+        "WASM self-host function/call/conditional rendering is exercised; these residual statements are defensive branches for unsupported function signatures, non-direct calls, and non-constant conditional layouts that the supported scalar/data corpus does not produce.": {
           "<module>": 1,
           "_Ctx.__init__": 2,
           "_Scope.bind": 1,
@@ -722,9 +718,14 @@
       "uncovered_statements": 672
     },
     "wasm": {
-      "statements": 2662,
+      "statements": 2664,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+        "In-file test/fault/lifecycle emission is intentionally outside the pure emitter oracle; these lines dispatch only from test blocks and are not part of module-function output.": {
+          "_refuse_fault_tests": 2,
+          "_refuse_lifecycle_tests": 2,
+          "test_export_names": 10
+        },
+        "Pure v3 oracle excludes component/service dispatch: these functions are called only by `_emit_v1`/`_emit_component` and the stc-go/WASM component runtime, not by function-only self-host `emit_src`.": {
           "_ComponentEmitter.__init__": 60,
           "_ComponentEmitter._boundary_wty": 6,
           "_ComponentEmitter._called_names": 12,
@@ -746,7 +747,6 @@
           "_ComponentEmitter._provide_prefix": 1,
           "_ComponentEmitter._register_witnessed_calls": 10,
           "_ComponentEmitter._restore_function_state": 1,
-          "_ComponentEmitter._route_op_spec": 20,
           "_ComponentEmitter._save_function_state": 1,
           "_ComponentEmitter._scalar_operator": 24,
           "_ComponentEmitter._scoped_key": 2,
@@ -757,38 +757,24 @@
           "_ComponentEmitter._wal_undo_name": 3,
           "_ComponentEmitter._witnessed_effect_step": 37,
           "_ComponentEmitter._witnessed_extern": 5,
-          "_ComponentEmitter.emit": 68,
-          "_V3Emitter._anon_record": 4,
-          "_V3Emitter._call_type": 18,
-          "_V3Emitter._if_expr": 11,
-          "_V3Emitter._inline_arrow": 17,
-          "_V3Emitter._interp_expr": 20,
-          "_V3Emitter._match_expr": 16,
-          "_V3Emitter._match_expr.arm_body": 13,
-          "_V3Emitter._match_expr.arm_scope": 15,
-          "_V3Emitter._nullish_expr": 15,
-          "_V3Emitter._nullish_type": 4,
-          "_V3Emitter._opt_payload": 4,
-          "_assert_imports_within_requires": 3,
-          "_dedup_colour_erased_poly_externs._rewrite": 6,
-          "_emit_extern_func": 17,
-          "_extern_wasm_body": 2,
-          "_f64_literal": 1,
-          "_finite_float": 3,
-          "_format_parts": 20,
-          "_is_scalar_type": 1,
-          "_wat_string": 1
+          "_ComponentEmitter.emit": 68
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+        "Realm/placement/spawn/instance dispatch is a component-runtime path; pure function documents cannot produce these IR nodes and the self-host slice has no corresponding ABI.": {
+          "_ComponentEmitter._lower_instance_get_call": 37,
+          "_ComponentEmitter._lower_spawn": 26,
+          "_ComponentEmitter._realm_sections": 15,
+          "_ComponentEmitter._route_helpers": 35,
+          "_ComponentEmitter._route_op_spec": 20
+        },
+        "The enclosing pure-emitter dispatch is exercised, but this residual branch handles a distinct refusal/invalid-input condition or fallback that valid frontend IR cannot enter; its guard is preserved to fail loudly.": {
           "<module>": 12,
           "_V3Emitter._arrow_callee": 2,
-          "_V3Emitter._bin_expr": 28,
-          "_V3Emitter._builtin_expr": 52,
-          "_V3Emitter._builtin_type": 52,
-          "_V3Emitter._call_expr": 17,
+          "_V3Emitter._bin_expr": 19,
+          "_V3Emitter._builtin_expr": 46,
+          "_V3Emitter._builtin_type": 23,
+          "_V3Emitter._call_expr": 6,
           "_V3Emitter._check_type": 3,
           "_V3Emitter._collect_arrow_locals": 7,
-          "_V3Emitter._collect_cdiv_locals": 3,
           "_V3Emitter._collect_locals": 1,
           "_V3Emitter._collect_match_locals": 6,
           "_V3Emitter._collect_string_literals": 1,
@@ -796,17 +782,17 @@
           "_V3Emitter._declare_local": 1,
           "_V3Emitter._diverges": 2,
           "_V3Emitter._emit_for": 1,
-          "_V3Emitter._emit_function": 8,
-          "_V3Emitter._emit_stmts": 16,
-          "_V3Emitter._expr": 22,
+          "_V3Emitter._emit_function": 6,
+          "_V3Emitter._emit_stmts": 14,
+          "_V3Emitter._expr": 18,
           "_V3Emitter._field_expr": 4,
           "_V3Emitter._fresh_tmp": 2,
           "_V3Emitter._guard_frame_neutral_loop": 1,
           "_V3Emitter._index_expr": 4,
-          "_V3Emitter._infer_type": 54,
+          "_V3Emitter._infer_type": 42,
           "_V3Emitter._len_expr": 1,
           "_V3Emitter._list_expr": 1,
-          "_V3Emitter._list_type": 4,
+          "_V3Emitter._list_type": 3,
           "_V3Emitter._make_tagged": 1,
           "_V3Emitter._record_expr": 2,
           "_V3Emitter._record_fields": 1,
@@ -814,7 +800,7 @@
           "_V3Emitter._str_ptr": 1,
           "_V3Emitter._tag_of": 1,
           "_V3Emitter._tagged_layout": 2,
-          "_V3Emitter._un_expr": 5,
+          "_V3Emitter._un_expr": 2,
           "_V3Emitter._unsupported_comments": 2,
           "_V3Emitter.emit": 13,
           "_bin_instr": 2,
@@ -829,38 +815,83 @@
           "_refuse_holes.walk": 1,
           "_top_level_funcs": 4,
           "emit": 3,
-          "prune_unreachable_funcs": 2,
-          "test_export_names": 10
+          "prune_unreachable_funcs": 2
         },
-        "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
-          "_refuse_fault_tests": 2,
-          "_refuse_lifecycle_tests": 2
+        "This branch handles an unsupported, malformed, or absent typed-core construct (unknown type/case/field, invalid literal, or refusal guard); the frontend invariant keeps it out of valid oracle inputs.": {
+          "_V3Emitter._anon_record": 4,
+          "_V3Emitter._call_type": 6,
+          "_V3Emitter._if_expr": 2,
+          "_V3Emitter._inline_arrow": 17,
+          "_V3Emitter._interp_expr": 20,
+          "_V3Emitter._match_expr": 16,
+          "_V3Emitter._match_expr.arm_body": 13,
+          "_V3Emitter._match_expr.arm_scope": 15,
+          "_V3Emitter._nullish_expr": 15,
+          "_V3Emitter._nullish_type": 4,
+          "_V3Emitter._opt_payload": 4,
+          "_assert_imports_within_requires": 3,
+          "_dedup_colour_erased_poly_externs._rewrite": 6,
+          "_emit_extern_func": 17,
+          "_emit_v1": 14,
+          "_extern_wasm_body": 2,
+          "_f64_literal": 1,
+          "_finite_float": 3,
+          "_format_parts": 20,
+          "_is_scalar_type": 1,
+          "_wat_string": 1
         },
-        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
-          "_ComponentEmitter._lower_instance_get_call": 37,
-          "_ComponentEmitter._lower_spawn": 26,
-          "_ComponentEmitter._realm_sections": 15
-        },
-        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
-          "_ComponentEmitter._route_helpers": 35,
+        "This is a demand-pulled runtime helper or guard for stdlib/checked-division/string conversion; its source dispatch is outside the exercised scalar/data subset and is retained as an explicit named boundary.": {
+          "_V3Emitter._collect_cdiv_locals": 3,
           "_V3Emitter._helper_f64_to_str": 1,
           "_V3Emitter._helper_str_concat_n": 18,
           "_V3Emitter._helper_str_index_of": 1,
           "_V3Emitter._helper_str_join": 1,
           "_V3Emitter._helper_str_split": 1
-        },
-        "the v1/v2 live-component path: a component routes to the older runtime, not through the v3 emitter the self-host mirrors.": {
-          "_emit_v1": 14
         }
       },
-      "uncovered_statements": 1476
+      "uncovered_statements": 1376
     }
   },
   "selfhost": {
     "go": {
-      "statements": 1503,
+      "statements": 1121,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+        "Async coloring/erasure is performed by the frontend/component pipeline; pure v3 function emission receives no async-colored function body.": {
+          "erase_async": 1
+        },
+        "Builder candidate analysis is reached for loop self-rebinds, but these residual branches reject non-concatenation children or nested unsafe reads; `builder_safe` and `concat_pieces` conservatively preserve ordinary assignment in those cases.": {
+          "builder_safe": 2,
+          "concat_pieces": 8
+        },
+        "The enclosing pure-emitter dispatch is exercised, but this residual branch handles a distinct refusal/invalid-input condition or fallback that valid frontend IR cannot enter; its guard is preserved to fail loudly.": {
+          "arrow_param_hint": 1,
+          "build_type_tables": 2,
+          "emit_externs": 4,
+          "emit_v3_types": 1,
+          "extern_body_defer": 3,
+          "go_bin_op": 3,
+          "go_type": 3,
+          "go_v3_lit": 2,
+          "has_extra_linebreak": 1,
+          "infer_type": 11,
+          "is_atomic": 3,
+          "is_extra_linebreak": 3,
+          "is_ref_named": 1,
+          "record_type_for_fields": 1,
+          "ref_name": 1,
+          "render_arrow": 1,
+          "render_bin": 3,
+          "render_call": 4,
+          "render_construct": 1,
+          "render_inner": 2,
+          "render_interp": 4,
+          "render_match": 3,
+          "render_un": 1,
+          "split_fn_type": 1,
+          "v3_ident": 1,
+          "v3_stmt": 1
+        },
+        "This branch handles an unsupported, malformed, or absent typed-core construct (unknown type/case/field, invalid literal, or refusal guard); the frontend invariant keeps it out of valid oracle inputs.": {
           "flags_or": 1,
           "is_addsubmul": 1,
           "is_builtin_ctor": 1,
@@ -868,48 +899,9 @@
           "is_scalar": 1,
           "json_tag": 1,
           "typed_ctx": 9
-        },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "arrow_param_hint": 10,
-          "build_type_tables": 2,
-          "double_pct": 1,
-          "emit_externs": 5,
-          "emit_src": 1,
-          "emit_v3_types": 1,
-          "extern_body_defer": 3,
-          "flag_walk": 5,
-          "go_bin_op": 3,
-          "go_type": 4,
-          "go_v3_lit": 7,
-          "has_extra_linebreak": 1,
-          "infer_type": 39,
-          "is_atomic": 5,
-          "is_extra_linebreak": 3,
-          "is_go_reserved": 7,
-          "is_ref_named": 1,
-          "prim_go": 1,
-          "record_type_for_fields": 1,
-          "ref_name": 1,
-          "render_arrow": 1,
-          "render_bin": 4,
-          "render_call": 3,
-          "render_construct": 1,
-          "render_expr": 2,
-          "render_field": 1,
-          "render_index": 1,
-          "render_inner": 11,
-          "render_interp": 11,
-          "render_match": 7,
-          "render_un": 8,
-          "split_fn_type": 1,
-          "v3_ident": 3,
-          "v3_stmt": 2
-        },
-        "declared out of every self-host slice: async coloring.": {
-          "erase_async": 1
         }
       },
-      "uncovered_statements": 173
+      "uncovered_statements": 88
     },
     "java": {
       "statements": 2423,
@@ -926,7 +918,7 @@
           "is_int_operand": 1,
           "newline": 1
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+        "WASM self-host function/call/conditional rendering is exercised; these residual statements are defensive branches for unsupported function signatures, non-direct calls, and non-constant conditional layouts that the supported scalar/data corpus does not produce.": {
           "acquire_is_witnessed": 1,
           "bind_type": 29,
           "body_step_supported": 6,
@@ -1023,7 +1015,7 @@
           "opt_to_int_block": 6,
           "setup_step": 23
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+        "WASM self-host function/call/conditional rendering is exercised; these residual statements are defensive branches for unsupported function signatures, non-direct calls, and non-constant conditional layouts that the supported scalar/data corpus does not produce.": {
           "arm_body_is_bind": 1,
           "arm_body_mentions": 5,
           "birth_container": 2,
@@ -1248,9 +1240,42 @@
       "uncovered_statements": 349
     },
     "wasm": {
-      "statements": 1489,
+      "statements": 1233,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+          "function_sig": 1,
+          "render_direct_call": 2,
+          "render_if": 1
+        },
+        "The enclosing pure-emitter dispatch is exercised, but this residual branch handles a distinct refusal/invalid-input condition or fallback that valid frontend IR cannot enter; its guard is preserved to fail loudly.": {
+          "adt_cell_ty": 1,
+          "bin_instr": 3,
+          "builtin_type": 1,
+          "cmp_suffix": 2,
+          "const_numeral": 3,
+          "diverges": 3,
+          "emit_function": 1,
+          "emit_src": 1,
+          "emit_stmt": 1,
+          "expr_max_depth": 1,
+          "fold_const": 3,
+          "infer_ty": 4,
+          "infer_val_ty": 3,
+          "is_record_type": 1,
+          "list_type_of": 1,
+          "payload_present": 1,
+          "payload_ty_of": 1,
+          "rec_lit_value": 1,
+          "record_type_of": 1,
+          "render_bin": 1,
+          "render_builtin": 1,
+          "render_index": 2,
+          "render_inner": 6,
+          "rstrip": 1,
+          "tag_of": 1,
+          "tagged_layout": 3
+        },
+        "This branch handles an unsupported, malformed, or absent typed-core construct (unknown type/case/field, invalid literal, or refusal guard); the frontend invariant keeps it out of valid oracle inputs.": {
           "align4": 1,
           "align8": 1,
           "i64_hi": 1,
@@ -1263,45 +1288,11 @@
           "printable": 1,
           "wty": 3
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "adt_cell_ty": 1,
-          "bin_instr": 3,
-          "builtin_type": 22,
-          "cmp_suffix": 2,
-          "const_numeral": 3,
-          "diverges": 3,
-          "emit_function": 2,
-          "emit_src": 1,
-          "emit_stmt": 2,
-          "expr_max_depth": 2,
-          "fold_const": 3,
-          "fold_numeral": 6,
-          "infer_ty": 9,
-          "infer_val_ty": 14,
-          "is_record_type": 1,
-          "list_type_of": 1,
-          "loop_control_targets": 1,
-          "names_eq": 2,
-          "payload_present": 1,
-          "payload_ty_of": 1,
-          "rec_lit_value": 1,
-          "record_type_of": 1,
-          "render_bin": 1,
-          "render_builtin": 2,
-          "render_expr": 2,
-          "render_index": 2,
-          "render_inner": 7,
-          "render_un": 3,
-          "rstrip": 1,
-          "stmt_max_depth": 1,
-          "tag_of": 1,
-          "tagged_layout": 3
-        },
-        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
+        "This is a demand-pulled runtime helper or guard for stdlib/checked-division/string conversion; its source dispatch is outside the exercised scalar/data subset and is retained as an explicit named boundary.": {
           "helper_preamble": 1
         }
       },
-      "uncovered_statements": 119
+      "uncovered_statements": 66
     }
   }
 }
