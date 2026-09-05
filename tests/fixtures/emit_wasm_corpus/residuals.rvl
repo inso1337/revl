@@ -1,0 +1,26 @@
+type Narrow = { x: Int }
+type Pair = { x: Int, y: Int }
+type Distinct = { z: Int }
+
+fn inferredRecord() -> Int {
+  let p = { z: 3 }
+  return p.z
+}
+fn deeperLeft() -> Int { return [[1]][0][0] + 2 }
+fn nestedSome() -> Opt[List[Int]] { return Some([1, 2]) }
+fn inferredSome() -> Int {
+  let value = Some(4)
+  return 3
+}
+fn elseControl(n: Int) -> Int {
+  var i = n
+  while (i > 0) {
+    if (i > 2) { i = i - 1 } else { break }
+  }
+  return i
+}
+fn emptyUnit() {}
+fn fallingUnit(n: Int) { let value = n }
+fn ifUnit(n: Int) { if (n > 0) { return } }
+fn negativeAddOverflow() -> Int { return (-9223372036854775807 - 1) + (-1) }
+fn positiveSubtractOverflow() -> Int { return 9223372036854775807 - (-1) }
