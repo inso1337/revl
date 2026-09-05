@@ -79,6 +79,19 @@ def test_wasm_matches_the_oracle_projection(survey):
     assert row["error"]["type"] == "OracleSlice"
 
 
+def test_wasm_component_rows_are_not_selection_evidence(survey):
+    assert survey.selection_exclusion("wasm", {"components": [{"name": "C"}]})
+    assert survey.selection_exclusion("wasm", {"functions": {}}) is None
+    baseline = [{"document": "mixed.rvl", "reached": {"reference": [1], "selfhost": [1]},
+                 "status": "byte_agreement", "in_corpus": True,
+                 "selection_excluded": "wasm_functions_projection_discards_component_output"}]
+    candidate = [{"document": "mixed-extra.rvl", "reached": {"reference": [2], "selfhost": [2]},
+                 "status": "byte_agreement", "in_corpus": False,
+                 "selection_excluded": "wasm_functions_projection_discards_component_output"}]
+    assert survey.select_cover(candidate, baseline) == {
+        "baseline_lines": 0, "selected": [], "additional_lines": 0}
+
+
 def test_tree_walk_excludes_junk_and_stabilizes_identity(survey, tmp_path):
     for name in ("b.rvl", "nested/a.rvl", ".git/a.rvl", ".venv/a.rvl", "venv/a.rvl",
                  "build/a.rvl", "node_modules/a.rvl", "target/a.rvl", "custom-env/a.rvl"):
