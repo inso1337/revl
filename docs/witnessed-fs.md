@@ -103,6 +103,80 @@ through a directory fd walked down from the root one component at a time with
 `stdlib/fs.rvl` and fails if any path reaches a mutation by another route, so
 the enumeration cannot quietly grow a fifth member.
 
+### Python process-lifetime physical root binding (API 1)
+
+Trusted Python hosts can opt into a **supported, separately versioned** bootstrap
+API before `Session.load` or any filesystem guard use:
+
+```python
+from revl.fs_workspace import PINNED_ROOT_API_VERSION, bind_workspace_root
+
+if PINNED_ROOT_API_VERSION != 1:
+    raise RuntimeError("unsupported physical workspace binding API")
+bind_workspace_root(root_fd, expected_dev, expected_ino, root_label=root_label)
+```
+
+`bind_workspace_root(root_fd: int, expected_dev: int, expected_ino: int, *,
+root_label: str) -> None` duplicates the caller-owned directory descriptor,
+checks its device/inode/type and checks that the label names that directory at
+binding. The label must be an absolute normalized string. The caller may close
+or reuse its descriptor afterward. `revl.fs_workspace` locates the Python
+backend in either the checkout or wheel and binds the **same module state**
+used by the real emitted stdlib bodies, not a second copy. A conflicting
+already-imported backend installation is refused.
+
+After binding, the label is an immutable namespace, **never authority to reopen
+its pathname**. Every named-endpoint walk, sidecar directory, inverse source,
+mutation and `READ_HELPERS` lookup starts from a duplicate of the pinned fd.
+Preimages are read from the verified write fd and copied/cloned into the same
+physical root. Renaming the root and replacing its old pathname therefore
+continues on the admitted original directory, including rollback; it never
+switches to the replacement. `REVL_FS_WORKSPACE` changes have no effect.
+
+Bound mode accepts only absolute paths under the original label, with no `..`
+components. It refuses **all symlinks below the root**, including internal
+aliases; no-follow descriptor traversal re-establishes this at syscall time.
+It does not add capabilities or broaden metadata access. Sidecar inverse
+sources remain restricted to their matching runtime-reserved directories;
+this API exposes no general file-reading or mutation helper to the host.
+`resolve_within` returns a label, **not a pathname safe for a host `open()`**.
+Hosts doing their own reads or classification must use their own admitted
+directory fd and no-follow traversal, and retain their existing `.revl`/private
+metadata exclusions. The observations below do not make arbitrary host reads
+physically pinned.
+
+The binding is process-lifetime and has no close, unbind, or rebind API: the
+runtime cannot prove that all live handles, sessions and retained witnesses
+have discharged. Its private fd is non-inheritable across exec and stays open
+until process exit. Run one root per actor process; bind before starting work,
+not after forking an already active runtime. Keep the actor alive while its
+lifecycle remains owed. **Exit does not commit, abort, delete sidecars, or
+recover witnesses.** Serialized witness paths do not encode physical identity:
+post-crash recovery must independently re-establish the admitted physical root;
+replaying under an unbound or newly granted replacement root is not protected
+by this process-lifetime contract.
+
+Failures raise the exported `FsOpError` / `ConfinementError` with explicit
+codes: `EBOUND` for duplicate or late binding, `EIDENTITY` for identity/type
+mismatch, `EINVAL` for malformed arguments, ordinary descriptor/path errno
+codes where applicable, and `ENOTSUP` if directory-fd/no-follow primitives are
+unavailable. A failed bind releases its duplicate and leaves no partial binding.
+There is no unsafe platform fallback. Without binding, legacy relative paths,
+symlink resolution and environment-based root selection remain unchanged;
+root replacement is still outside that legacy mode's guarantee.
+
+This is not a root-ownership registry, protection from arbitrary host Python,
+or serialization against other writers. A descendant directory already held
+open may itself be moved by another writer; pinning the workspace root is not a
+filesystem-wide namespace lock. Hosts still own exclusive actor/root lifecycle
+coordination and must not reload the guard or manipulate its private fd.
+
+`tests/test_fs_pinned_root.py` runs fresh processes and real `Session.load(...,
+record=True)` / `FsOpsC` methods, with barriers immediately before actual opens,
+preimage creation/copy, writes, inverse classification and rename/unlink/rmdir
+syscalls. The replacement tree stays unchanged across repeated write/abort
+cycles, while original preimages and garbage are consumed by real inverses.
+
 ## Observation: the read half, and the door it opens
 
 The four ops above mutate. A consumer also needs to *look*: read a workspace
@@ -140,7 +214,8 @@ What was left was a relative path guess into the install tree
 revl moves; revl-harness hit that three times.
 
 So the door is a revl one. The consumer asks revl for the decision and does its
-own reading with the plain host filesystem module:
+own reading with the plain host filesystem module in **legacy, unbound mode**.
+In pinned mode it must instead read through its admitted fd as described above:
 
 ```revl sketch
 // Elided host bodies, so this block is a sketch. The same consumer, whole and
