@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import operator
+import math
 import re
 from typing import Any
 
@@ -106,6 +107,22 @@ def _wat_string(value: str) -> str:
 
 class EmitError(ValueError):
     """The IR document cannot be lowered to the wasm tier."""
+
+
+def _finite_float(value):
+    """The literal's value, refused when a `Float` is not finite (issue #312).
+
+    A non-finite `Float` has no literal spelling in revl and no uniform one
+    across the tiers — the host repr renders `inf`, which is an UNBOUND NAME
+    in this target's source, not a number. The frontend refuses such a literal
+    at the checker (`typecheck._reject_float_literal_range`), so this is the
+    backend's own belt: an IR handed straight to the emitter still cannot make
+    it print a name nothing binds.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EmitError(
+            f"non-finite Float literal {value!r} has no representation in this tier")
+    return value
 
 
 # Dispatcher conformance (roadmap item 76a). This file carries THREE
@@ -1766,7 +1783,7 @@ class _ComponentEmitter:
                 else:
                     raise EmitError(f"{mwhere}: unknown step {mkind!r}")
 
-            header = f'(func (export "{self._provide_prefix(key)}.{mname}") {" ".join(decl)}'.rstrip()
+            header = f'(func (export "{_wat_string(self._provide_prefix(key) + "." + mname)}") {" ".join(decl)}'.rstrip()
             # wasm requires local declarations before the body — and each one
             # now has to be declared at the width of the value it holds, which
             # is only known once the body has been lowered (`_declare_local`)
@@ -1888,7 +1905,7 @@ class _ComponentEmitter:
             params = " ".join(f"(param {w})" for w in param_wtys)
             result = f" (result {result_wty})" if result_wty else ""
             sig = f" {params}" if params else ""
-            lines.append(f'  (import "{self._import_module(key)}" "{op}" (func $req_{key}_{op}{sig}{result}))')
+            lines.append(f'  (import "{_wat_string(self._import_module(key))}" "{_wat_string(op)}" (func $req_{key}_{op}{sig}{result}))')
         # item 173: the routed-require ABI. Per routed key called: a `live`
         # probe (`route:<key>.live(index) -> i32`, 1 iff that one realm has an
         # ACTIVE provider — the strict, no-parent-fallback liveness the emitted
@@ -2448,9 +2465,12 @@ def _f64_literal(value: float) -> str:
     Python's `float.hex()` is the IEEE-754 hexadecimal form WAT accepts
     verbatim (`0x1.b1ae4d6e2ef50p+69`), so the constant that reaches wasmtime
     is the same 64-bit pattern the source named — no decimal round-trip, no
-    ambiguity. NaN/Infinity never arrive here (they are computed, not written).
+    ambiguity. NaN/Infinity never arrive here (they are computed, not
+    written) — the frontend refuses a non-finite literal, and
+    `_finite_float` re-states that invariant here rather than trusting it
+    (issue #312).
     """
-    return float.hex(value)
+    return float.hex(_finite_float(value))
 
 
 def _wat_bytes(data: bytes) -> str:

@@ -55,6 +55,19 @@ release also folds in the full agent story and the standing correctness debt.
   capability channel, and a config field type is restricted to data heads.
 - Embeddable gate: a two-layer gate API (a pure verdict surface plus a session
   facade), fail-closed, that never admits what the reference compiler refuses.
+  It ships in three forms. `revl.gate` is the python library facade.
+  `crates/revl-gate` is the native rust library, generated from the self-host
+  sources by `tools/build_gate_crate.py` and committed so it builds with no
+  Python on the machine. `crates/revl-gate-wasm` packages that crate as a
+  WASI-P2 component (`revl:gate@1.0.0`) with an EMPTY import list, so the
+  verdict is a total deterministic function of its arguments, provable from the
+  artifact. Both native forms carry the same asymmetry: they can refuse, and
+  their non-refusing arm is `no-objection`, never an admission.
+- `crates/revl-lsp`: the language server as a native rust binary (item 336
+  slices 1 and 2). It answers `definition` and the signature half of `hover`
+  through `revl_gate::symbols` with no interpreter on the path, and forwards the
+  reference front end's diagnostics verbatim, adding native refusals rather than
+  replacing anything.
 
 ### Security hardening
 
@@ -158,6 +171,35 @@ but not seen. Every instance was closed. Representative fixes:
   the rest of itself in code position. Emitted string literals, identifiers and
   template literals were already routed through their own escapers and are
   unchanged; no golden bytes move.
+- `revl fmt` proves meaning preservation for every file it writes. Its
+  equivalence gate had two holes that met in the middle: the IR comparison
+  compiled with no module resolution, so every `use`-bearing file skipped it,
+  and the fall-back it landed on compared the formatter's own trivia scanner
+  with itself, which cannot fail no matter how wrong that scanner is. The
+  scanner had drifted from the lexer, so a `use`-bearing file with a
+  triple-quoted string, a `0x`/`0b`/`0o` literal, a `_` digit separator, a
+  `'...'` string, a `\"` escape or a `}` inside a host body was silently
+  rewritten into a different program. The gate now lexes both texts with the
+  reference lexer and refuses on any difference, before anything else and
+  whatever the file contains; the IR comparison resolves imports for an on-disk
+  file so it actually runs; and the scanner calls the lexer's own number,
+  string and brace-matching routines instead of a second copy of its rules.
+  Across the 888 `.rvl` files in the tree the formatter now changes the
+  compiled meaning of none.
+
+### Operations
+
+- E-Stop (item 443): the operator's emergency halt, as a third verdict `halted`
+  alongside `committed` and `aborted`. `revl estop` arms an idempotent latch,
+  `revl estop --report` reads it back, and `revl run --estop-latch FILE` honours
+  it; `revl_estop` and `revl_estop_report` are the MCP forms. The price is
+  stated, not hidden: every registered entry is left stranded and every acquired
+  handle stays held, and `revl recover --wal` is how the books are settled.
+- `revl changelog`: the release note derived from the structural delta between
+  two compositions, every line traceable to a differ fact (item 261).
+- `truc`, the component manager (`revl truc`, `src/revl/truc/`): eight
+  components plus a bootstrap that assembles itself through the gate on every
+  invocation.
 
 ### Live systems
 

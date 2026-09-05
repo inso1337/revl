@@ -47,6 +47,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -396,15 +397,43 @@ def test_the_type_layer_gap_never_reads_as_an_admission(consumer, name, source):
 # --------------------------------------------------------------- fail closed
 
 
-FRONTIER_PROBES = [
-    # `.is_digit()` / `.str()` are reference stdlib builtins the self-host
-    # lowering does not treat as builtins, so they are in the crate's GENERATED
-    # frontier table. The crate must decline to decide, not guess.
-    ("excluded builtin is_digit",
-     "fn f(s: Str) -> Bool { return s.charAt(0).is_digit() }"),
-    ("excluded builtin str",
-     "fn f(x: Int) -> Str { return x.str() }"),
-]
+def _generated_frontier() -> tuple[list[str], list[str], int]:
+    """The two lexical tables and the size bound the crate was GENERATED with,
+    read out of `src/frontier.rs`.
+
+    Read rather than hand-listed for a reason this test learned the hard way:
+    the probes below used to name `.is_digit()` and `.str()`, item 391 ported
+    both into `selfhost/lower.rvl`, the builtin row emptied, and the probes went
+    on asserting a gap that had closed. A probe derived from the table cannot
+    outlive the gap it probes."""
+    src = (CRATE / "src" / "frontier.rs").read_text(encoding="utf-8")
+
+    def table(name: str) -> list[str]:
+        match = re.search(rf"{name}: &\[&str\] = &\[(.*?)\];", src, re.S)
+        return re.findall(r'"([^"]+)"', match.group(1)) if match else []
+
+    bound = re.search(r"MAX_SOURCE_BYTES: usize = (\d+);", src)
+    return table("EXCLUDED_KEYWORDS"), table("EXCLUDED_BUILTINS"), int(bound.group(1))
+
+
+def _frontier_probes() -> list[tuple[str, str]]:
+    """One probe per live frontier trigger. The size bound is always live; the
+    two lexical tables contribute a probe only while they have an entry (both
+    are empty at this generation — the self-host lexes every reference keyword
+    and lowers every reference stdlib builtin)."""
+    keywords, builtins, bound = _generated_frontier()
+    probes = [("oversized source",
+               "fn id(x: Int) -> Int { return x } " * (bound // 30 + 1))]
+    if builtins:
+        probes.append((f"excluded builtin {builtins[0]}",
+                       f"fn f(x: Str) -> Bool {{ return x.{builtins[0]}() }}"))
+    if keywords:
+        probes.append((f"excluded keyword {keywords[0]}",
+                       f"fn f() -> Int {{ {keywords[0]} }}"))
+    return probes
+
+
+FRONTIER_PROBES = _frontier_probes()
 
 
 @pytest.mark.parametrize("name,source", FRONTIER_PROBES,

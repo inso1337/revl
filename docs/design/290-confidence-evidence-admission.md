@@ -1,6 +1,9 @@
 # 290: Confidence/evidence admission policy (`revl policy evaluate`)
 
-Status: DESIGN (implementation pending)
+Status: IMPLEMENTED. `revl policy evaluate` ships; the evidence/register
+predicates this note designs live in `src/revl/policy.py` (see its "item 290:
+evidence / register" section). Flags are documented in
+[../commands-reference.md](../commands-reference.md).
 Roadmap: item 290 (external proposal, one line; part of the 243-261
 product-vision triage). Reconciles with 33 (boundary policy), 45 (quarantine
 tier), 246 (approval gate), 251 (approval distillation), 293 (evidence-carrying

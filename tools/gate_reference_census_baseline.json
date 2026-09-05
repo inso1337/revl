@@ -24,6 +24,7 @@
    "backends/java/scenarios/runtime_values.rvl",
    "backends/typescript/tests/fixtures/a2a_agent.rvl",
    "backends/typescript/tests/fixtures/match_sync_arms.rvl",
+   "backends/typescript/tests/fixtures/str_scan.rvl",
    "backends/wasm/scenarios/crashproof/crashproof.rvl",
    "examples/async_timer.rvl",
    "examples/budget_attenuation.rvl",
@@ -50,6 +51,7 @@
    "examples/uxprobe2_fault.rvl",
    "examples/uxprobe2_jobs.rvl",
    "examples/uxprobe_cache.rvl",
+   "selfhost/lexer.rvl",
    "stdlib/crypto.rvl",
    "stdlib/json.rvl",
    "stdlib/list.rvl",
@@ -241,6 +243,18 @@
    }
   },
   "backends/typescript/tests/fixtures/match_sync_arms.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/typescript/tests/fixtures/str_scan.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
@@ -666,6 +680,18 @@
     "code": "BAD",
     "kind": "refused",
     "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "selfhost/lexer.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
    },
    "reference": {
     "message": "",

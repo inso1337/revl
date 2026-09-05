@@ -16,19 +16,22 @@ compiler cannot even parse, iff the rewritten output is newly admissible).
 ## How the formatter avoids touching the parser/lexer
 
 Comment and blank-line preservation would normally push a formatter to teach
-the lexer to keep trivia.  The reference lexer (`revl.lexer`) and the live
-selfhost lexer/parser are off-limits, so this module does NOT reuse them for
-rendering.  Instead it carries a small, self-contained *trivia scanner*
-(`_scan`) that mirrors the lexer's token boundaries but additionally keeps
-comments, newlines and blank lines, and captures strings, backtick templates
-and `@host { ... }` blocks as opaque verbatim spans.
+the lexer to keep trivia.  Rather than change the lexer, this module carries a
+small *trivia scanner* (`_scan`) that adds comments, newlines and blank lines
+to the lexer's token boundaries and captures strings, backtick templates and
+`@host { ... }` blocks as opaque verbatim spans.  It does not RE-DERIVE those
+boundaries: it calls `revl.lexer`'s own `_lex_number`, `_match_brace` and
+quote rules, so a scanner that disagreed with the lexer is a class of bug that
+cannot be introduced by omission (issue 309 -- the scanner had drifted to no
+`_` separators, no `0x`, `"`-only strings and a naive brace count, and every
+mis-scan was a silent rewrite of the program's meaning).
 
 Because strings, templates and host blocks are reproduced byte-for-byte, and
 because the only whitespace the lexer treats as significant is the space
 separating two adjacent word tokens (identifiers / keywords / numbers), the
 formatter is free to normalise every other space.  Re-lexing the formatted
-text yields the same token sequence, so the IR is identical -- which the gate
-then proves for real.
+text yields the same token sequence -- which the gate then proves for real,
+with the reference lexer, on EVERY file it writes (see `ir_equivalent`).
 
 ### Documented limitation (no parser change)
 
@@ -43,16 +46,22 @@ holds; rather than edit the parser, that is left out by design.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 
+from . import lexer as _lexer
 from .errors import RevlError
 
-# --- token-boundary tables, mirrored from revl.lexer (read, not imported, so
-# --- this module never depends on lexer internals for rendering) ------------
+# --- token-boundary tables, IMPORTED from revl.lexer -------------------------
+#
+# These were hand-mirrored copies until issue 309.  Every divergence between
+# the copy and the lexer was a silent meaning change: the copy had no `<<`/`>>`
+# and no `&`/`^`/`~`, so `a & b` failed to scan and `a << b` scanned as two
+# `<` operators.  A table the lexer owns cannot drift from the lexer.
 
-_OPERATORS = ("===", "!==", "=>", "?.", "??", "<=", ">=", "==", "!=", "&&", "||", "->")
-_SINGLE_OPERATORS = set("+-*/%<>!?;|@")
-_SYMBOLS = set("{}()[],:=.")
+_OPERATORS = _lexer.OPERATORS
+_SINGLE_OPERATORS = set(_lexer.SINGLE_OPERATORS)
+_SYMBOLS = set(_lexer.SYMBOLS)
 
 # Kinds a scanned piece can carry.
 _WORD = "word"          # identifier or number (spacing-significant when adjacent)
@@ -63,18 +72,7 @@ _PUNCT = "punct"        # structural symbol from _SYMBOLS
 _COMMENT = "comment"    # //... to end of line
 _NEWLINE = "newline"    # one physical line break
 
-_KEYWORDS = {
-    "service", "component", "requires", "provides", "config", "let",
-    "effect", "undo", "emit", "emission", "provide", "fn", "return",
-    "true", "false", "null", "isolate", "intercept", "realm", "in", "with",
-    "handoff",
-    "every", "after",
-    "spawn", "type", "use", "pub", "var", "while", "for", "of", "if", "else",
-    "match", "test", "assert", "async", "as", "fail", "hole",
-    "break", "continue",
-    "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
-    "idempotent",
-}
+_KEYWORDS = _lexer.KEYWORDS
 
 _OPENERS = {"(", "[", "{"}
 _CLOSERS = {")", "]", "}"}
@@ -101,8 +99,12 @@ def _scan(source: str, filename: str) -> list[_Piece]:
     """Scan *source* into a flat list of pieces, preserving comments, newlines
     and blank lines, and capturing strings/templates/host-blocks verbatim.
 
-    Token boundaries match `revl.lexer` exactly; whitespace (other than the
-    newlines we record) is dropped -- the renderer re-derives it canonically.
+    Token boundaries come from `revl.lexer` itself (its `_lex_number`,
+    `_match_brace` and quote rules), not from a second copy of its rules;
+    whitespace other than the newlines we record is dropped -- the renderer
+    re-derives it canonically.  The dispatch order below mirrors `lexer.lex`
+    branch for branch, so a prefix collision (a triple quote before a single
+    one, `<<` before `<`) resolves the same way in both.
     """
     pieces: list[_Piece] = []
     i, n = 0, len(source)
@@ -111,7 +113,7 @@ def _scan(source: str, filename: str) -> list[_Piece]:
         if c == "\n":
             pieces.append(_Piece(_NEWLINE, "\n"))
             i += 1
-        elif c in " \t\r":
+        elif c in " \t\r" or (c.isspace() and c != "\n"):
             i += 1
         elif source.startswith("//", i):
             j = i
@@ -119,7 +121,13 @@ def _scan(source: str, filename: str) -> list[_Piece]:
                 j += 1
             pieces.append(_Piece(_COMMENT, source[i:j].rstrip()))
             i = j
-        elif c == '"':
+        elif any(source.startswith(op, i) for op in _OPERATORS):
+            for op in _OPERATORS:
+                if source.startswith(op, i):
+                    pieces.append(_Piece(_OP, op))
+                    i += len(op)
+                    break
+        elif c in _QUOTES:
             j = _scan_string(source, i, filename)
             pieces.append(_Piece(_VERBATIM, source[i:j]))
             i = j
@@ -127,31 +135,25 @@ def _scan(source: str, filename: str) -> list[_Piece]:
             j = _scan_template(source, i, filename)
             pieces.append(_Piece(_VERBATIM, source[i:j]))
             i = j
-        elif c == "@" and i + 1 < n and (source[i + 1].isalpha() or source[i + 1] == "_"):
-            j = _scan_hostblock(source, i)
+        elif c in _lexer._IDENT_START:
+            j = i
+            while j < n and source[j] in _lexer._IDENT_CONT:
+                j += 1
+            word = source[i:j]
+            pieces.append(_Piece(_KW if word in _KEYWORDS else _WORD, word))
+            i = j
+        elif c in _lexer._ASCII_DIGIT:
+            j = _scan_number(source, i, filename)
+            pieces.append(_Piece(_WORD, source[i:j]))
+            i = j
+        elif c == "@" and i + 1 < n and source[i + 1] in _lexer._IDENT_START:
+            j = _scan_hostblock(source, i, filename)
             if j is None:
                 pieces.append(_Piece(_OP, "@"))
                 i += 1
             else:
                 pieces.append(_Piece(_VERBATIM, source[i:j]))
                 i = j
-        elif any(source.startswith(op, i) for op in _OPERATORS):
-            for op in _OPERATORS:
-                if source.startswith(op, i):
-                    pieces.append(_Piece(_OP, op))
-                    i += len(op)
-                    break
-        elif c.isalpha() or c == "_":
-            j = i
-            while j < n and (source[j].isalnum() or source[j] == "_"):
-                j += 1
-            word = source[i:j]
-            pieces.append(_Piece(_KW if word in _KEYWORDS else _WORD, word))
-            i = j
-        elif c.isdigit():
-            j = _scan_number(source, i)
-            pieces.append(_Piece(_WORD, source[i:j]))
-            i = j
         elif c in _SYMBOLS:
             pieces.append(_Piece(_PUNCT, c))
             i += 1
@@ -164,93 +166,100 @@ def _scan(source: str, filename: str) -> list[_Piece]:
     return pieces
 
 
+def _as_format_error(filename: str, line: int, error: RevlError) -> FormatError:
+    """Re-badge a lexer refusal as a `FormatError`, keeping its own message,
+    line and hint so `revl fmt` reports exactly what `revl compile` would."""
+    return FormatError(filename, getattr(error, "line", line),
+                       getattr(error, "message", str(error)),
+                       hint=getattr(error, "hint", None))
+
+
+# The three string spellings the lexer accepts (docs/strings.md): `"..."`,
+# `'...'` (item 382) and the multi-line verbatim `"""..."""`.  A scanner that
+# knew only `"` split `"""abc"""` into `""`, `abc`, `""` -- three tokens where
+# the program had one (issue 309).
+_QUOTES = ('"', "'")
+
+
 def _scan_string(source: str, start: int, filename: str) -> int:
-    """Return the index just past a double-quoted string starting at *start*."""
-    n = len(source)
-    j = start + 1
-    while j < n:
-        if source[j] == '"':
-            return j + 1
-        if source[j] == "\n":
-            line = source.count("\n", 0, start) + 1
-            raise FormatError(filename, line, "unterminated string literal")
-        j += 1
+    """Return the index just past a string literal starting at *start*.
+
+    Delegates the actual boundary to the lexer's own `_lex_triple_string` /
+    `_lex_string`, which own the escape rules (`\\"` and `\\\\` only) and the
+    triple-quote form.  Only the END OFFSET is used -- the span is reproduced
+    byte-for-byte, so the lexer's value decoding is irrelevant here.
+    """
     line = source.count("\n", 0, start) + 1
-    raise FormatError(filename, line, "unterminated string literal")
+    try:
+        if source.startswith('"""', start):
+            end, _text, _line = _lexer._lex_triple_string(
+                source, start + 3, line, filename)
+            return end
+        end, _text = _lexer._lex_string(
+            source, start + 1, line, filename, quote=source[start])
+        return end
+    except RevlError as error:
+        raise _as_format_error(filename, line, error) from None
 
 
 def _scan_template(source: str, start: int, filename: str) -> int:
     """Return the index just past a backtick template starting at *start*.
 
-    `${ ... }` interpolations are balanced across braces exactly as the lexer
-    balances them, so a template containing a record literal is captured whole.
+    `${ ... }` interpolations are balanced by the lexer's own `_match_brace`,
+    so a `}` inside an interpolated string (`` `${m.get("}")}` ``) or after a
+    `//` does not close the template early.
+    """
+    line = source.count("\n", 0, start) + 1
+    try:
+        end, _parts, _line, _suspect, _interp_lines = _lexer._lex_template(
+            source, start + 1, line, filename)
+        return end
+    except RevlError as error:
+        raise _as_format_error(filename, line, error) from None
+
+
+def _scan_hostblock(source: str, start: int, filename: str) -> int | None:
+    """Return the index just past an `@backend { ... }` host block, or None if
+    what follows the `@name` is not a `{` (i.e. it is a bare `@` operator).
+
+    The closing brace is found with the lexer's `_match_brace` under the same
+    per-backend trivia table the lexer uses, so a `}` inside a host string or
+    block comment (`@ts { return "}" }`, `@go { /* } */ }`) does not truncate
+    the body.  A naive brace count truncated `stdlib/json.rvl` (issue 309).
     """
     n = len(source)
     j = start + 1
-    while j < n:
-        c = source[j]
-        if c == "`":
-            return j + 1
-        if c == "$" and j + 1 < n and source[j + 1] == "{":
-            depth = 1
-            j += 2
-            while j < n and depth > 0:
-                if source[j] == "{":
-                    depth += 1
-                elif source[j] == "}":
-                    depth -= 1
-                j += 1
-            continue
+    while j < n and source[j] in _lexer._IDENT_CONT:
         j += 1
-    line = source.count("\n", 0, start) + 1
-    raise FormatError(filename, line, "unterminated template literal")
-
-
-def _scan_hostblock(source: str, start: int) -> int | None:
-    """Return the index just past an `@backend { ... }` host block, or None if
-    what follows the `@name` is not a `{` (i.e. it is a bare `@` operator)."""
-    n = len(source)
-    j = start + 1
-    while j < n and (source[j].isalnum() or source[j] == "_"):
-        j += 1
+    backend = source[start + 1:j]
     k = j
     while k < n and source[k].isspace():
         k += 1
     if k >= n or source[k] != "{":
         return None
-    depth = 0
-    p = k
-    while p < n:
-        if source[p] == "{":
-            depth += 1
-        elif source[p] == "}":
-            depth -= 1
-            if depth == 0:
-                return p + 1
-        p += 1
-    return None  # unterminated; treat as bare `@` and let the compiler report it
+    trivia = _lexer._HOST_TRIVIA.get(backend, _lexer._C_FAMILY)
+    close = _lexer._match_brace(source, k, trivia)
+    if close is None:
+        line = source.count("\n", 0, start) + 1
+        raise FormatError(filename, line, f"unterminated @{backend} host body")
+    return close + 1
 
 
-def _scan_number(source: str, start: int) -> int:
-    """Return the index just past a numeric literal, using the lexer's float
-    rule so `7.div(2)` stops at `7` and `.` becomes a separate token."""
-    n = len(source)
-    j = start
-    while j < n and source[j].isdigit():
-        j += 1
-    if j < n and source[j] == "." and j + 1 < n and source[j + 1].isdigit():
-        j += 1
-        while j < n and source[j].isdigit():
-            j += 1
-    if j < n and source[j] in "eE":
-        k = j + 1
-        if k < n and source[k] in "+-":
-            k += 1
-        if k < n and source[k].isdigit():
-            while k < n and source[k].isdigit():
-                k += 1
-            j = k
-    return j
+def _scan_number(source: str, start: int, filename: str) -> int:
+    """Return the index just past a numeric literal.
+
+    Delegates to the lexer's `_lex_number`, which owns the `0x`/`0b`/`0o`
+    radix prefixes and the `_` digit-group separators (item 381) as well as the
+    float rule that stops `7.div(2)` at `7`.  The hand-written copy this
+    replaced knew none of the three, so it split `1_000` into `1` and `_000`
+    and `0xFF` into `0` and `xFF` -- both silent meaning changes (issue 309).
+    """
+    line = source.count("\n", 0, start) + 1
+    try:
+        end, _token = _lexer._lex_number(source, start, line, filename)
+        return end
+    except RevlError as error:
+        raise _as_format_error(filename, line, error) from None
 
 
 # --------------------------------------------------------------------------
@@ -284,7 +293,14 @@ def _space_between(prev: _Piece, cur: _Piece,
     # A number piece is the only _WORD that starts with a digit, and one of the
     # five unit idents can follow it only in a timer delay — the IR gate proves
     # the join changes nothing (both spellings lex to int + unit ident).
-    if pk == _WORD and p[:1].isdigit() and ck == _WORD and c in ("ms", "s", "m", "h", "d"):
+    # A NON-DECIMAL literal is excluded: `d` is a hex digit, so joining
+    # `0x3 d` would make the single literal `0x3d` (61) out of two tokens --
+    # the one join in this table that is not whitespace-only. The gate would
+    # refuse it, but a refusal on valid source is still a formatter that does
+    # not work, so the rule excludes the case rather than leans on the gate.
+    if (pk == _WORD and p[:1].isdigit() and ck == _WORD
+            and c in ("ms", "s", "m", "h", "d")
+            and p[1:2].lower() not in ("x", "b", "o")):
         return False
     # a row label binds its sigil tight: `@db`, never `@ db` (item 426). A bare
     # `@` piece exists only here — an `@backend { ... }` host body is scanned as
@@ -434,32 +450,57 @@ def _canonical_ir(ir: dict) -> str:
     return json.dumps(ir, sort_keys=True, ensure_ascii=False)
 
 
-def _token_signature(source: str, filename: str) -> list[tuple[str, str]] | None:
-    """The significant token stream (kind, text), dropping comments/newlines.
+def _token_signature(source: str, filename: str):
+    """The token stream the REFERENCE LEXER produces, as `(kind, value)` pairs.
 
-    This is the invariant the formatter actually guarantees, and the sound
-    fall-back proof when neither side compiles (a syntactically valid file
-    the type checker rejects still deserves formatting, and its line numbers
-    -- hence its diagnostics -- move under reformatting).  Returns None if the
-    source cannot be scanned at all.
+    Line numbers are excluded on purpose: the formatter collapses runs of blank
+    lines, so a token may legitimately move to a different line, and nothing
+    downstream of the parser distinguishes two programs by line number alone.
+    Everything else the lexer reports is compared, so two sources with this
+    same signature parse identically and therefore compile identically.
+
+    This used to compare `_scan(original)` with `_scan(candidate)` -- the
+    FORMATTER'S OWN scanner against itself.  That is not a proof of anything: a
+    scanner bug corrupts both sides in the same way, so the comparison passes
+    and the corrupted rewrite ships (issue 309).  The lexer is the only
+    authority on what a token stream is, so the lexer is what gets asked.
+
+    Returns None when *source* does not lex, which the gate treats as a
+    refusal rather than as an excuse to skip the check.
     """
+    from .lexer import lex
+
     try:
-        pieces = _scan(source, filename)
+        return [(token.kind, token.value) for token in lex(source, filename)]
     except RevlError:
         return None
-    return [(p.kind, p.text) for p in pieces if p.kind not in (_COMMENT, _NEWLINE)]
+    except Exception:  # pragma: no cover - defensive
+        return None
 
 
 def _compile_ir(source: str, filename: str):
     """Compile *source* to IR, returning `(ir, None)` or `(None, error)`.
 
+    When *filename* names a file that exists on disk, the compile goes through
+    `compile_files` with *source* supplied in memory for that root, so `use`
+    imports RESOLVE and the IR gate actually runs.  `compile_source` alone
+    refuses any `use`-bearing file for want of a module directory, which sent
+    every such file to the fall-back branch and out from under the headline
+    gate (issue 309).  The in-memory override is what lets the CANDIDATE be
+    compiled in place -- same directory, same imports -- without writing it.
+
     Imported lazily so this module stays importable without pulling the whole
     compiler in for callers that only want `format_source`.
     """
-    from .compiler import compile_source
+    from .compiler import compile_files, compile_source
 
     try:
-        return compile_source(source, filename), None
+        if filename and os.path.isfile(filename):
+            ir = compile_files([filename],
+                               sources={os.path.abspath(filename): source})
+        else:
+            ir = compile_source(source, filename)
+        return ir, None
     except RevlError as error:
         return None, error
     except Exception as error:  # pragma: no cover - defensive
@@ -471,6 +512,10 @@ class GateResult:
     admitted: bool
     proof: str            # human-readable description of what was proven
     reason: str | None = None  # populated when refused
+    # populated when a check could not be run to completion but the rewrite is
+    # carried by a stronger proof; the caller MUST surface it, so a weakened
+    # check is never silent.
+    warning: str | None = None
 
 
 def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
@@ -489,32 +534,67 @@ def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
     Rules, in order:
 
     * `candidate == original`  -> admitted, nothing changed.
-    * original compiles:  a token-preserving rewrite (the formatter) MUST
-      compile to byte-identical IR, otherwise it is refused (this is the
-      headline gate -- it catches any reformat that changed what the compiler
-      sees).  A token-changing rewrite (`--migrate`) is a DELIBERATE semantic
-      upgrade: since 2.0 makes a bare `$` literal (item 203), a legacy
-      `"$name"` now compiles as a literal and migrating it to a
-      `` `${name}` `` template legitimately changes the IR, so an IR delta is
-      ADMITTED as the intended migration -- the migrate gate that still bites
-      is that the rewritten source must still COMPILE (a rewrite that broke
-      compilation is refused, catching a corrupted mechanical pass).
-    * original does NOT compile standalone but the candidate does (an
-      `import`-only file, or a pre-item-203 1.x source the 2.0 compiler still
-      rejects before `--migrate` fixes it):  IR cannot be compared, so the
-      candidate is admitted as *newly admissible* -- it now compiles.
-    * neither side compiles:  there is no compilable baseline for the gate to
-      violate.  A token-preserving rewrite (the formatter) still proves the
-      sound weaker invariant it guarantees -- the significant token stream is
-      byte-identical -- admitting it (this formats a syntactically valid file
-      the type checker rejects, e.g. an `examples/rejections/*` case) or
-      refusing if the tokens changed.  A token-changing rewrite (`--migrate`)
-      has no such baseline and no token invariant; it proceeds as the trusted
-      mechanical rewrite it is (the gate's protection is the compilable-origin
-      case above, where a migration that altered a working program is caught).
+    * a token-preserving rewrite (the formatter) must FIRST prove, with the
+      reference lexer, that both texts lex and lex to the same token stream.
+      This runs on EVERY file, before anything else and whatever the file
+      contains, and a failure at any of the three steps -- the original does
+      not lex, the output does not lex, the streams differ -- is a refusal.
+      This is the check that makes the class of bug behind issue 309
+      impossible: the formatter is a whitespace rewrite, so identical tokens
+      is exactly its contract, and a mis-scan can now only cost a refusal
+      rather than a silently corrupted file.  It replaces a fall-back that
+      compared the formatter's own scanner with itself and therefore proved
+      nothing.
+    * original compiles:  a token-preserving rewrite (the formatter) MUST also
+      compile to byte-identical IR, otherwise it is refused (the headline gate
+      -- it catches any reformat that changed what the compiler sees).  Since
+      `_compile_ir` resolves `use` imports for an on-disk file, this arm now
+      covers the `use`-bearing files that used to fall past it.  A
+      token-changing rewrite (`--migrate`) is a DELIBERATE semantic upgrade:
+      since 2.0 makes a bare `$` literal (item 203), a legacy `"$name"` now
+      compiles as a literal and migrating it to a `` `${name}` `` template
+      legitimately changes the IR, so an IR delta is ADMITTED as the intended
+      migration -- the migrate gate that still bites is that the rewritten
+      source must still COMPILE (a rewrite that broke compilation is refused,
+      catching a corrupted mechanical pass).
+    * original does NOT compile but the candidate does (a pre-item-203 1.x
+      source the 2.0 compiler still rejects before `--migrate` fixes it):  IR
+      cannot be compared, so the candidate is admitted as *newly admissible*
+      -- it now compiles.  A formatter reaching here has already proven token
+      identity above.
+    * neither side compiles (a syntactically valid file the type checker
+      rejects, e.g. an `examples/rejections/*` case, still deserves
+      formatting):  there is no IR baseline to compare.  A token-preserving
+      rewrite is carried by the lexer-verified token identity already proven;
+      a token-changing rewrite (`--migrate`) has no such invariant and
+      proceeds as the trusted mechanical rewrite it is (the gate's protection
+      is the compilable-origin case above).
     """
     if candidate == original:
         return GateResult(True, "unchanged")
+
+    # Step 1, universal: the formatter's own contract, checked with the
+    # reference lexer on every construct in every file, fail-closed.
+    if token_preserving:
+        sig_orig = _token_signature(original, filename)
+        if sig_orig is None:
+            return GateResult(
+                False, "token comparison",
+                reason="source does not lex, so no formatting of it can be "
+                       "proven meaning-preserving",
+            )
+        sig_cand = _token_signature(candidate, filename)
+        if sig_cand is None:
+            return GateResult(
+                False, "token comparison",
+                reason="formatted output no longer lexes",
+            )
+        if sig_orig != sig_cand:
+            return GateResult(
+                False, "token comparison",
+                reason="formatting changed the token stream: "
+                       + _first_token_delta(sig_orig, sig_cand),
+            )
 
     ir_orig, err_orig = _compile_ir(original, filename)
     ir_cand, err_cand = _compile_ir(candidate, filename)
@@ -544,6 +624,29 @@ def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
                     "migration rewrite (IR intentionally changed: legacy `$` "
                     "string → template)",
                 )
+            # The token stream is already proven identical with the reference
+            # lexer, so an IR delta here means the compiler saw something the
+            # lexer did not. Before blaming the rewrite, check the oracle: if
+            # compiling the ORIGINAL twice does not agree with itself, the IR
+            # comparison carries no information about the rewrite at all, and
+            # refusing on it would be a false alarm on a rewrite the stronger
+            # check already proved safe. (`selfhost/*.rvl` hit this: the
+            # composition compiler dedupes declarations by `id()`, and CPython
+            # reuses the address of a freed object, so a second compile in the
+            # same process can drop a declaration.) Admit on the token proof,
+            # and hand the caller a warning so the compiler bug is loud.
+            replay, _ = _compile_ir(original, filename)
+            if replay is None or _canonical_ir(replay) != _canonical_ir(ir_orig):
+                return GateResult(
+                    True,
+                    "reference-lexer token identity (IR comparison unavailable)",
+                    warning=(
+                        f"{filename}: compiling the ORIGINAL twice did not "
+                        "produce the same IR, so the IR cross-check was "
+                        "skipped; the formatting is admitted on the "
+                        "reference-lexer token identity alone"
+                    ),
+                )
             return GateResult(
                 False,
                 "IR comparison",
@@ -558,22 +661,29 @@ def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
             "output newly admissible (original did not compile standalone)",
         )
 
-    # Neither side compiles: no compilable baseline for the gate to violate.
+    # Neither side compiles: no IR baseline for the gate to violate.
     if not token_preserving:
         # A token-changing mechanical rewrite (`--migrate`) proceeds; the gate
         # only guards the compilable-origin case handled above.
         return GateResult(True, "no compilable baseline (mechanical rewrite)")
 
-    # A token-preserving rewrite (the formatter) still proves its invariant.
-    sig_orig = _token_signature(original, filename)
-    sig_cand = _token_signature(candidate, filename)
-    if sig_orig is not None and sig_orig == sig_cand:
-        return GateResult(
-            True,
-            "token-stream identity (source does not compile standalone)",
-        )
+    # A token-preserving rewrite carries the lexer-verified token identity
+    # proven in step 1 above; that is the whole of the formatter's contract.
     return GateResult(
-        False,
-        "token comparison",
-        reason=f"formatting changed the token stream (source does not compile): {err_cand}",
+        True,
+        "reference-lexer token identity (source does not compile: "
+        f"{err_orig})",
     )
+
+
+def _first_token_delta(sig_orig, sig_cand) -> str:
+    """A short description of where two token streams first diverge, so a
+    refusal names the construct the scanner got wrong instead of just saying
+    that something changed."""
+    for index, (before, after) in enumerate(zip(sig_orig, sig_cand)):
+        if before != after:
+            return (f"token {index} was {before[0]} {before[1]!r}, "
+                    f"became {after[0]} {after[1]!r}")
+    if len(sig_orig) != len(sig_cand):
+        return (f"{len(sig_orig)} tokens before, {len(sig_cand)} after")
+    return "streams differ"  # pragma: no cover - unreachable while != held

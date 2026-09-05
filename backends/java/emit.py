@@ -41,6 +41,7 @@ CLI: `python3 emit.py <ir.json> [> out.java]`.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 
@@ -144,6 +145,22 @@ _EMITTER_RESERVED = {"ctx", "config", "root"}
 
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
+
+
+def _finite_float(value):
+    """The literal's value, refused when a `Float` is not finite (issue #312).
+
+    A non-finite `Float` has no literal spelling in revl and no uniform one
+    across the tiers — the host repr renders `inf`, which is an UNBOUND NAME
+    in this target's source, not a number. The frontend refuses such a literal
+    at the checker (`typecheck._reject_float_literal_range`), so this is the
+    backend's own belt: an IR handed straight to the emitter still cannot make
+    it print a name nothing binds.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EmitError(
+            f"non-finite Float literal {value!r} has no representation in this tier")
+    return value
 
 
 def _refuse_stream_host(fn: str) -> None:
@@ -476,7 +493,7 @@ def _lit(value: object) -> str:
     if isinstance(value, int):
         return f"{value}L"
     if isinstance(value, float):
-        return f"{value}d"
+        return f"{_finite_float(value)}d"
     raise EmitError(f"unsupported literal: {value!r}")
 
 _JAVA_V3_BIN_OPS = {

@@ -66,6 +66,9 @@ def _run_fmt(args: argparse.Namespace) -> int:
             print(f"error: refusing {path_str}: {gate.reason}", file=sys.stderr)
             exit_code = 1
             continue
+        if gate.warning:
+            # a check the gate could not run to completion: never silent.
+            print(f"warning: {gate.warning}", file=sys.stderr)
 
         if getattr(args, "check", False):
             if rewritten != original:

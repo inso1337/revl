@@ -1796,6 +1796,10 @@ def _tool_fmt(arguments: dict) -> dict:
                 "note": "refused — the rewrite would change what the compiler sees"}
     result = {"ok": True, "admitted": True, "formatted": rewritten,
               "changed": rewritten != source, "proof": gate.proof}
+    # a check the gate could not run to completion travels with the result, so
+    # a weakened proof is as visible to an agent as it is on the CLI.
+    if gate.warning:
+        warnings = [*warnings, gate.warning]
     if warnings:
         result["warnings"] = warnings
     return result

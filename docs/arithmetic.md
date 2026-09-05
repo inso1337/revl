@@ -75,7 +75,7 @@ is. This split is Boute's Euclidean definition (TOPLAS 1992), and it is the
 one Ada draws as `rem`/`mod`, Haskell as `quot`/`rem` vs `div`/`mod`, and Rust
 as `%`/`rem_euclid`.
 
-## One definition, five tiers
+## One definition, six tiers
 
 Each operation is lowered so that every tier computes the *same* result rather
 than inheriting a host rule:
@@ -226,6 +226,21 @@ out-of-range literal and is refused by the same rule. The negative bound is
 reachable by computation from in-range literals — `0 - 9223372036854775807 -
 1` — which is an ordinary runtime value on every tier, inside the range and
 checked like any other arithmetic.
+
+A `Float` literal has the same rule for the same reason
+(`examples/rejections/t36_float_literal_range.rvl`). `1e999` is past the
+largest finite binary64, so it folds to IEEE infinity — and revl has no
+*spelling* for infinity, which meant every emitter printed the host's name for
+it as a bare word: `inf` on python, `inff64` on rust, `infd` on java,
+`float64(inf)` on go. Those are unbound identifiers, so the program failed to
+compile or died at runtime, while TypeScript alone rendered `Infinity` and ran.
+A literal that non-finite is refused at the checker.
+
+The bound is the *literal's*, not arithmetic's. `1e308 * 10.0` still overflows
+to infinity at runtime on every tier, exactly as IEEE 754 says it should:
+that is a computed value with one agreed meaning, and this rule does not touch
+it. `1e-999` likewise still underflows to `0.0`, which is also what IEEE 754
+says, and is a finite value.
 
 ### Every tier holds it
 
@@ -495,7 +510,7 @@ must fault, checked narrowing that must fault out of range, `-Int32.MIN`, and
 the widen/narrow coercions on py/ts/go/wasm, with rust/java behind
 `REVL_CROSS_TIER_SLOW=1`.
 
-## Division by zero
+## Float division by zero
 
 IEEE defines it as a *value*, not a fault: `1.0 / 0.0` is `+infinity`,
 `-1.0 / 0.0` is `-infinity`, and `0.0 / 0.0` is `NaN`. Python raises
@@ -514,14 +529,15 @@ emitter, not of WebAssembly, which has `f64`. That means `/` is unavailable
 there too, since it yields Float. `div_trunc`, `div_floor`, `div_euclid` and
 `mod` all work, at the full 64-bit range.
 
-## Division by zero
+## Integer division by zero
 
 Integer division and modulo have no value at zero, and every tier said so
 differently: python raises, rust and wasm trap, java throws, and TypeScript
 handed back `Infinity`/`NaN` — a *value*, where the checker had declared
 `Int`. That is the same class of unsoundness as lowering structural `==` to
 JS `===`, and it is closed the same way: TypeScript's integer operations go
-through guarded helpers that throw, so all five tiers now fault.
+through guarded helpers that throw, so all six tiers now fault (go panics on
+integer division by zero natively).
 
 A **literal** zero divisor never reaches any of them — the checker refuses it
 (`examples/rejections/arith_zero_divisor.rvl`), because it is not a program
@@ -552,10 +568,10 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
   wasm reading an i64 bit pattern). See "A literal outside the range never
   reaches a tier" above; it remains why `Int.MIN` has no spelling.
 
-- **`Int` is 64-bit on every tier but wasm**, which is still `i32` (see
-  above). python and TypeScript are arbitrary-precision hosts and impose the
-  bound; rust, java and go carry it natively. The remaining gap is the wasm
-  widening, not the specification.
+- ~~**`Int` is 64-bit on every tier but wasm.**~~ **Closed.** The wasm i64 port
+  landed; `Int` is 64-bit on all six tiers (`backends/wasm/emit.py` lowers `Int`
+  to `i64`). python and TypeScript are arbitrary-precision hosts and impose the
+  bound; rust, java, go and wasm carry it natively.
 - ~~**A total, value-returning form.**~~ **Closed.** The `checked_div_*`
   forms below return `Result[Int, Str]`, so a program handles a zero divisor
   without faulting. `fail` could not serve here: it is a component construct

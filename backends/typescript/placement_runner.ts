@@ -37,6 +37,18 @@ const name: string = spec.name
 const _stdlibRefRoot: string =
   spec.stdlibRefRoot ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 ;(globalThis as any).__REVL_STDLIB_REF_ROOT__ = _stdlibRefRoot
+
+// Stream-based sha256 helper: avoids slurping large files into memory.
+async function sha256File(abs: string): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256')
+    const rs = fs.createReadStream(abs)
+    rs.on('error', reject)
+    hash.on('error', reject)
+    rs.on('data', (chunk) => hash.update(chunk))
+    rs.on('end', () => resolve(hash.digest('hex')))
+  })
+}
 for (const ref of (spec.refs || []) as Array<{ extern: string; path: string; sha256: string; root?: string }>) {
   // per-kind: a stdlib ref hash-checks against the install root, a user ref
   // against the user root. No cross-domain fallback — the two roots are the two
@@ -45,7 +57,7 @@ for (const ref of (spec.refs || []) as Array<{ extern: string; path: string; sha
   const abs = path.resolve(base, ref.path)
   let got: string
   try {
-    got = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex')
+    got = await sha256File(abs)
   } catch (e) {
     throw new Error(`revl @ts ref for extern \`${ref.extern}\`: cannot read ${abs} (${e})`)
   }

@@ -346,6 +346,12 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
     it — claimed line 1 of the enclosing file (issue #313). Zero, the default,
     is a whole file starting at line 1.
     """
+    if line_offset == 0 and source.startswith("\ufeff"):
+        source = source[1:]
+    for position, character in enumerate(source):
+        if 0xD800 <= ord(character) <= 0xDFFF:
+            line = line_offset + source.count("\n", 0, position) + 1
+            raise RevlError(filename, line, "source contains a lone surrogate")
     tokens: list[Token] = []
     i, line, n = 0, 1 + line_offset, len(source)
     while i < n:
@@ -476,6 +482,8 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
                 "revl has no `#` comments",
                 hint="a line comment is `// ...` (syntax-2.0 §3.2)",
             )
+        elif c == "\ufeff":
+            raise RevlError(filename, line, "byte-order mark is only allowed at the start of a file")
         elif _ident_char(c):
             # Non-ASCII, but identifier-shaped: a name a Unicode-permissive
             # lexer would have accepted. Refused here, in the frontend, so no
@@ -573,7 +581,11 @@ def _lex_number(source: str, i: int, line: int, filename: str):
             is_float = True
     if is_float:
         return i, Token("float", float(num), line)
-    return i, Token("int", int(num), line)
+    try:
+        value = int(num)
+    except ValueError as error:
+        raise RevlError(filename, line, "Int literal is outside the 64-bit range") from error
+    return i, Token("int", value, line)
 
 
 def _lex_string(source: str, i: int, line: int, filename: str, quote: str = '"'):

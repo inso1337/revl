@@ -548,7 +548,8 @@ def _capabilities_of(boundary: dict) -> tuple[tuple[str, ...], int]:
 def _audit_document(ir: dict) -> dict:
     """The item-28 interchange document for a component — byte-identical to
     what `revl audit --json` emits, so an entry's manifest.json is reproducible
-    from its source by the current compiler (docs/registry.md §1)."""
+    from its source by the current compiler (docs/registry.md §1).
+    Does not mutate the input IR."""
     from .__main__ import _boundary            # noqa: PLC0415 — lazy, like plan/mcp
     from .distribute import distributability   # noqa: PLC0415
     from .interchange import stamp             # noqa: PLC0415
@@ -560,11 +561,19 @@ def _audit_document(ir: dict) -> dict:
     # directories would produce two different manifests. Normalize it to the
     # entry's stable filename so manifest.json is byte-reproducible wherever the
     # regenerator runs (the reproducibility invariant, docs/registry.md §1).
-    for comp in manifest.get("components") or []:
-        if comp.get("file"):
-            comp["file"] = os.path.basename(comp["file"])
+    # Create a normalized copy without mutating the original.
+    normalized_manifest = {
+        **manifest,
+        "components": [
+            {
+                **comp,
+                "file": os.path.basename(comp["file"]) if comp.get("file") else comp.get("file")
+            }
+            for comp in manifest.get("components") or []
+        ]
+    }
     return stamp({
-        "manifest": manifest,
+        "manifest": normalized_manifest,
         "boundary": boundary,
         "externs": [
             {"name": ext["name"], "class": ext.get("class"),

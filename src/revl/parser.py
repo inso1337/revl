@@ -26,8 +26,61 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import contextlib
+import re
+import sys
+
 from .errors import RevlError
 from .lexer import Token, lex
+
+
+# --------------------------------------------------------- recursion bounds
+#
+# The parser is recursive descent and the precedence ladder alone (`_ternary`
+# -> `_or` -> ... -> `_primary`) costs roughly two dozen python frames for
+# every nested `(`. Against CPython's default 1000-frame limit that put the
+# ceiling at THIRTY-EIGHT nested parentheses and forty nested calls (issue
+# #310) — well inside what generated code writes, and reached as a
+# `RecursionError` traceback rather than a diagnostic. In `revl.gate`, a
+# library with a security contract, that is an input that makes the admission
+# gate raise instead of answering.
+#
+# Two things fix it, and both are needed. `NESTING_LIMIT` is the LANGUAGE's
+# answer: a stated bound, refused with a diagnostic that names it, so a
+# hostile input costs bounded work and gets an honest no. The headroom is the
+# IMPLEMENTATION's: python's own limit must sit far enough above the stated
+# bound that the bound — not the interpreter — is what a program meets, and it
+# must cover the walkers in lower.py and typecheck.py that later descend the
+# same accepted tree.
+NESTING_LIMIT = 200
+
+# Realm labels become part of capability addresses on some backends. Keep the
+# address grammar deliberately narrower than a general string literal so labels
+# cannot introduce namespace or target-language syntax.
+_REALM_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+# ~27 parser frames per level, and the deepest post-parse walker is shallower
+# than that, so this clears `NESTING_LIMIT` with room to spare while staying
+# far below anything that would trouble the C stack.
+_RECURSION_HEADROOM = 12000
+
+
+@contextlib.contextmanager
+def recursion_headroom(frames: int = _RECURSION_HEADROOM):
+    """Raise python's recursion limit for the duration of a compile.
+
+    Restores whatever the embedder had set, and never LOWERS it: a host that
+    already asked for more keeps it.
+    """
+    previous = sys.getrecursionlimit()
+    if previous >= frames:
+        yield
+        return
+    sys.setrecursionlimit(frames)
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(previous)
 
 
 # ---------------------------------------------------------------- AST
@@ -1545,6 +1598,12 @@ class Parser:
         # docs/design/379-break-continue.md).
         self._loop_depth = 0
         self._in_block_arm = False
+        # issue #310: how many expressions deep the cursor currently is, held
+        # against `NESTING_LIMIT`. A `${...}` interpolation is parsed by a
+        # SEPARATE `Parser` over the template body, so the depth is handed to
+        # that sub-parser (`_parse_template_parts`) — otherwise nested
+        # templates reset the count and walk straight past the bound.
+        self._nesting = 0
 
     # -- token helpers
 
@@ -1675,13 +1734,36 @@ class Parser:
     # -- productions
 
     def parse(self) -> Program:
-        try:
-            return self._parse_program()
-        except RevlError as e:
-            better = self._maybe_stray_backtick_error(e)
-            if better is not None:
-                raise better from None
-            raise
+        with recursion_headroom():
+            try:
+                return self._parse_program()
+            except RevlError as e:
+                better = self._maybe_stray_backtick_error(e)
+                if better is not None:
+                    raise better from None
+                raise
+            except RecursionError:
+                # The backstop under `NESTING_LIMIT` (issue #310). The bound
+                # above covers the expression ladder, which is what explodes
+                # first and fastest; the other recursive descents here —
+                # nested blocks, nested type arguments — are shallower per
+                # level and reach python's limit only far past anything a
+                # program means. Whichever one gives out, the caller gets a
+                # diagnostic, because a `RecursionError` escaping a library is
+                # an unhandled fault and `revl.gate` is a library with a
+                # security contract.
+                raise self._nesting_too_deep() from None
+
+    def _nesting_too_deep(self) -> RevlError:
+        return self.err(
+            self.peek().line,
+            "this program nests deeper than the compiler can parse",
+            hint="the parser is recursive descent, so nesting costs stack: "
+                 f"expressions are bounded at {NESTING_LIMIT} levels and the "
+                 "other nestings by the interpreter's own limit. This is an "
+                 "implementation bound, not a language one — name the inner "
+                 "constructs with `let` bindings or helper functions.",
+        )
 
     def _maybe_stray_backtick_error(self, e: RevlError) -> "RevlError | None":
         """Item 365: a stray backtick inside a host `//`/`/*` comment closes a
@@ -4429,6 +4511,13 @@ class Parser:
         label = tok.value
         if not label:
             raise self.err(line, "a realm label cannot be empty")
+        if not _REALM_LABEL_RE.fullmatch(label):
+            raise self.err(
+                line,
+                f"invalid realm label {label!r}",
+                hint="realm labels must start with an ASCII letter or digit and contain "
+                     "only ASCII letters, digits, `.`, `_`, or `-`",
+            )
         self.expect(")")
         return label
 
@@ -4464,6 +4553,13 @@ class Parser:
             label = tok.value
             if not label:
                 raise self.err(line, "a realm label cannot be empty")
+            if not _REALM_LABEL_RE.fullmatch(label):
+                raise self.err(
+                    line,
+                    f"invalid realm label {label!r}",
+                    hint="realm labels must start with an ASCII letter or digit and contain "
+                         "only ASCII letters, digits, `.`, `_`, or `-`",
+                )
             if label in realms:
                 raise self.err(
                     line,
@@ -5380,6 +5476,9 @@ class Parser:
                 interp_line = line
             expr_index += 1
             sub = Parser(value, self.filename, line_offset=interp_line - 1)
+            # the interpolation is nested INSIDE this expression: carry the
+            # depth across so `${`${`${...}`}`}` is bounded too (issue #310)
+            sub._nesting = self._nesting
             expr = sub.pure_expr()
             if not sub.at("eof"):
                 extra = sub.peek()
@@ -5393,6 +5492,33 @@ class Parser:
         return self._ternary()
 
     def _ternary(self):
+        """The head of the precedence ladder, and so the one place every
+        NESTED expression re-enters (a parenthesised group, a call argument, a
+        list or record element, a lambda body, a `${...}` interpolation). The
+        depth is counted here, once per level, and refused past
+        `NESTING_LIMIT` with a diagnostic that names the bound (issue #310).
+
+        A stated limit, not a crash: the bound is the compiler's, not the
+        language's, so it has to be said out loud. `_bin` itself loops rather
+        than recursing, so a long `a + b + c ...` chain costs no depth."""
+        self._nesting += 1
+        try:
+            if self._nesting > NESTING_LIMIT:
+                raise self.err(
+                    self.peek().line,
+                    f"expression nesting is deeper than the parser's limit of "
+                    f"{NESTING_LIMIT} levels",
+                    hint="this is an implementation bound, not a language one: "
+                         "the parser is recursive descent and a nesting this "
+                         "deep would exhaust the interpreter's stack. Name the "
+                         "inner expressions with `let` bindings and the nesting "
+                         "goes away.",
+                )
+            return self._ternary_body()
+        finally:
+            self._nesting -= 1
+
+    def _ternary_body(self):
         cond = self._or()
         if self.at("?"):
             self.next()

@@ -10,8 +10,13 @@ revl is a compiler, not a running service — so the threat model is unusual, an
 worth stating plainly. A report is in scope if it shows one of these:
 
 - **A soundness escape.** A `.rvl` program that the checker *accepts* but that
-  violates a guarantee it promises to enforce — G1–G8 or the lifecycle rules
-  A1–A8 (see [DESIGN.md](DESIGN.md) §4). Undeclared access that compiles, a
+  violates a guarantee it promises to enforce: G1–G9, the `Secret` families
+  (`G-SECRET`, `G-SECRET-FLOW`), the typing rules T1–T3, or the lifecycle rules
+  A1, A2, A3, A5, A6, A8 and A9 — listed rather than given as a range, because
+  A4 and A7 are not guarantee codes. The set is generated from
+  `revl.diagnostics.GUARANTEES` into [DESIGN.md](DESIGN.md) §4 and
+  [docs/rejections.md](docs/rejections.md), so neither can drift from the
+  compiler. Undeclared access that compiles, a
   mutation with no inverse and no `emit` that compiles, a dependency cycle or
   provision conflict that links, teardown that leaves residue the checker
   claimed it could not — each is a security issue, because downstream systems
@@ -100,7 +105,8 @@ much as applies:
   and the exact command (`revl compile …`, `revl audit …`,
   `revl mcp …`);
 - **what the compiler did** (accepted, emitted, admitted) and **what it should
-  have done** (which guarantee G1–G8 / rule A1–A8 you believe was violated);
+  have done** (which guarantee or lifecycle rule you believe was violated, by
+  its code from `src/revl/diagnostics.py`);
 - for an emitted-code issue, the **emitted output** and why it is unsafe;
 - the revl version or commit SHA, and the toolchain versions if a runtime is
   involved.
