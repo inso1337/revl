@@ -96,6 +96,7 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_wasm_corpus"
 CORPUS = [
+    "scratch_names.rvl",
     "widening.rvl",
     "residuals.rvl",
     "folding.rvl",
@@ -218,7 +219,7 @@ def test_selfhosted_emitter_output_scaffold(emitted):
     assert src.endswith(")\n")
 
 
-@pytest.mark.parametrize("rel", ["widening.rvl", "folding.rvl", "variants.rvl"])
+@pytest.mark.parametrize("rel", ["widening.rvl", "folding.rvl", "variants.rvl", "scratch_names.rvl"])
 def test_supported_corpus_compiles_as_wasm(emitted, reference, tmp_path, rel):
     compiler = shutil.which("wat2wasm")
     if compiler is None:
@@ -233,6 +234,19 @@ def test_supported_corpus_compiles_as_wasm(emitted, reference, tmp_path, rel):
             capture_output=True, text=True, timeout=30,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_nested_scratch_names_sort_lexically(emitted, reference, tmp_path):
+    source = tmp_path / "deep.rvl"
+    source.write_text(
+        "fn deep(__revl_tmp: Int) -> " + "List[" * 12 + "Int" + "]" * 12
+        + " { return " + "[" * 12 + "__revl_tmp" + "]" * 12 + " }\n",
+        encoding="utf-8",
+    )
+    ir = compile_files([str(source)])
+    got = emitted["emit_src"](ir)
+    assert got == reference.emit(ir)["functions"]
+    assert got.index("(local $__revl_tmp_1_n10 ") < got.index("(local $__revl_tmp_1_n2 ")
 
 
 def test_selfhosted_emitter_in_file_tests_pass(emitted):
