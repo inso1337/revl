@@ -258,89 +258,65 @@
   },
   "rust": {
     "blind": {
-      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: a `pub fn`: every document in the rust corpus declares its functions private, so the `pub ` visibility prefix is emitted by neither side under test.": [
-        "public=<true>"
-      ],
-      "declared out of the slice by the oracle's own docstring: `await`/`spawn` and the host `let-effect` binds (`Pool`/`Map`/`Job`).": [
+      "The reference lowers activation `await` through the async plugin/runtime scheduler and host `let-effect` through acquisition, undo, and frame registration. The self-host Rust emitter only detects these steps to emit explicit DEFER markers; it does not assemble that runtime ABI.": [
         "step=await",
         "step=let-effect"
       ],
-      "declared out of the slice by the oracle's own docstring: async methods and their `idempotent` retry metadata.": [
-        "idempotent=<true>"
+      "The self-host analyzer recognizes Map `remove` only to preserve borrowed key ownership, but render_builtin still returns the explicit UNSUPPORTED-BUILTIN marker; the reference implementation's persistent Map removal therefore remains outside the mirrored stdlib subset.": [
+        "method=remove"
       ],
-      "declared out of the slice by the oracle's own docstring: body-level `effect`/`timer`/`fail`/`if` steps and the `host`/`format` component-dialect expression kinds.": [
-        "kind=fn",
-        "kind=if"
-      ],
-      "declared out of the slice by the oracle's own docstring: the canonical Float->Str helper: float interpolation and float arithmetic are both out.": [
-        "operands=Float",
-        "widen=Float",
-        "widen=Int"
+      "The reference emits record/list destructuring in _v3_let_pattern, including a temporary name derived from output position. The self-host emitter tracks let_pattern names for lexical analysis but deliberately has no matching statement renderer.": [
+        "step=let_pattern"
       ]
     },
     "unported": {
-      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
-        "args=<true>",
-        "bind=_",
-        "body=<true>",
+      "Witnessed effects, lifecycle tests, streams, child instances, timers, and host scheduling terminate in reference-only frame/router/runtime emission. The self-host module emitter does not implement those runtime protocols and reports them through explicit refusal or DEFER paths.": [
         "class=witnessed",
-        "else=<true>",
-        "event=<true>",
         "fn=Job.run",
-        "fn=Map.new",
-        "intercept=<true>",
-        "isolate=<true>",
-        "items=<true>",
-        "kind=builtin",
-        "kind=format",
-        "kind=hole",
         "kind=host",
         "kind=instance-get",
-        "kind=len",
-        "kind=optcall",
-        "kind=optfield",
-        "kind=record_update",
         "kind=spawn",
         "kind=stream-merge",
         "kind=subscribe",
         "lifecycle=<true>",
-        "method=charAt",
-        "method=charCodeAt",
-        "method=codepoint_at",
-        "method=concat",
-        "method=get",
-        "method=indexOf",
-        "method=join",
-        "method=length",
-        "method=next",
-        "method=push",
-        "method=remove",
-        "method=repeat",
-        "method=set",
-        "method=slice",
-        "method=split",
-        "method=to_int",
-        "method=to_str",
         "mode=every",
-        "name=<true>",
-        "name=Map",
-        "name=get",
-        "name=remove",
-        "pattern=list",
-        "pattern=record",
-        "returns=<true>",
         "secret_witness=<true>",
-        "sized_length=<true>",
-        "stages=<true>",
         "step=advance",
         "step=assert_no_residue",
         "step=call",
         "step=fail",
-        "step=let_pattern",
         "step=load",
         "step=stream-iter",
         "step=timer",
         "step=unload"
+      ],
+      "Reference host Map construction and access use runtime descriptors and borrowed-key conventions. The self-host pure-v3 port has no host Map value representation, so its Map names and get/next operations are not renderable.": [
+        "fn=Map.new",
+        "method=get",
+        "method=next",
+        "name=Map",
+        "name=get",
+        "name=remove"
+      ],
+      "These expression and destructuring forms are rejected before or inside the self-host pure-v3 renderer: unresolved holes, legacy format nodes, optional call/field chaining, record update, and list/record binding patterns all require lowering absent from the port.": [
+        "bind=_",
+        "kind=format",
+        "kind=hole",
+        "kind=optcall",
+        "kind=optfield",
+        "kind=record_update",
+        "pattern=list",
+        "pattern=record"
+      ],
+      "The reference Rust builtin renderer implements these positional-string, mutable-collection, conversion, and repetition families. The self-host renderer's supported subset ends at covered length/to_str/read-only string operations and returns an explicit unsupported marker for these methods.": [
+        "method=charAt",
+        "method=charCodeAt",
+        "method=codepoint_at",
+        "method=push",
+        "method=repeat",
+        "method=set",
+        "method=slice",
+        "method=to_int"
       ]
     }
   },

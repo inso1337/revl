@@ -128,6 +128,9 @@ CORPUS = [
     "str_borrows.rvl",  # fixpoint signatures, owned boundaries, &str call sites
     "borrow_boundaries.rvl",  # callbacks, escaping captures, nested-list needles
     "borrow_shadowing.rvl",  # later/sibling bindings cannot hide function values
+    "lengths.rvl",  # property length and scalar to_str, not just method length
+    "branch_edges.rvl",  # conditional targets, explicit widening, escape/void branches
+    "component_edges.rvl",  # pure blocks, idempotence, scalar config/Option bridge
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # let/var/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls + the by-value clone / Copy-scalar split
@@ -327,7 +330,8 @@ def test_str_borrow_callback_and_capture_boundaries(emitted, reference):
 @pytest.mark.parametrize("backend", ["reference", "selfhost"])
 def test_str_borrow_boundaries_build_and_run(emitted, reference, tmp_path, backend):
     ir = compile_files([str(CORPUS_DIR / rel) for rel in
-                        ("borrow_boundaries.rvl", "borrow_shadowing.rvl")])
+                        ("borrow_boundaries.rvl", "borrow_shadowing.rvl",
+                         "lengths.rvl", "branch_edges.rvl")])
     src = (reference.emit(ir) if backend == "reference"
            else emitted["emit_rust_src"](ir))
     bench = _load_bench_rust()
@@ -337,7 +341,7 @@ def test_str_borrow_boundaries_build_and_run(emitted, reference, tmp_path, backe
     (tmp_path / "src").mkdir()
     (tmp_path / "Cargo.toml").write_text(
         reference.cargo_toml("revl_borrow_boundaries"), encoding="utf-8")
-    (tmp_path / "src" / "main.rs").write_text(src + """
+    (tmp_path / "src" / "main.rs").write_text(src + r"""
 fn main() {
     assert_eq!(alias_count(), 3);
     assert_eq!(callback_count(), 4);
@@ -355,6 +359,21 @@ fn main() {
     assert_eq!(sibling_shadow(false), 4);
     assert_eq!(sibling_shadow(true), 0);
     assert_eq!(local_shadow(), 5);
+    assert_eq!(property_lengths("é", vec![1, 2]), 3);
+    assert_eq!(scalar_text(-12), "-12");
+    assert_eq!(edge_wide(3), 3.0);
+    assert_eq!(edge_wider(4), 4);
+    assert_eq!(edge_bytes(vec![1, 2]), vec![1, 2]);
+    edge_bare();
+    assert_eq!(edge_escaped(), r#""\\n\r\t"#);
+    assert_eq!(edge_field(true, EdgeCell { text: "a".into() },
+                         EdgeCell { text: "b".into() }), "a");
+    assert_eq!(edge_index(false), 2);
+    assert_eq!(edge_coalesce(true, None, Some(3)), 0);
+    assert_eq!(edge_coalesce(false, None, Some(3)), 3);
+    assert_eq!(edge_direct(4), 5);
+    assert!(edge_borrow(true, "pre".into(), "other".into()));
+    assert_eq!(edge_self_reference("x".into()), "prefixxx");
 }
 """, encoding="utf-8")
     result = bench._cargo("run", tmp_path, "--quiet")

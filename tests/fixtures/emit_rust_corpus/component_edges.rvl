@@ -1,0 +1,24 @@
+fn component_seed(n: Int) -> Int { return n }
+
+service EdgeService {
+  emission idempotent fn write_(n: Int) -> Int
+  fn ratio(n: Float) -> Float
+  fn maybe_text() -> Opt[Str]
+  fn maybe_int() -> Opt[Int]
+  fn maybe_bool() -> Opt[Bool]
+}
+
+component EdgeProvider provides edge: EdgeService {
+  config { ratio: Float = 0.5, enabled: Bool = true, disabled: Bool = false, count: Int }
+  provide edge {
+    fn write_(n) {
+      var local = n
+      local = local + 1
+      return component_seed(local)
+    }
+    fn ratio(n) = n
+    fn maybe_text() = Some("edge")
+    fn maybe_int() = Some(1)
+    fn maybe_bool() = Some(true)
+  }
+}
