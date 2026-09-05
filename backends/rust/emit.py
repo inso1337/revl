@@ -1451,6 +1451,179 @@ _RECORD_MODE = False
 _REDACTED_SECRET = "<redacted:secret>"
 
 
+# ---- declared Secret[T] confidentiality (item 421 F6, the rust half) ---------
+#
+# The rust tier carried only the EMIT-TIME `_REDACTED_SECRET` witness redaction
+# (the `secret_witness` referent written into the WAL). It had no RUNTIME
+# registry: nothing that funnels arbitrary host-written free-form text through
+# redaction, so a driver error, a panic message, or any host string that quotes
+# a held credential reached this tier's trace verbatim.
+#
+# Same mechanism as backends/go/emit.py's `revlMarkSecret` block and
+# backends/java/emit.py's `revlMarkSecret`/`revlRedactText`: the emitted program
+# registers the declared value itself, at every end the IR still carries after
+# taint.py strips the qualifier (`config[i]["secret"]` at the head of the plugin
+# closure, the one door every load goes through; `params[i]["secret"]` at the
+# head of a provide method; `secret_return` around an extern), and every
+# free-form runtime sink this tier keeps — the host trace `revl_stream_record`
+# gathers, and the WAL descriptor arguments under `--record` — funnels through
+# `revl_redact_text`. A composition that declares no `Secret[T]` carries none of
+# this and is byte-identical to before (`_SECRET_MODE`).
+#
+# rust (native) has no reflection, so there is nothing to bind the way java
+# binds its runners to the container reflectively: the registry is a
+# process-global the emitted code populates directly at each declared end, and
+# the emitted runtime sinks read through it in-line. That is the same shape the
+# go tier uses (`hostRecord` scrubs at the one choke point), on rust's runtime.
+_SECRET_PREAMBLE = r'''// ---- declared Secret[T] confidentiality (item 421 F6) ----------------
+//
+// A declared marking registers its value here, at every end the IR carries it:
+// revl_mark_secret at the head of the plugin closure for a config field declared
+// Secret[T] (the value the operator supplied at load), at the head of a provide
+// method that declares a Secret[T] parameter (the receiver), and
+// revl_secret_result around an extern whose declared return was Secret[T] (the
+// origin). Every free-form runtime sink this tier keeps reads through
+// revl_redact_text: the host trace revl_stream_record gathers and the WAL
+// descriptor arguments under --record. A unit that declares no Secret[T] carries
+// none of this block and is byte-identical to before.
+
+// Must equal confidential.REDACTED on the py tier: a polyglot composition
+// redacts to the SAME marker whichever tier wrote the line.
+pub const REVL_REDACTED_SECRET: &str = "<redacted:secret>";
+
+// A remembered value has to be long enough that an exact match means something.
+// Below this it is a coin flip against ordinary trace data ("", "1", "ok"), and
+// blanket-erasing those would gut the trace for no confidentiality gain. Same
+// bound as the py tier's _MIN_MARKABLE and the go tier's revlMinMarkable.
+const REVL_MIN_MARKABLE: usize = 4;
+
+// Process-wide, so a value registered by one plugin's load is scrubbed from a
+// sink another component writes. Longest first, so a needle containing another
+// leaves no tail behind (the ordering the go/java tiers keep too).
+static REVL_SECRET_VALUES: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> =
+    std::sync::OnceLock::new();
+
+fn revl_secret_values<R>(f: impl FnOnce(&mut Vec<String>) -> R) -> R {
+    let cell = REVL_SECRET_VALUES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+
+fn revl_remember_secret(text: String) {
+    if text.len() < REVL_MIN_MARKABLE {
+        return;
+    }
+    revl_secret_values(|values| {
+        if values.iter().any(|known| *known == text) {
+            return;
+        }
+        values.push(text);
+        values.sort_by(|a, b| b.len().cmp(&a.len()));
+    });
+}
+
+// revl_mark_secret registers a declared-Secret value (the config and receiver ends).
+pub fn revl_mark_secret<T: std::fmt::Display>(value: &T) {
+    revl_remember_secret(value.to_string());
+}
+
+// revl_secret_result registers a declared-Secret return and hands it back
+// unchanged, so a call site wraps with no change in meaning (the origin end).
+pub fn revl_secret_result<T: std::fmt::Display>(value: T) -> T {
+    revl_remember_secret(value.to_string());
+    value
+}
+
+// revl_redact_text replaces every registered secret in free-form host text.
+pub fn revl_redact_text(text: String) -> String {
+    revl_secret_values(|values| {
+        let mut text = text;
+        for needle in values.iter() {
+            if !needle.is_empty() && text.contains(needle.as_str()) {
+                text = text.replace(needle.as_str(), REVL_REDACTED_SECRET);
+            }
+        }
+        text
+    })
+}
+
+// revl_forget_secrets drops every remembered value (test isolation).
+pub fn revl_forget_secrets() {
+    revl_secret_values(|values| values.clear());
+}
+'''
+
+
+# True while emitting a document that declares a `Secret[T]` anywhere the
+# emitter can see it: a service-method parameter, an extern return, or a
+# component config field. Off by default, so a secret-free document emits
+# byte-identically (the golden oracle and the selfhost mirror).
+_SECRET_MODE = False
+
+
+def _declares_secret(ir: dict) -> bool:
+    """Does this IR carry a surviving `Secret[T]` marking?
+
+    `taint.py` strips the qualifier before lowering, so the markings ARE the
+    declaration: `params[i]["secret"]` on a service method (the receiver),
+    `secret_return` on an extern (the origin) and `secret` on a config field.
+    Same predicate as backends/go/emit.py's `_declares_secret`.
+    """
+    for service in (ir.get("services") or {}).values():
+        for method in (service.get("methods") or {}).values():
+            for param in method.get("params") or []:
+                if isinstance(param, dict) and param.get("secret"):
+                    return True
+    for ext in ir.get("externs") or []:
+        if ext.get("secret_return"):
+            return True
+        for param in ext.get("params") or []:
+            if isinstance(param, dict) and param.get("secret"):
+                return True
+    for comp in ir.get("components") or []:
+        for field in comp.get("config") or []:
+            if isinstance(field, dict) and field.get("secret"):
+                return True
+    return False
+
+
+def _emit_secret_registry() -> list[str]:
+    """The registry block, emitted into the crate once, only in `_SECRET_MODE`."""
+    return _SECRET_PREAMBLE.strip("\n").split("\n")
+
+
+def _secret_config_fields(config_fields: list) -> list[str]:
+    """The config fields the plugin closure registers at load, by rust name."""
+    if not _SECRET_MODE:
+        return []
+    return [_ident(f.get("name"), "config field")
+            for f in config_fields if isinstance(f, dict) and f.get("secret")]
+
+
+def _secret_config_mark(config_fields: list, indent: int) -> list[str]:
+    """item 421 F6, the config half: a `Secret[T]` config field is registered at
+    the head of the plugin closure, the one door every load goes through (the go
+    tier does the same at `Load<Comp>`). The value is read off the applied
+    `config` local, so the registration sits once, after config application."""
+    secret = _secret_config_fields(config_fields)
+    if not secret:
+        return []
+    pad = "    " * indent
+    return [f"{pad}revl_mark_secret(&config.{f});" for f in secret]
+
+
+def _secret_method_params(env: "_Env", key: str, mname: str, params: list) -> list[str]:
+    """The parameters a provide method registers at its head: the positions the
+    service declared `Secret[T]`, read off the same `params[i]["secret"]` stamp
+    the py, ts, go and java emitters read. Empty outside `_SECRET_MODE`."""
+    if not _SECRET_MODE:
+        return []
+    service = env.provides[key]
+    declared = env.services[service]["methods"].get(mname, {}).get("params", [])
+    secret = {mp["name"] for mp in declared if isinstance(mp, dict) and mp.get("secret")}
+    return [p for p in params if p in secret]
+
+
 def _witnessed_extern_for(env: "_Env", acquire: object) -> dict | None:
     """The witnessed extern descriptor a step's acquisition calls, or None.
     Mirrors `backends/python/emit.py::_ComponentEmitter._witnessed_extern`."""
@@ -1951,7 +2124,24 @@ def _emit_host_stubs(ir: dict) -> list[str]:
             ]
         )
     if "Stream" in used:
-        out.extend(_STREAM_HOST_RUST)
+        out.extend(_stream_host_rust())
+    return out
+
+
+def _stream_host_rust() -> list[str]:
+    """The stream host runtime. In `_SECRET_MODE`, `revl_stream_record` — the ONE
+    choke point every stream host trace mark passes through, and the one that
+    interpolates a free-form `emit`ted item (`stream.emit {item}`) — first reads
+    the mark through the registry, so a held `Secret[T]` an item quotes never
+    reaches `revl_stream_marks()`. Byte-identical to before outside secret mode
+    (the golden oracle and the selfhost mirror both run with it off)."""
+    if not _SECRET_MODE:
+        return _STREAM_HOST_RUST
+    out: list[str] = []
+    for line in _STREAM_HOST_RUST:
+        out.append(line)
+        if line == "fn revl_stream_record(mark: String) {":
+            out.append("    let mark = revl_redact_text(mark);")
     return out
 
 
@@ -3354,12 +3544,20 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 **{p: _param_type(env, key, original_mname, p)
                    for p in method.get("params") or []},
             }
+            # item 421 F6: a parameter the service declared `Secret[T]` is a
+            # declared DISCLOSURE RECEIVER; registering it at the head is what
+            # lets every free-form sink scrub it once the body hands it on.
+            secret_params = _secret_method_params(
+                env, key, original_mname, method.get("params") or [])
+            mark = "".join(f"revl_mark_secret(&{p}); " for p in secret_params)
             if _method_has_effectful_steps(method):
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
+                if secret_params:
+                    out.append(f"        {mark.rstrip()}")
                 _method_body_lines(env, method, out, indent=2)
                 out.append("    }")
             else:
-                out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {_method_body_pure_new(env, method)} }}")
+                out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {mark}{_method_body_pure_new(env, method)} }}")
         out.append("}")
         out.append("")
 
@@ -3400,6 +3598,10 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     if env.needs_teardown:
         _emit_teardown_begin(env, out, indent=3)
     out.extend(_emit_config_application(component, config_ty, indent=3))
+    # item 421 F6: a `Secret[T]` config field is registered at load, right after
+    # config is applied and before any effect can quote it. The value arrives
+    # once, through this closure (the go tier registers at `Load<Comp>`).
+    out.extend(_secret_config_mark(component.get("config") or [], indent=3))
     out.extend(_emit_provide_config_local(component, indent=3))
     # Realm isolation is NOT applied here. cordis evaluates a plugin's reactive
     # `Inject` gate against the context the plugin is registered on, before this
@@ -3669,7 +3871,13 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
                 **{p: _param_type(env, key, mname, p)
                    for p in method.get("params") or []},
             }
-            out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {_method_body(env, method)} }}")
+            # item 421 F6: register a `Secret[T]` provide-method parameter (the
+            # declared receiver) at the method head, so a body that hands it on
+            # to a free-form sink is scrubbed.
+            secret_params = _secret_method_params(
+                env, key, mname, method.get("params") or [])
+            mark = "".join(f"revl_mark_secret(&{p}); " for p in secret_params)
+            out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {mark}{_method_body(env, method)} }}")
         out.append("}")
         out.append("")
 
@@ -3689,6 +3897,10 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     if env.needs_teardown:
         _emit_teardown_begin(env, out, indent=3)
     out.extend(_emit_config_application(component, config_ty, indent=3))
+    # item 421 F6: a `Secret[T]` config field is registered at load, right after
+    # config is applied and before any effect can quote it. The value arrives
+    # once, through this closure (the go tier registers at `Load<Comp>`).
+    out.extend(_secret_config_mark(component.get("config") or [], indent=3))
     out.extend(_emit_provide_config_local(component, indent=3))
     _emit_req_bindings(env, cname, out, indent=3)
     for step in component.get("body") or []:
@@ -6310,7 +6522,23 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
                 f"extern `{name}` has no @rs body — not portable to this backend "
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
-        out.append(f"fn {name}({params}) -> {returns} {{")
+        # item 421 F6, the origin end: `taint.py` strips the qualifier before
+        # lowering, so `secret_return` is the only surviving record that this
+        # extern's declared return was `Secret[T]`. The verbatim @rs body keeps
+        # the declared name's signature under a private name and the public one
+        # registers what it returns, so no call site changes.
+        secret_return = bool(_SECRET_MODE and ext.get("secret_return"))
+        if secret_return:
+            impl = f"_revl_secret_{name}"
+            forward = ", ".join(_ident(p.get("name"), "extern parameter name")
+                                for p in ext.get("params") or [])
+            out.append(f"fn {name}({params}) -> {returns} {{")
+            out.append(f"    revl_secret_result({impl}({forward}))")
+            out.append("}")
+            out.append("")
+            out.append(f"fn {impl}({params}) -> {returns} {{")
+        else:
+            out.append(f"fn {name}({params}) -> {returns} {{")
         # item 378 Stage 5: a config extern binds `_revl_config` as the first
         # body line; None for a no-config extern (byte-identical body splice).
         config_bind = _rust_extern_config_bind(ext)
@@ -7093,6 +7321,12 @@ def _revl_record_preamble() -> list[str]:
         "/// it returns, so a crash after this call still leaves the inverse",
         "/// re-issuable from the log alone. No-op when `REVL_WAL` is unset.",
         "pub fn revl_record_transactional(receiver: &str, method: &str, args: Vec<String>) {",
+        # item 421 F6: the WAL is a plaintext file at rest. A descriptor
+        # argument is a stringified witness, so in secret mode it reads through
+        # the registry before it is written; outside it the line is absent and
+        # the record is byte-identical to before.
+        *(["    let args: Vec<String> = args.into_iter().map(revl_redact_text).collect();"]
+          if _SECRET_MODE else []),
         "    if let Some(sink) = revl_wal_sink() {",
         "        let mut wal = sink.lock().unwrap();",
         "        let seq = wal.seq;",
@@ -7583,6 +7817,12 @@ def _emit_components(ir: dict, components: list) -> list[str]:
     out: list[str] = []
     out.extend(_emit_service_traits(ir.get("services") or {}, ir.get("types") or {}))
     out.extend(_emit_host_stubs(ir))
+    # item 421 F6: the declared-Secret[T] runtime registry, emitted once, only
+    # for a document that declares one (`_SECRET_MODE`). A secret-free document
+    # carries none of it, so every existing golden and the selfhost mirror stay
+    # byte-identical.
+    if _SECRET_MODE:
+        out.extend(_emit_secret_registry())
     if _uses_timer(components) or _tests_use_advance(ir.get("tests") or []):
         out.extend(_revl_timer_preamble())
     if _uses_stdlib(ir):
@@ -7798,7 +8038,7 @@ def emit(ir: dict, record: bool = False) -> str:
     recording preamble and the per-descriptor `revl_record_transactional` calls.
     Mirrors backends/go/emit.py's `emit(..., record=...)`.
     """
-    global _RECORD_MODE
+    global _RECORD_MODE, _SECRET_MODE
     _RECORD_MODE = record
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
@@ -7808,13 +8048,21 @@ def emit(ir: dict, record: bool = False) -> str:
 
     _refuse_fault_tests(ir)
 
-    version = ir.get("ir_version")
-    if version == 1:
-        return _emit_v1(ir)
-    if version == 2:
-        return _emit_v2(ir)
-    if version == 3:
-        return _emit_v3(ir)
+    # item 421 F6: secret mode is a pure function of the IR (does it declare a
+    # `Secret[T]`?), saved/restored so a caller emitting several documents is
+    # not left in secret mode by a previous one.
+    saved_secret = _SECRET_MODE
+    _SECRET_MODE = _declares_secret(ir)
+    try:
+        version = ir.get("ir_version")
+        if version == 1:
+            return _emit_v1(ir)
+        if version == 2:
+            return _emit_v2(ir)
+        if version == 3:
+            return _emit_v3(ir)
+    finally:
+        _SECRET_MODE = saved_secret
     raise EmitError(
         f"unsupported ir_version: {version!r} — the Rust backend targets "
         f"ir_version 1, 2 (realms), and 3 (types/functions/match)"
