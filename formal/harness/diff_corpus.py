@@ -86,6 +86,7 @@ from revl import recovery
 from revl.compiler import compile_source
 from revl.diagnostics import classify
 from revl.errors import RevlError
+from revl.typecheck import _HOST_ACQUIRE_VERBS  # the shipped acquire-verb table
 from revl.wal import WAL_GUARANTEE, WAL_VERSION
 import runtime as _rt  # backends/python/runtime.py — the reference teardown
 from revl.parser import (
@@ -541,6 +542,161 @@ def _isolate_map(comp) -> dict[str, str]:
     return out
 
 
+# --------------------------------------------------------- host acquisition
+#
+# A HOST acquire verb (`Pool.open`, `Map.new`, `Stream.source`) opens a host
+# resource whose release is a SEPARATE verb, so it is legal ONLY as the
+# acquisition of an `effect <acquire> undo <release>` bracket — the one
+# construct that registers the release with the activation's teardown
+# accumulator (`typecheck._HOST_ACQUIRE_VERBS`,
+# `lower._refuse_unbracketed_host_acquire`). Anywhere else — a plain `let`, an
+# `emit` expression, a teardown slot, or a `fn` body a component reaches — the
+# resource is acquired irreversibly (G4, category `acquire`).
+#
+# This is the SAME G4 guarantee the marker rule serves, over a different fact:
+# not "is this crossing marked" but "does this host acquisition sit where its
+# release is registered". The exporter carries the fact and its POSITION; the
+# model owns the verb table and states the rule (`Oracle.hostAcquireOK`),
+# exactly as the exporter carries a call's `emit` context and the model owns
+# the marker rule (issue 334).
+
+
+def _host_dotted(callee: object) -> str | None:
+    """The dotted verb of a `Type.method(..)` call — a host-object family
+    surface — or None. Only a CAPITALISED root is a host family constructor
+    (`Pool.open`, `Map.new`); a lower-cased receiver (`pool.close`) is a
+    method on a bound local, never a host acquisition."""
+    rt = _route(callee)
+    if rt and rt[1] and rt[0][:1].isupper():
+        return f"{rt[0]}.{rt[1]}"
+    return None
+
+
+def _host_calls(node, pos: str, out: list[tuple[str, str]]) -> None:
+    """Collect (verb, position) for every host-family call in `node`.
+
+    Position is `bracket` when the verb is the ROOT of an `effect`'s
+    acquisition expression (the only legal site), and otherwise the site the
+    checker names: `undo` for a teardown slot, `emit` for an emit expression,
+    `plain` for everything else. Identity, not shape: only the bracket's own
+    root call is `bracket`, so `effect wrap(Pool.open(..)) undo ..` — a pool
+    the inverse never names — is `plain`, refused exactly as the checker
+    refuses it."""
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return
+    if isinstance(node, (EmitStmt, EmitExpr)):
+        for f in dataclasses.fields(node):
+            _host_calls(getattr(node, f.name), "emit", out)
+        return
+    if type(node).__name__ in ("EffectStmt", "LetEffect"):
+        acq = getattr(node, "acquire", None)
+        undo = getattr(node, "undo", None)
+        if isinstance(acq, ExprCall):
+            verb = _host_dotted(acq.callee)
+            if verb is not None:
+                out.append((verb, "bracket"))
+            for a in acq.args:
+                _host_calls(a, "plain", out)
+        else:
+            _host_calls(acq, "plain", out)
+        _host_calls(undo, "undo", out)
+        return
+    if isinstance(node, ExprCall):
+        verb = _host_dotted(node.callee)
+        if verb is not None:
+            out.append((verb, pos))
+        for a in node.args:
+            _host_calls(a, pos, out)
+        return
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            _host_calls(getattr(node, f.name), pos, out)
+        return
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            _host_calls(x, pos, out)
+
+
+def _host_calls_flat(node, out: list[tuple[str, str]]) -> None:
+    """Every host-family call in `node` as position `fn`, IGNORING effect
+    structure: a reached `fn` body is refused for any host acquisition
+    regardless of a bracket, because it has no teardown accumulator to hold
+    the release (`lower._scan`)."""
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return
+    if isinstance(node, ExprCall):
+        verb = _host_dotted(node.callee)
+        if verb is not None:
+            out.append((verb, "fn"))
+        for a in node.args:
+            _host_calls_flat(a, out)
+        return
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            _host_calls_flat(getattr(node, f.name), out)
+        return
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            _host_calls_flat(x, out)
+
+
+def _named_call_roots(node, out: set[str]) -> None:
+    """The receiver roots of every call in `node` — the fn-call graph seed."""
+    if node is None or isinstance(node, (str, int, float, bool)):
+        return
+    if isinstance(node, ExprCall):
+        rt = _route(node.callee)
+        if rt:
+            out.add(rt[0])
+        for a in node.args:
+            _named_call_roots(a, out)
+        return
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            _named_call_roots(getattr(node, f.name), out)
+        return
+    if isinstance(node, (list, tuple)):
+        for x in node:
+            _named_call_roots(x, out)
+
+
+def _reached_fns(comp, fns: dict) -> set[str]:
+    """The named functions a component body reaches, transitively — the
+    checker's `_scan` reach (`lower.py`). A host acquisition in one of these
+    is refused because residue is defined against the ACTIVATION whose
+    teardown the helper contributes nothing to; a `pub fn` no component reaches
+    is a library entry point revl promises nothing about, and is not here."""
+    frontier: set[str] = set()
+    for stmt in comp.body:
+        _named_call_roots(stmt, frontier)
+    frontier &= set(fns)
+    reached: set[str] = set()
+    while frontier:
+        name = frontier.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        callees: set[str] = set()
+        _named_call_roots(fns[name].body, callees)
+        frontier |= (callees & set(fns)) - reached
+    return reached
+
+
+def _host_acquire_facts(comp, fns: dict) -> list[tuple[str, str]]:
+    """Every host-family acquisition a component's reachable code names, with
+    its position. The component's own statements keep their structural
+    position (a bracket root is legal); a reached `fn` body has no teardown
+    accumulator at all, so every host acquisition in one is `fn` — illegal
+    wherever it sits, matching the checker's blanket refusal in a reached fn."""
+    out: list[tuple[str, str]] = []
+    for stmt in comp.body:
+        _host_calls(stmt, "plain", out)
+    for name in sorted(_reached_fns(comp, fns)):
+        for stmt in fns[name].body:
+            _host_calls_flat(stmt, out)
+    return out
+
+
 def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
     """Parse the corpus; return (tsv rows, per-file facts, census)."""
     tsv: list[str] = []
@@ -583,6 +739,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 tsv.append("\t".join(["Q", rel, svc, meth, e]))
         emitting = _fn_emitting(prog)
         templates = _spawn_templates(prog)
+        fns_by_name = {fn.name: fn for fn in prog.fn_decls}
         # provide-key -> service, file-wide (children resolve handle receivers).
         psvc = {c.name: {k: s for k, s, _ln in c.provides} for c in prog.components}
 
@@ -665,6 +822,13 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             caps_seen.update(act_reach)
             for cap in sorted(act_reach):
                 tsv.append("\t".join(["A", rel, c.name, cap]))
+
+            # host acquisition facts (HA): each host-family acquisition the
+            # component's reachable code names, with the POSITION that decides
+            # its legality. The model owns the verb table and states the rule
+            # (issue 334); the exporter carries where each acquisition sits.
+            for verb, position in _host_acquire_facts(c, fns_by_name):
+                tsv.append("\t".join(["HA", rel, c.name, verb, position]))
 
             # provide-method reach (F): emission caps a method's body crosses
             # (all-call) — the bound check's left side and, with A, the
@@ -1574,6 +1738,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     frows = [r for r in rows if r and r[0] == "F" and len(r) == 7]
     krows = [r for r in rows if r and r[0] == "K" and len(r) == 5]
     srows = [r for r in rows if r and r[0] == "S" and len(r) == 4]
+    harows = [r for r in rows if r and r[0] == "HA" and len(r) == 5]
 
     ems_by_file: dict[str, set[tuple[str, str]]] = {}
     bounds_by_file: dict[tuple[str, str, str], tuple[str, set[str]]] = {}
@@ -1621,7 +1786,15 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             u[2] == compn and ((u[3] == "emit") != ((u[5], u[6]) in ems))
             for u in urows if u[1] == rel
         )
-        comps[(rel, compn)] = "fail" if raw else "ok"
+        # HA row: [HA, file, comp, verb, position]. The same G4 guarantee over
+        # the acquisition fact: a host acquire verb outside a `bracket` is
+        # refused (issue 334). The verb table is the SHIPPED one — this side is
+        # the checker's, and the Lean oracle carries its own matching copy.
+        acquire = any(
+            h[2] == compn and h[3] in _HOST_ACQUIRE_VERBS and h[4] != "bracket"
+            for h in harows if h[1] == rel
+        )
+        comps[(rel, compn)] = "fail" if (raw or acquire) else "ok"
 
     providers: dict[tuple[str, str, str, str, str], str] = {}
     fmethods: dict[tuple[str, str, str, str, str], set[str]] = {}
@@ -1737,27 +1910,18 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         align[key] = align.get(key, 0) + 1
         samples.setdefault(key, []).append(rel)
 
-    # G4 refusal CATEGORIES the shaped model does not cover. The model's G4
-    # fragment is the MARKER rule — a classified statement's marker presence
-    # against the interface's declared emission, over crossings it can resolve
-    # to a (service, method). `acquire` is a different rule under the same
-    # guarantee: a HOST acquire verb (`Pool.open`) called anywhere but an
-    # acquisition bracket, where the release is registered. There is no host
-    # verb in the model's vocabulary at all, so it cannot see one, and bucketing
-    # by the code letter alone reads that as the model being weaker than the
-    # checker on the rule it does model.
-    #
-    # This is not a new exemption, only an explicit one: the corpus already
-    # carries two G4-coded host/extern acquisition refusals the model does not
-    # model — `g4_missing_undo.rvl` and `v2_extern_acquire_no_undo.rvl` — and
-    # both escape `missed-G4` today by accident, one because the PARSER refuses
-    # it before the model sees it and one because its file declares no
-    # component. Naming the category keeps the fatal bucket pointed at the
-    # fragment the model actually covers, and a G4 refusal in ANY other
-    # category is fatal exactly as before. Modelling host acquisition — a
-    # verb table, an acquisition-position fact and the Lean rule over it — is
-    # its own piece of work.
-    OUT_OF_FRAGMENT_G4 = {"acquire"}
+    # The model covers BOTH G4 rules now. The MARKER rule — a classified
+    # statement's marker presence against the interface's declared emission,
+    # over crossings resolved to a (service, method) — is `Oracle.g4OK`. The
+    # ACQUIRE rule — a HOST acquire verb (`Pool.open`) legal only as the
+    # acquisition of an `effect … undo …` bracket, where its release is
+    # registered — is `Oracle.hostAcquireOK` over the `HA` position facts
+    # (issue 334). So a G4 refusal is fatal in EVERY category again: there is
+    # no out-of-fragment exemption. The two G4-coded refusals the model still
+    # cannot see — `g4_missing_undo.rvl` and `v2_extern_acquire_no_undo.rvl` —
+    # never reach this loop: one is refused at PARSE and one declares no
+    # component, so both are reported by the no-manifest census below, not
+    # bucketed here.
 
     def checker_code(rel: str) -> tuple[str, str]:
         try:
@@ -1782,8 +1946,6 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # model does not — the model is stricter than the fragment it
             # covers, which is a finding to chase, not a licence to relax it.
             record("agree-accept" if formal_clean else "formal-strict", rel)
-        elif code == "G4" and category in OUT_OF_FRAGMENT_G4:
-            record("out-of-fragment-G4", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
         elif code in ("G2", "G3"):
