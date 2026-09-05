@@ -232,6 +232,29 @@ ISSUE_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+# A private SECURITY-ADVISORY citation, which is the tracked state record for
+# a security item. CONTRIBUTING.md rule 4 and SECURITY.md route a soundness or
+# audit-surface escape to a private GitHub Security Advisory, NEVER a public
+# issue, because this repository is public and an issue is a disclosure. So an
+# audit item can never satisfy --require-issue by citing a public issue, and
+# demanding one from it would keep --require-issue off the lint job forever.
+# It is tracked, just privately. This accepts that record: a GHSA id, the
+# advisory URL it lives at, or the words "security advisory/advisories".
+#
+# The bound is the phrase "SECURITY advisory", not a bare "advisory". The
+# roadmap uses "advisory" for a different thing all over the file ("the needs
+# gate is advisory", "this gate stays advisory"); matching that would let an
+# ordinary item skip the issue requirement by accident. A GHSA id and the
+# advisory URL are unambiguous on their own.
+ADVISORY_RE = re.compile(
+    r"""(
+          \bGHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}\b
+        | security/advisories/
+        | \bsecurity\s+advisor(?:y|ies)\b
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
 # Sections whose items are historical record, not tracked work.
 UNTRACKED_SECTIONS = ("Done (dependency order as built)", "Declined, deliberately")
 
@@ -640,12 +663,13 @@ def issue_findings(text: str) -> list[str]:
             continue
         if it["section"] in UNTRACKED_SECTIONS:
             continue
-        if ISSUE_RE.search(it["body"]):
+        if ISSUE_RE.search(it["body"]) or ADVISORY_RE.search(it["body"]):
             continue
         title = re.sub(r"\s+", " ", it["text"])[:96]
         findings.append(
             f"L{it['line']}: item {it['number']} ({it['status']}, section "
-            f"{it['section']!r}) cites no GitHub issue.\n    {title}"
+            f"{it['section']!r}) cites no GitHub issue or security advisory.\n"
+            f"    {title}"
         )
     return findings
 
@@ -1645,8 +1669,9 @@ def main(argv: list[str] | None = None) -> int:
                          "unaffected.")
     ap.add_argument("--require-issue", action="store_true",
                     help="ALSO require every open or partial top-level item to "
-                         "cite a GitHub issue. Off until the issue migration "
-                         "happens; see CONTRIBUTING.md 'Tracking work'.")
+                         "cite a GitHub issue, or, for a security item, a "
+                         "private security advisory (GHSA id or advisory URL). "
+                         "See CONTRIBUTING.md 'Tracking work'.")
     ap.add_argument("--check-contradiction", action="store_true",
                     help="(A) ALSO fail when a closure claim's own scope of "
                          "text says the work is not done. The item 422 shape.")
@@ -1714,7 +1739,8 @@ def main(argv: list[str] | None = None) -> int:
         if extra:
             findings.append(
                 f"--require-issue: {len(extra)} open/partial item(s) cite no "
-                f"GitHub issue:\n" + "\n".join("  " + e for e in extra)
+                f"GitHub issue or security advisory:\n"
+                + "\n".join("  " + e for e in extra)
             )
     for flag, label, produce in (
         (args.check_contradiction, "--check-contradiction",
