@@ -830,13 +830,21 @@ def _field_read(target: str, name: str, opt: bool = False,
     dispatch on the receiver's shape — but the dispatch is one `isinstance`,
     which does not need a Python frame around it. `_revl_field(p, 'x')` cost a
     frame per field read, on every record-shaped path in the program (roadmap
-    item 436 F4). What is left — the `isinstance` itself — is the part only a
-    frontend marker can remove, and item 445 owns that.
+    item 436 F4). What is left — the `isinstance` itself — cannot be dropped by a
+    static record-type marker alone: a field read off a record-TYPED value still
+    has to tolerate a host object an extern handed back under that type (the
+    `getattr` arm, docs/records.md), so removing the dispatch needs a
+    value-PROVENANCE fact (the value was built here, as a dict), not just its
+    type.
 
     `opt` is the item-380 TOTAL read: an absent key (or a non-record receiver)
-    is the Opt's empty case, never a raise. `rereadable` says the caller has
-    already bound the target to a name (the `?.` chain has), so no temp is
-    needed.
+    is the Opt's empty case, never a raise. `rereadable` says the target is
+    ALREADY a stable name that can be read twice with no re-evaluation and no
+    side effect — either the caller bound it (the `?.` chain has) or it is itself
+    a bare variable — so the `_fv :=` re-read temp is pure overhead and is
+    dropped (item 436 F4: the `inline field _fv :=` cost the audit measured, on
+    the common bare-name `p.x`). A non-atom target (`f(x).x`, `a.b.x`, `xs[i].x`)
+    still binds the temp, so the receiver is evaluated exactly once.
     """
     if rereadable:
         got, tmp = target, target
@@ -1474,8 +1482,11 @@ class _ComponentEmitter:
             # record literals are dicts; ADT payloads are objects — the read
             # dispatches on the shape INLINE (item 436 F4). An `Opt[T]`-declared
             # field reads TOTAL (item 380): absent -> None, the Opt's empty case.
-            return _field_read(self._expr(expr.get("target"), where), name,
-                               opt=bool(expr.get("opt")))
+            # A bare-variable target needs no `_fv :=` re-read temp (item 436 F4).
+            tgt = expr.get("target")
+            atom = isinstance(tgt, dict) and tgt.get("kind") == "var"
+            return _field_read(self._expr(tgt, where), name,
+                               opt=bool(expr.get("opt")), rereadable=atom)
         if kind == "index":
             return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
         if kind == "bin":
@@ -3200,8 +3211,12 @@ def _expr(node: dict) -> str:
         # record literals are dicts; ADT payloads are objects — the read
         # dispatches on the shape INLINE (item 436 F4). An `Opt[T]`-declared
         # field reads TOTAL (item 380): absent -> None, the Opt's empty case.
-        return _field_read(_expr(node["target"]), node["name"],
-                           opt=bool(node.get("opt")))
+        # A bare-variable target reads twice with no re-eval, so it needs no
+        # `_fv :=` temp (item 436 F4: drop the measured `inline field _fv :=`).
+        tgt = node["target"]
+        atom = isinstance(tgt, dict) and tgt.get("kind") == "var"
+        return _field_read(_expr(tgt), node["name"],
+                           opt=bool(node.get("opt")), rereadable=atom)
     if kind == "index":
         return f"{_expr(node['target'])}[{_expr(node['index'])}]"
     if kind == "if":

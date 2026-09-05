@@ -210,8 +210,10 @@ fn bounded(operation: Str, width: Str) -> Str {
 // The reference's `_field_read` (item 436 F4): `p.x` INLINE, not through a
 // `_revl_field` call. Record literals are dicts and ADT payloads are objects, so
 // the read dispatches on the receiver's shape — but one `isinstance` needs no
-// python frame around it. `rereadable` says the caller already bound the target
-// to a name (the `?.` chain has), so no temp is needed.
+// python frame around it. `rereadable` says the target is already a stable name
+// that can be read twice with no re-eval or side effect — the caller bound it
+// (the `?.` chain has) or it is itself a bare variable — so the `_fv :=` re-read
+// temp is dropped (item 436 F4).
 fn field_read(target: Str, name: Str, rereadable: Bool, opt: Bool) -> Str {
   var tmp = "_fv"
   var got = `(_fv := ${target})`
@@ -741,7 +743,10 @@ fn expr_inner(node: Any) -> Str {
   }
   if (kind == "field") {
     if (value_bool(value_field(node, "sized_length"))) { return `len(${expr(value_field(node, "target"))})` }
-    return field_read(expr(value_field(node, "target")), py_repr(value_field(node, "name")), false, value_bool(value_field(node, "opt")))
+    // A bare-variable target reads twice with no re-eval, so it needs no
+    // `_fv :=` temp (item 436 F4: drop the measured `inline field _fv :=`).
+    let atom = node_kind(value_field(node, "target")) == "var"
+    return field_read(expr(value_field(node, "target")), py_repr(value_field(node, "name")), atom, value_bool(value_field(node, "opt")))
   }
   if (kind == "index") {
     return `${expr(value_field(node, "target"))}[${expr(value_field(node, "index"))}]`
@@ -1465,7 +1470,9 @@ fn cexpr(node: Any) -> Str {
   }
   if (kind == "field") {
     if (value_bool(value_field(node, "sized_length"))) { return `len(${cexpr(value_field(node, "target"))})` }
-    return field_read(cexpr(value_field(node, "target")), py_repr(value_field(node, "name")), false, value_bool(value_field(node, "opt")))
+    // A bare-variable target needs no `_fv :=` re-read temp (item 436 F4).
+    let atom = node_kind(value_field(node, "target")) == "var"
+    return field_read(cexpr(value_field(node, "target")), py_repr(value_field(node, "name")), atom, value_bool(value_field(node, "opt")))
   }
   if (kind == "index") {
     return `${cexpr(value_field(node, "target"))}[${cexpr(value_field(node, "index"))}]`
