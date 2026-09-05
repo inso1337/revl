@@ -308,7 +308,10 @@ fn is_builtin_ctor(name: Str) -> Bool {
 // up the active rename for free, exactly as the reference's `rename` recursion.
 // `fb` holds the module-wide borrowed parameter indices; `bp` holds the borrowed
 // parameter names in the current function (empty in component methods).
-type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str] }
+// `flb` holds the module-wide borrowed LIST parameter indices (the list analog
+// of `fb`); `lp` holds the borrowed list-parameter names in the current function
+// (the list analog of `bp`).
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str], flb: Map[Str, List[Int]], lp: Map[Str, Str] }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds `_V3Ctx` per function-list, reusing
 // the same type tables); paired with the type-NAME set for `rust_type`.
@@ -322,15 +325,15 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
 }
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
-  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp }
+  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
 }
 // Swap in a fresh rename map (the component-capture scope for one render).
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
-  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp }
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
 }
 // Swap in a fresh var_types map (a provide-method seeds params/map-bindings).
 fn set_vts(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
-  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp }
+  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
@@ -427,6 +430,12 @@ fn split_generic(inner: Str) -> List[Str] {
 fn list_element_type(t: Str) -> Str {
   if (t.startsWith("List[") && t.endsWith("]")) { return t.slice(5, t.length() - 1) }
   return ""
+}
+
+// `_is_list_type`: a declared `List[..]` surface type, the only shape the
+// read-only list-parameter borrow (below) lowers to a `&[..]` slice.
+fn is_list_type(t: Str) -> Bool {
+  return t.startsWith("List[") && t.endsWith("]")
 }
 
 // `_rust_type`: scalars, the `List`/`Opt`/`Map`/`Result` generics, a user
@@ -873,8 +882,111 @@ fn compute_str_param_borrows(functions: List[Any]) -> Map[Str, List[Int]] {
   return borrow
 }
 
+// `_compute_list_param_borrows`'s `escapes`: does any candidate LIST parameter
+// reach a position that consumes (rather than reads) it? Indexing, `len`, and
+// the read-only `length`/`at` builtins only read; a free-function call reads a
+// slot the callee itself lends; every other slot moves the value. Mirrors the
+// reference's nested `escapes`.
+fn list_param_escapes(node: Any, candidates: Map[Str, Str], safe: Bool, borrow: Map[Str, List[Int]], names: Map[Str, Str]) -> Bool {
+  let vk = value_kind(node)
+  if (vk == "list") {
+    for (item of value_list(node)) {
+      if (list_param_escapes(item, candidates, safe, borrow, names)) { return true }
+    }
+    return false
+  }
+  if (vk != "record") { return false }
+  let k = node_kind(node)
+  if (k == "var" || k == "name" || k == "req") {
+    var ident = value_str(value_field(node, "id"))
+    if (ident == "") { ident = value_str(value_field(node, "name")) }
+    return candidates.has(ident) && !safe
+  }
+  if (k == "len" || k == "index") {
+    return list_param_escapes(value_field(node, "target"), candidates, true, borrow, names)
+  }
+  if (k == "builtin") {
+    let method = value_str(value_field(node, "method"))
+    let read = method == "length" || method == "at"
+    if (list_param_escapes(value_field(node, "target"), candidates, true, borrow, names)) { return true }
+    for (a of value_list(value_field(node, "args"))) {
+      if (list_param_escapes(a, candidates, read, borrow, names)) { return true }
+    }
+    return false
+  }
+  var callee_name = ""
+  if (k == "fn") { callee_name = value_str(value_field(node, "name")) }
+  if (k == "call") {
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) == "var") { callee_name = value_str(value_field(callee, "name")) }
+  }
+  if (callee_name != "" && names.has(callee_name)) {
+    let args = value_list(value_field(node, "args"))
+    var i = 0
+    while (i < args.length()) {
+      if (list_param_escapes(args[i], candidates, borrow_slot(borrow, callee_name, i), borrow, names)) { return true }
+      i = i + 1
+    }
+    return false
+  }
+  for (key of value_keys(node)) {
+    if (list_param_escapes(value_field(node, key), candidates, false, borrow, names)) { return true }
+  }
+  return false
+}
+
+// `_compute_list_param_borrows`: internal `List` parameters used only by
+// read-only operations lower to a `&[..]` slice instead of an owned `Vec`, so
+// the token stream threaded through a self-host scan chain is lent, not cloned,
+// at every call. Start with every non-`pub` `List` parameter a candidate and
+// drop a whole function's set the moment one candidate escapes (the reference's
+// all-or-nothing per-function fixpoint), settling because the set only shrinks.
+fn compute_list_param_borrows(functions: List[Any]) -> Map[Str, List[Int]] {
+  var names: Map[Str, Str] = Map.empty()
+  for (f of functions) { names = names.set(value_str(value_field(f, "name")), "1") }
+  var borrow: Map[Str, List[Int]] = Map.empty()
+  for (f of functions) {
+    var slots: List[Int] = []
+    let params = value_list(value_field(f, "params"))
+    var i = 0
+    while (i < params.length()) {
+      if (!value_bool(value_field(f, "public")) && is_list_type(value_str(value_field(params[i], "type")))) {
+        slots = slots.push(i)
+      }
+      i = i + 1
+    }
+    borrow = borrow.set(value_str(value_field(f, "name")), slots)
+  }
+  var changed = true
+  while (changed) {
+    changed = false
+    for (f of functions) {
+      let fname = value_str(value_field(f, "name"))
+      let slots = borrow.lookup(fname) ?? []
+      let params = value_list(value_field(f, "params"))
+      var candidates: Map[Str, Str] = Map.empty()
+      for (i of slots) { candidates = candidates.set(value_str(value_field(params[i], "name")), "1") }
+      if (slots.length() > 0 && list_param_escapes(value_field(f, "body"), candidates, false, borrow, names)) {
+        borrow = borrow.set(fname, [])
+        changed = true
+      }
+    }
+  }
+  return borrow
+}
+
+// `_borrow_list_arg`: an argument bound for a `&[..]` slot. A parameter already
+// lowered to a slice passes straight through; every other list expression is
+// lent with `&`, parenthesized when it is not atomic.
+fn borrow_list_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  if (ctx.lp.has(ref_name(arg_node))) { return rendered }
+  if (is_atomic(node_kind(arg_node))) { return `&${rendered}` }
+  return `&(${rendered})`
+}
+
 fn call_arg(callee: Str, index: Int, node: Any, rendered: Str, ctx: Ctx) -> Str {
   if (borrow_slot(ctx.fb, callee, index)) { return borrow_str_arg(node, rendered, ctx) }
+  if (borrow_slot(ctx.flb, callee, index)) { return borrow_list_arg(node, rendered, ctx) }
   return by_value_arg(node, rendered, ctx)
 }
 
@@ -1067,6 +1179,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
   var vt = ctx.vt
   var rn = ctx.rn
   var bp = ctx.bp
+  var lp = ctx.lp
   var i = 0
   for (p of value_list(value_field(node, "params"))) {
     let name = value_str(p)
@@ -1075,6 +1188,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     vt = vt.set(name, ptype)
     rn = rn.remove(name)
     bp = bp.remove(name)
+    lp = lp.remove(name)
     var param = mangle(name)
     if (ptype != "" && !is_fn_type(ptype)) {
       param = `${param}: ${rust_type_t(ptype, ctx.tn)}`
@@ -1082,7 +1196,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     ps = ps.push(param)
     i = i + 1
   }
-  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp }
+  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp, flb: ctx.flb, lp: lp }
   return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), inner)} }`
 }
 
@@ -1394,6 +1508,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
 fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables) -> List[Str] {
   var out = []
   let borrow = compute_str_param_borrows(functions)
+  let list_borrow = compute_list_param_borrows(functions)
   for (fnode of functions) {
     let raw = value_str(value_field(fnode, "name"))
     let name = mangle(raw)
@@ -1402,19 +1517,26 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
     let body = value_list(value_field(fnode, "body"))
     var bp: Map[Str, Str] = Map.empty()
+    var lp: Map[Str, Str] = Map.empty()
     var ps = []
     var i = 0
     for (p of params) {
       let pname = value_str(value_field(p, "name"))
+      let raw_type = value_str(value_field(p, "type"))
       var ptype = rust_type_pos(value_field(p, "type"), tables.tn)
       if (borrow_slot(borrow, raw, i)) {
         ptype = "&str"
         bp = bp.set(pname, "1")
+      } else {
+        if (borrow_slot(list_borrow, raw, i)) {
+          ptype = `&[${rust_type_pos(strip_spaces(list_element_type(raw_type)), tables.tn)}]`
+          lp = lp.set(pname, "1")
+        }
       }
       ps = ps.push(`${mangle(pname)}: ${ptype}`)
       i = i + 1
     }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: bp }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: bp, flb: list_borrow, lp: lp }
     var returns = "()"
     if (!value_is_null(value_field(fnode, "returns"))) {
       returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
@@ -1984,7 +2106,7 @@ fn fr_map(ir: Any) -> Map[Str, Str] {
 // applies to method names; the simple path names them raw (mirrors the two
 // reference sites exactly). `effectful` gives the effectful body renderer +
 // the `self.ctx` field capture.
-fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool) -> List[Str] {
+fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], borrow: Map[Str, List[Int]], list_borrow: Map[Str, List[Int]], effectful: Bool, use_mname: Bool) -> List[Str] {
   let body = value_list(value_field(comp, "body"))
   let svc_methods = value_field(value_field(services, srv), "methods")
   var out = []
@@ -2004,7 +2126,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     var ret = "()"
     let r = value_field(svc_method, "returns")
     if (!value_is_null(r)) { ret = rust_type_t(r, tables.tn) }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty() }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty() }
     if (effectful && method_has_effectful_steps(method)) {
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} {`)
       let bl = method_body_lines(comp, method, services, ctx, 2)
@@ -2064,7 +2186,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
     out = out.push(`impl ${srv} for ${struct} {`)
-    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), false, false))
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), compute_list_param_borrows(value_list(value_field(ir, "functions"))), false, false))
     out = out.push("}")
     out = out.push("")
   }
@@ -2122,7 +2244,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     out = out.push("    ctx: Arc<cordis::Context>,")
     out = out.push("}")
     out = out.push(`impl ${srv} for ${struct} {`)
-    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), true, true))
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, compute_str_param_borrows(value_list(value_field(ir, "functions"))), compute_list_param_borrows(value_list(value_field(ir, "functions"))), true, true))
     out = out.push("}")
     out = out.push("")
   }
@@ -2477,9 +2599,10 @@ fn stdlib_helpers() -> List[Str] {
   return [
     "trait RevlStrOps {", "    fn revl_length(&self) -> i64;", "    fn revl_slice(&self, a: i64, b: i64) -> String;", "    fn revl_index_of(&self, needle: &str) -> i64;", "    fn revl_concat(&self, other: &str) -> String;", "    fn revl_split(&self, sep: &str) -> Vec<String>;", "    fn revl_repeat(&self, n: i64) -> String;", "    fn revl_starts_with(&self, prefix: &str) -> bool;", "    fn revl_ends_with(&self, suffix: &str) -> bool;", "}",
     "impl RevlStrOps for str {", "    fn revl_length(&self) -> i64 { self.chars().count() as i64 }", "    fn revl_slice(&self, a: i64, b: i64) -> String {", "        self.chars().skip(a.max(0) as usize).take((b - a).max(0) as usize).collect()", "    }", "    fn revl_index_of(&self, needle: &str) -> i64 {", "        match self.find(needle) {", "            Some(b) => self[..b].chars().count() as i64,", "            None => -1,", "        }", "    }", "    fn revl_concat(&self, other: &str) -> String { format!(\"{}{}\", self, other) }", "    fn revl_split(&self, sep: &str) -> Vec<String> {", "        if sep.is_empty() {", "            self.chars().map(|c| c.to_string()).collect()", "        } else {", "            self.split(sep).map(|s| s.to_string()).collect()", "        }", "    }", "    fn revl_repeat(&self, n: i64) -> String { self.repeat(n.max(0) as usize) }", "    fn revl_starts_with(&self, prefix: &str) -> bool { self.starts_with(prefix) }", "    fn revl_ends_with(&self, suffix: &str) -> bool { self.ends_with(suffix) }", "}",
-    "trait RevlStrListOps {", "    fn revl_join(&self, sep: &str) -> String;", "}", "impl RevlStrListOps for Vec<String> {", "    fn revl_join(&self, sep: &str) -> String { self.join(sep) }", "}",
+    "trait RevlStrListOps {", "    fn revl_join(&self, sep: &str) -> String;", "}", "impl RevlStrListOps for Vec<String> {", "    fn revl_join(&self, sep: &str) -> String { self.join(sep) }", "}", "impl RevlStrListOps for [String] {", "    fn revl_join(&self, sep: &str) -> String { self.join(sep) }", "}",
     "trait RevlListOps<T> {", "    fn revl_length(&self) -> i64;", "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T>;", "    fn revl_index_of(&self, needle: &T) -> i64;", "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T>;", "    fn revl_push(&self, item: T) -> Vec<T>;", "}",
     "impl<T: Clone + PartialEq> RevlListOps<T> for Vec<T> {", "    fn revl_length(&self) -> i64 { self.len() as i64 }", "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {", "        // JS slice semantics: out-of-range bounds clamp, never panic.", "        let len = self.len();", "        let a2 = (a.max(0) as usize).min(len);", "        let b2 = (b.max(0) as usize).min(len).max(a2);", "        self[a2..b2].to_vec()", "    }",     "    fn revl_index_of(&self, needle: &T) -> i64 {", "        self.iter().position(|x| x == needle).map(|i| i as i64).unwrap_or(-1)", "    }", "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T> {", "        let mut _v = self.clone(); _v.extend(other.iter().cloned()); _v", "    }", "    fn revl_push(&self, item: T) -> Vec<T> {", "        let mut _v = self.clone(); _v.push(item); _v", "    }", "}",
+    "impl<T: Clone + PartialEq> RevlListOps<T> for [T] {", "    fn revl_length(&self) -> i64 { self.len() as i64 }", "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {", "        let len = self.len();", "        let a2 = (a.max(0) as usize).min(len);", "        let b2 = (b.max(0) as usize).min(len).max(a2);", "        self[a2..b2].to_vec()", "    }", "    fn revl_index_of(&self, needle: &T) -> i64 { self.iter().position(|x| x == needle).map_or(-1, |i| i as i64) }", "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T> { let mut out = self.to_vec(); out.extend(other.iter().cloned()); out }", "    fn revl_push(&self, item: T) -> Vec<T> { let mut out = self.to_vec(); out.push(item); out }", "}",
   ]
 }
 
@@ -2628,7 +2751,7 @@ test "constructor lowers user variants and built-ins" {
   cp = cp.set("Node", "y")
   ca = ca.set("Leaf", "Tree")
   cp = cp.set("Leaf", "n")
-  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty() }
+  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty() }
   assert constructor(ctx, "Node", ["x"]) == "Tree::Node(x)"
   assert constructor(ctx, "Leaf", []) == "Tree::Leaf"
   assert constructor(ctx, "Some", ["v"]) == "Some(v)"
