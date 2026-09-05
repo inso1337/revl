@@ -394,17 +394,6 @@ UNGATED = {
     "revl_history_lifetime": "reads the recording",
     "revl_timeline": "reads the recording",
     "revl_inspect_step": "reads one recorded step",
-    # session-plane verbs that move a cursor or a workspace rather than the
-    # composition. They mutate SESSION state and are ungated today: the
-    # operator profile's grammar has no verb for them, and minting one is a
-    # policy decision for the profile's author, not a bug fix. Recorded here so
-    # the choice is visible rather than implied by absence.
-    "revl_call": "invokes a provided method; composes nothing new",
-    "revl_lease": "claims/releases a lease in the workspace book",
-    "revl_fork": "derives a fork hash; confirms nothing",
-    "revl_fork_confirm": "rewinds and branches the session workspace",
-    "revl_step_back": "moves the replay cursor",
-    "revl_replay_forward": "moves the replay cursor",
     "revl_replay_bisect": "binary-searches the recording for a predicate flip",
 }
 
