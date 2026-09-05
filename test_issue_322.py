@@ -32,7 +32,11 @@ component C requires db: Db provides cache: Cache {
 
 
 def test_async_acquisition_in_provide_method_let_effect_refused():
-    """Async acquisition in provide-method let-effect should raise EmitError."""
+    """A let-bound acquisition in a provide-method body is refused at the FRONTEND:
+    only `spawn` may be acquired there (src/revl/lower.py, item 386). That refusal
+    fires before emit for every non-spawn let-acquisition, so this async case never
+    reaches the Python emitter's own let-effect guard — the property (an async
+    let-acquisition in a provide method is refused) holds at compile time."""
     src = """
 service Db { fn q(sql: Str) -> Int  async fn aq(sql: Str) -> Int }
 service Cache { async fn set(key: Str) }
@@ -40,16 +44,10 @@ component C requires db: Db provides cache: Cache {
   provide cache { async fn set(key) { let result = effect db.aq(key) undo db.q(key)  return 0 } }
 }
 """
-    # Should compile in the frontend
-    ir = compile_source(src, "t.rvl")
-    assert ir
-    
-    # But Python backend should refuse at emission
-    from backends.python.emit import emit
-    with pytest.raises(Exception) as excinfo:
-        emit(ir)
-    
-    assert "async acquisition" in str(excinfo.value).lower() or "await" in str(excinfo.value).lower()
+    from revl.errors import RevlErrors
+    with pytest.raises(RevlErrors) as excinfo:
+        compile_source(src, "t.rvl")
+    assert "only `spawn` may be acquired inside a provide-method body" in str(excinfo.value)
 
 
 def test_sync_acquisition_in_provide_method_effect_works():
