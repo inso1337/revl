@@ -3164,9 +3164,14 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             left = _expr(expr["left"], ctx)
             right = _expr(expr["right"], ctx)
             shown = json.dumps(f"{left} {op} {right}")
+            condition = f"$revl_l {op} $revl_r"
+            if equality:
+                condition = "revlEq($revl_l, $revl_r)"
+                if expr["op"] in ("!=", "!=="):
+                    condition = f"!{condition}"
             # item 143: `$`-sigil temporaries can't collide with a user binding.
             out.append(f"{pad}{{ const $revl_l = {left}, $revl_r = {right};")
-            out.append(f"{pad}  if (!($revl_l {op} $revl_r)) throw new Error({shown} + "
+            out.append(f"{pad}  if (!({condition})) throw new Error({shown} + "
                        f'"\\n  left  = " + revlShow($revl_l) + '
                        f'"\\n  right = " + revlShow($revl_r)) }}')
         else:

@@ -207,6 +207,8 @@ CORPUS = [
     "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
     "branch_edges.rvl",
     "destructuring.rvl",
+    "property_edges.rvl",
+    "component_edges.rvl",
     "../emit_go_corpus/variants.rvl",
     "../emit_py_corpus/services_method_effects.rvl",
 ]
@@ -321,3 +323,21 @@ def test_destructuring_runtime(emitted, reference, tmp_path, side, expression, e
     proc = subprocess.run(["node", str(module)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("side", ["reference", "selfhost"])
+def test_structural_assertion_runtime(emitted, reference, tmp_path, side):
+    if shutil.which("node") is None:
+        pytest.skip("node not on PATH")
+    ir = compile_files([str(CORPUS_DIR / "property_edges.rvl")])
+    # Keep the runtime probe function-only; component output is checked by the oracle.
+    ir = {**ir, "components": [], "services": []}
+    src = reference.emit(ir) if side == "reference" else emitted["emit_ts_src"](ir)
+    (tmp_path / "runtime.ts").write_text("export const host = {};\n", encoding="utf-8")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    module = pkg / "mod.ts"
+    module.write_text(src + "\nconsole.log(list_equal());\n", encoding="utf-8")
+    proc = subprocess.run(["node", str(module)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "true"

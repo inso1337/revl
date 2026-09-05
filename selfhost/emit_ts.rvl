@@ -1188,10 +1188,17 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   if (kind == "un") { return render_un(node, counter, acx) }
   if (kind == "field") {
     let tr = paren_target(value_field(node, "target"), counter, acx)
+    if (value_bool(value_field(node, "sized_length"))) {
+      return { text: `revlLen(${tr.text})`, counter: tr.counter }
+    }
     return { text: member(tr.text, value_str(value_field(node, "name")), false), counter: tr.counter }
   }
   if (kind == "index") {
     let tr = paren_target(value_field(node, "target"), counter, acx)
+    let index = value_field(node, "index")
+    if (node_kind(index) == "lit" && value_kind(value_field(index, "value")) == "str") {
+      return { text: `${tr.text}[${json_dumps(value_field(index, "value"))}]`, counter: tr.counter }
+    }
     let ir = int_as_number(value_field(node, "index"), tr.counter, acx)
     return { text: `${tr.text}[${ir.text}]`, counter: ir.counter }
   }
@@ -1685,9 +1692,14 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
       let right = expr(value_field(e, "right"), left.counter, a)
       let tsop = ts_bin_op(op)
       let shown = json_dumps(`${left.text} ${tsop} ${right.text}`)
+      var condition = `$revl_l ${tsop} $revl_r`
+      if (list_contains(["==", "===", "!=", "!=="], op)) {
+        condition = "revlEq($revl_l, $revl_r)"
+        if (op == "!=" || op == "!==") { condition = `!${condition}` }
+      }
       return { lines: [
         `${pad}{ const $revl_l = ${left.text}, $revl_r = ${right.text};`,
-        `${pad}  if (!($revl_l ${tsop} $revl_r)) throw new Error(${shown} + "\n  left  = " + revlShow($revl_l) + "\n  right = " + revlShow($revl_r)) }`
+        `${pad}  if (!(${condition})) throw new Error(${shown} + "\n  left  = " + revlShow($revl_l) + "\n  right = " + revlShow($revl_r)) }`
       ], counter: right.counter }
     }
     let r = expr(e, counter, a)
@@ -2022,6 +2034,10 @@ fn ts_return_type_v1(v: Any, known_types: List[Str]) -> Str {
   return ts_type_v1(value_str(v), known_types)
 }
 
+fn is_map_cas(acq: Any) -> Bool {
+  return node_kind(acq) == "call" && node_method(acq) == "insert_if_absent"
+}
+
 // `_method_body`: steps inside a provide-method body. An `async` provide method
 // (services 2.0 §5) renders its body with `in_async` set (via `acx`), so the
 // item-141 await-seed fires on a req-keyed async-op call, and an explicit
@@ -2084,7 +2100,11 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
             } else {
               out = out.push(`${pad}  ${ar.text}`)
             }
-            out = out.push(`${pad}  return () => ${ur.text}`)
+            var inverse = `() => ${ur.text}`
+            if (has_bind && is_map_cas(value_field(step, "acquire"))) {
+              inverse = `${bind} ? ${inverse} : () => {}`
+            }
+            out = out.push(`${pad}  return ${inverse}`)
             out = out.push(`${pad}})`)
           } else {
             if (kind == "emit") {
@@ -2214,7 +2234,11 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     let b_site = `${comp_name}.body:${b_key}`
     let b_undo = call_method_name(value_field(step, "undo"))
     let b_crossing = `{ key: ${json_dumps(b_key)}, method: ${json_dumps(b_method)}, args: [], site: ${json_dumps(b_site)} }`
-    out = out.push(`${pad}yield ${frame_var}.bracket(${b_crossing}, ${json_dumps(b_undo)}, () => ${ur.text})`)
+    var inverse = `() => ${ur.text}`
+    if (kind == "let-effect" && is_map_cas(value_field(step, "acquire"))) {
+      inverse = `${ident(value_str(value_field(step, "bind")))} ? ${inverse} : () => {}`
+    }
+    out = out.push(`${pad}yield ${frame_var}.bracket(${b_crossing}, ${json_dumps(b_undo)}, ${inverse})`)
     return { lines: out, counter: ur.counter }
   }
   if (kind == "await") {
@@ -2991,6 +3015,7 @@ fn is_str_method(m: Str) -> Bool {
 
 fn uses_str_methods(n: Any) -> Bool {
   if (node_kind(n) == "len") { return true }
+  if (node_kind(n) == "field" && value_bool(value_field(n, "sized_length"))) { return true }
   if (node_kind(n) == "builtin" && is_str_method(node_method(n))) { return true }
   for (c of value_children(n)) {
     if (uses_str_methods(c)) { return true }
