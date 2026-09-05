@@ -1,8 +1,10 @@
-"""Supported Python process-lifetime filesystem root binding (API version 1).
+"""Supported, separately versioned Python filesystem host lifecycle APIs.
 
-Call before Session.load or any filesystem guard use. This configures only the
+Bind before Session.load or any filesystem guard use. This configures only the
 Python stdlib filesystem runtime, not arbitrary host code or sandbox grants.
-See docs/witnessed-fs.md for the lifetime and recovery limits.
+Committed sidecar cleanup is trusted-host-only and requires exclusive metadata
+write ownership and durable actual commit acknowledgment. See docs/witnessed-fs.md
+for the lifetime, cleanup concurrency contract, and recovery limits.
 """
 
 from importlib import import_module
@@ -20,10 +22,13 @@ if Path(_runtime.__file__).resolve() != (_backend / "revl_fs_workspace.py").reso
 
 PINNED_ROOT_API_VERSION = _runtime.PINNED_ROOT_API_VERSION
 bind_workspace_root = _runtime.bind_workspace_root
+COMMITTED_SIDECAR_API_VERSION = _runtime.COMMITTED_SIDECAR_API_VERSION
+finalize_committed_sidecar = _runtime.finalize_committed_sidecar
 FsOpError = _runtime.FsOpError
 ConfinementError = _runtime.ConfinementError
 
 __all__ = [
     "PINNED_ROOT_API_VERSION", "bind_workspace_root",
+    "COMMITTED_SIDECAR_API_VERSION", "finalize_committed_sidecar",
     "FsOpError", "ConfinementError",
 ]

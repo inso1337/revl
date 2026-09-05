@@ -29,6 +29,10 @@ runtime capability, versioned independently of `revl.gate`. Its process-lifetime
 physical-root binding and limits are specified in
 [witnessed-fs.md](witnessed-fs.md#python-process-lifetime-physical-root-binding-api-1).
 It neither changes a gate admission nor confines arbitrary host code.
+The same facade's separately versioned
+[committed-preimage finalizer](witnessed-fs.md#trusted-committed-preimage-cleanup-api-1)
+is trusted-host-only and requires authoritative commit ownership plus exclusive
+sidecar-directory write access; it is not a commit receipt or an agent capability.
 
 That sentence, not "revl as a safety kernel," is what you are allowed to
 build on. "Safety kernel" describes an aspiration for the full stack — admit,
