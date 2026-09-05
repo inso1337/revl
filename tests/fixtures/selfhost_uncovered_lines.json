@@ -708,8 +708,7 @@
         "Malformed ownership annotation: _py_inplace_write returns None when an assign stamped unique has a non-dict value. Frontend ownership marks expression dictionaries only; port is_inplace_write also declines this shape.": {
           "_py_inplace_write": 1
         },
-        "Match helper invariant cases: _arm_body_is_bind's non-dict body returns false; _arm_body_mentions keeps a binder when a _RenderedBody has no source node; _match_expr synthesizes non-exhaustive throw for zero arms. Frontend arms carry expressions and exhaustiveness checks; component rendered arms pass their source. Ordinary and wildcard matching is covered in control/result/branches/services_match.": {
-          "_arm_body_is_bind": 1,
+        "Match helper invariant cases: _arm_body_mentions keeps a binder when a _RenderedBody has no source node (the component render path, which the emit corpus does not reach); _match_expr synthesizes a non-exhaustive throw for zero arms. Frontend arms carry expressions and exhaustiveness checks; component rendered arms pass their source. Ordinary and wildcard matching is covered in control/result/branches/services_match, and match_binder_scan grades the conservative key/list scan and the Some/None-binder short-circuit (#306).": {
           "_arm_body_mentions": 1,
           "_match_expr": 1
         },
@@ -763,7 +762,7 @@
           "_ComponentEmitter._witnessed_extern": 1
         }
       },
-      "uncovered_statements": 628
+      "uncovered_statements": 627
     },
     "rust": {
       "statements": 3189,
@@ -1587,9 +1586,8 @@
           "match_expr": 2,
           "match_folds": 1
         },
-        "Match source bookkeeping: arm_body_is_bind rejects nonobject body; arm_body_mentions conservatively retains a binder if an object KEY equals its name, and returns false for a list whose members never mention it. Both match reference subtree scanning; current corpus mentions binders as values, not object keys. control/result/services_match exercise ordinary binder use and folding.": {
-          "arm_body_is_bind": 2,
-          "arm_body_mentions": 2
+        "Match source bookkeeping: arm_body_is_bind's non-record body guard returns false, and every match arm body is an expression record, so no document reaches this defensive branch (the reference folds the same guard into _arm_body_is_bind). Its Some/None-binder short-circuit, and arm_body_mentions' conservative object-KEY retention and exhausted-list walk, are now graded on both sides by match_binder_scan (#306); control/result/services_match exercise ordinary binder use and folding.": {
+          "arm_body_is_bind": 1
         },
         "Method let-effect lookup/acquire sequence is source-bound to spawn or result-declared host verbs; witnessed provide binds are frontend-refused, pinned in tests. Ordinary unbound witnessed/adopt/compensation are covered. Final method marker covers deferred await and invalid nested/unknown steps, not supported return/effect rendering.": {
           "method_step": 11
@@ -1662,7 +1660,7 @@
           "witnessed_extern": 1
         }
       },
-      "uncovered_statements": 97
+      "uncovered_statements": 94
     },
     "rust": {
       "statements": 1872,
