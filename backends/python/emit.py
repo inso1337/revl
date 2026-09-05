@@ -70,7 +70,7 @@ _HOST_ROOTS = {"Pool", "Map", "Job", "Stream"}
 _IMPORT_ALIAS = {
     "fmt": "_revl_fmt",
     "Frame": "_revl_Frame",
-    "frame_for_ctx": "_revl_frame_for_ctx",
+    "_frame_for_ctx": "_revl_frame_for_ctx",
     "ConfigSchema": "_revl_ConfigSchema",
     "spawn": "_revl_spawn",
     "schedule_every": "_revl_schedule_every",
@@ -4630,7 +4630,7 @@ def emit(ir: dict) -> str:
         # `plug` and reads the host-builtin trace to detect unreleased resources.
         # `retry_idempotent` (item 44) gives the driver its auto-retry right for
         # idempotent emissions — see `_REVL_IDEMPOTENT` and `_revl_call` below.
-        | ({"plug", "set_trace", "retry_idempotent", "frame_for_ctx"}
+        | ({"plug", "set_trace", "retry_idempotent", "_frame_for_ctx"}
            if lifecycle else set())
         # item 102: only a lifecycle test with an `advance` step drives the
         # clock coeffect, so `Clock` is imported (for `advance`/`reset`) only
