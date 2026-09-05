@@ -490,42 +490,12 @@ def _free_fn_calls(body: object,
     return calls
 
 
-def _bound_names(fn: dict) -> "set[str]":
-    """Every name `fn` binds locally: its parameters, `let`/`var` bindings
-    (destructuring included), loop bindings and closure parameters. A bare
-    reference to one of these names is a local read, not a reference to a
-    same-named free function."""
-    bound = {p.get("name") for p in (fn.get("params") or [])}
-
-    def walk(node: object) -> None:
-        if isinstance(node, dict):
-            if node.get("step") == "let":
-                bound.add(node.get("name"))
-                for nm in node.get("names") or []:
-                    bound.add(nm)
-            elif node.get("step") == "for":
-                bound.add(node.get("bind"))
-            elif node.get("kind") == "arrow":
-                for nm in node.get("params") or []:
-                    bound.add(nm)
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value)
-
-    walk(fn.get("body") or [])
-    bound.discard(None)
-    return bound
-
-
 def _fn_value_refs(functions: list,
                    function_names: "frozenset[str] | set") -> "set[str]":
     """Function names referenced as a VALUE (not in callee position). Growing a
     synthetic parameter would change such a function's type, so those are
-    excluded from the view entirely. A name the enclosing function binds locally
-    (`let step = ..` next to a free `fn step`) is a local read and does not
-    count — otherwise one shadowing local would disable the pass module-wide."""
+    excluded from the view entirely. Local bindings shadow only subsequent reads
+    in their lexical scope, never preceding reads or reads in sibling branches."""
     used: set[str] = set()
 
     def walk(node: object, bound: "set[str]") -> None:
@@ -542,14 +512,26 @@ def _fn_value_refs(functions: list,
                 if ident in function_names and ident not in bound:
                     used.add(ident)
                 return
-            for value in node.values():
-                walk(value, bound)
+            body_bound = bound
+            if node.get("step") == "for":
+                body_bound = bound | {node.get("bind")}
+            elif node.get("kind") == "arrow":
+                body_bound = bound | set(node.get("params") or [])
+            for key, value in node.items():
+                walk(value, body_bound if key == "body" else bound)
         elif isinstance(node, list):
+            local_bound = set(bound)
             for value in node:
-                walk(value, bound)
+                walk(value, local_bound)
+                if (isinstance(value, dict)
+                        and value.get("step") in ("let", "let_pattern")):
+                    local_bound.add(value.get("name"))
+                    local_bound.update(value.get("names") or [])
+                    local_bound.add(value.get("rest"))
 
     for fn in functions:
-        walk(fn.get("body") or [], _bound_names(fn))
+        walk(fn.get("body") or [],
+             {p.get("name") for p in fn.get("params") or []})
     return used
 
 
@@ -753,6 +735,13 @@ def _str_param_escapes(body: object, params: "set[str]",
                 if ident in params and not safe:
                     escaped.add(ident)
                 return
+            if kind == "arrow":
+                # A returned closure must own captured strings even if it only
+                # reads them; a read-only receiver does not prove a lifetime.
+                escaped.update(
+                    name for name in params
+                    if _v3_mentions_name(node.get("body"), name))
+                return
             if kind == "builtin":
                 walk(node.get("target"), True)
                 arg_safe = node.get("method") in _STR_READONLY_ARG_BUILTINS
@@ -831,10 +820,9 @@ def _compute_str_param_borrows(functions: list) -> "dict[str, frozenset]":
     helpers, which a `pub` entry still lends its owned string to by borrow.
 
     The pass is gated on the module actually using the stdlib (a `builtin`/`len`
-    node in some function): borrowing only reshapes the string-scanning surface,
-    which is exactly the surface the self-hosted `emit_rust.rvl` port leaves OUT,
-    so a stdlib-free module (`fn cat(a, b) = a + b`) still emits byte-identically
-    to that port. A module with no builtin has nothing item 282 speeds up anyway.
+    node in some function): a stdlib-free module retains its existing signatures.
+    The self-hosted emitter mirrors this gate and the owned callback/capture
+    boundaries.
     """
     if not _functions_use_stdlib(functions):
         return {fn.get("name"): frozenset() for fn in functions}

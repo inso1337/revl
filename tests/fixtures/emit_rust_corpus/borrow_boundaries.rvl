@@ -1,0 +1,20 @@
+fn count(s: Str) -> Int { return s.length() }
+pub fn alias_count() -> Int { let f = count; return f("abc") }
+fn apply(f: (Str) -> Int, s: Str) -> Int { return f(s) }
+pub fn callback_count() -> Int { return apply(count, "abcd") }
+
+fn read(s: Str) -> Int { return s.length() }
+fn maker(s: Str) -> () -> Int { return () => s.length() }
+fn forwarded_maker(s: Str) -> () -> Int { return () => read(s) }
+fn constant_maker(s: Str) -> () -> Int { return () => 7 }
+
+fn nested_find(xs: List[List[Str]], s: Str) -> Int {
+  for (x of xs) { return x.indexOf(s) }
+  return -1
+}
+fn deep_find(xs: List[List[List[Str]]], s: Str) -> Int {
+  for (ys of xs) {
+    for (x of ys) { return x.indexOf(s) }
+  }
+  return -1
+}

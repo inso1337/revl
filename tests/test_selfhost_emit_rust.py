@@ -42,7 +42,11 @@ Covered subset (what emits byte-identical):
     Int/Int32, ``/`` as widened f64 true division, ``%``, comparisons,
     ``&&``/``||``, string ``+`` via ``format!``), un, the 2.0 ``callee``/``args``
     call with ``_by_value_arg`` cloning, the ``widen`` markers, index, list,
-    maplit, the sync arrow, and non-float ``${..}`` interpolation.
+    maplit, the sync arrow, and non-float ``${..}`` interpolation;
+  * the basic Str/List stdlib helpers and interprocedural read-only ``Str``
+    borrowing, with owned public/callback signatures and closure captures;
+    declared function types in parameter/return positions and nested-list
+    loop bindings are covered by compiler-and-runtime ownership regressions.
 
 Covered subset (slice 3, item 207) — the components/services + bridge surface:
   * ``_emit_service_traits`` — each ``service`` as a ``pub trait S: Send + Sync``
@@ -88,16 +92,16 @@ the remaining ``_emit_component_new`` surfaces — timers / routers (``routes``)
 (``Pool``/``Map``/``Job``) and the item-114 host-Map undo-reclone, body-level
 ``effect``/``timer``/``fail``/``if`` steps, and the ``host``/``format``
 component-dialect expression kinds; the host-object stubs (``Map``/``Pool``/
-``Job``) and every preamble helper (timer/stdlib/float/realm/spawn); and the
+``Job``) and the timer/float/realm/spawn preamble helpers; and the
 non-scalar bridge marshalling (Result/serde/``Vec<Value>``/opaque-``Value``
 params and returns); functional record-update ``{r | f = e}`` (the
 Rust reference itself *raises* on ``record_update`` — a structural exclusion, not
-merely un-ported); the stdlib surface (every ``builtin``/``len`` node and the
-``_stdlib_helper_traits`` it pulls in); the Value/serde erasure surface
+merely un-ported); the remaining stdlib families beyond the basic Str/List
+helpers; the Value/serde erasure surface
 (``_emit_bridge``, ``Pool``/``Map``/``Job`` host stubs); async coloring / spawn /
 instances / realms; in-file ``test``/lifecycle-test emission; the
 canonical Float->Str ``revl_ftoa`` (so float interpolation is excluded); the
-``impl Fn(..)`` lowering of a declared function type; the non-ASCII reaches of
+escaping function types in unsupported container/field positions; the non-ASCII reaches of
 ``_string`` beyond the ASCII core; and ``let_pattern`` (the list form names a
 temporary from the output-buffer length, which a second implementation cannot
 reproduce).
@@ -122,6 +126,8 @@ CORPUS = [
     "float_pub.rvl", # finite Float literals/arithmetic, Int->Float widening, pub fn
     "checked_div.rvl", # total checked division/modulo and Result matching
     "str_borrows.rvl",  # fixpoint signatures, owned boundaries, &str call sites
+    "borrow_boundaries.rvl",  # callbacks, escaping captures, nested-list needles
+    "borrow_shadowing.rvl",  # later/sibling bindings cannot hide function values
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
     "control.rvl",   # let/var/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls + the by-value clone / Copy-scalar split
@@ -299,6 +305,62 @@ def test_str_borrow_calls_from_component_methods(emitted, reference):
     assert "show(&who)" in got
 
 
+def test_str_borrow_callback_and_capture_boundaries(emitted, reference):
+    ir = compile_files([str(CORPUS_DIR / "borrow_boundaries.rvl")])
+    got = emitted["compute_str_param_borrows"](ir["functions"])
+    assert {name: frozenset(slots) for name, slots in got.items()} == (
+        reference._compute_str_param_borrows(ir["functions"]))
+    for name in ("count", "apply", "maker", "forwarded_maker"):
+        assert got[name] == [], name
+    assert got["read"] == got["constant_maker"] == [0]
+    assert got["nested_find"] == got["deep_find"] == [1]
+
+    ir = compile_files([str(CORPUS_DIR / "borrow_shadowing.rvl")])
+    got = emitted["compute_str_param_borrows"](ir["functions"])
+    assert {name: frozenset(slots) for name, slots in got.items()} == (
+        reference._compute_str_param_borrows(ir["functions"]))
+    assert got["later_count"] == got["sibling_count"] == []
+    assert got["local_count"] == [0]
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@pytest.mark.parametrize("backend", ["reference", "selfhost"])
+def test_str_borrow_boundaries_build_and_run(emitted, reference, tmp_path, backend):
+    ir = compile_files([str(CORPUS_DIR / rel) for rel in
+                        ("borrow_boundaries.rvl", "borrow_shadowing.rvl")])
+    src = (reference.emit(ir) if backend == "reference"
+           else emitted["emit_rust_src"](ir))
+    bench = _load_bench_rust()
+    reason = bench.rust_runtime_reason()
+    if reason is not None:
+        pytest.skip(f"cordis-rs runtime does not resolve here: {reason}")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        reference.cargo_toml("revl_borrow_boundaries"), encoding="utf-8")
+    (tmp_path / "src" / "main.rs").write_text(src + """
+fn main() {
+    assert_eq!(alias_count(), 3);
+    assert_eq!(callback_count(), 4);
+    let captured = maker(String::from("abc"));
+    assert_eq!(captured(), 3);
+    assert_eq!(captured(), 3);
+    assert_eq!(forwarded_maker(String::from("four"))(), 4);
+    assert_eq!(constant_maker("ignored")(), 7);
+    let xs = vec![vec![String::from("no"), String::from("yes")]];
+    assert_eq!(nested_find(xs.clone(), "yes"), 1);
+    assert_eq!(nested_find(xs.clone(), "missing"), -1);
+    assert_eq!(deep_find(vec![xs], "yes"), 1);
+    assert_eq!(nested_find(vec![], "yes"), -1);
+    assert_eq!(later_shadow(), 3);
+    assert_eq!(sibling_shadow(false), 4);
+    assert_eq!(sibling_shadow(true), 0);
+    assert_eq!(local_shadow(), 5);
+}
+""", encoding="utf-8")
+    result = bench._cargo("run", tmp_path, "--quiet")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 _S = {"kind": "var", "name": "s"}
 _LIT = {"kind": "lit", "value": "text"}
 _LEN = {"kind": "len", "target": _S}
@@ -327,7 +389,11 @@ _READ = {"kind": "call", "callee": {"kind": "var", "name": "read"}, "args": [_S]
     ({"kind": "index", "target": _S, "index": 0}, False),
     ({"kind": "un", "op": "!", "operand": _S}, False),
     ({"kind": "arrow", "params": [], "body": _S}, False),
-    ({"kind": "arrow", "params": [], "body": _LEN}, True),
+    ({"kind": "arrow", "params": [], "body": _LEN}, False),
+    ({"kind": "arrow", "params": [], "body": _READ}, False),
+    ({"kind": "arrow", "params": [], "body": _LIT}, True),
+    ({"kind": "arrow", "params": [], "body": {
+        "kind": "arrow", "params": [], "body": _LEN}}, False),
     ({"kind": "if", "cond": True, "then": _S, "else": _LIT}, False),
     ({"kind": "if", "cond": True, "then": _LEN, "else": _LEN}, True),
     ({"step": "let", "name": "alias", "value": _S}, False),
