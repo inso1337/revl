@@ -1,6 +1,6 @@
 {
   "lockVersion": 1,
-  "note": "truc's stage-0 composition: the file list the launcher compiles, and the sha256 of each file's bytes. That compile IS truc passing its own gate on every boot (docs/design/truc-architecture.md section 7). externs.rvl is pulled in as an import, so it is not listed as a root. The pins are mandatory and so is this file: a missing, unparseable or unpinned lock refuses to boot rather than falling back to compiling whatever sits in components/. Regenerate with `python -m revl.truc._relock` and commit; tests/test_truc_bootstrap.py is the regenerate-or-red gate.",
+  "note": "truc's stage-0 composition: the file list the launcher compiles, and the sha256 of each file's bytes. That compile IS truc passing its own gate on every boot (docs/design/truc-architecture.md section 7). externs.rvl is pulled in as an import, so it is not listed as a root. The pins are mandatory and so is this file: a missing, unparseable or unpinned lock refuses to boot rather than falling back to compiling whatever sits in components/. Regenerate with `python -P -m revl.truc._relock` and commit; tests/test_truc_bootstrap.py is the regenerate-or-red gate. (The `-P` is the PYTHONSAFEPATH safety bit; without it, `-m` puts the CWD at sys.path[0] and a sibling `truc.py` in a component's directory would shadow truc's own launcher; issue #317.)",
   "files": [
     {
       "path": "components/registry_client.rvl",

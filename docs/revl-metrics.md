@@ -12,9 +12,11 @@ the file loader), `src/revl/__main__.py` (`revl metrics`),
 ## 1. What it is
 
 `revl why` explains **one** component's cause chain; the OTel export
-(`python -m revl.otel`) forwards **every** transition as a span. `revl metrics`
-sits above both: it reads the same `revl run --trace run.jsonl` JSONL trace
-(docs/why-runtime.md) and aggregates the whole run into three metrics.
+(`python -P -m revl.otel`, the `-P` is the PYTHONSAFEPATH safety bit
+closing the CWD-shadowing window issue #317 names) forwards **every**
+transition as a span. `revl metrics` sits above both: it reads the same
+`revl run --trace run.jsonl` JSONL trace (docs/why-runtime.md) and
+aggregates the whole run into three metrics.
 
 ```
 $ revl metrics run.jsonl

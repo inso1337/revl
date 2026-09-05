@@ -336,7 +336,16 @@ baseline, so an agent can demonstrate its component leaves nothing behind
 *before* committing it to disk.
 
 Multi-module candidates work too: `modules` supplies in-memory sources for
-`use` imports, keyed by the path the import names.
+`use` imports, keyed by the path the import names. Every verb that takes a
+candidate carries it: `revl_check`, `revl_admit`, `revl_plan`, `revl_ship`,
+`revl_audit`, `revl_tools`, `revl_load`, `revl_swap`, the grading verbs and the
+static queries all resolve the same `modules` map, so a candidate one verb
+accepts is not refused by the next with `cannot find imported module`. Under
+`--provider`, the agent's modules ride under the operator's providers in both
+of the door's compiles (the decision and the composition), and a provider's
+path cannot be displaced by an agent entry. `modules` are agent-authored source
+like `source` is: a module carrying a realm placement or a host-body extern is
+refused by the untrusted-author profile exactly as inline text would be.
 
 ### Deltas, not documents — `revl_edit`
 

@@ -1561,7 +1561,8 @@ TESTS_SYMBOLS_RS = r'''//! The navigation surface's own tests (`cargo test`), ru
 //! the contract that makes [`revl_gate::symbols::symbols`] safe to put behind
 //! an editor: it answers only what it can answer exactly, and every uncertainty
 //! is an absence, never a guess. The reference-agreement half — that an answer
-//! here is byte-identical to `python -m revl.lsp`'s — lives in
+//! here is byte-identical to `python -P -m revl.lsp`'s (the `-P` is the
+//! PYTHONSAFEPATH safety bit, issue #317) — lives in
 //! `crates/revl-lsp/tests/reference_agreement.rs`, because it needs the
 //! reference.
 

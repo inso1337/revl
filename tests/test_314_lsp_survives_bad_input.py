@@ -1,10 +1,13 @@
 """The language server answers bad input instead of exiting on it.
 
-Issue #314. `python -m revl.lsp` used to die on structurally malformed
+Issue #314. `python -P -m revl.lsp` used to die on structurally malformed
 JSON-RPC — `AttributeError: 'list' object has no attribute 'get'`, exit 1 —
 and on any compiler crash, and to exit 0 in silence on a frame it could not
 decode. An editor holds one server for the whole session, so each of those is
-the user's tooling going dark until they restart it.
+the user's tooling going dark until they restart it. (The `revl lsp` form is
+the documented happy path; the absolute-interpreter fallback `python -P -m
+revl.lsp` needs the `-P` because `-m` puts the CWD at `sys.path[0]`, issue
+#317.)
 
 The property under test is not "no traceback". It is that the server is STILL
 ANSWERING afterwards: every case here feeds one bad message followed by a
@@ -288,7 +291,8 @@ def test_a_clean_document_still_reports_no_diagnostics():
 
 def test_the_installed_entry_point_exits_zero_on_a_malformed_frame():
     # The unit tests drive `serve` in-process; this one proves the shipped
-    # `python -m revl.lsp` behaves the same. Before the fix it exited 1 with an
+    # `python -P -m revl.lsp` behaves the same (the `-P` is the PYTHONSAFEPATH
+    # safety bit, issue #317). Before the fix it exited 1 with an
     # AttributeError traceback on stderr.
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
