@@ -45,6 +45,19 @@ def test_compare_distinguishes_outputs(survey, output, status):
     assert survey.compare({}, "py", reference("wanted"), lambda ir: output)["status"] == status
 
 
+def test_marker_literal_in_agreeing_output_is_not_port_refusal(survey):
+    output = "const marker = '<<UNSUPPORTED-EXPR:adt>>';\n"
+    row = survey.compare({}, "py", reference(output), lambda ir: output)
+    assert row["status"] == "byte_agreement"
+
+
+def test_marker_present_in_reference_is_divergence_not_port_refusal(survey):
+    reference_output = "const marker = '<<UNSUPPORTED-EXPR:adt>>';\n"
+    port_output = reference_output + "extra\n"
+    row = survey.compare({}, "py", reference(reference_output), lambda ir: port_output)
+    assert row["status"] == "byte_divergence"
+
+
 def test_compare_retains_error_and_byte_evidence(survey):
     ref = reference("\u00e9")
     row = survey.compare({}, "py", ref, lambda ir: "\u00e9x")

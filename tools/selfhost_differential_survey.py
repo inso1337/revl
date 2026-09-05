@@ -95,6 +95,10 @@ def _fingerprint(text: str) -> dict:
     return {"bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
 
 
+def _unsupported_markers(text: str) -> list[str]:
+    return sorted(set(re.findall(r"<<UNSUPPORTED[^>]*>>", text)))
+
+
 def compare(ir: dict, tier: str, reference, port) -> dict:
     """One oracle invocation; rejection is never represented as agreement."""
     try:
@@ -119,8 +123,13 @@ def compare(ir: dict, tier: str, reference, port) -> dict:
     if got == want:
         result["status"] = "byte_agreement"
     else:
-        markers = sorted(set(re.findall(r"<<UNSUPPORTED[^>]*>>", got)))
-        result["status"] = "port_refusal" if markers else "byte_divergence"
+        markers = _unsupported_markers(got)
+        reference_markers = _unsupported_markers(want)
+        # A marker copied into otherwise valid emitted source is data, not a
+        # refusal. Only a marker newly introduced by the port identifies a
+        # refusal; markers already present in the reference remain divergence.
+        refusal_markers = sorted(set(markers) - set(reference_markers))
+        result["status"] = "port_refusal" if refusal_markers else "byte_divergence"
         if markers:
             result["markers"] = markers
         a, b = want.encode("utf-8"), got.encode("utf-8")
