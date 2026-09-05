@@ -6,8 +6,8 @@ backend, executed, and cross-checked BYTE-FOR-BYTE against the reference emitter
 This has the exact shape of tests/test_selfhost_emit_py.py: two independent
 implementations of one lowering — the reference Rust backend and its revl port —
 are forced to agree, and the agreement is the strongest an emitter can be held
-to: the emitted Rust source must be identical to the last byte. The reference is
-ground truth; any divergence is a defect in the slice.
+to on that corpus: the emitted Rust source must be identical to the last byte.
+A divergence needs triage; either implementation can be wrong (item 429).
 
 Every IR the frontend produces is ir_version 3, so the covered corpus is the
 corner of the reference's v3 path (``_emit_v3`` -> ``_emit_v3_functions`` ->
@@ -132,6 +132,7 @@ CORPUS = [
     # slice 2 — the v3 typed-core:
     "records.rvl",   # record `type` -> `pub struct`, record literal + field clone,
                      #   field access, a record-typed field, List[Point] lowering
+    "reserved_names.rvl",  # item 429(c): emitter-reserved names and underscore twins
     "variants.rvl",  # variant `type` -> serde-tagged `pub enum`, ADT construction
                      #   (nullary + payload), `match` (bind / nullary / `_` wildcard
                      #   vs `unreachable!()`), built-in Some/Ok coexisting
@@ -234,6 +235,35 @@ def test_selfhosted_emitter_is_byte_identical(emitted, reference, rel):
         f"self-hosted emitter diverged from the reference on {rel}\n"
         f"--- lengths ref={len(want)} got={len(got)} ---"
     )
+
+
+def test_selfhosted_mangle_covers_both_reserved_sets(emitted, reference):
+    reserved = reference._RUST_RESERVED | reference._EMITTER_RESERVED
+    for word in sorted(reserved):
+        ladder = [word + "_" * depth for depth in range(4)]
+        images = [emitted["mangle"](name) for name in ladder]
+        assert images == [name + "_" for name in ladder], word
+        assert images == [reference._mangle(name) for name in ladder], word
+        assert len(set(images)) == len(ladder), word
+        assert not set(images) & reserved, word
+    for name in ("value", "value_", "context", "rooted", "_ctx", "_"):
+        assert emitted["mangle"](name) == reference._mangle(name) == name
+
+
+def test_selfhosted_emitter_reserved_names_at_declarations_and_uses(emitted):
+    src = emitted["emit_rust_src"](
+        compile_files([str(CORPUS_DIR / "reserved_names.rvl")]))
+    assert "fn plugin_(root_: i64, root__: i64) -> ReservedNames {" in src
+    assert "fn plugin__(ctx_: i64, ctx__: i64) -> i64 {" in src
+    assert "let root_ = plugin_(ctx_, ctx__);" in src
+    for name in ("ctx", "config", "root", "plugin"):
+        for suffix in ("_", "__"):
+            assert f"    {name}{suffix}: i64," in src
+            assert f"{name}{suffix}:" in src.split("return ReservedNames {", 1)[1]
+            assert f"root_.{name}{suffix}" in src
+    for declaration in ("let ctx_ = root_;", "let ctx__ = root__;",
+                        "let config__ = ctx__;"):
+        assert declaration in src
 
 
 def test_selfhosted_emitter_output_scaffold(emitted):

@@ -1,0 +1,15 @@
+// Item 429(c): emitter-owned names and their underscore twins must remain
+// distinct at declarations and uses, not just inside the mangling helper.
+type ReservedNames = { ctx: Int, ctx_: Int, config: Int, config_: Int, root: Int, root_: Int, plugin: Int, plugin_: Int }
+
+fn plugin(root: Int, root_: Int) -> ReservedNames {
+  let ctx = root
+  let ctx_ = root_
+  let config_ = ctx_
+  return { ctx: ctx, ctx_: ctx_, config: ctx, config_: config_, root: root, root_: root_, plugin: ctx, plugin_: ctx_ }
+}
+
+fn plugin_(ctx: Int, ctx_: Int) -> Int {
+  let root = plugin(ctx, ctx_)
+  return root.ctx + root.ctx_ + root.config + root.config_ + root.root + root.root_ + root.plugin + root.plugin_
+}
