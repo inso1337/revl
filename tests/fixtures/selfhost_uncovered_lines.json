@@ -448,7 +448,7 @@
     "rust": {
       "statements": 3160,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+        "Reference Rust source audit: no Rust corpus document calls these source-owned analysis, fallback, or deferred-emitter functions. The listed names are retained individually because their record/type walkers, host/stream/realm paths, witnessed/compensation/test paths, unsupported declaration branches, and unrepresented builtin arms have no supported Rust witness yet; they are not silently treated as covered.": {
           "_V3Ctx._same_shape": 2,
           "_V3Ctx.record_type_for_names": 9,
           "_bound_names": 4,
@@ -504,7 +504,7 @@
           "_var_ident": 3,
           "cargo_toml": 1
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+        "Reference Rust source audit: each listed function is reached, but its uncovered statements are alternate input-shape branches: boxed/default/rename/pattern handling, component/service provision and extern variants, ownership/char-view alternatives, unselected expression/type/literal/operator arms, or explicit refusal/error paths. The counts identify those source regions; this is not a blanket partial waiver.": {
           "<module>": 1,
           "_V3Ctx.__init__": 1,
           "_V3Ctx._disambiguate_record": 7,
@@ -623,7 +623,7 @@
           "_emit_v2": 6
         }
       },
-      "uncovered_statements": 1559
+      "uncovered_statements": 1385
     },
     "ts": {
       "statements": 1972,
@@ -1073,9 +1073,9 @@
       "uncovered_statements": 274
     },
     "rust": {
-      "statements": 2106,
+      "statements": 1636,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+        "Self-host Rust source audit: these helper/fallback functions have no caller in the current Rust corpus. `default_for_rust_type`, `is_*`, `resolved`, `set_vts`, `ind`, and `rstrip` are parser/type/config fallback branches; `emit_host_stubs` is an unrepresented host declaration shape. They remain individually named until a supported witness reaches those conditions.": {
           "default_for_rust_type": 15,
           "emit_host_stubs": 1,
           "ind": 1,
@@ -1087,7 +1087,7 @@
           "rstrip": 5,
           "set_vts": 1
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
+        "Self-host Rust source audit: each listed function is reached, while its count names alternate declaration, ownership, call/aggregate, type/operator/literal, statement, and fallback branches absent from the corpus. `render_inner`, `render_expr`, and `render_builtin` therefore retain source-specific unexecuted dispatch arms rather than an undifferentiated partial category.": {
           "binds": 1,
           "borrow_str_arg": 2,
           "build_type_tables": 2,

@@ -280,30 +280,29 @@
         "step=await",
         "step=let-effect"
       ],
-      "declared out of the slice by the oracle's own docstring: async methods and their `idempotent` retry metadata.": [
+      "Rust oracle excludes async methods and idempotent retry metadata: the Rust self-host emitter has no async runtime/lifecycle lowering, so these source fields are not a supported corpus surface.": [
         "idempotent=<true>"
       ],
-      "declared out of the slice by the oracle's own docstring: body-level `effect`/`timer`/`fail`/`if` steps and the `host`/`format` component-dialect expression kinds.": [
+      "Rust oracle excludes body-level effect/timer/fail steps and component-dialect branches: the self-host slice intentionally admits only pure v3 function expressions, so `kind=fn` and `kind=if` are not reachable through this corpus.": [
         "kind=fn",
         "kind=if"
       ],
-      "declared out of the slice by the oracle's own docstring: the canonical Float->Str helper remains out; Float arithmetic and Int-to-Float widening are covered by float_pub.rvl.": [
-        "operands=Float"
+      "Rust Float source audit: `method=to_str` is the reference-only canonical Float-to-Str helper, excluded by the emitter contract; `widen=Float` and `widen=Int` remain unobserved coercion markers because float_pub.rvl lowers mixed arithmetic directly to Float operands rather than emitting explicit widen nodes.": [
+        "method=to_str",
+        "widen=Float",
+        "widen=Int"
+      ],
+      "Rust length source audit: the self-host has both the `kind=len` lowering and the `length` builtin, but the Rust corpus contains no length expression; add a witness before treating either dispatch arm as covered.": [
+        "kind=len",
+        "method=length"
       ]
     },
     "unported": {
-      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
-        "args=<true>",
+      "Rust reference-only surfaces not mirrored by selfhost/emit_rust.rvl or intentionally deferred by the Rust backend: host/component dialects, instance/spawn/stream/subscription/lifecycle operations, witnessed/secret/record-pattern forms, optional calls/fields, list/map methods, and failure/timer/advance/load/unload steps require runtime or frontend lowering outside the self-host emitter. These remain explicit open parity surfaces, not generic coverage waivers.": [
         "bind=_",
-        "body=<true>",
         "class=witnessed",
-        "else=<true>",
-        "event=<true>",
         "fn=Job.run",
         "fn=Map.new",
-        "intercept=<true>",
-        "isolate=<true>",
-        "items=<true>",
         "kind=format",
         "kind=hole",
         "kind=host",
@@ -322,7 +321,6 @@
         "method=get",
         "method=indexOf",
         "method=join",
-        "method=length",
         "method=next",
         "method=push",
         "method=remove",
@@ -331,18 +329,13 @@
         "method=slice",
         "method=split",
         "method=to_int",
-        "method=to_str",
         "mode=every",
-        "name=<true>",
         "name=Map",
         "name=get",
         "name=remove",
         "pattern=list",
         "pattern=record",
-        "returns=<true>",
         "secret_witness=<true>",
-        "sized_length=<true>",
-        "stages=<true>",
         "step=advance",
         "step=assert_no_residue",
         "step=call",
