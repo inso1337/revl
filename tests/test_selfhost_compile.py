@@ -154,6 +154,7 @@ PY_FUNCTION_DOCS = [
 ]
 RUST_FUNCTION_DOCS = [
     "arith.rvl", "control.rvl", "lists.rvl", "strings.rvl", "variants.rvl",
+    "float_pub.rvl",
 ]
 # ts (roadmap item 146, gap 2): the function-only slice of the emit_ts corpus that
 # the NATIVE chain reproduces byte-exact. The ts emitter is byte-exact on all 34
@@ -333,6 +334,35 @@ def test_three_way_composition_co_compiles(compile_rvl):
     ``Ctx``, a colliding test name — the ``compile_rvl`` fixture would have raised.)"""
     assert callable(compile_rvl["compile_to"])
     assert callable(compile_rvl["admit"])
+
+
+@pytest.mark.parametrize("source", [
+    "pub component Hidden {}",
+    "pub pub fn twice() -> Int { return 1 }",
+    "pub",
+])
+def test_native_gate_refuses_invalid_public_declarations(admit, source):
+    with pytest.raises(RevlError):
+        compile_source(source)
+    assert admit(source).startswith("BAD|")
+
+
+@pytest.mark.parametrize("modifiers", [
+    "emission idempotent", "idempotent emission",
+    "async emission idempotent", "idempotent emission[db] async",
+])
+def test_native_gate_admits_idempotent_emissions(admit, modifiers):
+    source = f"service Store {{ {modifiers} fn put(value: Int) -> Int }}"
+    compile_source(source)
+    assert admit(source) == ""
+
+
+@pytest.mark.parametrize("modifiers", ["idempotent", "async idempotent"])
+def test_native_gate_refuses_idempotency_without_emission(admit, modifiers):
+    source = f"service Store {{ {modifiers} fn put(value: Int) -> Int }}"
+    with pytest.raises(RevlError, match="only meaningful on an `emission` operation"):
+        compile_source(source)
+    assert admit(source).startswith("BAD|")
 
 
 # item 429: documents the reference admits and the native gate does NOT. A FALSE
