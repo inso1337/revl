@@ -5628,11 +5628,11 @@ fn infer_record_ty(fields: &[InitN], env: &[Bind]) -> String {
         names.push((fields)[(i) as usize].clone().name);
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
-    let sorted = sort_strs(&names);
+    let sorted_ = sort_strs(&names);
     let mut out = String::from("{");
     let mut j = 0i64;
-    while (j < sorted.revl_length()) {
-        let nm = (sorted)[(j) as usize].clone();
+    while (j < sorted_.revl_length()) {
+        let nm = (sorted_)[(j) as usize].clone();
         let mut ty = String::from("");
         let mut k = 0i64;
         while (k < fields.revl_length()) {
