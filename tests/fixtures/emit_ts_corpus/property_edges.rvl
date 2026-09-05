@@ -1,0 +1,11 @@
+fn indexed(value: Any) -> Any { return value["function"] }
+fn list_equal() -> Bool {
+  assert [1, 2] == [1, 2]
+  assert [1, 2] != [1, 3]
+  return true
+}
+service LengthReader { fn size() -> Int }
+component LengthProvider provides reader: LengthReader {
+  config { label: Str = "text" }
+  provide reader { fn size() = config.label.length }
+}
