@@ -188,7 +188,7 @@ was corrected by hand and had drifted back within a day.
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
 | truc.md | needs-work | 47 |  |
-| ts-runtime-contract.md | needs-work | 0 |  |
+| ts-runtime-contract.md | needs-work | 2 |  |
 | verified-canary.md | needs-work | 22 |  |
 | verified-effect.md | needs-work | 18 |  |
 | vision.md | current | 8 |  |
