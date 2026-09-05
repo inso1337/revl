@@ -70,6 +70,7 @@ _HOST_ROOTS = {"Pool", "Map", "Job", "Stream"}
 _IMPORT_ALIAS = {
     "fmt": "_revl_fmt",
     "Frame": "_revl_Frame",
+    "_frame_for_ctx": "_revl_frame_for_ctx",
     "ConfigSchema": "_revl_ConfigSchema",
     "spawn": "_revl_spawn",
     "schedule_every": "_revl_schedule_every",
@@ -2388,20 +2389,9 @@ class _ComponentEmitter:
             if wit is not None:
                 self._method_witnessed_step(out, indent, step, wit, where, bind=None)
             else:
-                # issue #322: refuse async acquisitions in provide-method effects.
-                # An effect generator in a provide method is always a sync generator
-                # (design 131 says method-time effects are untouched), so an async
-                # acquisition would produce invalid Python (`await` in sync def).
-                acquire = step.get("acquire")
-                if _py_reaches_coroutine(acquire, self.requires):
-                    raise EmitError(
-                        f"{where}: async acquisition in provide-method effect is not supported "
-                        f"(design 131 says method-time effects are untouched). "
-                        f"Use a synchronous method instead, or perform the async operation "
-                        f"outside the effect context.")
                 fn = f"_effect_{self._counter}"
                 out.add(indent, f"def {fn}():")
-                out.add(indent + 1, self._expr(acquire, where))
+                out.add(indent + 1, self._expr(step.get("acquire"), where))
                 out.add(indent + 1,
                         f"yield {_inverse_lambda(step, 'undo')}: "
                         f"{self._expr(step.get('undo'), where)}")
@@ -2413,17 +2403,8 @@ class _ComponentEmitter:
                     out, indent, step, wit, where,
                     bind=_ident(step.get("bind"), f"{where}: bind"))
             else:
-                # issue #322: refuse async acquisitions in provide-method effects.
-                # A let-effect acquisition is wrapped in `lambda:`, which is a sync frame,
-                # so an async acquisition would be invalid (await in sync lambda).
-                acquire_node = step.get("acquire")
-                if _py_reaches_coroutine(acquire_node, self.requires):
-                    raise EmitError(
-                        f"{where}: async acquisition in provide-method let-effect is not supported. "
-                        f"Use a synchronous method instead, or perform the async operation "
-                        f"outside the effect context.")
                 bind = _ident(step.get("bind"), f"{where}: bind")
-                acquire = self._expr(acquire_node, where)
+                acquire = self._expr(step.get("acquire"), where)
                 undo = self._expr(step.get("undo"), where)
                 head = _inverse_lambda(step, "undo", bind)
                 if _is_map_cas(step.get("acquire")):
@@ -3912,13 +3893,21 @@ def _revl_no_residue(root, baseline, events, where):
     changed = ["{}: {!r} -> {!r}".format(k, baseline[k], now[k])
                for k in now if now[k] != baseline[k]]
     unreleased = _revl_unreleased(events)
-    if not changed and not unreleased:
+    inverse_residue = globals().get("_REVL_INVERSE_RESIDUE", [])
+    if not changed and not unreleased and not inverse_residue:
         return
     detail = []
     if changed:
         detail.append("host runtime still holds " + "; ".join(changed) + " (R4)")
     if unreleased:
         detail.append("host resources never released: " + ", ".join(unreleased) + " (R1)")
+    if inverse_residue:
+        detail.append("inverse failures recorded: " + "; ".join(
+            f"{r.get('component', '<unknown>')}.{r.get('method', '<unknown>')}: "
+            f"{r.get('error', {}).get('type', 'error')}: "
+            f"{r.get('error', {}).get('message', '')}"
+            for r in inverse_residue
+        ) + " (R4)")
     raise AssertionError(where + ": residue \u2014 " + " | ".join(detail))
 
 
@@ -3940,12 +3929,18 @@ async def _revl_call(root, key, method, args, where):
     return await _revl_retry_idempotent(
         lambda: getattr(impl, method)(*args),
         idempotent=idempotent, where=where)
+
+
+def _revl_collect_inverse_residue(fiber):
+    frame = _revl_frame_for_ctx(getattr(fiber, "ctx", None))
+    return list(getattr(frame, "compensation_residue", ())) if frame is not None else []
 '''
 
 
 def _emit_lifecycle_harness() -> "_Lines":
     out = _Lines()
     out.add(0, f"_REVL_ACQUIRE = {_LIFECYCLE_ACQUIRE!r}")
+    out.add(0, "_REVL_INVERSE_RESIDUE = []")
     out.add(0)
     for line in _LIFECYCLE_HARNESS.strip("\n").split("\n"):
         out.add(0, line)
@@ -3975,6 +3970,7 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
         # independent of any earlier lifecycle test in the file.
         out.add(2, "_revl_Clock.reset()")
     out.add(2, "events = []")
+    out.add(2, "_REVL_INVERSE_RESIDUE.clear()")
     out.add(2, "_revl_fibers = {}")
     if uses_abort:
         # item 377: register a 245 session-commit owner BEFORE any component
@@ -4001,6 +3997,8 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
     out.add(5, "await fiber.dispose()")
     out.add(4, "except Exception:")
     out.add(5, "pass")
+    out.add(4, "finally:")
+    out.add(5, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(fiber))")
     out.add(0)
     out.add(1, "_revl_asyncio.run(_run())")
     out.add(0)
@@ -4017,7 +4015,9 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         out.add(indent, "await _revl_settle()")
     elif kind == "unload":
         component = _ident(step["component"], "component name")
-        out.add(indent, f"await _revl_fibers.pop({component!r}).dispose()")
+        out.add(indent, f"_revl_fiber = _revl_fibers.pop({component!r})")
+        out.add(indent, "await _revl_fiber.dispose()")
+        out.add(indent, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(_revl_fiber))")
         out.add(indent, "await _revl_settle()")
     elif kind == "call":
         args = ", ".join(_expr(arg) for arg in step.get("args") or [])
@@ -4630,7 +4630,8 @@ def emit(ir: dict) -> str:
         # `plug` and reads the host-builtin trace to detect unreleased resources.
         # `retry_idempotent` (item 44) gives the driver its auto-retry right for
         # idempotent emissions — see `_REVL_IDEMPOTENT` and `_revl_call` below.
-        | ({"plug", "set_trace", "retry_idempotent"} if lifecycle else set())
+        | ({"plug", "set_trace", "retry_idempotent", "_frame_for_ctx"}
+           if lifecycle else set())
         # item 102: only a lifecycle test with an `advance` step drives the
         # clock coeffect, so `Clock` is imported (for `advance`/`reset`) only
         # then — a timer-free document's output is unchanged.

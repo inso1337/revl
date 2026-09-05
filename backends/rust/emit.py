@@ -912,7 +912,7 @@ def _list_param_escapes(body: object, params: "set[str]",
 
     A bare parameter reference is read-only — safe to borrow — only where its
     immediate slot proves it: the receiver of a read-only builtin (`.length()`,
-    `.at(i)`, etc.), an argument to a free-fn slot the fixpoint still holds
+    a `[i]` index, etc.), an argument to a free-fn slot the fixpoint still holds
     borrowable, or an interpolation hole. Every other slot (a `return` value, a
     record field, a constructor/ADT payload, a list element, a `let`
     right-hand side, an owned call argument) moves the value, so a parameter
@@ -931,8 +931,11 @@ def _list_param_escapes(body: object, params: "set[str]",
                 return
             if kind == "builtin":
                 walk(node.get("target"), True)
-                # List read-only builtins: length, at (indexing)
-                arg_safe = node.get("method") in ("length", "at")
+                # `length` is the only read-only list builtin that takes no
+                # owning argument, so a param reached inside any OTHER builtin's
+                # argument list escapes. (Indexing is `kind == "index"`, not a
+                # builtin, and is handled by the receiver walk above.)
+                arg_safe = node.get("method") == "length"
                 for a in node.get("args") or []:
                     walk(a, arg_safe)
                 return
@@ -1022,10 +1025,20 @@ def _compute_list_param_borrows(functions: list) -> "dict[str, frozenset]":
 
 
 def _render_param_type(borrowed: bool, ftype: object, types: dict) -> str:
-    """The Rust type of a free-function parameter, `&str` when the borrow
-    analysis lowered this read-only `Str` param to a borrow (item 282), else the
-    owned lowering `_rust_type` gives it."""
+    """The Rust type of a free-function parameter: `&str` when the borrow
+    analysis lowered a read-only `Str` param to a borrow (item 282), `&[T]` when
+    it lowered a read-only `List[T]` param to a borrowed slice (issue #333), else
+    the owned lowering `_rust_type` gives it.
+
+    A `List[T]` borrows to the slice `&[T]`, the list analogue of `Str`'s `&str`:
+    the `RevlListOps`/`RevlStrListOps` runtime traits are implemented on the
+    unsized `[T]`/`[String]`, so both an owned `Vec<T>` (via `Deref`) and a
+    borrowed `&[T]` carry the same read-only methods, exactly as `str` serves
+    both `String` and `&str`."""
     if borrowed:
+        elem = _list_element_type(ftype)
+        if elem is not None:
+            return f"&[{_rust_type(elem, types)}]"
         return "&str"
     return _rust_type(ftype, types, position="param")
 
@@ -4898,10 +4911,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # component dialect: a free-function call `name(..)`.
         name = _ident(node.get("name"), "function")
         borrow = ctx.fn_borrow.get(node.get("name"), frozenset())
+        list_borrow = ctx.fn_list_borrow.get(node.get("name"), frozenset())
         fn_arg_nodes = node.get("args") or []
         fn_arg_exprs = [_render_expr(a, ctx, rename) for a in fn_arg_nodes]
         rendered = [
             _borrow_str_arg(a, r, ctx) if idx in borrow
+            else _borrow_list_arg(a, r, ctx) if idx in list_borrow
             else _by_value_arg(a, r, ctx)
             for idx, (a, r) in enumerate(zip(fn_arg_nodes, fn_arg_exprs))
         ]
@@ -5050,8 +5065,10 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # `Str` param the callee lowered to `&str` takes a borrow instead of
             # a clone (item 282), so its whole string is never copied at the call.
             borrow = ctx.fn_borrow.get(callee_name, frozenset())
+            list_borrow = ctx.fn_list_borrow.get(callee_name, frozenset())
             bv_args = [
                 _borrow_str_arg(a, r, ctx) if idx in borrow
+                else _borrow_list_arg(a, r, ctx) if idx in list_borrow
                 else _by_value_arg(a, r, ctx)
                 for idx, (a, r) in enumerate(zip(node.get("args") or [], arg_exprs))
             ]
@@ -5579,7 +5596,7 @@ def _stdlib_helper_traits() -> list[str]:
         "trait RevlStrListOps {",
         "    fn revl_join(&self, sep: &str) -> String;",
         "}",
-        "impl RevlStrListOps for Vec<String> {",
+        "impl RevlStrListOps for [String] {",
         "    fn revl_join(&self, sep: &str) -> String { self.join(sep) }",
         "}",
         "trait RevlListOps<T> {",
@@ -5589,7 +5606,7 @@ def _stdlib_helper_traits() -> list[str]:
         "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T>;",
         "    fn revl_push(&self, item: T) -> Vec<T>;",
         "}",
-        "impl<T: Clone + PartialEq> RevlListOps<T> for Vec<T> {",
+        "impl<T: Clone + PartialEq> RevlListOps<T> for [T] {",
         "    fn revl_length(&self) -> i64 { self.len() as i64 }",
         "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {",
         "        // JS slice semantics: out-of-range bounds clamp, never panic.",
@@ -5602,10 +5619,10 @@ def _stdlib_helper_traits() -> list[str]:
         "        self.iter().position(|x| x == needle).map(|i| i as i64).unwrap_or(-1)",
         "    }",
         "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T> {",
-        "        let mut _v = self.clone(); _v.extend(other.iter().cloned()); _v",
+        "        let mut _v = self.to_vec(); _v.extend(other.iter().cloned()); _v",
         "    }",
         "    fn revl_push(&self, item: T) -> Vec<T> {",
-        "        let mut _v = self.clone(); _v.push(item); _v",
+        "        let mut _v = self.to_vec(); _v.push(item); _v",
         "    }",
         "}",
         "",
