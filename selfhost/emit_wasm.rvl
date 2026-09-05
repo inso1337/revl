@@ -538,7 +538,6 @@ fn infer_val_ty(node: Any, s: Scope) -> Str {
     }
     let sig = function_sig(value_str(value_field(callee, "name")), s)
     return value_str(value_field(sig, "returns"))
-    return ""
   }
   return infer_ty(node, s.types)
 }
