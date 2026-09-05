@@ -1154,10 +1154,6 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
 // `ctx.var_types = {p.name: p.type ..}`).
 fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables) -> List[Str] {
   var out = []
-  var uses_stdlib = false
-  for (f of functions) {
-    if (contains_stdlib(value_field(f, "body"))) { uses_stdlib = true }
-  }
   for (fnode of functions) {
     let name = mangle(value_str(value_field(fnode, "name")))
     let params = value_list(value_field(fnode, "params"))
@@ -1166,9 +1162,7 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
     let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, rn: Map.empty() }
     var ps = []
     for (p of params) {
-      var ptype = rust_type_pos(value_field(p, "type"), tables.tn)
-      if (uses_stdlib && !value_bool(value_field(fnode, "public")) && ptype == "String") { ptype = "&str" }
-      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${ptype}`)
+      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_pos(value_field(p, "type"), tables.tn)}`)
     }
     let returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
     var vis = ""
