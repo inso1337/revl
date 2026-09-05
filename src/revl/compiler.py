@@ -63,6 +63,23 @@ class _LoadedModule:
     pure_dependencies: set[int] = field(default_factory=set)
 
 
+def escaping_use_path(path: str) -> bool:
+    """Whether a `use` path names a file outside the importing directory's own
+    tree: an ABSOLUTE path, or a relative one that normalises to a leading
+    `..`. Purely syntactic, so the check opens and stat-s nothing. Everything
+    else resolves under the importer's directory or, when nothing sits there,
+    through the operator's own search path (`REVL_IMPORT_PATH`, then the
+    installed stdlib), which is why `use "stdlib/str.rvl"` is never escaping.
+
+    Shared by the MCP transport jail (`mcp.server._escaping_use`, roadmap 425
+    F2) and the in-compiler admission confinement below, so the two doors
+    agree on what "escaping" means."""
+    if os.path.isabs(path):
+        return True
+    normalized = os.path.normpath(path)
+    return normalized == ".." or normalized.startswith(".." + os.sep)
+
+
 class _ModuleLoader:
     """Loads modules and resolves `use` with cycle detection.
 
@@ -76,7 +93,15 @@ class _ModuleLoader:
                  profile: AdmissionProfile | None = None) -> None:
         self._cache: dict[str, _LoadedModule] = {}
         self._stack: list[str] = []
-        self._sources = sources or {}
+        # Keys are normalised to abspath ONCE here. Every lookup below is by
+        # abspath (`has_source`, `load`), so a relative key would never match
+        # and the loader would fall through to `parse_file` on the SAME relative
+        # path — silently admitting whatever sits on disk under that name in
+        # place of the text the caller submitted (`gate_service.admit` passed
+        # its keys through verbatim). A caller's in-memory source now stands in
+        # for the file it names however the key was spelled.
+        self._sources = {os.path.abspath(k): v
+                         for k, v in (sources or {}).items()}
         # roadmap 319: REVL_IMPORT_PATH + the revl stdlib, read fresh per
         # loader so a test's `monkeypatch.setenv` takes effect.
         self._search_path = _default_search_path()
@@ -143,7 +168,8 @@ class _ModuleLoader:
     def _exists(self, path: str) -> bool:
         return self.has_source(path) or os.path.exists(path)
 
-    def resolve_use(self, importer_dir: str, importer_path: str, use: _ast.UseDecl) -> str:
+    def resolve_use(self, importer_dir: str, importer_path: str, use: _ast.UseDecl,
+                    *, in_memory: bool = False) -> str:
         """Resolve a `use` path to the file it names.
 
         Relative-to-the-importing-file resolution is primary and unchanged:
@@ -151,8 +177,15 @@ class _ModuleLoader:
         entry never shadows a genuine local file of the same relative path
         (roadmap 319). Only when nothing sits there does the search path
         (REVL_IMPORT_PATH, then the revl stdlib) get a turn, in order.
+
+        `in_memory` says the IMPORTER was supplied as source text rather than
+        read from disk. Under an untrusted-author profile that is the admitted
+        source itself (or a module handed in beside it), and its imports are
+        confined BEFORE anything is stat'd — see `_confine_use`.
         """
         primary = os.path.join(importer_dir, use.path)
+        if in_memory and self._profile is not None and self._profile.untrusted:
+            self._confine_use(importer_path, use, primary)
         if self._exists(primary):
             self._note_stdlib_shadow(use.path, primary, "importer-relative")
             return primary
@@ -184,6 +217,59 @@ class _ModuleLoader:
                      "found relative to the importer or anywhere on that path")
         raise RevlError(importer_path, use.line,
                         f"cannot find imported module `{use.path}`", hint=hint)
+
+    def _confine_use(self, importer_path: str, use: _ast.UseDecl,
+                     primary: str) -> None:
+        """Admission confinement of a `use` written by an untrusted author.
+
+        The compile FOLLOWS a `use` path: `resolve_use` joins it to the
+        importing directory and the loader parses whatever is there. For source
+        whose author is untrusted that made every `use "<path>"` a probe of the
+        admitting process's filesystem: the refusal that came back (a parse
+        error at `<path>:1` naming the first token, or "cannot find imported
+        module") disclosed whether the path exists and what it starts with. The
+        MCP transport closed this at its dispatch layer (roadmap 425 F2) for
+        source that arrived over the wire, but the library doors admit the same
+        source without a transport — `Session.admit` (item 330, and the
+        in-language `admit` crossing behind it), `Gate.propose` (item 334) — and
+        each compiled with the profile and no jail. The door is the compile
+        itself, so the confinement lives here, keyed on the ONE fact every door
+        already states: `profile.untrusted`.
+
+        Scope is the same premise the transport jail runs on. An in-memory
+        importer under an untrusted profile is agent-authored (the admitted
+        root, or a `modules=` entry supplied beside it); a `.rvl` read from
+        disk was put there by a human, and its own `../lib/x.rvl` is the
+        operator's composition layout, untouched. Two shapes escape and are
+        refused: an absolute path, and a relative path that traverses upward
+        out of the admitting directory. A relative path that stays inside
+        resolves as before (the admitting directory is the operator's, the
+        same sanction the transport gives its cwd), as does the search-path
+        spelling of an installed module. A path the caller also supplies
+        in-memory is exempt: it resolves out of the sources map and no
+        filesystem is involved.
+
+        Order is the point: this runs before `_exists`, so the refusal is
+        byte-identical whether or not the named file exists. A confinement
+        that leaked existence through its own message would be the defect it
+        closes, in a smaller font (the 396 F4 no-oracle discipline)."""
+        if not escaping_use_path(use.path) or self.has_source(primary):
+            return
+        raise RevlError(
+            importer_path, use.line,
+            f"admission confinement: `use \"{use.path}\"` in untrusted-authored "
+            f"source may not name an absolute path or traverse upward out of "
+            f"the admitting directory",
+            hint="the compile follows a `use` path and reads the file it names, "
+                 "so an unconfined one would report whether any path on the "
+                 "machine exists and what its first token is. Supply the "
+                 "imported module in-memory (`modules=`), keyed by the path the "
+                 "import names; write the import relative to the admitting "
+                 "directory; or, for an installed module, use its search-path "
+                 "spelling (`use \"stdlib/str.rvl\"`). A trusted author's file "
+                 "on disk resolves its own imports unchanged",
+            category="admission",
+        )
 
     def _note_stdlib_shadow(self, written: str, resolved: str,
                             origin: str) -> None:
@@ -288,7 +374,8 @@ class _ModuleLoader:
 
             self._cache[abs_path] = module
             for use in program.uses:
-                dep_path = self.resolve_use(module.dir, abs_path, use)
+                dep_path = self.resolve_use(module.dir, abs_path, use,
+                                            in_memory=virtual is not None)
                 used = self.load(dep_path)
                 if use.names is not None:
                     for name in use.names:
