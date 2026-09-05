@@ -358,6 +358,8 @@ def _ledger() -> dict:
 def _reasoned(entry: dict) -> dict[str, str]:
     """`blind` is stored reason-first (one reason, many constructs) so the
     ledger reads as an argument rather than as a list of strings."""
+    if not isinstance(entry, dict):
+        return {}
     flat: dict[str, str] = {}
     for reason, constructs in entry.items():
         for construct in constructs:
@@ -415,10 +417,17 @@ def check(data: dict) -> list[str]:
             problems.append(f"{tier}: survey did not produce a tier")
             continue
         recorded = ledger.get(tier, {})
+        if not isinstance(recorded, dict):
+            continue
         waived = _reasoned(recorded.get("blind", {}))
         baseline = set(_reasoned(recorded.get("unported", {})))
 
-        blind = set(found["blind"])
+        blind_value = found.get("blind")
+        unported_value = found.get("unported")
+        if not isinstance(blind_value, list) or not isinstance(unported_value, list):
+            problems.append(f"{tier}: survey construct populations must be lists")
+            continue
+        blind = set(blind_value)
         for construct in sorted(blind - set(waived)):
             problems.append(
                 f"{tier}: `{construct}` is mirrored in selfhost/{TIERS[tier][1]}.rvl "
@@ -432,7 +441,7 @@ def check(data: dict) -> list[str]:
                 f"not blind any more (the corpus reaches it, or the branch is "
                 f"gone). Delete the entry: this ledger only shrinks.")
 
-        unported = set(found["unported"])
+        unported = set(unported_value)
         for construct in sorted(unported - baseline):
             problems.append(
                 f"{tier}: `{construct}` is a NEW reference-only construct that no "

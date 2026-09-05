@@ -161,3 +161,14 @@ def test_construct_closure_rejects_duplicates_and_missing_tiers(tool, monkeypatc
     problems = tool.check({"py": {"blind": [], "unported": []}})
     assert any("classified more than once" in problem for problem in problems)
     assert any("missing construct ledger tier" in problem for problem in problems)
+
+
+def test_construct_check_fails_closed_on_malformed_maps(tool, monkeypatch, tmp_path):
+    ledger = {tier: {"blind": None, "unported": []} for tier in TIERS}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(tool, "LEDGER", path)
+    data = {tier: {"blind": None, "unported": []} for tier in TIERS}
+    problems = tool.check(data)
+    assert any("missing `blind` reason map" in problem for problem in problems)
+    assert any("construct populations must be lists" in problem for problem in problems)
