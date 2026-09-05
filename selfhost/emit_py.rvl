@@ -50,20 +50,30 @@
 // does — pinned by `tests/fixtures/emit_py_corpus/secrets{,_nested}.rvl` in both
 // the emit_py oracle and the fully-native compile corpus.
 //
+// Item 429 also cross-checks cache-pure memo wrappers, pure-function inlining,
+// witnessed activation/provide effects (shared registration numbering and setup),
+// ADT construction, Float widening, optional record reads, and pure-let match
+// blocks. The literal CORPUS is the shared construct/line measurement workload.
+//
 // ============================================================ WHAT IT DEFERS
 // Reported for a follow-on slice 5, deliberately OUT of this file:
 //   * async coloring (colored fns / async externs' await-seed / awaited call
 //     sites), realm placements (`isolate`/`intercept`/`routes`/router),
 //     spawn/instances, in-file `test`/`fault_test`/`lifecycle test` emission,
-//     `adt` construction (a user-variant constructor call), and the ABI;
+//     and the ABI;
 //   * method-body `let-effect` — EMITTED (the `_revl_frame.acquire` form) but not
-//     yet cross-checked: the surface admits only a `spawn` acquire there, whose
-//     `cexpr` lands in slice 5;
+//     yet cross-checked: admitted bound acquisitions use spawn or result-declared
+//     host verbs (Map/Pool), whose component runtime lowering lands in slice 5.
+//     Bound witnessed acquisition in a provide method is frontend-rejected;
 //   * `let_pattern` (record/list destructuring): still unimplemented here, but no
 //     longer a PERMANENT exclusion — item 179 replaced the reference's
 //     `__revl_destructure_{id(node)}` (a nondeterministic Python object id) with a
 //     per-`_Lines` monotonic counter in deterministic emission order, so its bytes
 //     are now reproducible and a future slice CAN port + cross-check it.
+// Exact residual conditions and reproducing inputs, including runtime streams,
+// approval/deferred/validated dispatch and full model-flow provenance, live in
+// the Python entries of selfhost_{blind_spots,uncovered_lines}.json. These are
+// measured limitations, not a claim of whole-emitter parity.
 //
 // ------------------------------------------------------ the erased-IR boundary
 // revl has no dynamic `dict[str, Any]`, and the checker refuses stdlib methods
@@ -1285,12 +1295,12 @@ fn comp_names(ir: Any) -> Str {
 // Slice 4 (item 206) added the `config` cexpr, config (`ConfigSchema`), and the
 // method-body `effect`/`let-effect`/compensated-`emit` accumulator (the
 // `_revl_frame.adopt`/`.acquire` + `_label`/`_effect_N`/`_emit_N` counter, now
-// threaded through provides/methods). STILL DEFERRED to slice 5 (a divergence,
-// not a bug, if fed one): async coloring (async methods / await bodies / the
+// threaded through provides/methods). STILL DEFERRED to slice 5: async coloring
+// (async methods / await bodies / the
 // await-seed), host roots (`Pool`/`Map`/`Job`) in COMPONENT bodies (fn/test
 // bodies already covered), realm placements (`isolate`/`intercept`/`routes`/the
 // router), spawn/instances, lifecycle TESTS (the `plug`/`set_trace`/`Clock`/
-// `asyncio` driver), and the `adt`/`format`/`host`/`spawn`/`instance-get` cexpr
+// `asyncio` driver), and the `format`/`host`/`spawn`/`instance-get` cexpr
 // kinds.
 
 // A body-emission result: the lines produced AND the running timer counter (the

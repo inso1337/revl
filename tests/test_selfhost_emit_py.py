@@ -15,8 +15,7 @@ IR through a bespoke ``@py`` accessor set (``g``/``gs``/``alist``/``at``/…),
 navigation is now PURE revl through stdlib/value.rvl's ``value_*`` (item 180) —
 a refactor of HOW the IR is read, proven by the function corpus staying
 byte-identical. Only host formatting stays ``@py`` (``py_repr``/``newline``/
-``mangle``/``snake``/``pascal``), plus one flagged gap: value.rvl ships no
-record-key enumerator, so ``record_keys`` is bridged locally (see the file).
+``mangle``/``snake``/``pascal``); record keys use value.rvl's ``value_keys``.
 
 Covered subset (what emits byte-identical):
   * the FUNCTION-ONLY document — module scaffold, gated arithmetic preludes
@@ -65,13 +64,20 @@ Slice 4 (item 206) adds three more byte-identical forms:
 Deliberately OUT (excluded from the corpus, deferred to Path B slice 5+):
 in-file ``test``/``fault_test`` and ``lifecycle test`` emission, async coloring
 (async methods / async externs' await-seed / ``await`` bodies), realm placements
-(``isolate``/``intercept``/``routes``), spawn/instances, ``adt`` construction, and
+(``isolate``/``intercept``/``routes``), spawn/instances, and
 the canonical ABI. Method-body ``let-effect`` is emitted (the
 ``_revl_frame.acquire`` form) but NOT cross-checked this slice: the surface admits
-only a ``spawn`` acquire there, whose ``cexpr`` lands in slice 5. ``let_pattern``
+``spawn`` or result-declared host acquisitions there, whose ``cexpr`` lands in
+slice 5; it rejects bound witnessed acquisitions. ``let_pattern``
 (destructuring) is still unimplemented here but is no longer a *permanent*
 exclusion: item 179 made the reference's destructure temp deterministic (a
 per-``_Lines`` counter, not ``id(node)``), so a future slice can port it.
+
+Item 429 expands the exact workload with existing-tree inputs and authored
+cache-pure, witnessed/setup, inlining, Float, ADT, optional-field and component
+expression edges. Every residual function and construct is classified in the
+Python ledger entries with source sites and representative inputs. The boundary
+tests below pin real exclusions separately; they are NOT positive CORPUS inputs.
 
 Restored by item 317 (was OUT as of item 247, docs/design/teardown-contract.md):
 ``services_body.rvl`` exercises the ACTIVATION-BODY ``emit ... compensate ...``
@@ -489,3 +495,29 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+@pytest.mark.parametrize(("path", "reference_text", "port_marker"), [
+    ("tests/fixtures/emit_ts_corpus/async_module_local.rvl", "async def run(", None),
+    ("tests/fixtures/emit_ts_corpus/services_async.rvl", "'async': True", None),
+    ("tests/fixtures/emit_ts_corpus/realm_intercept.rvl", "'inject': {'db':", None),
+    ("tests/fixtures/emit_ts_corpus/realm_isolate.rvl", "'isolate':", None),
+    ("stdlib/fs.rvl", "_REVL_REFS = {}", None),
+    ("examples/lifecycle_wasm.rvl", "REVL_TESTS = []", None),
+    ("examples/regressions/fuzz_go_6be27824.rvl", "REVL_TESTS = []", None),
+    ("backends/go/scenarios/accessor.rvl", "spawn as _revl_spawn",
+     "<<UNSUPPORTED-CEXPR:spawn>>"),
+    ("backends/go/scenarios/advance.rvl", "fmt as _revl_fmt",
+     "<<UNSUPPORTED-CEXPR:format>>"),
+    ("backends/go/testdata/stream_130.rvl", "Pool, Stream",
+     "<<UNSUPPORTED-CEXPR:subscribe>>"),
+])
+def test_named_runtime_and_harness_boundaries(emitted, reference, path, reference_text, port_marker):
+    """Pin specific deferred paths, not a blanket allowance for different bytes."""
+    ir = compile_files([str(ROOT / path)])
+    expected = reference.emit(ir)
+    actual = emitted["emit_py_src"](ir)
+    assert reference_text in expected
+    assert reference_text not in actual
+    if port_marker is not None:
+        assert port_marker in actual
