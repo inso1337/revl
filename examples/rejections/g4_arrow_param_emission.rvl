@@ -1,0 +1,56 @@
+// REJECTED — G4: a spawn-handle provision flowing in as a call ARGUMENT to an
+// arrow whose PARAMETER carries the service type does not drop the `emit`
+// marker (the sibling of `g4_unmarked_alias_emission.rvl`, one indirection
+// further — GHSA-wg4v-r47x-52p2 residual).
+//
+// #331 resolved a crossing reached through a `let`/capture binding of the
+// handle. Here the handle does not name the receiver lexically: it is passed
+// as an argument, `f(w.task, prompt)`, and the arrow body `t.run(s)` calls the
+// emission through the service-typed parameter `t: Task`. The parameter's
+// declared service type is the provenance the emission analysis follows: the
+// provision flows across the parameter binding at the application, so `t.run`
+// is the SAME crossing `w.task.run` is and is refused for the same reason and
+// named for what it is.
+//
+// Before, this compiled clean AND `revl audit` reported the component as
+// "fully revertible" with no emissions, while the marked spelling
+// `emit t.run(s)` was refused as "not declared `emission`". Both ends were
+// wrong; both are now the same judgment the unaliased spelling gets — an
+// unmarked crossing refused, a marked one carried onto the audit surface.
+//
+// expected error:
+//   call to emission `w.task.run` must be marked `emit` (G4)
+
+service Net {
+  emission[net] fn send(msg: Str) -> Int
+}
+
+service Task {
+  emission[net] fn run(prompt: Str) -> Int
+  fn status() -> Int
+}
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+    fn status() = 0
+  }
+}
+
+service Sup {
+  emission fn go(prompt: Str) -> Int
+}
+
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(prompt: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let f = (t: Task, s: Str) => t.run(s)
+      let r = f(w.task, prompt)
+      return r
+    }
+  }
+}

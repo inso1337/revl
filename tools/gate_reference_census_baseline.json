@@ -1,11 +1,6 @@
 {
  "buckets": {
   "false-admit/A1": [
-   "examples/rejections/a1_async_compensate_suspends.rvl",
-   "examples/rejections/a1_async_effect_not_awaited.rvl",
-   "examples/rejections/a1_async_emit_step_not_awaited.rvl",
-   "examples/rejections/a1_await_emit_sync.rvl",
-   "examples/rejections/a1_effect_await_sync.rvl",
    "examples/rejections/t34_arrow_self_declared_async.rvl"
   ],
   "false-admit/G4": [
@@ -49,9 +44,6 @@
   "false-reject/G1": [
    "backends/go/testdata/stream_130.rvl",
    "backends/rust/scenarios/stream.rvl"
-  ],
-  "msg-mismatch/A1": [
-   "examples/rejections/a1_async_undo_suspends.rvl"
   ],
   "tag-mismatch/G4->BAD": [
    "examples/rejections/g4_spawn_widens_budget.rvl"
@@ -342,78 +334,6 @@
    "reference": {
     "message": "",
     "tag": ""
-   }
-  },
-  "examples/rejections/a1_async_compensate_suspends.rvl": {
-   "bucket": "false-admit/A1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`compensate` reaches async operation `model.record`, but teardown is synchronous on every tier \u2014 a suspension there would be a compensation that can hang or silently no-op (A1)",
-    "tag": "A1"
-   }
-  },
-  "examples/rejections/a1_async_effect_not_awaited.rvl": {
-   "bucket": "false-admit/A1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "component `A` acquires through async operation `p.open` but the effect is not awaited; the binding would hold the in-flight value, not the result (A1)",
-    "tag": "A1"
-   }
-  },
-  "examples/rejections/a1_async_emit_step_not_awaited.rvl": {
-   "bucket": "false-admit/A1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`emit` step reaches async operation `model.complete` but the emission is not awaited; py would build a coroutine it never awaits (the emission never fires) and ts a floating unordered Promise (A1)",
-    "tag": "A1"
-   }
-  },
-  "examples/rejections/a1_async_undo_suspends.rvl": {
-   "bucket": "msg-mismatch/A1",
-   "gate": {
-    "code": "A1",
-    "kind": "refused",
-    "message": "component `A` reaches async function `open_conn` in a setup/activation body, which cannot suspend a fiber (A1)"
-   },
-   "reference": {
-    "message": "`undo` reaches async operation `w.heat`, but teardown is synchronous on every tier \u2014 a suspension there would be a teardown that can hang or silently no-op (A1)",
-    "tag": "A1"
-   }
-  },
-  "examples/rejections/a1_await_emit_sync.rvl": {
-   "bucket": "false-admit/A1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`await emit` on an emission that reaches nothing async \u2014 an `await` in an activation body is a real divert window (A1)",
-    "tag": "A1"
-   }
-  },
-  "examples/rejections/a1_effect_await_sync.rvl": {
-   "bucket": "false-admit/A1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "`effect await` on an acquisition that reaches nothing async \u2014 an `await` in an activation body is a real divert window (A1)",
-    "tag": "A1"
    }
   },
   "examples/rejections/g4_spawn_widens_budget.rvl": {
