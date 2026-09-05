@@ -4385,9 +4385,8 @@ fn ends_expr_kw(w: Str) -> Bool {
 
 // A token that makes a NODE out of what precedes it, and so adds one level to
 // the tree the walkers will descend.
-fn extends_spine(t: Token) -> Bool {
-  let k = t.kind
-  if (k == "kw") { return t.text == "emit" }
+fn extends_spine(k: Str, w: Str) -> Bool {
+  if (k == "kw") { return w == "emit" }
   if (k == "." || k == "?." || k == "?") { return true }
   if (k == "!" || k == "~") { return true }
   if (k == "+" || k == "-" || k == "*" || k == "/" || k == "%") { return true }
@@ -4410,8 +4409,8 @@ fn nesting_depth(ts: List[Token]) -> Int {
   var i = 0
   let n = ts.length()
   while (i < n) {
-    let t = ts[i]
-    let k = t.kind
+    let k = ts[i].kind
+    let w = ts[i].text
     if (k == "(" || k == "[" || k == "{") {
       depth += 1
       run = 0
@@ -4449,7 +4448,7 @@ fn nesting_depth(ts: List[Token]) -> Int {
       spine = 0
       run = 0
     } else if (k == "," || k == ";" || k == "="
-               || (k == "kw" && ends_expr_kw(t.text))) {
+               || (k == "kw" && ends_expr_kw(w))) {
       // a sibling boundary — a separator, an assignment `=`, a statement or
       // declaration keyword. The next expression starts from nothing, and the
       // one that just ended only matters as far as it was the tallest
@@ -4458,18 +4457,23 @@ fn nesting_depth(ts: List[Token]) -> Int {
       run = 0
       chain = 0
     } else {
-      if (k == "!" || k == "~" || k == "-" || (k == "kw" && t.text == "emit")) {
+      if (k == "!" || k == "~" || k == "-" || (k == "kw" && w == "emit")) {
         run += 1
       } else {
         run = 0
       }
       if (k == "??" || k == "?") { chain += 1 }
-      if (extends_spine(t)) { spine += 1 }
+      if (extends_spine(k, w)) { spine += 1 }
     }
     var here = depth + run + chain
     if (spine > here) { here = spine }
     if (sibs > here) { here = sibs }
     if (here > worst) { worst = here }
+    // stop at the answer. Past the bound the verdict cannot change, and
+    // walking the rest of a hostile source is work an attacker chose the size
+    // of — the saved-spine stack in particular is copied on every close, so a
+    // deeply nested input would cost quadratic time to finish measuring.
+    if (worst > nesting_limit()) { return worst }
     i += 1
   }
   return worst

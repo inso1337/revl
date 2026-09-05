@@ -3865,10 +3865,163 @@ pub fn foreign_scan(src: String) -> String {
     return String::from("");
 }
 
+fn ends_expr_kw(w: &str) -> bool {
+    if (((((w == "let") || (w == "var")) || (w == "return")) || (w == "if")) || (w == "else")) {
+        return true;
+    }
+    if (((((w == "while") || (w == "for")) || (w == "of")) || (w == "break")) || (w == "continue")) {
+        return true;
+    }
+    if (((((w == "fn") || (w == "pub")) || (w == "type")) || (w == "use")) || (w == "test")) {
+        return true;
+    }
+    if ((((w == "service") || (w == "component")) || (w == "extern")) || (w == "provide")) {
+        return true;
+    }
+    if ((((w == "requires") || (w == "provides")) || (w == "config")) || (w == "effect")) {
+        return true;
+    }
+    if ((((w == "assert") || (w == "fail")) || (w == "compensate")) || (w == "undo")) {
+        return true;
+    }
+    return false;
+}
+
+fn extends_spine(k: &str, w: &str) -> bool {
+    if (k == "kw") {
+        return (w == "emit");
+    }
+    if (((k == ".") || (k == "?.")) || (k == "?")) {
+        return true;
+    }
+    if ((k == "!") || (k == "~")) {
+        return true;
+    }
+    if (((((k == "+") || (k == "-")) || (k == "*")) || (k == "/")) || (k == "%")) {
+        return true;
+    }
+    if (((k == "&&") || (k == "||")) || (k == "??")) {
+        return true;
+    }
+    if (((((k == "&") || (k == "|")) || (k == "^")) || (k == "<<")) || (k == ">>")) {
+        return true;
+    }
+    if ((((k == "==") || (k == "!=")) || (k == "===")) || (k == "!==")) {
+        return true;
+    }
+    if ((((k == "<") || (k == ">")) || (k == "<=")) || (k == ">=")) {
+        return true;
+    }
+    return false;
+}
+
+fn nesting_depth(ts: Vec<Token>) -> i64 {
+    let mut depth = 0i64;
+    let mut run = 0i64;
+    let mut chain = 0i64;
+    let mut spine = 0i64;
+    let mut sibs = 0i64;
+    let mut up_spine: Vec<i64> = vec![];
+    let mut up_sibs: Vec<i64> = vec![];
+    let mut worst = 0i64;
+    let mut i = 0i64;
+    let n = ts.revl_length();
+    while (i < n) {
+        let k = (ts)[(i) as usize].clone().kind;
+        let w = (ts)[(i) as usize].clone().text;
+        if (((k == "(") || (k == "[")) || (k == "{")) {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+            run = 0i64;
+            chain = 0i64;
+            up_spine.push(spine);
+            up_sibs.push(sibs);
+            spine = 0i64;
+            sibs = 0i64;
+        } else {
+            if (((k == ")") || (k == "]")) || (k == "}")) {
+                if (depth > 0i64) {
+                    depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+                }
+                run = 0i64;
+                chain = 0i64;
+                let mut inner = sibs;
+                if (spine > inner) {
+                    inner = spine;
+                }
+                let mut os = 0i64;
+                let mut ob = 0i64;
+                if (up_spine.revl_length() > 0i64) {
+                    os = (up_spine)[((up_spine.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone();
+                    up_spine = up_spine.revl_slice(0i64, (up_spine.revl_length()).checked_sub(1i64).expect("revl: Int overflow"));
+                    ob = (up_sibs)[((up_sibs.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone();
+                    up_sibs = up_sibs.revl_slice(0i64, (up_sibs.revl_length()).checked_sub(1i64).expect("revl: Int overflow"));
+                }
+                spine = os;
+                if (inner > spine) {
+                    spine = inner;
+                }
+                spine = (spine).checked_add(1i64).expect("revl: Int overflow");
+                sibs = ob;
+            } else {
+                if (k == ":") {
+                    if (spine > sibs) {
+                        sibs = spine;
+                    }
+                    spine = 0i64;
+                    run = 0i64;
+                } else {
+                    if ((((k == ",") || (k == ";")) || (k == "=")) || ((k == "kw") && ends_expr_kw(&w))) {
+                        if (spine > sibs) {
+                            sibs = spine;
+                        }
+                        spine = 0i64;
+                        run = 0i64;
+                        chain = 0i64;
+                    } else {
+                        if ((((k == "!") || (k == "~")) || (k == "-")) || ((k == "kw") && (w == "emit"))) {
+                            run = (run).checked_add(1i64).expect("revl: Int overflow");
+                        } else {
+                            run = 0i64;
+                        }
+                        if ((k == "??") || (k == "?")) {
+                            chain = (chain).checked_add(1i64).expect("revl: Int overflow");
+                        }
+                        if extends_spine(&k, &w) {
+                            spine = (spine).checked_add(1i64).expect("revl: Int overflow");
+                        }
+                    }
+                }
+            }
+        }
+        let mut here = ((depth).checked_add(run).expect("revl: Int overflow")).checked_add(chain).expect("revl: Int overflow");
+        if (spine > here) {
+            here = spine;
+        }
+        if (sibs > here) {
+            here = sibs;
+        }
+        if (here > worst) {
+            worst = here;
+        }
+        if (worst > nesting_limit()) {
+            return worst;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return worst;
+}
+
+fn too_deep_msg() -> String {
+    return format!("expression nesting is deeper than the parser's limit of {} levels", (nesting_limit()).to_string());
+}
+
 pub fn admit_src(src: String) -> String {
     let fgn = foreign_scan(src.clone());
     if (fgn != "") {
         return tagged("FOREIGN", &fgn);
+    }
+    if (nesting_depth(lex_src(src.clone())) > nesting_limit()) {
+        return tagged("BAD", &too_deep_msg());
     }
     let pg = parse_prog(src.clone());
     if (pg.bad != "") {
@@ -6893,6 +7046,14 @@ fn bad(msg: String) -> PR {
     return PR { i: (0i64).checked_sub(1i64).expect("revl: Int overflow"), e: Expr::Bad(msg.clone()) };
 }
 
+pub fn nesting_limit() -> i64 {
+    return 200i64;
+}
+
+fn too_deep() -> PR {
+    return bad(format!("expression nesting is deeper than the parser's limit of {} levels", (nesting_limit()).to_string()));
+}
+
 fn join_exprs(xs: Vec<Expr>) -> String {
     let mut out: Vec<String> = vec![];
     let mut i = 0i64;
@@ -6982,13 +7143,16 @@ pub fn render(e: Expr) -> String {
 };
 }
 
-fn p_type(ts: Vec<Token>, i: i64) -> TyR {
+fn p_type(ts: Vec<Token>, i: i64, d: i64) -> TyR {
+    if (d > nesting_limit()) {
+        return TyR { i: (0i64).checked_sub(1i64).expect("revl: Int overflow"), ty: String::from(""), ok: false };
+    }
     if at(ts.clone(), i, "(") {
         let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
         let mut inner: Vec<String> = vec![];
         let mut ok = true;
         while ((ok && (!at(ts.clone(), j.clone(), ")"))) && (!at(ts.clone(), j.clone(), "eof"))) {
-            let t = p_type(ts.clone(), j.clone());
+            let t = p_type(ts.clone(), j.clone(), (d).checked_add(1i64).expect("revl: Int overflow"));
             if (!t.ok) {
                 ok = false;
             }
@@ -7008,7 +7172,7 @@ fn p_type(ts: Vec<Token>, i: i64) -> TyR {
         }
         j = (j).checked_add(1i64).expect("revl: Int overflow");
         if at(ts.clone(), j, "arrow") {
-            let r = p_type(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"));
+            let r = p_type(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
             if (!r.ok) {
                 return TyR { i: (0i64).checked_sub(1i64).expect("revl: Int overflow"), ty: String::from(""), ok: false };
             }
@@ -7031,7 +7195,7 @@ fn p_type(ts: Vec<Token>, i: i64) -> TyR {
         let mut k = (j2).checked_add(1i64).expect("revl: Int overflow");
         let mut ok2 = true;
         while ((ok2 && (!at(ts.clone(), k.clone(), "]"))) && (!at(ts.clone(), k.clone(), "eof"))) {
-            let a = p_type(ts.clone(), k.clone());
+            let a = p_type(ts.clone(), k.clone(), (d).checked_add(1i64).expect("revl: Int overflow"));
             if (!a.ok) {
                 ok2 = false;
             }
@@ -7101,23 +7265,30 @@ fn canon(op: String) -> String {
 }
 
 pub fn p_expr(ts: Vec<Token>, i: i64) -> PR {
-    return p_ternary(ts.clone(), i);
+    return p_ternary(ts.clone(), i, 0i64);
 }
 
-fn p_ternary(ts: Vec<Token>, i: i64) -> PR {
-    let c = p_or(ts.clone(), i);
+fn p_expr_d(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    return p_ternary(ts.clone(), i, d);
+}
+
+fn p_ternary(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    if (d > nesting_limit()) {
+        return too_deep();
+    }
+    let c = p_or(ts.clone(), i, d);
     if is_bad(c.e.clone()) {
         return c;
     }
     if at(ts.clone(), c.i, "?") {
-        let t = p_ternary(ts.clone(), (c.i).checked_add(1i64).expect("revl: Int overflow"));
+        let t = p_ternary(ts.clone(), (c.i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
         if is_bad(t.e.clone()) {
             return t;
         }
         if (!at(ts.clone(), t.i, ":")) {
             return bad(String::from("expected :"));
         }
-        let f = p_ternary(ts.clone(), (t.i).checked_add(1i64).expect("revl: Int overflow"));
+        let f = p_ternary(ts.clone(), (t.i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
         if is_bad(f.e.clone()) {
             return f;
         }
@@ -7126,13 +7297,13 @@ fn p_ternary(ts: Vec<Token>, i: i64) -> PR {
     return c;
 }
 
-fn p_or(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_nullish(ts.clone(), i);
+fn p_or(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_nullish(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
     while at(ts.clone(), acc.i, "||") {
-        let r = p_nullish(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+        let r = p_nullish(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), d);
         if is_bad(r.e.clone()) {
             return r;
         }
@@ -7144,13 +7315,16 @@ fn p_or(ts: Vec<Token>, i: i64) -> PR {
     return acc;
 }
 
-fn p_nullish(ts: Vec<Token>, i: i64) -> PR {
-    let l = p_and(ts.clone(), i);
+fn p_nullish(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    if (d > nesting_limit()) {
+        return too_deep();
+    }
+    let l = p_and(ts.clone(), i, d);
     if is_bad(l.e.clone()) {
         return l;
     }
     if at(ts.clone(), l.i, "??") {
-        let r = p_nullish(ts.clone(), (l.i).checked_add(1i64).expect("revl: Int overflow"));
+        let r = p_nullish(ts.clone(), (l.i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
         if is_bad(r.e.clone()) {
             return r;
         }
@@ -7162,13 +7336,13 @@ fn p_nullish(ts: Vec<Token>, i: i64) -> PR {
     return l;
 }
 
-fn p_and(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_bor(ts.clone(), i);
+fn p_and(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_bor(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
     while at(ts.clone(), acc.i, "&&") {
-        let r = p_bor(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+        let r = p_bor(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), d);
         if is_bad(r.e.clone()) {
             return r;
         }
@@ -7180,13 +7354,13 @@ fn p_and(ts: Vec<Token>, i: i64) -> PR {
     return acc;
 }
 
-fn p_bor(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_bxor(ts.clone(), i);
+fn p_bor(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_bxor(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
     while at(ts.clone(), acc.i, "|") {
-        let r = p_bxor(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+        let r = p_bxor(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), d);
         if is_bad(r.e.clone()) {
             return r;
         }
@@ -7195,13 +7369,13 @@ fn p_bor(ts: Vec<Token>, i: i64) -> PR {
     return acc;
 }
 
-fn p_bxor(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_band(ts.clone(), i);
+fn p_bxor(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_band(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
     while at(ts.clone(), acc.i, "^") {
-        let r = p_band(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+        let r = p_band(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), d);
         if is_bad(r.e.clone()) {
             return r;
         }
@@ -7210,13 +7384,13 @@ fn p_bxor(ts: Vec<Token>, i: i64) -> PR {
     return acc;
 }
 
-fn p_band(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_eq(ts.clone(), i);
+fn p_band(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_eq(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
     while at(ts.clone(), acc.i, "&") {
-        let r = p_eq(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+        let r = p_eq(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), d);
         if is_bad(r.e.clone()) {
             return r;
         }
@@ -7241,8 +7415,8 @@ fn eq_op(ts: Vec<Token>, i: i64) -> String {
     return String::from("");
 }
 
-fn p_eq(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_cmp(ts.clone(), i);
+fn p_eq(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_cmp(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
@@ -7253,7 +7427,7 @@ fn p_eq(ts: Vec<Token>, i: i64) -> PR {
             go = false;
         }
         if (op != "") {
-            let r = p_cmp(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+            let r = p_cmp(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), d);
             if is_bad(r.e.clone()) {
                 return r;
             }
@@ -7279,8 +7453,8 @@ fn cmp_op(ts: Vec<Token>, i: i64) -> String {
     return String::from("");
 }
 
-fn p_cmp(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_shift(ts.clone(), i);
+fn p_cmp(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_shift(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
@@ -7291,7 +7465,7 @@ fn p_cmp(ts: Vec<Token>, i: i64) -> PR {
             go = false;
         }
         if (op != "") {
-            let r = p_shift(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+            let r = p_shift(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), d);
             if is_bad(r.e.clone()) {
                 return r;
             }
@@ -7311,8 +7485,8 @@ fn shift_op(ts: Vec<Token>, i: i64) -> String {
     return String::from("");
 }
 
-fn p_shift(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_add(ts.clone(), i);
+fn p_shift(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_add(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
@@ -7323,7 +7497,7 @@ fn p_shift(ts: Vec<Token>, i: i64) -> PR {
             go = false;
         }
         if (op != "") {
-            let r = p_add(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+            let r = p_add(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), d);
             if is_bad(r.e.clone()) {
                 return r;
             }
@@ -7343,8 +7517,8 @@ fn add_op(ts: Vec<Token>, i: i64) -> String {
     return String::from("");
 }
 
-fn p_add(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_mul(ts.clone(), i);
+fn p_add(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_mul(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
@@ -7355,7 +7529,7 @@ fn p_add(ts: Vec<Token>, i: i64) -> PR {
             go = false;
         }
         if (op != "") {
-            let r = p_mul(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+            let r = p_mul(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), d);
             if is_bad(r.e.clone()) {
                 return r;
             }
@@ -7378,8 +7552,8 @@ fn mul_op(ts: Vec<Token>, i: i64) -> String {
     return String::from("");
 }
 
-fn p_mul(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_unary(ts.clone(), i);
+fn p_mul(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_unary(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
@@ -7390,7 +7564,7 @@ fn p_mul(ts: Vec<Token>, i: i64) -> PR {
             go = false;
         }
         if (op != "") {
-            let r = p_unary(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+            let r = p_unary(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), d);
             if is_bad(r.e.clone()) {
                 return r;
             }
@@ -7400,32 +7574,35 @@ fn p_mul(ts: Vec<Token>, i: i64) -> PR {
     return acc;
 }
 
-fn p_unary(ts: Vec<Token>, i: i64) -> PR {
+fn p_unary(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    if (d > nesting_limit()) {
+        return too_deep();
+    }
     if ((at(ts.clone(), i, "!") || at(ts.clone(), i, "-")) || at(ts.clone(), i, "~")) {
         let op = tk(ts.clone(), i).kind;
-        let r = p_unary(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+        let r = p_unary(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
         if is_bad(r.e.clone()) {
             return r;
         }
         return PR { i: r.i, e: Expr::Un(Box::new(UnN { op: op.clone(), e: r.e.clone() })) };
     }
     if at_kw(ts.clone(), i, "emit") {
-        let em = p_unary(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+        let em = p_unary(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
         if is_bad(em.e.clone()) {
             return em;
         }
         return PR { i: em.i, e: Expr::Emit(Box::new(UnN { op: String::from("emit"), e: em.e.clone() })) };
     }
-    return p_postfix(ts.clone(), i);
+    return p_postfix(ts.clone(), i, d);
 }
 
-fn p_seq(ts: Vec<Token>, i: i64, close: &str) -> Seq {
+fn p_seq(ts: Vec<Token>, i: i64, close: &str, d: i64) -> Seq {
     let mut j = i;
     let mut xs: Vec<Expr> = vec![];
     let mut ok = true;
     let mut msg = String::from("");
     while ((ok && (!at(ts.clone(), j, close))) && (!at(ts.clone(), j, "eof"))) {
-        let a = p_expr(ts.clone(), j);
+        let a = p_expr_d(ts.clone(), j, d);
         if is_bad(a.e.clone()) {
             ok = false;
             msg = String::from("bad element");
@@ -7449,8 +7626,8 @@ fn p_seq(ts: Vec<Token>, i: i64, close: &str) -> Seq {
     return Seq { i: (jj).checked_add(1i64).expect("revl: Int overflow"), xs: items.clone(), ok: fin, msg: why.clone() };
 }
 
-fn p_postfix(ts: Vec<Token>, i: i64) -> PR {
-    let mut acc = p_primary(ts.clone(), i);
+fn p_postfix(ts: Vec<Token>, i: i64, d: i64) -> PR {
+    let mut acc = p_primary(ts.clone(), i, d);
     if is_bad(acc.e.clone()) {
         return acc;
     }
@@ -7473,7 +7650,7 @@ fn p_postfix(ts: Vec<Token>, i: i64) -> PR {
                 }
                 let nm2 = tk(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow")).text;
                 if at(ts.clone(), (acc.i).checked_add(2i64).expect("revl: Int overflow"), "(") {
-                    let s = p_seq(ts.clone(), (acc.i).checked_add(3i64).expect("revl: Int overflow"), ")");
+                    let s = p_seq(ts.clone(), (acc.i).checked_add(3i64).expect("revl: Int overflow"), ")", (d).checked_add(1i64).expect("revl: Int overflow"));
                     if (!s.ok) {
                         return bad(s.msg.clone());
                     }
@@ -7487,7 +7664,7 @@ fn p_postfix(ts: Vec<Token>, i: i64) -> PR {
                     if optional {
                         return bad(String::from("call after ?."));
                     }
-                    let s2 = p_seq(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), ")");
+                    let s2 = p_seq(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), ")", (d).checked_add(1i64).expect("revl: Int overflow"));
                     if (!s2.ok) {
                         return bad(s2.msg.clone());
                     }
@@ -7497,7 +7674,7 @@ fn p_postfix(ts: Vec<Token>, i: i64) -> PR {
                         if optional {
                             return bad(String::from("index after ?."));
                         }
-                        let x = p_expr(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"));
+                        let x = p_expr_d(ts.clone(), (acc.i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
                         if is_bad(x.e.clone()) {
                             return x;
                         }
@@ -7569,7 +7746,7 @@ fn record_update_ahead(ts: Vec<Token>, i: i64) -> bool {
     return false;
 }
 
-fn p_params(ts: Vec<Token>, i: i64) -> Pars {
+fn p_params(ts: Vec<Token>, i: i64, d: i64) -> Pars {
     let mut j = i;
     let mut xs = vec![];
     let mut ok = true;
@@ -7582,7 +7759,7 @@ fn p_params(ts: Vec<Token>, i: i64) -> Pars {
             let mut ty = String::from("");
             j = (j).checked_add(1i64).expect("revl: Int overflow");
             if at(ts.clone(), j, ":") {
-                let t = p_type(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"));
+                let t = p_type(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), d);
                 if (!t.ok) {
                     ok = false;
                 }
@@ -7609,7 +7786,7 @@ fn p_params(ts: Vec<Token>, i: i64) -> Pars {
     return Pars { i: (jj).checked_add(1i64).expect("revl: Int overflow"), xs: ps.clone(), ok: fin, msg: String::from("") };
 }
 
-fn p_arms(ts: Vec<Token>, i: i64) -> Arms {
+fn p_arms(ts: Vec<Token>, i: i64, d: i64) -> Arms {
     let mut j = i;
     let mut xs: Vec<ArmN> = vec![];
     let mut ok = true;
@@ -7638,7 +7815,7 @@ fn p_arms(ts: Vec<Token>, i: i64) -> Arms {
                 ok = false;
             }
             if ok {
-                let b = p_expr(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"));
+                let b = p_expr_d(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), d);
                 if is_bad(b.e.clone()) {
                     ok = false;
                 }
@@ -7664,7 +7841,7 @@ fn p_arms(ts: Vec<Token>, i: i64) -> Arms {
     return Arms { i: (jj).checked_add(1i64).expect("revl: Int overflow"), xs: arms.clone(), ok: fin, msg: String::from("") };
 }
 
-fn p_inits(ts: Vec<Token>, i: i64) -> Inits {
+fn p_inits(ts: Vec<Token>, i: i64, d: i64) -> Inits {
     let mut j = i;
     let mut xs: Vec<InitN> = vec![];
     let mut ok = true;
@@ -7678,7 +7855,7 @@ fn p_inits(ts: Vec<Token>, i: i64) -> Inits {
                 ok = false;
             }
             if at(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), ":") {
-                let v = p_expr(ts.clone(), (j).checked_add(2i64).expect("revl: Int overflow"));
+                let v = p_expr_d(ts.clone(), (j).checked_add(2i64).expect("revl: Int overflow"), d);
                 if is_bad(v.e.clone()) {
                     ok = false;
                 }
@@ -7723,7 +7900,7 @@ fn unesc(s: &str) -> String {
     return out;
 }
 
-fn p_template(text: &str) -> Expr {
+fn p_template(text: &str, d: i64) -> Expr {
     let raw = text.revl_split("|");
     let mut parts: Vec<PartN> = vec![];
     let mut i = 0i64;
@@ -7736,7 +7913,7 @@ fn p_template(text: &str) -> Expr {
             parts.push(PartN { kind: String::from("t"), text: body.clone(), e: Expr::NullLit });
         }
         if (tag == "v:") {
-            let sub = parse_expr_str(body.clone());
+            let sub = parse_expr_str_d(body.clone(), d);
             if is_bad(sub.clone()) {
                 ok = false;
             }
@@ -7756,7 +7933,7 @@ fn p_template(text: &str) -> Expr {
     return Expr::Templ(TemplN { parts: ps.clone() });
 }
 
-fn p_primary(ts: Vec<Token>, i: i64) -> PR {
+fn p_primary(ts: Vec<Token>, i: i64, d: i64) -> PR {
     let t = tk(ts.clone(), i);
     if (t.kind == "int") {
         return PR { i: (i).checked_add(1i64).expect("revl: Int overflow"), e: Expr::IntLit(t.text.clone()) };
@@ -7768,7 +7945,7 @@ fn p_primary(ts: Vec<Token>, i: i64) -> PR {
         return PR { i: (i).checked_add(1i64).expect("revl: Int overflow"), e: Expr::StrLit(t.text.clone()) };
     }
     if (t.kind == "template") {
-        let e = p_template(&t.text);
+        let e = p_template(&t.text, (d).checked_add(1i64).expect("revl: Int overflow"));
         if is_bad(e.clone()) {
             return bad(String::from("bad template"));
         }
@@ -7782,7 +7959,7 @@ fn p_primary(ts: Vec<Token>, i: i64) -> PR {
     }
     if (t.kind == "ident") {
         if at(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), "=>") {
-            let b = p_expr(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"));
+            let b = p_expr_d(ts.clone(), (i).checked_add(2i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
             if is_bad(b.e.clone()) {
                 return b;
             }
@@ -7798,7 +7975,7 @@ fn p_primary(ts: Vec<Token>, i: i64) -> PR {
         let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
         let mut ty = String::from("");
         if at(ts.clone(), j.clone(), "[") {
-            let ty_ = p_type(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"));
+            let ty_ = p_type(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
             if (!ty_.ok) {
                 return bad(String::from("bad hole type"));
             }
@@ -7819,14 +7996,14 @@ fn p_primary(ts: Vec<Token>, i: i64) -> PR {
         return PR { i: jj, e: Expr::Hole(HoleN { ty: tt.clone(), msg: mm.clone() }) };
     }
     if ((t.kind == "kw") && (t.text == "match")) {
-        let scr = p_expr(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+        let scr = p_expr_d(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
         if is_bad(scr.e.clone()) {
             return scr;
         }
         if (!at(ts.clone(), scr.i, "{")) {
             return bad(String::from("expected { after match scrutinee"));
         }
-        let a = p_arms(ts.clone(), (scr.i).checked_add(1i64).expect("revl: Int overflow"));
+        let a = p_arms(ts.clone(), (scr.i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
         if (!a.ok) {
             return bad(String::from("bad match arm"));
         }
@@ -7834,20 +8011,20 @@ fn p_primary(ts: Vec<Token>, i: i64) -> PR {
     }
     if (t.kind == "(") {
         if arrow_ahead(ts.clone(), i) {
-            let ps = p_params(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+            let ps = p_params(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
             if (!ps.ok) {
                 return bad(String::from("bad arrow params"));
             }
             if (!at(ts.clone(), ps.i, "=>")) {
                 return bad(String::from("expected =>"));
             }
-            let ab = p_expr(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"));
+            let ab = p_expr_d(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
             if is_bad(ab.e.clone()) {
                 return ab;
             }
             return PR { i: ab.i, e: Expr::Arrow(Box::new(ArrowN { params: ps.xs.clone(), body: ab.e.clone() })) };
         }
-        let inner = p_expr(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+        let inner = p_expr_d(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
         if is_bad(inner.e.clone()) {
             return inner;
         }
@@ -7860,14 +8037,14 @@ fn p_primary(ts: Vec<Token>, i: i64) -> PR {
         if record_update_ahead(ts.clone(), i) {
             return bad(String::from("record update `{base | f = e}` is not supported here"));
         }
-        let fs = p_inits(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"));
+        let fs = p_inits(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
         if (!fs.ok) {
             return bad(String::from("bad record field"));
         }
         return PR { i: fs.i, e: Expr::Rec(RecN { fields: fs.xs.clone() }) };
     }
     if (t.kind == "[") {
-        let ls = p_seq(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), "]");
+        let ls = p_seq(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), "]", (d).checked_add(1i64).expect("revl: Int overflow"));
         if (!ls.ok) {
             return bad(ls.msg.clone());
         }
@@ -7884,8 +8061,12 @@ fn mark_paren(e: Expr) -> Expr {
 }
 
 pub fn parse_expr_str(src: String) -> Expr {
+    return parse_expr_str_d(src.clone(), 0i64);
+}
+
+fn parse_expr_str_d(src: String, d: i64) -> Expr {
     let ts = lex_src(src.clone());
-    let r = p_expr(ts.clone(), 0i64);
+    let r = p_expr_d(ts.clone(), 0i64, d);
     if is_bad(r.e.clone()) {
         return r.e;
     }
@@ -7905,12 +8086,12 @@ pub fn expr_at(ts: Vec<Token>, i: i64) -> AtExpr {
 }
 
 pub fn params_at(ts: Vec<Token>, i: i64) -> AtPars {
-    let r = p_params(ts.clone(), i);
+    let r = p_params(ts.clone(), i, 0i64);
     return AtPars { i: r.i, ps: r.xs.clone(), ok: r.ok };
 }
 
 pub fn type_at(ts: Vec<Token>, i: i64) -> AtTy {
-    let t = p_type(ts.clone(), i);
+    let t = p_type(ts.clone(), i, 0i64);
     return AtTy { i: t.i, ty: t.ty.clone(), ok: t.ok };
 }
 
