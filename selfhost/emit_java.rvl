@@ -7,16 +7,18 @@
 // It is one half of a differential BYTE oracle: this file and
 // backends/java/emit.py's `emit()` are two independent implementations of the
 // same lowering, forced to produce BYTE-IDENTICAL Java for every input in the
-// covered subset (tests/test_selfhost_emit_java.py). The reference is ground
-// truth; any divergence is a defect in this slice.
+// covered subset (tests/test_selfhost_emit_java.py). A divergence requires
+// inspecting both implementations; neither is assumed correct by definition.
 //
 // ============================================================ WHAT IT COVERS
-// Every IR the frontend produces is ir_version 3, so the covered slice mirrors
-// the reference's v3 path (`_emit_v3` -> `_emit_v3_types` /
+// The frontend selects v1, v2 or v3 from the document's features. The corpus
+// covers scalar legacy providers as well as the reference's v3 path
+// (`_emit_v3` -> `_emit_v3_types` /
 // `_emit_service_interfaces_v3` / `_emit_v3_functions` / `_emit_component` ->
 // `_expr` / `_v3_stmt`) for a document with NO externs, NO tests, NO stdlib
-// builtins, NO built-in Result, and only SIMPLE (pure-provider) components — the
-// v3 typed-core PLUS the smallest byte-exact component/service unit:
+// builtins and NO built-in Result. Modern config/req, realm placement, Map/Job,
+// activation guards/await and compensated frame teardown are also supported.
+// Float arithmetic/widening and Opt are supported, not blanket exclusions.
 //
 //   * SLICE 1 (item 199) — the module scaffold (the two banner comments, the
 //     `package revl;`, the five unconditional `import io.cordis4j.core.*;` lines,
@@ -51,6 +53,9 @@
 //         the `_covers_variant` omission of the `default` throw for a total match;
 //         and the built-in Opt `Some`/`None` match (`.map(..).orElseGet(..)`);
 //       - user type NAMES wherever `_java_v3_type` meets one (`_ident`/`_mangle`).
+//   * Later component slices (216/225/235/238): simple legacy providers and the
+//     modern component subset described above, including positional `format`.
+//     The corpus and Java ledger keys record the exact exercised conditions.
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on java-emitter slices, deliberately OUT of this slice —
@@ -1229,8 +1234,9 @@ fn core_imports(ir: Any) -> List[Str] {
 }
 
 // `_V3Ctx`'s type-table construction: fold the document `types` into the case /
-// record lookups. Ambiguity (a case name / field set shared by two decls) is
-// marked `<<AMBIG>>`, exactly where the reference stores `None`.
+// record lookups. Shared field sets are ambiguous at literal construction.
+// Shared variant case names are a reference emission refusal; this port marks
+// them `<<AMBIG>>` instead (outside the successful-byte oracle).
 fn build_ctx(ir: Any) -> Ctx {
   var fns: Map[Str, Bool] = Map.empty()
   for (fnode of value_list(value_field(ir, "functions"))) {
@@ -2540,10 +2546,11 @@ fn config_default_lit(field: Any) -> Str {
 
 // `_metadata_lit`: an `intercept ... with <meta>` value -> a Java object literal
 // (v2). Scalars mirror `_lit` (str via `json.dumps`, int `<n>L`, float `<n>d`,
-// bool/null keyword); a list -> `java.util.List.of(..)` and a record (map) ->
-// `java.util.Map.of(<key>, <val>, ..)`, each key a `json.dumps` string, recursing
-// on the value. `value_kind` orders bool before int (as Python's isinstance does),
-// so a `true`/`false` metadatum never renders `1L`/`0L`.
+// bool/null keyword); null-free lists/maps use `List.of`/`Map.of`, while a
+// container with a direct null uses an unmodifiable null-tolerant collection.
+// Each map key is a `json.dumps` string and values recurse. `value_kind` orders
+// bool before int (as Python's isinstance does), so a `true`/`false` metadatum
+// never renders `1L`/`0L`.
 fn metadata_lit(v: Any) -> Str {
   let k = value_kind(v)
   if (k == "null") { return "null" }
@@ -2553,13 +2560,29 @@ fn metadata_lit(v: Any) -> Str {
   if (k == "float") { return num_str(v).concat("d") }
   if (k == "list") {
     var parts = []
-    for (item of value_list(v)) { parts = parts.push(metadata_lit(item)) }
+    var has_null = false
+    for (item of value_list(v)) {
+      if (value_is_null(item)) { has_null = true }
+      parts = parts.push(metadata_lit(item))
+    }
+    if (has_null) {
+      return `java.util.Collections.unmodifiableList(java.util.Arrays.<Object>asList(${parts.join(", ")}))`
+    }
     return `java.util.List.of(${parts.join(", ")})`
   }
   if (k == "record") {
     var entries = []
+    var puts = []
+    var has_null = false
     for (mk of value_keys(v)) {
-      entries = entries.push(`${json_dumps(mk)}, ${metadata_lit(value_field(v, mk))}`)
+      let mv = value_field(v, mk)
+      if (value_is_null(mv)) { has_null = true }
+      let rendered = metadata_lit(mv)
+      entries = entries.push(`${json_dumps(mk)}, ${rendered}`)
+      puts = puts.push(`put(${json_dumps(mk)}, ${rendered});`)
+    }
+    if (has_null) {
+      return `java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<String, Object>() {{ ${puts.join(" ")} }})`
     }
     return `java.util.Map.of(${entries.join(", ")})`
   }
@@ -3044,8 +3067,12 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
     let struct = `${cname}${camel(key)}`
     out = out.push(`            undos.add(ctx.provide(ServiceKey.of(${srv}.class), new ${struct}()));`)
   }
-  out = out.push("            java.util.Collections.reverse(undos);")
-  out = out.push("            return Disposables.composite(undos.toArray(new Disposable[0]));")
+  if (body.length() > 0) {
+    out = out.push("            java.util.Collections.reverse(undos);")
+    out = out.push("            return Disposables.composite(undos.toArray(new Disposable[0]));")
+  } else {
+    out = out.push("            return Disposables.none();")
+  }
   out = out.push("        } catch (RuntimeException | Error failure) {")
   out = out.push("            for (int i = undos.size() - 1; i >= 0; i--) {")
   out = out.push("                undos.get(i).dispose();")
@@ -3062,8 +3089,8 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
 // two banner comments, the package, the core imports, the `Components` wrapper,
 // then the user `type` decls and the free functions — each line 4-space indented
 // into the class — joined with newlines, right-stripped, closed with a single
-// trailing newline. Components/services/externs/tests/Result/stdlib are DEFERRED;
-// the covered corpus declares none, so every gated block contributes nothing.
+// trailing newline. Components/services follow the admitted slices above;
+// externs/tests/Result/stdlib blocks remain deferred.
 pub fn emit_src(ir: Any) -> Str {
   let ctx = build_ctx(ir)
   let types = value_field(ir, "types")
@@ -3093,8 +3120,8 @@ pub fn emit_src(ir: Any) -> Str {
   }
   // Service interfaces follow the type decls, mirroring `_emit_v3`'s block order
   // (result-type / types / services / host-stubs / ... / functions / components).
-  // Host stubs, stdlib, ftoa, checked-div, externs, tests and spawn are all
-  // DEFERRED and contribute nothing for the covered corpus.
+  // Stdlib, ftoa, checked-div, externs, tests and spawn remain deferred;
+  // Map/Job host stubs are emitted immediately after the services.
   let services = value_field(ir, "services")
   if (!value_is_null(services) && value_keys(services).length() > 0) {
     for (l of emit_service_interfaces_v3(services)) {
