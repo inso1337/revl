@@ -110,16 +110,19 @@ def main() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    any_stale = False
     for vendor in TARGETS:
         matches = list(vendor.glob(fresh_wheel.name))
         rel = (vendor / fresh_wheel.name).relative_to(ROOT)
         if not matches:
             print(f"::warning::{rel} is missing; run "
                   "`python3 tools/check_site_wheel.py --write`")
+            any_stale = True
             continue
         committed = _member_hashes(matches[0])
         diff = _describe(fresh, committed)
         if diff:
+            any_stale = True
             print(f"::warning::{rel} is stale; rebuild it with "
                   "`python3 tools/check_site_wheel.py --write` "
                   "(or `python3 site/build.py`) and commit the result:")
@@ -128,9 +131,15 @@ def main() -> int:
         else:
             print(f"{rel} is current")
 
-    # always succeed: wheels are not a required context for the merge gate.
-    # warnings above surface drift for awareness, but do not block merges.
-    print("committed playground/site wheel matches a fresh build")
+    # Exit 0 either way: the wheel is not a required context for the merge
+    # gate (PR #347). But the final line must not contradict the warnings
+    # above it: a stale wheel printed "matches a fresh build" for a day,
+    # and a log tail read the opposite of the truth.
+    if any_stale:
+        print("committed playground/site wheel is STALE (see the warnings above); "
+              "not a merge blocker, rebuild with `python3 tools/check_site_wheel.py --write`")
+    else:
+        print("committed playground/site wheel matches a fresh build")
     return 0
 
 
