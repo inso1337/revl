@@ -61,6 +61,13 @@ fn captured(xs: List[Int], n: Int) -> Int {
   return f(xs[0])
 }
 fn direct(n: Int) -> Int { return ((x: Int) => x + 1)(n) }
+fn bytes_identity(value: Bytes) -> Bytes { return value }
+fn unit_identity(value: Unit) -> Unit { return value }
+fn never_identity(value: Never) -> Never { return value }
+fn conditional_call(flag: Bool, f: (Int) -> Int, g: (Int) -> Int, n: Int) -> Int { return (flag ? f : g)(n) }
+fn conditional_index(flag: Bool) -> Int { return (flag ? [1] : [2])[0] }
+fn conditional_length(flag: Bool) -> Int { return (flag ? [1] : [2]).length }
+fn conditional_field(flag: Bool, a: Opt[Keywords], b: Opt[Keywords]) -> Opt[Int] { return (flag ? a : b)?.class }
 
 service EdgeSink {
   emission idempotent fn put(value: Int) -> Int
