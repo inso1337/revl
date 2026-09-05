@@ -4492,8 +4492,11 @@ pub fn admit_src(src: Str) -> Str {
   let fgn = foreign_scan(src)
   if (fgn != "") { return tagged("FOREIGN", fgn) }
   // ... and the nesting bound before any descent, so a source built to run the
-  // front end out of stack is refused rather than parsed.
-  if (nesting_depth(lex_src(src)) > nesting_limit()) {
+  // front end out of stack is refused rather than parsed. The token stream is
+  // read once here and handed to `type_ctors` below, which used to lex the
+  // source a second time of its own.
+  let ts0 = lex_src(src)
+  if (nesting_depth(ts0) > nesting_limit()) {
     return tagged("BAD", too_deep_msg())
   }
   let pg = parse_prog(src)
@@ -4502,7 +4505,7 @@ pub fn admit_src(src: Str) -> Str {
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
   // declarations structurally — see `type_ctors`.
-  let base = ctx_with_callables(build_maps(pg), type_ctors(lex_src(src)))
+  let base = ctx_with_callables(build_maps(pg), type_ctors(ts0))
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
   // the whole program before any body is gated, exactly where `check_and_lower`
   // places `_refuse_host_acquire_in_component_reachable_fn` — after the fn
