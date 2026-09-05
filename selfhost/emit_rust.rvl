@@ -7,8 +7,8 @@
 // It is one half of a differential BYTE oracle: this file and
 // backends/rust/emit.py's `emit()` are two independent implementations of the
 // same lowering, forced to produce BYTE-IDENTICAL Rust for every input in the
-// covered subset (tests/test_selfhost_emit_rust.py). The reference is ground
-// truth; any divergence is a defect in this slice.
+// covered subset (tests/test_selfhost_emit_rust.py). A divergence needs triage:
+// either implementation can be wrong (roadmap item 429).
 //
 // ============================================================ WHAT IT COVERS
 // Every IR the frontend produces is ir_version 3, so the covered slice mirrors
@@ -141,8 +141,9 @@ extern pure fn string_lit(v: Any) -> Str = @py {
 extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
 // A real newline — the line SEPARATOR (`"\n".join(out)` in the reference).
 extern pure fn newline() -> Str = @py { return chr(10) }
-// `_mangle` verbatim: rename a Rust reserved word so a valid revl identifier
-// that is a Rust keyword emits and RUNS. INJECTIVE: escape a name iff the name
+// `_mangle` verbatim: mirror BOTH `_RUST_RESERVED` and `_EMITTER_RESERVED`
+// so user identifiers cannot collide with keywords or generated scaffolding.
+// INJECTIVE: escape a name iff the name
 // or any name reachable from it by dropping trailing `_` is reserved, by
 // exactly one `_`, so the whole `kw`/`kw_`/`kw__` ladder shifts up a rung
 // (`match` -> `match_`, `match_` -> `match__`) instead of collapsing two
@@ -155,7 +156,7 @@ extern pure fn mangle(name: Str) -> Str = @py {
                 "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
                 "self", "Self", "static", "struct", "super", "trait", "true",
                 "type", "unsafe", "use", "where", "while", "async", "await",
-                "dyn")
+                "dyn", "ctx", "config", "root", "plugin")
     root = name
     while root:
         if root in reserved:
