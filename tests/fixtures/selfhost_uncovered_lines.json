@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 4057,
+      "statements": 4110,
       "uncovered": {
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
@@ -138,6 +138,9 @@
           "_key_var": 1,
           "_realm_helper_name": 1
         },
+        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+          "_go_v3_match_opt": 54
+        },
         "Only carriage-return escaping remains: parser.parse_file normalizes literal CR to LF, and the lexer preserves backslash-r verbatim rather than interpreting it. This file-corpus input boundary cannot produce a CR string literal. Newline, tab, BMP and astral scalar escaping are covered.": {
           "_go_string": 1
         },
@@ -230,7 +233,7 @@
           "_emit_v3_go_types": 2
         },
         "Remaining scalar-wildcard payload binding is compatibility IR: source wildcard arms do not introduce that bind. Other residuals lower explicitly deferred Opt/Result cases or reject an unknown case. Scalar wildcard-only and fresh user-constructor scrutinees are now repaired and covered.": {
-          "_go_v3_match": 12
+          "_go_v3_match": 10
         },
         "Remaining statements emit destructive stdlib self-rebinds, optimized code-point scans, or reject an unknown step. Their prerequisite builtin families are deferred; ordinary assignments, loops and accumulator builders are not excluded.": {
           "_go_v3_stmt": 12
@@ -265,7 +268,7 @@
           "_needs_sync": 1
         }
       },
-      "uncovered_statements": 2885
+      "uncovered_statements": 2937
     },
     "java": {
       "statements": 2551,
@@ -765,7 +768,7 @@
       "uncovered_statements": 627
     },
     "rust": {
-      "statements": 3189,
+      "statements": 3227,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and stream refusal. Those require the live plugin/frame runtime that the self-host component slice explicitly marks DEFER.": {
           "_emit_step": 95,
@@ -848,7 +851,7 @@
           "_v3_builtin": 29,
           "_v3_empty_vec_elem_types": 66,
           "_v3_empty_vec_elem_types.collect": 1,
-          "_v3_infer_type": 15,
+          "_v3_infer_type": 20,
           "_v3_inplace_persistent": 12,
           "_v3_interp": 3,
           "_v3_is_float": 4,
@@ -937,7 +940,7 @@
           "_witnessed_extern_for": 3
         }
       },
-      "uncovered_statements": 1213
+      "uncovered_statements": 1218
     },
     "ts": {
       "statements": 1979,
@@ -1663,7 +1666,7 @@
       "uncovered_statements": 94
     },
     "rust": {
-      "statements": 1872,
+      "statements": 1953,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "component_uses_await": 1,
@@ -1750,7 +1753,7 @@
           "v3_infer_type": 3
         }
       },
-      "uncovered_statements": 139
+      "uncovered_statements": 142
     },
     "ts": {
       "statements": 2086,
