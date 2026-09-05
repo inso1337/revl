@@ -1026,6 +1026,10 @@
         "Test-mode statement rendering only: `_v3_stmt`'s remaining structural/truthy assertion lines emit vitest `expect` calls when `test_mode=True`, plus the final unknown-step rejection. Runtime function assertions use the covered throwing form; in-file test harness generation is a separate declared boundary": {
           "_v3_stmt": 8
         },
+        "The #278/#302 install-tree-reach refusal diagnostic: `_reject_install_tree_reach` and its `_door` closure refuse a verbatim @ts body that loads an install-tree host module. No corpus document reaches them because such a document is refused by this very check, and selfhost/emit_ts.rvl does not port the diagnostic.": {
+          "_reject_install_tree_reach": 5,
+          "_reject_install_tree_reach._door": 1
+        },
         "Top-level emitter dispatch: `emit` rejects non-object/unsupported versions, delegates temporal IR, and rejects mixed temporal documents. The corpus supplies valid v1/v2/v3 objects; temporal delegation is a declared separate backend": {
           "emit": 4
         },
@@ -1051,7 +1055,7 @@
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 434
+      "uncovered_statements": 440
     },
     "wasm": {
       "statements": 2693,
