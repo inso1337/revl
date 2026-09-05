@@ -1,1 +1,2 @@
 fn list_len(xs: List[Int]) -> Int { return xs.length() }
+fn str_len(s: Str) -> Int { return s.length() }
