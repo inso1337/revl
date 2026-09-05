@@ -73,7 +73,7 @@ def _user_cache_apply(_revl_ctx, _revl_config):
             def put(self, key, value):
                 def _effect_0():
                     store.insert(key, value)
-                    yield lambda: store.remove(key)
+                    yield _revl_frame._guard(lambda: store.remove(key))
                 _revl_frame.adopt(_revl_ctx.effect(_effect_0, 'UserCache.cache.put#1'))
                 _revl_ctx.db.execute(_revl_fmt('INSERT INTO cache_log VALUES ($0)', key))
 

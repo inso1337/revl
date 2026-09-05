@@ -2403,9 +2403,19 @@ class _ComponentEmitter:
                 fn = f"_effect_{self._counter}"
                 out.add(indent, f"def {fn}():")
                 out.add(indent + 1, self._expr(acquire, where))
+                # issue #321: a method-body effect's generator is adopted
+                # directly (it never passes through `Frame._tracked`, the
+                # activation body's guard chokepoint), so its yielded inverse
+                # must be routed through `_revl_frame._guard` HERE — exactly as
+                # the method-body `let-effect` inverse is guarded inside
+                # `Frame.acquire`. Without it a raising undo escapes to the
+                # cordis unwind: it is logged, never recorded in
+                # `compensation_residue`, and so is invisible to `revl test`
+                # and `revl run`'s no-residue proof (teardown-contract.md:
+                # "every failure is recorded, never silently dropped").
                 out.add(indent + 1,
-                        f"yield {_inverse_lambda(step, 'undo')}: "
-                        f"{self._expr(step.get('undo'), where)}")
+                        f"yield _revl_frame._guard({_inverse_lambda(step, 'undo')}: "
+                        f"{self._expr(step.get('undo'), where)})")
                 out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
             wit = self._witnessed_extern(step.get("acquire"))

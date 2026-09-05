@@ -35,11 +35,16 @@ L0 definition and these verdicts move.
 Three verdicts have no counterpart in the model, and are computed here by
 hand. They are listed so the gate's reach is not overstated:
 
-1. `g4OK` (the `G` row, marker rule). The G4 model
+1. `g4OK` and `hostAcquireOK` (the `G` row). Two rules under the G4
+   guarantee. `g4OK` is the MARKER rule; the G4 model
    (`RevL.Theorems.G4_InverseOrEmit` over `RevL.Syntax.Stmt`) is indexed
-   by statement syntax. The export carries call FACTS — receiver, service,
-   method, marker context — and no statement terms, so no model
-   definition takes its shape.
+   by statement syntax, and the export carries call FACTS — receiver,
+   service, method, marker context — so no model definition takes its
+   shape. `hostAcquireOK` (issue 334) is the ACQUIRE rule: a host acquire
+   verb is legal only as an `effect … undo …` bracket's acquisition. Its
+   verb table (`hostAcquireVerbs`) is the model's copy of the checker's
+   `_HOST_ACQUIRE_VERBS`, and it decides over the `HA` position facts the
+   export carries.
 2. `methodBoundOK` (the `P` row, a provide method against its service's
    `emission[...]` declaration). The model has no definition of that
    rule at all; `RevL.Boundary.bodyBoundary` enumerates a body's crossing
@@ -77,6 +82,13 @@ Fact rows in (tab-separated, one fact per line):
   S <file> <comp> <child>                    activation spawn edge
   H <file> <comp> <var> <child>              spawn handle var
   U <file> <comp> <ctx> <root> <svc> <meth>  call fact + marker context
+  HA <file> <comp> <verb> <bracket|plain|emit|undo|fn>
+                                             a host-family acquisition and the
+                                             POSITION that decides its legality
+                                             — `bracket` is the acquisition of
+                                             an `effect … undo …` (legal); any
+                                             other site acquires irreversibly
+                                             (G4, category `acquire`)
   I <file> <comp> <index> <pure|effect|emit|raw> <heads-csv> <inverse-csv>
                                               reconstructed RevL.Syntax.Stmt
   T <file> <comp> <kind>                     statement class (census)
@@ -109,6 +121,7 @@ Capabilities arrive DECOMPOSED (Z/Y), from `src/revl/cap_order.parse_cap`
 Verdict rows out:
   V <file> <disjoint=ok|fail> <closed=ok|fail> <link=ok|fail>
   G <file> <comp> <g4=ok|fail>                     marker rule (incl. handle)
+                                                   AND host-acquisition rule
   P <file> <comp> <key> <svc> <meth> <bound=ok|fail>
   W <file> <comp> <child> <atten=ok|fail>          spawn attenuation
   X <file> <refused=CODE>                          refusal of record
@@ -839,6 +852,17 @@ structure XRow where
   path : String
   code : String
 
+/-- One host-family acquisition a component's reachable code names, with the
+position that decides its legality (`HA` row). `pos` is `bracket` when the
+verb is the root of an `effect`'s acquisition expression — the only legal
+site — and otherwise the site the checker names (`plain` / `emit` / `undo` /
+`fn`). -/
+structure HARow where
+  path : String
+  comp : String
+  verb : String
+  pos : String
+
 structure IRow where
   path : String
   comp : String
@@ -916,6 +940,11 @@ def parseS (f : List String) : Option SRow :=
 def parseX (f : List String) : Option XRow :=
   match f with
   | ["X", path, code] => some ⟨path, code⟩
+  | _ => none
+
+def parseHA (f : List String) : Option HARow :=
+  match f with
+  | ["HA", path, comp, verb, pos] => some ⟨path, comp, verb, pos⟩
   | _ => none
 
 /-- One entry of a teardown scenario's LIFO stack, in registration order
@@ -1002,6 +1031,24 @@ def g4OK (ems : List (String × String)) (calls : List URow) : Bool :=
     let em := ems.any fun e => e.1 == u.svc && e.2 == u.meth
     (u.ctx == "emit") != em
 
+/-- The host acquisition verb table — the model's copy of the checker's
+`_HOST_ACQUIRE_VERBS` (`src/revl/typecheck.py`). Each opens a host resource
+whose release is a SEPARATE verb; the differential is that this list and the
+checker's must agree (issue 334). -/
+def hostAcquireVerbs : List String := ["Map.new", "Pool.open", "Stream.source"]
+
+/-- Host-acquisition rule (G4-shaped, category `acquire`): a host acquire verb
+is legal ONLY as the acquisition of an `effect … undo …` bracket, the one
+construct that registers its release with the teardown accumulator. Every `HA`
+occurrence of a table verb must therefore sit in `bracket` position; a `plain`
+`let`, an `emit` expression, an `undo` slot, or a reached `fn` body acquires a
+resource nothing reclaims (`lower._refuse_unbracketed_host_acquire`).
+
+PRIVATE RESTATEMENT (see the header, beside `g4OK`): the acquisition-position
+fact is carried by the export, and the verb table and rule are stated here. -/
+def hostAcquireOK (has : List HARow) : Bool :=
+  !has.any fun h => hostAcquireVerbs.contains h.verb && h.pos != "bracket"
+
 /-- Provide-method bound: the reached emission tokens must be within the
 declared bound (plain => none; any => free; scoped => the declared
 entries).
@@ -1081,6 +1128,7 @@ def main (args : List String) : IO UInt32 := do
     let krows := fields.filterMap parseK
     let srows := fields.filterMap parseS
     let xrows := fields.filterMap parseX
+    let harows := fields.filterMap parseHA
     let irows := fields.filterMap parseI
     let erows := fields.filterMap parseE
     let jrows := fields.filterMap parseJ
@@ -1151,6 +1199,7 @@ def main (args : List String) : IO UInt32 := do
       let uk := krows.filter (fun r => r.path == p)
       let us := srows.filter (fun r => r.path == p)
       let uu := urows.filter (fun r => r.path == p)
+      let uha := harows.filter (fun r => r.path == p)
       let ems : List (String × String) :=
         (ub.filter (fun b => b.mode != "plain")).map (fun b => (b.svc, b.meth))
       let bounds : List (String × String × String × List String) :=
@@ -1174,7 +1223,9 @@ def main (args : List String) : IO UInt32 := do
       let closed := closeN (edges.length + 1) edges owns
       -- G verdicts (marker rule) per component
       for cn in fm.map (·.name) do
-        let gv := if g4OK ems (uu.filter (fun r => r.comp == cn)) then "ok" else "fail"
+        let markerOK := g4OK ems (uu.filter (fun r => r.comp == cn))
+        let acquireOK := hostAcquireOK (uha.filter (fun r => r.comp == cn))
+        let gv := if markerOK && acquireOK then "ok" else "fail"
         out := out ++ s!"G\t{p}\t{cn}\tg4={gv}\n"
       -- P verdicts (provide-method bound) per method reach group
       let fkeys := (uf.map (fun r => (r.comp, r.key, r.svc, r.meth))).eraseDups

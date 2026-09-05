@@ -1561,7 +1561,13 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     let fname = `_effect_${counter}`
     var out = [line(indent, `def ${fname}():`)]
     out = out.push(line(indent + 1, cexpr(value_field(step, "acquire"))))
-    out = out.push(line(indent + 1, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
+    // issue #321: a method-body effect's generator is adopted directly (it never
+    // passes through `Frame._tracked`, the activation body's guard chokepoint), so
+    // its yielded inverse must be routed through `_revl_frame._guard` HERE — exactly
+    // as the reference emit.py's `_method_step` does — or a raising undo escapes to
+    // the cordis unwind, is logged, never recorded in `compensation_residue`, and so
+    // is invisible to `revl test` and `revl run`'s no-residue proof.
+    out = out.push(line(indent + 1, `yield _revl_frame._guard(lambda: ${cexpr(value_field(step, "undo"))})`))
     let c = counter + 1
     let label = `${comp_name}.${provide_name}.${method_name}#${c}`
     out = out.push(line(indent, `_revl_frame.adopt(_revl_ctx.effect(${fname}, ${py_repr(label)}))`))
