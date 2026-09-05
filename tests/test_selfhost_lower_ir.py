@@ -262,6 +262,29 @@ def test_selfhosted_lower_ir_in_file_tests_pass(ns):
         fn()  # the block's asserts fire here; a failure raises
 
 
+def test_native_ir_preserves_function_visibility(lower_to_ir):
+    source = (
+        "pub fn exported(n: Int) -> Int { return n + 1 }\n"
+        "fn internal(n: Int) -> Int { return n - 1 }\n"
+    )
+    reference = compile_source(source)["functions"]
+    native = json.loads(lower_to_ir(source))["functions"]
+    assert [fn["public"] for fn in reference] == [True, False]
+    assert native == reference
+
+
+@pytest.mark.parametrize("modifiers", [
+    "emission idempotent", "idempotent emission",
+    "async emission idempotent", "idempotent emission[db] async",
+])
+def test_native_ir_preserves_idempotent_service_methods(lower_to_ir, modifiers):
+    source = f"service Store {{ {modifiers} fn put(value: Int) -> Int }}"
+    native = json.loads(lower_to_ir(source))
+    reference = compile_source(source)
+    assert native["services"] == reference["services"]
+    assert native["ir_version"] == reference["ir_version"] == 3
+
+
 @pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_services(lower_to_ir, rel):
     """The SERVICES table is byte-identical to the reference IR on every corpus
