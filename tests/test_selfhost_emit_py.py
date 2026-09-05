@@ -180,6 +180,7 @@ CORPUS = [
     # that BUILDS a Result. Added red on both stages.
     "adt.rvl",
     "cache_pure.rvl",
+    "witnessed.rvl",
 ]
 
 

@@ -446,7 +446,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "div_trunc") {
     return bounded(`_revl_div_trunc(${target}, ${args[0]})`, "64")
   }
-  if (method == "div_floor") { return bounded(`${target} // ${args[0]}`, "64") }
+  if (method == "div_floor") { return bounded(target.concat(" // ").concat(args[0]), "64") }
   if (method == "div_euclid") {
     return bounded(`_revl_div_euclid(${target}, ${args[0]})`, "64")
   }
@@ -1681,7 +1681,27 @@ fn timer_emit(step: Any, indent: Int, counter: Int) -> Emit {
 
 // `_body_step`: one activation-body step -> its lines (with the reference's
 // trailing blank), threading the timer counter.
-fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any) -> Emit {
+fn witnessed_extern(expr: Any, externs: List[Any]) -> Any {
+  if (node_kind(expr) != "fn") { return None }
+  let name = value_str(value_field(expr, "name"))
+  for (ext of externs) {
+    if (value_str(value_field(ext, "name")) == name && value_str(value_field(ext, "class")) == "witnessed") { return ext }
+  }
+  return None
+}
+
+fn witnessed_step(step: Any, indent: Int, ext: Any) -> List[Str] {
+  let tmp = "_revl_wit1"
+  let call_expr = cexpr(value_field(step, "acquire"))
+  let inverse_expr = cexpr(value_field(ext, "undo"))
+  var out = []
+  out = out.push(line(indent, tmp.concat(" = ").concat(call_expr)))
+  out = out.push(line(indent, "if isinstance(".concat(tmp).concat(", Ok):")))
+  out = out.push(line(indent + 1, "yield _revl_frame.transactional((lambda result: ".concat(inverse_expr).concat("), ").concat(tmp).concat(".value)")))
+  return out
+}
+
+fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect") {
     var out = []
@@ -1694,8 +1714,13 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   if (kind == "effect") {
     var out = []
     for (su of value_list(value_field(step, "setup"))) { out = out.concat(setup_step(su, indent)) }
-    out = out.push(line(indent, cexpr(value_field(step, "acquire"))))
-    out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
+    let wit = witnessed_extern(value_field(step, "acquire"), externs)
+    if (!value_is_null(wit)) {
+      out = out.concat(witnessed_step(step, indent, wit))
+    } else {
+      out = out.push(line(indent, cexpr(value_field(step, "acquire"))))
+      out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
+    }
     out = out.push("")
     return { lines: out, counter: counter }
   }
@@ -1723,13 +1748,13 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   if (kind == "if") {
     var out = [line(indent, `if ${cexpr(value_field(step, "cond"))}:`)]
     var c = counter
-    let te = emit_body_steps(value_list(value_field(step, "then")), indent + 1, comp_name, c, services)
+    let te = emit_body_steps(value_list(value_field(step, "then")), indent + 1, comp_name, c, services, externs)
     out = out.concat(te.lines)
     c = te.counter
     let els = value_list(value_field(step, "else"))
     if (els.length() > 0) {
       out = out.push(line(indent, "else:"))
-      let ee = emit_body_steps(els, indent + 1, comp_name, c, services)
+      let ee = emit_body_steps(els, indent + 1, comp_name, c, services, externs)
       out = out.concat(ee.lines)
       c = ee.counter
     }
@@ -1753,11 +1778,11 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   return { lines: out, counter: counter }
 }
 
-fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int, services: Any) -> Emit {
+fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
   var out = []
   var c = counter
   for (s of steps) {
-    let e = body_step(s, indent, comp_name, c, services)
+    let e = body_step(s, indent, comp_name, c, services, externs)
     out = out.concat(e.lines)
     c = e.counter
   }
@@ -1800,7 +1825,7 @@ fn body_has_secret_param(steps: List[Any], services: Any) -> Bool {
 }
 
 // One component: the `_<snake>_apply` closure and its plugin dict.
-fn component_body(comp: Any, services: Any) -> List[Str] {
+fn component_body(comp: Any, services: Any, externs: List[Any]) -> List[Str] {
   let name = mangle(value_str(value_field(comp, "name")))
   let sn = snake(name)
   var out = []
@@ -1850,7 +1875,7 @@ fn component_body(comp: Any, services: Any) -> List[Str] {
   // post-activation abort's activation-body offsets are drained after Phase 1
   // instead of lost. Mirrors backends/python/emit.py (byte-agreement oracle).
   out = out.push(line(2, "yield _revl_frame.begin"))
-  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0, services)
+  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0, services, externs)
   out = out.concat(e.lines)
   out = out.push(line(2, "yield _revl_frame.drain"))
   out = out.push("")
@@ -2365,7 +2390,7 @@ pub fn emit_py_src(ir: Any) -> Str {
   out = out.push("")
   out = out.push("")
   for (c of components) {
-    out = out.concat(component_body(c, value_field(ir, "services")))
+    out = out.concat(component_body(c, value_field(ir, "services"), externs))
     out = out.push("")
     out = out.push("")
   }
