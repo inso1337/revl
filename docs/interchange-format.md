@@ -53,7 +53,7 @@ host bootstrap it needs are [composition-bootstrap.md](composition-bootstrap.md)
 | `schema_version` | `MAJOR.MINOR` of this format (see the promise below). |
 | `kind` | the constant `"revl.interchange"`, so a consumer can identify the document. |
 | `manifest` | the static composition: `components` (each with `inject` = **requires** and `provides`, plus optional `isolate` / `intercept`), `loadOrder` (providers first; teardown is the exact reverse), and optional `templates` (runtime spawn targets). |
-| `boundary` | the **reaches** half, per component: `emissions` (irreversible call sites), `capabilities` (the scope each emission's declaration carries — `["*"]` means it promises nothing), `compensated`, `awaits`, and `externs` (host code reached transitively, a first-class dispatch shown as name `"*"`). |
+| `boundary` | the **reaches** half, per component: `emissions` (irreversible call sites), `capabilities` (the scope each emission's declaration carries — `["*"]` means it promises nothing), `compensated`, `awaits`, and `externs` (host code reached transitively; each entry carries `name`, `class`, optional `capabilities`, and `backends`; see [the boundary extern entry](#the-boundary-extern-entry) below; a first-class dispatch is shown as name `"*"`). |
 | `externs` | every declared host-code extern — the trust surface a proof cannot cover. |
 | `distributability` | per service, whether it may cross a process seam (`transport-safe` / `address-space-bound`) and why (interop-bridge §4). |
 | `retention` | optional (item 308 F10). The report-only retention surface: one row per resource-carrying parameter of a non-inverse extern or of a service method — every declared position at which a resource handle leaves revl's sight. Present only when there is one, so a handle-free composition omits the key. Each row is a MAY-retain: it does not prove a host body keeps the handle, and an absent row does not prove one does not. A declared inverse is excluded (teardown closing a handle is the contract working). |
@@ -61,6 +61,76 @@ host bootstrap it needs are [composition-bootstrap.md](composition-bootstrap.md)
 Provides / requires / reaches — the three things another admission harness
 needs — are `manifest.components[].provides`, `manifest.components[].inject`,
 and `boundary[name]`.
+
+### The boundary extern entry
+
+Each entry in `boundary[name].externs[]` is the machine-readable classification
+of one host-code crossing a component reaches. It is the supported way to read
+what the human render prints on its `host code:` line, and it carries:
+
+| field | what it is |
+| --- | --- |
+| `name` | the extern's name, or `"*"` for a first-class dispatch (a reach through a value whose target is not statically nameable). |
+| `class` | the G4 classification, one of the four boundary classes: `"pure"` (no observable effect), `"acquire"` (takes a resource that must be released), `"emission"` (an irreversible crossing out of the system), or `"witnessed"` (a reversible host mutation that names its inverse). `"first-class dispatch"` is the pseudo-class for a `"*"` entry. May be `null` when the class is not known. |
+| `capabilities` | the declared capability scope of a scoped `emission[...]` / `witnessed[...]` extern, as a sorted token list (e.g. `["fs"]`). **This token, not the name, is what a `capability <glob>` policy rule keys on.** Absent for an unscoped extern, whose token is its own name. |
+| `backends` | the backend tiers this extern has a body for (sorted), e.g. `["py"]`. |
+
+So the human line
+
+```
+host code: … write [fs] (witnessed, py)
+```
+
+is exactly this JSON entry:
+
+```json
+{ "name": "write", "class": "witnessed", "capabilities": ["fs"], "backends": ["py"] }
+```
+
+The `capabilities` and `backends` fields carry the `[fs]` token and the `py`
+tier the render folds into that one line. A consumer that needs to know a
+crossing's classification, its declared capability, or its tier reads these
+fields, never the prose.
+
+## The human render is not a stability contract
+
+`revl audit` **without** `--json` prints a human-readable render: the
+composition, each component's boundary, the externs, and the distributability
+verdicts, for a person reading a review. **That render is not a stability
+contract.** Its wording, spacing, and line shape may change between releases to
+read better, and such a change is not a semver break.
+
+This is not hypothetical. PR #257 added the declared capability token to the
+boundary line, so a witnessed `fs` extern that rendered
+
+```
+host code: … write (witnessed, py)
+```
+
+began rendering
+
+```
+host code: … write [fs] (witnessed, py)
+```
+
+The classification was byte-identical at every sha; only the render gained the
+` [fs]` token, which is a strict improvement (the token is what a capability
+rule targets). But a downstream consumer matching the old prose string stopped
+matching, and read the failed match as "no longer witnessed". It was not; the
+consumer was parsing an output that was never a contract.
+
+**`revl audit --json` is the supported surface for consumers.** It is the
+versioned, schema-published document this file describes, with the additive-only
+compatibility promise below. Everything a consumer might have scraped from the
+prose (every classification, capability token, and tier) is a documented
+field of that document (`boundary[name].externs[]` above); parse the JSON.
+
+A wording change to the prose is still worth reviewing, so it does not surprise
+someone reading a diff: the human boundary line is pinned by a golden
+(`tests/test_audit_human_boundary_golden.py`) over a corpus that exercises all
+four classifications, scoped and bare. The golden does not freeze the render;
+it makes changing it a deliberate, reviewable diff rather than a silent break.
+Re-applying #257's ` [fs]` addition turns that golden red on purpose.
 
 ## The compatibility promise
 

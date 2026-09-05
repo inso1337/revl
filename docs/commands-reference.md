@@ -285,7 +285,11 @@ non-retention. Declared inverses are excluded: teardown closing a handle is the
 contract working, not a hazard.
 
 - `FILES` (required).
-- `--json` - machine-readable output.
+- `--json` - machine-readable output. This is the **supported surface for
+  consumers**: a versioned, schema-published document
+  ([interchange-format.md](interchange-format.md)). The default (prose) render
+  is for people and is **not** a stability contract; its wording may change
+  between releases. Parse `--json`, not the prose.
 - `--diff PREV.json` - authority-drift gate: re-audit and FAIL (nonzero) if
   the new generation ADDS boundary crossings not in `PREV.json`
   ([audit-diff.md](audit-diff.md)).
