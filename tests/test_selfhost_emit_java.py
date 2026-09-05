@@ -209,6 +209,33 @@ CORPUS = [
     # `Long`/`Integer` form — vs v3's `java.lang.Long` — is out of this slice's
     # byte-checked surface; the fixture keeps signatures scalar.)
     "v1_components.rvl",
+    "legacy_void.rvl",
+    "legacy_realms.rvl",
+    # Item 429: existing agreeing documents with measured additional coverage.
+    "../../../examples/tenants.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/05-rate-limiter/v1/attempt-1.rvl",
+    "../emit_ts_corpus/services_async.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
+    "../emit_wasm_corpus/constfold.rvl",
+    "../../../backends/go/scenarios/tagger.rvl",
+    "../../../examples/ecosystem-consumer-js/candidates/double_tool.rvl",
+    "../../../bench/results/baseline-deepseek-v4-pro/18-config-echo/v1/attempt-1.rvl",
+    "../emit_go_corpus/variants.rvl",
+    "../emit_go_corpus/records.rvl",
+    "../emit_ts_corpus/realm_intercept.rvl",
+    "../emit_py_corpus/services_config.rvl",
+    "../emit_py_corpus/services_method_effects.rvl",
+    "../emit_ts_corpus/components_mixed.rvl",
+    "../emit_wasm_corpus/listmem.rvl",
+    "../erase_realms.rvl",
+    "../realm_conformance/provider_a.rvl",
+    "match_ignored.rvl",
+    "float_numeric.rvl",
+    "component_format.rvl",
+    "branch_shapes.rvl",
+    "component_branches.rvl",
+    "map_inference.rvl",
 ]
 
 
