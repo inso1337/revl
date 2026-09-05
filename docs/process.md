@@ -97,20 +97,51 @@ So, whenever you change logic that a `selfhost/*` file mirrors:
 4. **Add the corpus case before the fix, and watch it FAIL.** A corpus entry
    that was never seen red proves nothing.
 
-Two gates measure what the corpus does not reach and refuse to let that set
-grow silently, both run by `tests/test_selfhost_coverage.py`:
+Two gates measure what the oracle's own corpus does not reach and refuse to let
+that set grow silently:
 
-* `tools/selfhost_line_coverage.py --check` reports which STATEMENTS of the
-  mirrored emitters no corpus document executes, on both sides. This is the one the
-  surface rests on. Measured today: the corpus runs 46.2% of the reference
-  emitter statements and 75.1% of the ported ones.
+* `tools/selfhost_line_coverage.py --check`, exercised by
+  `tests/test_selfhost_line_coverage.py`, measures unexecuted STATEMENTS on both
+  sides. The port is measured through its emitted Python, attributed to the
+  declaring `.rvl` function, not to `.rvl` source lines. Its totals exclude
+  generated scaffolding; optimizer-inlined helpers can retain unentered
+  definitions even when their inlined behavior runs. Run the tool for current
+  counts; historical percentages are not a coverage target.
 * `tools/selfhost_coverage.py --check` is the cheap construct-level check over
-  dispatch arms. Kept because it is fast and names constructs rather than
-  functions, but it is a proxy: it reports 19% blind where statements say 54%.
+  dispatch arms, exercised by `tests/test_selfhost_coverage.py`. It names
+  constructs rather than functions, but reaching a dispatch arm does not mean
+  executing its whole body.
 
-Both are floors, not substitutes for the rule above. Neither can see inside a
-branch the corpus already reaches, and neither knows whether a covered line is
-a correct one.
+Both are floors, not substitutes for the rule above. Statement coverage can find
+unexecuted code inside a reached arm, but neither gate detects a missing member
+of a reserved-name set on a line that already executes. Neither establishes
+that covered code is correct.
+
+Triage is not a baseline refresh. Add oracle cases for supported omissions and
+fix demonstrated divergences; for remaining gaps, record the actual source
+condition and evidence for a declared scope boundary or unreachable path.
+An unentered function or a partially exercised function is a measurement, not
+an explanation. Do not declare a supported feature out of scope merely because
+its new corpus case fails. A justified parity deferral remains a limitation,
+not an assertion that the oracle covers that feature.
+
+Use the differential survey to reproduce a broader repository experiment without
+changing either ledger or corpus:
+
+```sh
+python3 tools/selfhost_differential_survey.py --tiers ts java --select-cover --json survey.json
+```
+
+`--documents path/to/input.rvl` narrows the experiment.
+The report distinguishes frontend/reference rejection, port refusal or error,
+byte divergence, and byte agreement. Its greedy suggestions use additional
+statement reach on both sides, accept only agreeing inputs, and measure against
+the oracle's actual `CORPUS` list. Baseline failures remain explicit in the
+report. WASM compares only the `functions` projection: mixed-component documents
+remain in the report but are excluded from automatic selection, since work on
+discarded component output is not evidence of agreement.
+Review suggested inputs and remaining source branches; a zero-exit
+survey, byte agreement, or a coverage gain is not proof of correctness.
 
 ## What CI covers
 
