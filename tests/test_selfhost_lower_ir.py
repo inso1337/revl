@@ -170,31 +170,22 @@ UNIQUE_MARKER_GAP = {
 
 CORPUS_UNIQUE_AWARE = _corpus_params(UNIQUE_MARKER_GAP)
 
-# item 429: the extern DECLARATION shapes `witnessed.rvl` carries and
-# `selfhost/lower.rvl` does not lower. Measured, three of them, all in the
-# `externs` section and all silent until this document existed:
-#   * an `undo` clause on an extern (`extern acquire fn lock() -> Unit undo
-#     unlock()`) drops the WHOLE `externs` section to `null` rather than
-#     refusing — the reference lowers a full table, the native producer lowers
-#     nothing, and no emitter downstream can tell the difference from a document
-#     with no externs;
-#   * a capability tag on any class (`witnessed[fs]`, `emission[net]`) does the
-#     same;
-#   * the `witnessed` class itself is refused outright by the admission gate
-#     (`BAD|expected fn after extern`) — a FALSE REFUSAL of a program the
-#     reference compiles, recorded on the gate side in
-#     tests/test_selfhost_compile.py's NATIVE_GATE_GAPS.
-# The old corpus reached none of them: `externs.rvl` declares two `pure` externs
-# with no `undo` and no tag. Marked strict-xfail on the same terms as the
-# `Secret[T]` gap was before it closed and the item-445 gap still is: red for a
-# NAMED reason, and it XPASSes loudly the day the grammar lands.
-EXTERN_DECL_GAP = {
-    "witnessed.rvl": (
-        "item 429: selfhost/lower.rvl drops the whole `externs` section to "
-        "`null` for an extern carrying an `undo` clause or a capability tag, so "
-        "the native IR has no extern table to compare against the reference's"
-    ),
-}
+# item 429 / item 386: the extern DECLARATION shapes `witnessed.rvl` carries.
+# The `externs`-section half of the gap is CLOSED (`selfhost/lower.rvl`'s
+# `ir_extern` now lowers them to the reference's `_lower_externs` shape):
+#   * an `undo`/`compensate` clause on an extern lowers its inverse EXPRESSION
+#     with the same `expr_at`/`lir_expr` ladder a fn body uses, plus the item-309
+#     `undo_idempotent`/`undo_read`/`register` stamps;
+#   * a capability tag on a `witnessed`/`emission` class (`witnessed[fs]`,
+#     `emission[net]`, item 343) lowers to `capabilities: [...]`;
+#   * the `witnessed` class lowers the item-243 transactional descriptor
+#     (`entry_kind`/`revertible`/`ok_conditional`/`witness`).
+# The REMAINING half is the admission gate's parse refusal of the `witnessed`
+# class and the capability tag (`BAD|expected fn after extern`) — a FALSE REFUSAL
+# recorded on the gate side in tests/test_selfhost_compile.py's NATIVE_GATE_GAPS.
+# `lower_to_ir` runs additive to and independent of the gate, so the externs
+# section is now byte-exact against the reference even while the gate half stands.
+EXTERN_DECL_GAP: dict[str, str] = {}
 
 CORPUS_EXTERN_AWARE = _corpus_params(EXTERN_DECL_GAP)
 

@@ -6411,12 +6411,50 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind]) -> Str {
 // is omitted rather than emitted wrong.
 
 type ExAcc = { js: Str, ok: Bool }
+type CapR  = { js: Str, i: Int }
+
+// The capability scope after a `witnessed`/`emission` class (`[fs]`,
+// `[gateway.send]`, `[a, b]`, item 343). `i` points at the opening `[`; the
+// result carries the JSON array BODY (each token joined so a dotted
+// `gateway.send` renders as one string) and the index past the closing `]`,
+// matching the reference's `_capability_list`.
+fn ir_cap_list(ts: List[Token], i: Int) -> CapR {
+  var k = i + 1
+  var out = ""
+  var first = true
+  var cur = ""
+  while (k < ts.length() && !atk(ts, k, "]")) {
+    if (atk(ts, k, ",")) {
+      if (cur != "") { out = first ? jstr(cur) : out.concat(", ").concat(jstr(cur))  first = false }
+      cur = ""
+    } else {
+      cur = cur.concat(tkc(ts, k).text)
+    }
+    k += 1
+  }
+  if (cur != "") { out = first ? jstr(cur) : out.concat(", ").concat(jstr(cur)) }
+  return { js: out, i: k + 1 }
+}
 
 // One extern declaration -> its IR entry. `ok:false` when the declaration
-// reaches a form outside the covered surface (an `undo`/`compensate` slot).
+// reaches a form outside the covered surface. The `witnessed` class (item 243),
+// a capability scope (`witnessed[fs]`/`emission[net]`, item 343) and the
+// `undo`/`compensate` teardown slots (items 243/309/440) are all in the covered
+// surface and lower to the reference's `_lower_externs` shape.
 fn ir_extern(ts: List[Token], i: Int) -> IrRes {
+  // `witnessed` is a contextual keyword (an ident), so `.text` is the class for
+  // every classification. `pure`/`acquire`/`emission` are reserved keywords.
   let cls = tkc(ts, i + 1).text
   var j = i + 2
+  // Capability scope directly after the class (`witnessed[fs]`/`emission[net]`).
+  var capsJson = ""
+  var hasCaps = false
+  if (atk(ts, j, "[")) {
+    let cp = ir_cap_list(ts, j)
+    capsJson = cp.js
+    hasCaps = true
+    j = cp.i
+  }
   var isAsync = false
   if (atw(ts, j, "async")) { isAsync = true  j += 1 }
   if (!atw(ts, j, "fn")) { return mk_irres(false, "") }
@@ -6436,9 +6474,36 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
     retDecl = tr.ty
     k = tr.i
   }
-  // undo/compensate lower a pure expression in the extern scope — outside this
-  // projection; leave the covered surface so the section is omitted, not wrong.
-  if (atw(ts, k, "undo") || atw(ts, k, "compensate")) { return mk_irres(false, "") }
+  // Teardown slots. `undo [idempotent] [pure] <inverse>` (items 243/309/440) and
+  // `compensate <inverse>` lower their inverse EXPRESSION with the same
+  // `expr_at`/`lir_expr` ladder a fn body uses (the reference's
+  // `_lower_extern_expr` over a pure expression), so a `witnessed`/`acquire`
+  // inverse `unstash(result)` lowers to the same call node the reference emits.
+  var undoJson = ""
+  var hasUndo = false
+  var undoIdem = false
+  var undoRead = false
+  var compJson = ""
+  var hasComp = false
+  if (atw(ts, k, "undo")) {
+    var u = k + 1
+    while (atw(ts, u, "idempotent") || atw(ts, u, "pure")) {
+      if (atw(ts, u, "idempotent")) { undoIdem = true } else { undoRead = true }
+      u += 1
+    }
+    let r = expr_at(ts, u)
+    if (is_bad(r.e) || r.i <= u) { return mk_irres(false, "") }
+    undoJson = lir_expr(r.e, [])
+    hasUndo = true
+    k = r.i
+  }
+  if (atw(ts, k, "compensate")) {
+    let r = expr_at(ts, k + 1)
+    if (is_bad(r.e) || r.i <= k + 1) { return mk_irres(false, "") }
+    compJson = lir_expr(r.e, [])
+    hasComp = true
+    k = r.i
+  }
   var bodies = ""
   var bcount = 0
   while (atk(ts, k, "=") && atk(ts, k + 1, "hostbody")) {
@@ -6464,7 +6529,29 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
   // discharge descriptor records as its inverse's referent.
   if (taint_mentions_secret(retDecl)) { js = js.concat(", \"secret_return\": true") }
   if (taint_secret_witness(retDecl)) { js = js.concat(", \"secret_witness\": true") }
+  // item 309: the idempotency register the inverse-carrying slots stamp. Both
+  // flags are additive and the `register` tier is `read` for `undo pure`, else
+  // `declared` (a keyed emission is out of the covered extern surface).
+  if (undoIdem) { js = js.concat(", \"undo_idempotent\": true") }
+  if (undoRead) { js = js.concat(", \"undo_read\": true") }
+  if (undoIdem || undoRead) {
+    js = js.concat(", \"register\": ").concat(jstr(undoRead ? "read" : "declared"))
+  }
   if (isAsync) { js = js.concat(", \"async\": true") }
+  // item 243: the witnessed transactional descriptor. The witness is the `Ok`
+  // payload of the declared `Result[Witness, Error]` return, WAL-serializable
+  // data the auto-registered inverse is rebuilt from.
+  if (cls == "witnessed") {
+    js = js.concat(", \"entry_kind\": \"transactional\", \"revertible\": true")
+      .concat(", \"ok_conditional\": true, \"witness\": ").concat(jstr(type_arg1(retDecl)))
+  }
+  // item 343: the declared capability TOKEN a witnessed/emission crossing is
+  // keyed on (a bare `emission` writes none — name-as-capability).
+  if ((cls == "witnessed" || cls == "emission") && hasCaps) {
+    js = js.concat(", \"capabilities\": [").concat(capsJson).concat("]")
+  }
+  if (hasUndo) { js = js.concat(", \"undo\": ").concat(undoJson) }
+  if (hasComp) { js = js.concat(", \"compensate\": ").concat(compJson) }
   return mk_irres(true, js.concat("}"))
 }
 
