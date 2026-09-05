@@ -1,0 +1,49 @@
+fn nested(parts: List[Str], rows: List[List[Str]]) -> Str {
+  var out = "prefix:"
+  var other = ""
+  for (row of rows) {
+    for (p of row) {
+      if (p == "") { continue }
+      out = out + p + ";"
+      other = other + ":"
+    }
+  }
+  for (p of parts) { out = out + p }
+  return out + other
+}
+
+fn whileAppend(parts: List[Str], more: Bool) -> Str {
+  var out = ""
+  while (more) {
+    for (p of parts) { out = out + p }
+    break
+  }
+  return out
+}
+
+fn observed(parts: List[Str]) -> Str {
+  var out = ""
+  for (p of parts) {
+    if (out == "stop") { break }
+    out = out + p
+  }
+  return out
+}
+
+fn reassigned(parts: List[Str], clear: Bool) -> Str {
+  var out = ""
+  for (p of parts) {
+    if (clear) { out = "" }
+    out = out + p
+  }
+  return out
+}
+
+fn earlyReturn(parts: List[Str]) -> Str {
+  var out = ""
+  for (p of parts) {
+    out = out + p
+    if (p == "!") { return out }
+  }
+  return out
+}
