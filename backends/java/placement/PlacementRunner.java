@@ -46,8 +46,47 @@ public final class PlacementRunner {
     static String name = "?";
     static final List<Disposable> fibers = new ArrayList<>();
 
+    // The one choke point every console line passes through (the py tier's
+    // `runtime._record`, the go tier's `hostRecord`): a declared Secret[T] is
+    // scrubbed HERE, never at each printer.
     static void log(String channel, String subject, String detail) {
-        System.out.println(("[" + name + "] " + pad(channel, 6) + "| " + pad(subject, 16) + "| " + detail).stripTrailing());
+        System.out.println(("[" + name + "] " + pad(channel, 6) + "| " + pad(redactSecrets(subject), 16)
+                + "| " + redactSecrets(detail)).stripTrailing());
+    }
+
+    // --- the declared Secret[T] registry (item 421 F6, the java half) --------
+    //
+    // The emitted Components registers every declared `Secret[T]` value with a
+    // registry of its own (revlMarkSecret in a plugin constructor for a config
+    // field, at the head of a provide method for a parameter, revlSecretResult
+    // around an extern's return) and exposes revlRedactText over it. This
+    // runner keeps no registry: it BINDS to the container's, reflectively, so
+    // a Components emitted for a document that declares no Secret[T] (which
+    // carries no registry, byte-identical to before) binds nothing and the
+    // funnel is the identity. Every line this process prints and every failure
+    // it sends back across the seam passes through it, so a sink added later
+    // reads an already-redacted line.
+    static volatile java.util.function.UnaryOperator<String> secretRedactor = text -> text;
+
+    static void bindSecretRegistry(String container) {
+        Method redact;
+        try {
+            redact = Class.forName(container).getMethod("revlRedactText", String.class);
+        } catch (ReflectiveOperationException absent) {
+            return; // no declared Secret[T] in this document: nothing to redact
+        }
+        secretRedactor = text -> {
+            try {
+                return (String) redact.invoke(null, text);
+            } catch (ReflectiveOperationException failure) {
+                // A funnel that cannot run must not let the text through.
+                throw new IllegalStateException("secret redaction failed", failure);
+            }
+        };
+    }
+
+    static String redactSecrets(String text) {
+        return text == null ? null : secretRedactor.apply(text);
     }
 
     static String pad(String s, int n) {
@@ -61,6 +100,7 @@ public final class PlacementRunner {
         Map<String, Object> spec = (Map<String, Object>) Json.parse(Files.readString(Path.of(argv[0])));
         name = (String) spec.get("name");
         String container = (String) spec.getOrDefault("module", "revl.Components");
+        bindSecretRegistry(container); // before the first line is printed
         Map<String, Object> ifaces = (Map<String, Object>) spec.getOrDefault("ifaces", Map.of());
         Map<String, Object> config = (Map<String, Object>) spec.getOrDefault("config", Map.of());
 
@@ -110,7 +150,11 @@ public final class PlacementRunner {
                 Object value = probe(ctx, ifaces, expr);
                 log("probe", expr, "=> " + render(value));
             } catch (Exception ex) {
-                log("probe", expr, "ERROR " + ex.getMessage());
+                // The probe dispatches reflectively too, so without the unwrap
+                // every failure read "ERROR null". `log` funnels the text
+                // through the registry; a seam reply arrives already redacted.
+                Throwable failure = unwrapDispatch(ex);
+                log("probe", expr, "ERROR " + failure.getClass().getSimpleName() + ": " + failure.getMessage());
             }
         }
 
@@ -376,10 +420,25 @@ public final class PlacementRunner {
     }
 
     // The error text a provider-side failure is allowed to send back to the
-    // consumer, with this call's own argument values replaced by REDACTED_ARG.
-    // Longest needle first, so one that contains another leaves no tail behind.
+    // consumer: this call's own argument values replaced by REDACTED_ARG, and
+    // THEN every value a declared Secret[T] marking registered replaced by the
+    // container's REVL_REDACTED_SECRET. Longest needle first within each
+    // stage, so one that contains another leaves no tail behind.
+    //
+    // Two stages because they answer two different questions, and the second
+    // one the arguments cannot answer. A held credential (a Secret[T] config
+    // field, a token an extern minted earlier) is not among THIS call's
+    // arguments, so the argument scrub never sees it, and a provider message
+    // that quotes it would cross the seam verbatim. The registry stage is the
+    // same funnel the console reads through, reused rather than restated. The
+    // markers stay distinct on purpose: `<redacted:arg>` says a value the
+    // caller passed in was here, `<redacted:secret>` says a declared Secret[T]
+    // was; the argument scrub runs first, so an argument that is ALSO a
+    // registered secret reports as the caller's own data, the more specific
+    // fact. Mirror of typescript/bridge.ts's seamFailure.
     static String seamFailure(Throwable t, List<Object> args) {
-        String text = t.getClass().getSimpleName() + ": " + t.getMessage();
+        Throwable failure = unwrapDispatch(t);
+        String text = failure.getClass().getSimpleName() + ": " + failure.getMessage();
         java.util.Set<String> needles = new java.util.HashSet<>();
         argNeedles(args, needles);
         List<String> ordered = new ArrayList<>(needles);
@@ -387,7 +446,20 @@ public final class PlacementRunner {
         for (String needle : ordered) {
             if (!needle.isEmpty()) text = text.replace(needle, REDACTED_ARG);
         }
-        return text;
+        return redactSecrets(text);
+    }
+
+    // `Method.invoke` wraps whatever the provider threw in an
+    // InvocationTargetException whose own message is null, so the reply used
+    // to read "InvocationTargetException: null" and said nothing. The cause is
+    // the diagnostic. It is also exactly where a host error quotes a held
+    // credential, which is why this unwrap and the registry stage above are
+    // one change: neither is safe to land without the other.
+    static Throwable unwrapDispatch(Throwable t) {
+        while (t instanceof java.lang.reflect.InvocationTargetException wrapped && wrapped.getCause() != null) {
+            t = wrapped.getCause();
+        }
+        return t;
     }
 
     // --- transport: the provider-side stub ----------------------------------
