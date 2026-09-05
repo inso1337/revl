@@ -158,6 +158,67 @@ def test_a_tool_on_path_but_erroring_is_not_ok():
     assert _check(report, "java backend (JDK)").status is MISSING
 
 
+# ---------------------------------------------------------------- invocation
+#
+# issue #336: every documented invocation of `revl` should land on the safe
+# shape — a console script (window-free by design, the script entry point's
+# own directory goes on `sys.path`) or `python -P -m revl` (PYTHONSAFEPATH,
+# 3.11+). The only shape that still has the CWD-shadowing window issue #317
+# names is a bare `python -m revl`. Doctor reports which shape it is under
+# so an operator can tell at a glance whether the documented setup actually
+# produced the safe shape; the warn is informational, not an error (issue
+# #317's `drop_cwd_entry` already closed most of the window).
+
+def test_invocation_is_ok_under_a_console_script():
+    # the `[project.scripts]` entries land at .venv/bin/revl — `sys.argv[0]`
+    # carries that path when the script is the entry point.
+    check = doctor.check_invocation(FakeProber(),
+                                    argv0="/path/to/.venv/bin/revl",
+                                    safe_path=False)
+    assert check.status is OK
+    assert "console script" in check.detail
+    assert "/.venv/bin/revl" in check.detail
+
+
+def test_invocation_is_ok_under_python_P_m_revl():
+    # `python -P -m revl` is the documented safe `-m` shape; the canonical
+    # signal CPython sets for both spellings of PYTHONSAFEPATH is
+    # `sys.flags.safe_path`. `argv[0]` is the interpreter's path, not a
+    # console script.
+    check = doctor.check_invocation(FakeProber(),
+                                    argv0="/path/to/python",
+                                    safe_path=True)
+    assert check.status is OK
+    assert "PYTHONSAFEPATH" in check.detail
+
+
+def test_invocation_warns_under_bare_python_m_revl():
+    # the unsafe shape: `python -m revl` without `-P` puts the CWD at
+    # `sys.path[0]` ahead of site-packages. The warn names all three ways
+    # out so the operator does not have to read the issue.
+    check = doctor.check_invocation(FakeProber(),
+                                    argv0="/path/to/python",
+                                    safe_path=False)
+    assert check.status is WARN
+    assert "sys.path[0]" in check.detail
+    assert "console script" in check.detail
+    assert "PYTHONSAFEPATH" in check.detail
+
+
+def test_invocation_is_a_row_in_the_report():
+    # the new check is part of the standard report, not a hidden one —
+    # an agent reading `revl doctor --json` needs the same fact.
+    report = doctor.diagnose(FakeProber(), backends_dir=ROOT / "backends")
+    names = [c.name for c in report.checks]
+    assert "invocation" in names
+    blob = doctor.to_json(report)
+    inv = next(c for c in blob["checks"] if c["name"] == "invocation")
+    # the test process is pytest — the argv[0] is the pytest interpreter, so
+    # the check is in the warn shape; the row still has to be on the report.
+    assert inv["status"] in (OK, WARN)
+    assert inv["detail"]
+
+
 def test_node_too_old_is_warn_with_the_required_version():
     prober = FakeProber(present=("node",), runs={"node": _ok_run("v18.4.0\n")})
     report = doctor.diagnose(prober, backends_dir=ROOT / "backends")

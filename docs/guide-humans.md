@@ -312,7 +312,7 @@ inline diagnostics, hover, and go-to-definition: it pushes
 `textDocument/publishDiagnostics` from the checker, answers `textDocument/hover`
 from the diagnostic explanations and symbol info, and answers
 `textDocument/definition` from the resolver, all read-only over the existing
-compiler surfaces (`src/revl/lsp/`). `python -m revl.otel run.jsonl` exports a
+compiler surfaces (`src/revl/lsp/`). `python -P -m revl.otel run.jsonl` exports a
 `revl run --trace` lifecycle trace to OpenTelemetry (a lifecycle transition
 becomes a span, its cause a span event, a causal edge a link), so a
 composition's causality lands in Grafana, Datadog, Honeycomb or Jaeger; the OTel
@@ -333,29 +333,31 @@ live cross-tier migration, see [swap.md](swap.md)), `--plan` (print the load
 plan, no runtime), `--config FILE`.
 
 ```bash
-python -m revl compile app.rvl -o out.json   # parse → check → link → IR
-python -m revl audit app.rvl                 # manifest + G8 boundary surface
-python -m revl test app.rvl                  # run in-file test blocks (--backend ts|rust|java|wasm|all)
-python -m revl fmt --migrate old.rvl         # rewrite 1.x "$name" → `${name}`
-python -m revl run app.rvl                   # boot on cordis-py; hold live with a REPL over provided services
-python -m revl run app.rvl --backend rust --once  # boot the composition as a cordis-rs process; LIFO teardown + no-residue proof; exit
-python -m revl run app.rvl --backend java --once  # same round-trip on a JVM (cordis4j runtime)
-python -m revl run app.rvl --backend wasm --once  # same round-trip on cordis-wasm (wasmtime); the substrate tier
-python -m revl run app.rvl --watch           # recompile on edit; a rejected change keeps the run alive
-python -m revl run app.rvl --plan            # print the load plan (order, config, callable keys); no runtime needed
-python -m revl plan cand.rvl --manifest running.json -o change.plan  # an executable plan artifact (docs/apply.md)
-python -m revl apply change.plan             # apply it: drift-refuse, verify each step, roll back on failure
+revl compile app.rvl -o out.json   # parse → check → link → IR
+revl audit app.rvl                 # manifest + G8 boundary surface
+revl test app.rvl                  # run in-file test blocks (--backend ts|rust|java|wasm|all)
+revl fmt --migrate old.rvl         # rewrite 1.x "$name" → `${name}`
+revl run app.rvl                   # boot on cordis-py; hold live with a REPL over provided services
+revl run app.rvl --backend rust --once  # boot the composition as a cordis-rs process; LIFO teardown + no-residue proof; exit
+revl run app.rvl --backend java --once  # same round-trip on a JVM (cordis4j runtime)
+revl run app.rvl --backend wasm --once  # same round-trip on cordis-wasm (wasmtime); the substrate tier
+revl run app.rvl --watch           # recompile on edit; a rejected change keeps the run alive
+revl run app.rvl --plan            # print the load plan (order, config, callable keys); no runtime needed
+revl plan cand.rvl --manifest running.json -o change.plan  # an executable plan artifact (docs/apply.md)
+revl apply change.plan             # apply it: drift-refuse, verify each step, roll back on failure
 ```
 
 ```bash
-python -m revl compile app.rvl --json-diagnostics  # structured rejections for CI
-python -m revl run app.rvl --placement map.toml    # split across processes/languages
+revl compile app.rvl --json-diagnostics  # structured rejections for CI
+revl run app.rvl --placement map.toml    # split across processes/languages
 #   at the interactive swap> prompt:  swap <component> --to <backend>   (docs/swap.md)
-python -m revl mcp serve                           # the compiler as an MCP server
-python -m revl mcp schema app.rvl                  # provided services -> MCP tools
-python -m revl mcp import tools.json               # an MCP server -> revl source
-python3 tools/conformance.py                       # every construct x every backend
+revl mcp serve                           # the compiler as an MCP server
+revl mcp schema app.rvl                  # provided services -> MCP tools
+revl mcp import tools.json               # an MCP server -> revl source
+python3 tools/conformance.py             # every construct x every backend
 ```
+
+The first form (`revl <cmd>`) is the documented happy path: `backends/python/setup.sh` (or `uv pip install -e ".[test]"` at the root) installs the `revl` console script on `PATH`, and a script entry point is window-free by design (issue #317 / #336). Callers that need a venv's interpreter explicitly reach the same code with `python -P -m revl <cmd>` (PYTHONSAFEPATH, 3.11+) — the `-P` is the safety bit; without it, `-m` puts the CWD at `sys.path[0]`. `revl doctor` reports which shape it is under.
 
 `run --backend py` needs the cordis-py runtime (`backends/python/setup.sh`);
 without it the command says so and exits nonzero, and the end-to-end tests in
@@ -422,7 +424,7 @@ round-trip rather than pretending to hold a REPL.
 Non-interactive round-trip (boot → trace → exit):
 
 ```bash
-python -m revl run examples/user_cache.rvl --config cfg.toml < /dev/null
+revl run examples/user_cache.rvl --config cfg.toml < /dev/null
 ```
 
 Two of these are worth being precise about, because they are the project's
