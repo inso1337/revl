@@ -405,6 +405,11 @@ def measure_selfhost() -> dict:
                                   if n in declared}
             found["sizes"] = {n: c for n, c in found["sizes"].items() if n in declared}
             found["declared"] = len(declared)
+            # The ledger population is declared .rvl functions only. Do not
+            # headline generated scaffolding statements that cannot receive a
+            # source-function residual or be triaged in the ledger.
+            found["statements"] = sum(found["sizes"].values())
+            found["uncovered"] = sum(found["functions"].values())
             found["never_entered"] = sorted(
                 n for n, c in found["functions"].items()
                 if c >= found["sizes"].get(n, c) - 1)
