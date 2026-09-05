@@ -2389,9 +2389,20 @@ class _ComponentEmitter:
             if wit is not None:
                 self._method_witnessed_step(out, indent, step, wit, where, bind=None)
             else:
+                # issue #322: refuse async acquisitions in provide-method effects.
+                # An effect generator in a provide method is always a sync generator
+                # (design 131 says method-time effects are untouched), so an async
+                # acquisition would produce invalid Python (`await` in sync def).
+                acquire = step.get("acquire")
+                if _py_reaches_coroutine(acquire, self.requires):
+                    raise EmitError(
+                        f"{where}: async acquisition in provide-method effect is not supported "
+                        f"(design 131 says method-time effects are untouched). "
+                        f"Use a synchronous method instead, or perform the async operation "
+                        f"outside the effect context.")
                 fn = f"_effect_{self._counter}"
                 out.add(indent, f"def {fn}():")
-                out.add(indent + 1, self._expr(step.get("acquire"), where))
+                out.add(indent + 1, self._expr(acquire, where))
                 out.add(indent + 1,
                         f"yield {_inverse_lambda(step, 'undo')}: "
                         f"{self._expr(step.get('undo'), where)}")
@@ -2403,8 +2414,17 @@ class _ComponentEmitter:
                     out, indent, step, wit, where,
                     bind=_ident(step.get("bind"), f"{where}: bind"))
             else:
+                # issue #322: refuse async acquisitions in provide-method effects.
+                # A let-effect acquisition is wrapped in `lambda:`, which is a sync frame,
+                # so an async acquisition would be invalid (await in sync lambda).
+                acquire_node = step.get("acquire")
+                if _py_reaches_coroutine(acquire_node, self.requires):
+                    raise EmitError(
+                        f"{where}: async acquisition in provide-method let-effect is not supported. "
+                        f"Use a synchronous method instead, or perform the async operation "
+                        f"outside the effect context.")
                 bind = _ident(step.get("bind"), f"{where}: bind")
-                acquire = self._expr(step.get("acquire"), where)
+                acquire = self._expr(acquire_node, where)
                 undo = self._expr(step.get("undo"), where)
                 head = _inverse_lambda(step, "undo", bind)
                 if _is_map_cas(step.get("acquire")):
