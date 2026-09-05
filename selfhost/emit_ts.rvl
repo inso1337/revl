@@ -2038,6 +2038,19 @@ fn is_map_cas(acq: Any) -> Bool {
   return node_kind(acq) == "call" && node_method(acq) == "insert_if_absent"
 }
 
+fn pinned_arrow(step: Any, slot: Str, arrow: Str) -> Str {
+  let names = value_list(value_field(step, `${slot}_captures`))
+  if (names.length() == 0) { return arrow }
+  var bound = []
+  var args = []
+  for (name of names) {
+    let n = ident(value_str(name))
+    bound = bound.push(`${n}: any`)
+    args = args.push(n)
+  }
+  return `((${bound.join(", ")}) => ${arrow})(${args.join(", ")})`
+}
+
 // `_method_body`: steps inside a provide-method body. An `async` provide method
 // (services 2.0 §5) renders its body with `in_async` set (via `acx`), so the
 // item-141 await-seed fires on a req-keyed async-op call, and an explicit
@@ -2100,7 +2113,7 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: 
             } else {
               out = out.push(`${pad}  ${ar.text}`)
             }
-            var inverse = `() => ${ur.text}`
+            var inverse = pinned_arrow(step, "undo", `() => ${ur.text}`)
             if (has_bind && is_map_cas(value_field(step, "acquire"))) {
               inverse = `${bind} ? ${inverse} : () => {}`
             }
@@ -2211,13 +2224,20 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
   let a = sync_acx()
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect" || kind == "effect") {
-    let ar = expr(value_field(step, "acquire"), counter, a)
+    let awaited = value_bool(value_field(step, "async"))
+    var acquire_acx = a
+    if (awaited && kind == "let-effect") {
+      acquire_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty() }
+    }
+    let ar = expr(value_field(step, "acquire"), counter, acquire_acx)
     var out = []
     if (kind == "let-effect") {
       let bind = ident(value_str(value_field(step, "bind")))
       out = out.push(`${pad}const ${bind} = ${ar.text}`)
     } else {
-      out = out.push(`${pad}${ar.text}`)
+      var acquire_text = ar.text
+      if (awaited) { acquire_text = `await ${acquire_text}` }
+      out = out.push(`${pad}${acquire_text}`)
     }
     let ur = expr(value_field(step, "undo"), ar.counter, a)
     // Phase-1 continue-and-record (docs/design/teardown-contract.md): a bracket
@@ -2293,7 +2313,11 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
 fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: Str, scope_name: Str, register: Str) -> StmtOut {
     let pad = ind(level)
     let er = expr(value_field(step, "expr"), counter, a)
-    var out = [`${pad}${er.text}`]
+    var emitted = er.text
+    if (value_bool(value_field(step, "async")) && !a.in_async) {
+      emitted = `await ${emitted}`
+    }
+    var out = [`${pad}${emitted}`]
     let comp = value_field(step, "compensate")
     if (value_is_null(comp)) { return { lines: out, counter: er.counter } }
     // item 247/243 Slice 2b: a compensation entry — audit-facing, best-effort,
