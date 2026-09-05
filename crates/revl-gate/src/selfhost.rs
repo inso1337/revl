@@ -305,6 +305,8 @@ pub type UpsR = IrRes;
 
 pub type ExAcc = IrRes;
 
+pub type CapR = CfgDef;
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Token {
     kind: String,
@@ -6322,15 +6324,46 @@ fn fns_walk(ts: Vec<Token>, i: i64, acc: String, cases: Vec<Bind>) -> String {
     return fns_walk(ts.clone(), skip_line(ts.clone(), i), acc.clone(), cases.clone());
 }
 
+fn ir_cap_list(ts: Vec<Token>, i: i64) -> CapR {
+    let mut k = (i).checked_add(1i64).expect("revl: Int overflow");
+    let mut out = String::from("");
+    let mut first = true;
+    let mut cur = String::from("");
+    while ((k < ts.revl_length()) && (!atk(ts.clone(), k.clone(), "]"))) {
+        if atk(ts.clone(), k.clone(), ",") {
+            if (cur != "") {
+                out = if first { jstr(&cur) } else { (out.revl_concat(", ")).revl_concat(&jstr(&cur)) };
+                first = false;
+            }
+            cur = String::from("");
+        } else {
+            cur.push_str(&tkc(ts.clone(), k.clone()).text);
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (cur != "") {
+        out = if first { jstr(&cur) } else { (out.revl_concat(", ")).revl_concat(&jstr(&cur)) };
+    }
+    return CapR { js: out.clone(), i: (k).checked_add(1i64).expect("revl: Int overflow") };
+}
+
 fn ir_extern(ts: Vec<Token>, i: i64) -> IrRes {
     let cls = tkc(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+    let mut capsJson = String::from("");
+    let mut hasCaps = false;
+    if atk(ts.clone(), j.clone(), "[") {
+        let cp = ir_cap_list(ts.clone(), j.clone());
+        capsJson = cp.js;
+        hasCaps = true;
+        j = cp.i;
+    }
     let mut isAsync = false;
-    if atw(ts.clone(), j.clone(), "async") {
+    if atw(ts.clone(), j, "async") {
         isAsync = true;
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
-    if (!atw(ts.clone(), j.clone(), "fn")) {
+    if (!atw(ts.clone(), j, "fn")) {
         return mk_irres(false, String::from(""));
     }
     let nm = tkc(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow")).text;
@@ -6351,8 +6384,38 @@ fn ir_extern(ts: Vec<Token>, i: i64) -> IrRes {
         retDecl = tr.ty;
         k = tr.i;
     }
-    if (atw(ts.clone(), k, "undo") || atw(ts.clone(), k, "compensate")) {
-        return mk_irres(false, String::from(""));
+    let mut undoJson = String::from("");
+    let mut hasUndo = false;
+    let mut undoIdem = false;
+    let mut undoRead = false;
+    let mut compJson = String::from("");
+    let mut hasComp = false;
+    if atw(ts.clone(), k, "undo") {
+        let mut u = (k).checked_add(1i64).expect("revl: Int overflow");
+        while (atw(ts.clone(), u.clone(), "idempotent") || atw(ts.clone(), u.clone(), "pure")) {
+            if atw(ts.clone(), u.clone(), "idempotent") {
+                undoIdem = true;
+            } else {
+                undoRead = true;
+            }
+            u = (u).checked_add(1i64).expect("revl: Int overflow");
+        }
+        let r = expr_at(ts.clone(), u.clone());
+        if (is_bad(r.e.clone()) || (r.i <= u)) {
+            return mk_irres(false, String::from(""));
+        }
+        undoJson = lir_expr(r.e.clone(), vec![]);
+        hasUndo = true;
+        k = r.i;
+    }
+    if atw(ts.clone(), k, "compensate") {
+        let r = expr_at(ts.clone(), (k).checked_add(1i64).expect("revl: Int overflow"));
+        if (is_bad(r.e.clone()) || (r.i <= (k).checked_add(1i64).expect("revl: Int overflow"))) {
+            return mk_irres(false, String::from(""));
+        }
+        compJson = lir_expr(r.e.clone(), vec![]);
+        hasComp = true;
+        k = r.i;
     }
     let mut bodies = String::from("");
     let mut bcount = 0i64;
@@ -6379,8 +6442,29 @@ fn ir_extern(ts: Vec<Token>, i: i64) -> IrRes {
     if taint_secret_witness(retDecl.clone()) {
         js.push_str(", \"secret_witness\": true");
     }
+    if undoIdem {
+        js.push_str(", \"undo_idempotent\": true");
+    }
+    if undoRead {
+        js.push_str(", \"undo_read\": true");
+    }
+    if (undoIdem || undoRead) {
+        js = (js.revl_concat(", \"register\": ")).revl_concat(&jstr(&(if undoRead { String::from("read") } else { String::from("declared") })));
+    }
     if isAsync {
         js.push_str(", \"async\": true");
+    }
+    if (cls == "witnessed") {
+        js = ((js.revl_concat(", \"entry_kind\": \"transactional\", \"revertible\": true")).revl_concat(", \"ok_conditional\": true, \"witness\": ")).revl_concat(&jstr(&type_arg1(&retDecl)));
+    }
+    if (((cls == "witnessed") || (cls == "emission")) && hasCaps) {
+        js = ((js.revl_concat(", \"capabilities\": [")).revl_concat(&capsJson)).revl_concat("]");
+    }
+    if hasUndo {
+        js = (js.revl_concat(", \"undo\": ")).revl_concat(&undoJson);
+    }
+    if hasComp {
+        js = (js.revl_concat(", \"compensate\": ")).revl_concat(&compJson);
     }
     return mk_irres(true, js.revl_concat("}"));
 }
