@@ -448,452 +448,176 @@
     "rust": {
       "statements": 3160,
       "uncovered": {
-        "reference <module>: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "<module>": 1
-        },
-        "reference _V3Ctx.__init__: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_V3Ctx.__init__": 1
-        },
-        "reference _V3Ctx._disambiguate_record: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_V3Ctx._disambiguate_record": 7
-        },
-        "reference _V3Ctx.constructor: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_V3Ctx.constructor": 10
-        },
-        "reference _V3Ctx.field_is_boxed: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_V3Ctx.field_is_boxed": 4
-        },
-        "reference _V3Ctx.match_pattern: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_V3Ctx.match_pattern": 3
-        },
-        "reference _V3Ctx.record_field_types: type/signature inference branch for an unrepresented source shape.": {
-          "_V3Ctx.record_field_types": 1
-        },
-        "reference _acquire_moved_locals: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_acquire_moved_locals": 5
-        },
-        "reference _arg_ref_name: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_arg_ref_name": 2
-        },
-        "reference _body_has_compensation: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_body_has_compensation": 3
-        },
-        "reference _body_has_witnessed: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_body_has_witnessed": 3
-        },
-        "reference _borrow_str_arg: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_borrow_str_arg": 3
-        },
-        "reference _by_value_arg: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_by_value_arg": 4
-        },
-        "reference _by_value_field_clone: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_by_value_field_clone": 2
-        },
-        "reference _by_value_reuse: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_by_value_reuse": 1
-        },
-        "reference _by_value_tail: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_by_value_tail": 1
-        },
-        "reference _char_view_args: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_char_view_args": 9
-        },
-        "reference _component_has_effectful_methods: component/service/host branch not represented by the Rust corpus.": {
-          "_component_has_effectful_methods": 1
-        },
-        "reference _component_map_values: component/service/host branch not represented by the Rust corpus.": {
-          "_component_map_values": 5
-        },
-        "reference _compute_char_views: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_compute_char_views": 20
-        },
-        "reference _compute_str_param_borrows: type/signature inference branch for an unrepresented source shape.": {
-          "_compute_str_param_borrows": 8
-        },
-        "reference _config_default_lit: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_config_default_lit": 6
-        },
-        "reference _dedup_colour_erased_poly_externs: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "_dedup_colour_erased_poly_externs": 11
-        },
-        "reference _emit_component: component/service/host branch not represented by the Rust corpus.": {
-          "_emit_component": 4
-        },
-        "reference _emit_component_new: component/service/host branch not represented by the Rust corpus.": {
-          "_emit_component_new": 25
-        },
-        "reference _emit_components: component/service/host branch not represented by the Rust corpus.": {
-          "_emit_components": 7
-        },
-        "reference _emit_host_stubs: component/service/host branch not represented by the Rust corpus.": {
-          "_emit_host_stubs": 5
-        },
-        "reference _emit_host_stubs.walk: component/service/host branch not represented by the Rust corpus.": {
-          "_emit_host_stubs.walk": 1
-        },
-        "reference _emit_req_bindings: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_req_bindings": 2
-        },
-        "reference _emit_service_traits: component/service/host branch not represented by the Rust corpus.": {
-          "_emit_service_traits": 1
-        },
-        "reference _emit_step: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_step": 95
-        },
-        "reference _emit_v3: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_v3": 7
-        },
-        "reference _emit_v3_functions: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_v3_functions": 9
-        },
-        "reference _emit_v3_types: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_v3_types": 6
-        },
-        "reference _guard_frame_neutral_loop: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_guard_frame_neutral_loop": 1
-        },
-        "reference _ident: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_ident": 1
-        },
-        "reference _is_fn_type: type/signature inference branch for an unrepresented source shape.": {
-          "_is_fn_type": 1
-        },
-        "reference _method_bodies_have_compensation: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_method_bodies_have_compensation": 2
-        },
-        "reference _method_bodies_have_witnessed: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_method_bodies_have_witnessed": 2
-        },
-        "reference _method_body_lines: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_method_body_lines": 37
-        },
-        "reference _method_undo_clones: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_method_undo_clones": 1
-        },
-        "reference _mname: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_mname": 1
-        },
-        "reference _param_type: type/signature inference branch for an unrepresented source shape.": {
-          "_param_type": 1
-        },
-        "reference _provide_let_type: type/signature inference branch for an unrepresented source shape.": {
-          "_provide_let_type": 1
-        },
-        "reference _pure_method_statements: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_pure_method_statements": 12
-        },
-        "reference _recursive_boxed_edges: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_recursive_boxed_edges": 13
-        },
-        "reference _recursive_boxed_edges.reaches: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_recursive_boxed_edges.reaches": 9
-        },
-        "reference _refuse_deferred_emissions: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "_refuse_deferred_emissions": 10
-        },
-        "reference _refuse_holes: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "_refuse_holes": 4
-        },
-        "reference _refuse_holes.walk: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "_refuse_holes.walk": 1
-        },
-        "reference _render_expr: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_render_expr": 83
-        },
-        "reference _render_param_type: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_render_param_type": 1
-        },
-        "reference _rust_fn_type: type/signature inference branch for an unrepresented source shape.": {
-          "_rust_fn_type": 1
-        },
-        "reference _rust_type: type/signature inference branch for an unrepresented source shape.": {
-          "_rust_type": 2
-        },
-        "reference _rust_v3_lit: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_rust_v3_lit": 4
-        },
-        "reference _snake: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_snake": 1
-        },
-        "reference _split_fn_type: type/signature inference branch for an unrepresented source shape.": {
-          "_split_fn_type": 1
-        },
-        "reference _step_is_witnessed_effect: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_step_is_witnessed_effect": 2
-        },
-        "reference _string: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_string": 9
-        },
-        "reference _undo_reclone_locals: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_undo_reclone_locals": 1
-        },
-        "reference _uses_float_interp.walk: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_uses_float_interp.walk": 3
-        },
-        "reference _uses_timer.walk: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_uses_timer.walk": 2
-        },
-        "reference _v3_empty_vec_elem_types: type/signature inference branch for an unrepresented source shape.": {
-          "_v3_empty_vec_elem_types": 66
-        },
-        "reference _v3_empty_vec_elem_types.collect: type/signature inference branch for an unrepresented source shape.": {
-          "_v3_empty_vec_elem_types.collect": 1
-        },
-        "reference _v3_infer_type: type/signature inference branch for an unrepresented source shape.": {
-          "_v3_infer_type": 21
-        },
-        "reference _v3_interp: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_interp": 3
-        },
-        "reference _v3_is_float: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_is_float": 4
-        },
-        "reference _v3_is_str: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_is_str": 2
-        },
-        "reference _v3_match_expr: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_match_expr": 2
-        },
-        "reference _v3_mentions_name: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_mentions_name": 2
-        },
-        "reference _v3_self_append_inplace: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_self_append_inplace": 19
-        },
-        "reference _v3_self_append_plus: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_self_append_plus": 2
-        },
-        "reference _v3_stmt: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_v3_stmt": 6
-        },
-        "reference _witnessed_extern_for: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "_witnessed_extern_for": 3
-        },
-        "reference emit: expression/statement dispatch branch for an unrepresented source shape.": {
-          "emit": 3
-        },
-        "reference _V3Ctx._same_shape: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_V3Ctx._same_shape": 2
-        },
-        "reference _V3Ctx.record_type_for_names: type/signature inference branch for an unrepresented source shape.": {
-          "_V3Ctx.record_type_for_names": 9
-        },
-        "reference _bound_names.walk: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_bound_names.walk": 6
-        },
-        "reference _compute_char_views.threaded_index: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_compute_char_views.threaded_index": 4
-        },
-        "reference _dedup_colour_erased_poly_externs._rewrite: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "_dedup_colour_erased_poly_externs._rewrite": 6
-        },
-        "reference _default_for_rust_type: type/signature inference branch for an unrepresented source shape.": {
-          "_default_for_rust_type": 15
-        },
-        "reference _emit_activation_compensation: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_activation_compensation": 13
-        },
-        "reference _emit_compensation_registration: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_compensation_registration": 14
-        },
-        "reference _emit_method_witnessed_step: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_method_witnessed_step": 19
-        },
-        "reference _emit_setup_step: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_setup_step": 22
-        },
-        "reference _emit_setup_value: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_setup_value": 1
-        },
-        "reference _emit_teardown_begin: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_teardown_begin": 3
-        },
-        "reference _emit_teardown_commit: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_teardown_commit": 2
-        },
-        "reference _emit_v3_externs: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "_emit_v3_externs": 3
-        },
-        "reference _emit_v3_tests: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_v3_tests": 25
-        },
-        "reference _emit_witnessed_step: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_witnessed_step": 26
-        },
-        "reference _escape_format_braces: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_escape_format_braces": 1
-        },
-        "reference _finite_float: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_finite_float": 1
-        },
-        "reference _fn_value_refs.walk: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_fn_value_refs.walk": 5
-        },
-        "reference _format: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_format": 20
-        },
-        "reference _format.literal: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_format.literal": 2
-        },
-        "reference _free_fn_call: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_free_fn_call": 7
-        },
-        "reference _free_fn_calls.walk: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_free_fn_calls.walk": 1
-        },
-        "reference _host_of: component/service/host branch not represented by the Rust corpus.": {
-          "_host_of": 12
-        },
-        "reference _is_map_cas: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_is_map_cas": 1
-        },
-        "reference _is_stream_next: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_is_stream_next": 7
-        },
-        "reference _list_element_type: type/signature inference branch for an unrepresented source shape.": {
-          "_list_element_type": 5
-        },
-        "reference _main: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_main": 11
-        },
-        "reference _map_expr_inserts: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_map_expr_inserts": 20
-        },
-        "reference _map_insert_candidates: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_map_insert_candidates": 15
-        },
-        "reference _map_value_expr_type: type/signature inference branch for an unrepresented source shape.": {
-          "_map_value_expr_type": 71
-        },
-        "reference _map_value_rust_type: type/signature inference branch for an unrepresented source shape.": {
-          "_map_value_rust_type": 18
-        },
-        "reference _method_body_pure_new: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_method_body_pure_new": 1
-        },
-        "reference _refuse_unlowered_stream_surface: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "_refuse_unlowered_stream_surface": 7
-        },
-        "reference _result_ok_err: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_result_ok_err": 2
-        },
-        "reference _result_to_json: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_result_to_json": 1
-        },
-        "reference _rust_extern_config_bind: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "_rust_extern_config_bind": 9
-        },
-        "reference _split_result: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_split_result": 12
-        },
-        "reference _str_param_escapes: type/signature inference branch for an unrepresented source shape.": {
-          "_str_param_escapes": 3
-        },
-        "reference _str_param_escapes.walk: type/signature inference branch for an unrepresented source shape.": {
-          "_str_param_escapes.walk": 38
-        },
-        "reference _str_params_indexed.walk: type/signature inference branch for an unrepresented source shape.": {
-          "_str_params_indexed.walk": 3
-        },
-        "reference _stream_head: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_stream_head": 4
-        },
-        "reference _subscription_binds: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_subscription_binds": 1
-        },
-        "reference _v3_borrowed_lit_args: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_borrowed_lit_args": 9
-        },
-        "reference _v3_builtin: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_builtin": 37
-        },
-        "reference _v3_builtin.ref: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_builtin.ref": 1
-        },
-        "reference _v3_inplace_persistent: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_inplace_persistent": 12
-        },
-        "reference _v3_let_pattern: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_let_pattern": 19
-        },
-        "reference cargo_toml: source-specific fallback or alternate branch not reached by current supported corpus.": {
+        "module and package assembly: the corpus does not exercise alternate CLI/package metadata branches": {
+          "<module>": 1,
+          "emit": 3,
+          "_main": 11,
           "cargo_toml": 1
         },
-        "reference _erase_async: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_erase_async": 1
+        "source-specific fallback: this helper has an uncovered alternate input/error branch with no matching supported Rust fixture": {
+          "_V3Ctx.__init__": 1,
+          "_arg_ref_name": 2,
+          "_emit_v3": 7,
+          "_uses_float_interp.walk": 3,
+          "_uses_timer.walk": 2,
+          "_free_fn_call": 7,
+          "_free_fn_calls.walk": 1,
+          "_is_map_cas": 1,
+          "_is_stream_next": 7,
+          "_map_expr_inserts": 20,
+          "_map_insert_candidates": 15,
+          "_result_ok_err": 2,
+          "_result_to_json": 1,
+          "_split_result": 12,
+          "_stream_head": 4,
+          "_subscription_binds": 1,
+          "_intercept_json_lit": 18,
+          "_intercept_json_type": 34,
+          "_emit_v1": 1,
+          "_emit_v2": 6
         },
-        "reference _emit_v3_lifecycle_tests: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_v3_lifecycle_tests": 81
+        "record and recursive-type analysis: boxed recursive edges, ambiguous record shapes, constructor payloads, and bound match patterns lack a Rust corpus witness": {
+          "_V3Ctx._disambiguate_record": 7,
+          "_V3Ctx.constructor": 10,
+          "_V3Ctx.field_is_boxed": 4,
+          "_V3Ctx.match_pattern": 3,
+          "_V3Ctx.record_field_types": 1,
+          "_recursive_boxed_edges": 13,
+          "_recursive_boxed_edges.reaches": 9,
+          "_V3Ctx._same_shape": 2,
+          "_V3Ctx.record_type_for_names": 9
         },
-        "reference _lifecycle_uses_advance: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_lifecycle_uses_advance": 1
+        "ownership analysis: alternate string-borrow, char-view, move-acquisition, and function-value escape conditions require indexed/escaping arguments not in the corpus": {
+          "_acquire_moved_locals": 5,
+          "_borrow_str_arg": 3,
+          "_by_value_arg": 4,
+          "_by_value_field_clone": 2,
+          "_by_value_reuse": 1,
+          "_by_value_tail": 1,
+          "_char_view_args": 9,
+          "_compute_char_views": 20,
+          "_compute_str_param_borrows": 8,
+          "_bound_names.walk": 6,
+          "_compute_char_views.threaded_index": 4,
+          "_fn_value_refs.walk": 5,
+          "_str_param_escapes": 3,
+          "_str_param_escapes.walk": 38,
+          "_str_params_indexed.walk": 3
         },
-        "reference _refuse_fault_tests: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "_refuse_fault_tests": 2
-        },
-        "reference _collect_realm_labels: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_collect_realm_labels": 8
-        },
-        "reference _emit_router_struct: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_router_struct": 16
-        },
-        "reference _intercept_json_lit: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_intercept_json_lit": 18
-        },
-        "reference _intercept_json_type: type/signature inference branch for an unrepresented source shape.": {
-          "_intercept_json_type": 34
-        },
-        "reference _revl_realm_helper: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_revl_realm_helper": 7
-        },
-        "reference _revl_spawn_handle: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_revl_spawn_handle": 1
-        },
-        "reference _uses_spawn: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_uses_spawn": 1
-        },
-        "reference _v3_instance_get: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_instance_get": 8
-        },
-        "reference _v3_spawn: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_v3_spawn": 14
-        },
-        "reference _bridge_arg_extract: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_bridge_arg_extract": 7
-        },
-        "reference _bridge_arg_ser: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_bridge_arg_ser": 5
-        },
-        "reference _bridge_ret_deser: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_bridge_ret_deser": 6
-        },
-        "reference _bridge_ret_ser: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_bridge_ret_ser": 7
-        },
-        "reference _bridge_serde_ok: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_bridge_serde_ok": 1
-        },
-        "reference _emit_bridge: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_bridge": 13
-        },
-        "reference _revl_ftoa_helper: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_revl_ftoa_helper": 1
-        },
-        "reference _revl_record_preamble: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "_revl_record_preamble": 2
-        },
-        "reference _revl_teardown_preamble: source-specific fallback or alternate branch not reached by current supported corpus.": {
+        "effect lifecycle lowering: compensation, witnessed activation, setup/teardown, and undo branches require component runtime steps not present in pure v3 documents": {
+          "_body_has_compensation": 3,
+          "_body_has_witnessed": 3,
+          "_guard_frame_neutral_loop": 1,
+          "_method_bodies_have_compensation": 2,
+          "_method_bodies_have_witnessed": 2,
+          "_method_body_lines": 37,
+          "_method_undo_clones": 1,
+          "_pure_method_statements": 12,
+          "_step_is_witnessed_effect": 2,
+          "_undo_reclone_locals": 1,
+          "_witnessed_extern_for": 3,
+          "_emit_activation_compensation": 13,
+          "_emit_compensation_registration": 14,
+          "_emit_method_witnessed_step": 19,
+          "_emit_setup_step": 22,
+          "_emit_setup_value": 1,
+          "_emit_teardown_begin": 3,
+          "_emit_teardown_commit": 2,
+          "_emit_witnessed_step": 26,
+          "_method_body_pure_new": 1,
           "_revl_teardown_preamble": 1
         },
-        "reference _revl_timer_preamble: source-specific fallback or alternate branch not reached by current supported corpus.": {
+        "component/service/host lowering: v1 capability, provider, host-stub, and service-trait branches are outside the pure v3 self-host corpus": {
+          "_component_has_effectful_methods": 1,
+          "_component_map_values": 5,
+          "_emit_component": 4,
+          "_emit_component_new": 25,
+          "_emit_components": 7,
+          "_emit_host_stubs": 5,
+          "_emit_host_stubs.walk": 1,
+          "_emit_req_bindings": 2,
+          "_emit_service_traits": 1,
+          "_host_of": 12
+        },
+        "type/config inference: default, generic container, function-signature, and component-config alternatives are source shapes not represented by current Rust fixtures": {
+          "_config_default_lit": 6,
+          "_is_fn_type": 1,
+          "_param_type": 1,
+          "_provide_let_type": 1,
+          "_render_param_type": 1,
+          "_rust_fn_type": 1,
+          "_rust_type": 2,
+          "_split_fn_type": 1,
+          "_v3_infer_type": 21,
+          "_default_for_rust_type": 15,
+          "_list_element_type": 5,
+          "_map_value_expr_type": 71,
+          "_map_value_rust_type": 18
+        },
+        "explicit backend boundary: deferred, hole, stream, and extern refusal/normalization branches are intentionally surfaced rather than silently emitted": {
+          "_dedup_colour_erased_poly_externs": 11,
+          "_refuse_deferred_emissions": 10,
+          "_refuse_holes": 4,
+          "_refuse_holes.walk": 1,
+          "_dedup_colour_erased_poly_externs._rewrite": 6,
+          "_emit_v3_externs": 3,
+          "_refuse_unlowered_stream_surface": 7,
+          "_rust_extern_config_bind": 9,
+          "_refuse_fault_tests": 2
+        },
+        "v3 expression/statement dispatch: unselected literal, operator, builtin, pattern, and statement arms remain after ordinary arithmetic/control witnesses": {
+          "_emit_step": 95,
+          "_emit_v3_functions": 9,
+          "_emit_v3_types": 6,
+          "_ident": 1,
+          "_mname": 1,
+          "_render_expr": 83,
+          "_rust_v3_lit": 4,
+          "_snake": 1,
+          "_string": 9,
+          "_v3_empty_vec_elem_types": 66,
+          "_v3_empty_vec_elem_types.collect": 1,
+          "_v3_interp": 3,
+          "_v3_is_float": 4,
+          "_v3_is_str": 2,
+          "_v3_match_expr": 2,
+          "_v3_mentions_name": 2,
+          "_v3_self_append_inplace": 19,
+          "_v3_self_append_plus": 2,
+          "_v3_stmt": 6,
+          "_emit_v3_tests": 25,
+          "_escape_format_braces": 1,
+          "_finite_float": 1,
+          "_format": 20,
+          "_format.literal": 2,
+          "_v3_borrowed_lit_args": 9,
+          "_v3_builtin": 37,
+          "_v3_builtin.ref": 1,
+          "_v3_inplace_persistent": 12,
+          "_v3_let_pattern": 19
+        },
+        "realm/lifecycle bridge: spawn, instance, router, async, and lifecycle helper branches require the deferred runtime surface": {
+          "_erase_async": 1,
+          "_emit_v3_lifecycle_tests": 81,
+          "_lifecycle_uses_advance": 1,
+          "_collect_realm_labels": 8,
+          "_emit_router_struct": 16,
+          "_revl_realm_helper": 7,
+          "_revl_spawn_handle": 1,
+          "_uses_spawn": 1,
+          "_v3_instance_get": 8,
+          "_v3_spawn": 14
+        },
+        "runtime bridge/preamble: ABI serialization and demand-pulled runtime helper variants are not reached by pure v3 corpus documents": {
+          "_bridge_arg_extract": 7,
+          "_bridge_arg_ser": 5,
+          "_bridge_ret_deser": 6,
+          "_bridge_ret_ser": 7,
+          "_bridge_serde_ok": 1,
+          "_emit_bridge": 13,
+          "_revl_ftoa_helper": 1,
+          "_revl_record_preamble": 2,
           "_revl_timer_preamble": 1
-        },
-        "reference _emit_v1: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_v1": 1
-        },
-        "reference _emit_v2: expression/statement dispatch branch for an unrepresented source shape.": {
-          "_emit_v2": 6
         }
       },
       "uncovered_statements": 1384
@@ -1348,226 +1072,86 @@
     "rust": {
       "statements": 1636,
       "uncovered": {
-        "selfhost render_builtin: expression/statement dispatch branch for an unrepresented source shape.": {
-          "render_builtin": 3
-        },
-        "selfhost binds: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "binds": 1
-        },
-        "selfhost borrow_str_arg: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "borrow_str_arg": 2
-        },
-        "selfhost build_type_tables: type/signature inference branch for an unrepresented source shape.": {
-          "build_type_tables": 2
-        },
-        "selfhost by_value_arg: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "by_value_arg": 1
-        },
-        "selfhost component_provide_uses_config: component/service/host branch not represented by the Rust corpus.": {
-          "component_provide_uses_config": 1
-        },
-        "selfhost config_default_lit: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "config_default_lit": 7
-        },
-        "selfhost constructor: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "constructor": 2
-        },
-        "selfhost emit_component: component/service/host branch not represented by the Rust corpus.": {
-          "emit_component": 2
-        },
-        "selfhost emit_component_new: component/service/host branch not represented by the Rust corpus.": {
-          "emit_component_new": 5
-        },
-        "selfhost emit_provide_construction: expression/statement dispatch branch for an unrepresented source shape.": {
-          "emit_provide_construction": 1
-        },
-        "selfhost emit_service_traits: component/service/host branch not represented by the Rust corpus.": {
-          "emit_service_traits": 1
-        },
-        "selfhost emit_v3_externs: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "emit_v3_externs": 4
-        },
-        "selfhost emit_v3_functions: expression/statement dispatch branch for an unrepresented source shape.": {
-          "emit_v3_functions": 1
-        },
-        "selfhost emit_v3_types: expression/statement dispatch branch for an unrepresented source shape.": {
-          "emit_v3_types": 1
-        },
-        "selfhost extern_body_defer: explicit deferred/refusal/extern boundary not reached by supported corpus.": {
-          "extern_body_defer": 2
-        },
-        "selfhost has_extra_linebreak: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "has_extra_linebreak": 1
-        },
-        "selfhost is_atomic: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "is_atomic": 11
-        },
-        "selfhost is_extra_linebreak: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "is_extra_linebreak": 3
-        },
-        "selfhost match_pattern: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "match_pattern": 1
-        },
-        "selfhost mentions_name: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "mentions_name": 6
-        },
-        "selfhost method_body_lines: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "method_body_lines": 5
-        },
-        "selfhost method_has_effectful_steps: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "method_has_effectful_steps": 1
-        },
-        "selfhost method_scope_rename: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "method_scope_rename": 1
-        },
-        "selfhost method_undo_clones: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "method_undo_clones": 1
-        },
-        "selfhost method_undo_rename: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "method_undo_rename": 1
-        },
-        "selfhost mname: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "mname": 2
-        },
-        "selfhost provide_let_type: type/signature inference branch for an unrepresented source shape.": {
-          "provide_let_type": 1
-        },
-        "selfhost provide_methods: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "provide_methods": 1
-        },
-        "selfhost provision_uses_config: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "provision_uses_config": 1
-        },
-        "selfhost pure_method_statements: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "pure_method_statements": 17
-        },
-        "selfhost record_type_for_fields: type/signature inference branch for an unrepresented source shape.": {
-          "record_type_for_fields": 1
-        },
-        "selfhost ref_name: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "ref_name": 1
-        },
-        "selfhost render_bin: expression/statement dispatch branch for an unrepresented source shape.": {
-          "render_bin": 2
-        },
-        "selfhost render_call: expression/statement dispatch branch for an unrepresented source shape.": {
-          "render_call": 2
-        },
-        "selfhost render_component_call: component/service/host branch not represented by the Rust corpus.": {
-          "render_component_call": 3
-        },
-        "selfhost render_expr: expression/statement dispatch branch for an unrepresented source shape.": {
-          "render_expr": 2
-        },
-        "selfhost render_field: expression/statement dispatch branch for an unrepresented source shape.": {
-          "render_field": 1
-        },
-        "selfhost render_index: expression/statement dispatch branch for an unrepresented source shape.": {
-          "render_index": 1
-        },
-        "selfhost render_inner: expression/statement dispatch branch for an unrepresented source shape.": {
-          "render_inner": 14
-        },
-        "selfhost render_interp: expression/statement dispatch branch for an unrepresented source shape.": {
-          "render_interp": 2
-        },
-        "selfhost render_un: expression/statement dispatch branch for an unrepresented source shape.": {
-          "render_un": 1
-        },
-        "selfhost render_var: expression/statement dispatch branch for an unrepresented source shape.": {
-          "render_var": 2
-        },
-        "selfhost rust_type_t: type/signature inference branch for an unrepresented source shape.": {
-          "rust_type_t": 3
-        },
-        "selfhost rust_v3_lit: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "rust_v3_lit": 5
-        },
-        "selfhost self_append_plus: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "self_append_plus": 2
-        },
-        "selfhost service_param_type: component/service/host branch not represented by the Rust corpus.": {
-          "service_param_type": 1
-        },
-        "selfhost split_fn_params: type/signature inference branch for an unrepresented source shape.": {
-          "split_fn_params": 2
-        },
-        "selfhost split_fn_ret: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "split_fn_ret": 2
-        },
-        "selfhost strip_spaces: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "strip_spaces": 1
-        },
-        "selfhost type_map: type/signature inference branch for an unrepresented source shape.": {
-          "type_map": 1
-        },
-        "selfhost v3_bin_ops: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "v3_bin_ops": 3
-        },
-        "selfhost v3_infer_type: type/signature inference branch for an unrepresented source shape.": {
-          "v3_infer_type": 4
-        },
-        "selfhost v3_is_float: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "v3_is_float": 3
-        },
-        "selfhost v3_is_str: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "v3_is_str": 1
-        },
-        "selfhost v3_stmt: expression/statement dispatch branch for an unrepresented source shape.": {
-          "v3_stmt": 2
-        },
-        "selfhost default_for_rust_type: type/signature inference branch for an unrepresented source shape.": {
-          "default_for_rust_type": 15
-        },
-        "selfhost emit_host_stubs: component/service/host branch not represented by the Rust corpus.": {
-          "emit_host_stubs": 1
-        },
-        "selfhost ind: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "ind": 1
-        },
-        "selfhost is_addsubmul: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "is_addsubmul": 1
-        },
-        "selfhost is_builtin_ctor: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "is_builtin_ctor": 1
-        },
-        "selfhost is_fn_type: type/signature inference branch for an unrepresented source shape.": {
-          "is_fn_type": 1
-        },
-        "selfhost is_scalar_option: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "is_scalar_option": 1
-        },
-        "selfhost resolved: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "resolved": 1
-        },
-        "selfhost rstrip: source-specific fallback or alternate branch not reached by current supported corpus.": {
+        "self-host v3 dispatch/type helper: this function has an unrepresented alternate source shape or fallback branch": {
+          "render_builtin": 3,
+          "binds": 1,
+          "build_type_tables": 2,
+          "constructor": 2,
+          "emit_v3_functions": 1,
+          "emit_v3_types": 1,
+          "has_extra_linebreak": 1,
+          "is_atomic": 11,
+          "is_extra_linebreak": 3,
+          "match_pattern": 1,
+          "mentions_name": 6,
+          "mname": 2,
+          "ref_name": 1,
+          "render_bin": 2,
+          "render_call": 2,
+          "render_expr": 2,
+          "render_field": 1,
+          "render_index": 1,
+          "render_inner": 14,
+          "render_interp": 2,
+          "render_un": 1,
+          "render_var": 2,
+          "rust_type_t": 3,
+          "rust_v3_lit": 5,
+          "split_fn_params": 2,
+          "split_fn_ret": 2,
+          "strip_spaces": 1,
+          "type_map": 1,
+          "v3_bin_ops": 3,
+          "v3_infer_type": 4,
+          "v3_is_float": 3,
+          "v3_is_str": 1,
+          "v3_stmt": 2,
+          "default_for_rust_type": 15,
+          "ind": 1,
+          "is_addsubmul": 1,
+          "is_builtin_ctor": 1,
+          "is_fn_type": 1,
+          "is_scalar_option": 1,
           "rstrip": 5
         },
-        "selfhost set_vts: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "set_vts": 1
-        },
-        "selfhost component_uses_await: component/service/host branch not represented by the Rust corpus.": {
-          "component_uses_await": 1
-        },
-        "selfhost erase_async_ret: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "erase_async_ret": 1
-        },
-        "selfhost bridge_arg_extract: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "bridge_arg_extract": 2
-        },
-        "selfhost bridge_arg_ser: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "bridge_arg_ser": 1
-        },
-        "selfhost bridge_ret_deser: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "bridge_ret_deser": 8
-        },
-        "selfhost bridge_ret_ser: source-specific fallback or alternate branch not reached by current supported corpus.": {
-          "bridge_ret_ser": 1
-        },
-        "selfhost emit_bridge: expression/statement dispatch branch for an unrepresented source shape.": {
+        "self-host source-specific fallback: this helper has an uncovered alternate input branch with no matching supported Rust fixture": {
+          "borrow_str_arg": 2,
+          "by_value_arg": 1,
+          "config_default_lit": 7,
+          "self_append_plus": 2,
+          "emit_host_stubs": 1,
+          "resolved": 1,
+          "set_vts": 1,
+          "erase_async_ret": 1,
+          "bridge_arg_extract": 2,
+          "bridge_arg_ser": 1,
+          "bridge_ret_deser": 8,
+          "bridge_ret_ser": 1,
           "emit_bridge": 9
         },
-        "selfhost checked_method: source-specific fallback or alternate branch not reached by current supported corpus.": {
+        "self-host component/provide path: config capture, service trait, method undo, and record-field alternatives are not in the pure v3 corpus": {
+          "component_provide_uses_config": 1,
+          "emit_component": 2,
+          "emit_component_new": 5,
+          "emit_provide_construction": 1,
+          "emit_service_traits": 1,
+          "method_body_lines": 5,
+          "method_has_effectful_steps": 1,
+          "method_scope_rename": 1,
+          "method_undo_clones": 1,
+          "method_undo_rename": 1,
+          "provide_let_type": 1,
+          "provide_methods": 1,
+          "provision_uses_config": 1,
+          "pure_method_statements": 17,
+          "record_type_for_fields": 1,
+          "render_component_call": 3,
+          "service_param_type": 1,
+          "component_uses_await": 1
+        },
+        "self-host explicit boundary: extern/deferred and checked-method fallback arms preserve the supported refusal contract": {
+          "emit_v3_externs": 4,
+          "extern_body_defer": 2,
           "checked_method": 5
         }
       },

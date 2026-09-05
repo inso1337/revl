@@ -276,25 +276,20 @@
   },
   "rust": {
     "blind": {
-      "declared out of the slice by the oracle's own docstring: `await`/`spawn` and the host `let-effect` binds (`Pool`/`Map`/`Job`).": [
+      "Rust async/idempotence boundary: the Rust self-host emits synchronous pure v3 functions; no corpus can exercise async retry metadata or host effect binding without entering the deferred runtime path.": [
         "step=await",
-        "step=let-effect"
-      ],
-      "Rust oracle excludes async methods and idempotent retry metadata: the Rust self-host emitter has no async runtime/lifecycle lowering, so these source fields are not a supported corpus surface.": [
+        "step=let-effect",
         "idempotent=<true>"
       ],
-      "Rust oracle excludes body-level effect/timer/fail steps and component-dialect branches: the self-host slice intentionally admits only pure v3 function expressions, so `kind=fn` and `kind=if` are not reachable through this corpus.": [
+      "Rust component statement boundary: `kind=fn` and `kind=if` in the reference construct table are component-dialect/body-level forms, while the self-host corpus admits only the v3 pure-function statement surface.": [
         "kind=fn",
         "kind=if"
       ],
-      "Rust Float source audit: `method=to_str` is the reference-only canonical Float-to-Str helper, excluded by the emitter contract; `widen=Float` and `widen=Int` remain unobserved coercion markers because float_pub.rvl lowers mixed arithmetic directly to Float operands rather than emitting explicit widen nodes.": [
-        "method=to_str",
-        "widen=Float",
-        "widen=Int"
+      "Rust canonical conversion boundary: `method=to_str` is the reference Float-to-Str helper path; ordinary string conversion is covered, but the canonical Float helper remains a distinct backend helper requiring its own numeric runtime contract.": [
+        "method=to_str"
       ],
-      "Rust length source audit: the self-host has both the `kind=len` lowering and the `length` builtin, but the Rust corpus contains no length expression; add a witness before treating either dispatch arm as covered.": [
-        "kind=len",
-        "method=length"
+      "Rust len boundary: the corpus exercises `.length()` through the builtin path, but the extractor\u2019s separate `kind=len` node is not produced by the accepted Revl surface and has no valid source witness.": [
+        "kind=len"
       ]
     },
     "unported": {
