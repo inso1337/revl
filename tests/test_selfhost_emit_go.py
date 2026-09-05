@@ -77,7 +77,9 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_go_corpus"
 CORPUS = [
+    "accumulator_hygiene.rvl",
     "accumulators.rvl",
+    "builder_literal.rvl",
     "../emit_rust_corpus/perf_shapes.rvl",
     "identifiers.rvl",
     "../emit_java_corpus/records.rvl",
@@ -207,6 +209,42 @@ def test_supported_corpus_compiles_as_go(emitted, reference, tmp_path, rel):
             env={**os.environ, "GO111MODULE": "off"}, timeout=60,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_accumulator_generated_names_compile_and_run(
+    emitted, reference, tmp_path,
+):
+    """Builder locals and their package alias must not collide with user names."""
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("Go compiler not installed")
+    ir = compile_files([str(CORPUS_DIR / "accumulator_hygiene.rvl")])
+    test_source = """package emitted
+import "testing"
+func TestAccumulatorHygiene(t *testing.T) {
+    xs := []string{"a", "b"}
+    if got := reserved(xs); got != "xx" { t.Fatalf("reserved: %q", got) }
+    if got := shadowed(xs); got != "!!" { t.Fatalf("shadowed: %q", got) }
+}
+"""
+    for name, source in (("reference", reference.emit(ir)),
+                         ("selfhost", emitted["emit_src"](ir))):
+        case = tmp_path / name
+        case.mkdir()
+        (case / "emitted.go").write_text(source)
+        (case / "emitted_test.go").write_text(test_source)
+        result = subprocess.run(
+            [go, "test", "."], cwd=case, capture_output=True, text=True,
+            env={**os.environ, "GO111MODULE": "off"}, timeout=60,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_builder_text_literal_does_not_import_strings(emitted, reference):
+    ir = compile_files([str(CORPUS_DIR / "builder_literal.rvl")])
+    want, got = reference.emit(ir), emitted["emit_src"](ir)
+    assert '"strings"' not in want
+    assert '"strings"' not in got
 
 
 @pytest.mark.parametrize("source, reference_token, port_token", [
