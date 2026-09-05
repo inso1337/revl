@@ -1769,8 +1769,12 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   return p_top(ts, skip_line(ts, i), bad_prog(pg, "unexpected declaration"))
 }
 
+fn parse_prog_ts(ts: List[Token]) -> Prog {
+  return p_top(ts, 0, { fns: [], svcs: [], comps: [], bad: "" })
+}
+
 pub fn parse_prog(src: Str) -> Prog {
-  return p_top(lex_src(src), 0, { fns: [], svcs: [], comps: [], bad: "" })
+  return parse_prog_ts(lex_src(src))
 }
 
 // ================================================================ fixed points
@@ -4574,8 +4578,7 @@ fn foreign_form_at(ts: List[Token], i: Int) -> Str {
 // The whole scan, left to right: the FIRST foreign construct in the token
 // stream, "" when the file contains none. Left-to-right approximates the
 // reference's own report order (its parser walks the source once).
-pub fn foreign_scan(src: Str) -> Str {
-  let ts = lex_src(src)
+fn foreign_scan_ts(ts: List[Token]) -> Str {
   let bound = bound_idents(ts)
   var i = 0
   while (i < ts.length()) {
@@ -4599,6 +4602,10 @@ pub fn foreign_scan(src: Str) -> Str {
     }
   }
   return ""
+}
+
+pub fn foreign_scan(src: Str) -> Str {
+  return foreign_scan_ts(lex_src(src))
 }
 
 // The admission entry. "" admits; "<tag>|<message>" refuses.
@@ -4794,26 +4801,26 @@ fn too_deep_msg() -> Str {
 }
 
 pub fn admit_src(src: Str) -> Str {
+  let ts = lex_src(src)
   // item 384: the foreign-construct redirects run first — the reference's
   // parser half fires before any admission check, and no program that reaches
   // an admission refusal carries one of these spellings.
-  let fgn = foreign_scan(src)
+  let fgn = foreign_scan_ts(ts)
   if (fgn != "") { return tagged("FOREIGN", fgn) }
   // ... and the nesting bound before any descent, so a source built to run the
   // front end out of stack is refused rather than parsed. The token stream is
-  // read once here and handed to `type_ctors` below, which used to lex the
-  // source a second time of its own.
-  let ts0 = lex_src(src)
-  if (nesting_depth(ts0) > nesting_limit()) {
+  // read once at the top of this fn and handed to every check below, which used
+  // to lex the source again of their own.
+  if (nesting_depth(ts) > nesting_limit()) {
     return tagged("BAD", too_deep_msg())
   }
-  let pg = parse_prog(src)
+  let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
   // the ADT constructors the program declares join the callable universe a bare
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
   // declarations structurally — see `type_ctors`.
-  let base = ctx_with_callables(build_maps(pg), type_ctors(ts0))
+  let base = ctx_with_callables(build_maps(pg), type_ctors(ts))
   let cachev = check_cache_fns(pg.fns)
   if (cachev != "") { return cachev }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
@@ -4858,7 +4865,7 @@ pub fn admit_src(src: Str) -> Str {
   // get different verdicts from the two implementations. Two contracts cannot
   // both be the exhaustive list of what the host must inject, and an admission
   // check against "the" contract would silently check only one of them.
-  let boots = boot_names(lex_src(src))
+  let boots = boot_names(ts)
   if (boots.length() > 1) {
     return tagged("BOOT",
       "a composition declares at most one `boot` component, found "
