@@ -455,7 +455,7 @@ def _flatten(entry: dict) -> dict[str, int]:
     for functions in entry.get("uncovered", {}).values():
         if isinstance(functions, dict):
             for name, count in functions.items():
-                if isinstance(name, str) and isinstance(count, int) and count >= 0:
+                if isinstance(name, str) and type(count) is int and count >= 0:
                     flat[name] = count
     return flat
 
@@ -526,13 +526,20 @@ WHERE = {
 def check(data: dict) -> list[str]:
     ledger = _load_ledger()
     problems = _closure_problems(ledger)
+    if not isinstance(data, dict):
+        return problems + ["survey data is not a map"]
     for half in ("reference", "selfhost"):
         recorded_half = ledger.get(half, {})
+        if not isinstance(recorded_half, dict):
+            recorded_half = {}
         for tier in TIERS:
             try:
                 found = data[half][tier]["functions"]
             except (KeyError, TypeError):
                 problems.append(f"{half}/{tier}: survey data is missing")
+                continue
+            if not isinstance(found, dict):
+                problems.append(f"{half}/{tier}: survey functions are not a map")
                 continue
             recorded = _flatten(recorded_half.get(tier, {}))
             raw_entry = recorded_half.get(tier)
@@ -542,12 +549,12 @@ def check(data: dict) -> list[str]:
                     for functions in raw_reasons.values():
                         if isinstance(functions, dict):
                             for name, count in functions.items():
-                                if not isinstance(count, int) or count < 0:
+                                if type(count) is not int or count < 0:
                                     problems.append(
                                         f"{half}/{tier}: invalid uncovered count for `{name}`")
             for name in sorted(set(found) | set(recorded)):
                 now, before = found.get(name, 0), recorded.get(name)
-                if not isinstance(now, int) or now < 0:
+                if type(now) is not int or now < 0:
                     problems.append(f"{half}/{tier}: invalid measured count for `{name}`")
                     continue
                 if before is None:
