@@ -1073,7 +1073,14 @@ def test_cargo_check_config_in_provide_body(tmp_path):
 def test_cargo_check_non_copy_value_and_impl_fn_reused(tmp_path):
     """(c) real cargo gate: a non-Copy ADT used by two calls and an `impl Fn`
     parameter passed by value inside a loop both compile — the reused value is
-    cloned, the function value is passed by reference (`&f: Fn`)."""
+    cloned, the function value is passed by reference (`&f: Fn`).
+
+    The loop binding `it` is inferred to the `List` element type (`Str`), so a
+    by-value free-fn argument of that known non-Copy type is `.clone()`d — the
+    always-sound `_by_value_arg` shape, mirrored by the self-hosted port and
+    proven to build by the cargo gate below. What this test pins is the function
+    value reaching the `impl Fn` slot by reference (`&call`), not the presence or
+    absence of a clone on the value argument."""
     src = emit.emit(compile_source(
         "type Reply = Tool(Str) | Final(Str)\n"
         "fn is_tool(d: Reply) -> Bool { return match d { Tool(x) => true, Final(x) => false } }\n"
@@ -1090,7 +1097,7 @@ def test_cargo_check_non_copy_value_and_impl_fn_reused(tmp_path):
         "}\n"
     ))
     assert "is_tool(dec.clone())" in src
-    assert "apply(&call, it)" in src
+    assert "apply(&call, it.clone())" in src
     result = _cargo_check(tmp_path, src)
     assert result.returncode == 0, result.stderr
 
