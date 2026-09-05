@@ -881,12 +881,16 @@ fn mk_srun(ss: Vec<Stmt>, i: i64) -> SRun {
 
 fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
     let t = tkc(ts.clone(), lo);
-    if ((t.kind == "kw") && (t.text == "let")) {
-        if (!atk(ts.clone(), (lo).checked_add(2i64).expect("revl: Int overflow"), "=")) {
+    if ((t.kind == "kw") && ((t.text == "let") || (t.text == "var"))) {
+        let mut eq = (lo).checked_add(2i64).expect("revl: Int overflow");
+        if atk(ts.clone(), eq.clone(), ":") {
+            eq = type_at(ts.clone(), (eq).checked_add(1i64).expect("revl: Int overflow")).i;
+        }
+        if (!atk(ts.clone(), eq, "=")) {
             return mk_srun(vec![mkstmt(String::from("skip"), int_lit0())], hi);
         }
         let bn = tkc(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow")).text;
-        let mut j = (lo).checked_add(3i64).expect("revl: Int overflow");
+        let mut j = (eq).checked_add(1i64).expect("revl: Int overflow");
         let mut kd = String::from("expr");
         if atw(ts.clone(), j.clone(), "emit") {
             kd = String::from("emit");

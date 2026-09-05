@@ -747,10 +747,12 @@ fn mk_srun(ss: List[Stmt], i: Int) -> SRun { return { ss: ss, i: i } }
 
 fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
-  if (t.kind == "kw" && t.text == "let") {
-    if (!atk(ts, lo + 2, "=")) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
+  if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
+    var eq = lo + 2
+    if (atk(ts, eq, ":")) { eq = type_at(ts, eq + 1).i }
+    if (!atk(ts, eq, "=")) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
     let bn = tkc(ts, lo + 1).text
-    var j = lo + 3
+    var j = eq + 1
     var kd = "expr"
     if (atw(ts, j, "emit")) {
       kd = "emit"
