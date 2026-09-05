@@ -646,7 +646,7 @@ fn contains(xs: &[String], s: &str) -> bool {
 fn contains_int(xs: &[i64], v: i64) -> bool {
     let mut i = 0i64;
     while (i < xs.revl_length()) {
-        if ((xs)[(i) as usize].clone() == v) {
+        if ((xs)[(i) as usize] == v) {
             return true;
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
@@ -2254,7 +2254,7 @@ fn g4_verdict(svcName: &str, mname: &str, decl: MSig, a: Ac) -> String {
                 if (i > 0i64) {
                     msg.push_str(", ");
                 }
-                if ((extra)[(i) as usize].clone() == "*") {
+                if ((extra)[(i) as usize] == "*") {
                     msg.push_str("an unnameable host boundary");
                 } else {
                     msg = ((msg.revl_concat("`")).revl_concat(&(extra)[(i) as usize].clone())).revl_concat("`");
@@ -3349,7 +3349,7 @@ fn offending_join(xs: &[String]) -> String {
         if (i > 0i64) {
             out.push_str(", ");
         }
-        if ((xs)[(i) as usize].clone() == "*") {
+        if ((xs)[(i) as usize] == "*") {
             out.push_str("an unnameable host boundary");
         } else {
             out = ((out.revl_concat("`")).revl_concat(&(xs)[(i) as usize].clone())).revl_concat("`");
@@ -5832,7 +5832,7 @@ fn list_transform_free(name: &str) -> String {
 fn amb_has(amb: &[String], n: &str) -> bool {
     let mut i = 0i64;
     while (i < amb.revl_length()) {
-        if ((amb)[(i) as usize].clone() == n) {
+        if ((amb)[(i) as usize] == n) {
             return true;
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");

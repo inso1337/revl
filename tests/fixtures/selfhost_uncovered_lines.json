@@ -766,7 +766,7 @@
       "uncovered_statements": 628
     },
     "rust": {
-      "statements": 3176,
+      "statements": 3189,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and stream refusal. Those require the live plugin/frame runtime that the self-host component slice explicitly marks DEFER.": {
           "_emit_step": 95,
@@ -849,7 +849,7 @@
           "_v3_builtin": 29,
           "_v3_empty_vec_elem_types": 66,
           "_v3_empty_vec_elem_types.collect": 1,
-          "_v3_infer_type": 20,
+          "_v3_infer_type": 15,
           "_v3_inplace_persistent": 12,
           "_v3_interp": 3,
           "_v3_is_float": 4,
@@ -938,7 +938,7 @@
           "_witnessed_extern_for": 3
         }
       },
-      "uncovered_statements": 1218
+      "uncovered_statements": 1213
     },
     "ts": {
       "statements": 1979,
@@ -1665,7 +1665,7 @@
       "uncovered_statements": 97
     },
     "rust": {
-      "statements": 1859,
+      "statements": 1872,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "component_uses_await": 1,

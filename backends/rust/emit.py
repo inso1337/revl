@@ -4201,6 +4201,28 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
     return False
 
 
+def _v3_strip_index_clone(node: object, rendered: str) -> str | None:
+    """The borrow place `v[i]` for a `List` index read used in a READ-ONLY
+    position — its already-rendered form with the trailing `.clone()` removed —
+    else None (item 437d).
+
+    revl reads a `List` element BY VALUE, so the `index` arm of `_render_expr`
+    clones the element to own it. But a read-only slot — a `==`/`!=` operand and
+    a builtin receiver (every `Revl*Ops`/`Map` method takes `&self`, or clones
+    the receiver itself) — only borrows the element, and Rust auto-refs the
+    `v[i]` place there, so the clone is pure heap waste: `list_index.rvl`, the
+    isolated worst case, drops from 150,000 heap allocations to zero. Only the
+    read-only positions here are touched; an index read in an OWNED slot (a
+    `return`/`let` value, a by-value argument, a record field) still clones.
+    Stripping the fixed `.clone()` suffix off the already-rendered string reuses
+    it exactly, so any identifier renaming already applied is preserved and the
+    place is byte-identical to the clone form minus the suffix."""
+    if (isinstance(node, dict) and node.get("kind") == "index"
+            and rendered.endswith(".clone()")):
+        return rendered[:-len(".clone()")]
+    return None
+
+
 def _v3_str_eq_borrow(node: dict, left: str, right: str,
                       ctx: "_V3Ctx") -> tuple[str, str]:
     """Compare a `Str` against a literal without allocating it (item 437b).
@@ -4234,6 +4256,16 @@ def _v3_str_eq_borrow(node: dict, left: str, right: str,
         right = r_lit
     if l_lit is not None and _v3_infer_type(rnode, ctx) in (None, "Str"):
         left = l_lit
+    # item 437d: a `List` index read in an `==`/`!=` operand only needs a
+    # borrow — Rust auto-refs each place for `PartialEq::eq` — so drop the
+    # element `.clone()` the read added. A node is a literal OR an index OR
+    # neither, so this composes with the literal borrow above.
+    l_place = _v3_strip_index_clone(lnode, left)
+    if l_place is not None:
+        left = l_place
+    r_place = _v3_strip_index_clone(rnode, right)
+    if r_place is not None:
+        right = r_place
     return left, right
 
 
@@ -5113,6 +5145,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
     if kind == "builtin":
         target_node = node.get("target")
         target = _render_expr(target_node, ctx, rename)
+        # item 437d: a `List` index receiver only needs a borrow — every
+        # `Revl*Ops`/`Map` builtin below takes `&self` (or clones the receiver
+        # itself), so the element `.clone()` the index read added is pure waste.
+        place = _v3_strip_index_clone(target_node, target)
+        if place is not None:
+            target = place
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
         arg_nodes = node.get("args") or []
