@@ -34,8 +34,12 @@ import java.util.Map;
 public final class RunOnce {
     static String name = "run";
 
+    // Every console line reads through the declared Secret[T] registry the
+    // emitted Components carries (item 421 F6); PlacementRunner binds it.
     static void log(String channel, String subject, String detail) {
-        System.out.println(("[" + name + "] " + pad(channel, 6) + "| " + pad(subject, 16) + "| " + detail).stripTrailing());
+        System.out.println(("[" + name + "] " + pad(channel, 6) + "| "
+                + pad(PlacementRunner.redactSecrets(subject), 16) + "| "
+                + PlacementRunner.redactSecrets(detail)).stripTrailing());
     }
 
     static String pad(String s, int n) {
@@ -49,6 +53,7 @@ public final class RunOnce {
         Map<String, Object> spec = (Map<String, Object>) PlacementRunner.Json.parse(Files.readString(Path.of(argv[0])));
         name = (String) spec.getOrDefault("name", "run");
         String container = (String) spec.getOrDefault("module", "revl.Components");
+        PlacementRunner.bindSecretRegistry(container); // before the first line is printed
         Map<String, Object> config = (Map<String, Object>) spec.getOrDefault("config", Map.of());
         Map<String, Object> ifaces = (Map<String, Object>) spec.getOrDefault("ifaces", Map.of());
         List<Object> provides = (List<Object>) spec.getOrDefault("provides", List.of());

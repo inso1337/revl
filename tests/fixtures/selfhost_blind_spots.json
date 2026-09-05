@@ -181,6 +181,10 @@
       "Existing witnessed-extern boundary: _emit_witnessed_step consults secret_witness when recording/redacting inverse witnesses. Extern/witness lowering is not ported; strict method_witnessed.rvl retains a representative divergence, not a claim that secrecy is unnecessary.": [
         "secret_witness=<true>"
       ],
+      "Item 421 F6 added the Secret[T] runtime registry to the reference java backend (backends/java/emit.py), but the item-199 Path B self-host java emitter (selfhost/emit_java.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's _SECRET_MODE redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_java.rvl ports the registry.": [
+        "secret=<true>",
+        "secret_return=<true>"
+      ],
       "Reference refusal in _expr/_refuse_stream_host: subscribe and stream-merge require the unimplemented Java Stream runtime. Refusal parity is outside the successful-byte contract.": [
         "kind=stream-merge",
         "kind=subscribe"

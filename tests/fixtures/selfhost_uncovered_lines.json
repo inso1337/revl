@@ -268,7 +268,7 @@
       "uncovered_statements": 2885
     },
     "java": {
-      "statements": 2488,
+      "statements": 2551,
       "uncovered": {
         "backends/java/emit.py::<module>: The __main__ CLI entry is not invoked by the emit(ir) API oracle.": {
           "<module>": 1
@@ -318,6 +318,9 @@
         "backends/java/emit.py::_covers_variant: The remaining false return is a missing user-variant case. lower.py rejects nonexhaustive user matches before emission; exhaustive and wildcard matches are covered.": {
           "_covers_variant": 1
         },
+        "backends/java/emit.py::_declares_secret: item 421 F6: scans the IR for a surviving `Secret[T]` marking (service param `secret`, extern `secret_return`, config-field `secret`) to gate `_SECRET_MODE`. No java corpus document declares a secret, so the scan's positive branches never run; selfhost/emit_java.rvl has no secret-redaction port (item-429(d)), so a corpus document reaching them would flip the byte-agreement oracle red rather than close this gap.": {
+          "_declares_secret": 7
+        },
         "backends/java/emit.py::_dedup_colour_erased_poly_externs._rewrite: Recursive callee-name rewriting runs only after an erased polymorphic extern collision is found; extern emission is explicitly deferred.": {
           "_dedup_colour_erased_poly_externs._rewrite": 6
         },
@@ -330,8 +333,8 @@
         "backends/java/emit.py::_emit_component: Residual requirement/bind fields and constructor assignments, config fields, ctx.get and let-effect/effect/emit branches are the nonsimple legacy effect/bind path, excluded by component_simple_ok. The final unsupported-step raise is refusal. Empty and provide-only legacy components are now covered.": {
           "_emit_component": 17
         },
-        "backends/java/emit.py::_emit_component_modern: Missing branches reject invalid isolate/intercept keys, bind a routed requirement and emit the router class. Frontend validates placement keys; routers remain an explicit boundary, not general realm exclusion.": {
-          "_emit_component_modern": 5
+        "backends/java/emit.py::_emit_component_modern: Missing branches reject invalid isolate/intercept keys, bind a routed requirement and emit the router class. Frontend validates placement keys; routers remain an explicit boundary, not general realm exclusion. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
+          "_emit_component_modern": 6
         },
         "backends/java/emit.py::_emit_component_stmts: Residual setup delegation and nonhost/witnessed or Map.compare_and_set let-effect acquisition are excluded by the host-only binding/setup gate. Body return raises (methods only); unknown body steps delegate to deferred setup lowering.": {
           "_emit_component_stmts": 15
@@ -357,11 +360,14 @@
         "backends/java/emit.py::_emit_pool_runtime: The Pool host runtime text is only requested by Pool roots, explicitly deferred and reproduced by the strict pg-pool regression.": {
           "_emit_pool_runtime": 1
         },
-        "backends/java/emit.py::_emit_record_sink: Record sink support belongs to emit(ir, record=True), not the oracle's default emit(ir) API. This optional instrumentation mode was not part of the port contract.": {
-          "_emit_record_sink": 1
+        "backends/java/emit.py::_emit_record_sink: Record sink support belongs to emit(ir, record=True), not the oracle's default emit(ir) API. This optional instrumentation mode was not part of the port contract. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
+          "_emit_record_sink": 2
         },
         "backends/java/emit.py::_emit_result_type: Built-in Result wrapper text is demanded by Ok/Err and checked division, explicitly deferred; result_ctor_302.rvl is a strict divergent regression. User variants and Opt are covered.": {
           "_emit_result_type": 1
+        },
+        "backends/java/emit.py::_emit_secret_registry: item 421 F6: the redaction registry preamble, emitted into Components once under `_SECRET_MODE`. No java corpus document enables secret mode, and selfhost/emit_java.rvl does not port the registry (item-429(d)).": {
+          "_emit_secret_registry": 1
         },
         "backends/java/emit.py::_emit_service_interfaces: The missing idempotent annotation is in the legacy service path: lower.py version selection forces v3 for any idempotent/async/commutative method (6567-6571), so source input cannot reach that legacy branch.": {
           "_emit_service_interfaces": 1
@@ -375,17 +381,17 @@
         "backends/java/emit.py::_emit_stdlib_helpers: Residual source-group and transitive dependency emission needs builtin/len helpers, explicitly deferred; control.rvl/runtime_values.rvl reproduce missing stdlib output.": {
           "_emit_stdlib_helpers": 5
         },
-        "backends/java/emit.py::_emit_v1: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. The successful legacy component/service path is covered; Float-to-Str remains explicitly deferred.": {
-          "_emit_v1": 2
+        "backends/java/emit.py::_emit_v1: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. The successful legacy component/service path is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
+          "_emit_v1": 3
         },
-        "backends/java/emit.py::_emit_v2: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. Legacy isolate/intercept assembly is covered; Float-to-Str remains explicitly deferred.": {
-          "_emit_v2": 2
+        "backends/java/emit.py::_emit_v2: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. Legacy isolate/intercept assembly is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
+          "_emit_v2": 3
         },
-        "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers.": {
-          "_emit_v3": 14
+        "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
+          "_emit_v3": 15
         },
-        "backends/java/emit.py::_emit_v3_externs: Extern method wrappers, witnessed signatures and config-schema bindings require extern declarations, explicitly deferred; strict extern_config and method_witnessed cases retain reproductions.": {
-          "_emit_v3_externs": 23
+        "backends/java/emit.py::_emit_v3_externs: Extern method wrappers, witnessed signatures and config-schema bindings require extern declarations, explicitly deferred; strict extern_config and method_witnessed cases retain reproductions. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
+          "_emit_v3_externs": 32
         },
         "backends/java/emit.py::_emit_v3_lifecycle_tests: Lifecycle test method assembly, load/unload state and conditional REVL_TESTS invocation require in-file lifecycle tests, explicitly deferred.": {
           "_emit_v3_lifecycle_tests": 31
@@ -504,6 +510,15 @@
         "backends/java/emit.py::_scan_map_writes: Remaining assignment/writer scanning belongs to unannotated VALUE Map.empty inference, explicitly deferred; host Map writers are scanned by _map_insert_candidates instead.": {
           "_scan_map_writes": 6
         },
+        "backends/java/emit.py::_secret_config_fields: item 421 F6: the `Secret[T]` config-field names a plugin constructor registers at load. Returns empty outside `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d)).": {
+          "_secret_config_fields": 1
+        },
+        "backends/java/emit.py::_secret_config_mark: item 421 F6, config half: the `revlMarkSecret` registration inside the plugin constructors for `Secret[T]` config fields. Reached only in `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d)).": {
+          "_secret_config_mark": 1
+        },
+        "backends/java/emit.py::_secret_method_params: item 421 F6: the provide-method parameter positions a service declared `Secret[T]`, read off the `params[i]['secret']` stamp. Returns empty outside `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d)).": {
+          "_secret_method_params": 4
+        },
         "backends/java/emit.py::_split_generic: This helper is used by legacy _java_type's Map branch, beyond the explicitly scalar v1/v2 signatures. v3 generic splitting uses _split_v3_types and is covered.": {
           "_split_generic": 11
         },
@@ -577,7 +592,7 @@
           "emit": 2
         }
       },
-      "uncovered_statements": 886
+      "uncovered_statements": 914
     },
     "py": {
       "statements": 2354,
