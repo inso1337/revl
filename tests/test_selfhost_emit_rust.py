@@ -143,6 +143,11 @@ CORPUS = [
                         #   self-append rewrite. 437 found NO fixture reached
                         #   either shape, so the oracle stayed green over an
                         #   unported optimisation; this closes that (item 429)
+    "perf_index.rvl",   # item 437d — a List index read in a read-only position
+                        #   (an `==`/`!=` operand, a builtin receiver) borrows
+                        #   rather than cloning the element; the owned `return`/
+                        #   `let` cases keep the clone. No corpus fixture reached
+                        #   the shape, so this closes the same 429 gap.
     # slice 2 — the v3 typed-core:
     "records.rvl",   # record `type` -> `pub struct`, record literal + field clone,
                      #   field access, a record-typed field, List[Point] lowering
