@@ -117,6 +117,27 @@ def test_rollback_verb_is_an_alias_for_undo():
     assert carol.allows("undo", frozenset({"*"}))[0] is True
 
 
+def test_session_plane_verbs_have_profile_capabilities():
+    reg = parse_profile(
+        "operator session may call, lease, fork, replay on *")
+    session = reg.get("session")
+    labels = frozenset({"TenantACache", "tenant_a"})
+    assert all(session.allows(verb, labels)[0]
+               for verb in ("call", "lease", "fork", "replay"))
+
+
+def test_session_plane_verbs_are_gated_at_dispatch():
+    operator = parse_profile("operator session may call on *").get("session")
+    sess = _FakeSession(compile_source(TWO_REALM), operator)
+
+    allowed = decide(sess, "revl_call", {"key": "ca", "method": "get"})
+    refused = decide(sess, "revl_lease", {"component": "TenantACache"})
+
+    assert allowed.gated and allowed.allowed and allowed.verb == "call"
+    assert refused.gated and not refused.allowed and refused.verb == "lease"
+    assert "lease" in refused.message
+
+
 def test_sole_operator_needs_no_token():
     reg = parse_profile("operator only may swap on *")
     assert reg.sole().token == "only"
