@@ -532,10 +532,131 @@ _HOST_RESERVED = {
 }
 
 
+# A3, the REMAINDER (issue #320). Items 160/165/406 made every host *keyword*
+# safe verbatim: each backend injectively renames a user identifier that spells
+# one of ITS keywords (`func`/`class`/`type`/…). What they missed is the rest of
+# the host namespace a bare identifier can still collide with — names that are
+# NOT keywords and so slip past every per-tier keyword rename:
+#
+#   * builtins the emitter emits verbatim next to the user's name (`len(x)`,
+#     `str(x)`, `isinstance(...)` on python; `Number`/`String`/`Object`/`JSON`/
+#     `Array` on TS),
+#   * predeclared globals and imported package names (`float64`/`int64`/
+#     `strconv`/`testing`/`panic` on go, the JS globals above),
+#   * the emitter's own helper names (`revlLen`/`revlEq`/`revlStrLen`, wasm's
+#     `alloc`/`f64_to_str`/`memory`),
+#   * the host-root and ADT-constructor spellings (`Map`/`Pool`/`Job`,
+#     `Some`/`None`/`Ok`/`Err`) — legal identifiers a user may bind.
+#
+# A3 says "backends may assume every name is safe verbatim", so this remainder
+# is renamed HERE, once, at the tier-agnostic frontend — exactly as the keyword
+# families already are per tier. The set is deliberately DISJOINT from every
+# backend's keyword-rename set (`_ALL_HOST_KEYWORDS` below): a name a backend
+# already renames must NOT be pre-escaped here too, or the two passes compose
+# and double-escape (`func` -> `func_` -> `func__`), the bug PR #374 hit. Because
+# the set is disjoint from every keyword rename, a name escaped here has a root
+# no backend keyword-mangle touches, so it survives verbatim on every tier and
+# the backends need no change.
+#
+# `_ALL_HOST_KEYWORDS` mirrors the six backends' keyword sets
+# (`backends/*/emit.py`); `tests/test_reserved_lexicon_sweep.py` asserts the
+# mirror still matches. Filtering the candidate set through it means an
+# accidental keyword in the candidates is simply dropped (left to its backend
+# rename) rather than double-escaped.
+_ALL_HOST_KEYWORDS: frozenset[str] = frozenset({
+    # go (_GO_KEYWORDS)
+    "type", "range", "func", "map", "chan", "select", "go", "defer",
+    "return", "var", "const", "package", "import",
+    # java (_JAVA_RESERVED)
+    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char",
+    "class", "continue", "default", "do", "double", "else", "enum", "extends",
+    "final", "finally", "float", "for", "goto", "if", "implements",
+    "instanceof", "int", "interface", "long", "native", "new", "private",
+    "protected", "public", "short", "static", "strictfp", "super", "switch",
+    "synchronized", "this", "throw", "throws", "transient", "try", "void",
+    "volatile", "while", "record", "yield",
+    # rust (_RUST_RESERVED)
+    "as", "crate", "extern", "false", "fn", "impl", "in", "let", "loop",
+    "match", "mod", "move", "mut", "pub", "ref", "self", "Self", "struct",
+    "trait", "true", "unsafe", "use", "where", "async", "await", "dyn",
+    # ts (JS_RESERVED)
+    "debugger", "delete", "export", "function", "null", "throw", "typeof",
+    "with",
+})
+
+
+def _host_keyword(name: str) -> bool:
+    """True when a backend already renames `name` as one of ITS keywords, so
+    the frontend must NOT also escape it (that would double-escape). Python
+    keywords are included because `backends/python/emit.py::_mangle` renames
+    them too."""
+    return (name in _ALL_HOST_KEYWORDS
+            or keyword.iskeyword(name)
+            or keyword.issoftkeyword(name))
+
+
+# Candidate remainder names. Any that is also a host keyword is filtered out
+# below (kept with its backend rename); the rest form `_HOST_PREDECLARED`. The
+# set is kept to names that DEMONSTRABLY collide — a builtin an emitter writes
+# verbatim next to the user's name, an issue-#320 identifier, a host root, or an
+# ADT constructor — so it is a no-op on ordinary programs (which is what keeps
+# every golden and the byte-agreement corpus unchanged). Speculative builtins an
+# emitter never actually writes are deliberately excluded: they would rename
+# harmlessly but pointlessly, and only widen the corpus-collision surface.
+#
+# NOTE: `int`/`float`/`new`/`class`/… are host BUILTINS on some tier yet also
+# KEYWORDS on another (java), so they cannot be added here without double-
+# escaping on the keyword tier. Making a name that is BOTH still safe verbatim
+# needs the full item-320 coordinated fix (backends drop their keyword rename
+# too); those stay a documented remainder — see the module docstring of
+# tools/reserved_lexicon_sweep.py.
+_PREDECLARED_CANDIDATES: frozenset[str] = frozenset({
+    # python builtins the emitter emits verbatim (backends/python/emit.py):
+    # a user identifier of the same spelling shadows the call the emitter makes.
+    "len", "str", "isinstance", "abs", "ord", "sorted", "range",
+    # JS/TS predeclared globals + emitter helpers the emitted code names
+    # verbatim (issue #320's typescript list).
+    "Number", "String", "Object", "JSON", "Array", "TypeError",
+    "eval", "arguments", "revlLen", "revlEq", "revlStrLen",
+    # go predeclared / imported package names (issue #320's go list).
+    "strconv", "float64", "int64",
+    # host roots and ADT constructors — legal identifiers a user may bind, but
+    # spelled the same as a builtin the emitter constructs directly.
+    "Map", "Pool", "Job", "Stream", "Some", "None", "Ok", "Err",
+})
+
+# The frontend-owned remainder lexicon: candidates minus anything a backend
+# already renames as a keyword (so the two escaping passes never compose).
+_HOST_PREDECLARED: frozenset[str] = frozenset(
+    n for n in _PREDECLARED_CANDIDATES if not _host_keyword(n))
+
+
+def _predeclared_mangle(name: str) -> str:
+    """Escape a value/binding identifier that spells a host predeclared name so
+    it is safe verbatim on every tier (issue #320).
+
+    Same injective ladder-shift the backends use for keywords, but over the
+    keyword-DISJOINT `_HOST_PREDECLARED`: escape a name iff the name — or any
+    name reachable from it by dropping trailing `_` — is a predeclared name, by
+    exactly one `_`. Pure and injective, so a declaration and its use sites
+    agree without threading a map, and it composes with the backends' keyword
+    renames because the two name-sets are disjoint. Identity on every other
+    name, so a program that binds no predeclared name is byte-identical."""
+    root = name
+    while root:
+        if root in _HOST_PREDECLARED:
+            return name + "_"
+        if not root.endswith("_"):
+            break
+        root = root[:-1]
+    return name
+
+
 def _safe_name(name: str, taken: set[str]) -> str:
     candidate = name
     while (
         candidate in _HOST_RESERVED
+        or candidate in _HOST_PREDECLARED
         or keyword.iskeyword(candidate)
         or keyword.issoftkeyword(candidate)
         or candidate in taken
@@ -1588,7 +1709,15 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
             # whether a composition can mint the `confidential` origin anywhere.
             # Additive: absent unless the author wrote `Secret[T]`, so every
             # existing IR document stays byte-identical.
-            "params": _ir_params(((p.name, p.type) for p in decl.params),
+            # issue #320: a fn parameter that spells a host predeclared name
+            # (`len`, `str`, `Some`, `Map`, …) is renamed here, once, so it is
+            # safe verbatim on every tier. The body's references resolve through
+            # the same pure `_predeclared_mangle` (see `_lower_pure_expr`'s
+            # in-scope `var` case), so declaration and use stay in agreement
+            # without a table. Extern params are NOT renamed (their verbatim
+            # `@backend` bodies reference the raw spelling).
+            "params": _ir_params(((_predeclared_mangle(p.name), p.type)
+                                  for p in decl.params),
                                  getattr(decl, "secret_params", ())),
             "returns": decl.returns,
             "public": decl.public,
@@ -4597,7 +4726,8 @@ def _lower_prop_tests(program: Program, filename: str, types: dict,
             _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
         units.append({
             "name": decl.name,
-            "params": [{"name": p.name, "type": p.type} for p in decl.params],
+            "params": [{"name": _predeclared_mangle(p.name), "type": p.type}
+                       for p in decl.params],
             "body": body,
         })
     return units
@@ -4884,7 +5014,7 @@ def _lower_lifecycle_call(stmt: CallStmt, provided: dict, components: dict, serv
         scope[stmt.bind] = False
         if method.returns:
             type_env[stmt.bind] = method.returns
-        node["bind"] = stmt.bind
+        node["bind"] = _predeclared_mangle(stmt.bind)
     return node
 
 
@@ -4936,7 +5066,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         # an annotated `let x: Float = 3` is a coercion site too (docs/arithmetic.md)
         _mark_widen(declared, actual_declared, lowered_value)
         _pin_empty_literal(declared, lowered_value)
-        body.append({"step": "let", "name": stmt.name,
+        body.append({"step": "let", "name": _predeclared_mangle(stmt.name),
                      "value": lowered_value,
                      "mutable": stmt.mutable})
     elif isinstance(stmt, LetPatternStmt):
@@ -4984,7 +5114,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         lowered_value = _lower_pure_expr(value, scope, callables, alias_fns, filename, type_env, types)
         # assigning into a `Float`-declared variable is a coercion site too
         _mark_widen(declared, inferred, lowered_value)
-        body.append({"step": "assign", "name": stmt.name,
+        body.append({"step": "assign", "name": _predeclared_mangle(stmt.name),
                      "value": lowered_value})
     elif isinstance(stmt, ReturnStmt):
         if stmt.expr is not None:
@@ -5057,7 +5187,8 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         inner_body = []
         for s in stmt.body:
             _lower_pure_stmt(s, inner_scope, callables, alias_fns, inner_body, filename, inner_type_env, types, expected_return)
-        body.append({"step": "for", "bind": stmt.bind, "iterable": iterable, "body": inner_body})
+        body.append({"step": "for", "bind": _predeclared_mangle(stmt.bind),
+                     "iterable": iterable, "body": inner_body})
     elif isinstance(stmt, ExprStmt):
         infer_ast(stmt.expr, type_env, types, filename)
         body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
@@ -5367,13 +5498,18 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
     # ADT construction (Result / user variants) lowers to a tagged `adt` node
     # (Opt's Some/None are not tagged — handled as identity/null downstream).
     _cases = types.get(CASES_KEY) or {}
+    # A bound local shadows a constructor of the same spelling (issue #320): a
+    # parameter `Ok`/`Some`/… is the value, not the variant, so it is resolved
+    # as an in-scope `var` below (and renamed by `_predeclared_mangle`), never
+    # lowered to an `adt` node here.
     if isinstance(expr, ExprCall) and isinstance(expr.callee, ExprVar) \
+            and expr.callee.name not in scope \
             and _tagged_case(expr.callee.name, types) is not None:
         info = _cases[expr.callee.name]
         return {"kind": "adt", "type": info["adt"], "case": expr.callee.name,
                 "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types)
                          for a in expr.args]}
-    if isinstance(expr, ExprVar):
+    if isinstance(expr, ExprVar) and expr.name not in scope:
         info = _tagged_case(expr.name, types)
         if info is not None and info.get("payload") is None \
                 and not str(info.get("adt", "")).startswith(("Result", "Opt")):
@@ -5410,6 +5546,11 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             _reject_foreign_name(expr.name, filename, expr.line)  # item 384
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
                             hint="declare it with `let`/`var` or add it as a parameter (G1)")
+        # issue #320: an in-scope value binding that spells a host predeclared
+        # name is renamed to match its (mangled) declaration; a callable
+        # reference (module fn / extern / host) is left verbatim.
+        if expr.name in scope:
+            return {"kind": "var", "name": _predeclared_mangle(expr.name)}
         return {"kind": "var", "name": expr.name}
     if isinstance(expr, ExprBin):
         node = {"kind": "bin", "op": expr.op,
@@ -5635,7 +5776,9 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 inner_type_env.pop(param, None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
         _b1_capture_check(expr, type_env, types, filename, expr.line)
-        node = {"kind": "arrow", "params": expr.params, "captures": captures,
+        node = {"kind": "arrow",
+                "params": [_predeclared_mangle(p) for p in expr.params],
+                "captures": [_predeclared_mangle(c) for c in captures],
                 "body": _lower_pure_expr(expr.body, inner, callables, alias_fns, filename, inner_type_env, types)}
         # IR v3: an arrow whose signature the checker knows *completely* carries
         # it, so a backend can declare it instead of guessing
@@ -5676,7 +5819,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                     inner_type_env[bind] = payload_type
             arm = {
                 "pattern": pattern,
-                "bind": bind,
+                "bind": _predeclared_mangle(bind) if bind is not None else None,
                 "body": _lower_pure_expr(body, inner_scope, callables, alias_fns, filename, inner_type_env, types),
             }
             # payload type helps backends that must cast (e.g. Java's tagged
