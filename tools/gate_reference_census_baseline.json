@@ -21,6 +21,7 @@
    "backends/go/testdata/opt_gaps_280.rvl",
    "backends/go/testdata/result_ctor_302.rvl",
    "backends/java/scenarios/method_witnessed.rvl",
+   "backends/java/scenarios/secret_registry.rvl",
    "backends/typescript/tests/fixtures/a2a_agent.rvl",
    "backends/wasm/scenarios/crashproof/crashproof.rvl",
    "examples/async_timer.rvl",
@@ -177,6 +178,18 @@
    }
   },
   "backends/java/scenarios/method_witnessed.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/java/scenarios/secret_registry.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
