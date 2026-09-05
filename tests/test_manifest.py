@@ -164,3 +164,37 @@ def test_boundary_counts_forward_position_emissions():
         """
     )
     assert _boundary(ir)["Quiet"]["emissions"] == ["bus.send"]
+
+
+# ---------------------------------------------- _audit_document invariants (#380)
+
+def test_audit_document_does_not_mutate_input_ir():
+    """PR #354 removed the `copy.deepcopy` at three callers, so "does not mutate
+    the input IR" is now a property `_audit_document` must guarantee itself.
+    Snapshot the input, run it, and assert the IR is byte-for-byte unchanged."""
+    import copy
+
+    from revl.registry import _audit_document  # noqa: PLC0415
+
+    ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
+    snapshot = copy.deepcopy(ir)
+    _audit_document(ir)
+    assert ir == snapshot
+
+
+def test_audit_document_leaves_a_fileless_component_without_a_file_key():
+    """A manifest component with no `file` key must stay without one. Injecting
+    `"file": null` (the #354 dict-comprehension regression) would change the
+    byte-reproducible manifest.json/policy.json for any IR shape that lacks a
+    `file` — compiler-produced IR always carries one, but consumers may not."""
+    from revl.registry import _audit_document  # noqa: PLC0415
+
+    ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
+    for comp in ir["manifest"]["components"]:
+        comp.pop("file", None)
+
+    audit = _audit_document(ir)
+    components = audit["manifest"]["components"]
+    assert components, "expected at least one component to check"
+    for comp in components:
+        assert "file" not in comp, f"file key injected: {comp!r}"
