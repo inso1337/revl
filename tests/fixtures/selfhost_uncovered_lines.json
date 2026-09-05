@@ -448,179 +448,434 @@
     "rust": {
       "statements": 3160,
       "uncovered": {
-        "module and package assembly: the corpus does not exercise alternate CLI/package metadata branches": {
-          "<module>": 1,
-          "emit": 3,
-          "_main": 11,
-          "cargo_toml": 1
+        "reference `_component_has_effectful_methods`: component/service/host lowering branch outside pure v3 corpus; no supported self-host input reaches this source path.": {
+          "_component_has_effectful_methods": 1
         },
-        "source-specific fallback: this helper has an uncovered alternate input/error branch with no matching supported Rust fixture": {
-          "_V3Ctx.__init__": 1,
-          "_arg_ref_name": 2,
-          "_emit_v3": 7,
-          "_uses_float_interp.walk": 3,
-          "_uses_timer.walk": 2,
-          "_free_fn_call": 7,
-          "_free_fn_calls.walk": 1,
-          "_is_map_cas": 1,
-          "_is_stream_next": 7,
-          "_map_expr_inserts": 20,
-          "_map_insert_candidates": 15,
-          "_result_ok_err": 2,
-          "_result_to_json": 1,
-          "_split_result": 12,
-          "_stream_head": 4,
-          "_subscription_binds": 1,
-          "_intercept_json_lit": 18,
-          "_intercept_json_type": 34,
-          "_emit_v1": 1,
-          "_emit_v2": 6
+        "reference `_component_map_values`: component/service/host lowering branch outside pure v3 corpus; no supported self-host input reaches this source path.": {
+          "_component_map_values": 5
         },
-        "record and recursive-type analysis: boxed recursive edges, ambiguous record shapes, constructor payloads, and bound match patterns lack a Rust corpus witness": {
-          "_V3Ctx._disambiguate_record": 7,
-          "_V3Ctx.constructor": 10,
-          "_V3Ctx.field_is_boxed": 4,
-          "_V3Ctx.match_pattern": 3,
-          "_V3Ctx.record_field_types": 1,
-          "_recursive_boxed_edges": 13,
-          "_recursive_boxed_edges.reaches": 9,
-          "_V3Ctx._same_shape": 2,
-          "_V3Ctx.record_type_for_names": 9
+        "reference `_emit_component`: component/service/host lowering branch outside pure v3 corpus; no supported self-host input reaches this source path.": {
+          "_emit_component": 4
         },
-        "ownership analysis: alternate string-borrow, char-view, move-acquisition, and function-value escape conditions require indexed/escaping arguments not in the corpus": {
-          "_acquire_moved_locals": 5,
-          "_borrow_str_arg": 3,
-          "_by_value_arg": 4,
-          "_by_value_field_clone": 2,
-          "_by_value_reuse": 1,
-          "_by_value_tail": 1,
-          "_char_view_args": 9,
-          "_compute_char_views": 20,
-          "_compute_str_param_borrows": 8,
-          "_bound_names.walk": 6,
-          "_compute_char_views.threaded_index": 4,
-          "_fn_value_refs.walk": 5,
-          "_str_param_escapes": 3,
-          "_str_param_escapes.walk": 38,
-          "_str_params_indexed.walk": 3
+        "reference `_emit_component_new`: component/service/host lowering branch outside pure v3 corpus; no supported self-host input reaches this source path.": {
+          "_emit_component_new": 25
         },
-        "effect lifecycle lowering: compensation, witnessed activation, setup/teardown, and undo branches require component runtime steps not present in pure v3 documents": {
-          "_body_has_compensation": 3,
-          "_body_has_witnessed": 3,
-          "_guard_frame_neutral_loop": 1,
-          "_method_bodies_have_compensation": 2,
-          "_method_bodies_have_witnessed": 2,
-          "_method_body_lines": 37,
-          "_method_undo_clones": 1,
-          "_pure_method_statements": 12,
-          "_step_is_witnessed_effect": 2,
-          "_undo_reclone_locals": 1,
-          "_witnessed_extern_for": 3,
-          "_emit_activation_compensation": 13,
-          "_emit_compensation_registration": 14,
-          "_emit_method_witnessed_step": 19,
-          "_emit_setup_step": 22,
-          "_emit_setup_value": 1,
-          "_emit_teardown_begin": 3,
-          "_emit_teardown_commit": 2,
-          "_emit_witnessed_step": 26,
-          "_method_body_pure_new": 1,
-          "_revl_teardown_preamble": 1
+        "reference `_emit_components`: component/service/host lowering branch outside pure v3 corpus; no supported self-host input reaches this source path.": {
+          "_emit_components": 7
         },
-        "component/service/host lowering: v1 capability, provider, host-stub, and service-trait branches are outside the pure v3 self-host corpus": {
-          "_component_has_effectful_methods": 1,
-          "_component_map_values": 5,
-          "_emit_component": 4,
-          "_emit_component_new": 25,
-          "_emit_components": 7,
-          "_emit_host_stubs": 5,
-          "_emit_host_stubs.walk": 1,
-          "_emit_req_bindings": 2,
-          "_emit_service_traits": 1,
+        "reference `_emit_host_stubs`: component/service/host lowering branch outside pure v3 corpus; no supported self-host input reaches this source path.": {
+          "_emit_host_stubs": 5
+        },
+        "reference `_emit_host_stubs.walk`: component/service/host lowering branch outside pure v3 corpus; no supported self-host input reaches this source path.": {
+          "_emit_host_stubs.walk": 1
+        },
+        "reference `_emit_req_bindings`: component/service/host lowering branch outside pure v3 corpus; no supported self-host input reaches this source path.": {
+          "_emit_req_bindings": 2
+        },
+        "reference `_emit_service_traits`: component/service/host lowering branch outside pure v3 corpus; no supported self-host input reaches this source path.": {
+          "_emit_service_traits": 1
+        },
+        "reference `_host_of`: component/service/host lowering branch outside pure v3 corpus; no supported self-host input reaches this source path.": {
           "_host_of": 12
         },
-        "type/config inference: default, generic container, function-signature, and component-config alternatives are source shapes not represented by current Rust fixtures": {
-          "_config_default_lit": 6,
-          "_is_fn_type": 1,
-          "_param_type": 1,
-          "_provide_let_type": 1,
-          "_render_param_type": 1,
-          "_rust_fn_type": 1,
-          "_rust_type": 2,
-          "_split_fn_type": 1,
-          "_v3_infer_type": 21,
-          "_default_for_rust_type": 15,
-          "_list_element_type": 5,
-          "_map_value_expr_type": 71,
-          "_map_value_rust_type": 18
+        "reference `_body_has_compensation`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_body_has_compensation": 3
         },
-        "explicit backend boundary: deferred, hole, stream, and extern refusal/normalization branches are intentionally surfaced rather than silently emitted": {
-          "_dedup_colour_erased_poly_externs": 11,
-          "_refuse_deferred_emissions": 10,
-          "_refuse_holes": 4,
-          "_refuse_holes.walk": 1,
-          "_dedup_colour_erased_poly_externs._rewrite": 6,
-          "_emit_v3_externs": 3,
-          "_refuse_unlowered_stream_surface": 7,
-          "_rust_extern_config_bind": 9,
+        "reference `_body_has_witnessed`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_body_has_witnessed": 3
+        },
+        "reference `_emit_activation_compensation`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_emit_activation_compensation": 13
+        },
+        "reference `_emit_compensation_registration`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_emit_compensation_registration": 14
+        },
+        "reference `_emit_method_witnessed_step`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_emit_method_witnessed_step": 19
+        },
+        "reference `_emit_setup_step`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_emit_setup_step": 22
+        },
+        "reference `_emit_setup_value`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_emit_setup_value": 1
+        },
+        "reference `_emit_teardown_begin`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_emit_teardown_begin": 3
+        },
+        "reference `_emit_teardown_commit`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_emit_teardown_commit": 2
+        },
+        "reference `_emit_witnessed_step`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_emit_witnessed_step": 26
+        },
+        "reference `_guard_frame_neutral_loop`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_guard_frame_neutral_loop": 1
+        },
+        "reference `_method_bodies_have_compensation`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_method_bodies_have_compensation": 2
+        },
+        "reference `_method_bodies_have_witnessed`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_method_bodies_have_witnessed": 2
+        },
+        "reference `_method_body_lines`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_method_body_lines": 37
+        },
+        "reference `_method_body_pure_new`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_method_body_pure_new": 1
+        },
+        "reference `_method_undo_clones`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_method_undo_clones": 1
+        },
+        "reference `_pure_method_statements`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_pure_method_statements": 12
+        },
+        "reference `_revl_teardown_preamble`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_revl_teardown_preamble": 1
+        },
+        "reference `_step_is_witnessed_effect`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_step_is_witnessed_effect": 2
+        },
+        "reference `_undo_reclone_locals`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_undo_reclone_locals": 1
+        },
+        "reference `_witnessed_extern_for`: effect lifecycle branch requires activation/setup/teardown input, outside pure v3 corpus.": {
+          "_witnessed_extern_for": 3
+        },
+        "reference `_dedup_colour_erased_poly_externs`: explicit deferred/refusal/extern boundary retained by backend contract.": {
+          "_dedup_colour_erased_poly_externs": 11
+        },
+        "reference `_dedup_colour_erased_poly_externs._rewrite`: explicit deferred/refusal/extern boundary retained by backend contract.": {
+          "_dedup_colour_erased_poly_externs._rewrite": 6
+        },
+        "reference `_emit_v3_externs`: explicit deferred/refusal/extern boundary retained by backend contract.": {
+          "_emit_v3_externs": 3
+        },
+        "reference `_refuse_deferred_emissions`: explicit deferred/refusal/extern boundary retained by backend contract.": {
+          "_refuse_deferred_emissions": 10
+        },
+        "reference `_refuse_fault_tests`: explicit deferred/refusal/extern boundary retained by backend contract.": {
           "_refuse_fault_tests": 2
         },
-        "v3 expression/statement dispatch: unselected literal, operator, builtin, pattern, and statement arms remain after ordinary arithmetic/control witnesses": {
-          "_emit_step": 95,
-          "_emit_v3_functions": 9,
-          "_emit_v3_types": 6,
-          "_ident": 1,
-          "_mname": 1,
-          "_render_expr": 83,
-          "_rust_v3_lit": 4,
-          "_snake": 1,
-          "_string": 9,
-          "_v3_empty_vec_elem_types": 66,
-          "_v3_empty_vec_elem_types.collect": 1,
-          "_v3_interp": 3,
-          "_v3_is_float": 4,
-          "_v3_is_str": 2,
-          "_v3_match_expr": 2,
-          "_v3_mentions_name": 2,
-          "_v3_self_append_inplace": 19,
-          "_v3_self_append_plus": 2,
-          "_v3_stmt": 6,
-          "_emit_v3_tests": 25,
-          "_escape_format_braces": 1,
-          "_finite_float": 1,
-          "_format": 20,
-          "_format.literal": 2,
-          "_v3_borrowed_lit_args": 9,
-          "_v3_builtin": 37,
-          "_v3_builtin.ref": 1,
-          "_v3_inplace_persistent": 12,
-          "_v3_let_pattern": 19
+        "reference `_refuse_holes`: explicit deferred/refusal/extern boundary retained by backend contract.": {
+          "_refuse_holes": 4
         },
-        "realm/lifecycle bridge: spawn, instance, router, async, and lifecycle helper branches require the deferred runtime surface": {
-          "_erase_async": 1,
-          "_emit_v3_lifecycle_tests": 81,
-          "_lifecycle_uses_advance": 1,
-          "_collect_realm_labels": 8,
-          "_emit_router_struct": 16,
-          "_revl_realm_helper": 7,
-          "_revl_spawn_handle": 1,
-          "_uses_spawn": 1,
-          "_v3_instance_get": 8,
+        "reference `_refuse_holes.walk`: explicit deferred/refusal/extern boundary retained by backend contract.": {
+          "_refuse_holes.walk": 1
+        },
+        "reference `_refuse_unlowered_stream_surface`: explicit deferred/refusal/extern boundary retained by backend contract.": {
+          "_refuse_unlowered_stream_surface": 7
+        },
+        "reference `_rust_extern_config_bind`: explicit deferred/refusal/extern boundary retained by backend contract.": {
+          "_rust_extern_config_bind": 9
+        },
+        "reference `<module>`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "<module>": 1
+        },
+        "reference `_main`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_main": 11
+        },
+        "reference `cargo_toml`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "cargo_toml": 1
+        },
+        "reference `emit`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "emit": 3
+        },
+        "reference `_acquire_moved_locals`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_acquire_moved_locals": 5
+        },
+        "reference `_borrow_str_arg`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_borrow_str_arg": 1
+        },
+        "reference `_bound_names.walk`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_bound_names.walk": 4
+        },
+        "reference `_by_value_arg`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_by_value_arg": 4
+        },
+        "reference `_by_value_field_clone`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_by_value_field_clone": 2
+        },
+        "reference `_by_value_reuse`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_by_value_reuse": 1
+        },
+        "reference `_char_view_args`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_char_view_args": 9
+        },
+        "reference `_compute_char_views`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_compute_char_views": 13
+        },
+        "reference `_compute_char_views.threaded_index`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_compute_char_views.threaded_index": 4
+        },
+        "reference `_fn_value_refs.walk`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_fn_value_refs.walk": 1
+        },
+        "reference `_str_param_escapes.walk`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_str_param_escapes.walk": 2
+        },
+        "reference `_str_params_indexed.walk`: ownership branch requires indexed, escaping, or move-sensitive input not represented by current fixtures.": {
+          "_str_params_indexed.walk": 3
+        },
+        "reference `_collect_realm_labels`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_collect_realm_labels": 8
+        },
+        "reference `_emit_router_struct`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_emit_router_struct": 16
+        },
+        "reference `_emit_v3_lifecycle_tests`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_emit_v3_lifecycle_tests": 81
+        },
+        "reference `_erase_async`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_erase_async": 1
+        },
+        "reference `_lifecycle_uses_advance`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_lifecycle_uses_advance": 1
+        },
+        "reference `_revl_realm_helper`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_revl_realm_helper": 7
+        },
+        "reference `_revl_spawn_handle`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_revl_spawn_handle": 1
+        },
+        "reference `_uses_spawn`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_uses_spawn": 1
+        },
+        "reference `_v3_instance_get`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_v3_instance_get": 8
+        },
+        "reference `_v3_spawn`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
           "_v3_spawn": 14
         },
-        "runtime bridge/preamble: ABI serialization and demand-pulled runtime helper variants are not reached by pure v3 corpus documents": {
-          "_bridge_arg_extract": 7,
-          "_bridge_arg_ser": 5,
-          "_bridge_ret_deser": 6,
-          "_bridge_ret_ser": 7,
-          "_bridge_serde_ok": 1,
-          "_emit_bridge": 13,
-          "_revl_ftoa_helper": 1,
-          "_revl_record_preamble": 2,
+        "reference `_V3Ctx._disambiguate_record`: record/recursive-type branch requires boxed, ambiguous, or bound-pattern input not represented.": {
+          "_V3Ctx._disambiguate_record": 7
+        },
+        "reference `_V3Ctx._same_shape`: record/recursive-type branch requires boxed, ambiguous, or bound-pattern input not represented.": {
+          "_V3Ctx._same_shape": 2
+        },
+        "reference `_V3Ctx.constructor`: record/recursive-type branch requires boxed, ambiguous, or bound-pattern input not represented.": {
+          "_V3Ctx.constructor": 10
+        },
+        "reference `_V3Ctx.field_is_boxed`: record/recursive-type branch requires boxed, ambiguous, or bound-pattern input not represented.": {
+          "_V3Ctx.field_is_boxed": 4
+        },
+        "reference `_V3Ctx.match_pattern`: record/recursive-type branch requires boxed, ambiguous, or bound-pattern input not represented.": {
+          "_V3Ctx.match_pattern": 3
+        },
+        "reference `_V3Ctx.record_field_types`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_V3Ctx.record_field_types": 1
+        },
+        "reference `_V3Ctx.record_type_for_names`: record/recursive-type branch requires boxed, ambiguous, or bound-pattern input not represented.": {
+          "_V3Ctx.record_type_for_names": 9
+        },
+        "reference `_recursive_boxed_edges`: record/recursive-type branch requires boxed, ambiguous, or bound-pattern input not represented.": {
+          "_recursive_boxed_edges": 13
+        },
+        "reference `_recursive_boxed_edges.reaches`: record/recursive-type branch requires boxed, ambiguous, or bound-pattern input not represented.": {
+          "_recursive_boxed_edges.reaches": 9
+        },
+        "reference `_bridge_arg_extract`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_bridge_arg_extract": 7
+        },
+        "reference `_bridge_arg_ser`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_bridge_arg_ser": 5
+        },
+        "reference `_bridge_ret_deser`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_bridge_ret_deser": 6
+        },
+        "reference `_bridge_ret_ser`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_bridge_ret_ser": 7
+        },
+        "reference `_bridge_serde_ok`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_bridge_serde_ok": 1
+        },
+        "reference `_emit_bridge`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_emit_bridge": 13
+        },
+        "reference `_revl_ftoa_helper`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_revl_ftoa_helper": 1
+        },
+        "reference `_revl_record_preamble`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
+          "_revl_record_preamble": 2
+        },
+        "reference `_revl_timer_preamble`: runtime bridge/lifecycle branch deferred outside pure v3 corpus.": {
           "_revl_timer_preamble": 1
+        },
+        "reference `_V3Ctx.__init__`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_V3Ctx.__init__": 1
+        },
+        "reference `_arg_ref_name`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_arg_ref_name": 2
+        },
+        "reference `_emit_v1`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_emit_v1": 1
+        },
+        "reference `_emit_v2`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_emit_v2": 6
+        },
+        "reference `_emit_v3`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_emit_v3": 7
+        },
+        "reference `_free_fn_call`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_free_fn_call": 2
+        },
+        "reference `_intercept_json_lit`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_intercept_json_lit": 18
+        },
+        "reference `_intercept_json_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_intercept_json_type": 34
+        },
+        "reference `_is_map_cas`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_is_map_cas": 1
+        },
+        "reference `_is_stream_next`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_is_stream_next": 7
+        },
+        "reference `_map_expr_inserts`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_map_expr_inserts": 20
+        },
+        "reference `_map_insert_candidates`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_map_insert_candidates": 15
+        },
+        "reference `_result_ok_err`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_result_ok_err": 2
+        },
+        "reference `_result_to_json`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_result_to_json": 1
+        },
+        "reference `_split_result`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_split_result": 12
+        },
+        "reference `_stream_head`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_stream_head": 4
+        },
+        "reference `_subscription_binds`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_subscription_binds": 1
+        },
+        "reference `_uses_float_interp.walk`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_uses_float_interp.walk": 3
+        },
+        "reference `_uses_timer.walk`: source-specific fallback branch not reached by the current supported Rust fixtures.": {
+          "_uses_timer.walk": 2
+        },
+        "reference `_config_default_lit`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_config_default_lit": 6
+        },
+        "reference `_default_for_rust_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_default_for_rust_type": 15
+        },
+        "reference `_is_fn_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_is_fn_type": 1
+        },
+        "reference `_list_element_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_list_element_type": 5
+        },
+        "reference `_map_value_expr_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_map_value_expr_type": 71
+        },
+        "reference `_map_value_rust_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_map_value_rust_type": 18
+        },
+        "reference `_param_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_param_type": 1
+        },
+        "reference `_provide_let_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_provide_let_type": 1
+        },
+        "reference `_rust_fn_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_rust_fn_type": 1
+        },
+        "reference `_rust_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_rust_type": 2
+        },
+        "reference `_split_fn_type`: type/config inference branch for an unrepresented generic or signature shape.": {
+          "_split_fn_type": 1
+        },
+        "reference `_v3_infer_type`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_infer_type": 21
+        },
+        "reference `_emit_step`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_emit_step": 95
+        },
+        "reference `_emit_v3_functions`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_emit_v3_functions": 9
+        },
+        "reference `_emit_v3_tests`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_emit_v3_tests": 25
+        },
+        "reference `_emit_v3_types`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_emit_v3_types": 6
+        },
+        "reference `_escape_format_braces`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_escape_format_braces": 1
+        },
+        "reference `_finite_float`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_finite_float": 1
+        },
+        "reference `_format`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_format": 20
+        },
+        "reference `_format.literal`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_format.literal": 2
+        },
+        "reference `_ident`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_ident": 1
+        },
+        "reference `_mname`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_mname": 1
+        },
+        "reference `_render_expr`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_render_expr": 73
+        },
+        "reference `_rust_v3_lit`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_rust_v3_lit": 4
+        },
+        "reference `_snake`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_snake": 1
+        },
+        "reference `_string`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_string": 7
+        },
+        "reference `_v3_builtin`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_builtin": 31
+        },
+        "reference `_v3_empty_vec_elem_types`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_empty_vec_elem_types": 66
+        },
+        "reference `_v3_empty_vec_elem_types.collect`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_empty_vec_elem_types.collect": 1
+        },
+        "reference `_v3_inplace_persistent`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_inplace_persistent": 12
+        },
+        "reference `_v3_interp`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_interp": 3
+        },
+        "reference `_v3_is_float`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_is_float": 4
+        },
+        "reference `_v3_is_str`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_is_str": 2
+        },
+        "reference `_v3_let_pattern`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_let_pattern": 19
+        },
+        "reference `_v3_match_expr`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_match_expr": 2
+        },
+        "reference `_v3_mentions_name`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_mentions_name": 2
+        },
+        "reference `_v3_self_append_inplace`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_self_append_inplace": 19
+        },
+        "reference `_v3_self_append_plus`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_self_append_plus": 2
+        },
+        "reference `_v3_stmt`: v3 expression/statement dispatch arm for an unrepresented literal/operator/builtin/statement shape.": {
+          "_v3_stmt": 6
         }
       },
-      "uncovered_statements": 1384
+      "uncovered_statements": 1286
     },
     "ts": {
       "statements": 1972,
@@ -1070,92 +1325,235 @@
       "uncovered_statements": 274
     },
     "rust": {
-      "statements": 1636,
+      "statements": 1773,
       "uncovered": {
-        "self-host v3 dispatch/type helper: this function has an unrepresented alternate source shape or fallback branch": {
-          "render_builtin": 3,
-          "binds": 1,
-          "build_type_tables": 2,
-          "constructor": 2,
-          "emit_v3_functions": 1,
-          "emit_v3_types": 1,
-          "has_extra_linebreak": 1,
-          "is_atomic": 11,
-          "is_extra_linebreak": 3,
-          "match_pattern": 1,
-          "mentions_name": 6,
-          "mname": 2,
-          "ref_name": 1,
-          "render_bin": 2,
-          "render_call": 2,
-          "render_expr": 2,
-          "render_field": 1,
-          "render_index": 1,
-          "render_inner": 14,
-          "render_interp": 2,
-          "render_un": 1,
-          "render_var": 2,
-          "rust_type_t": 3,
-          "rust_v3_lit": 5,
-          "split_fn_params": 2,
-          "split_fn_ret": 2,
-          "strip_spaces": 1,
-          "type_map": 1,
-          "v3_bin_ops": 3,
-          "v3_infer_type": 4,
-          "v3_is_float": 3,
-          "v3_is_str": 1,
-          "v3_stmt": 2,
-          "default_for_rust_type": 15,
-          "ind": 1,
-          "is_addsubmul": 1,
-          "is_builtin_ctor": 1,
-          "is_fn_type": 1,
-          "is_scalar_option": 1,
-          "rstrip": 5
+        "selfhost `owned_borrowed_tail`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "owned_borrowed_tail": 1
         },
-        "self-host source-specific fallback: this helper has an uncovered alternate input branch with no matching supported Rust fixture": {
-          "borrow_str_arg": 2,
-          "by_value_arg": 1,
-          "config_default_lit": 7,
-          "self_append_plus": 2,
-          "emit_host_stubs": 1,
-          "resolved": 1,
-          "set_vts": 1,
-          "erase_async_ret": 1,
-          "bridge_arg_extract": 2,
-          "bridge_arg_ser": 1,
-          "bridge_ret_deser": 8,
-          "bridge_ret_ser": 1,
-          "emit_bridge": 9
+        "selfhost `str_param_readonly`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "str_param_readonly": 5
         },
-        "self-host component/provide path: config capture, service trait, method undo, and record-field alternatives are not in the pure v3 corpus": {
-          "component_provide_uses_config": 1,
-          "emit_component": 2,
-          "emit_component_new": 5,
-          "emit_provide_construction": 1,
-          "emit_service_traits": 1,
-          "method_body_lines": 5,
-          "method_has_effectful_steps": 1,
-          "method_scope_rename": 1,
-          "method_undo_clones": 1,
-          "method_undo_rename": 1,
-          "provide_let_type": 1,
-          "provide_methods": 1,
-          "provision_uses_config": 1,
-          "pure_method_statements": 17,
-          "record_type_for_fields": 1,
-          "render_component_call": 3,
-          "service_param_type": 1,
+        "selfhost `component_provide_uses_config`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "component_provide_uses_config": 1
+        },
+        "selfhost `component_uses_await`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
           "component_uses_await": 1
         },
-        "self-host explicit boundary: extern/deferred and checked-method fallback arms preserve the supported refusal contract": {
-          "emit_v3_externs": 4,
-          "extern_body_defer": 2,
+        "selfhost `emit_component`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "emit_component": 2
+        },
+        "selfhost `emit_component_new`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "emit_component_new": 5
+        },
+        "selfhost `emit_provide_construction`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "emit_provide_construction": 1
+        },
+        "selfhost `emit_service_traits`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "emit_service_traits": 1
+        },
+        "selfhost `method_body_lines`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "method_body_lines": 5
+        },
+        "selfhost `method_has_effectful_steps`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "method_has_effectful_steps": 1
+        },
+        "selfhost `method_scope_rename`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "method_scope_rename": 1
+        },
+        "selfhost `method_undo_clones`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "method_undo_clones": 1
+        },
+        "selfhost `method_undo_rename`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "method_undo_rename": 1
+        },
+        "selfhost `provide_let_type`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "provide_let_type": 1
+        },
+        "selfhost `provide_methods`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "provide_methods": 1
+        },
+        "selfhost `provision_uses_config`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "provision_uses_config": 1
+        },
+        "selfhost `pure_method_statements`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "pure_method_statements": 17
+        },
+        "selfhost `record_type_for_fields`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "record_type_for_fields": 1
+        },
+        "selfhost `render_component_call`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "render_component_call": 3
+        },
+        "selfhost `service_param_type`: component/provide capture, service, method-undo, or record-field branch absent from pure v3 fixtures.": {
+          "service_param_type": 1
+        },
+        "selfhost `checked_method`: explicit extern/deferred or checked-arithmetic refusal/conversion branch exercised only at that boundary.": {
           "checked_method": 5
+        },
+        "selfhost `emit_v3_externs`: explicit extern/deferred or checked-arithmetic refusal/conversion branch exercised only at that boundary.": {
+          "emit_v3_externs": 4
+        },
+        "selfhost `extern_body_defer`: explicit extern/deferred or checked-arithmetic refusal/conversion branch exercised only at that boundary.": {
+          "extern_body_defer": 2
+        },
+        "selfhost `borrow_str_arg`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "borrow_str_arg": 1
+        },
+        "selfhost `bridge_arg_extract`: runtime bridge/realm branch outside pure v3 self-host slice.": {
+          "bridge_arg_extract": 2
+        },
+        "selfhost `bridge_arg_ser`: runtime bridge/realm branch outside pure v3 self-host slice.": {
+          "bridge_arg_ser": 1
+        },
+        "selfhost `bridge_ret_deser`: runtime bridge/realm branch outside pure v3 self-host slice.": {
+          "bridge_ret_deser": 8
+        },
+        "selfhost `bridge_ret_ser`: runtime bridge/realm branch outside pure v3 self-host slice.": {
+          "bridge_ret_ser": 1
+        },
+        "selfhost `by_value_arg`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "by_value_arg": 2
+        },
+        "selfhost `config_default_lit`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "config_default_lit": 7
+        },
+        "selfhost `emit_bridge`: runtime bridge/realm branch outside pure v3 self-host slice.": {
+          "emit_bridge": 9
+        },
+        "selfhost `emit_host_stubs`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "emit_host_stubs": 1
+        },
+        "selfhost `erase_async_ret`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "erase_async_ret": 1
+        },
+        "selfhost `resolved`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "resolved": 1
+        },
+        "selfhost `self_append_plus`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "self_append_plus": 2
+        },
+        "selfhost `set_vts`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "set_vts": 1
+        },
+        "selfhost `binds`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "binds": 1
+        },
+        "selfhost `build_type_tables`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "build_type_tables": 2
+        },
+        "selfhost `constructor`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "constructor": 2
+        },
+        "selfhost `default_for_rust_type`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "default_for_rust_type": 15
+        },
+        "selfhost `emit_v3_functions`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "emit_v3_functions": 1
+        },
+        "selfhost `emit_v3_types`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "emit_v3_types": 1
+        },
+        "selfhost `has_extra_linebreak`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "has_extra_linebreak": 1
+        },
+        "selfhost `ind`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "ind": 1
+        },
+        "selfhost `is_addsubmul`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "is_addsubmul": 1
+        },
+        "selfhost `is_atomic`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "is_atomic": 5
+        },
+        "selfhost `is_builtin_ctor`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "is_builtin_ctor": 1
+        },
+        "selfhost `is_extra_linebreak`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "is_extra_linebreak": 3
+        },
+        "selfhost `is_fn_type`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "is_fn_type": 1
+        },
+        "selfhost `is_scalar_option`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "is_scalar_option": 1
+        },
+        "selfhost `match_pattern`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "match_pattern": 1
+        },
+        "selfhost `mentions_name`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "mentions_name": 6
+        },
+        "selfhost `mname`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "mname": 2
+        },
+        "selfhost `ref_name`: source-specific helper fallback branch not reached by the current supported Rust fixtures.": {
+          "ref_name": 1
+        },
+        "selfhost `render_bin`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "render_bin": 2
+        },
+        "selfhost `render_builtin`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "render_builtin": 3
+        },
+        "selfhost `render_call`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "render_call": 2
+        },
+        "selfhost `render_field`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "render_field": 1
+        },
+        "selfhost `render_index`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "render_index": 1
+        },
+        "selfhost `render_inner`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "render_inner": 17
+        },
+        "selfhost `render_interp`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "render_interp": 2
+        },
+        "selfhost `render_un`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "render_un": 1
+        },
+        "selfhost `render_var`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "render_var": 2
+        },
+        "selfhost `rstrip`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "rstrip": 5
+        },
+        "selfhost `rust_type_t`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "rust_type_t": 3
+        },
+        "selfhost `rust_v3_lit`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "rust_v3_lit": 5
+        },
+        "selfhost `split_fn_params`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "split_fn_params": 2
+        },
+        "selfhost `split_fn_ret`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "split_fn_ret": 2
+        },
+        "selfhost `strip_spaces`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "strip_spaces": 1
+        },
+        "selfhost `type_map`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "type_map": 1
+        },
+        "selfhost `v3_bin_ops`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "v3_bin_ops": 3
+        },
+        "selfhost `v3_infer_type`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "v3_infer_type": 4
+        },
+        "selfhost `v3_is_float`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "v3_is_float": 3
+        },
+        "selfhost `v3_is_str`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "v3_is_str": 1
+        },
+        "selfhost `v3_stmt`: v3 renderer/type helper alternate branch for an unrepresented input shape.": {
+          "v3_stmt": 2
         }
       },
-      "uncovered_statements": 207
+      "uncovered_statements": 208
     },
     "ts": {
       "statements": 2285,
