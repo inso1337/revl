@@ -1715,11 +1715,12 @@
           "emit_v3_externs": 4,
           "extern_body_defer": 2
         },
-        "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string operations are covered.": {
+        "Ownership and expression-rendering guards: the remaining arms handle computed/non-atomic borrow refusal, unknown-type clone safety, arrow/destructuring lexical scopes, malformed or explicitly unsupported operators/nodes, borrowed-to-owned conversion, and Float interpolation detection. The three uncovered `list_param_escapes` arms are the read-only list-parameter borrow's escape-refusal paths: a candidate list consumed through a non-read builtin's target or argument, and a candidate reached as an argument of a first-class function VALUE node (`kind: fn`) rather than an ordinary call. The corpus only reads list parameters (index, `length`, `at`) and threads them through ordinary calls, so those escape branches never fire. Supported calls, callbacks, conditionals, records, lists, ADTs, widening and read-only string and list-parameter operations are covered.": {
           "borrow_str_arg": 1,
           "by_value_arg": 2,
           "collect_fn_value_refs": 2,
           "is_atomic": 4,
+          "list_param_escapes": 3,
           "mentions_name": 1,
           "owned_borrowed_tail": 1,
           "render_bin": 1,
