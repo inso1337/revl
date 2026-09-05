@@ -229,7 +229,7 @@
 
 use "./lexer.rvl" { Token, lex_src }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
-                    is_bad, expr_at, params_at, type_at }
+                    is_bad, expr_at, params_at, type_at, nesting_limit }
 
 // ================================================================ IR model
 //
@@ -4320,12 +4320,178 @@ pub fn foreign_scan(src: Str) -> Str {
 }
 
 // The admission entry. "" admits; "<tag>|<message>" refuses.
+// ----------------------------------------------------------- nesting bound
+//
+// How deep the front end would have to go to read this token stream, measured
+// WITHOUT going there: one pass, four integers and a small integer stack, no
+// recursion of its own.
+//
+// The front end is recursive over the expression tree twice over — once
+// descending to parse it (one nested level costs a full pass down the
+// precedence ladder) and again in every walk over the result. Neither descent
+// had a bound, so a short source could drive both arbitrarily deep. On the
+// python emission that surfaces as a `RecursionError`; on the rust and wasm
+// emissions behind `crates/revl-gate` it exhausts the stack, and a stack
+// exhaustion in rust ABORTS — `catch_unwind` cannot turn it back into a
+// verdict, so an embedder loses the process instead of getting an answer. For
+// a gate whose whole job is to decide sources it does not trust, an input that
+// kills it is the worst answer available.
+//
+// selfhost/parser.rvl now holds `nesting_limit()` on both descents itself, and
+// that is what makes the abort impossible. What it CANNOT do is say so: a
+// parse that stops early returns `Bad`, and an expression-level `Bad` is not
+// something `parse_prog` surfaces, so the program would come back with no
+// objection raised — the wrong thing to say about a source nobody can read. So
+// the bound is measured here too, ahead of any descent, where it is a verdict.
+//
+// Two quantities, each held against the same limit, because the two ways to
+// make the front end descend do not look alike in the token stream:
+//
+//   * BRACKET DEPTH — `(`/`[`/`{` open a nested expression and the ladder
+//     follows them one for one. This is the `((((...))))`, `f(f(f(...)))`,
+//     `[[[...]]]`, `{a:{a:...}}`, `List[List[...]]` family, plus the two forms
+//     that recurse without a bracket and so are counted alongside it: a prefix
+//     run (`!!!x`, `- -x`, `emit emit x`) and a right-associative `??`/`?`
+//     chain.
+//   * SPINE LENGTH — the operators at ONE bracket level. The parser reads
+//     `a + a + a + ...` and `x.f().f()...` with a loop, so they cost it no
+//     stack, but they build a tree one level taller per operator and every
+//     later walk over that tree pays for it. The count is saved and restored
+//     across brackets (so a `.concat()` chain still accumulates across the
+//     calls in it) and cleared by a statement or declaration keyword, which is
+//     where one expression ends and the next begins.
+//
+// Both are estimates and both can be off by a little in either direction — a
+// `${...}` interpolation is one flattened lexer token so a nested template
+// reads as flat here, and a `?` closing an optional type reads as a
+// conditional. Neither direction can produce an ABORT, which is the property
+// this exists for: under-counting leaves the parser's own bound to stop the
+// descent, and over-counting costs a refusal at a depth no program a human or
+// a generator writes ever reaches.
+
+// A `kw` token that ends whatever expression preceded it: every statement and
+// declaration head. The expression keywords (`true`/`false`/`null`, `match`,
+// `emit`, `await`, `hole`, `config`, `async`, `as`) are deliberately absent —
+// they continue an expression rather than starting a statement.
+fn ends_expr_kw(w: Str) -> Bool {
+  if (w == "let" || w == "var" || w == "return" || w == "if" || w == "else") { return true }
+  if (w == "while" || w == "for" || w == "of" || w == "break" || w == "continue") { return true }
+  if (w == "fn" || w == "pub" || w == "type" || w == "use" || w == "test") { return true }
+  if (w == "service" || w == "component" || w == "extern" || w == "provide") { return true }
+  if (w == "requires" || w == "provides" || w == "config" || w == "effect") { return true }
+  if (w == "assert" || w == "fail" || w == "compensate" || w == "undo") { return true }
+  return false
+}
+
+// A token that makes a NODE out of what precedes it, and so adds one level to
+// the tree the walkers will descend.
+fn extends_spine(t: Token) -> Bool {
+  let k = t.kind
+  if (k == "kw") { return t.text == "emit" }
+  if (k == "." || k == "?." || k == "?") { return true }
+  if (k == "!" || k == "~") { return true }
+  if (k == "+" || k == "-" || k == "*" || k == "/" || k == "%") { return true }
+  if (k == "&&" || k == "||" || k == "??") { return true }
+  if (k == "&" || k == "|" || k == "^" || k == "<<" || k == ">>") { return true }
+  if (k == "==" || k == "!=" || k == "===" || k == "!==") { return true }
+  if (k == "<" || k == ">" || k == "<=" || k == ">=") { return true }
+  return false
+}
+
+fn nesting_depth(ts: List[Token]) -> Int {
+  var depth = 0        // open brackets
+  var run = 0          // consecutive prefix unaries at this point
+  var chain = 0        // `??` / `?` levels at this bracket level
+  var spine = 0        // operators in the expression being read
+  var sibs = 0         // the tallest expression finished at this level
+  var up_spine: List[Int] = []
+  var up_sibs: List[Int] = []
+  var worst = 0
+  var i = 0
+  let n = ts.length()
+  while (i < n) {
+    let t = ts[i]
+    let k = t.kind
+    if (k == "(" || k == "[" || k == "{") {
+      depth += 1
+      run = 0
+      chain = 0
+      up_spine = up_spine.push(spine)
+      up_sibs = up_sibs.push(sibs)
+      spine = 0
+      sibs = 0
+    } else if (k == ")" || k == "]" || k == "}") {
+      if (depth > 0) { depth -= 1 }
+      run = 0
+      chain = 0
+      var inner = sibs
+      if (spine > inner) { inner = spine }
+      var os = 0
+      var ob = 0
+      if (up_spine.length() > 0) {
+        os = up_spine[up_spine.length() - 1]
+        up_spine = up_spine.slice(0, up_spine.length() - 1)
+        ob = up_sibs[up_sibs.length() - 1]
+        up_sibs = up_sibs.slice(0, up_sibs.length() - 1)
+      }
+      // the closed group becomes ONE node at the level above — a call, an
+      // index, a list, a record, a block — sitting on top of whichever of its
+      // two sides is taller
+      spine = os
+      if (inner > spine) { spine = inner }
+      spine += 1
+      sibs = ob
+    } else if (k == ":") {
+      // a field or conditional `:` ends the expression before it, but NOT the
+      // `?`/`??` chain — the `:` of a conditional is that chain's own
+      // separator and `a ? b : c ? d : ...` keeps descending across it
+      if (spine > sibs) { sibs = spine }
+      spine = 0
+      run = 0
+    } else if (k == "," || k == ";" || k == "="
+               || (k == "kw" && ends_expr_kw(t.text))) {
+      // a sibling boundary — a separator, an assignment `=`, a statement or
+      // declaration keyword. The next expression starts from nothing, and the
+      // one that just ended only matters as far as it was the tallest
+      if (spine > sibs) { sibs = spine }
+      spine = 0
+      run = 0
+      chain = 0
+    } else {
+      if (k == "!" || k == "~" || k == "-" || (k == "kw" && t.text == "emit")) {
+        run += 1
+      } else {
+        run = 0
+      }
+      if (k == "??" || k == "?") { chain += 1 }
+      if (extends_spine(t)) { spine += 1 }
+    }
+    var here = depth + run + chain
+    if (spine > here) { here = spine }
+    if (sibs > here) { here = sibs }
+    if (here > worst) { worst = here }
+    i += 1
+  }
+  return worst
+}
+
+// The refusal, worded as `revl.parser` words it so the two implementations
+// read the same when they refuse the same program.
+fn too_deep_msg() -> Str {
+  return `expression nesting is deeper than the parser's limit of ${nesting_limit().to_str()} levels`
+}
+
 pub fn admit_src(src: Str) -> Str {
   // item 384: the foreign-construct redirects run first — the reference's
   // parser half fires before any admission check, and no program that reaches
   // an admission refusal carries one of these spellings.
   let fgn = foreign_scan(src)
   if (fgn != "") { return tagged("FOREIGN", fgn) }
+  // ... and the nesting bound before any descent, so a source built to run the
+  // front end out of stack is refused rather than parsed.
+  if (nesting_depth(lex_src(src)) > nesting_limit()) {
+    return tagged("BAD", too_deep_msg())
+  }
   let pg = parse_prog(src)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
   // the ADT constructors the program declares join the callable universe a bare
