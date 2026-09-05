@@ -508,17 +508,26 @@ def test_ts_emitter_scaffolding_names_are_renamed_cross_tier():
     assert [s["bind"] for s in ir["components"][0]["body"]] == ["store"]
 
 
-def test_a3_reserved_union_applies_to_pure_function_bindings():
+def test_pure_function_bindings_keep_their_source_spelling_in_ir():
+    """A3 reserved-identifier escaping is owned per-backend, not by the frontend.
+
+    Each backend's emitter applies its own *injective* reserved-word rename over
+    its own keyword set (`func` -> `func_` in Go, `class` -> `class_` in Python,
+    `kw_` -> `kw__`), so the frontend must hand the IR the identifier *exactly as
+    the author wrote it*. If lower.py pre-escaped these names, every backend would
+    escape a second time and emit `len__`/`str__`, which is the regression this
+    guards against. The single-underscore emit contract is proven per backend in
+    each `test_reserved_word_idents_*` suite."""
     from revl import compile_source
 
     ir = compile_source(
         "fn f(len: Int) -> Int { let str = len return str }"
     )
     fn = ir["functions"][0]
-    assert fn["params"] == [{"name": "len_", "type": "Int"}]
+    assert fn["params"] == [{"name": "len", "type": "Int"}]
     assert fn["body"] == [
-        {"step": "let", "name": "str_", "value": {"kind": "var", "name": "len_"}, "mutable": False},
-        {"step": "return", "expr": {"kind": "var", "name": "str_"}},
+        {"step": "let", "name": "str", "value": {"kind": "var", "name": "len"}, "mutable": False},
+        {"step": "return", "expr": {"kind": "var", "name": "str"}},
     ]
 
 
