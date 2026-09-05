@@ -627,6 +627,18 @@ fn borrowed_str_lit(node: Any) -> Str {
   return string_lit(v)
 }
 
+// `_v3_strip_index_clone`: the borrow place `v[i]` for a `List` index read used
+// in a READ-ONLY position — its rendered form with the trailing `.clone()`
+// removed — else "" (item 437d). revl reads a `List` element BY VALUE, so
+// `render_index` clones the element to own it; but a `==`/`!=` operand and a
+// builtin receiver only borrow it (Rust auto-refs the place / every `Revl*Ops`
+// method takes `&self`), so that clone is pure heap waste. `.clone()` is 8
+// chars; stripping the fixed suffix reuses the already-rendered string exactly.
+fn strip_index_clone(node: Any, rendered: Str) -> Str {
+  if (node_kind(node) != "index" || !rendered.endsWith(".clone()")) { return "" }
+  return rendered.slice(0, rendered.length() - 8)
+}
+
 // `_v3_str_eq_borrow`'s guard: may the literal on the OTHER side of this `==`
 // be borrowed? Yes unless the emitter positively knows this operand is some
 // other surface type. The other operand of a `Str` literal is a `Str` by the
@@ -1067,6 +1079,12 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
     let rlit = borrowed_str_lit(rn)
     if (rlit != "" && eq_operand_borrowable(ln, ctx)) { right = rlit }
     if (llit != "" && eq_operand_borrowable(rn, ctx)) { left = llit }
+    // item 437d: a `List` index read in an `==`/`!=` operand only needs a
+    // borrow (Rust auto-refs the place), so drop the element `.clone()`.
+    let lplace = strip_index_clone(ln, left)
+    if (lplace != "") { left = lplace }
+    let rplace = strip_index_clone(rn, right)
+    if (rplace != "") { right = rplace }
   }
   let opnd = node_operands(node)
   if (is_addsubmul(op) && opnd == "Int") {
@@ -1364,6 +1382,10 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
   let method = value_str(value_field(node, "method"))
   let target_node = value_field(node, "target")
   var target = render_expr(target_node, ctx)
+  // item 437d: a `List` index receiver only needs a borrow — every builtin
+  // below takes `&self` (or clones the receiver itself) — so drop the clone.
+  let tplace = strip_index_clone(target_node, target)
+  if (tplace != "") { target = tplace }
   if (!is_atomic(node_kind(target_node))) { target = `(${target})` }
   let args = value_list(value_field(node, "args"))
   if (str_readonly_arg_builtin(method)) {
