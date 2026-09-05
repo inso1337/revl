@@ -1,0 +1,36 @@
+fn seed() -> Int { return 0 }
+service Sink { emission fn send(msg: Str) }
+service Empty { fn done() }
+
+component Branches requires sink: Sink provides empty: Empty {
+  config {
+    count: Int, small: Int32, ratio: Float, enabled: Bool,
+    defaultRatio: Float = 1.5, defaultEnabled: Bool = false
+  }
+  intercept sink with { enabled: false, ratio: 2.5 }
+  if (config.enabled) {
+    fail "yes"
+  } else {
+    fail "no"
+  }
+  provide empty {
+    fn done() { return }
+  }
+}
+
+component Terminal {
+  fail "terminal"
+}
+
+service BackgroundApi {
+  emission fn run()
+}
+component Background provides background: BackgroundApi {
+  let job = effect Job.run("background") undo Job.run("stop")
+  await Job.run("foreground")
+  provide background {
+    fn run() {
+      effect job.run("start") undo job.run("stop")
+    }
+  }
+}

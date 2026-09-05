@@ -1,0 +1,42 @@
+type Cell = { value: Int }
+type Flag = On(Int) | Off
+fn seed() -> Int { return 0 }
+fn text() -> Str { return "value" }
+service Source { fn read() -> Str }
+service Writer { emission fn write(c: Cell, x: Opt[Int]) }
+
+component Maps requires source: Source provides writer: Writer {
+  config { initial: Int = 2, active: Bool = true }
+  let ints = effect Map.new() undo ints.drop()
+  let bools = effect Map.new() undo bools.drop()
+  let floats = effect Map.new() undo floats.drop()
+  let texts = effect Map.new() undo texts.drop()
+  let lists = effect Map.new() undo lists.drop()
+  let cells = effect Map.new() undo cells.drop()
+  let flags = effect Map.new() undo flags.drop()
+  let unused = effect Map.new() undo unused.drop()
+
+  effect ints.insert("literal", 1) undo ints.remove("literal")
+  effect ints.insert("config", config.initial) undo ints.remove("config")
+  effect bools.insert("literal", true) undo bools.remove("literal")
+  effect floats.insert("literal", 2.5) undo floats.remove("literal")
+  effect texts.insert("format", `prefix ${config.initial}`) undo texts.remove("format")
+  effect texts.insert("function", text()) undo texts.remove("function")
+  effect texts.insert("service", source.read()) undo texts.remove("service")
+  effect lists.insert("list", [1, 2]) undo lists.remove("list")
+  effect cells.insert("record", { value: 1 }) undo cells.remove("record")
+  effect flags.insert("adt", On(1)) undo flags.remove("adt")
+  effect texts.insert("unknown", "a" + "b") undo texts.remove("unknown")
+  effect lists.insert("empty", []) undo lists.remove("empty")
+  effect lists.insert("unknown", [1 + 2]) undo lists.remove("unknown")
+  effect texts.insert("host", texts.get("literal") ?? ("a" + "b")) undo texts.remove("host")
+
+  if (config.active) { fail "active" } else { fail "inactive" }
+
+  provide writer {
+    fn write(c, x) {
+      effect ints.insert("field", c.value) undo ints.remove("field")
+      effect ints.insert("coalesce", x ?? 0) undo ints.remove("coalesce")
+    }
+  }
+}

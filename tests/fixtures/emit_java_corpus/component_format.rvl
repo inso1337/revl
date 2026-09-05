@@ -1,0 +1,9 @@
+// Config reads force the supported modern path, including format expressions.
+fn seed() -> Int { return 0 }
+service Formatter { fn text(msg: Str, n: Int) -> Str }
+component Formats provides f: Formatter {
+  config { prefix: Str = "p" }
+  provide f {
+    fn text(msg, n) = `${config.prefix}$ ${msg} % ${n} end`
+  }
+}
