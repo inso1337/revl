@@ -460,7 +460,7 @@ fn callable_tail(tokens: &[Tok], raw: &[selfhost::Token], decl: &Decl) -> Option
         return None;
     }
     let parsed =
-        serde_json::to_value(selfhost::params_at(raw.to_vec(), decl.fn_at as i64 + 3)).ok()?;
+        serde_json::to_value(selfhost::params_at(raw, decl.fn_at as i64 + 3)).ok()?;
     if parsed.get("ok")?.as_bool()? != true {
         return None;
     }
@@ -478,7 +478,7 @@ fn callable_tail(tokens: &[Tok], raw: &[selfhost::Token], decl: &Decl) -> Option
     let after = parsed.get("i")?.as_i64()?;
     let mut returns = String::new();
     if tokens.get(after as usize).map(|t| t.kind.as_str()) == Some("arrow") {
-        let ty = serde_json::to_value(selfhost::type_at(raw.to_vec(), after + 1)).ok()?;
+        let ty = serde_json::to_value(selfhost::type_at(raw, after + 1)).ok()?;
         if ty.get("ok")?.as_bool()? != true {
             return None;
         }
