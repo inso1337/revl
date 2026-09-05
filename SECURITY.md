@@ -102,7 +102,7 @@ much as applies:
 - the **`.rvl` source** that triggers it (minimal is ideal — the rejection
   suite in `examples/rejections/` shows the size we work with);
 - the **target tier** (`py` / `ts` / `rust` / `java` / `wasm` / `go`, or "all")
-  and the exact command (`python -m revl compile …`, `revl audit …`,
+  and the exact command (`revl compile …`, `revl audit …`,
   `revl mcp …`);
 - **what the compiler did** (accepted, emitted, admitted) and **what it should
   have done** (which guarantee or lifecycle rule you believe was violated, by

@@ -1,7 +1,7 @@
 # `revl apply` — a plan you can execute, with a rollback that is a theorem
 
-**Status:** implemented — `python -m revl plan <files...> --manifest running.json
--o change.plan` writes the artifact, `python -m revl apply change.plan` executes
+**Status:** implemented — `revl plan <files...> --manifest running.json
+-o change.plan` writes the artifact, `revl apply change.plan` executes
 it, and the engine is `revl.mcp.session.Session.apply`. Tests: `tests/test_apply.py`.
 
 `revl plan` ([docs/plan.md](plan.md)) is the dry run: it reports the delta a swap

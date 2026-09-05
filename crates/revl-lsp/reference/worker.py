@@ -5,7 +5,8 @@ the reference front end (design `docs/design/336-native-single-binary-tooling.md
 A1): a native checker outside the self-host frontier returns no diagnostic where
 the reference refuses, which in an editor is a silent false-admit. So the rust
 binary computes nothing about a document itself; it asks this worker, which
-calls exactly the functions `python -m revl.lsp` calls, and forwards the answer
+calls exactly the functions `python -P -m revl.lsp` (the `-P` is the
+PYTHONSAFEPATH safety bit, issue #317) calls, and forwards the answer
 verbatim.
 
 The protocol is one JSON object per line in, one JSON object per line out, in

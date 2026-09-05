@@ -203,8 +203,8 @@ _PY_RUNTIME_REMEDY = (
     "preflight: this document's py-tier tests drive the cordis-py runtime "
     "(a `lifecycle test`), which this interpreter does not have\n"
     "       set it up:  sh backends/python/setup.sh\n"
-    "       then rerun under that interpreter:  "
-    "backends/python/.venv/bin/python -m revl test")
+    "       then rerun:  revl test                                       # the documented happy path\n"
+    "                    backends/python/.venv/bin/python -P -m revl test    # absolute-interpreter fallback (the `-P` is PYTHONSAFEPATH, issue #317)")
 
 
 def run_py(ir: dict) -> tuple[str, str]:
@@ -1020,8 +1020,8 @@ def sweep_command(ir: dict) -> int:
               "and needs the cordis-py runtime, which this interpreter does "
               "not have\n"
               "        set it up:  sh backends/python/setup.sh\n"
-              "        then rerun under that interpreter:  "
-              "backends/python/.venv/bin/python -m revl test --sweep")
+              "        then rerun:  revl test --sweep                                            # the documented happy path\n"
+              "                    backends/python/.venv/bin/python -P -m revl test --sweep    # absolute-interpreter fallback (the `-P` is PYTHONSAFEPATH, issue #317)")
         return 0
 
     from .fault import run_sweep  # noqa: PLC0415 — lazy: needs cordis
@@ -1097,8 +1097,8 @@ def schedule_command(ir: dict, seed=None, seeds: int = None) -> int:
               "real and needs the cordis-py runtime, which this interpreter "
               "does not have\n"
               "        set it up:  sh backends/python/setup.sh\n"
-              "        then rerun under that interpreter:  "
-              "backends/python/.venv/bin/python -m revl test --schedule-seeds 200")
+              "        then rerun:  revl test --schedule-seeds 200                                  # the documented happy path\n"
+              "                    backends/python/.venv/bin/python -P -m revl test --schedule-seeds 200   # absolute-interpreter fallback (the `-P` is PYTHONSAFEPATH, issue #317)")
         return 0
 
     from .schedule import run_schedules  # noqa: PLC0415 — lazy: needs cordis
@@ -1134,8 +1134,8 @@ def mock_requires_command(ir: dict) -> int:
               "activates components for real and needs the cordis-py runtime, "
               "which this interpreter does not have\n"
               "        set it up:  sh backends/python/setup.sh\n"
-              "        then rerun under that interpreter:  "
-              "backends/python/.venv/bin/python -m revl test --mock-requires")
+              "        then rerun:  revl test --mock-requires                       # the documented happy path\n"
+              "                    backends/python/.venv/bin/python -P -m revl test --mock-requires   # absolute-interpreter fallback (the `-P` is PYTHONSAFEPATH, issue #317)")
         return 0
     try:
         failures, _total = run_mock_requires(ir)
