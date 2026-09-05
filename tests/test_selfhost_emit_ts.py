@@ -140,6 +140,7 @@ CORPUS = [
     "services_async.rvl",       # async op `Promise<T>` sigs, `async` methods, the item-141
                                 # await-seed (direct `fetch` + nested ternary arm `pick`)
     "components_await.rvl",     # activation-body `await` -> `async function*` + iteration boundary
+    "async_effects.rvl",        # awaited activation acquisition + emission (`async: true` steps)
     # slice 5 (item 226) — the MODULE-FN async path, byte-exact:
     "async_module_extern.rvl",  # async extern (`export async function …: Promise<T>` + verbatim
                                 # @ts body) + a colored fn awaiting it (`var`-callee, let + return)
@@ -342,7 +343,10 @@ def test_structural_assertion_runtime(emitted, reference, tmp_path, side):
 
 
 @pytest.mark.parametrize("side", ["reference", "selfhost"])
-def test_failed_map_cas_registers_noop_inverse(emitted, reference, tmp_path, side):
+@pytest.mark.parametrize(("insert_result", "expected"), [(False, ""), (True, "method,boot")])
+def test_map_cas_inverse_result_and_capture(
+    emitted, reference, tmp_path, side, insert_result, expected
+):
     if shutil.which("node") is None:
         pytest.skip("node not on PATH")
     ir = compile_files([str(CORPUS_DIR / "cas_runtime.rvl")])
@@ -350,7 +354,7 @@ def test_failed_map_cas_registers_noop_inverse(emitted, reference, tmp_path, sid
     runtime = """
 export const removals: string[] = []
 const ledger = {
-  insert_if_absent(_key: string, _value: bigint) { return false },
+  insert_if_absent(_key: string, _value: bigint) { return INSERT_RESULT },
   remove(key: string) { removals.push(key) },
   drop() {},
 }
@@ -365,7 +369,7 @@ export class Frame {
   bracket(_crossing: unknown, _method: string, dispose: () => void) { return dispose }
 }
 export function record() {}
-"""
+""".replace("INSERT_RESULT", str(insert_result).lower())
     (tmp_path / "runtime.ts").write_text(runtime, encoding="utf-8")
     pkg = tmp_path / "pkg"
     pkg.mkdir()
@@ -390,9 +394,9 @@ const ctx: any = {
 CasProvider.apply(ctx, {})
 if (ctx.ops.run() !== 2n) throw new Error("method did not run")
 for (const dispose of disposers.reverse()) dispose()
-console.log(removals.length)
+console.log(removals.join(","))
 """
     module.write_text(src + probe, encoding="utf-8")
     proc = subprocess.run(["node", str(module)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "0"
+    assert proc.stdout.strip() == expected
