@@ -131,19 +131,23 @@ def test_the_gate_reproduces_the_item_429d_secret_gap(tool, monkeypatch):
     that `selfhost/emit_py.rvl` could emit NEITHER end of the `Secret[T]`
     redaction markings — a self-hosted emitter producing a program that does not
     redact, invisible because the corpus contained no `Secret[` at all. Take
-    that document back out and this gate must NAME the two markings. A gate that
-    stays green under the ablation would be decoration.
+    that document and its later nested-secret companion back out and this gate
+    must NAME the two markings. A gate that stays green under the ablation would
+    be decoration.
     """
     keep = tool.corpus_documents
 
     def without_secrets(tier):
-        return [p for p in keep(tier) if p.name != "secrets.rvl"]
+        if tier != "py":
+            return keep(tier)
+        return [p for p in keep(tier)
+                if p.name not in {"secrets.rvl", "secrets_nested.rvl"}]
 
     monkeypatch.setattr(tool, "corpus_documents", without_secrets)
     problems = tool.check(tool.survey())
     named = [p for p in problems if "secret" in p]
     assert len(named) >= 2, (
-        "dropping secrets.rvl from the py corpus must make the `secret` and "
+        "dropping the secret fixtures from the py corpus must make `secret` and "
         f"`secret_return` markings blind again; the gate said: {problems}")
     assert any("secret_return=<true>" in p for p in named)
     assert any("secret=<true>" in p for p in named)
