@@ -3956,6 +3956,8 @@ class _V3Emitter:
             return "Int"
         if method == "to_int32":
             return "Int32"
+        if method in ("div_trunc", "div_floor", "div_euclid", "mod"):
+            return "Int"
         if method == "push":
             if not _is_list_type(target_ty):
                 raise EmitError("push is only lowerable on List values")

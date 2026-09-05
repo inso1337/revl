@@ -94,6 +94,10 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_wasm_corpus"
 CORPUS = [
+    "folding.rvl",
+    "calls.rvl",
+    "inference.rvl",
+    "string_ops.rvl",
     "arith.rvl",    # checked int/int32 +-*, % (rem_s), i64/i32 cmp, &&/||, !, unary -
     "constfold.rvl",  # item 432(g): constant `+ - *` folded to one const, the
                       # overflowing ones declined so their checked helper (and
