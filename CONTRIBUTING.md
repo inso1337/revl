@@ -364,9 +364,11 @@ in the `lint` CI job) now fails when a marker contradicts git. Four rules:
    something is open, assigned, in flight or closed is a tracker's job, and a
    tracker updates itself. The roadmap keeps what a tracker is bad at: the
    argument, the reproducer, the evidence, the negative results, and the
-   cross-references between findings. Once the migration is done,
-   `tools/check_roadmap_markers.py --require-issue` becomes mandatory and every
-   open or partial item has to cite its issue.
+   cross-references between findings. The migration is done:
+   `tools/check_roadmap_markers.py --require-issue` runs in the `lint` job, and
+   every open or partial item has to cite its issue, or, for a security item
+   whose finding must not be a public issue (rule 4), its private security
+   advisory (a GHSA id or the advisory URL).
 
 2. **A fix records which instances it covers, and which it does not.** This is
    the one thing no tracker fixes for you. A merged branch is not a closed

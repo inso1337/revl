@@ -151,6 +151,14 @@ jobs:
       # #174), so a new unowned finding is a new red rather than one more line
       # in a backlog.
       #
+      # --require-issue joins the line here too (roadmap item 452): the issue
+      # migration is finished, so every open or partial top-level item now
+      # cites its GitHub issue, or, for a security item, its private security
+      # advisory (CONTRIBUTING.md rule 4 routes a soundness or audit-surface
+      # escape to a private advisory, never a public issue on this public
+      # repo). A new open item with no tracked state is now a red rather than
+      # a line that quietly rots in the roadmap.
+      #
       # D (--check-tier-parity) is the only one still off: it has two real
       # findings on main (items 421 F6 and 422 F6, python-only fixes to a
       # language-wide guarantee). Turn it on here as its findings are
@@ -178,6 +186,7 @@ jobs:
             --check-delegation \
             --check-duplicate-headers \
             --check-orphan \
+            --require-issue \
             --head-branch "$HEAD_BRANCH"
 
   frontend:

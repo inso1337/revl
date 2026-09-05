@@ -28,9 +28,11 @@ pre-merge-affected:
 # full re-investigation. Same contract as matrix-check: a claim that can be
 # checked mechanically must be. See tools/check_roadmap_markers.py for what it
 # can and cannot know, and CONTRIBUTING.md "Tracking work" for the discipline.
-# Add --require-issue once the GitHub-issue migration lands.
+# --require-issue is on (roadmap item 452): the issue migration is finished, so
+# every open or partial item cites its issue, or its private security advisory
+# for a security item that must not be a public issue on this public repo.
 roadmap-check:
-	python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan
+	python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --require-issue
 
 # The same tool with all five prose checks on: self-contradiction, dangling
 # delegation, orphaned findings, single-tier fixes for language-wide
