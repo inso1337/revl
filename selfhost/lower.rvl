@@ -1905,7 +1905,7 @@ type Ctx = { svcs: Map[Str, SvcD], reqMap: Map[Str, Str], caps: CapsT,
              fnAsyncSlots: Map[Str, List[Int]],
              underArrow: Bool, handles: Map[Str, Str],
              provKeySvc: Map[Str, Str], provAlias: Map[Str, Str],
-             acqWhere: Str }
+             localArrows: Map[Str, ArrowN], acqWhere: Str }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -2314,14 +2314,74 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
   return walk_exprs(args, 0, marked, cx, na)
 }
 
+// The `<handle>#<key>` a provision-read ARGUMENT names, else "". A direct read
+// `h.<key>` off a known spawn handle, or a local that already aliases one
+// (`provAlias`) — the same two provenance shapes `alias_note` records.
+fn provision_ref(e: Expr, cx: Ctx) -> Str {
+  return match e {
+    Field(fl) => match fl.target {
+      Var(h) => cx.handles.has(h) ? h.concat("#").concat(fl.name) : "",
+      _      => "",
+    },
+    Var(v) => match cx.provAlias.lookup(v) { Some(r) => r, None => "" },
+    _      => "",
+  }
+}
+
+// Does any argument carry a spawn-handle provision into a parameter?
+fn has_provision_arg(args: List[Expr], i: Int, cx: Ctx) -> Bool {
+  if (i >= args.length()) { return false }
+  if (provision_ref(args[i], cx) != "") { return true }
+  return has_provision_arg(args, i + 1, cx)
+}
+
+// Map each parameter that receives a provision argument to the `<handle>#<key>`
+// that argument names, extending `provAlias` positionally.
+fn arrow_param_alias(ps: List[ParamN], args: List[Expr], i: Int, cx: Ctx,
+                     m: Map[Str, Str]) -> Map[Str, Str] {
+  if (i >= ps.length() || i >= args.length()) { return m }
+  let ref = provision_ref(args[i], cx)
+  let m2 = ref != "" ? m.set(ps[i].name, ref) : m
+  return arrow_param_alias(ps, args, i + 1, cx, m2)
+}
+
+// The arrow-parameter provision seam (GHSA-wg4v-r47x-52p2 residual): a spawn-
+// handle provision passed as an ARGUMENT to a local arrow whose parameter is
+// service-typed crosses the boundary through the parameter exactly as the
+// direct `w.<key>.<op>` spelling does. #331 followed the crossing through a
+// `let`/capture binding of the handle; this follows it through the parameter
+// binding at the application. Each parameter that receives a provision argument
+// is mapped into `provAlias` as `<handle>#<key>`, and the arrow BODY is walked
+// under that map with the parameters in scope — so `t.run(s)` takes the same
+// `alias_call` -> `handle_emit` path the direct handle call takes: refused
+// unmarked (naming `w.task.run`), admitted marked. When no provision flows in
+// (an arrow not applied to one, or a non-emission op through it), nothing is
+// followed — the accepting twin.
+fn arrow_apply_check(ar: ArrowN, args: List[Expr], marked: Bool,
+                     cx: Ctx, a: Ac) -> Ac {
+  if (!has_provision_arg(args, 0, cx)) { return a }
+  let pal = arrow_param_alias(ar.params, args, 0, cx, cx.provAlias)
+  let bcx = ctx_bind(ctx_alias(cx, pal), param_names(ar.params))
+  return walk_expr(ar.body, marked, bcx, a)
+}
+
 // A bare named call `name(...)`. The head must resolve to a callable (or a
 // declared local, an Upper-cased constructor, or `config`) — an unresolved
 // head is a G1 undeclared access, exactly as a `req` receiver is. G4 evidence:
 // reaching an emitting name labels `f()` with its caps. A1: reaching an
-// async-colored name records it for the reach verdict.
+// async-colored name records it for the reach verdict. A local arrow applied to
+// a spawn-handle provision is resolved through its parameter first (GHSA
+// residual), before its own name is judged.
 fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
   if (!call_head_declared(cx, name)) { return g1_refuse(cx, name, a) }
   var na = a
+  if (cx.localArrows.has(name)) {
+    na = match cx.localArrows.lookup(name) {
+      Some(ar) => arrow_apply_check(ar, args, marked, cx, na),
+      None     => na,
+    }
+    if (na.msg != "") { return na }
+  }
   if (contains(cx.emittingNames, name)) {
     // deduped, as `_method_emissions`'s `note` is — see `req_call`
     na = { msg: "", tag: "", labels: union_into(na.labels, [name.concat("()")]),
@@ -2391,7 +2451,8 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, acqWhere: cx.acqWhere }
+           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           acqWhere: cx.acqWhere }
 }
 
 // The same context carrying the host-acquire position phrase of the statement
@@ -2403,7 +2464,8 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, acqWhere: where }
+           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           acqWhere: where }
 }
 
 // The same context carrying a body's provision-alias map.
@@ -2414,7 +2476,20 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: al, acqWhere: cx.acqWhere }
+           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere }
+}
+
+// The same context carrying the local arrows one body binds (`let f = (…) =>
+// …`), so an application `f(w.task, …)` can be resolved to the crossing its
+// body performs through a service-typed parameter (GHSA-wg4v-r47x-52p2).
+fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
+  return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -2426,7 +2501,8 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, acqWhere: cx.acqWhere }
+           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           acqWhere: cx.acqWhere }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -2594,7 +2670,8 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
-           provAlias: Map.empty(), acqWhere: "this position" }
+           provAlias: Map.empty(), localArrows: Map.empty(),
+           acqWhere: "this position" }
 }
 
 // The same context with extra callable names — the program's own ADT
@@ -2607,7 +2684,7 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           acqWhere: cx.acqWhere }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -2629,7 +2706,8 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            fnNames: base.fnNames, compName: comp.name,
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc,
-           provAlias: Map.empty(), acqWhere: "this position" }
+           provAlias: Map.empty(), localArrows: Map.empty(),
+           acqWhere: "this position" }
 }
 
 // The spawn handles a component binds: every `let h = effect spawn C …` in its
@@ -2695,6 +2773,22 @@ fn alias_in(ss: List[Stmt], i: Int, handles: Map[Str, Str],
   let m2 = (s.bind != "" && s.spawnTarget == "")
     ? alias_note(s.bind, s.e, handles, m) : m
   return alias_in(ss, i + 1, handles, m2)
+}
+
+// The local ARROWS one body binds (`let f = (t: Task, s) => t.run(s)`), keyed
+// by name, in statement order. Scoped per body exactly as `alias_in` is (and
+// for the same reason — the reference saves/restores `Env.local_arrows` around
+// every provide method), so an arrow bound in one method is never resolved
+// against an application in another. Used by `arrow_apply_check` to follow a
+// spawn-handle provision across the parameter binding at the application.
+fn arrows_in(ss: List[Stmt], i: Int, m: Map[Str, ArrowN]) -> Map[Str, ArrowN] {
+  if (i >= ss.length()) { return m }
+  let s = ss[i]
+  let m2 = match s.e {
+    Arrow(ar) => s.bind != "" ? m.set(s.bind, ar) : m,
+    _         => m,
+  }
+  return arrows_in(ss, i + 1, m2)
 }
 
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
@@ -3321,7 +3415,11 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
   // provide method (the reference lowers setup first and restores to that map
   // after each method), a method's own are not visible to the next one.
   let setupAlias = alias_in(comp.setup, 0, cx.handles, Map.empty())
-  let scx = ctx_alias(cx, setupAlias)
+  // local arrows are scoped per body exactly as provision aliases are: setup's
+  // are visible to every provide method, a method's own are not visible to the
+  // next (GHSA-wg4v-r47x-52p2 residual — the arrow-parameter provision seam).
+  let setupArrows = arrows_in(comp.setup, 0, Map.empty())
+  let scx = ctx_arrows(ctx_alias(cx, setupAlias), setupArrows)
   let sa = walk_stmts(comp.setup, 0, scx, empty_ac())
   if (sa.msg != "") { return tagged(sa.tag, sa.msg) }
   let pcx = cx
@@ -3340,7 +3438,9 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
         return tagged("A1", async_sig_msg(pv.key, pm.name, pv.svcName,
                                           pm.isAsync, decl.isAsync))
       }
-      let mcx = ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias))
+      let mcx = ctx_arrows(
+        ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
+        arrows_in(pm.body, 0, setupArrows))
       let a = walk_stmts(pm.body, 0, mcx, empty_ac())
       if (a.msg != "") { return tagged(a.tag, a.msg) }
       // `await` outside a component body (lower.py's method-lowering AwaitStmt
