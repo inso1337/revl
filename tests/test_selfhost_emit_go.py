@@ -77,6 +77,7 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_go_corpus"
 CORPUS = [
+    "match_edges.rvl",
     "accumulators.rvl",
     "../emit_rust_corpus/perf_shapes.rvl",
     "identifiers.rvl",
@@ -207,6 +208,33 @@ def test_supported_corpus_compiles_as_go(emitted, reference, tmp_path, rel):
             env={**os.environ, "GO111MODULE": "off"}, timeout=60,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("side", ["reference", "selfhost"])
+def test_match_edges_runtime(emitted, reference, tmp_path, side):
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("Go compiler not installed")
+    ir = compile_files([str(CORPUS_DIR / "match_edges.rvl")])
+    source = reference.emit(ir) if side == "reference" else emitted["emit_src"](ir)
+    module = tmp_path / "matches.go"
+    module.write_text(source, encoding="utf-8")
+    test = tmp_path / "matches_test.go"
+    test.write_text(
+        'package emitted\nimport "testing"\n'
+        'func TestMatches(t *testing.T) {\n'
+        '  if scalar_wildcard(1) != 42 || record_wildcard(Box{Value: 2}) != 43 || '
+        'list_wildcard([]int64{3}) != 44 || constructed(9) != 9 || '
+        'discarded(TreeNode{Value: 4}) != 45 || inverted(0) != -1 || '
+        'escaped() != "a\\nb\\tcd\\u00e9" { t.Fatal("match edge result") }\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [go, "test", str(module), str(test)], capture_output=True, text=True,
+        env={**os.environ, "GO111MODULE": "off"}, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("source, reference_token, port_token", [

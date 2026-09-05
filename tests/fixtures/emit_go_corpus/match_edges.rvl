@@ -1,0 +1,17 @@
+type Box = { value: Int }
+type Tree = Leaf | Node(Int)
+
+fn scalar_wildcard(x: Int) -> Int { return match x { _ => 42 } }
+fn record_wildcard(x: Box) -> Int { return match x { _ => 43 } }
+fn list_wildcard(x: List[Int]) -> Int { return match x { _ => 44 } }
+fn constructed(x: Int) -> Int {
+  return match Node(x) { Node(value) => value, Leaf => 0 }
+}
+fn discarded(x: Tree) -> Int {
+  return match x { Node(_) => 45, Leaf => 0 }
+}
+fn inverted(x: Int32) -> Int32 { let y = ~x return y }
+fn escaped() -> Str {
+  return `a
+b	cdé`
+}

@@ -218,11 +218,12 @@ def test_selfhosted_emitter_output_scaffold(emitted):
     assert src.endswith(")\n")
 
 
-def test_widened_locals_compile_as_wasm(emitted, reference, tmp_path):
+@pytest.mark.parametrize("rel", ["widening.rvl", "folding.rvl", "variants.rvl"])
+def test_supported_corpus_compiles_as_wasm(emitted, reference, tmp_path, rel):
     compiler = shutil.which("wat2wasm")
     if compiler is None:
         pytest.skip("wat2wasm compiler not installed")
-    ir = compile_files([str(CORPUS_DIR / "widening.rvl")])
+    ir = compile_files([str(CORPUS_DIR / rel)])
     for name, source in (("reference", reference.emit(ir)["functions"]),
                          ("selfhost", emitted["emit_src"](ir))):
         path = tmp_path / f"{name}.wat"
