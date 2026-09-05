@@ -276,8 +276,8 @@ fn has(o: Outcome) -> Bool {
 
 def test_v3_stdlib_emit_shapes():
     src = emit.emit(_load(V3_STDLIB), package="stdlib")
-    # Opt/Result as generic sealed interfaces
-    _has(src, "type RevlOpt[T any] interface { isRevlOpt() }")
+    # Opt as a two-value struct (item 434 (d)); Result still a sealed interface
+    _has(src, "type RevlOpt[T any] struct {")
     _has(src, "type RevlResult[T any, E any] interface { isRevlResult() }")
     # optfield/optcall -> revlOptMap over the payload; the record field is
     # exported (item 390: json_stringify(record) needs exported struct fields)
@@ -535,13 +535,13 @@ def test_map_value_helpers_are_pulled_in_and_persistent():
     assert "for kk, vv := range m" in helper
 
 
-def test_map_lookup_answers_the_sealed_opt_and_has_bool():
+def test_map_lookup_answers_the_opt_struct_and_has_bool():
     src = emit.emit(_compile(
         'pub fn get(m: Map[Str, Int], k: Str) -> Int { return m.lookup(k) ?? 0 }\n'
         'pub fn member(m: Map[Str, Int], k: Str) -> Bool { return m.has(k) }\n'))
     assert "revlMapGet(m, k)" in src and "revlMapHas(m, k)" in src
     # lookup answers a RevlOpt, so the Opt preamble is pulled in for `??`
-    assert "type RevlOpt[T any] interface{ isRevlOpt() }" in src
+    assert "type RevlOpt[T any] struct {" in src
     assert "revlOptOr(revlMapGet(m, k), 0)" in src
 
 
