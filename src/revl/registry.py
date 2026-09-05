@@ -561,14 +561,18 @@ def _audit_document(ir: dict) -> dict:
     # directories would produce two different manifests. Normalize it to the
     # entry's stable filename so manifest.json is byte-reproducible wherever the
     # regenerator runs (the reproducibility invariant, docs/registry.md §1).
-    # Create a normalized copy without mutating the original.
+    # Create a normalized copy without mutating the original. A component with
+    # no `file` key keeps it absent — injecting `"file": null` would change the
+    # byte-reproducible manifest.json/policy.json for IR shapes that lack it.
+    def _normalized_component(comp: dict) -> dict:
+        if not comp.get("file"):
+            return dict(comp)
+        return {**comp, "file": os.path.basename(comp["file"])}
+
     normalized_manifest = {
         **manifest,
         "components": [
-            {
-                **comp,
-                "file": os.path.basename(comp["file"]) if comp.get("file") else comp.get("file")
-            }
+            _normalized_component(comp)
             for comp in manifest.get("components") or []
         ]
     }
