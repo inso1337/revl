@@ -5002,6 +5002,64 @@ fn type_args(t: &str) -> Vec<String> {
     return split_top_commas(&inner);
 }
 
+fn split_top_type_commas(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut depth = 0i64;
+    let mut cur = String::from("");
+    let mut i = 0i64;
+    while (i < s.revl_length()) {
+        let c = { s.chars().nth((i) as usize).unwrap().to_string() };
+        if ((c == "[") || (c == "(")) {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+            cur.push_str(&c);
+        } else {
+            if ((c == "]") || (c == ")")) {
+                depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+                cur.push_str(&c);
+            } else {
+                if ((c == ",") && (depth == 0i64)) {
+                    out.push(ty_trim(&cur));
+                    cur = String::from("");
+                } else {
+                    cur.push_str(&c);
+                }
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out.revl_push(ty_trim(&cur));
+}
+
+fn fn_param_types(ty: &str) -> Vec<String> {
+    if ((ty.revl_length() == 0i64) || ({ ty.chars().nth((0i64) as usize).unwrap().to_string() } != "(")) {
+        return vec![];
+    }
+    let mut depth = 0i64;
+    let mut i = 0i64;
+    let mut close = (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    while ((i < ty.revl_length()) && (close == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) {
+        let c = { ty.chars().nth((i) as usize).unwrap().to_string() };
+        if (c == "(") {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (c == ")") {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+            if (depth == 0i64) {
+                close = i;
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (close <= 0i64) {
+        return vec![];
+    }
+    let inner = ty.revl_slice(1i64, close);
+    if (inner == "") {
+        return vec![];
+    }
+    return split_top_type_commas(&inner);
+}
+
 fn type_arg1(t: &str) -> String {
     let a = type_args(t);
     if (a.revl_length() == 0i64) {
@@ -5333,6 +5391,20 @@ fn lir_args(args: Vec<Expr>, env: Vec<Bind>) -> String {
     return out;
 }
 
+fn lir_call_args(args: Vec<Expr>, ptypes: Vec<String>, env: Vec<Bind>) -> String {
+    let mut out = String::from("");
+    let mut i = 0i64;
+    while (i < args.revl_length()) {
+        let mut e = lir_expr((args)[(i) as usize].clone(), env.clone());
+        if (i < ptypes.revl_length()) {
+            e = apply_arg_markers(e.clone(), &(ptypes)[(i) as usize].clone(), &infer((args)[(i) as usize].clone(), env.clone()));
+        }
+        out = if (i == 0i64) { e.clone() } else { (out.revl_concat(",")).revl_concat(&e) };
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn lir_fields(fields: Vec<InitN>, env: Vec<Bind>) -> String {
     let mut out = String::from("");
     let mut i = 0i64;
@@ -5643,7 +5715,12 @@ fn lir_call(callee: Expr, args: Vec<Expr>, env: Vec<Bind>) -> String {
     if (builtin != "") {
         return builtin;
     }
-    return (((String::from("{\"kind\":\"call\",\"callee\":").revl_concat(&lir_expr(callee.clone(), env.clone()))).revl_concat(",\"args\":[")).revl_concat(&lir_args(args.clone(), env.clone()))).revl_concat("]}");
+    let ptypes = match callee.clone() {
+    Expr::Var(n) => fn_param_types(&tenv_get(env.clone(), &n)),
+    _ => vec![],
+};
+    let argsjs = if (ptypes.revl_length() == 0i64) { lir_args(args.clone(), env.clone()) } else { lir_call_args(args.clone(), ptypes.clone(), env.clone()) };
+    return (((String::from("{\"kind\":\"call\",\"callee\":").revl_concat(&lir_expr(callee.clone(), env.clone()))).revl_concat(",\"args\":[")).revl_concat(&argsjs)).revl_concat("]}");
 }
 
 fn is_host_root_recv(recv: Expr) -> bool {
@@ -5738,6 +5815,13 @@ fn apply_ret_markers(node: String, expected: String, actual: String) -> String {
     }
     if ((((actual != "") && (parse_head(expected.clone()) == "Opt")) && (type_args(&expected).revl_length() > 0i64)) && (parse_head(actual.clone()) != "Opt")) {
         return (String::from("{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"Some\"},\"args\":[").revl_concat(&node)).revl_concat("]}");
+    }
+    return node;
+}
+
+fn apply_arg_markers(node: String, expected: &str, actual: &str) -> String {
+    if (((expected == "Float") && ((actual == "Int") || (actual == "Int32"))) || ((expected == "Int") && (actual == "Int32"))) {
+        return (((node.revl_slice(0i64, (node.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"widen\":")).revl_concat(&jstr(expected))).revl_concat("}");
     }
     return node;
 }
