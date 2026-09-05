@@ -38,9 +38,11 @@ What is PROVEN here (§9, corrected exit criterion):
 from __future__ import annotations
 
 import asyncio
+import itertools
 import pathlib
 import re
 import sys
+import tempfile
 import types
 
 import pytest
@@ -55,22 +57,84 @@ _SRC = pathlib.Path(__file__).resolve().parents[3] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from revl import compile_source  # noqa: E402
+from revl.compiler import compile_files  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
 # harness
 # --------------------------------------------------------------------------- #
+#
+# The recording emissions below observe the runtime's record-sink (item 259
+# slice 2 buffers a mid-branch `_record` and replays it at the join in plan
+# order). Reaching `runtime._record` from a user `@py` body by inlining
+# `import runtime` is exactly what the backend-import confinement refuses
+# (#302): a user composition must not turn the backend search path into an
+# ambient host dependency. The sanctioned route is `@py ref` — the fixtures
+# name a small TRUSTED host module (`_host_module` below) that imports the
+# runtime, and the compiler jails the ref to the program's own root tree. Each
+# compile gets a UNIQUE host-module name so a per-compile `DELAY` never collides
+# in `sys.modules` across the many programs this file builds in one process.
 
-def _module(src: str, name: str = "p259") -> types.ModuleType:
-    code = emit.emit(compile_source(src, "p259.rvl"))
+_HOST_PLACEHOLDER = "__REC_HOST__"
+_host_counter = itertools.count()
+
+
+def _host_module(delay: float) -> str:
+    """A trusted host module the fixtures reference with `@py ref`.
+
+    `fire` records its firing then awaits `delay`; `boom` models a faulting
+    member; `unfire` records a compensation. All three call `runtime._record`,
+    which is legitimate here because this file is TRUSTED host code declared
+    through a ref, not an inline user `@py` body (#302)."""
+    return (
+        '"""Trusted host recording helpers for the item-259 fixtures."""\n'
+        "import asyncio\n"
+        "import runtime\n"
+        "\n"
+        f"DELAY = {delay!r}\n"
+        "\n"
+        "\n"
+        "async def fire(x):\n"
+        '    runtime._record("fire " + x)\n'
+        "    await asyncio.sleep(DELAY)\n"
+        "    return x\n"
+        "\n"
+        "\n"
+        "async def boom(x):\n"
+        "    await asyncio.sleep(0.0)\n"
+        '    raise RuntimeError(x + " boom")\n'
+        "\n"
+        "\n"
+        "def unfire(x):\n"
+        '    runtime._record("comp " + x)\n'
+        "    return x\n"
+    )
+
+
+def _write_program(src: str, delay: float) -> str:
+    """Write a program (and its trusted host module) to a fresh directory and
+    return the path to `main.rvl`. The host module gets a unique name so its
+    `DELAY` is isolated per compile even though every program imports it."""
+    host_name = f"rec_host_{next(_host_counter)}"
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="revl259_"))
+    (directory / f"{host_name}.py").write_text(_host_module(delay), encoding="utf-8")
+    resolved = src.replace(_HOST_PLACEHOLDER, host_name)
+    main = directory / "main.rvl"
+    main.write_text(resolved, encoding="utf-8")
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+    return str(main)
+
+
+def _module(src: str, name: str = "p259", delay: float = 0.0) -> types.ModuleType:
+    code = emit.emit(compile_files([_write_program(src, delay)]))
     module = types.ModuleType(name)
     exec(compile(code, f"{name}.py", "exec"), module.__dict__)  # noqa: S102
     return module
 
 
-def _emitted(src: str) -> str:
-    return emit.emit(compile_source(src, "p259.rvl"))
+def _emitted(src: str, delay: float = 0.0) -> str:
+    return emit.emit(compile_files([_write_program(src, delay)]))
 
 
 def _ops(events: list[str]) -> list[str]:
@@ -82,31 +146,26 @@ def _ops(events: list[str]) -> list[str]:
 # declaration so the SAME body can be compiled with the fan-out gate open
 # (idempotent) or forced sequential (non-idempotent) - the sequential form is
 # the byte-identical baseline the parallel run is diffed against.
-def _three_emission_src(kw: str, delay: float, *, compensate: bool = False) -> str:
+def _three_emission_src(kw: str, *, compensate: bool = False) -> str:
+    # The recording body lives in the trusted host module (`fire`/`unfire`),
+    # declared with `@py ref` so the fixture reaches `runtime._record` without
+    # an inline backend import (#302). The firing latency is the host module's
+    # `DELAY`, baked in per compile by `_write_program` (passed to `_module`).
     comp_decls = ""
     comp_a = comp_b = comp_c = ""
     if compensate:
         comp_decls = (
-            'extern emission[send.email] fn undo_a(x: Str) -> Str = @py '
-            '{ import runtime; runtime._record("comp " + x); return x }\n'
-            'extern emission[db.write] fn undo_b(x: Str) -> Str = @py '
-            '{ import runtime; runtime._record("comp " + x); return x }\n'
-            'extern emission[metrics] fn undo_c(x: Str) -> Str = @py '
-            '{ import runtime; runtime._record("comp " + x); return x }\n'
+            f'extern emission[send.email] fn undo_a(x: Str) -> Str = @py ref unfire from "{_HOST_PLACEHOLDER}.py"\n'
+            f'extern emission[db.write] fn undo_b(x: Str) -> Str = @py ref unfire from "{_HOST_PLACEHOLDER}.py"\n'
+            f'extern emission[metrics] fn undo_c(x: Str) -> Str = @py ref unfire from "{_HOST_PLACEHOLDER}.py"\n'
         )
         comp_a = ' compensate undo_a("a")'
         comp_b = ' compensate undo_b("b")'
         comp_c = ' compensate undo_c("c")'
     return (
-        f'extern emission[send.email] {kw}async fn fire_a(x: Str) -> Str = @py '
-        f'{{ import runtime, asyncio; runtime._record("fire " + x); '
-        f'await asyncio.sleep({delay}); return x }}\n'
-        f'extern emission[db.write] {kw}async fn fire_b(x: Str) -> Str = @py '
-        f'{{ import runtime, asyncio; runtime._record("fire " + x); '
-        f'await asyncio.sleep({delay}); return x }}\n'
-        f'extern emission[metrics] {kw}async fn fire_c(x: Str) -> Str = @py '
-        f'{{ import runtime, asyncio; runtime._record("fire " + x); '
-        f'await asyncio.sleep({delay}); return x }}\n'
+        f'extern emission[send.email] {kw}async fn fire_a(x: Str) -> Str = @py ref fire from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[db.write] {kw}async fn fire_b(x: Str) -> Str = @py ref fire from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[metrics] {kw}async fn fire_c(x: Str) -> Str = @py ref fire from "{_HOST_PLACEHOLDER}.py"\n'
         f'{comp_decls}'
         f'component W {{\n'
         f'  await emit fire_a("a"){comp_a}\n'
@@ -150,14 +209,12 @@ async def test_three_disjoint_emissions_run_concurrently_with_identical_audit():
     byte-identical to the sequential form (the record-sink replays in plan order)
     and the group completes in ~max(latency) not sum - the roadmap exit test."""
     delay = 0.15
-    par_mod = _module(_three_emission_src("idempotent ", delay), "par")
-    seq_mod = _module(_three_emission_src("", delay), "seq")
+    par_mod = _module(_three_emission_src("idempotent "), "par", delay)
+    seq_mod = _module(_three_emission_src(""), "seq", delay)
 
     # the parallel module actually fans out; the sequential one does not
-    assert "_revl_parallel" in emit.emit(compile_source(
-        _three_emission_src("idempotent ", delay), "p.rvl"))
-    assert "_revl_parallel" not in emit.emit(compile_source(
-        _three_emission_src("", delay), "p.rvl"))
+    assert "_revl_parallel" in _emitted(_three_emission_src("idempotent "))
+    assert "_revl_parallel" not in _emitted(_three_emission_src(""))
 
     par_ops, par_elapsed = await _activate_and_collect(par_mod, until=3)
     seq_ops, seq_elapsed = await _activate_and_collect(seq_mod, until=3)
@@ -202,7 +259,7 @@ def test_non_idempotent_disjoint_group_stays_sequential():
     """The plan groups three disjoint emissions, but the fan-out GATE refuses a
     non-idempotent member (over-firing it under a fault/divert is not proved
     safe), so the whole group degrades to sequential."""
-    assert "_revl_parallel" not in _emitted(_three_emission_src("", 0.0))
+    assert "_revl_parallel" not in _emitted(_three_emission_src(""))
 
 
 # --------------------------------------------------------------------------- #
@@ -341,21 +398,16 @@ def _world(ops: list[str]) -> set:
 
 
 def _fault_src(kw: str) -> str:
+    # `fire_b` faults (the trusted host `boom`); `fire_a`/`fire_c` record and
+    # return (`fire`), and the compensations record through `undo`. All bodies
+    # are `@py ref`s into the trusted host module, never inline backend imports.
     return (
-        f'extern emission[send.email] {kw}async fn fire_a(x: Str) -> Str = @py '
-        f'{{ import runtime, asyncio; await asyncio.sleep(0.0); '
-        f'runtime._record("fire " + x); return x }}\n'
-        f'extern emission[db.write] {kw}async fn fire_b(x: Str) -> Str = @py '
-        f'{{ import asyncio; await asyncio.sleep(0.0); raise RuntimeError("b boom") }}\n'
-        f'extern emission[metrics] {kw}async fn fire_c(x: Str) -> Str = @py '
-        f'{{ import runtime, asyncio; await asyncio.sleep(0.0); '
-        f'runtime._record("fire " + x); return x }}\n'
-        f'extern emission[send.email] idempotent fn undo_a(x: Str) -> Str = @py '
-        f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
-        f'extern emission[db.write] idempotent fn undo_b(x: Str) -> Str = @py '
-        f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
-        f'extern emission[metrics] idempotent fn undo_c(x: Str) -> Str = @py '
-        f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
+        f'extern emission[send.email] {kw}async fn fire_a(x: Str) -> Str = @py ref fire from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[db.write] {kw}async fn fire_b(x: Str) -> Str = @py ref boom from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[metrics] {kw}async fn fire_c(x: Str) -> Str = @py ref fire from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[send.email] idempotent fn undo_a(x: Str) -> Str = @py ref unfire from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[db.write] idempotent fn undo_b(x: Str) -> Str = @py ref unfire from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[metrics] idempotent fn undo_c(x: Str) -> Str = @py ref unfire from "{_HOST_PLACEHOLDER}.py"\n'
         f'component W {{\n'
         f'  await emit fire_a("a") compensate undo_a("a")\n'
         f'  await emit fire_b("b") compensate undo_b("b")\n'
@@ -416,22 +468,15 @@ def _divert_src(kw: str) -> str:
     c and, because the join completes, compensates BOTH in plan order. All three
     compensations are declared `idempotent`, so the members satisfy the tightened
     gate (compensation idempotent-or-absent)."""
+    # Same shape as `_fault_src`: the deadline is modelled by the trusted host
+    # `boom` raising at `fire_b`'s await. Bodies are `@py ref`s (#302).
     return (
-        f'extern emission[send.email] {kw}async fn fire_a(x: Str) -> Str = @py '
-        f'{{ import runtime, asyncio; await asyncio.sleep(0.0); '
-        f'runtime._record("fire " + x); return x }}\n'
-        f'extern emission[db.write] {kw}async fn fire_b(x: Str) -> Str = @py '
-        f'{{ import asyncio; await asyncio.sleep(0.0); '
-        f'raise RuntimeError("deadline exceeded on b") }}\n'
-        f'extern emission[metrics] {kw}async fn fire_c(x: Str) -> Str = @py '
-        f'{{ import runtime, asyncio; await asyncio.sleep(0.0); '
-        f'runtime._record("fire " + x); return x }}\n'
-        f'extern emission[send.email] idempotent fn undo_a(x: Str) -> Str = @py '
-        f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
-        f'extern emission[db.write] idempotent fn undo_b(x: Str) -> Str = @py '
-        f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
-        f'extern emission[metrics] idempotent fn undo_c(x: Str) -> Str = @py '
-        f'{{ import runtime; runtime._record("comp " + x); return x }}\n'
+        f'extern emission[send.email] {kw}async fn fire_a(x: Str) -> Str = @py ref fire from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[db.write] {kw}async fn fire_b(x: Str) -> Str = @py ref boom from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[metrics] {kw}async fn fire_c(x: Str) -> Str = @py ref fire from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[send.email] idempotent fn undo_a(x: Str) -> Str = @py ref unfire from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[db.write] idempotent fn undo_b(x: Str) -> Str = @py ref unfire from "{_HOST_PLACEHOLDER}.py"\n'
+        f'extern emission[metrics] idempotent fn undo_c(x: Str) -> Str = @py ref unfire from "{_HOST_PLACEHOLDER}.py"\n'
         f'component W {{\n'
         f'  await emit fire_a("a") compensate undo_a("a")\n'
         f'  await emit fire_b("b") compensate undo_b("b")\n'
@@ -477,7 +522,7 @@ async def test_external_dispose_mid_group_tears_down_cleanly():
     (§4.1/§10). The members here declare no compensation (the trivially-safe
     idempotent-or-absent case)."""
     delay = 0.2
-    module = _module(_three_emission_src("idempotent ", delay), "xdvt")
+    module = _module(_three_emission_src("idempotent "), "xdvt", delay)
 
     events: list[str] = []
     runtime_mod.set_trace(events.append)

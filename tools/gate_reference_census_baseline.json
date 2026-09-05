@@ -41,7 +41,6 @@
    "stdlib/json.rvl",
    "stdlib/list.rvl",
    "stdlib/render.rvl",
-   "stdlib/shell.rvl",
    "stdlib/value.rvl",
    "tests/fixtures/emit_py_corpus/witnessed.rvl",
    "tests/fixtures/v2_math_lib.rvl"
@@ -537,18 +536,6 @@
    }
   },
   "stdlib/render.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "stdlib/shell.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
