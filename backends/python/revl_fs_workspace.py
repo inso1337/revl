@@ -161,10 +161,13 @@ bodies a pure host-local read with no cordis config-resolution dependency.
 A future tier / item 294 (parameterized capabilities) can promote this to a
 typed session capability; for the py H1 slice it is one env var.
 
-The root itself is opened by name once per operation; it is the trust anchor
-the session configures, not attacker-supplied input, and everything below it is
-reached only through fds. A root that is itself moved or replaced mid-session
-is out of scope for this guard.
+Without binding, the root is opened by name once per operation; moving or
+replacing it remains out of scope for that legacy mode. The opt-in Python API
+`revl.fs_workspace.bind_workspace_root` instead pins a physical directory for
+the process lifetime. Bound paths are absolute names under an immutable label,
+not paths to reopen: every lookup starts from the pinned fd, including sidecars
+and inverse sources. Root renames continue on the original directory. Bound
+mode refuses symlinks and relative paths rather than widening the legacy jail.
 
 The ts tier (`backends/typescript/revl_fs_ts.ts`) carries this same shape now:
 the same `PATH_FAMILIES` enumeration, the same table-driven totality wrapper,
@@ -183,7 +186,9 @@ import errno
 import functools
 import os
 import stat
+import threading
 import uuid
+from typing import NamedTuple
 
 #: The environment variable naming the session workspace root (py tier).
 WORKSPACE_ENV = "REVL_FS_WORKSPACE"
@@ -249,6 +254,21 @@ SYSCALL_PATH_ARGS: dict[str, tuple[int, ...]] = {
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+#: The supported host binding contract, also exported by `revl.fs_workspace`.
+PINNED_ROOT_API_VERSION = 1
+
+
+class _PinnedRoot(NamedTuple):
+    fd: int
+    label: str
+    dev: int
+    ino: int
+
+
+_pinned_root: _PinnedRoot | None = None
+_workspace_used = False
+_binding_lock = threading.Lock()
 
 
 class FsOpError(Exception):
@@ -354,12 +374,84 @@ def _make_total(name: str, fn):
     return total
 
 
+def bind_workspace_root(root_fd: int, expected_dev: int, expected_ino: int,
+                        *, root_label: str) -> None:
+    """Pin a caller-owned directory before any workspace use, once per process.
+
+    The private duplicate is non-inheritable and intentionally retained until
+    process exit. There is no unbind/close: this module cannot prove that all
+    sessions, write handles and retained witnesses have discharged their root.
+    Binding never commits, aborts, or discards a witness.
+    """
+    global _pinned_root
+    with _binding_lock:
+        if _pinned_root is not None or _workspace_used:
+            raise ConfinementError(
+                "EBOUND", "workspace binding must precede all filesystem use "
+                "and cannot be repeated", _sanitized(root_label))
+        required = (os.open, os.stat, os.lstat, os.mkdir, os.unlink, os.rmdir,
+                    os.rename)
+        if (not _O_DIRECTORY or not _O_NOFOLLOW
+                or any(fn not in os.supports_dir_fd for fn in required)
+                or os.stat not in os.supports_follow_symlinks
+                or os.utime not in os.supports_fd
+                or not hasattr(os, "pread")):
+            raise ConfinementError(
+                "ENOTSUP", "pinned workspace requires directory-fd and "
+                "no-follow filesystem support", _sanitized(root_label))
+        if (not isinstance(root_label, str) or not root_label
+                or "\x00" in root_label or not os.path.isabs(root_label)
+                or os.path.normpath(root_label) != root_label
+                or root_label.startswith("//")
+                or any(type(n) is not int or n < 0
+                       for n in (root_fd, expected_dev, expected_ino))):
+            raise ConfinementError(
+                "EINVAL", "binding requires an absolute normalized root label "
+                "and nonnegative integer descriptor/device/inode",
+                _sanitized(root_label))
+        fd = None
+        try:
+            fd = os.dup(root_fd)
+            os.set_inheritable(fd, False)
+            st = os.fstat(fd)
+            if (not stat.S_ISDIR(st.st_mode)
+                    or (st.st_dev, st.st_ino) != (expected_dev, expected_ino)):
+                raise ConfinementError(
+                    "EIDENTITY", "root descriptor is not the admitted directory",
+                    root_label)
+            label_fd = os.open(root_label, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+            try:
+                named = os.fstat(label_fd)
+                if (named.st_dev, named.st_ino) != (expected_dev, expected_ino):
+                    raise ConfinementError(
+                        "EIDENTITY", "root label does not name the admitted directory",
+                        root_label)
+            finally:
+                os.close(label_fd)
+            _pinned_root = _PinnedRoot(fd, root_label, expected_dev, expected_ino)
+            fd = None
+        except (ValueError, OverflowError) as exc:
+            raise ConfinementError(
+                "EINVAL", f"cannot represent workspace binding ({exc})",
+                _sanitized(root_label)) from None
+        except OSError as exc:
+            raise ConfinementError(
+                _errno_code(exc), f"cannot bind workspace ({exc})",
+                root_label) from None
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+
 def workspace_root() -> str:
     """The configured session workspace root, realpath-resolved (so the root
     itself is symlink-canonical and membership tests compare like with like).
 
     Raises `ConfinementError` when unset: an fs op with no configured root is
     refused, never silently allowed to touch the whole filesystem."""
+    binding = _binding_for_use()
+    if binding is not None:
+        return binding.label
     root = os.environ.get(WORKSPACE_ENV)
     if not root:
         raise ConfinementError(
@@ -377,11 +469,101 @@ def workspace_root() -> str:
     return real
 
 
+def _binding_for_use() -> _PinnedRoot | None:
+    global _workspace_used
+    with _binding_lock:
+        _workspace_used = True
+        return _pinned_root
+
+
 def _is_within(root: str, real: str) -> bool:
     """True iff `real` is the root itself or a descendant of it. Compares
     realpath'd, normalized absolute paths; the `+ os.sep` guards against a
     sibling whose name merely shares the root as a prefix (`/ws` vs `/ws-evil`)."""
     return real == root or real.startswith(root + os.sep)
+
+
+def _bound_path(path: str) -> str:
+    """Validate a label-relative namespace without consulting any pathname."""
+    root = workspace_root()
+    refuse_unusable_path(path)
+    if (not isinstance(path, str) or not os.path.isabs(path)
+            or path.startswith("//")
+            or ".." in path.split(os.sep)):
+        raise ConfinementError(
+            "EOUTSIDE", "bound paths must be absolute original-root-label "
+            "paths without parent traversal", _sanitized(path))
+    real = os.path.normpath(path)
+    if real != root and not real.startswith(root.rstrip(os.sep) + os.sep):
+        raise ConfinementError(
+            "EOUTSIDE", "path escapes the bound workspace label", real)
+    return real
+
+
+def _root_dirfd() -> int:
+    root = workspace_root()
+    if _pinned_root is None:
+        return os.open(root, os.O_RDONLY | _O_DIRECTORY)
+    fd = os.dup(_pinned_root.fd)
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISDIR(st.st_mode)
+                or (st.st_dev, st.st_ino) != (_pinned_root.dev, _pinned_root.ino)):
+            raise ConfinementError(
+                "EIDENTITY", "pinned root descriptor lost its identity", root)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _bound_stat(real: str):
+    """No-follow lookup; missing names alone mean absence, not refusal."""
+    real = _bound_path(real)
+    if real == workspace_root():
+        fd = _root_dirfd()
+        try:
+            return os.fstat(fd)
+        finally:
+            os.close(fd)
+    parent, leaf = _split(real)
+    try:
+        fd = _open_dirfd(parent)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            return os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+    finally:
+        os.close(fd)
+
+
+def _resolve_bound(path: str) -> str:
+    real = _bound_path(path)
+    root = workspace_root()
+    rel = os.path.relpath(real, root)
+    parts = [] if rel == os.curdir else rel.split(os.sep)
+    fd = _root_dirfd()
+    try:
+        for index, part in enumerate(parts):
+            try:
+                st = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                break
+            if stat.S_ISLNK(st.st_mode):
+                raise ConfinementError(
+                    "EOUTSIDE", "bound workspace paths may not contain symlinks",
+                    real)
+            if index < len(parts) - 1:
+                nxt = os.open(part, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW,
+                              dir_fd=fd)
+                os.close(fd)
+                fd = nxt
+    finally:
+        os.close(fd)
+    return real
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +595,8 @@ def resolve_within(path: str) -> str:
     # and every inverse endpoint (`resolve_sidecar` routes through here too).
     refuse_unusable_path(path)
     root = workspace_root()
+    if _pinned_root is not None:
+        return _resolve_bound(path)
     target = path if os.path.isabs(path) else os.path.join(root, path)
     real = os.path.realpath(target)
     if not _is_within(root, real):
@@ -444,10 +628,12 @@ def _open_dirfd(real_dir: str) -> int:
     `OSError` (`ENOENT` for a missing component, `ELOOP` for a swapped one) for
     the caller to translate."""
     root = workspace_root()
-    if not _is_within(root, real_dir):
+    if _pinned_root is not None:
+        real_dir = _bound_path(real_dir)
+    elif not _is_within(root, real_dir):
         raise ConfinementError(
             "EOUTSIDE", "path escapes the session workspace root", real_dir)
-    fd = os.open(root, os.O_RDONLY | _O_DIRECTORY)
+    fd = _root_dirfd()
     try:
         rel = os.path.relpath(real_dir, root)
         parts = [] if rel == os.curdir else rel.split(os.sep)
@@ -466,6 +652,8 @@ def _split(real: str) -> tuple[str, str]:
     """A resolved path as (parent directory, leaf name), refusing the root
     itself — no op may replace or remove the workspace root."""
     root = workspace_root()
+    if _pinned_root is not None:
+        real = _bound_path(real)
     if real == root:
         raise ConfinementError(
             "EWORKSPACE", "the workspace root itself is not a valid target", real)
@@ -490,7 +678,7 @@ def _sidecar_dir_real(kind: str, create: bool) -> str:
     `resolve_within` then confirms containment."""
     name = SIDECAR_KINDS[kind]
     root = workspace_root()
-    rootfd = os.open(root, os.O_RDONLY | _O_DIRECTORY)
+    rootfd = _root_dirfd()
     try:
         if create:
             try:
@@ -508,7 +696,8 @@ def _sidecar_dir_real(kind: str, create: bool) -> str:
                 "EOUTSIDE",
                 f"the `{name}` sidecar directory is a symlink; the reversal "
                 "machinery must live inside the session workspace root",
-                os.path.realpath(os.path.join(root, name)),
+                (os.path.join(root, name) if _pinned_root is not None
+                 else os.path.realpath(os.path.join(root, name))),
             )
         if not stat.S_ISDIR(st.st_mode):
             raise ConfinementError(
@@ -999,6 +1188,8 @@ def lexists_confined(real: str) -> bool:
     idempotent no-op. It decides nothing about confinement — the mutation that
     follows re-establishes containment through fds regardless of what this said,
     so a lost race here costs an error message, never an escape."""
+    if _binding_for_use() is not None:
+        return _bound_stat(real) is not None
     return os.path.lexists(real)
 
 
@@ -1017,6 +1208,9 @@ def is_dir_confined(real: str) -> bool:
     is what the ts peer's `fs.statSync(real).isDirectory()` does, and the two
     tiers must answer the same question. Total on its own (it swallows the
     stat error and answers False), and total again through `_make_total`."""
+    if _binding_for_use() is not None:
+        st = _bound_stat(real)
+        return st is not None and stat.S_ISDIR(st.st_mode)
     return os.path.isdir(real)
 
 
