@@ -961,17 +961,54 @@ fn fn_params(params: List[Any]) -> Str {
   return ps.join(", ")
 }
 
+fn is_cache_pure_fn(fnode: Any) -> Bool {
+  let cache = value_field(fnode, "cache")
+  if (value_is_null(cache)) { return false }
+  return value_str(value_field(cache, "class")) == "pure_fn"
+}
+
+fn memo_source() -> List[Str] {
+  return ["_REVL_MEMO = {}", "_REVL_NOMEMO = object()", "_REVL_MISS = object()", "",
+    "", "def _revl_memo_key(v):", "    \"\"\"A hashable STRUCTURAL key for a revl value, or `_REVL_NOMEMO`.\"\"\"", "    if v is None or isinstance(v, (bool, int, float, str, bytes)):",
+    "        return (type(v).__name__, v)", "    if isinstance(v, (list, tuple)):",
+    "        parts = []", "        for item in v:", "            key = _revl_memo_key(item)",
+    "            if key is _REVL_NOMEMO:", "                return _REVL_NOMEMO", "            parts.append(key)",
+    "        return (\"seq\", tuple(parts))", "    if isinstance(v, dict):", "        parts = []",
+    "        for name in v:", "            if not isinstance(name, str):", "                return _REVL_NOMEMO",
+    "            key = _revl_memo_key(v[name])", "            if key is _REVL_NOMEMO:", "                return _REVL_NOMEMO",
+    "            parts.append((name, key))", "        parts.sort()", "        return (\"rec\", tuple(sorted(parts)))",
+    "    if callable(v) or getattr(v, \"__dict__\", None):", "        return _REVL_NOMEMO",
+    "    slots = getattr(type(v), \"__slots__\", None)",     "    if slots == ():", "        return (\"adt\", type(v).__name__)",
+    "    if slots == (\"value\",):", "        key = _revl_memo_key(v.value)",
+    "        if key is _REVL_NOMEMO:", "            return _REVL_NOMEMO", "        return (\"adt\", type(v).__name__, key)",
+    "    return _REVL_NOMEMO", ""]
+}
+
+fn emit_memo_wrapper(name: Str, params: List[Any]) -> List[Str] {
+  let args = fn_params(params)
+  let inner = "_revl_uncached_".concat(name)
+  var out = [`def ${name}(${args}):`, "    \"\"\"item 310 `cache pure`: memoized on the structural args key.\"\"\"",
+    `    _revl_k = _revl_memo_key((${py_repr(name)}${if (args == "") { "" } else { ", " }}${args},))`,
+    "    if _revl_k is _REVL_NOMEMO:", `        return ${inner}(${args})`,
+    "    _revl_v = _REVL_MEMO.get(_revl_k, _REVL_MISS)", "    if _revl_v is _REVL_MISS:",
+    `        _revl_v = ${inner}(${args})`, "        _REVL_MEMO[_revl_k] = _revl_v", "    return _revl_v", ""]
+  return out
+}
+
 // `_emit_functions`: each module fn as a Python `def`, blank-line separated.
 fn emit_functions(functions: List[Any]) -> List[Str] {
   var out = []
   for (fnode of functions) {
     let name = mangle(value_str(value_field(fnode, "name")))
     let params = fn_params(value_list(value_field(fnode, "params")))
-    out = out.push(`def ${name}(${params}):`)
+    let memoized = is_cache_pure_fn(fnode)
+    let body_name = memoized ? "_revl_uncached_".concat(name) : name
+    out = out.push(`def ${body_name}(${params}):`)
     let body = value_list(value_field(fnode, "body"))
     if (body.length() == 0) { out = out.push(line(1, "pass")) }
     for (s of body) { out = out.concat(fn_stmt(s, 1)) }
     out = out.push("")
+    if (memoized) { out = out.concat(emit_memo_wrapper(name, value_list(value_field(fnode, "params")))) }
   }
   return out
 }
@@ -2297,6 +2334,9 @@ pub fn emit_py_src(ir: Any) -> Str {
     }
   }
   if (uses_float_interp(ir)) { out = out.concat(ftoa_block()) }
+  var has_cache_pure = false
+  for (f of value_list(value_field(ir, "functions"))) { if (is_cache_pure_fn(f)) { has_cache_pure = true } }
+  if (has_cache_pure) { out = out.concat(memo_source()) }
   // Built-in Result classes (gated), each suppressed if a user variant case
   // shadows the name.
   let types = value_field(ir, "types")

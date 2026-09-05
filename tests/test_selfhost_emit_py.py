@@ -179,6 +179,7 @@ CORPUS = [
     # function that does not exist — the self-host could not compile a program
     # that BUILDS a Result. Added red on both stages.
     "adt.rvl",
+    "cache_pure.rvl",
 ]
 
 
@@ -277,6 +278,16 @@ def test_selfhosted_emitter_optional_chains_run(emitted):
     assert ns["joined"]({"k": ["a", "b"]}, "k", "+") == "a+b"
     assert ns["joined"]({"k": ["a", "b"]}, "k", None) == "a-b"
     assert ns["joined"]({}, "k", "+") is None
+
+
+def test_selfhosted_cache_pure_functions_execute_through_memo_wrapper(emitted):
+    ir = compile_files([str(CORPUS_DIR / "cache_pure.rvl")])
+    ns: dict = {}
+    exec(compile(emitted["emit_py_src"](ir), "cache_pure_emitted.py", "exec"), ns)
+    assert ns["twice"](4) == 8
+    assert ns["cached_record"]({"x": 2, "y": 5}) == 7
+    assert "_revl_uncached_twice" in ns
+    assert ns["twice"] is not ns["_revl_uncached_twice"]
 
 
 def test_selfhosted_emitter_lowers_components_and_services(emitted):
