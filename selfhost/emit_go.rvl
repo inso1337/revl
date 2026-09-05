@@ -139,7 +139,7 @@ use "../stdlib/str.rvl" { split_top, rstrip, trim, str_tab }
 // The list kit (item 194): `list_sort` is the codepoint-lexicographic `sorted(..)`
 // the reference uses to canonicalise a record's field set into a `record_by_fields`
 // key — no re-hand-roll (byte-fuzz-pinned against Python `sorted()`).
-use "../stdlib/list.rvl" { list_sort }
+use "../stdlib/list.rvl" { list_sort, list_contains }
 
 // ------------------------------------------------- host formatting (kept @py)
 // A single tab / newline byte — the one genuine U+0009 / U+000A. Go indents with
@@ -305,12 +305,16 @@ type Ctx = {
   vt: Map[Str, Str], fr: Map[Str, Str], er: Map[Str, Str],
   signatures: List[Any],
   ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
+  variants: List[Str],
   rt: Str, builders: Map[Str, Str], builder_seq: Int
 }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds one `_V3GoCtx` for the function list,
 // reusing the same type tables).
-type TypeTables = { ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str] }
+type TypeTables = {
+  ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
+  variants: List[Str]
+}
 // A statement-emission result: the lines produced AND the threaded ctx, since
 // revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
 // is visible to every later statement (the reference mutates one `ctx`).
@@ -323,7 +327,7 @@ fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
   return {
     vt: ctx.vt.set(k, v), fr: ctx.fr, er: ctx.er,
     signatures: ctx.signatures,
-    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, rt: ctx.rt,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants, rt: ctx.rt,
     builders: ctx.builders, builder_seq: ctx.builder_seq
   }
 }
@@ -344,6 +348,7 @@ fn build_type_tables(types: Any) -> TypeTables {
   var cp: Map[Str, Str] = Map.empty()
   var rbf: Map[Str, Str] = Map.empty()
   var rf: Map[Str, Str] = Map.empty()
+  var variants: List[Str] = []
   for (name of value_keys(types)) {
     let spec = value_field(types, name)
     let kind = value_str(value_field(spec, "kind"))
@@ -357,6 +362,7 @@ fn build_type_tables(types: Any) -> TypeTables {
       }
     }
     if (kind == "variant") {
+      variants = variants.push(name)
       for (case of value_list(value_field(spec, "cases"))) {
         let cn = value_str(value_field(case, "name"))
         let payload = value_field(case, "payload")
@@ -365,7 +371,7 @@ fn build_type_tables(types: Any) -> TypeTables {
       }
     }
   }
-  return { ca: ca, cp: cp, rbf: rbf, rf: rf }
+  return { ca: ca, cp: cp, rbf: rbf, rf: rf, variants: variants }
 }
 
 // `_V3GoCtx.record_type_for_fields`: a record literal's nominal struct type, from
@@ -917,8 +923,35 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
     }
   }
   if (exp_t == "") { exp_t = "any" }
+  // Concrete Go values cannot be type-switch operands; evaluate and discard
+  // the scrutinee before the wildcard body instead.
+  if (st != "" && st != "any" && !list_contains(ctx.variants, st)) {
+    for (arm of arms) {
+      if (value_str(value_field(arm, "pattern")) == "_") {
+        var direct = [`func() ${exp_t} {`]
+        let bind = value_str(value_field(arm, "bind"))
+        var armctx = ctx
+        if (bind != "" && bind != "_") {
+          armctx = set_vt(ctx, bind, st)
+          direct = direct.push(line(1, `${v3_ident(bind)} := ${scrutinee}`))
+          direct = direct.push(line(1, `_ = ${v3_ident(bind)}`))
+        } else {
+          direct = direct.push(line(1, `_ = ${scrutinee}`))
+        }
+        direct = direct.push(line(1, `return ${render_expr(value_field(arm, "body"), armctx, expected)}`))
+        direct = direct.push("}()")
+        return direct.join(newline())
+      }
+    }
+  }
   var lines = [`func() ${exp_t} {`]
-  lines = lines.push(line(1, `switch _m := ${scrutinee}.(type) {`))
+  var switch_operand = scrutinee
+  if (node_kind(scrut_node) != "var" && node_kind(scrut_node) != "name") {
+    let iface_t = st == "" ? "any" : go_type(st)
+    lines = lines.push(line(1, `var _s ${iface_t} = ${scrutinee}`))
+    switch_operand = "_s"
+  }
+  lines = lines.push(line(1, `switch _m := ${switch_operand}.(type) {`))
   var hasWild = false
   for (arm of arms) {
     let pattern = value_str(value_field(arm, "pattern"))
@@ -933,7 +966,7 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
       lines = lines.push(line(1, `case ${v3_ident(adt)}${pattern}:`))
       let bindn = value_field(arm, "bind")
       var armctx = ctx
-      if (!value_is_null(bindn) && value_str(bindn) != "") {
+      if (!value_is_null(bindn) && value_str(bindn) != "" && value_str(bindn) != "_") {
         let bind = value_str(bindn)
         armctx = set_vt(ctx, bind, map_get(ctx.cp, pattern))
         lines = lines.push(line(2, `${v3_ident(bind)} := _m.Value`))
@@ -1067,7 +1100,7 @@ fn builder_safe(node: Any, name: Str) -> Bool {
 fn with_builders(ctx: Ctx, builders: Map[Str, Str], seq: Int) -> Ctx {
   return {
     vt: ctx.vt, fr: ctx.fr, er: ctx.er, signatures: ctx.signatures,
-    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, rt: ctx.rt,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, variants: ctx.variants, rt: ctx.rt,
     builders: builders, builder_seq: seq
   }
 }
@@ -1358,7 +1391,7 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
     let rt = value_str(value_field(fnode, "returns"))
-    let ctx = { vt: vt, fr: fr, er: er, signatures: signatures, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, rt: rt, builders: Map.empty(), builder_seq: 0 }
+    let ctx = { vt: vt, fr: fr, er: er, signatures: signatures, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, rt: rt, builders: Map.empty(), builder_seq: 0 }
     var ps = []
     for (p of params) {
       ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"))}`)
@@ -1585,7 +1618,7 @@ fn typed_ctx() -> Ctx {
   rbf = rbf.set("x,y", "Point")
   return {
     vt: Map.empty(), fr: Map.empty(), er: Map.empty(),
-    ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), rt: "", signatures: [],
+    ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), variants: ["Tree"], rt: "", signatures: [],
     builders: Map.empty(), builder_seq: 0
   }
 }

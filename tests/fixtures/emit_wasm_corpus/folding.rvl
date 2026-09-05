@@ -1,6 +1,9 @@
 fn sum() -> Int { return 2 + 3 }
 fn difference() -> Int { return 2 - 3 }
 fn product() -> Int { return 2 * 3 }
+fn sum32() -> Int32 { return 2.to_int32() + 3.to_int32() }
+fn difference32() -> Int32 { return 2.to_int32() - 3.to_int32() }
+fn product32() -> Int32 { return 2.to_int32() * 3.to_int32() }
 fn zeroProduct() -> Int { return 0 * 3 }
 fn negativeProduct() -> Int { return -2 * 3 }
 fn overflowingSum() -> Int { return 9223372036854775807 + 1 }
