@@ -21,79 +21,62 @@
   ],
   "go": {
     "blind": {
-      "declared out of the slice by the oracle's own docstring: Float (excluded from interpolation and from arithmetic) and the stdlib surface that carries `.to_int()` widening.": [
-        "widen=Float",
-        "widen=Int"
+      "General Str/List/Map stdlib and checked-division helpers are explicitly deferred by the Go oracle/scaffold. Arithmetic conversion builtins are handled separately and covered; those do not supply length/concat/collection helper bodies or Map/Result preambles.": [
+        "kind=builtin",
+        "method=concat"
       ],
-      "declared out of the slice by the oracle's own docstring: the built-in Opt/Result/Map surface, `??` included.": [
-        "op=??"
-      ],
-      "declared out of the slice by the oracle's own docstring: the go LIVE-COMPONENT world - a component routes to the v1/v2 stc-go runtime, not through this emitter, so its dialect expression kinds are unreachable here.": [
-        "kind=if",
+      "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
         "kind=name"
+      ],
+      "Builtin Opt/Result constructors, matching, coalescing and optional chaining need the absent tagged generic preambles/payload renderer. Declared user variants are implemented and covered; the static case/name/pattern markers here refer to builtin Some/None/Ok/Err, not all ADTs.": [
+        "op=??"
       ]
     },
     "unported": {
-      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
-        "args=<true>",
-        "bind=_",
+      "Builtin Opt/Result constructors, matching, coalescing and optional chaining need the absent tagged generic preambles/payload renderer. Declared user variants are implemented and covered; the static case/name/pattern markers here refer to builtin Some/None/Ok/Err, not all ADTs.": [
         "case=Err",
         "case=None",
         "case=Ok",
         "case=Some",
-        "class=witnessed",
-        "components=<true>",
-        "config=<true>",
-        "else=<true>",
-        "event=<true>",
-        "fn=Map.new",
-        "has_config=<true>",
-        "idempotent=<true>",
-        "kind=bool",
-        "kind=builtin",
-        "kind=config",
-        "kind=fn",
-        "kind=format",
-        "kind=hole",
-        "kind=host",
-        "kind=instance-get",
-        "kind=int",
-        "kind=len",
-        "kind=maplit",
         "kind=optcall",
         "kind=optfield",
-        "kind=record_update",
-        "kind=req",
-        "kind=spawn",
-        "kind=str",
-        "kind=stream-merge",
-        "kind=subscribe",
-        "lifecycle=<true>",
-        "method=checked_div_trunc",
-        "method=concat",
-        "method=length",
-        "method=next",
-        "method=push",
-        "method=set",
-        "mode=every",
-        "name=<true>",
         "name=Err",
         "name=None",
         "name=Ok",
         "name=Some",
-        "name=length",
-        "op=!==",
-        "op====",
-        "operands=Float",
         "pattern=Err",
         "pattern=None",
         "pattern=Ok",
-        "pattern=Some",
-        "secret_witness=<true>",
-        "stages=<true>",
-        "step=<true>",
+        "pattern=Some"
+      ],
+      "Witnessed effects require component method/activation frames and WAL inverse descriptors. Their witness and secret-witness handling is outside the pure module port; roadmap 421F6 still tracks runtime redaction separately from ordinary Secret extern return wrapping.": [
+        "class=witnessed",
+        "secret_witness=<true>"
+      ],
+      "General Str/List/Map stdlib and checked-division helpers are explicitly deferred by the Go oracle/scaffold. Arithmetic conversion builtins are handled separately and covered; those do not supply length/concat/collection helper bodies or Map/Result preambles.": [
+        "fn=Map.new",
+        "kind=len",
+        "kind=maplit",
+        "method=checked_div_trunc",
+        "method=length",
+        "method=push",
+        "method=set",
+        "name=length"
+      ],
+      "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope.": [
+        "has_config=<true>",
+        "idempotent=<true>",
+        "kind=config",
+        "kind=host",
+        "kind=instance-get",
+        "kind=req",
+        "kind=spawn",
+        "kind=stream-merge",
+        "kind=subscribe",
+        "lifecycle=<true>",
+        "method=next",
+        "mode=every",
         "step=advance",
-        "step=assert_no_residue",
         "step=await",
         "step=call",
         "step=effect",
@@ -107,11 +90,30 @@
         "step=timer",
         "step=unload",
         "step=var",
-        "subscribe=<true>",
-        "value=<true>"
+        "subscribe=<true>"
       ],
-      "item 421 F6 CROSSED TIERS AND THE PORT DID NOT FOLLOW - a live 429(d) recurrence, verified in source on this branch. backends/typescript/emit.py now mentions `secret` 17 times and backends/go/emit.py 20 times, marking `Secret[T]` at both ends; selfhost/emit_ts.rvl and selfhost/emit_go.rvl mention it ZERO times, and neither tier's corpus contains a single `Secret[`, so both oracles are green over a self-hosted emitter that DOES NOT REDACT. This falsifies the (5) sibling survey in the roadmap, which recorded on 2026-09-02 that the marking was python-tier only. Recorded, not fixed: porting it is 421 F6 cross-tier work, and the corpus family must be added FIRST and seen to fail, per exit (3).": [
+      "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
+        "kind=bool",
+        "kind=fn",
+        "kind=format",
+        "kind=int",
+        "kind=str"
+      ],
+      "Unresolved holes are rejected by the reference's pre-emission _refuse_holes pass; successful source corpus documents cannot exercise hole emission.": [
+        "kind=hole"
+      ],
+      "The Go reference explicitly raises for v3 record_update; this is a backend refusal, not a missing supported port corpus family.": [
+        "kind=record_update"
+      ],
+      "parser._CANONICAL_OPS rewrites source ===/!== to ==/!= before typed IR; ordinary equality is covered, while these compatibility aliases cannot be selected by a source corpus document.": [
+        "op=!==",
+        "op===="
+      ],
+      "Surviving service/config/extern secret markings select runtime redaction through _declares_secret only after Go's pure-module early return. The corpus already covers a Secret extern return wrapper, but it does not establish parameter/call-descriptor or secret-witness WAL redaction parity (roadmap 421F6).": [
         "secret=<true>"
+      ],
+      "Lifecycle fault/teardown harness assertion checks runtime residue; in-file lifecycle tests and the live component teardown ABI are outside emit_go.rvl.": [
+        "step=assert_no_residue"
       ]
     }
   },
@@ -405,60 +407,32 @@
   },
   "wasm": {
     "blind": {
-      "declared out of the slice by the oracle's own docstring: Float end to end, and `.to_int()` widening (which arrives as a `builtin`, itself excluded).": [
-        "operands=Float",
-        "widen=Int"
+      "parser._CANONICAL_OPS rewrites source ===/!== to ==/!= before typed IR. Compatibility aliases remain in cmp_suffix, but canonical source equality already exercises ==/!=.": [
+        "op=!==",
+        "op===="
+      ],
+      "Tagged reads are explicitly deferred: coalescing and match require tag/payload loads and arm binding. WASM tagged construction is covered; it does not implement the match wildcard/Any-payload inference paths.": [
+        "op=??"
+      ],
+      "The WASM reference explicitly rejects operands=Float and Float-valued module types. Source / yields Float (including Int/Int), so its legacy integer WAT instruction entry is not evidence of supported source division; named integer division builtins are a separate covered family.": [
+        "operands=Float"
       ]
     },
     "unported": {
-      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
-        "args=<true>",
+      "Live component activation/provide/job/spawn/resource and witnessed undo ABI is implemented by the separate _ComponentEmitter, which the module-only selfhost port does not instantiate. This includes teardown/transactional frames and secret-witness WAL metadata; runtime redaction remains a separate roadmap 421F6 boundary.": [
         "async=<true>",
-        "bind=<true>",
         "class=witnessed",
-        "config=<true>",
-        "else=<true>",
         "fn=Job.run",
-        "kind=__wat",
-        "kind=arrow",
         "kind=bracket",
         "kind=compensation",
         "kind=config",
-        "kind=fn",
-        "kind=format",
-        "kind=hole",
         "kind=host",
-        "kind=if",
         "kind=instance-get",
-        "kind=interp",
-        "kind=maplit",
-        "kind=match",
-        "kind=name",
-        "kind=optcall",
-        "kind=optfield",
-        "kind=record_update",
         "kind=req",
         "kind=spawn",
         "kind=transactional",
         "lifecycle=<true>",
-        "method=codepoint_at",
         "method=dispose",
-        "method=has",
-        "method=indexOf",
-        "method=join",
-        "method=keys",
-        "method=lookup",
-        "method=remove",
-        "method=set",
-        "method=size",
-        "method=split",
-        "name=length",
-        "op=!==",
-        "op=/",
-        "op====",
-        "op=??",
-        "pattern=_",
-        "payload_type=Any",
         "secret_witness=<true>",
         "step=await",
         "step=effect",
@@ -467,6 +441,48 @@
         "step=provide",
         "subscribe=<true>",
         "witness=Str"
+      ],
+      "Internal pre-lowered WAT node injected by _ComponentEmitter._to_v3/_delegate, not a frontend source construct. Pure modules render source expressions directly and never enter this component bridge.": [
+        "kind=__wat"
+      ],
+      "Inline arrow/capture lowering is explicitly deferred by the selfhost oracle, and escaping function values/declared function-type signatures are refused by the WASM MVP reference. The kind=fn spelling also serves legacy component calls, unlike canonical v3 callee nodes.": [
+        "kind=arrow",
+        "kind=fn"
+      ],
+      "Interpolation and indexOf/join/split demand helper bodies absent from the selfhost preamble and are explicit oracle deferrals. Component format is the older $0-template encoding rewritten to interp; ordinary binary Str concatenation is covered.": [
+        "kind=format",
+        "kind=interp",
+        "method=indexOf",
+        "method=join",
+        "method=split"
+      ],
+      "The reference's pre-emission _refuse_holes pass rejects unresolved holes; accepted source corpus documents contain no hole emission.": [
+        "kind=hole"
+      ],
+      "Map literals and Map stdlib operations are explicitly refused by _V3Emitter rather than lowered by this backend; corresponding helper dispatch entries are not evidence of a supported source family.": [
+        "kind=maplit",
+        "method=has",
+        "method=keys",
+        "method=lookup",
+        "method=remove",
+        "method=set",
+        "method=size"
+      ],
+      "Tagged reads are explicitly deferred: coalescing and match require tag/payload loads and arm binding. WASM tagged construction is covered; it does not implement the match wildcard/Any-payload inference paths.": [
+        "kind=match",
+        "pattern=_",
+        "payload_type=Any"
+      ],
+      "Legacy component reference spelling consumed by _ComponentEmitter; canonical pure source references lower to kind=var. This syntax-census mismatch does not mean variable reads are unsupported.": [
+        "kind=name"
+      ],
+      "The WASM reference explicitly rejects record update and optional field/call chaining. Plain records/field reads and Opt construction are covered but do not provide these operations.": [
+        "kind=optcall",
+        "kind=optfield",
+        "kind=record_update"
+      ],
+      "The WASM reference explicitly rejects operands=Float and Float-valued module types. Source / yields Float (including Int/Int), so its legacy integer WAT instruction entry is not evidence of supported source division; named integer division builtins are a separate covered family.": [
+        "op=/"
       ]
     }
   }

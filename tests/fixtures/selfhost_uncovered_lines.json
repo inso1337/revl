@@ -26,182 +26,246 @@
   ],
   "reference": {
     "go": {
-      "statements": 4020,
+      "statements": 4057,
+      "uncovered_statements": 2885,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+        "JSON-file command-line entry and output writing are not entered by the in-process emit(ir) oracle.": {
+          "<module>": 1,
+          "main": 10
+        },
+        "Live-component binding environment: _emit_component/_emit_provide_impl construct _Env to resolve Apply receiver fields, requires, config and context; pure _emit_v3_go uses _V3GoCtx instead. The module-only port deliberately has no stc-go activation/provide ABI.": {
           "_Env.__init__": 7,
           "_Env._prefix": 1,
           "_Env.config_ref": 2,
           "_Env.ctx_ref": 1,
           "_Env.name_ref": 7,
           "_Env.req_ref": 1,
-          "_acquire_value_go_type": 17,
           "_bind_field": 1,
           "_bind_is_ptr": 1,
           "_bind_star": 1,
-          "_body_needs_frame": 12,
-          "_call_descriptor": 15,
-          "_collect_host_calls": 10,
           "_collect_refs": 10,
-          "_comp_builtin": 57,
-          "_comp_infer": 60,
-          "_component_config_fields": 4,
-          "_component_has_config": 4,
-          "_config_fields_flag": 1,
-          "_construction_case": 15,
-          "_dedup_colour_erased_poly_externs._rewrite": 6,
-          "_default_lit": 6,
+          "_host_of_bind": 1,
+          "_lower_camel": 2,
+          "_req_field": 1,
+          "_safe_local": 9,
+          "_service_of_req": 1
+        },
+        "Remaining raise rejects anonymous field sets with no unique declared record; successful typed corpus records have a unique layout.": {
+          "_V3GoCtx.record_type_for_fields": 1
+        },
+        "stc-go component activation and provided-service implementation, including host acquisition/stubs and runtime imports. emit returns through _emit_v3_go for corpus modules before constructing these runtime sections; emit_go.rvl explicitly excludes components/services/provide/host effects.": {
+          "_acquire_value_go_type": 17,
+          "_collect_host_calls": 10,
           "_emit_component": 85,
           "_emit_component_step": 124,
-          "_emit_config_struct": 18,
+          "_emit_host_stubs": 12,
+          "_emit_method_body": 56,
+          "_emit_provide_impl": 37,
+          "_emit_services": 16,
+          "_host_runtime": 10,
+          "_host_type_of_acquire": 9,
+          "_method_ret": 1,
+          "_method_returns_value": 1,
+          "_needs_sync": 1
+        },
+        "Component effect/undo frame and witnessed-WAL emission: activation/provide methods register inverses, pin captures and encode residue/teardown descriptors. None is a pure-function step in the accepted selfhost corpus; witnessed runtime support, including secret-witness redaction, remains outside this port.": {
+          "_body_needs_frame": 12,
+          "_call_descriptor": 15,
           "_emit_effect_step": 11,
+          "_emit_method_witnessed_step": 45,
+          "_emit_pins": 4,
+          "_emit_witnessed_step": 53,
+          "_method_body_has_compensate": 4,
+          "_method_body_has_witnessed": 4,
+          "_provide_has_method_frame": 1,
+          "_teardown_preamble": 8,
+          "_wal_referent": 3,
+          "_witnessed_extern": 5,
+          "_witnessed_result_types": 5
+        },
+        "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop.": {
+          "_bridge_decode_expr": 16,
+          "_bridge_encode_expr": 16,
+          "_emit_go_bridge": 117,
           "_emit_go_dispatch": 18,
           "_emit_go_dispatch_encode": 30,
           "_emit_go_proxy_decode": 49,
           "_emit_go_proxy_method": 15,
-          "_emit_host_stubs": 12,
-          "_emit_keys": 10,
-          "_emit_method_body": 56,
-          "_emit_method_witnessed_step": 45,
-          "_emit_pins": 4,
-          "_emit_provide_impl": 37,
+          "_emit_v3_bridge_helpers": 52,
+          "_emit_v3_placement": 197,
+          "_go_bridge_arg_expr": 4,
+          "_go_opt_inner": 4,
+          "_go_result_inner": 5,
+          "_revl_decode_fn": 1,
+          "_revl_encode_fn": 1,
+          "_v3_declared_variant": 4,
+          "emit_placement": 16
+        },
+        "Component/method expression renderer and tuple-return convention, reached from _emit_component_step/_emit_method_body, not the pure _go_v3_expr renderer. This includes legacy name/fn/format literals and component Opt/Result spreading; the selfhost module port excludes that live ABI, not the corresponding pure literals or user ADTs.": {
+          "_comp_builtin": 57,
+          "_comp_checked_div_expr": 9,
+          "_comp_infer": 60,
+          "_construction_case": 15,
           "_emit_return": 26,
-          "_emit_services": 16,
-          "_emit_v3_go_externs": 4,
-          "_emit_v3_go_tests": 17,
-          "_emit_witnessed_step": 53,
           "_expr": 160,
-          "_finite_float": 3,
-          "_flag_stream": 1,
           "_format": 50,
           "_format.flush_text": 4,
           "_go_comp_match": 52,
           "_go_comp_match_tuple": 72,
-          "_go_extern_config_bind": 5,
           "_go_literal": 13,
-          "_go_opt_inner": 4,
-          "_go_result_inner": 5,
           "_go_return": 9,
           "_go_type": 19,
-          "_go_v3_builtin": 68,
-          "_go_v3_infer_ctor": 7,
-          "_go_v3_optchain": 19,
-          "_go_v3_scan_read": 14,
           "_go_widen_int": 1,
           "_go_zero": 10,
-          "_hoist_go_imports": 4,
-          "_host_of_bind": 1,
-          "_host_runtime": 10,
-          "_host_type_of_acquire": 9,
-          "_infer_map_value_go_type": 20,
-          "_is_map_cas": 1,
-          "_is_stream_next": 7,
-          "_key_var": 1,
-          "_lower_camel": 2,
-          "_map_insert_value_types": 14,
-          "_method_body_has_compensate": 4,
-          "_method_body_has_witnessed": 4,
-          "_method_ret": 1,
-          "_method_returns_value": 1,
-          "_needs_sync": 1,
-          "_provide_has_method_frame": 1,
-          "_refuse_unlowered_stream_surface": 7,
-          "_req_field": 1,
-          "_revl_decode_fn": 1,
-          "_revl_encode_fn": 1,
-          "_safe_local": 9,
-          "_scan_step_for_inserts": 20,
-          "_service_of_req": 1,
-          "_stream_head": 4,
-          "_v3_builtin_ret_type": 34,
           "_v3_case_layout": 9,
           "_v3_case_payload": 5,
           "_v3_comp_construct": 15,
-          "_v3_declared_variant": 4,
-          "_v3_has_any": 1,
-          "_v3_is_lit": 1,
-          "_v3_own_continue": 12,
-          "_v3_record_type_for_fields": 10,
-          "_wal_referent": 3,
-          "_witnessed_extern": 5,
-          "_witnessed_result_types": 5,
-          "main": 10
+          "_v3_record_type_for_fields": 10
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "<module>": 1,
-          "_V3GoCtx.record_type_for_fields": 1,
-          "_dedup_colour_erased_poly_externs": 11,
-          "_emit_v3_go": 63,
-          "_emit_v3_go_types": 2,
-          "_go_string": 8,
-          "_go_v3_close_builders": 2,
-          "_go_v3_construct": 29,
-          "_go_v3_expr": 67,
-          "_go_v3_infer_type": 43,
-          "_go_v3_interp": 13,
-          "_go_v3_is_interface": 3,
-          "_go_v3_lit": 7,
-          "_go_v3_match": 28,
-          "_go_v3_open_builders": 8,
-          "_go_v3_self_rebind": 13,
-          "_go_v3_stmt": 17,
-          "_go_v3_type": 5,
-          "_guard_frame_neutral_loop": 1,
-          "_infer_arrow_param.walk": 3,
-          "_infer_arrow_param.walk_any": 2,
-          "_refuse_deferred_emissions": 10,
-          "_refuse_dropped_stream_component": 5,
-          "_refuse_holes": 4,
-          "_refuse_holes.walk": 1,
-          "_v3_ident": 3,
-          "_v3_len_receiver": 2,
-          "_v3_scan_loops": 1,
-          "_v3_scan_shape": 32,
-          "_v3_split_fn_type": 2,
-          "_v3_split_generic": 2,
-          "_v3_str_accumulators": 4,
-          "_v3_str_concat_pieces": 11,
-          "emit": 101
-        },
-        "declared out of every self-host slice: async coloring.": {
-          "_erase_async": 1
-        },
-        "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
-          "_emit_stc_lifecycle_tests": 128,
-          "_go_lifecycle_arg": 7,
-          "_go_lifecycle_assert": 28,
-          "_go_v3_test_name": 14
-        },
-        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
+        "Live-component config structs/defaults, service-key registration, realm load helpers and routed-require realization. These are called by component assembly, not pure function/type emission; config/provide/req/realms are outside the module-only selfhost ABI.": {
+          "_component_config_fields": 4,
+          "_component_has_config": 4,
+          "_config_fields_flag": 1,
+          "_default_lit": 6,
+          "_emit_config_struct": 18,
           "_emit_go_router_struct": 82,
+          "_emit_keys": 10,
+          "_emit_load_helpers": 27,
           "_emit_realm_helper": 21,
-          "_emit_spawn_support": 89,
-          "_emit_v3_placement": 197,
-          "_instance_get_expr": 9,
-          "_iter_spawn_nodes": 5,
-          "_realm_helper_name": 1,
-          "_spawn_expr": 9,
-          "_spawn_targets": 5,
-          "_uses_spawn": 1,
-          "emit_placement": 16
+          "_key_var": 1,
+          "_realm_helper_name": 1
         },
-        "declared out of every self-host slice: the bridge / marshalling / canonical-ABI surface.": {
-          "_bridge_decode_expr": 16,
-          "_bridge_encode_expr": 16,
-          "_emit_go_bridge": 117,
-          "_emit_v3_bridge_helpers": 52,
-          "_go_bridge_arg_expr": 4
-        },
-        "item 421 F6 CROSSED TIERS AND THE PORT DID NOT FOLLOW (a live 429(d) recurrence, verified in source). The reference now marks `Secret[T]` at both ends in the ts and go tiers; selfhost/emit_ts.rvl and selfhost/emit_go.rvl mention `secret` ZERO times and neither tier's corpus contains a single `Secret[`, so both oracles are green over a self-hosted emitter that DOES NOT REDACT. Not a triage bucket: this is a named, open security divergence. Porting it is 421 F6 cross-tier work; the corpus family goes in first and is seen to fail.": {
+        "emit calls this Secret-marking scan only after the pure-module early return, to select component record/WAL redaction. The corpus already exercises a pure extern Secret return, but service secret parameters, config secrets and secret_witness descriptors remain a separate roadmap 421F6 runtime/redaction gap; pure wrapping is not evidence of runtime parity.": {
           "_declares_secret": 16
         },
-        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
-          "_comp_checked_div_expr": 9,
-          "_emit_load_helpers": 27,
-          "_teardown_preamble": 8
+        "Remaining branches erase Async result wrappers, merge same-body async/sync polymorphic extern twins and rewrite calls to the surviving name. Async extern colour erasure is explicitly outside the Go module corpus, unlike ordinary synchronous extern bodies.": {
+          "_dedup_colour_erased_poly_externs": 11,
+          "_dedup_colour_erased_poly_externs._rewrite": 6,
+          "_erase_async": 1
+        },
+        "Spawn-handle runtime and instance-key lookup require live component acquisitions. The residual _spawn_targets/_iter_spawn_nodes branches inspect actual component let-effect spawn nodes; the empty pure-module scan runs but cannot enter those branches.": {
+          "_emit_spawn_support": 89,
+          "_instance_get_expr": 9,
+          "_iter_spawn_nodes": 5,
+          "_spawn_expr": 9,
+          "_spawn_targets": 5,
+          "_uses_spawn": 1
+        },
+        "Lifecycle test harness acquires/loads/unloads component instances and checks tuple-return service results. The selfhost oracle emits pure modules and explicitly defers lifecycle/in-file harness generation.": {
+          "_emit_stc_lifecycle_tests": 128,
+          "_go_lifecycle_arg": 7,
+          "_go_lifecycle_assert": 28
+        },
+        "Remaining assembly paths are the empty-document refusal, in-file tests, reflect structural equality, Float interpolation's ftoa helper, extern imports, and demanded Opt/Result/Map/stdlib plus integer-division helpers. Those helper-demand families are explicit Go scaffold deferrals; ordinary Float arithmetic and Int widening are covered, not excluded here.": {
+          "_emit_v3_go": 61
+        },
+        "Remaining extern paths generate config access scaffolding/bindings or reject a missing @go body. The oracle explicitly defers config-bearing externs and absent target bodies; simple synchronous body emission is already covered.": {
+          "_emit_v3_go_externs": 3,
+          "_go_extern_config_bind": 5
+        },
+        "In-file test body generation and collision-safe test export naming are omitted by emit_go.rvl's module scaffold, an explicit oracle boundary.": {
+          "_emit_v3_go_tests": 17,
+          "_go_v3_test_name": 14
+        },
+        "Remaining raises reject duplicate variant constructors and unsupported declared type kinds; valid record/variant emission is covered.": {
+          "_emit_v3_go_types": 2
+        },
+        "Remaining raise rejects NaN/infinity literal IR; source numeric literals in successful frontend documents are finite.": {
+          "_finite_float": 1
+        },
+        "Blocking component subscribe/next/merge runtime or explicit rejection of unlowered stream surfaces. _refuse_dropped_stream_component's remaining branch rejects stream-bearing components that would otherwise be skipped by pure-module routing; successful module corpus inputs contain no component stream effects.": {
+          "_flag_stream": 1,
+          "_is_stream_next": 7,
+          "_refuse_dropped_stream_component": 5,
+          "_refuse_unlowered_stream_surface": 7,
+          "_stream_head": 4
+        },
+        "Only carriage-return escaping remains: parser.parse_file normalizes literal CR to LF, and the lexer preserves backslash-r verbatim rather than interpreting it. This file-corpus input boundary cannot produce a CR string literal. Newline, tab, BMP and astral scalar escaping are covered.": {
+          "_go_string": 1
+        },
+        "General Str/List/Map stdlib helper rendering and return-type lookup remain deferred by the Go oracle; arithmetic conversions use separate covered paths. Methods such as length/concat/push/set and checked division demand omitted stdlib/Opt/Result scaffold.": {
+          "_go_v3_builtin": 68,
+          "_v3_builtin_ret_type": 34
+        },
+        "Remaining constructor paths implement deferred builtin Some/None/Ok/Err layouts, or reject unknown cases/bad arity. Covered user variants take the declared-layout branch; builtin tagged preambles are not emitted by the port.": {
+          "_go_v3_construct": 29
+        },
+        "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised.": {
+          "_go_v3_expr": 47
+        },
+        "Infers builtin Some/None/Ok/Err generic result types, whose constructors and preambles are explicitly deferred; user variant inference uses ctx.case_layout instead.": {
+          "_go_v3_infer_ctor": 7
+        },
+        "Remaining branches are malformed/unresolved inference fallbacks, deferred len/builtin/Map and builtin constructors, ambiguous-record recovery, and the late Float % fallback (the frontend rejects Float remainder). Int32 complement inference and ordinary Float arithmetic/widening are now covered.": {
+          "_go_v3_infer_type": 15
+        },
+        "Only the Float interpolation arm remains: it sets needs_ftoa and formats through revlFtoa, whose scaffold is explicitly deferred. Expression-free templates and non-Float typed interpolation are now covered.": {
+          "_go_v3_interp": 5
+        },
+        "Remaining branches are non-string type fallback and Opt/Result interface detection; declared user-variant interfaces are covered, builtin tagged families remain deferred.": {
+          "_go_v3_is_interface": 3
+        },
+        "Remaining paths handle null/None, an already-discriminated Bool fallback, or reject an unsupported literal value; ordinary Bool, numeric and string literals are covered.": {
+          "_go_v3_lit": 3
+        },
+        "Remaining scalar-wildcard payload binding is compatibility IR: source wildcard arms do not introduce that bind. Other residuals lower explicitly deferred Opt/Result cases or reject an unknown case. Scalar wildcard-only and fresh user-constructor scrutinees are now repaired and covered.": {
+          "_go_v3_match": 12
+        },
+        "Optional field/call traversal through builtin Opt payloads is not ported; the ordinary field/call paths do not provide this tag-aware behavior.": {
+          "_go_v3_optchain": 19
+        },
+        "Code-point scan-loop recognition/rendering requires Str length/charAt/charCodeAt builtin IR. Those stdlib calls and helper preambles are an explicit Go deferral; ordinary while/for and break/continue are already covered.": {
+          "_go_v3_scan_read": 14,
+          "_v3_is_lit": 1,
+          "_v3_len_receiver": 2,
+          "_v3_own_continue": 12,
+          "_v3_scan_loops": 1,
+          "_v3_scan_shape": 32
+        },
+        "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
+          "_go_v3_self_rebind": 13
+        },
+        "Remaining statements emit destructive stdlib self-rebinds, optimized code-point scans, or reject an unknown step. Their prerequisite builtin families are deferred; ordinary assignments, loops and accumulator builders are not excluded.": {
+          "_go_v3_stmt": 12
+        },
+        "Remaining type paths lower deferred Opt/Result generics or preserve an otherwise-unresolved type spelling; ordinary declared records/variants and List types are covered.": {
+          "_go_v3_type": 4
+        },
+        "Remaining raise rejects a loop carrying an effect/undo frame; successful pure-function loops are frame-neutral.": {
+          "_guard_frame_neutral_loop": 1
+        },
+        "Remaining branches parse and hoist @go import directives; extern import hoisting is an explicit byte-oracle deferral.": {
+          "_hoist_go_imports": 4
+        },
+        "Host Map acquisition/CAS type discovery scans component and provide-method bodies for insert values. This is the host-component Map ABI, not the pure Map value renderer; no component acquisition is accepted by emit_go.rvl.": {
+          "_infer_map_value_go_type": 20,
+          "_is_map_cas": 1,
+          "_map_insert_value_types": 14,
+          "_scan_step_for_inserts": 20
+        },
+        "Remaining paths install src/ for standalone CLI imports or translate an ownerless/session-commit emission error. In-process successful module emission has imports available and no invalid runtime emission.": {
+          "_refuse_deferred_emissions": 10
+        },
+        "Remaining paths find and reject an unresolved hole, or visit component service signatures looking for one. Successful frontend corpus documents contain no unresolved holes.": {
+          "_refuse_holes": 4,
+          "_refuse_holes.walk": 1
+        },
+        "Only consulted when selecting typed versus interface operands for structural equality; the reflect-based equality scaffold is explicitly deferred.": {
+          "_v3_has_any": 1
+        },
+        "Remaining raise rejects invalid/empty Go identifiers; accepted frontend names take the covered escaping path.": {
+          "_v3_ident": 1
+        },
+        "Remaining fallbacks reject a signature without a parenthesized argument list or without its closing parenthesis; canonical frontend function types are well formed.": {
+          "_v3_split_fn_type": 2
+        },
+        "Remaining accumulator recognition handles .concat builtin chains rather than the covered + chains; stdlib concat emission is an explicit Go deferral.": {
+          "_v3_str_concat_pieces": 6
+        },
+        "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return. The oracle calls emit(ir) on module-only v3 documents.": {
+          "emit": 101
         }
-      },
-      "uncovered_statements": 3007
+      }
     },
     "java": {
       "statements": 2488,
@@ -963,9 +1027,13 @@
       "uncovered_statements": 672
     },
     "wasm": {
-      "statements": 2662,
+      "statements": 2664,
+      "uncovered_statements": 1372,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+        "Command-line JSON input, output directory creation and WAT-file writing are not entered by the in-process emit(ir) oracle.": {
+          "<module>": 12
+        },
+        "The entire _ComponentEmitter is instantiated only for live components: it plans activation/provide calls, coeffect imports, spawn/instance handles, realm routing and witnessed undo/WAL custom sections. emit_wasm.rvl implements the separate pure _V3Emitter module ABI, not activation/deactivation or component service exports; even _delegate/_tail belong to that unentered component caller.": {
           "_ComponentEmitter.__init__": 60,
           "_ComponentEmitter._boundary_wty": 6,
           "_ComponentEmitter._called_names": 12,
@@ -974,6 +1042,8 @@
           "_ComponentEmitter._import_module": 1,
           "_ComponentEmitter._job_id": 8,
           "_ComponentEmitter._lower": 83,
+          "_ComponentEmitter._lower_instance_get_call": 37,
+          "_ComponentEmitter._lower_spawn": 26,
           "_ComponentEmitter._method_drain": 10,
           "_ComponentEmitter._method_undo_id": 6,
           "_ComponentEmitter._method_witnessed_step": 13,
@@ -985,8 +1055,10 @@
           "_ComponentEmitter._plan": 27,
           "_ComponentEmitter._provide": 90,
           "_ComponentEmitter._provide_prefix": 1,
+          "_ComponentEmitter._realm_sections": 15,
           "_ComponentEmitter._register_witnessed_calls": 10,
           "_ComponentEmitter._restore_function_state": 1,
+          "_ComponentEmitter._route_helpers": 35,
           "_ComponentEmitter._route_op_spec": 20,
           "_ComponentEmitter._save_function_state": 1,
           "_ComponentEmitter._scalar_operator": 24,
@@ -998,159 +1070,274 @@
           "_ComponentEmitter._wal_undo_name": 3,
           "_ComponentEmitter._witnessed_effect_step": 37,
           "_ComponentEmitter._witnessed_extern": 5,
-          "_ComponentEmitter.emit": 68,
+          "_ComponentEmitter.emit": 68
+        },
+        "Remaining paths infer an anonymous record with no matching/expected named declaration and construct its anonymous layout; this fallback is explicitly outside the selfhost record-layout subset.": {
           "_V3Emitter._anon_record": 4,
-          "_V3Emitter._call_type": 18,
-          "_V3Emitter._if_expr": 11,
-          "_V3Emitter._inline_arrow": 17,
-          "_V3Emitter._interp_expr": 20,
+          "_V3Emitter._record_type": 2
+        },
+        "Remaining paths resolve arrow-valued locals, collect capture/parameter scratch locals and inline their bodies. Inline arrows/closures are an explicit WASM oracle deferral; direct named function calls are covered.": {
+          "_V3Emitter._arrow_callee": 2,
+          "_V3Emitter._collect_arrow_locals": 7,
+          "_V3Emitter._inline_arrow": 17
+        },
+        "Remaining arms cover explicitly deferred coalescing/Float operations, invalid/void operand refusals, and legacy List +. Current frontend rejects List + (only numeric or Str +), so that compatibility branch is not a missing accepted source corpus family.": {
+          "_V3Emitter._bin_expr": 19
+        },
+        "Remaining branches are checked division, indexOf/split/join helper demand, Map operations rejected by this backend, and wrong/void receiver or unsupported-method refusals. Covered length/concat/push and arithmetic conversions must not be conflated with these precise deferred families.": {
+          "_V3Emitter._builtin_expr": 46,
+          "_V3Emitter._builtin_type": 23
+        },
+        "The remaining call paths inline a deferred arrow or raise for an indirect callee, wrong Some arity, unknown named function, wrong declared-function arity, or void argument. Expected-free Some payload inference is covered by the bare expression statement.": {
+          "_V3Emitter._call_expr": 6
+        },
+        "Remaining branches resolve deferred inline arrows or reject unknown/non-callable callees and argument-count/type mismatches; direct declared calls are covered.": {
+          "_V3Emitter._call_type": 6
+        },
+        "Remaining raises reject declared function-value types (including fields recursively containing one) or other nonlowerable types. The reference itself refuses closure-valued module signatures.": {
+          "_V3Emitter._check_type": 3
+        },
+        "Remaining scratch-local collection is for checked_div_* returning tagged Result; that builtin family is explicitly deferred.": {
+          "_V3Emitter._collect_cdiv_locals": 3
+        },
+        "Remaining continue skips an arrow-valued binding because capture locals are handled separately; inline arrow lowering is deferred.": {
+          "_V3Emitter._collect_locals": 1
+        },
+        "Tagged-value reads: match scrutinee/payload temporaries, per-arm binding/result blocks and Opt coalescing payload selection. The port constructs tagged values but explicitly defers match and ?? reads; construction coverage does not imply these helpers are ported.": {
+          "_V3Emitter._collect_match_locals": 6,
           "_V3Emitter._match_expr": 16,
           "_V3Emitter._match_expr.arm_body": 13,
           "_V3Emitter._match_expr.arm_scope": 15,
           "_V3Emitter._nullish_expr": 15,
           "_V3Emitter._nullish_type": 4,
-          "_V3Emitter._opt_payload": 4,
-          "_assert_imports_within_requires": 3,
-          "_dedup_colour_erased_poly_externs._rewrite": 6,
-          "_emit_extern_func": 17,
-          "_extern_wasm_body": 2,
-          "_f64_literal": 1,
-          "_finite_float": 3,
-          "_format_parts": 20,
-          "_is_scalar_type": 1,
-          "_wat_string": 1
+          "_V3Emitter._opt_payload": 4
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "<module>": 12,
-          "_V3Emitter._arrow_callee": 2,
-          "_V3Emitter._bin_expr": 28,
-          "_V3Emitter._builtin_expr": 52,
-          "_V3Emitter._builtin_type": 52,
-          "_V3Emitter._call_expr": 17,
-          "_V3Emitter._check_type": 3,
-          "_V3Emitter._collect_arrow_locals": 7,
-          "_V3Emitter._collect_cdiv_locals": 3,
-          "_V3Emitter._collect_locals": 1,
-          "_V3Emitter._collect_match_locals": 6,
-          "_V3Emitter._collect_string_literals": 1,
-          "_V3Emitter._collect_string_literals.walk": 7,
-          "_V3Emitter._declare_local": 1,
-          "_V3Emitter._diverges": 2,
-          "_V3Emitter._emit_for": 1,
-          "_V3Emitter._emit_function": 8,
-          "_V3Emitter._emit_stmts": 16,
-          "_V3Emitter._expr": 22,
-          "_V3Emitter._field_expr": 4,
-          "_V3Emitter._fresh_tmp": 2,
-          "_V3Emitter._guard_frame_neutral_loop": 1,
-          "_V3Emitter._index_expr": 4,
-          "_V3Emitter._infer_type": 54,
-          "_V3Emitter._len_expr": 1,
-          "_V3Emitter._list_expr": 1,
-          "_V3Emitter._list_type": 4,
-          "_V3Emitter._make_tagged": 1,
-          "_V3Emitter._record_expr": 2,
-          "_V3Emitter._record_fields": 1,
-          "_V3Emitter._record_type": 2,
-          "_V3Emitter._str_ptr": 1,
-          "_V3Emitter._tag_of": 1,
-          "_V3Emitter._tagged_layout": 2,
-          "_V3Emitter._un_expr": 5,
-          "_V3Emitter._unsupported_comments": 2,
-          "_V3Emitter.emit": 13,
-          "_bin_instr": 2,
-          "_dedup_colour_erased_poly_externs": 14,
-          "_emit_v3": 6,
-          "_fold_int_const": 1,
-          "_ident": 1,
-          "_is_fn_type": 10,
-          "_refuse_deferred_emissions": 10,
-          "_refuse_float_operands": 1,
-          "_refuse_holes": 4,
-          "_refuse_holes.walk": 1,
-          "_top_level_funcs": 4,
-          "emit": 3,
-          "prune_unreachable_funcs": 2,
-          "test_export_names": 10
+        "Remaining loop pools extra component descriptor strings passed by component planning; pure function literals use the covered tree traversal.": {
+          "_V3Emitter._collect_string_literals": 1
         },
-        "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
-          "_refuse_fault_tests": 2,
-          "_refuse_lifecycle_tests": 2
+        "Remaining literal-pool branches collect checked-division error text and interpolation/legacy-format text; checked division and interpolation are deferred, and format is component vocabulary.": {
+          "_V3Emitter._collect_string_literals.walk": 7
         },
-        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
-          "_ComponentEmitter._lower_instance_get_call": 37,
-          "_ComponentEmitter._lower_spawn": 26,
-          "_ComponentEmitter._realm_sections": 15
+        "Remaining raise rejects rebinding one emitted local name at incompatible WASM widths; valid typed source locals retain their declared width.": {
+          "_V3Emitter._declare_local": 1
         },
-        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
-          "_ComponentEmitter._route_helpers": 35,
+        "Remaining false returns handle empty/nondiverging typed bodies. The caller asks this only for non-Unit result functions; frontend return checking rejects those fall-through bodies, while Unit functions bypass the check.": {
+          "_V3Emitter._diverges": 2
+        },
+        "Remaining raise rejects a for-of receiver that is not List; frontend typing enforces List iteration.": {
+          "_V3Emitter._emit_for": 1
+        },
+        "Residual declarations allocate locals for deferred match bindings/scrutinees and inline arrows; test_mode appends its success result. The empty non-Unit body fallback is a defensive path: frontend return checking rejects such functions. Empty Unit source is covered and emits nop, not unreachable.": {
+          "_V3Emitter._emit_function": 6
+        },
+        "Remaining branches capture deferred arrow-valued lets or reject undeclared assignment, void binding, bare typed return, loop control outside a loop and unknown steps. Ordinary loops and scalar/local statements are covered.": {
+          "_V3Emitter._emit_stmts": 14
+        },
+        "Remaining expression paths are malformed/unbound/unsupported literals, component-injected __wat, Float, interpolation/tagged reads, and explicit refusals of escaping arrow values, Map, optional chaining and record update.": {
+          "_V3Emitter._expr": 18
+        },
+        "Remaining paths accept legacy .length IR or reject nonrecord, absent and void fields. Current source List/Str length calls lower through len/builtin, not this legacy field spelling.": {
+          "_V3Emitter._field_expr": 4
+        },
+        "Remaining raise rejects effect-frame-bearing loops; successful module loops are pure/frame-neutral.": {
+          "_V3Emitter._guard_frame_neutral_loop": 1
+        },
+        "Demand-generated Float formatting and k-ary string concatenation are selected by interpolation. All WASM interpolation is explicitly deferred; ordinary binary Str + uses the covered two-argument helper.": {
           "_V3Emitter._helper_f64_to_str": 1,
           "_V3Emitter._helper_str_concat_n": 18,
+          "_V3Emitter._interp_expr": 20
+        },
+        "These helper text generators are demanded only by indexOf/join/split; the selfhost scaffold lacks those helpers and the oracle explicitly excludes those methods.": {
           "_V3Emitter._helper_str_index_of": 1,
           "_V3Emitter._helper_str_join": 1,
           "_V3Emitter._helper_str_split": 1
         },
-        "the v1/v2 live-component path: a component routes to the older runtime, not through the v3 emitter the self-host mirrors.": {
-          "_emit_v1": 14
+        "Remaining raises reject unequal branch result types or void conditional results; successful frontend conditionals have compatible value branches.": {
+          "_V3Emitter._if_expr": 2
+        },
+        "Remaining Str-index compatibility branch cannot be produced by current source (Str [...] is rejected in favor of charAt); other residuals reject non-List receivers or void elements.": {
+          "_V3Emitter._index_expr": 4
+        },
+        "Remaining inference includes deferred coalescing/interpolation/match/Float/component __wat, legacy List + and Str index rejected by today's frontend, and malformed/unbound/unsupported kinds and type errors. Expected-free user ADT inference is now covered.": {
+          "_V3Emitter._infer_type": 41
+        },
+        "Remaining raise rejects len on a non-List/non-Str receiver; canonical frontend len nodes carry supported collection types.": {
+          "_V3Emitter._len_expr": 1
+        },
+        "Remaining raises reject void list elements, empty lists without an expected type, or heterogeneous element types. Valid typed lists use the covered allocation/layout paths.": {
+          "_V3Emitter._list_expr": 1,
+          "_V3Emitter._list_type": 3
+        },
+        "Remaining raises reject an absent tagged layout or a case absent from that layout; accepted constructor nodes name declared/builtin cases.": {
+          "_V3Emitter._make_tagged": 1,
+          "_V3Emitter._tag_of": 1
+        },
+        "Remaining raises reject missing or void-valued record fields; frontend record checking supplies all declared nonvoid fields.": {
+          "_V3Emitter._record_expr": 2
+        },
+        "Remaining negative lookups return no layout for nonrecord/nonvariant type declarations; valid typed allocation callers provide the corresponding record/tagged type.": {
+          "_V3Emitter._record_fields": 1
+        },
+        "Remaining raise is an internal invariant failure: a rendered string literal was not pooled by the preceding literal collection pass.": {
+          "_V3Emitter._str_ptr": 1
+        },
+        "Only the negative lookup for a nonvariant, non-Opt/Result type remains. The no-expected-type lookup is covered by bare Some; typed tagged constructors supply a valid tagged layout.": {
+          "_V3Emitter._tagged_layout": 1
+        },
+        "Remaining raises reject void operands and unsupported unary operators; canonical numeric negation, Bool not and Int32 complement are covered.": {
+          "_V3Emitter._un_expr": 2
+        },
+        "Extern @wasm body lookup/emission and comments for missing bodies are explicitly deferred by the module oracle; source-defined functions do not exercise raw-WAT extern handling.": {
+          "_V3Emitter._unsupported_comments": 2,
+          "_emit_extern_func": 17,
+          "_extern_wasm_body": 2
+        },
+        "Remaining assembly paths detect in-file test name collisions, emit tests/externs/missing-body comments, and append demanded interpolation/indexOf/split/join helpers. Each is an explicit scaffold deferral, not absent ordinary pure-function emission.": {
+          "_V3Emitter.emit": 13
+        },
+        "Component-only entry/ABI helpers: legacy component emission validates require imports and scalar service boundaries, rewrites $0 format templates, and encodes custom-section metadata strings. Pure modules use v3 interp/lit nodes and _wat_bytes data segments instead.": {
+          "_assert_imports_within_requires": 3,
+          "_emit_v1": 14,
+          "_format_parts": 20,
+          "_is_scalar_type": 1,
+          "_wat_string": 1
+        },
+        "Remaining None fallbacks handle unsupported comparison widths and non-Int arithmetic types; valid scalar operator combinations are covered.": {
+          "_bin_instr": 2
+        },
+        "Remaining branches merge equivalent async/sync polymorphic externs and rewrite call names after colour erasure; extern emission is outside the WASM module corpus.": {
+          "_dedup_colour_erased_poly_externs": 14,
+          "_dedup_colour_erased_poly_externs._rewrite": 6
+        },
+        "Remaining paths reject an empty document or duplicate module names and instantiate live component emitters; the selfhost oracle accepts the single pure functions module.": {
+          "_emit_v3": 6
+        },
+        "Float-valued module signatures/operands are refused by this backend. Residual Float formatting/finite-value validation is not evidence of a supported arithmetic family; _refuse_float_operands explicitly raises for operands=Float.": {
+          "_f64_literal": 1,
+          "_finite_float": 3,
+          "_refuse_float_operands": 1
+        },
+        "Remaining fallback declines folding when textual constant width disagrees with the typed operand width; canonical rendering and widening select matching widths before this call.": {
+          "_fold_int_const": 1
+        },
+        "Remaining raise rejects an invalid/empty emitted identifier; accepted frontend names satisfy the identifier grammar.": {
+          "_ident": 1
+        },
+        "Remaining signature scanner recognizes parenthesized declared function types; _check_type refuses them because this MVP module ABI has no function values.": {
+          "_is_fn_type": 10
+        },
+        "Remaining branches add src/ for standalone imports or translate invalid ownerless/session-commit emissions to EmitError. In-process successful pure documents take neither exceptional path.": {
+          "_refuse_deferred_emissions": 10
+        },
+        "Remaining raises explicitly reject fault-injection or lifecycle test harnesses unsupported by the WASM backend.": {
+          "_refuse_fault_tests": 2,
+          "_refuse_lifecycle_tests": 2
+        },
+        "Remaining traversal/raise detects unresolved holes, including service signatures; successful compiled source documents contain no holes.": {
+          "_refuse_holes": 4,
+          "_refuse_holes.walk": 1
+        },
+        "Remaining scanner paths attach the comments preceding deferred str_concatN helpers to their removable function block, skip escaped export-string characters, or terminate an EOF comment. Pure named exports do not need escaped names; noncanonical/raw-WAT text belongs to the explicitly deferred extern/component paths.": {
+          "_top_level_funcs": 4
+        },
+        "Remaining dispatch rejects nondict/unknown-version IR or routes legacy component versions to _emit_v1; the oracle uses canonical v3 pure-module documents.": {
+          "emit": 3
+        },
+        "Remaining branches retain a module with indirect/table/start edges or seed callees of unnamed exported component functions. The pure module ABI emits named exports and direct calls only.": {
+          "prune_unreachable_funcs": 2
+        },
+        "Remaining generation/uniquing of in-file test export names belongs to the explicitly deferred test harness, not normal exported source functions.": {
+          "test_export_names": 10
         }
-      },
-      "uncovered_statements": 1476
+      }
     }
   },
   "selfhost": {
     "go": {
-      "statements": 1503,
+      "statements": 1180,
+      "uncovered_statements": 84,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+        "Remaining assignments mark duplicate record field sets or duplicate variant case names as ambiguous; accepted oracle records/constructors resolve uniquely.": {
+          "build_type_tables": 2
+        },
+        "Only the let-shadow guard remains: the frontend rejects redeclaring an already-live accumulator name. Append-self and recursive appended-piece rejection are covered, preventing unsafe builder rewrites.": {
+          "builder_safe": 1
+        },
+        "Remaining recursive arm recognizes stdlib .concat accumulator chains; Go's ordinary builtin/stdlib scaffold remains explicitly deferred, whereas + chains are exercised.": {
+          "concat_pieces": 8
+        },
+        "Remaining guards mark missing @go bodies, config references/import directives and nonstandard body line separators as deferred. These exact extern boundaries are named in the oracle; ordinary target bodies and LF splitting are covered.": {
+          "emit_externs": 4,
+          "extern_body_defer": 3,
+          "has_extra_linebreak": 1,
+          "is_extra_linebreak": 3
+        },
+        "Remaining fallback marks an unsupported declared type kind; supported record/variant definitions take the covered branches.": {
+          "emit_v3_types": 1
+        },
+        "Remaining branch unwraps Async[T]; asynchronous extern colour erasure is excluded from the synchronous Go module corpus.": {
+          "erase_async": 1
+        },
+        "Generated Python inlines these tiny RVL helpers into emitter call sites; their substituted bodies execute while the retained definitions do not. Any residual named calls occur only in the RVL file's own unit-test functions, which are outside the corpus emitter entry point.": {
           "flags_or": 1,
           "is_addsubmul": 1,
           "is_builtin_ctor": 1,
           "is_eq_op": 1,
           "is_scalar": 1,
-          "json_tag": 1,
+          "json_tag": 1
+        },
+        "Remaining equality aliases ===/!== are normalized by the frontend to ==/!=; final empty return is the unknown-operator fallback, not missing ordinary equality.": {
+          "go_bin_op": 3
+        },
+        "Remaining generic branches lower builtin Opt/Result types whose preambles and constructors are explicitly deferred.": {
+          "go_type": 3
+        },
+        "Remaining branches mark null and unsupported literal-value IR; accepted scalar source literals use the covered paths.": {
+          "go_v3_lit": 2
+        },
+        "Remaining branches handle null/malformed/unresolved inference, missing List element/index type, nonreference callees, an unknown left + operand, unknown operators/conditional branches, ambiguous records and unresolved constructors. The late Float % fallback is frontend-rejected; supported Int32 complement and Float arithmetic are covered.": {
+          "infer_type": 11
+        },
+        "Only name and lit postfix arms remain: name is a legacy reference spelling, and current field/List-index typing cannot produce scalar literal receivers. The call receiver arm is covered by mk().field.": {
+          "is_atomic": 2
+        },
+        "Remaining defer marker reports a record field set without a unique declared layout; successful typed record corpus cases have one.": {
+          "record_type_for_fields": 1
+        },
+        "Remaining id lookup is compatibility with older reference-node encoding; canonical v3 source references carry name.": {
+          "ref_name": 1
+        },
+        "Remaining paths mark deferred coalescing/structural equality or unknown operators. Numeric/Bool/Str operators and Float/Int widening are already covered.": {
+          "render_bin": 3
+        },
+        "Remaining branches mark component-style calls with no callee, builtin tagged constructors, or legacy call-shaped user constructors. The frontend emits user constructors as adt; builtin tagged preambles and component calls are deferred.": {
+          "render_call": 4
+        },
+        "Remaining defer marker cannot resolve a user case name; valid declared variant constructors are exercised.": {
+          "render_construct": 1
+        },
+        "Remaining paths use any for an uninferred conditional result or mark an unknown expression kind; canonical typed conditionals are supported and covered.": {
+          "render_inner": 2
+        },
+        "Only Float operands remain; they request revlFtoa, absent from the explicitly deferred Float-interpolation scaffold. Expression-free templates and non-Float typed interpolation are now exercised.": {
+          "render_interp": 3
+        },
+        "Remaining paths defer builtin Opt/Result matches, recover any/unknown scrutinee types for noncanonical inference, or bind a scalar wildcard in compatibility IR that source wildcard arms do not produce. Scalar wildcard-only and fresh user-constructor cases are now repaired and covered.": {
+          "render_match": 6
+        },
+        "Remaining marker rejects an unsupported unary operator; canonical negation/not/Int32 complement lowering is implemented.": {
+          "render_un": 1
+        },
+        "Remaining fallback handles a function-type string without canonical opening parenthesis; frontend signatures are parenthesized.": {
+          "split_fn_type": 1
+        },
+        "Context builder used only by emit_go.rvl's own unit tests; emit_src builds the production context directly. This is not an unsupported emitted construct.": {
           "typed_ctx": 9
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "arrow_param_hint": 10,
-          "build_type_tables": 2,
-          "double_pct": 1,
-          "emit_externs": 5,
-          "emit_src": 1,
-          "emit_v3_types": 1,
-          "extern_body_defer": 3,
-          "flag_walk": 5,
-          "go_bin_op": 3,
-          "go_type": 4,
-          "go_v3_lit": 7,
-          "has_extra_linebreak": 1,
-          "infer_type": 39,
-          "is_atomic": 5,
-          "is_extra_linebreak": 3,
-          "is_go_reserved": 7,
-          "is_ref_named": 1,
-          "prim_go": 1,
-          "record_type_for_fields": 1,
-          "ref_name": 1,
-          "render_arrow": 1,
-          "render_bin": 4,
-          "render_call": 3,
-          "render_construct": 1,
-          "render_expr": 2,
-          "render_field": 1,
-          "render_index": 1,
-          "render_inner": 11,
-          "render_interp": 11,
-          "render_match": 7,
-          "render_un": 8,
-          "split_fn_type": 1,
-          "v3_ident": 3,
-          "v3_stmt": 2
-        },
-        "declared out of every self-host slice: async coloring.": {
-          "erase_async": 1
+        "Remaining fallback emits an unsupported-step marker; effectful/component steps are outside the pure function module port.": {
+          "v3_stmt": 1
         }
-      },
-      "uncovered_statements": 173
+      }
     },
     "java": {
       "statements": 2033,
@@ -1623,11 +1810,13 @@
       "uncovered_statements": 349
     },
     "wasm": {
-      "statements": 1489,
+      "statements": 1245,
+      "uncovered_statements": 60,
       "uncovered": {
-        "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
+        "Generated Python substitutes these tiny RVL helper bodies at production call sites; their retained definitions are not called by emit_src. Remaining named calls are confined to the RVL file's own unit tests. This includes the executed preamble/layout logic, not an absent backend feature.": {
           "align4": 1,
           "align8": 1,
+          "helper_preamble": 1,
           "i64_hi": 1,
           "i64_lo": 1,
           "iabs": 1,
@@ -1638,45 +1827,82 @@
           "printable": 1,
           "wty": 3
         },
-        "PARTIALLY EXERCISED - the corpus DOES call this function and leaves these statements unexecuted. This is the bucket a construct table cannot see: the dispatch arm is reached, so the construct counts as covered, while the branch, error arm or fallback below it never runs.": {
-          "adt_cell_ty": 1,
-          "bin_instr": 3,
-          "builtin_type": 22,
-          "cmp_suffix": 2,
-          "const_numeral": 3,
-          "diverges": 3,
-          "emit_function": 2,
-          "emit_src": 1,
-          "emit_stmt": 2,
-          "expr_max_depth": 2,
-          "fold_const": 3,
-          "fold_numeral": 6,
-          "infer_ty": 9,
-          "infer_val_ty": 14,
-          "is_record_type": 1,
-          "list_type_of": 1,
-          "loop_control_targets": 1,
-          "names_eq": 2,
+        "Remaining fallbacks reject unsupported operators/types; integer / compatibility exists but current source / produces Float and is rejected by the WASM reference.": {
+          "bin_instr": 3
+        },
+        "Remaining empty/defer return handles methods outside the port's implemented builtin set, including explicitly deferred checked division and indexOf/split/join, or invalid receiver/method combinations.": {
+          "builtin_type": 1,
+          "render_builtin": 1
+        },
+        "Remaining ===/!== aliases are frontend-normalized to ==/!= before canonical typed IR reaches the emitters.": {
+          "cmp_suffix": 2
+        },
+        "Remaining guards reject malformed emitted constant text: missing closing parenthesis, empty/sign-only numeral, or nondigit. Valid renderer-produced integer constants satisfy this parser.": {
+          "const_numeral": 3
+        },
+        "Remaining false returns handle empty bodies, if without else and nondiverging final statements. Only non-Unit result functions invoke this query; frontend return checking rejects such fall-through typed bodies.": {
+          "diverges": 3
+        },
+        "The remaining fallback emits unreachable only for an empty non-Unit body, which frontend return checking rejects. Empty Unit source is covered and emits nop.": {
+          "emit_function": 1
+        },
+        "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.": {
+          "emit_src": 1
+        },
+        "Remaining marker reports unsupported steps outside the pure module statement set; component/effect steps require the absent runtime ABI.": {
+          "emit_stmt": 1
+        },
+        "The noninteger operand guard rejects unsupported folding types. The Int32 bounds assignments require two emitted i32.const operands, but source integer literals are Int and to_int32 emits a checked narrowing call; the existing Int32 addition corpus therefore exits at const_numeral failure before these assignments. This is unreachable from the current source-to-WAT path, not missing Int32 arithmetic support.": {
+          "fold_const": 3
+        },
+        "Remaining no-signature record handles an unknown callee; frontend direct calls resolve a declared function.": {
+          "function_sig": 1
+        },
+        "Remaining widening=Int branch is intercepted by infer_val_ty before delegation; other fallbacks are unsupported literal/unary/kind and Float operand paths rejected by reference validation.": {
+          "infer_ty": 5
+        },
+        "Remaining Str/Bytes-index and invalid receiver branches cannot come from current List-only source indexing; expected-free ADT inference is now covered.": {
+          "infer_val_ty": 2
+        },
+        "Remaining false return is a missing declared type lookup; valid record allocations have a declaration or hit the separately deferred anonymous-record path.": {
+          "is_record_type": 1
+        },
+        "Remaining List[Int] fallback is for an empty literal without inferred/expected element type; canonical frontend empty lists require a type context.": {
+          "list_type_of": 1
+        },
+        "Remaining fallback handles a constructor case absent from its tagged layout; accepted typed constructors carry a matching declared/builtin case.": {
           "payload_present": 1,
           "payload_ty_of": 1,
-          "rec_lit_value": 1,
-          "record_type_of": 1,
-          "render_bin": 1,
-          "render_builtin": 2,
-          "render_expr": 2,
-          "render_index": 2,
-          "render_inner": 7,
-          "render_un": 3,
-          "rstrip": 1,
-          "stmt_max_depth": 1,
-          "tag_of": 1,
-          "tagged_layout": 3
+          "tag_of": 1
         },
-        "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
-          "helper_preamble": 1
+        "Remaining null fallback is a record literal missing a declared field; frontend record checking rejects that source shape.": {
+          "rec_lit_value": 1
+        },
+        "Remaining empty-name fallback finds no matching declared record layout; anonymous record fallback is explicitly deferred by the WASM oracle.": {
+          "record_type_of": 1
+        },
+        "Remaining marker defers ?? tagged payload reads; constructing Opt values does not implement coalescing.": {
+          "render_bin": 1
+        },
+        "Remaining markers reject an unknown callee or wrong arity; source direct calls are checked against declarations.": {
+          "render_direct_call": 2
+        },
+        "Remaining marker rejects unequal or missing branch result types; typed value conditionals are supported and exercised.": {
+          "render_if": 1
+        },
+        "Remaining Str indexing compatibility path is unreachable from today's frontend, which rejects Str [...] and directs callers to charAt.": {
+          "render_index": 2
+        },
+        "Only unsupported literal/kind markers and the unknown Some-payload default Int remain. Supported payloads have an inferable type; bare Some now covers expected-free payload inference.": {
+          "render_inner": 3
+        },
+        "The remaining loop strips trailing whitespace. Canonical assembled function output ends at its last instruction; the covered empty Unit case emits nop, not trailing whitespace.": {
+          "rstrip": 1
+        },
+        "Only non-generic and unrecognized-generic negative layout lookups remain. Valid tagged declarations resolve their layouts; bare Some covers the empty-expected-type return.": {
+          "tagged_layout": 2
         }
-      },
-      "uncovered_statements": 119
+      }
     }
   }
 }
