@@ -512,6 +512,16 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
   }
   if (k == "var" || k == "name") { return map_get(ctx.vt, ref_name(node)) }
   if (k == "interp") { return "Str" }
+  if (k == "list") {
+    let pin = value_str(value_field(node, "expected"))
+    if (pin.startsWith("List[") && pin.endsWith("]")) { return pin }
+    let items = value_list(value_field(node, "items"))
+    if (items.length() > 0) {
+      let elem = infer_type(items[0], ctx)
+      if (elem != "") { return `List[${elem}]` }
+    }
+    return ""
+  }
   if (k == "index") {
     let tt = infer_type(value_field(node, "target"), ctx)
     if (tt.startsWith("List[") && tt.endsWith("]")) { return tt.slice(5, tt.length() - 1) }
@@ -529,8 +539,9 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
   }
   if (k == "bin") {
     let op = node_op(node)
-    if (is_eq_op(op) || op == "&&" || op == "||") { return "Bool" }
+    if (is_eq_op(op) || op == "<" || op == ">" || op == "<=" || op == ">=" || op == "&&" || op == "||") { return "Bool" }
     if (node_operands(node) == "Int32" && is_addsubmul(op)) { return "Int32" }
+    if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") { return "Int32" }
     if (op == "+") {
       let lt = infer_type(value_field(node, "left"), ctx)
       let rt = infer_type(value_field(node, "right"), ctx)
@@ -539,7 +550,10 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
       return rt
     }
     if (op == "/") { return "Float" }
-    if (op == "-" || op == "*" || op == "%") { return "Int" }
+    if (op == "-" || op == "*" || op == "%") {
+      if (node_operands(node) == "Float") { return "Float" }
+      return "Int"
+    }
     return ""
   }
   if (k == "un") {
@@ -690,8 +704,9 @@ fn render_index(node: Any, ctx: Ctx) -> Str {
 
 fn render_list(node: Any, ctx: Ctx, expected: Str) -> Str {
   var elem = ""
-  if (expected.startsWith("List[") && expected.endsWith("]")) {
-    elem = expected.slice(5, expected.length() - 1)
+  let pin = expected == "" ? value_str(value_field(node, "expected")) : expected
+  if (pin.startsWith("List[") && pin.endsWith("]")) {
+    elem = pin.slice(5, pin.length() - 1)
   }
   let items = value_list(value_field(node, "items"))
   if (elem == "" && items.length() > 0) { elem = infer_type(items[0], ctx) }
@@ -729,7 +744,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     ps = ps.push(`${v3_ident(value_str(names[i]))} ${gt}`)
     i = i + 1
   }
-  let body = render_expr(value_field(node, "body"), ctx, "")
+  let body = render_expr(value_field(node, "body"), bodyctx, "")
   let bodyt = go_type(infer_type(value_field(node, "body"), bodyctx))
   var ret = ""
   if (bodyt != "") { ret = " ".concat(bodyt) }
@@ -983,7 +998,11 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     var got = ""
     if (inferred != "") { got = go_type(inferred) }
     var out = []
-    if (got == "int64" || got == "float64") {
+    var variant = false
+    for (case of ctx.ca.keys()) {
+      if (resolved(inferred) && map_get(ctx.ca, case) == inferred) { variant = true }
+    }
+    if (got == "int64" || got == "float64" || variant) {
       out = out.push(line(indent, `var ${nm} ${got} = ${value}`))
     } else {
       out = out.push(line(indent, `${nm} := ${value}`))
