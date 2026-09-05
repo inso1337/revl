@@ -1,4 +1,9 @@
-"""CLI: python -m revl compile <files...> [-o out.json]
+"""CLI: revl <cmd> (the documented happy path) — `python -P -m revl <cmd>`
+is the absolute-interpreter fallback for callers that always run a venv's
+interpreter by its full path (the `-P` is the PYTHONSAFEPATH safety bit,
+issue #317); both spellings reach this module, and the issue #317 / #336
+window that bare `-m` has is closed by `drop_cwd_entry` (and fully
+avoided by the `revl` console script this file is the entry point of).
 
 `main()` is argument-parser assembly (`revl.cli.parser.build_parser`) plus
 dispatch. The per-command handlers live in `revl.cli.{change,interop,observe}`;

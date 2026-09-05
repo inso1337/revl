@@ -86,11 +86,18 @@ uv venv && uv pip install -e ".[test]" && .venv/bin/pytest tests/
 ```
 
 ```bash
-python -m revl compile examples/user_cache.rvl   # source -> checked IR -> emitted component
-python -m revl audit    examples/user_cache.rvl   # everything that can cross the boundary
-python -m revl mcp serve                          # the compiler as an agent admission gate
-make demo                                         # a live hot-swap, migration and rollback
+revl compile examples/user_cache.rvl   # source -> checked IR -> emitted component
+revl audit    examples/user_cache.rvl   # everything that can cross the boundary
+revl mcp serve                          # the compiler as an agent admission gate
+make demo                               # a live hot-swap, migration and rollback
 ```
+
+The first command installs the `revl` package editable; the documented happy
+path then uses the `revl` console script (issue #336 closes the CWD-shadowing
+window that a bare `python -m revl` (no `-P`) still has; issue #317 is the
+underlying mechanism). The absolute-interpreter fallback is
+`python -P -m revl` (PYTHONSAFEPATH, 3.11+) — the `-P` is the safety bit
+that closes the rest of the window.
 
 The language reference is [docs/syntax-2.0.md](docs/syntax-2.0.md); if the
 component author is a model, start with the

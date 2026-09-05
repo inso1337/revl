@@ -6,7 +6,10 @@ edition = "2021"
 # `preserve_order`: a Diagnostic/Hover/Location computed by the reference front
 # end travels through this binary as JSON and must come out in the SAME key
 # order it went in, byte for byte (see `pyjson`). Without it serde_json sorts
-# object keys and the wire bytes stop matching `python -m revl.lsp`.
+# object keys and the wire bytes stop matching `python -P -m revl.lsp`
+# (the `-P` is PYTHONSAFEPATH, the safety bit that closes the CWD-shadowing
+# window issue #317 names; the byte-for-byte comparison runs both halves
+# under `-P` so the window cannot drift a result).
 [dependencies]
 # item 336 slice 2: the native navigation engine. The gate crate is committed
 # generated source, so this dependency adds no build-time Python.
