@@ -1,0 +1,6 @@
+extern pure fn empty() = @go {}
+
+fn func(chan: Int, default: Int, fallthrough: Int, goto: Int,
+        map: Int, select: Int, nil: Int) -> Int {
+  return chan + default + fallthrough + goto + map + select + nil
+}

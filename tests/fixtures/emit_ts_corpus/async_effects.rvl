@@ -1,0 +1,15 @@
+// Awaited activation acquisitions and emissions: the frontend stamps each
+// lowered step `async: true`, so both emitters must select the async-generator
+// body and await the operation before registering its inverse.
+service Store {
+  fn read(key: Str) -> Int
+  async fn open(key: Str) -> Int
+  emission fn restore(key: Str)
+  emission async fn write(key: Str)
+}
+
+component Consumer requires store: Store {
+  effect await store.open("probe") undo store.read("probe")
+  let value = effect await store.open("key") undo store.read("key")
+  await emit store.write("key") compensate store.restore("key")
+}

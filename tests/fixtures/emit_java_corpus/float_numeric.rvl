@@ -1,0 +1,15 @@
+// Float arithmetic is supported; only canonical Float-to-Str is deferred.
+type Measures = { ratio: Float, small: Int32 }
+type Scalar = Real(Float) | Narrow(Int32)
+
+fn literal() -> Float { return 2.5 }
+fn mixed(a: Int, b: Float) -> Float { return a + b }
+fn negate(a: Float) -> Float { return -a }
+fn multiply(a: Float, b: Float) -> Float { return a * b }
+fn subtract(a: Float, b: Float) -> Float { return a - b }
+fn divide(a: Float, b: Float) -> Float { return a / b }
+fn ordered(a: Float, b: Float) -> Bool { return a >= b }
+fn boxed(a: Float) -> Opt[Float] { return Some(a) }
+fn measures(a: Float, b: Int32) -> Measures { return { ratio: a, small: b } }
+fn small(a: Int32) -> Int { return a }
+fn real(a: Float) -> Scalar { return Real(a) }

@@ -19,6 +19,7 @@ emitter is precisely the event that opens a fresh uncovered region:
 """
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -74,19 +75,66 @@ def test_the_line_measurement_is_not_empty(lines, line_data, tier):
     assert 0 < reference["uncovered"] < reference["statements"]
 
 
-def test_the_selfhost_side_names_functions_the_corpus_never_enters(lines, line_data):
-    """The self-host half's headline, pinned so it cannot quietly become vacuous.
-
-    The oracles assert byte agreement on `selfhost/emit_<tier>.rvl` while never
-    executing some of its functions at all. That set is the honest statement of
-    what byte agreement is worth, and it must stay measurable: if the emitted-
-    module name mapping ever breaks, this reports zero and looks like success.
-    """
+def test_the_selfhost_side_has_real_declared_functions(lines, line_data):
+    """Zero never-entered functions is valid when statement measurement is real."""
     for tier in TIERS:
         found = line_data["selfhost"][tier]
         assert found["declared"] > 30, (
             f"selfhost/emit_{tier}.rvl declared {found['declared']} functions: "
             f"the `.rvl` -> emitted `def` name mapping has broken")
-        assert found["never_entered"], (
-            f"no self-host function in {tier} is unentered, which would be very "
-            f"good news and is more likely a broken measurement")
+
+
+def test_generic_baseline_cannot_masquerade_as_closure(lines, monkeypatch, tmp_path):
+    ledger = {half: {tier: {"statements": 1,
+                            "uncovered": {"NEVER ENTERED": {"f": 1}}}
+                     for tier in TIERS}
+              for half in ("reference", "selfhost")}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(lines, "LEDGER", path)
+    data = {half: {tier: {"functions": {}, "sizes": {}}
+                   for tier in TIERS}
+            for half in ("reference", "selfhost")}
+    problems = lines.check(data)
+    assert any("generic reason" in problem for problem in problems)
+
+
+def test_line_closure_rejects_duplicates_and_missing_sides(lines, monkeypatch, tmp_path):
+    ledger = {"reference": {"py": {"uncovered": {
+        "specific decision": {"f": 1}, "another decision": {"f": 1}}}}}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(lines, "LEDGER", path)
+    problems = lines.check({"reference": {}, "selfhost": {}})
+    assert any("appears in multiple reasons" in problem for problem in problems)
+    assert any("missing line-coverage side" in problem for problem in problems)
+
+
+def test_line_check_fails_closed_on_malformed_maps_and_counts(lines, monkeypatch, tmp_path):
+    ledger = {half: {tier: {"uncovered": None} for tier in TIERS}
+              for half in ("reference", "selfhost")}
+    ledger["reference"]["py"]["uncovered"] = {"specific decision": {"f": "bad"}}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(lines, "LEDGER", path)
+    data = {half: {tier: {"functions": {"f": "bad"}, "sizes": {}}
+                   for tier in TIERS}
+            for half in ("reference", "selfhost")}
+    problems = lines.check(data)
+    assert any("invalid uncovered count" in problem for problem in problems)
+    assert any("invalid measured count" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("functions", [None, [], {"f": True}])
+def test_line_check_rejects_malformed_function_population(lines, monkeypatch, tmp_path, functions):
+    ledger = {half: {tier: {"uncovered": {"specific decision": {}}}
+                     for tier in TIERS} for half in ("reference", "selfhost")}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(lines, "LEDGER", path)
+    data = {half: {tier: {"functions": functions, "sizes": {}}
+                   for tier in TIERS} for half in ("reference", "selfhost")}
+    problems = lines.check(data)
+    assert any("survey functions are not a map" in problem
+               for problem in problems) or any("invalid measured count" in problem
+                                                for problem in problems)

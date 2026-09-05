@@ -3111,13 +3111,18 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
         out.append(f"{'  ' * indent}continue")
     elif step == "let_pattern":
         value = _expr(node.get("value"), ctx)
+        keyword = "let" if node.get("mutable") else "const"
         names = [_ident(n, "binding") for n in node.get("names") or []]
         if node.get("pattern") == "record":
-            out.append(f"{'  ' * indent}const {{ {', '.join(names)} }} = {value}")
+            names = [
+                f"{_prop_key(raw, 'binding field')}: {name}" if raw != name else name
+                for raw, name in zip(node.get("names") or [], names)
+            ]
+            out.append(f"{'  ' * indent}{keyword} {{ {', '.join(names)} }} = {value}")
         else:
             rest = node.get("rest")
             parts = ", ".join(names + ([f"...{_ident(rest, 'binding')}"] if rest else []))
-            out.append(f"{'  ' * indent}const [{parts}] = {value}")
+            out.append(f"{'  ' * indent}{keyword} [{parts}] = {value}")
     elif step == "expr":
         out.append(f"{'  ' * indent}{_expr(node['expr'], ctx)}")
     elif step == "assert":
@@ -3159,9 +3164,14 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             left = _expr(expr["left"], ctx)
             right = _expr(expr["right"], ctx)
             shown = json.dumps(f"{left} {op} {right}")
+            condition = f"$revl_l {op} $revl_r"
+            if equality:
+                condition = "revlEq($revl_l, $revl_r)"
+                if expr["op"] in ("!=", "!=="):
+                    condition = f"!{condition}"
             # item 143: `$`-sigil temporaries can't collide with a user binding.
             out.append(f"{pad}{{ const $revl_l = {left}, $revl_r = {right};")
-            out.append(f"{pad}  if (!($revl_l {op} $revl_r)) throw new Error({shown} + "
+            out.append(f"{pad}  if (!({condition})) throw new Error({shown} + "
                        f'"\\n  left  = " + revlShow($revl_l) + '
                        f'"\\n  right = " + revlShow($revl_r)) }}')
         else:

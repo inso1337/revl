@@ -1,0 +1,7 @@
+fn equal(a: Str, b: Str) -> Bool { return a == b }
+fn unequal(a: Str, b: Str) -> Bool { return a != b }
+fn concat(a: Str, b: Str) -> Str { return a + b }
+fn localConcat(a: Str, b: Str) -> Int {
+  let combined = a + b
+  return combined.length()
+}

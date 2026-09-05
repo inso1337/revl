@@ -258,7 +258,7 @@ use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
 // into the fixed point exactly as the reference does.
 type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
              callees: List[Str], asyncSlots: List[Int], asyncParams: List[Str],
-             body: List[Stmt] }
+             body: List[Stmt], cachePure: Bool }
 
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
@@ -492,17 +492,11 @@ fn starts_with(s: Str, pre: Str) -> Bool {
   return s.slice(0, pre.length()) == pre
 }
 
-// Whether a rendered type is an async FUNCTION type `(…) -> Async[T]` — the one
-// spelling that colors a first-class callback (lower.py's `_is_async_fn_type`:
-// head is the fn-type head and the declared return's head is `Async`). The
-// parser renders a fn type as `(P1, P2) -> RET`, so: it must open with `(`, the
-// matching `)` closes the parameter list (paren depth handles a nested fn-typed
-// param), and the return part after `) -> ` must itself be an `Async[...]` type.
-// A bare `Async[T]` (not a fn type) is not one — the reference refuses those at
-// wellformedness, never colors them.
-fn is_async_fn_ty(ty: Str) -> Bool {
-  if (ty.length() == 0) { return false }
-  if (ty.charAt(0) != "(") { return false }
+// Read the return after the outer parameter list, not an arrow nested inside
+// a callback parameter. Shared by async coloring and typed call lowering.
+fn function_return_ty(ty: Str) -> Str {
+  if (ty.length() == 0) { return "" }
+  if (ty.charAt(0) != "(") { return "" }
   var depth = 0
   var i = 0
   var close = 0 - 1
@@ -515,11 +509,14 @@ fn is_async_fn_ty(ty: Str) -> Bool {
     }
     i += 1
   }
-  if (close == 0 - 1) { return false }
+  if (close == 0 - 1) { return "" }
   let rest = ty.slice(close + 1, ty.length())
-  if (!starts_with(rest, " -> ")) { return false }
-  let ret = rest.slice(4, rest.length())
-  return starts_with(ret, "Async[")
+  if (!starts_with(rest, " -> ")) { return "" }
+  return rest.slice(4, rest.length())
+}
+
+fn is_async_fn_ty(ty: Str) -> Bool {
+  return starts_with(function_return_ty(ty), "Async[")
 }
 
 // The parameter INDICES whose declared type is an async function type — the
@@ -654,7 +651,7 @@ fn mk_step(p: Prog, i: Int) -> PStep { return { pg: p, i: i } }
 fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
           aps: List[Str], bd: List[Stmt]) -> FnD {
   return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs,
-           asyncSlots: slots, asyncParams: aps, body: bd }
+           asyncSlots: slots, asyncParams: aps, body: bd, cachePure: false }
 }
 
 fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
@@ -747,10 +744,12 @@ fn mk_srun(ss: List[Stmt], i: Int) -> SRun { return { ss: ss, i: i } }
 
 fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
-  if (t.kind == "kw" && t.text == "let") {
-    if (!atk(ts, lo + 2, "=")) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
+  if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
+    var eq = lo + 2
+    if (atk(ts, eq, ":")) { eq = type_at(ts, eq + 1).i }
+    if (!atk(ts, eq, "=")) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
     let bn = tkc(ts, lo + 1).text
-    var j = lo + 3
+    var j = eq + 1
     var kd = "expr"
     if (atw(ts, j, "emit")) {
       kd = "emit"
@@ -1129,7 +1128,9 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let nm = tkc(ts, i + 1).text
   let ps = params_at(ts, i + 3)
-  let rti = ret_at(ts, ps.i)
+  var rti = ret_at(ts, ps.i)
+  let cachePure = ati(ts, rti, "cache") && atw(ts, rti + 1, "pure")
+  if (cachePure) { rti += 2 }
   if (!atk(ts, rti, "{")) {
     return mk_step(bad_prog(pg, "expected { after fn signature"), rti)
   }
@@ -1143,7 +1144,7 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
                               callees: body_callees(body, 0, []),
                               asyncSlots: async_slots_of(ps.ps),
                               asyncParams: async_params_of(ps.ps),
-                              body: body }), bend)
+                              body: body, cachePure: cachePure }), bend)
 }
 
 type MethsR = { xs: List[MSig], i: Int, ok: Bool }
@@ -1157,9 +1158,10 @@ fn p_methods(ts: List[Token], i: Int, end: Int, acc: List[MSig]) -> MethsR {
   var j = i
   var em = false
   var isAsync = false
+  var isIdempotent = false
   var caps: List[Str] = []
-  // `[emission[caps]] [async] fn` — flags in any order before `fn`.
-  while (atw(ts, j, "emission") || atw(ts, j, "async")) {
+  // Service flags may appear in any order before `fn`.
+  while (atw(ts, j, "emission") || atw(ts, j, "async") || atw(ts, j, "idempotent")) {
     if (atw(ts, j, "emission")) {
       em = true
       j += 1
@@ -1171,11 +1173,15 @@ fn p_methods(ts: List[Token], i: Int, end: Int, acc: List[MSig]) -> MethsR {
         }
         j = k + 1
       }
+    } else if (atw(ts, j, "idempotent")) {
+      isIdempotent = true
+      j += 1
     } else {
       isAsync = true
       j += 1
     }
   }
+  if (isIdempotent && !em) { return mk_meths(acc, j, false) }
   if (!atw(ts, j, "fn")) { return mk_meths(acc, j, false) }
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
@@ -1716,8 +1722,9 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
     let se = p_extern(ts, i, pg)
     return p_top(ts, se.i, se.pg)
   }
-  if (t.text == "fn") {
-    let sf = p_fn(ts, i, pg)
+  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
+  if (t.text == "fn" || public_fn) {
+    let sf = p_fn(ts, public_fn ? i + 1 : i, pg)
     return p_top(ts, sf.i, sf.pg)
   }
   if (t.text == "service") {
@@ -1758,7 +1765,12 @@ fn reached_caps(called: List[Str], caps: CapsT, i: Int,
 }
 
 fn emit_caps(fs: List[FnD]) -> CapsT {
+  return emit_caps_reach(fs, false)
+}
+
+fn emit_caps_reach(fs: List[FnD], include_values: Bool) -> CapsT {
   var caps: CapsT = Map.empty()
+  let names = fn_names_of(fs)
   var i = 0
   while (i < fs.length()) {
     if (fs[i].isEmExtern) { caps = caps.set(fs[i].name, [fs[i].name]) }
@@ -1770,7 +1782,8 @@ fn emit_caps(fs: List[FnD]) -> CapsT {
     i = 0
     while (i < fs.length()) {
       let f = fs[i]
-      let reached = reached_caps(f.callees, caps, 0, [])
+      let refs = include_values ? col_values_body(f.body, 0, names, f.callees) : f.callees
+      let reached = reached_caps(refs, caps, 0, [])
       let cur = caps_of(caps, f.name)
       if (reached.length() > 0 && !subset_of(reached, cur)) {
         caps = caps.set(f.name, union_into(cur, reached))
@@ -3005,38 +3018,38 @@ fn leaky_body(ss: List[Stmt], i: Int, cx: Ctx, cr: Bool) -> Str {
 // The value refusal is checked before the arrow leak, per fn, in declaration
 // order, exactly as the reference's single loop does.
 
-fn col_exprs(xs: List[Expr], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+fn col_exprs(xs: List[Expr], i: Int, names: List[Str], acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return col_exprs(xs, i + 1, cx, col_values(xs[i], cx, acc))
+  return col_exprs(xs, i + 1, names, col_values(xs[i], names, acc))
 }
 
-fn col_inits(xs: List[InitN], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+fn col_inits(xs: List[InitN], i: Int, names: List[Str], acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return col_inits(xs, i + 1, cx, col_values(xs[i].value, cx, acc))
+  return col_inits(xs, i + 1, names, col_values(xs[i].value, names, acc))
 }
 
-fn col_arms(xs: List[ArmN], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+fn col_arms(xs: List[ArmN], i: Int, names: List[Str], acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return col_arms(xs, i + 1, cx, col_values(xs[i].body, cx, acc))
+  return col_arms(xs, i + 1, names, col_values(xs[i].body, names, acc))
 }
 
-fn col_parts(xs: List[PartN], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+fn col_parts(xs: List[PartN], i: Int, names: List[Str], acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return col_parts(xs, i + 1, cx, col_values(xs[i].e, cx, acc))
+  return col_parts(xs, i + 1, names, col_values(xs[i].e, names, acc))
 }
 
 // The call HEAD var is the callee, not a flowing value (mirrors `_calls_in`,
 // which records it in `found`, never `values`); a non-var head is walked.
-fn col_call(tg: Expr, args: List[Expr], cx: Ctx, acc: List[Str]) -> List[Str] {
-  let a2 = match tg { Var(_) => acc, _ => col_values(tg, cx, acc) }
-  return col_exprs(args, 0, cx, a2)
+fn col_call(tg: Expr, args: List[Expr], names: List[Str], acc: List[Str]) -> List[Str] {
+  let a2 = match tg { Var(_) => acc, _ => col_values(tg, names, acc) }
+  return col_exprs(args, 0, names, a2)
 }
 
-// First-class async-colored names referenced as VALUES in an expression tree
-// (mirrors `_calls_in(values=…)` intersected with the colored set).
-fn col_values(e: Expr, cx: Ctx, acc: List[Str]) -> List[Str] {
+// Named callables referenced as VALUES (mirrors `_calls_in(values=…)`).
+// Async admission supplies the colored set; cache reach supplies all callables.
+fn col_values(e: Expr, names: List[Str], acc: List[Str]) -> List[Str] {
   return match e {
-    Var(n)      => contains(cx.colored, n) ? union_into(acc, [n]) : acc,
+    Var(n)      => contains(names, n) ? union_into(acc, [n]) : acc,
     IntLit(_)   => acc,
     FloatLit(_) => acc,
     StrLit(_)   => acc,
@@ -3044,26 +3057,26 @@ fn col_values(e: Expr, cx: Ctx, acc: List[Str]) -> List[Str] {
     NullLit     => acc,
     Hole(_)     => acc,
     Bad(_)      => acc,
-    Bin(b)      => col_values(b.r, cx, col_values(b.l, cx, acc)),
-    Un(u)       => col_values(u.e, cx, acc),
-    Emit(u)     => col_values(u.e, cx, acc),
-    Call(c)     => col_call(c.target, c.args, cx, acc),
-    Field(f)    => col_values(f.target, cx, acc),
-    OptField(f) => col_values(f.target, cx, acc),
-    OptCall(c)  => col_call(c.target, c.args, cx, acc),
-    Index(x)    => col_values(x.idx, cx, col_values(x.target, cx, acc)),
-    If(x)       => col_values(x.els, cx, col_values(x.then_, cx, col_values(x.cond, cx, acc))),
-    Rec(r)      => col_inits(r.fields, 0, cx, acc),
-    Lst(l)      => col_exprs(l.items, 0, cx, acc),
-    Arrow(ar)   => col_values(ar.body, cx, acc),
-    Match(m)    => col_arms(m.arms, 0, cx, col_values(m.scrut, cx, acc)),
-    Templ(t)    => col_parts(t.parts, 0, cx, acc),
+    Bin(b)      => col_values(b.r, names, col_values(b.l, names, acc)),
+    Un(u)       => col_values(u.e, names, acc),
+    Emit(u)     => col_values(u.e, names, acc),
+    Call(c)     => col_call(c.target, c.args, names, acc),
+    Field(f)    => col_values(f.target, names, acc),
+    OptField(f) => col_values(f.target, names, acc),
+    OptCall(c)  => col_call(c.target, c.args, names, acc),
+    Index(x)    => col_values(x.idx, names, col_values(x.target, names, acc)),
+    If(x)       => col_values(x.els, names, col_values(x.then_, names, col_values(x.cond, names, acc))),
+    Rec(r)      => col_inits(r.fields, 0, names, acc),
+    Lst(l)      => col_exprs(l.items, 0, names, acc),
+    Arrow(ar)   => col_values(ar.body, names, acc),
+    Match(m)    => col_arms(m.arms, 0, names, col_values(m.scrut, names, acc)),
+    Templ(t)    => col_parts(t.parts, 0, names, acc),
   }
 }
 
-fn col_values_body(ss: List[Stmt], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+fn col_values_body(ss: List[Stmt], i: Int, names: List[Str], acc: List[Str]) -> List[Str] {
   if (i >= ss.length()) { return acc }
-  return col_values_body(ss, i + 1, cx, col_values(ss[i].e, cx, acc))
+  return col_values_body(ss, i + 1, names, col_values(ss[i].e, names, acc))
 }
 
 // The module-fn value + leaky-arrow verdict for one fn (lower.py's fn loop).
@@ -3256,7 +3269,7 @@ fn check_reachable_fn_acquire(pg: Prog) -> Str {
 }
 
 fn fn_a1_verdict(f: FnD, base: Ctx) -> Str {
-  let vals = sort_strs(col_values_body(f.body, 0, base, []))
+  let vals = sort_strs(col_values_body(f.body, 0, base.colored, []))
   if (vals.length() > 0) {
     return tagged("A1", "function `".concat(f.name)
       .concat("` uses async callable `").concat(vals[0])
@@ -3272,6 +3285,28 @@ fn check_module_fns(fns: List[FnD], i: Int, base: Ctx) -> Str {
   let v = fn_a1_verdict(fns[i], base)
   if (v != "") { return v }
   return check_module_fns(fns, i + 1, base)
+}
+
+fn check_cache_fns(fns: List[FnD]) -> Str {
+  var has_cache = false
+  var n = 0
+  while (n < fns.length()) {
+    if (fns[n].cachePure) { has_cache = true }
+    n += 1
+  }
+  if (!has_cache) { return "" }
+  let caps = emit_caps_reach(fns, true)
+  var i = 0
+  while (i < fns.length()) {
+    let f = fns[i]
+    let crossed = sort_strs(caps_of(caps, f.name))
+    if (f.cachePure && crossed.length() > 0) {
+      return tagged("G4", "the reach of fn `".concat(f.name).concat("` crosses ")
+        .concat(crossed[0]).concat(": a crossing result is not pure"))
+    }
+    i += 1
+  }
+  return ""
 }
 
 // G4 + A1 over one component. "" = admitted, else a tagged refusal.
@@ -4333,6 +4368,8 @@ pub fn admit_src(src: Str) -> Str {
   // stream rather than out of `Prog`, because `p_top` steps over `type`
   // declarations structurally — see `type_ctors`.
   let base = ctx_with_callables(build_maps(pg), type_ctors(lex_src(src)))
+  let cachev = check_cache_fns(pg.fns)
+  if (cachev != "") { return cachev }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
   // the whole program before any body is gated, exactly where `check_and_lower`
   // places `_refuse_host_acquire_in_component_reachable_fn` — after the fn
@@ -4682,7 +4719,7 @@ fn ir_caps_json(cs: List[Str]) -> Str {
   return out
 }
 
-// One service's method table -> `"m": {params, returns, emission[, caps][, async]}`
+// One service's method table -> `"m": {params, returns, emission[, caps][, async][, idempotent]}`
 // pairs. Mirrors the reference's per-method dict (check_and_lower's `services`
 // comprehension): `capabilities` present iff a SCOPED `emission[..]`, `async`
 // iff the op is `async` (each of which also bumps `ir_version` to 3).
@@ -4692,8 +4729,9 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool) -> IrMethR 
   var em = false
   var scoped = false
   var isAsync = false
+  var isIdempotent = false
   var caps: List[Str] = []
-  while (atw(ts, j, "emission") || atw(ts, j, "async")) {
+  while (atw(ts, j, "emission") || atw(ts, j, "async") || atw(ts, j, "idempotent")) {
     if (atw(ts, j, "emission")) {
       em = true
       j += 1
@@ -4706,6 +4744,9 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool) -> IrMethR 
         }
         j = k + 1
       }
+    } else if (atw(ts, j, "idempotent")) {
+      isIdempotent = true
+      j += 1
     } else {
       isAsync = true
       j += 1
@@ -4728,9 +4769,10 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool) -> IrMethR 
     mj = mj.concat(", \"capabilities\": [").concat(ir_caps_json(caps)).concat("]")
   }
   if (isAsync) { mj = mj.concat(", \"async\": true") }
+  if (isIdempotent) { mj = mj.concat(", \"idempotent\": true") }
   mj = mj.concat("}")
   let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
-  return ir_methods(ts, nexti, end, nacc, v3 || isAsync)
+  return ir_methods(ts, nexti, end, nacc, v3 || isAsync || isIdempotent)
 }
 
 fn ir_service(ts: List[Token], i: Int) -> IrSvcR {
@@ -5494,12 +5536,13 @@ fn join_ty(a: Str, b: Str) -> Str {
   return ""
 }
 
-fn infer_field(t: Str, name: Str) -> Str {
+fn infer_field(t: Str, name: Str, env: List[Bind]) -> Str {
   if (name == "length") {
     let h = parse_head(t)
     if (h == "Str" || h == "Bytes" || h == "List") { return "Int" }
   }
-  return struct_field(t, name)
+  let structural = struct_field(t, name)
+  return structural != "" ? structural : tenv_get(env, "field ".concat(t).concat(".").concat(name))
 }
 
 fn infer_index(t: Str) -> Str {
@@ -5518,8 +5561,9 @@ fn infer_method(recv: Expr, method: Str, env: List[Bind]) -> Str {
 
 fn infer_callee(callee: Expr, env: List[Bind]) -> Str {
   return match callee {
-    Field(f) => infer_method(f.target, f.name, env),
-    _ => "",
+    Field(f) => is_empty_map_callee(callee) ? "Map[Str, Never]"
+      : infer_method(f.target, f.name, env),
+    _ => function_return_ty(infer(callee, env)),
   }
 }
 
@@ -5568,7 +5612,7 @@ fn infer(e: Expr, env: List[Bind]) -> Str {
     Un(u)       => u.op == "!" ? "Bool" : infer(u.e, env),
     Emit(u)     => "",
     Call(c)     => infer_callee(c.target, env),
-    Field(f)    => infer_field(infer(f.target, env), f.name),
+    Field(f)    => infer_field(infer(f.target, env), f.name, env),
     OptField(f) => "",
     OptCall(c)  => "",
     Index(x)    => infer_index(infer(x.target, env)),
@@ -5679,8 +5723,9 @@ fn lir_field(f: FieldN, env: List[Bind]) -> Str {
       return "{\"kind\":\"len\",\"target\":".concat(lir_expr(f.target, env)).concat("}")
     }
   }
+  let opt = parse_head(infer_field(infer(f.target, env), f.name, env)) == "Opt"
   return "{\"kind\":\"field\",\"target\":".concat(lir_expr(f.target, env))
-    .concat(",\"name\":").concat(jstr(f.name)).concat("}")
+    .concat(",\"name\":").concat(jstr(f.name)).concat(opt ? ",\"opt\":true" : "").concat("}")
 }
 
 fn lir_builtin(f: FieldN, args: List[Expr], env: List[Bind]) -> Str {
@@ -5769,7 +5814,22 @@ fn decl_cases(ts: List[Token], i: Int, a: CaseAcc) -> CaseStep {
   j += 1
   if (atk(ts, j, "{")) {
     let bend = close_brace(ts, j)
-    return { a: a, i: bend == 0 - 1 ? lineHi : bend }
+    if (bend == 0 - 1 || atk(ts, i + 2, "[")) {
+      return { a: a, i: bend == 0 - 1 ? lineHi : bend }
+    }
+    var binds = a.binds
+    var k = j + 1
+    while (k < bend - 1) {
+      if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
+        let tr = type_at(ts, k + 2)
+        if (!tr.ok || tr.i <= k + 2) { break }
+        binds = tenv_put(binds, "field ".concat(nm).concat(".").concat(tkc(ts, k).text),
+                         taint_strip(tr.ty))
+        k = tr.i
+      } else { k += 1 }
+    }
+    let fields = binds
+    return { a: { binds: fields, amb: a.amb }, i: bend }
   }
   if (!is_variant_rhs(ts, j, lineHi)) { return { a: a, i: lineHi } }
   var k = j
@@ -5809,7 +5869,21 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
     return case_binds_walk(ts, skip_line(ts, i), a)
   }
   if (t.text == "extern") { return case_binds_walk(ts, p_extern(ts, i, empty_prog()).i, a) }
-  if (t.text == "fn") { return case_binds_walk(ts, p_fn(ts, i, empty_prog()).i, a) }
+  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
+  if (t.text == "fn" || public_fn) {
+    let fi = public_fn ? i + 1 : i
+    let ps = params_at(ts, fi + 3)
+    let ret = atk(ts, ps.i, "arrow") ? taint_strip(type_at(ts, ps.i + 1).ty) : "Unit"
+    var param_types: List[Str] = []
+    var pi = 0
+    while (pi < ps.ps.length()) {
+      param_types = param_types.push(taint_strip(ps.ps[pi].ty))
+      pi += 1
+    }
+    let ty = "(".concat(param_types.join(", ")).concat(") -> ").concat(ret)
+    let binds = tenv_put(a.binds, tkc(ts, fi + 1).text, ty)
+    return case_binds_walk(ts, p_fn(ts, fi, empty_prog()).i, { binds: binds, amb: a.amb })
+  }
   if (t.text == "service") { return case_binds_walk(ts, p_service(ts, i, empty_prog()).i, a) }
   if (t.text == "component") { return case_binds_walk(ts, p_component(ts, i, empty_prog()).i, a) }
   return case_binds_walk(ts, skip_line(ts, i), a)
@@ -5869,7 +5943,17 @@ fn lir_receiver_first(free: Str, recv: Expr, args: List[Expr],
     .concat(args.length() > 0 ? "," : "").concat(lir_args(args, env)).concat("]}")
 }
 
+fn is_empty_map_callee(callee: Expr) -> Bool {
+  return match callee {
+    Field(f) => f.name == "empty" && match f.target { Var(n) => n == "Map", _ => false, },
+    _ => false,
+  }
+}
+
 fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
+  if (is_empty_map_callee(callee) && args.length() == 0) {
+    return "{\"kind\":\"maplit\",\"entries\":[]}"
+  }
   // ADT construction (Result / user variants) beats every other call shape: the
   // callee is a bare `Var` naming a case, not a callable.
   let ctor = match callee { Var(n) => tagged_case_adt(env, n), _ => "", }
@@ -6004,9 +6088,12 @@ fn lir_expr(e: Expr, env: List[Bind]) -> Str {
 
 // The `T` -> `Opt[T]` injection the checker accepts at a declared boundary
 // (lower.py's `_inject_opt`): materialised on a `return` whose value type is a
-// bare `T` where an `Opt[T]` is declared. (Widening markers are absent from the
-// covered corpus, so `_mark_widen` is not reproduced here.)
+// bare `T` where an `Opt[T]` is declared, plus numeric widening.
 fn apply_ret_markers(node: Str, expected: Str, actual: Str) -> Str {
+  if ((expected == "Float" && (actual == "Int" || actual == "Int32"))
+      || (expected == "Int" && actual == "Int32")) {
+    return node.slice(0, node.length() - 1).concat(",\"widen\":").concat(jstr(expected)).concat("}")
+  }
   if (actual != "" && parse_head(expected) == "Opt" && type_args(expected).length() > 0
       && parse_head(actual) != "Opt") {
     return "{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"Some\"},\"args\":["
@@ -6111,8 +6198,11 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     if (!r.ok) { return mk_one("", env, muts, hi) }
     let bindty = declared != "" ? declared : r.ty
     let env2 = bindty == "" ? env : tenv_put(env, name, bindty)
+    let value = declared != "" && r.js == "{\"kind\":\"maplit\",\"entries\":[]}"
+      ? r.js.slice(0, r.js.length() - 1).concat(",\"expected\":").concat(jstr(declared)).concat("}")
+      : r.js
     let js = "{\"step\":\"let\",\"name\":".concat(jstr(name)).concat(",\"value\":")
-      .concat(r.js).concat(",\"mutable\":").concat(mutable ? "true" : "false").concat("}")
+      .concat(value).concat(",\"mutable\":").concat(mutable ? "true" : "false").concat("}")
     return mk_one(js, env2, mutable ? muts.push(name) : muts, r.i)
   }
   if (t.kind == "kw" && t.text == "return") {
@@ -6249,7 +6339,7 @@ fn params_env(ps: List[ParamN], acc: List[Bind]) -> List[Bind] {
 }
 
 // One module `fn` -> its `functions` entry. Advances past the whole fn.
-fn lir_function(ts: List[Token], i: Int, cases: List[Bind]) -> LirFn {
+fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool) -> LirFn {
   let nm = tkc(ts, i + 1).text
   let ps = params_at(ts, i + 3)
   var reti = ps.i
@@ -6264,14 +6354,18 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind]) -> LirFn {
     retTy = taint_strip(tr.ty)
     reti = tr.i
   }
+  let cache_pure = ati(ts, reti, "cache") && atw(ts, reti + 1, "pure")
+  if (cache_pure) { reti += 2 }
   if (!atk(ts, reti, "{")) { return { js: "", i: skip_line(ts, i) } }
   let bend = close_brace(ts, reti)
   if (bend == 0 - 1) { return { js: "", i: ts.length() } }
   let bodyjs = lir_stmts(ts, reti + 1, bend - 1,
                          params_env(ps.ps, cases), [], retTy)
   let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_params_json(ps.ps))
-    .concat("],\"returns\":").concat(retJson).concat(",\"public\":false,\"body\":[")
-    .concat(bodyjs).concat("]}")
+    .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
+    .concat(public_fn ? "true" : "false").concat(",\"body\":[")
+    .concat(bodyjs).concat("]")
+    .concat(cache_pure ? ",\"cache\":{\"class\":\"pure_fn\"}" : "").concat("}")
   return { js: js, i: bend }
 }
 
@@ -6292,8 +6386,9 @@ fn fns_walk(ts: List[Token], i: Int, acc: Str, cases: List[Bind]) -> Str {
   }
   if (t.text == "type") { return fns_walk(ts, skip_line(ts, i), acc, cases) }
   if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc, cases) }
-  if (t.text == "fn") {
-    let f = lir_function(ts, i, cases)
+  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
+  if (t.text == "fn" || public_fn) {
+    let f = lir_function(ts, public_fn ? i + 1 : i, cases, public_fn)
     let acc2 = f.js == "" ? acc : (acc == "" ? f.js : acc.concat(",").concat(f.js))
     return fns_walk(ts, f.i, acc2, cases)
   }
@@ -6484,6 +6579,10 @@ fn ir_type_decl(ts: List[Token], i: Int) -> LirFn {
     let bend = close_brace(ts, j)
     if (bend == 0 - 1) { return { js: "", i: lineHi } }
     let fields = ir_type_fields(ts, j + 1, bend - 1)
+    // Reference declaration lowering treats an empty field table as a variant.
+    if (fields == "") {
+      return { js: jstr(nm).concat(": {\"params\": [], \"kind\": \"variant\", \"cases\": []}"), i: bend }
+    }
     let js = jstr(nm).concat(": {\"params\": [], \"kind\": \"record\", \"fields\": {")
       .concat(fields).concat("}}")
     return { js: js, i: bend }

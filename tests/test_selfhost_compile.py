@@ -150,10 +150,11 @@ PY_FUNCTION_DOCS = [
     "classify.rvl", "checked_div.rvl",
     # item 391: tagged ADT construction, native end to end (the case table is
     # built by `lower.rvl` and the constructor call rendered by `emit_py.rvl`).
-    "adt.rvl",
+    "adt.rvl", "cache_pure.rvl",
 ]
 RUST_FUNCTION_DOCS = [
     "arith.rvl", "control.rvl", "lists.rvl", "strings.rvl", "variants.rvl",
+    "float_pub.rvl",
 ]
 # ts (roadmap item 146, gap 2): the function-only slice of the emit_ts corpus that
 # the NATIVE chain reproduces byte-exact. The ts emitter is byte-exact on all 34
@@ -333,6 +334,78 @@ def test_three_way_composition_co_compiles(compile_rvl):
     ``Ctx``, a colliding test name — the ``compile_rvl`` fixture would have raised.)"""
     assert callable(compile_rvl["compile_to"])
     assert callable(compile_rvl["admit"])
+
+
+@pytest.mark.parametrize("source", [
+    "pub component Hidden {}",
+    "pub pub fn twice() -> Int { return 1 }",
+    "pub",
+])
+def test_native_gate_refuses_invalid_public_declarations(admit, source):
+    with pytest.raises(RevlError):
+        compile_source(source)
+    assert admit(source).startswith("BAD|")
+
+
+@pytest.mark.parametrize("modifiers", [
+    "emission idempotent", "idempotent emission",
+    "async emission idempotent", "idempotent emission[db] async",
+])
+def test_native_gate_admits_idempotent_emissions(admit, modifiers):
+    source = f"service Store {{ {modifiers} fn put(value: Int) -> Int }}"
+    compile_source(source)
+    assert admit(source) == ""
+
+
+@pytest.mark.parametrize("modifiers", ["idempotent", "async idempotent"])
+def test_native_gate_refuses_idempotency_without_emission(admit, modifiers):
+    source = f"service Store {{ {modifiers} fn put(value: Int) -> Int }}"
+    with pytest.raises(RevlError, match="only meaningful on an `emission` operation"):
+        compile_source(source)
+    assert admit(source).startswith("BAD|")
+
+
+@pytest.mark.parametrize("clause", [
+    "cache", "cache external", "cache capability",
+    "cache pure ttl 5m", "cache pure invalidated_by db", "cache pure cache pure",
+])
+def test_native_gate_refuses_invalid_plain_function_cache(admit, clause):
+    source = f"fn f(n: Int) -> Int {clause} {{ return n }}"
+    with pytest.raises(RevlError):
+        compile_source(source)
+    assert admit(source).startswith("BAD|")
+
+
+@pytest.mark.parametrize("body", [
+    "return write(n)",
+    "return helper(n)",
+    "let f = write\nreturn n",
+    "let f = write\nreturn f(n)",
+    "return apply(write, n)",
+])
+def test_native_cache_pure_preserves_emission_refusal(admit, body):
+    source = (
+        "extern emission fn write(n: Int) -> Int = @py { return n }\n"
+        "fn helper(n: Int) -> Int { return write(n) }\n"
+        "fn apply(f: (Int) -> Int, n: Int) -> Int { return f(n) }\n"
+        f"fn cached(n: Int) -> Int cache pure {{ {body} }}\n"
+    )
+    with pytest.raises(RevlError) as refused:
+        compile_source(source)
+    assert refused.value.code == "G4"
+    assert admit(source) == "G4|the reach of fn `cached` crosses write: a crossing result is not pure"
+
+
+@pytest.mark.parametrize("source", [
+    "fn cached(f: (Int) -> Int) -> Int cache pure { return f(1) }",
+    "fn pure_value(n: Int) -> Int { return n }\n"
+    "fn cached(n: Int) -> Int cache pure { let f = pure_value\nreturn f(n) }",
+    "extern emission fn write(n: Int) -> Int = @py { return n }\n"
+    "fn plain(n: Int) -> Int { return write(n) }",
+])
+def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit, source):
+    compile_source(source)
+    assert admit(source) == ""
 
 
 # item 429: documents the reference admits and the native gate does NOT. A FALSE

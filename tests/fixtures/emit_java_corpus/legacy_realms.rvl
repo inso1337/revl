@@ -1,0 +1,9 @@
+service Equality {
+  fn equal(a: Str, b: Str) -> Bool
+}
+component ScopedEquality provides equality: Equality {
+  isolate equality in realm("local")
+  provide equality {
+    fn equal(a, b) = a == b
+  }
+}

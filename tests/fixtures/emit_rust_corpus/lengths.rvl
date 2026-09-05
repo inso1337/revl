@@ -1,0 +1,7 @@
+fn property_lengths(s: Str, xs: List[Int]) -> Int {
+  return s.length + xs.length
+}
+
+fn scalar_text(n: Int) -> Str {
+  return n.to_str()
+}

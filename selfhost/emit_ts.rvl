@@ -69,7 +69,8 @@
 //     resolves to an emitted `interface Msg`). `known_types` is threaded down
 //     from the document's `types`; config-field types stay the scalar-or-`any`
 //     map (they never render a composite);
-//   * the RECORD half of `_emit_ts_types` — `export interface <Name> { … }` —
+//   * record and variant declarations in `_emit_ts_types` — interfaces, tagged
+//     unions, and their constructors —
 //     so a signature carrying a declared record has a real interface to name;
 //   * the component-dialect expr kinds `host` (`host.<fn>(…)`), `format` (the
 //     v1 `$N` template -> a JS template literal), `fn` (a top-level call), and
@@ -87,9 +88,8 @@
 //     all (they render bytes over a slice-limited covered surface), and no
 //     fixture reaches a `Stream.*` host builtin, so the oracle cannot see it;
 //     a port would mean inventing a refusal channel for an unreached shape;
-//   * the VARIANT half of `_emit_ts_types` (the `export type … =` union + its
-//     constructor functions) — only records are emitted; a variant type would
-//     emit a marker and diverge, so no fixture declares one;
+//   * malformed IR and deferred component-runtime features remain refused or
+//     explicitly marked by the corresponding source branch;
 //   * in-file `test`/`fault_test`/`lifecycle test` emission; ROUTED requires
 //     (`realms(...)` + the `revlRouter` helper, its `realmLabel` import, and the
 //     routed-`req` proxy — see SLICE 7); the canonical ABI;
@@ -898,7 +898,7 @@ fn render_record(fields: List[Any], counter: Int, acx: ACx) -> Rendered {
   for (p of fields) {
     let vr = expr(value_at(p, 1), c, acx)
     c = vr.counter
-    parts = parts.push(`${ident(value_str(value_at(p, 0)))}: ${vr.text}`)
+    parts = parts.push(`${prop_key(value_str(value_at(p, 0)))}: ${vr.text}`)
   }
   return { text: "{".concat(parts.join(", ")).concat("}"), counter: c }
 }
@@ -910,7 +910,7 @@ fn render_record_update(node: Any, counter: Int, acx: ACx) -> Rendered {
   for (u of value_list(value_field(node, "updates"))) {
     let vr = expr(value_at(u, 1), c, acx)
     c = vr.counter
-    parts = parts.push(`${ident(value_str(value_at(u, 0)))}: ${vr.text}`)
+    parts = parts.push(`${prop_key(value_str(value_at(u, 0)))}: ${vr.text}`)
   }
   let overrides = parts.join(", ")
   if (overrides == "") {
@@ -1159,6 +1159,20 @@ fn render_optcall(node: Any, counter: Int, acx: ACx) -> Rendered {
   return { text: call, counter: c }
 }
 
+fn member(target: Str, name: Str, optional: Bool) -> Str {
+  if (is_js_reserved(name)) {
+    if (optional) { return `${target}?.[${json_dumps(name)}]` }
+    return `${target}[${json_dumps(name)}]`
+  }
+  if (optional) { return `${target}?.${name}` }
+  return `${target}.${name}`
+}
+
+fn prop_key(name: Str) -> Str {
+  if (is_js_reserved(name)) { return json_dumps(name) }
+  return name
+}
+
 // The kind dispatch (post-widen), mirroring `_expr`'s branch order for the 2.0
 // dialect; the component-only kinds refuse (no component scope in this slice).
 fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
@@ -1174,10 +1188,17 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   if (kind == "un") { return render_un(node, counter, acx) }
   if (kind == "field") {
     let tr = paren_target(value_field(node, "target"), counter, acx)
-    return { text: `${tr.text}.${ident(value_str(value_field(node, "name")))}`, counter: tr.counter }
+    if (value_bool(value_field(node, "sized_length"))) {
+      return { text: `revlLen(${tr.text})`, counter: tr.counter }
+    }
+    return { text: member(tr.text, value_str(value_field(node, "name")), false), counter: tr.counter }
   }
   if (kind == "index") {
     let tr = paren_target(value_field(node, "target"), counter, acx)
+    let index = value_field(node, "index")
+    if (node_kind(index) == "lit" && value_kind(value_field(index, "value")) == "str") {
+      return { text: `${tr.text}[${json_dumps(value_field(index, "value"))}]`, counter: tr.counter }
+    }
     let ir = int_as_number(value_field(node, "index"), tr.counter, acx)
     return { text: `${tr.text}[${ir.text}]`, counter: ir.counter }
   }
@@ -1197,7 +1218,7 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   if (kind == "interp") { return render_interp(value_list(value_field(node, "parts")), counter, acx) }
   if (kind == "optfield") {
     let tr = paren_target(value_field(node, "target"), counter, acx)
-    return { text: `${tr.text}?.${ident(value_str(value_field(node, "name")))}`, counter: tr.counter }
+    return { text: member(tr.text, value_str(value_field(node, "name")), true), counter: tr.counter }
   }
   if (kind == "optcall") { return render_optcall(node, counter, acx) }
   // ---- component (v1) dialect scalar kinds (slice 2) ----
@@ -1219,11 +1240,14 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   // ---- slice-3 expr kinds ----
   // `fn` (`_fn_call`): a call to a top-level `fn`/`extern`, the component
   // dialect's spelling of what a 2.0 body writes as a `var`-callee `call`.
-  // Validation (declared? async?) is deferred like `ident`; async awaiting is
-  // deferred entirely (slice 3 defers async coloring).
+  // Validation of declaration membership is deferred like `ident`.
   if (kind == "fn") {
-    let fname = ident(value_str(value_field(node, "name")))
+    let raw_name = value_str(value_field(node, "name"))
+    let fname = ident(raw_name)
     let ar = commajoin(value_list(value_field(node, "args")), counter, acx)
+    if (acx.in_async && list_contains(acx.async_names, raw_name)) {
+      return { text: `(await ${fname}(${ar.text}))`, counter: ar.counter }
+    }
     return { text: `${fname}(${ar.text})`, counter: ar.counter }
   }
   // `adt`: a tagged ADT value (Result / user variant), `{ kind: "Ok", value: x }`
@@ -1344,7 +1368,7 @@ fn inplace_stmt(name: Str, value: Any, counter: Int, acx: ACx) -> Rendered {
     for (u of value_list(value_field(value, "updates"))) {
       let vr = expr(value_at(u, 1), c, acx)
       c = vr.counter
-      parts = parts.push(`${ident(value_str(value_at(u, 0)))}: ${vr.text}`)
+      parts = parts.push(`${prop_key(value_str(value_at(u, 0)))}: ${vr.text}`)
     }
     return { text: `Object.assign(${name}, { ${parts.join(", ")} })`, counter: c }
   }
@@ -1560,6 +1584,33 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   // a plain fn, or an `in_async` context for a phase-2 async-colored fn, so a
   // call to an async callable inside the body (return / let / branch) is awaited.
   let a = acx
+  if (step == "let_pattern") {
+    let r = expr(value_field(node, "value"), counter, a)
+    let is_record = value_str(value_field(node, "pattern")) == "record"
+    var kw = "const"
+    if (value_bool(value_field(node, "mutable"))) { kw = "let" }
+    var names = []
+    for (name of value_list(value_field(node, "names"))) {
+      let raw = value_str(name)
+      let binding = ident(raw)
+      if (is_record && raw != binding) {
+        names = names.push(`${prop_key(raw)}: ${binding}`)
+      } else {
+        names = names.push(binding)
+      }
+    }
+    var lhs = ""
+    if (is_record) {
+      lhs = `{ ${names.join(", ")} }`
+    } else {
+      let rest = value_field(node, "rest")
+      if (!value_is_null(rest) && value_str(rest) != "") {
+        names = names.push(`...${ident(value_str(rest))}`)
+      }
+      lhs = `[${names.join(", ")}]`
+    }
+    return { lines: [`${pad}${kw} ${lhs} = ${r.text}`], counter: r.counter }
+  }
   if (step == "let") {
     let r = expr(value_field(node, "value"), counter, a)
     var kw = "const"
@@ -1632,6 +1683,27 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   if (step == "expr") {
     let r = expr(value_field(node, "expr"), counter, a)
     return { lines: [`${pad}${r.text}`], counter: r.counter }
+  }
+  if (step == "assert") {
+    let e = value_field(node, "expr")
+    let op = value_str(value_field(e, "op"))
+    if (node_kind(e) == "bin" && list_contains(["==", "===", "!=", "!==", "<", ">", "<=", ">="], op)) {
+      let left = expr(value_field(e, "left"), counter, a)
+      let right = expr(value_field(e, "right"), left.counter, a)
+      let tsop = ts_bin_op(op)
+      let shown = json_dumps(`${left.text} ${tsop} ${right.text}`)
+      var condition = `$revl_l ${tsop} $revl_r`
+      if (list_contains(["==", "===", "!=", "!=="], op)) {
+        condition = "revlEq($revl_l, $revl_r)"
+        if (op == "!=" || op == "!==") { condition = `!${condition}` }
+      }
+      return { lines: [
+        `${pad}{ const $revl_l = ${left.text}, $revl_r = ${right.text};`,
+        `${pad}  if (!(${condition})) throw new Error(${shown} + "\n  left  = " + revlShow($revl_l) + "\n  right = " + revlShow($revl_r)) }`
+      ], counter: right.counter }
+    }
+    let r = expr(e, counter, a)
+    return { lines: [`${pad}if (!(${r.text})) throw new Error("assertion failed")`], counter: r.counter }
   }
   // item 379 / 391: bare loop control -> the host keyword (frame-neutral).
   if (step == "break") { return { lines: [`${pad}break`], counter: counter } }
@@ -1781,11 +1853,39 @@ fn emit_ts_types(types: Any) -> List[Str] {
       out = out.push(`export interface ${nm} {`)
       let fields = value_field(spec, "fields")
       for (fname of value_keys(fields)) {
-        out = out.push(`  ${ident(fname)}: ${ts_type(value_str(value_field(fields, fname)))}`)
+        out = out.push(`  ${prop_key(fname)}: ${ts_type(value_str(value_field(fields, fname)))}`)
       }
       out = out.push("}")
     } else {
-      out = out.push(`<<UNSUPPORTED-TYPE:${nm}>>`)
+      let cases = value_list(value_field(spec, "cases"))
+      out = out.push(`export type ${nm} =`)
+      var index = 0
+      for (case of cases) {
+        let cname = ident(value_str(value_field(case, "name")))
+        let payload = value_field(case, "payload")
+        var member = `{ kind: ${json_dumps(cname)} }`
+        if (!value_is_null(payload)) {
+          member = `{ kind: ${json_dumps(cname)}; value: ${ts_type(value_str(payload))} }`
+        }
+        var prefix = "  "
+        if (index > 0) { prefix = "  | " }
+        out = out.push(prefix.concat(member))
+        index += 1
+      }
+      out = out.push("")
+      for (case of cases) {
+        let cname = ident(value_str(value_field(case, "name")))
+        let payload = value_field(case, "payload")
+        if (value_is_null(payload)) {
+          out = out.push(`export function ${cname}(): ${nm} {`)
+          out = out.push(`  return { kind: ${json_dumps(cname)} }`)
+        } else {
+          out = out.push(`export function ${cname}(value: ${ts_type(value_str(payload))}): ${nm} {`)
+          out = out.push(`  return { kind: ${json_dumps(cname)}, value }`)
+        }
+        out = out.push("}")
+        out = out.push("")
+      }
     }
     out = out.push("")
   }
@@ -1934,11 +2034,28 @@ fn ts_return_type_v1(v: Any, known_types: List[Str]) -> Str {
   return ts_type_v1(value_str(v), known_types)
 }
 
+fn is_map_cas(acq: Any) -> Bool {
+  return node_kind(acq) == "call" && node_method(acq) == "insert_if_absent"
+}
+
+fn pinned_arrow(step: Any, slot: Str, arrow: Str) -> Str {
+  let names = value_list(value_field(step, `${slot}_captures`))
+  if (names.length() == 0) { return arrow }
+  var bound = []
+  var args = []
+  for (name of names) {
+    let n = ident(value_str(name))
+    bound = bound.push(`${n}: any`)
+    args = args.push(n)
+  }
+  return `((${bound.join(", ")}) => ${arrow})(${args.join(", ")})`
+}
+
 // `_method_body`: steps inside a provide-method body. An `async` provide method
 // (services 2.0 §5) renders its body with `in_async` set (via `acx`), so the
 // item-141 await-seed fires on a req-keyed async-op call, and an explicit
 // `await` step lands (A1). A sync method's `acx` is `sync_acx()`.
-fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx) -> StmtOut {
+fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx, frame_var: Str, provide_name: Str, method_name: Str) -> StmtOut {
   let pad = ind(level)
   var out = []
   var c = counter
@@ -1996,23 +2113,17 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx) -> StmtOut 
             } else {
               out = out.push(`${pad}  ${ar.text}`)
             }
-            out = out.push(`${pad}  return () => ${ur.text}`)
+            var inverse = pinned_arrow(step, "undo", `() => ${ur.text}`)
+            if (has_bind && is_map_cas(value_field(step, "acquire"))) {
+              inverse = `${bind} ? ${inverse} : () => {}`
+            }
+            out = out.push(`${pad}  return ${inverse}`)
             out = out.push(`${pad}})`)
           } else {
             if (kind == "emit") {
-              let er = expr(value_field(step, "expr"), c, acx)
+              let er = emit_compensated(step, level, c, acx, `${provide_name}.${method_name}`, provide_name, `${frame_var}.compensationMethod`)
+              out = out.concat(er.lines)
               c = er.counter
-              let comp = value_field(step, "compensate")
-              if (value_is_null(comp)) {
-                out = out.push(`${pad}${er.text}`)
-              } else {
-                let cr = expr(comp, c, acx)
-                c = cr.counter
-                out = out.push(`${pad}ctx.effect(() => {`)
-                out = out.push(`${pad}  ${er.text}`)
-                out = out.push(`${pad}  return () => ${cr.text}`)
-                out = out.push(`${pad}})`)
-              }
             } else {
               out = out.push(`${pad}<<UNSUPPORTED-METHOD-STEP:${kind}>>`)
             }
@@ -2029,7 +2140,7 @@ fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx) -> StmtOut 
 // bind the body; the param TYPES come from the service declaration (arity must
 // agree). An operation the service declares `async` lowers to an `async` method
 // whose body renders in an async context (the await-seed's `ops`, item 219).
-fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str], level: Int, counter: Int) -> StmtOut {
+fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str], async_names: List[Str], frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let svc_name = value_str(value_field(step, "service"))
   let declared = value_field(value_field(services, svc_name), "methods")
@@ -2068,7 +2179,7 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str]
     var body_acx = sync_acx()
     if (is_async) {
       prefix = "async "
-      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty() }
+      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty() }
     }
     out = out.push(`${pad}${prefix}${name}(${sig_parts.join(", ")}) {`)
     // A param the service declared `Secret[T]` is a declared DISCLOSURE
@@ -2080,7 +2191,7 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str]
     if (secret_params.length() > 0) {
       out = out.push(`${pad}  host.markSecret(${secret_params.join(", ")})`)
     }
-    let br = method_body(value_list(value_field(method, "body")), level + 1, c, body_acx)
+    let br = method_body(value_list(value_field(method, "body")), level + 1, c, body_acx, frame_var, svc_name, name)
     out = out.concat(br.lines)
     c = br.counter
     out = out.push(`${pad}},`)
@@ -2108,18 +2219,25 @@ fn crossing_key_name(target: Any) -> Str {
 // this component's RAW name (for a compensation entry's `site`); `frame_var` is
 // the emitted `Frame` local (`$revl_frame`, "" when the component needs none) —
 // a compensation entry registers through it (item 243 Slice 2b).
-fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[Str], comp_name: Str, frame_var: Str, level: Int, counter: Int) -> StmtOut {
+fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[Str], async_names: List[Str], comp_name: Str, frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let a = sync_acx()
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect" || kind == "effect") {
-    let ar = expr(value_field(step, "acquire"), counter, a)
+    let awaited = value_bool(value_field(step, "async"))
+    var acquire_acx = a
+    if (awaited && kind == "let-effect") {
+      acquire_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty() }
+    }
+    let ar = expr(value_field(step, "acquire"), counter, acquire_acx)
     var out = []
     if (kind == "let-effect") {
       let bind = ident(value_str(value_field(step, "bind")))
       out = out.push(`${pad}const ${bind} = ${ar.text}`)
     } else {
-      out = out.push(`${pad}${ar.text}`)
+      var acquire_text = ar.text
+      if (awaited) { acquire_text = `await ${acquire_text}` }
+      out = out.push(`${pad}${acquire_text}`)
     }
     let ur = expr(value_field(step, "undo"), ar.counter, a)
     // Phase-1 continue-and-record (docs/design/teardown-contract.md): a bracket
@@ -2136,7 +2254,11 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     let b_site = `${comp_name}.body:${b_key}`
     let b_undo = call_method_name(value_field(step, "undo"))
     let b_crossing = `{ key: ${json_dumps(b_key)}, method: ${json_dumps(b_method)}, args: [], site: ${json_dumps(b_site)} }`
-    out = out.push(`${pad}yield ${frame_var}.bracket(${b_crossing}, ${json_dumps(b_undo)}, () => ${ur.text})`)
+    var inverse = `() => ${ur.text}`
+    if (kind == "let-effect" && is_map_cas(value_field(step, "acquire"))) {
+      inverse = `${ident(value_str(value_field(step, "bind")))} ? ${inverse} : () => {}`
+    }
+    out = out.push(`${pad}yield ${frame_var}.bracket(${b_crossing}, ${json_dumps(b_undo)}, ${inverse})`)
     return { lines: out, counter: ur.counter }
   }
   if (kind == "await") {
@@ -2149,8 +2271,53 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     return { lines: out, counter: er.counter }
   }
   if (kind == "emit") {
+    return emit_compensated(step, level, counter, a, `${comp_name}.body`, comp_name, `yield ${frame_var}.compensation`)
+  }
+  if (kind == "provide") {
+    let name = value_str(value_field(step, "name"))
+    var out = [`${pad}yield ctx.provide(${json_dumps(name)}, {`]
+    let pr = provide_impl(step, services, ops, known_types, async_names, frame_var, level + 1, counter)
+    out = out.concat(pr.lines)
+    out = out.push(`${pad}} satisfies ${ident(value_str(value_field(step, "service")))})`)
+    return { lines: out, counter: pr.counter }
+  }
+  if (kind == "if") {
+    let cr = expr(value_field(step, "cond"), counter, a)
+    var out = [`${pad}if (${cr.text}) {`]
+    var c = cr.counter
+    for (s of value_list(value_field(step, "then"))) {
+      let r = component_step(s, services, ops, known_types, async_names, comp_name, frame_var, level + 1, c)
+      out = out.concat(r.lines)
+      c = r.counter
+    }
+    let els = value_list(value_field(step, "else"))
+    if (els.length() > 0) {
+      out = out.push(`${pad}} else {`)
+      for (s of els) {
+        let r = component_step(s, services, ops, known_types, async_names, comp_name, frame_var, level + 1, c)
+        out = out.concat(r.lines)
+        c = r.counter
+      }
+    }
+    out = out.push(`${pad}}`)
+    return { lines: out, counter: c }
+  }
+  if (kind == "fail") {
+    let mr = expr(value_field(step, "message"), counter, a)
+    return { lines: [`${pad}throw new Error(${mr.text})`], counter: mr.counter }
+  }
+  return { lines: [`${pad}<<UNSUPPORTED-STEP:${kind}>>`], counter: counter }
+}
+
+// Both activation and method compensation snapshot arguments at registration.
+fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: Str, scope_name: Str, register: Str) -> StmtOut {
+    let pad = ind(level)
     let er = expr(value_field(step, "expr"), counter, a)
-    var out = [`${pad}${er.text}`]
+    var emitted = er.text
+    if (value_bool(value_field(step, "async")) && !a.in_async) {
+      emitted = `await ${emitted}`
+    }
+    var out = [`${pad}${emitted}`]
     let comp = value_field(step, "compensate")
     if (value_is_null(comp)) { return { lines: out, counter: er.counter } }
     // item 247/243 Slice 2b: a compensation entry — audit-facing, best-effort,
@@ -2161,7 +2328,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     // them (no double evaluation).
     var c = er.counter + 1
     let n = c
-    let site = `${comp_name}.body#${n}`
+    let site = `${site_prefix}#${n}`
     let target = value_field(comp, "target")
     let method_f = value_field(comp, "method")
     if (!value_is_null(target) && !value_is_null(method_f)) {
@@ -2184,7 +2351,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
       let args_joined = temps.join(", ")
       let run_ts = `${target_tmp}.${ident(method)}(${args_joined})`
       let crossing = `{ key: ${json_dumps(crossing_key_name(target))}, method: ${json_dumps(method)}, args: [${args_joined}], site: ${json_dumps(site)} }`
-      out = out.push(`${pad}yield ${frame_var}.compensation(${crossing}, ${json_dumps(method)}, [${args_joined}], () => ${run_ts})`)
+      out = out.push(`${pad}${register}(${crossing}, ${json_dumps(method)}, [${args_joined}], () => ${run_ts})`)
       return { lines: out, counter: c }
     }
     let comp_kind = node_kind(comp)
@@ -2207,7 +2374,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
       var run_ts = `${ident(name)}(${args_joined})`
       if (comp_kind == "host") { run_ts = `host.${name}(${args_joined})` }
       let crossing = `{ key: ${json_dumps(name)}, method: ${json_dumps(name)}, args: [${args_joined}], site: ${json_dumps(site)} }`
-      out = out.push(`${pad}yield ${frame_var}.compensation(${crossing}, ${json_dumps(name)}, [${args_joined}], () => ${run_ts})`)
+      out = out.push(`${pad}${register}(${crossing}, ${json_dumps(name)}, [${args_joined}], () => ${run_ts})`)
       return { lines: out, counter: c }
     }
     // unrecognised compensate shape: eagerly snapshot its value now
@@ -2216,44 +2383,9 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     let cr = expr(comp, c, a)
     c = cr.counter
     out = out.push(`${pad}const ${snap} = ${cr.text}`)
-    let crossing = `{ key: ${json_dumps(comp_name)}, method: ${json_dumps("compensate")}, args: [], site: ${json_dumps(site)} }`
-    out = out.push(`${pad}yield ${frame_var}.compensation(${crossing}, ${json_dumps("compensate")}, [], () => ${snap})`)
+    let crossing = `{ key: ${json_dumps(scope_name)}, method: ${json_dumps("compensate")}, args: [], site: ${json_dumps(site)} }`
+    out = out.push(`${pad}${register}(${crossing}, ${json_dumps("compensate")}, [], () => ${snap})`)
     return { lines: out, counter: c }
-  }
-  if (kind == "provide") {
-    let name = value_str(value_field(step, "name"))
-    var out = [`${pad}yield ctx.provide(${json_dumps(name)}, {`]
-    let pr = provide_impl(step, services, ops, known_types, level + 1, counter)
-    out = out.concat(pr.lines)
-    out = out.push(`${pad}} satisfies ${ident(value_str(value_field(step, "service")))})`)
-    return { lines: out, counter: pr.counter }
-  }
-  if (kind == "if") {
-    let cr = expr(value_field(step, "cond"), counter, a)
-    var out = [`${pad}if (${cr.text}) {`]
-    var c = cr.counter
-    for (s of value_list(value_field(step, "then"))) {
-      let r = component_step(s, services, ops, known_types, comp_name, frame_var, level + 1, c)
-      out = out.concat(r.lines)
-      c = r.counter
-    }
-    let els = value_list(value_field(step, "else"))
-    if (els.length() > 0) {
-      out = out.push(`${pad}} else {`)
-      for (s of els) {
-        let r = component_step(s, services, ops, known_types, comp_name, frame_var, level + 1, c)
-        out = out.concat(r.lines)
-        c = r.counter
-      }
-    }
-    out = out.push(`${pad}}`)
-    return { lines: out, counter: c }
-  }
-  if (kind == "fail") {
-    let mr = expr(value_field(step, "message"), counter, a)
-    return { lines: [`${pad}throw new Error(${mr.text})`], counter: mr.counter }
-  }
-  return { lines: [`${pad}<<UNSUPPORTED-STEP:${kind}>>`], counter: counter }
 }
 
 // The activation body is an async generator when any TOP-LEVEL step is an
@@ -2296,7 +2428,7 @@ fn config_interface(comp: Any) -> List[Str] {
 }
 
 // `_component`: one component's config interface + plugin object.
-fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: Int) -> StmtOut {
+fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names: List[Str], counter: Int) -> StmtOut {
   let name = ident(value_str(value_field(comp, "name")))
   var out = config_interface(comp)
   out = out.push(`export const ${name} = {`)
@@ -2405,7 +2537,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
   let ops = async_ops_of(value_field(comp, "requires"), services)
   var c = counter
   for (step of body) {
-    let r = component_step(step, services, ops, known_types, raw_name, frame_var, 3, c)
+    let r = component_step(step, services, ops, known_types, async_names, raw_name, frame_var, 3, c)
     out = out.concat(r.lines)
     c = r.counter
   }
@@ -2494,7 +2626,7 @@ fn context_augmentation(components: List[Any]) -> List[Str] {
 // The component tail of the document (`_emit_v3` after the pure passes): service
 // interfaces, the context augmentation, then each component. Threads a FRESH
 // match counter (the reference's `doc_ctx`, distinct from the function pass).
-fn emit_component_tail(ir: Any) -> List[Str] {
+fn emit_component_tail(ir: Any, async_names: List[Str]) -> List[Str] {
   var out = []
   // `known_types` = the document's declared record/ADT names (`frozenset(types)`
   // in `_emit_v3`): the set `_ts_type` renders a bare name by, so a service
@@ -2505,7 +2637,7 @@ fn emit_component_tail(ir: Any) -> List[Str] {
   out = out.concat(context_augmentation(components))
   var c = 0
   for (comp of components) {
-    let r = component_lines(comp, value_field(ir, "services"), known_types, c)
+    let r = component_lines(comp, value_field(ir, "services"), known_types, async_names, c)
     out = out.concat(r.lines)
     out = out.push("")
     c = r.counter
@@ -2731,6 +2863,11 @@ fn body_needs_frame(steps: List[Any]) -> Bool {
   for (step of steps) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "emit" && !value_is_null(value_field(step, "compensate"))) { return true }
+    if (kind == "provide") {
+      for (method of value_list(value_field(step, "methods"))) {
+        if (body_needs_frame(value_list(value_field(method, "body")))) { return true }
+      }
+    }
     if (kind == "if") {
       if (body_needs_frame(value_list(value_field(step, "then")))) { return true }
       if (body_needs_frame(value_list(value_field(step, "else")))) { return true }
@@ -2902,6 +3039,7 @@ fn is_str_method(m: Str) -> Bool {
 
 fn uses_str_methods(n: Any) -> Bool {
   if (node_kind(n) == "len") { return true }
+  if (node_kind(n) == "field" && value_bool(value_field(n, "sized_length"))) { return true }
   if (node_kind(n) == "builtin" && is_str_method(node_method(n))) { return true }
   for (c of value_children(n)) {
     if (uses_str_methods(c)) { return true }
@@ -2975,7 +3113,7 @@ pub fn emit_ts_src(ir: Any) -> Str {
   let components = value_list(value_field(ir, "components"))
   let services = value_field(ir, "services")
   if (components.length() > 0 || value_keys(services).length() > 0) {
-    out = out.concat(emit_component_tail(ir))
+    out = out.concat(emit_component_tail(ir, async_names))
   }
   return py_rstrip(out.join(newline())).concat(newline())
 }

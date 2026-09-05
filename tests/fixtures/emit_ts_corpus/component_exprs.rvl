@@ -22,6 +22,8 @@ component Runner requires log: Log provides maker: Maker {
   effect Job.run("start") undo Job.run("stop")
 
   emit log.write(`go ${config.count}`) compensate log.write(tag(config.count))
+  emit log.write("cleanup") compensate Job.run("stop")
+  emit log.write("snapshot") compensate (config.count > 0 ? Job.run("stop") : Job.run("other"))
 
   provide maker {
     fn make(x) = Ok(x)

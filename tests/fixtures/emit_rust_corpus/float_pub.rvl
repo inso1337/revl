@@ -1,0 +1,9 @@
+// Rust corpus witness for finite Float literals, unary/binary float arithmetic,
+// mixed Int/Float widening, and public function visibility.
+fn float_ops(a: Float, n: Int) -> Float {
+  let x = 1.5 + a
+  let y = n + 0.5
+  return -x * y
+}
+
+pub fn public_float() -> Float { return 2.25 }

@@ -1,0 +1,72 @@
+type Point = { x: Int, y: Int }
+type Annotation = { real: Float, data: Bytes, unit: Unit, result: Result[Int, Str], callback: () -> Int }
+type Empty = {}
+type OptionalField = { value: Opt[Int] }
+
+fn read_optional(p: OptionalField) -> Opt[Int] { return p.value }
+fn mixed_float(a: Int, b: Float) -> Float { return a + b }
+fn widen_float(x: Int) -> Float { return x }
+fn negate_float(x: Float) -> Float { return -x }
+fn negate_i32(x: Int32) -> Int32 { return -x }
+fn empty() {}
+fn empty_loops(xs: List[Int]) {
+  while (false) {}
+  for (x of xs) {}
+}
+fn sized_length(xs: List[Int]) -> Int { return xs.length }
+fn optional_field(p: Opt[Point]) -> Opt[Int] { return p?.x }
+fn optional_parse(s: Opt[Str]) -> Opt[Opt[Int]] { return s?.to_int() }
+fn empty_map() -> Map[Str, Int] { return Map.empty() }
+fn removed(m: Map[Str, Int], k: Str) -> Map[Str, Int] { return m.remove(k) }
+fn assertions(x: Int) {
+  assert x >= 0
+  assert x != 2
+  assert x == x
+  assert x < 10
+  assert x <= 9
+  assert x > -1
+  assert !(x == 2)
+  empty_map()
+  return
+}
+
+service Values {
+  fn record(p: Point) -> Point
+  fn list() -> List[Int]
+  fn negate(x: Int, flag: Bool) -> Int
+  fn transform(x: Int) -> Int
+  fn optional(p: Opt[Point]) -> Opt[Int]
+  fn parse(s: Opt[Str]) -> Opt[Opt[Int]]
+  fn fallback(x: Opt[Int]) -> Int
+  fn at(xs: List[Int], i: Int) -> Int
+  fn wildcard(x: Opt[Int]) -> Int
+  fn new_map() -> Map[Str, Int]
+  fn arithmetic(x: Int, y: Int) -> Int
+  fn read_optional(p: OptionalField) -> Opt[Int]
+  fn length(xs: List[Int]) -> Int
+  fn block_match(x: Opt[Int]) -> Int
+}
+component ValuesProvider provides values: Values {
+  provide values {
+    fn record(p) {
+      let q = { x: p.x, y: p.y }
+      return { q | x = q.y, y = q.x }
+    }
+    fn list() { return [1, 2] }
+    fn negate(x, flag) { return !flag ? -x : x }
+    fn transform(x) {
+      let f = (n: Int) => n + 1
+      return f(x)
+    }
+    fn optional(p) { return p?.x }
+    fn parse(s) { return s?.to_int() }
+    fn fallback(x) { return x ?? 7 }
+    fn at(xs, i) { return xs[i] }
+    fn wildcard(x) { return match x { _ => 7 } }
+    fn new_map() { return Map.empty() }
+    fn arithmetic(x, y) { return x * y }
+    fn read_optional(p) { return p.value }
+    fn length(xs) { return xs.length }
+    fn block_match(x) { return match x { Some(n) => { let doubled = n * 2 doubled + 1 }, None => 0 } }
+  }
+}

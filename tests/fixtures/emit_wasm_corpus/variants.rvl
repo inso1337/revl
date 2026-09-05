@@ -56,3 +56,5 @@ fn optList() -> List[Opt[Int]] { return [Some(1), None] }
 
 // A list of user-variant cells, mixing a payload case and a nullary case.
 fn boxList() -> List[Box] { return [Full(7), Empty] }
+
+fn inferredBox() -> Int { let value = Full(7) return 0 }

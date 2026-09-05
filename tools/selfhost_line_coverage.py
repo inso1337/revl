@@ -86,11 +86,11 @@ rather than merely bounded. A function that appears with uncovered statements
 and is not in the ledger fails.
 
 WHAT THIS CANNOT KNOW. Statement coverage is not branch coverage: a line that
-executed once, on one shape of input, counts as covered here. It says nothing
-about the SELF-HOST side — `selfhost/*.rvl` carries no line provenance into its
-emitted Python, so the same measurement cannot yet be taken there (see the
-roadmap entry for what that would cost). And a covered line is not a correct
-line: when both sides agree and both are wrong, no coverage number says so.
+executed once, on one shape of input, counts as covered here. BOTH sides are
+measured, but the port's emitted Python statements map to `.rvl` FUNCTIONS,
+not `.rvl` source lines: source-line provenance is still absent. And a covered
+line is not a correct line: when both sides agree and both are wrong, no
+coverage number says so.
 
 Usage:
     python3 tools/selfhost_line_coverage.py            # the report
@@ -110,6 +110,7 @@ import sys
 import tempfile
 import types
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -209,6 +210,55 @@ def _per_function(cov, path: Path) -> dict:
         "functions": {name: absent[name] for name in sorted(absent)},
         "sizes": {name: total[name] for name in sorted(total)},
     }
+
+
+def load_reference(tier: str):
+    """Load this checkout's emitter by path, as the differential oracles do."""
+    sys.path.insert(0, str(ROOT / "src"))
+    spec = importlib.util.spec_from_file_location(
+        f"oracle_reference_{tier}", ROOT / "backends" / TIERS[tier] / "emit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@contextmanager
+def selfhost_module(tier: str, python_reference, scratch: Path):
+    """Compile a port through Python, with the oracle's inert runtime stub.
+
+    The caller controls tracing, including import-time statements. Registration
+    supports emitted dataclasses; all module state is restored on failure too.
+    """
+    sys.path.insert(0, str(ROOT / "src"))
+    from revl import compile_files  # noqa: PLC0415
+
+    emitted = python_reference.emit(
+        compile_files([str(ROOT / "selfhost" / f"emit_{tier}.rvl")]))
+    path = scratch / f"selfhost_emit_{tier}.py"
+    path.write_text(emitted)
+    name = f"selfhost_emit_{tier}"
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    stub = types.ModuleType("runtime")
+    stub.__file__ = "<runtime-stub>"
+
+    def stub_attr(attr):
+        if attr.startswith("__"):
+            raise AttributeError(attr)
+        return lambda *a, **k: None
+
+    stub.__getattr__ = stub_attr
+    previous = {key: sys.modules[key] for key in ("runtime", name) if key in sys.modules}
+    sys.modules["runtime"], sys.modules[name] = stub, module
+    try:
+        exec(compile(emitted, str(path), "exec"), module.__dict__)
+        yield module, path
+    finally:
+        for key in ("runtime", name):
+            if key in previous:
+                sys.modules[key] = previous[key]
+            else:
+                sys.modules.pop(key, None)
 
 
 def measure(frontend: bool = False) -> dict:
@@ -330,53 +380,23 @@ def measure_selfhost() -> dict:
     sys.path.insert(0, str(ROOT / "src"))
     from revl import compile_files  # noqa: PLC0415
 
-    spec = importlib.util.spec_from_file_location(
-        "selfhost_line_coverage_pyref", ROOT / "backends" / "python" / "emit.py")
-    reference = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(reference)
-
-    # The self-host emitters are components: their emitted module imports
-    # `runtime`, which the pure emitter functions never touch. Stub it as the
-    # oracles do — but leave the dunders alone, or `coverage`'s module
-    # inspection walks into the stub and dies.
-    stub = types.ModuleType("runtime")
-    stub.__file__ = "<runtime-stub>"
-
-    def _stub_attr(name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return lambda *a, **k: None
-
-    stub.__getattr__ = _stub_attr
-
+    reference = load_reference("py")
     result: dict[str, dict] = {}
-    scratch = Path(tempfile.mkdtemp(prefix="selfhost-coverage-"))
-    had_runtime, previous = "runtime" in sys.modules, sys.modules.get("runtime")
-    sys.modules["runtime"] = stub
-    try:
+    with tempfile.TemporaryDirectory(prefix="selfhost-coverage-") as temporary:
+        scratch = Path(temporary)
         for tier in TIERS:
             source_rvl = ROOT / "selfhost" / f"emit_{tier}.rvl"
-            emitted = reference.emit(compile_files([str(source_rvl)]))
             module_path = scratch / f"selfhost_emit_{tier}.py"
-            module_path.write_text(emitted)
             declared = set(re.findall(r"^\s*(?:pub\s+)?fn\s+(\w+)",
                                       source_rvl.read_text(), re.M))
-            # A real module, registered: the emitted source declares
-            # `@dataclass` types, and dataclasses resolves `cls.__module__`
-            # through `sys.modules`. A bare namespace dict dies there.
-            name = f"selfhost_emit_{tier}"
-            module = types.ModuleType(name)
-            module.__file__ = str(module_path)
-            sys.modules[name] = module
             cov = coverage.Coverage(data_file=None, include=[str(module_path)])
             cov.start()
             try:
-                exec(compile(emitted, str(module_path), "exec"), module.__dict__)
-                for document in corpus_documents(tier):
-                    _entry(module, tier)(compile_files([str(document)]))
+                with selfhost_module(tier, reference, scratch) as (module, _):
+                    for document in corpus_documents(tier):
+                        _entry(module, tier)(compile_files([str(document)]))
             finally:
                 cov.stop()
-                sys.modules.pop(name, None)
             found = _per_function(cov, module_path)
             # Keep only names that are `.rvl` functions: the emitted module also
             # carries scaffolding and nested closures that no `.rvl` `fn`
@@ -385,15 +405,15 @@ def measure_selfhost() -> dict:
                                   if n in declared}
             found["sizes"] = {n: c for n, c in found["sizes"].items() if n in declared}
             found["declared"] = len(declared)
+            # The ledger population is declared .rvl functions only. Do not
+            # headline generated scaffolding statements that cannot receive a
+            # source-function residual or be triaged in the ledger.
+            found["statements"] = sum(found["sizes"].values())
+            found["uncovered"] = sum(found["functions"].values())
             found["never_entered"] = sorted(
                 n for n, c in found["functions"].items()
                 if c >= found["sizes"].get(n, c) - 1)
             result[tier] = found
-    finally:
-        if had_runtime:
-            sys.modules["runtime"] = previous
-        else:
-            sys.modules.pop("runtime", None)
     return result
 
 
@@ -429,10 +449,60 @@ def _load_ledger() -> dict:
 
 
 def _flatten(entry: dict) -> dict[str, int]:
+    if not isinstance(entry, dict) or not isinstance(entry.get("uncovered"), dict):
+        return {}
     flat: dict[str, int] = {}
     for functions in entry.get("uncovered", {}).values():
-        flat.update(functions)
+        if isinstance(functions, dict):
+            for name, count in functions.items():
+                if isinstance(name, str) and type(count) is int and count >= 0:
+                    flat[name] = count
     return flat
+
+
+_GENERIC_REASONS = (
+    "NEVER ENTERED",
+    "PARTIALLY EXERCISED",
+    "NOT TRIAGED",
+    "UNDECLARED GAP",
+)
+
+
+def _closure_problems(ledger: dict) -> list[str]:
+    """Reject generic or structurally incomplete line-coverage baselines."""
+    problems: list[str] = []
+    for half in ("reference", "selfhost"):
+        side = ledger.get(half)
+        if not isinstance(side, dict):
+            problems.append(f"{half}: missing line-coverage side")
+            continue
+        for tier in TIERS:
+            entry = side.get(tier)
+            if not isinstance(entry, dict):
+                problems.append(f"{half}/{tier}: missing line-coverage tier")
+                continue
+            reasons = entry.get("uncovered")
+            if not isinstance(reasons, dict):
+                problems.append(f"{half}/{tier}: missing uncovered reason map")
+                continue
+            seen: dict[str, str] = {}
+            for reason, functions in reasons.items():
+                if not isinstance(reason, str) or not reason.strip():
+                    problems.append(f"{half}/{tier}: missing reason")
+                elif any(marker in reason.upper() for marker in _GENERIC_REASONS):
+                    problems.append(f"{half}/{tier}: generic reason `{reason}`")
+                if not isinstance(functions, dict) or not functions:
+                    problems.append(f"{half}/{tier}: reason has no functions")
+                    continue
+                for function in functions:
+                    previous = seen.get(function)
+                    if previous is not None:
+                        problems.append(
+                            f"{half}/{tier}: `{function}` appears in multiple "
+                            f"reasons ({previous}, {reason})")
+                    else:
+                        seen[function] = reason
+    return problems
 
 
 def _group_for(name: str, missing: int, size: int) -> str:
@@ -455,14 +525,38 @@ WHERE = {
 
 def check(data: dict) -> list[str]:
     ledger = _load_ledger()
-    problems: list[str] = []
+    problems = _closure_problems(ledger)
+    if not isinstance(data, dict):
+        return problems + ["survey data is not a map"]
     for half in ("reference", "selfhost"):
         recorded_half = ledger.get(half, {})
+        if not isinstance(recorded_half, dict):
+            recorded_half = {}
         for tier in TIERS:
-            found = data[half][tier]["functions"]
+            try:
+                found = data[half][tier]["functions"]
+            except (KeyError, TypeError):
+                problems.append(f"{half}/{tier}: survey data is missing")
+                continue
+            if not isinstance(found, dict):
+                problems.append(f"{half}/{tier}: survey functions are not a map")
+                continue
             recorded = _flatten(recorded_half.get(tier, {}))
+            raw_entry = recorded_half.get(tier)
+            if isinstance(raw_entry, dict):
+                raw_reasons = raw_entry.get("uncovered")
+                if isinstance(raw_reasons, dict):
+                    for functions in raw_reasons.values():
+                        if isinstance(functions, dict):
+                            for name, count in functions.items():
+                                if type(count) is not int or count < 0:
+                                    problems.append(
+                                        f"{half}/{tier}: invalid uncovered count for `{name}`")
             for name in sorted(set(found) | set(recorded)):
                 now, before = found.get(name, 0), recorded.get(name)
+                if type(now) is not int or now < 0:
+                    problems.append(f"{half}/{tier}: invalid measured count for `{name}`")
+                    continue
                 if before is None:
                     problems.append(
                         f"{half}/{tier}: `{name}` has {now} statement(s) that no "

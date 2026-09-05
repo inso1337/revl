@@ -15,8 +15,7 @@ IR through a bespoke ``@py`` accessor set (``g``/``gs``/``alist``/``at``/…),
 navigation is now PURE revl through stdlib/value.rvl's ``value_*`` (item 180) —
 a refactor of HOW the IR is read, proven by the function corpus staying
 byte-identical. Only host formatting stays ``@py`` (``py_repr``/``newline``/
-``mangle``/``snake``/``pascal``), plus one flagged gap: value.rvl ships no
-record-key enumerator, so ``record_keys`` is bridged locally (see the file).
+``mangle``/``snake``/``pascal``); record keys use value.rvl's ``value_keys``.
 
 Covered subset (what emits byte-identical):
   * the FUNCTION-ONLY document — module scaffold, gated arithmetic preludes
@@ -65,13 +64,20 @@ Slice 4 (item 206) adds three more byte-identical forms:
 Deliberately OUT (excluded from the corpus, deferred to Path B slice 5+):
 in-file ``test``/``fault_test`` and ``lifecycle test`` emission, async coloring
 (async methods / async externs' await-seed / ``await`` bodies), realm placements
-(``isolate``/``intercept``/``routes``), spawn/instances, ``adt`` construction, and
+(``isolate``/``intercept``/``routes``), spawn/instances, and
 the canonical ABI. Method-body ``let-effect`` is emitted (the
 ``_revl_frame.acquire`` form) but NOT cross-checked this slice: the surface admits
-only a ``spawn`` acquire there, whose ``cexpr`` lands in slice 5. ``let_pattern``
+``spawn`` or result-declared host acquisitions there, whose ``cexpr`` lands in
+slice 5; it rejects bound witnessed acquisitions. ``let_pattern``
 (destructuring) is still unimplemented here but is no longer a *permanent*
 exclusion: item 179 made the reference's destructure temp deterministic (a
 per-``_Lines`` counter, not ``id(node)``), so a future slice can port it.
+
+Item 429 expands the exact workload with existing-tree inputs and authored
+cache-pure, witnessed/setup, inlining, Float, ADT, optional-field and component
+expression edges. Every residual function and construct is classified in the
+Python ledger entries with source sites and representative inputs. The boundary
+tests below pin real exclusions separately; they are NOT positive CORPUS inputs.
 
 Restored by item 317 (was OUT as of item 247, docs/design/teardown-contract.md):
 ``services_body.rvl`` exercises the ACTIVATION-BODY ``emit ... compensate ...``
@@ -179,6 +185,31 @@ CORPUS = [
     # function that does not exist — the self-host could not compile a program
     # that BUILDS a Result. Added red on both stages.
     "adt.rvl",
+    "cache_pure.rvl",
+    "witnessed.rvl",
+    "branches.rvl",
+    "inline.rvl",
+    # Whole-tree differential survey's greedy joint-line selection: each input
+    # reaches a distinct branch on at least one side, with no copied fixtures.
+    "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
+    "../emit_go_corpus/control.rvl",
+    "../../../backends/typescript/tests/fixtures/unique_writes.rvl",
+    "../../../examples/v3_step_scheduler.rvl",
+    "../../../backends/typescript/tests/fixtures/conformance.rvl",
+    "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+    "../emit_wasm_corpus/builtins.rvl",
+    "../policy_agents.rvl",
+    "../../../bench/codegen/go/probe2.rvl",
+    "../../../bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl",
+    "../../../examples/java_match.rvl",
+    "../../../backends/go/scenarios/emitted/timer/timer.rvl",
+    "../emit_ts_corpus/unique_writes.rvl",
+    "../emit_wasm_corpus/forloop.rvl",
+    "../../../backends/typescript/tests/fixtures/str_scan.rvl",
+    "../../../bench/codegen/python/programs/maps.rvl",
+    "../../../src/revl/truc/components/cli.rvl",
+    "../emit_rust_corpus/reserved_names.rvl",
+    "../emit_rust_corpus/calls.rvl",
 ]
 
 
@@ -279,6 +310,157 @@ def test_selfhosted_emitter_optional_chains_run(emitted):
     assert ns["joined"]({}, "k", "+") is None
 
 
+def test_selfhosted_cache_pure_functions_execute_through_memo_wrapper(emitted):
+    ir = compile_files([str(CORPUS_DIR / "cache_pure.rvl")])
+    ns: dict = {}
+    exec(compile(emitted["emit_py_src"](ir), "cache_pure_emitted.py", "exec"), ns)
+    assert ns["twice"](4) == 8
+    assert ns["cached_record"]({"x": 2, "y": 5}) == 7
+    assert "_revl_uncached_twice" in ns
+    assert ns["twice"] is not ns["_revl_uncached_twice"]
+
+
+def test_inline_templates_preserve_argument_evaluation(emitted):
+    ir = compile_files([str(CORPUS_DIR / "inline.rvl")])
+    source = emitted["emit_py_src"](ir)
+    ns = {}
+    exec(compile(source, "inline_emitted.py", "exec"), ns)
+    calls = []
+
+    def next_value():
+        calls.append(len(calls) + 1)
+        return calls[-1]
+
+    assert ns["run_inline"](4, next_value) == 23
+    assert calls == [1, 2, 3, 4]
+    assert ns["pure_arguments"]([1, 2]) == 7
+    assert "a = next()" in source
+    assert "b = twice_inline(next())" in source
+    assert "c = ignores(next())" in source
+    assert "d = conditional_only(next())" in source
+    assert "return recursive_inline(x)" in source
+    assert ns["guarded"](-1) == 0
+    assert ns["guarded"](99) == 10
+    assert ns["eager_calls"](5) == 5
+
+
+def test_inline_callable_shadowing_is_rejected(tmp_path):
+    from revl.lower import RevlError
+
+    path = tmp_path / "shadowed.rvl"
+    path.write_text("fn identity(x: Int) -> Int { return x }\n"
+                    "fn shadowed(identity: (Int) -> Int) -> Int { return identity(3) }")
+    with pytest.raises(RevlError, match="a module function of that name is in scope"):
+        compile_files([str(path)])
+
+
+def test_record_fields_and_component_expressions_execute(emitted, monkeypatch):
+    class Frame:
+        begin = drain = None
+
+        def __init__(self, ctx, name):
+            pass
+
+        def install(self, body):
+            list(body())
+
+    runtime = types.ModuleType("runtime")
+    runtime.Frame = Frame
+    monkeypatch.setitem(sys.modules, "runtime", runtime)
+    ir = compile_files([str(CORPUS_DIR / "branches.rvl")])
+    ns = {}
+    exec(compile(emitted["emit_py_src"](ir), "branches_emitted.py", "exec"), ns)
+    services = {}
+    ctx = types.SimpleNamespace(provide=lambda key: None, set=services.__setitem__)
+    ns["ValuesProvider"]["apply"](ctx, {})
+    shapes = services["values"]
+    for record in ({}, types.SimpleNamespace(), None):
+        assert ns["read_optional"](record) is None
+        assert shapes.read_optional(record) is None
+    for record in ({"value": 3}, types.SimpleNamespace(value=3)):
+        assert ns["read_optional"](record) == 3
+        assert shapes.read_optional(record) == 3
+    assert shapes.length([1, 2]) == 2
+    assert shapes.block_match(3) == 7
+    assert shapes.block_match(None) == 0
+    assert shapes.parse("12") == 12
+    assert shapes.parse(None) is None
+    assert type(ns["widen_float"](3)) is float
+
+
+def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
+    ir = compile_files([str(CORPUS_DIR / "witnessed.rvl")])
+    source = emitted["emit_py_src"](ir)
+    frames = []
+
+    class Frame:
+        begin = drain = None
+
+        def __init__(self, ctx, name):
+            self.name = name
+            self.entries = []
+            frames.append(self)
+
+        def install(self, body):
+            list(body())
+
+        def transactional(self, inverse, witness, **kwargs):
+            self.entries.append(("activation", inverse, witness, kwargs))
+
+        def transactional_method(self, inverse, witness):
+            self.entries.append(("method", inverse, witness, {}))
+
+    runtime = types.ModuleType("runtime")
+    runtime.Frame = Frame
+    monkeypatch.setitem(sys.modules, "runtime", runtime)
+    ns = {}
+    exec(compile(source, "witnessed_emitted.py", "exec"), ns)
+    acquired, restored = [], []
+
+    def stash(path):
+        acquired.append(path)
+        if path == "fail":
+            return ns["Err"]({"code": "missing"})
+        return ns["Ok"]({"path": path, "ordinal": len(acquired)})
+
+    ns.update(stash=stash, unstash=restored.append)
+    services = {}
+    ctx = types.SimpleNamespace(provide=lambda key: None, set=services.__setitem__)
+    ns["Stasher"]["apply"](ctx, {})
+    ns["MethodStasher"]["apply"](ctx, {})
+    services["stashing"].save("success")
+    services["stashing"].save("fail")
+    assert acquired == ["payload", "second", "activation", "success", "success", "fail", "fail"]
+    assert [len(frame.entries) for frame in frames] == [2, 3]
+    assert [entry[0] for entry in frames[1].entries] == ["activation", "method", "method"]
+    for frame in frames:
+        for mode, inverse, witness, kwargs in frame.entries:
+            assert kwargs == ({"undo_idempotent": True, "register": "declared"}
+                              if mode == "activation" else {})
+            inverse(witness)
+    assert [witness["ordinal"] for witness in restored] == [1, 2, 3, 4, 5]
+    assert "saved = _revl_wit2" in source
+    assert "_revl_wit3 = stash(path)" in source
+
+
+@pytest.mark.parametrize("body, message", [
+    ('component C { if (true) { effect stash("x") } }',
+     "only `fail` .* may appear in a component guard"),
+    ('service S { emission fn save() }\n'
+     'component C provides s: S { provide s { fn save() {'
+     ' let saved = effect stash("x") } } }',
+     "only `spawn`"),
+])
+def test_witnessed_source_boundaries_are_frontend_rejections(tmp_path, body, message):
+    from revl.lower import RevlError
+
+    source = (CORPUS_DIR / "witnessed.rvl").read_text().split("component Stasher")[0]
+    path = tmp_path / "witnessed_boundary.rvl"
+    path.write_text(source + body)
+    with pytest.raises(RevlError, match=message):
+        compile_files([str(path)])
+
+
 def test_selfhosted_emitter_lowers_components_and_services(emitted):
     """Beyond byte-identity: a component/service document actually drives the
     slice-2 path — the emitted module populates SERVICES and COMPONENTS and its
@@ -313,3 +495,29 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+@pytest.mark.parametrize(("path", "reference_text", "port_marker"), [
+    ("tests/fixtures/emit_ts_corpus/async_module_local.rvl", "async def run(", None),
+    ("tests/fixtures/emit_ts_corpus/services_async.rvl", "'async': True", None),
+    ("tests/fixtures/emit_ts_corpus/realm_intercept.rvl", "'inject': {'db':", None),
+    ("tests/fixtures/emit_ts_corpus/realm_isolate.rvl", "'isolate':", None),
+    ("stdlib/fs.rvl", "_REVL_REFS = {}", None),
+    ("examples/lifecycle_wasm.rvl", "REVL_TESTS = []", None),
+    ("examples/regressions/fuzz_go_6be27824.rvl", "REVL_TESTS = []", None),
+    ("backends/go/scenarios/accessor.rvl", "spawn as _revl_spawn",
+     "<<UNSUPPORTED-CEXPR:spawn>>"),
+    ("backends/go/scenarios/advance.rvl", "fmt as _revl_fmt",
+     "<<UNSUPPORTED-CEXPR:format>>"),
+    ("backends/go/testdata/stream_130.rvl", "Pool, Stream",
+     "<<UNSUPPORTED-CEXPR:subscribe>>"),
+])
+def test_named_runtime_and_harness_boundaries(emitted, reference, path, reference_text, port_marker):
+    """Pin specific deferred paths, not a blanket allowance for different bytes."""
+    ir = compile_files([str(ROOT / path)])
+    expected = reference.emit(ir)
+    actual = emitted["emit_py_src"](ir)
+    assert reference_text in expected
+    assert reference_text not in actual
+    if port_marker is not None:
+        assert port_marker in actual

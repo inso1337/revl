@@ -1,0 +1,78 @@
+type Keywords = { class: Int, class_: Int, plain: Str }
+type Row = { x: Int }
+
+fn keywords(x: Int) -> Keywords { return { class: x, class_: x + 1, plain: "ok" } }
+fn edited(r: Keywords) -> Keywords { return { r | class = r.class_, class_ = r.class } }
+fn fields(r: Opt[Keywords]) -> Opt[Int] { return r?.class }
+fn ordinary(r: Opt[Keywords]) -> Opt[Str] { return r?.plain }
+fn shifted(r: Opt[Keywords]) -> Opt[Int] { return r?.class_ }
+fn owned(n: Int) -> Keywords {
+  var r = { class: n, class_: n, plain: "" }
+  r = { r | class = n + 1 }
+  return r
+}
+fn wide(n: Int) -> Float { return n }
+fn wider(n: Int32) -> Int { return n }
+fn negatives(a: Int32, b: Float) -> Float { let n = -a; return -b + n.to_int() }
+fn floatops(a: Float, b: Int) -> Float { return (a + 1.5) * (b - 2.5) / 3.0 }
+fn checked(a: Int, b: Int) -> List[Result[Int, Str]] {
+  return [a.checked_div_floor(b), a.checked_div_euclid(b), a.checked_mod(b)]
+}
+fn mapinfo(m: Map[Str, Int], k: Str) -> Int {
+  if (m.has(k)) { return m.size() }
+  return 0
+}
+fn sliced(s: Opt[Str], n: Int) -> Opt[Str] { return s?.slice(1, n) }
+fn repeated(s: Opt[Str], n: Int) -> Opt[Str] { return s?.repeat(n) }
+fn chars(s: Opt[Str], n: Int) -> Opt[Str] { return s?.charAt(n) }
+fn codes(s: Opt[Str], n: Int) -> Opt[Int] { return s?.charCodeAt(n) }
+fn points(s: Opt[Str], n: Int) -> Opt[Int] { return s?.codepoint_at(n) }
+fn found(s: Opt[Str]) -> Opt[Int] { return s?.indexOf("x") }
+fn lengths(s: Str, xs: List[Int]) -> Int { return s.length + xs.length }
+fn optional(flag: Bool, n: Int) -> Opt[Int] {
+  if (flag) { return Some(n) }
+  return None
+}
+fn constructors(flag: Bool, n: Int) -> Result[Int, Str] {
+  if (flag) { return Ok(n) }
+  return Err("missing")
+}
+fn matched(v: Opt[Int]) -> Int {
+  return match v { Some(_) => 1, None => 0 }
+}
+fn fallback(v: Result[Int, Str]) -> Int {
+  return match v { Ok(_) => 1, _ => 0 }
+}
+fn asserts(a: Int, b: Int, ok: Bool) {
+  assert a == b
+  assert a != b
+  assert ok
+  return
+}
+fn destructured(r: Row, xs: List[Int]) -> Int {
+  let { x } = r
+  let [head, ...rest] = xs
+  return x + head + rest.length()
+}
+fn captured(xs: List[Int], n: Int) -> Int {
+  var offset = n
+  let f = (x: Int) => x + offset
+  offset = offset + 1
+  return f(xs[0])
+}
+fn direct(n: Int) -> Int { return ((x: Int) => x + 1)(n) }
+fn bytes_identity(value: Bytes) -> Bytes { return value }
+fn unit_identity(value: Unit) -> Unit { return value }
+fn never_identity(value: Never) -> Never { return value }
+fn conditional_call(flag: Bool, f: (Int) -> Int, g: (Int) -> Int, n: Int) -> Int { return (flag ? f : g)(n) }
+fn conditional_index(flag: Bool) -> Int { return (flag ? [1] : [2])[0] }
+fn conditional_length(flag: Bool) -> Int { return (flag ? [1] : [2]).length }
+fn conditional_field(flag: Bool, a: Opt[Keywords], b: Opt[Keywords]) -> Opt[Int] { return (flag ? a : b)?.class }
+
+service EdgeSink {
+  emission idempotent fn put(value: Int) -> Int
+}
+component EdgeProvider provides edge: EdgeSink {
+  config { ratio: Float = 0.5, enabled: Bool = true, token: Secret[Str] = "hidden" }
+  provide edge { fn put(value) = value }
+}
