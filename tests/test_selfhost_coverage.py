@@ -104,6 +104,26 @@ def test_the_corpus_survey_is_not_empty(tool, tier):
     assert {"kind=lit", "kind=var", "kind=bin"} <= exhibited
 
 
+def test_reference_truthiness_only_records_schema_boolean_fields(tool, tmp_path):
+    source = tmp_path / "emit.py"
+    source.write_text("""
+def emit(node):
+    if node.get('entries'):
+        pass
+    if node.get('name'):
+        pass
+    if node.get('idempotent'):
+        pass
+    if node.get('secret'):
+        pass
+""")
+    found = tool.reference_constructs(source)
+    assert "entries=<true>" not in found
+    assert "name=<true>" not in found
+    assert "idempotent=<true>" in found
+    assert "secret=<true>" in found
+
+
 def test_the_gate_reproduces_the_item_429d_secret_gap(tool, monkeypatch):
     """The load-bearing proof.
 
