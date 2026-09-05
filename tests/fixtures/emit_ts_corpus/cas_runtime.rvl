@@ -7,7 +7,9 @@ component CasProvider provides ops: CasOps {
   let fresh = effect ledger.insert_if_absent("boot", 1) undo ledger.remove("boot")
   provide ops {
     fn run() {
-      let token = effect ledger.insert_if_absent("method", 2) undo ledger.remove("method")
+      var key = "method"
+      let token = effect ledger.insert_if_absent(key, 2) undo ledger.remove(key)
+      key = "later"
       return 2
     }
   }
