@@ -305,7 +305,7 @@ type Ctx = {
   vt: Map[Str, Str], fr: Map[Str, Str], er: Map[Str, Str],
   signatures: List[Any],
   ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
-  rt: Str
+  rt: Str, builders: Map[Str, Str], builder_seq: Int
 }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds one `_V3GoCtx` for the function list,
@@ -323,7 +323,8 @@ fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
   return {
     vt: ctx.vt.set(k, v), fr: ctx.fr, er: ctx.er,
     signatures: ctx.signatures,
-    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, rt: ctx.rt
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, rt: ctx.rt,
+    builders: ctx.builders, builder_seq: ctx.builder_seq
   }
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
@@ -1015,6 +1016,91 @@ fn emit_stmts(nodes: List[Any], ctx: Ctx, indent: Int) -> Sout {
 // `_go_v3_stmt`: one fn-body step -> its emitted (indented) lines and threaded
 // ctx. `t` is the assert receiver — the reference uses "t" in a fn body (there
 // is no such binding in scope, but the byte-check holds it to the reference).
+// Only the leftmost self-reference is permitted: all appended pieces, loop
+// conditions and nested statements must remain independent of the accumulator.
+fn concat_pieces(node: Any, name: Str) -> List[Any] {
+  if (node_kind(node) == "bin" && node_op(node) == "+" &&
+      node_operands(node) != "Int" && node_operands(node) != "Int32" &&
+      node_operands(node) != "Float") {
+    let left = value_field(node, "left")
+    let right = value_field(node, "right")
+    if (node_kind(left) == "var" && value_str(value_field(left, "name")) == name) { return [right] }
+    let pieces = concat_pieces(left, name)
+    if (pieces.length() > 0) { return pieces.push(right) }
+  }
+  if (node_kind(node) == "builtin" && value_str(value_field(node, "method")) == "concat") {
+    let args = value_list(value_field(node, "args"))
+    if (args.length() == 1) {
+      let target = value_field(node, "target")
+      if (node_kind(target) == "var" && value_str(value_field(target, "name")) == name) { return args }
+      let pieces = concat_pieces(target, name)
+      if (pieces.length() > 0) { return pieces.concat(args) }
+    }
+  }
+  return []
+}
+
+fn builder_candidates(node: Any, ctx: Ctx) -> List[Str] {
+  var names = []
+  let name = value_str(value_field(node, "name"))
+  if (value_str(value_field(node, "step")) == "assign" && map_get(ctx.vt, name) == "Str" &&
+      concat_pieces(value_field(node, "value"), name).length() > 0) { names = names.push(name) }
+  for (child of value_children(node)) { names = names.concat(builder_candidates(child, ctx)) }
+  return names
+}
+
+fn builder_safe(node: Any, name: Str) -> Bool {
+  let step = value_str(value_field(node, "step"))
+  if (step == "return") { return false }
+  if (node_kind(node) == "var" && value_str(value_field(node, "name")) == name) { return false }
+  if ((step == "let" || step == "assign") && value_str(value_field(node, "name")) == name) {
+    if (step == "let") { return false }
+    let pieces = concat_pieces(value_field(node, "value"), name)
+    if (pieces.length() == 0) { return false }
+    for (piece of pieces) { if (!builder_safe(piece, name)) { return false } }
+    return true
+  }
+  for (child of value_children(node)) { if (!builder_safe(child, name)) { return false } }
+  return true
+}
+
+fn with_builders(ctx: Ctx, builders: Map[Str, Str], seq: Int) -> Ctx {
+  return {
+    vt: ctx.vt, fr: ctx.fr, er: ctx.er, signatures: ctx.signatures,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, rt: ctx.rt,
+    builders: builders, builder_seq: seq
+  }
+}
+
+fn open_builders(node: Any, ctx: Ctx, indent: Int) -> Sout {
+  var c = ctx
+  var out = []
+  for (name of builder_candidates(value_field(node, "body"), ctx)) {
+    if (map_get(c.builders, name) == "" && builder_safe(node, name)) {
+      let builder = `_revlSB${c.builder_seq}`
+      out = out.push(line(indent, `var ${builder} strings.Builder`))
+      out = out.push(line(indent, `${builder}.WriteString(${v3_ident(name)})`))
+      c = with_builders(c, c.builders.set(name, builder), c.builder_seq + 1)
+    }
+  }
+  return { lines: out, ctx: c }
+}
+
+fn close_builders(before: Ctx, current: Ctx, indent: Int) -> Sout {
+  var out = []
+  var seq = before.builder_seq
+  while (seq < current.builder_seq) {
+    let builder = `_revlSB${seq}`
+    for (name of current.builders.keys()) {
+      if (map_get(current.builders, name) == builder) {
+        out = out.push(line(indent, `${v3_ident(name)} = ${builder}.String()`))
+      }
+    }
+    seq = seq + 1
+  }
+  return { lines: out, ctx: with_builders(current, before.builders, current.builder_seq) }
+}
+
 fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   let step = node_step(node)
   if (step == "let") {
@@ -1043,6 +1129,15 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   if (step == "assign") {
     let raw = value_str(value_field(node, "name"))
     let nm = v3_ident(raw)
+    let builder = map_get(ctx.builders, raw)
+    if (builder != "") {
+      let pieces = concat_pieces(value_field(node, "value"), raw)
+      if (pieces.length() > 0) {
+        var out = []
+        for (piece of pieces) { out = out.push(line(indent, `${builder}.WriteString(${render_expr(piece, ctx, "")})`)) }
+        return { lines: out, ctx: ctx }
+      }
+    }
     let value = render_expr(value_field(node, "value"), ctx, map_get(ctx.vt, raw))
     return { lines: [line(indent, `${nm} = ${value}`)], ctx: ctx }
   }
@@ -1067,11 +1162,13 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     return { lines: out, ctx: c }
   }
   if (step == "while") {
-    var out = [line(indent, `for ${render_expr(value_field(node, "cond"), ctx, "")} {`)]
-    let bodyR = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1)
+    let opened = open_builders(node, ctx, indent)
+    var out = opened.lines.push(line(indent, `for ${render_expr(value_field(node, "cond"), opened.ctx, "")} {`))
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), opened.ctx, indent + 1)
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
-    return { lines: out, ctx: bodyR.ctx }
+    let closed = close_builders(ctx, bodyR.ctx, indent)
+    return { lines: out.concat(closed.lines), ctx: closed.ctx }
   }
   if (step == "for") {
     let raw = value_str(value_field(node, "bind"))
@@ -1082,12 +1179,14 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     if (itt.startsWith("List[") && itt.endsWith("]")) {
       fctx = set_vt(ctx, raw, itt.slice(5, itt.length() - 1))
     }
-    var out = [line(indent, `for _, ${bind} := range ${render_expr(itnode, ctx, "")} {`)]
+    let opened = open_builders(node, fctx, indent)
+    var out = opened.lines.push(line(indent, `for _, ${bind} := range ${render_expr(itnode, opened.ctx, "")} {`))
     out = out.push(line(indent + 1, `_ = ${bind}`))
-    let bodyR = emit_stmts(value_list(value_field(node, "body")), fctx, indent + 1)
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), opened.ctx, indent + 1)
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
-    return { lines: out, ctx: bodyR.ctx }
+    let closed = close_builders(fctx, bodyR.ctx, indent)
+    return { lines: out.concat(closed.lines), ctx: closed.ctx }
   }
   if (step == "expr") {
     return { lines: [line(indent, `_ = ${render_expr(value_field(node, "expr"), ctx, "")}`)], ctx: ctx }
@@ -1259,7 +1358,7 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
     let rt = value_str(value_field(fnode, "returns"))
-    let ctx = { vt: vt, fr: fr, er: er, signatures: signatures, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, rt: rt }
+    let ctx = { vt: vt, fr: fr, er: er, signatures: signatures, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, rt: rt, builders: Map.empty(), builder_seq: 0 }
     var ps = []
     for (p of params) {
       ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"))}`)
@@ -1403,6 +1502,7 @@ pub fn emit_src(ir: Any) -> Str {
   let rendered = fnlines.join(newline())
   let uses_fmt = rendered.indexOf("fmt.Sprintf(") >= 0
   let uses_strconv = rendered.indexOf("strconv.Format") >= 0
+  let uses_strings = rendered.indexOf(" strings.Builder") >= 0
 
   var out = []
   out = out.push("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -1410,11 +1510,12 @@ pub fn emit_src(ir: Any) -> Str {
   out = out.push("package emitted")
   out = out.push("")
 
-  if (uses_fmt || uses_strconv) {
+  if (uses_fmt || uses_strconv || uses_strings) {
     out = out.push("import (")
     // `sorted(set(imports))` on the reference: "fmt" sorts before "strconv".
     if (uses_fmt) { out = out.push(line(1, `"fmt"`)) }
     if (uses_strconv) { out = out.push(line(1, `"strconv"`)) }
+    if (uses_strings) { out = out.push(line(1, `"strings"`)) }
     out = out.push(")")
     out = out.push("")
   }
@@ -1484,7 +1585,8 @@ fn typed_ctx() -> Ctx {
   rbf = rbf.set("x,y", "Point")
   return {
     vt: Map.empty(), fr: Map.empty(), er: Map.empty(),
-    ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), rt: "", signatures: []
+    ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), rt: "", signatures: [],
+    builders: Map.empty(), builder_seq: 0
   }
 }
 

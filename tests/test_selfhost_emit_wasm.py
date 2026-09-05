@@ -238,3 +238,50 @@ def test_fn_type_param_refused(emitted, reference):
         reference.emit(ir)
     got = emitted["emit_src"](ir)
     assert "<<DEFER-fn-type>>" in got
+
+
+@pytest.mark.parametrize("source, reference_token, port_token", [
+    pytest.param("fn f(x: Opt[Int]) -> Int { return x ?? 0 }",
+                 "i64.load", "<<DEFER-coalesce>>", id="tagged-coalesce"),
+    pytest.param("fn f(x: Result[Int, Str]) -> Int { return match x { Ok(v) => v, Err(e) => 0 } }",
+                 "i64.load", "<<UNSUPPORTED-EXPR:match>>", id="tagged-match"),
+    pytest.param('fn f(s: Str) -> Int { return s.indexOf("x") }',
+                 "(func $str_index_of", "<<UNSUPPORTED-BUILTIN:indexOf>>", id="demand-index-of"),
+    pytest.param('fn f(s: Str) -> List[Str] { return s.split(",") }',
+                 "(func $str_split", "<<UNSUPPORTED-BUILTIN:split>>", id="demand-split"),
+    pytest.param('fn f(xs: List[Str]) -> Str { return xs.join(",") }',
+                 "(func $str_join", "<<UNSUPPORTED-BUILTIN:join>>", id="demand-join"),
+    pytest.param("fn f(x: Int) -> Str { return `n=${x}` }",
+                 "(call $str_concat)", "<<UNSUPPORTED-EXPR:interp>>", id="interpolation"),
+    pytest.param("fn f(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_trunc(b) }",
+                 "cdiv_", "<<UNSUPPORTED-BUILTIN:checked_div_trunc>>", id="checked-division"),
+    pytest.param("fn f(n: Int) -> Int { let add = (x: Int) => x + 1; return add(n) }",
+                 "$f", "<<UNSUPPORTED-EXPR:arrow>>", id="inline-arrow"),
+    pytest.param('fn f() -> Str { return "\u00e9" }',
+                 "\\c3\\a9", "(data", id="utf8-string-pool"),
+    pytest.param("extern pure fn f() -> Int = @wasm { (i64.const 7) }\nfn g() -> Int { return f() }",
+                 "(func $f", ";; Generated", id="wasm-extern"),
+    pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
+                 "$revl_test_probe", "$f", id="in-file-tests"),
+])
+def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
+                                         reference_token, port_token):
+    """Keep deferred witnesses separate from the byte-agreement workload."""
+    path = tmp_path / "boundary.rvl"
+    path.write_text(source)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir)["functions"], emitted["emit_src"](ir)
+    assert reference_token in want
+    assert port_token in got
+    assert got != want, "boundary is stale: move its witness into CORPUS"
+
+
+@pytest.mark.parametrize("source, reason", [
+    ("fn f(x: Float) -> Float { return x }", "Float"),
+    ("fn f(x: Map[Str, Int]) -> Map[Str, Int] { return x }", "Map"),
+])
+def test_reference_abi_refusals(reference, tmp_path, source, reason):
+    path = tmp_path / "abi.rvl"
+    path.write_text(source)
+    with pytest.raises(reference.EmitError, match=reason):
+        reference.emit(compile_files([str(path)]))

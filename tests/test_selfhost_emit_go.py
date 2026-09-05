@@ -77,6 +77,12 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_go_corpus"
 CORPUS = [
+    "accumulators.rvl",
+    "../emit_rust_corpus/perf_shapes.rvl",
+    "identifiers.rvl",
+    "../emit_java_corpus/records.rvl",
+    "../emit_wasm_corpus/loopctrl.rvl",
+    "../emit_wasm_corpus/strlit.rvl",
     "inference.rvl",
     "arith.rvl",     # trapping int/int32 + - *, / widening, %, comparisons, unary
     "bitwise.rvl",  # Int32 bitwise & | ^ << >> and unary ~ (item 366, item 391 self-host port)
@@ -183,12 +189,15 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
         fn()
 
 
-def test_inference_corpus_compiles_as_go(emitted, reference, tmp_path):
+@pytest.mark.parametrize("rel", [
+    "inference.rvl", "accumulators.rvl", "../emit_rust_corpus/perf_shapes.rvl",
+])
+def test_supported_corpus_compiles_as_go(emitted, reference, tmp_path, rel):
     """Agreement alone cannot catch a type error shared by both emitters."""
     go = shutil.which("go")
     if go is None:
         pytest.skip("Go compiler not installed")
-    ir = compile_files([str(CORPUS_DIR / "inference.rvl")])
+    ir = compile_files([str(CORPUS_DIR / rel)])
     for name, source in (("reference", reference.emit(ir)),
                          ("selfhost", emitted["emit_src"](ir))):
         path = tmp_path / f"{name}.go"
@@ -198,3 +207,42 @@ def test_inference_corpus_compiles_as_go(emitted, reference, tmp_path):
             env={**os.environ, "GO111MODULE": "off"}, timeout=60,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("source, reference_token, port_token", [
+    pytest.param("fn f(x: Opt[Int]) -> Int { return x ?? 0 }",
+                 "RevlOpt", "<<DEFER-coalesce>>", id="opt-coalesce-runtime"),
+    pytest.param("fn f(x: Result[Int, Str]) -> Int { return match x { Ok(v) => v, Err(e) => 0 } }",
+                 "RevlResult", "<<DEFER-match-builtin>>", id="result-match-runtime"),
+    pytest.param("fn f() -> Map[Str, Int] { return Map.empty() }",
+                 "map[string]int64", "<<UNSUPPORTED-EXPR:", id="map-runtime"),
+    pytest.param("fn f(s: Str) -> Int { return s.length() }",
+                 "utf8.RuneCountInString", "<<UNSUPPORTED-EXPR:builtin>>", id="stdlib-runtime"),
+    pytest.param("fn f(a: List[Int], b: List[Int]) -> Bool { return a == b }",
+                 "reflect.DeepEqual", "<<DEFER-reflect-eq>>", id="structural-equality"),
+    pytest.param("fn f(x: Float) -> Str { return `x=${x}` }",
+                 "func revlFtoa", "revlFtoa(x)", id="float-format-helper"),
+    pytest.param('extern pure fn f() -> Str = @go {\n//revl:import strings\nreturn strings.ToUpper("x")\n}',
+                 '"strings"', "<<DEFER-EXTERN-import:f>>", id="extern-imports"),
+    pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
+                 "*testing.T", "func f()", id="in-file-tests"),
+    pytest.param("service S { fn f() -> Int }\ncomponent C provides s: S { provide s { fn f() = 1 } }",
+                 "stc-go", "pure typed-core tier", id="live-component"),
+])
+def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
+                                         reference_token, port_token):
+    """These witnesses are not byte-agreement CORPUS; a port closes the reason."""
+    path = tmp_path / "boundary.rvl"
+    path.write_text(source)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_src"](ir)
+    assert reference_token in want
+    assert port_token in got
+    assert got != want, "boundary is stale: move its witness into CORPUS"
+
+
+def test_record_update_is_a_reference_refusal(reference, tmp_path):
+    path = tmp_path / "record_update.rvl"
+    path.write_text("type R = { x: Int }\nfn f(r: R) -> R { return {r | x = 2} }")
+    with pytest.raises(reference.EmitError, match="record.update"):
+        reference.emit(compile_files([str(path)]))
