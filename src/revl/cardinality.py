@@ -367,6 +367,66 @@ def _cert_reason(kind: str, fname: str) -> str:
     return reasons.get(kind, reasons["mutual"])
 
 
+def _collect_arrows(node, out: dict) -> None:
+    """Every `let <name> = (…) => …` arrow binding in a component/method body,
+    keyed by the name its application's callee resolves to. This is the SAME
+    collection `_boundary` does for the arrow-parameter seam, so the cardinality
+    count follows the crossing identically (GHSA-wg4v-r47x-52p2 residual, #396)."""
+    if isinstance(node, dict):
+        if node.get("step") == "let" and isinstance(node.get("value"), dict) \
+                and node["value"].get("kind") == "arrow":
+            out[node.get("name")] = node["value"]
+        for value in node.values():
+            _collect_arrows(value, out)
+    elif isinstance(node, list):
+        for value in node:
+            _collect_arrows(value, out)
+
+
+def _count_arrow_body(body, bind_service: dict, services: dict) -> dict:
+    """Count emission crossings that ride a service-typed arrow PARAMETER (item
+    396): a `t.run(s)` inside an arrow body whose receiver `t` is a parameter
+    the application bound to a provision (`bind_service` maps that param name to
+    the provided service). Mirrors `count_expr`'s exact-count discipline —
+    straight-line SUM, branch MAX, the `retry` multiplier on the single crossing
+    — so the arrow-param spelling `let f = (t: Task, s) => t.run(s); f(w.task, s)`
+    reports the SAME per-activation bound as the direct `emit w.<key>.<method>`
+    spelling (docs/design/260 §2.1, and the §5.1 tie to `_boundary`)."""
+    total: dict[str, int] = {}
+    if isinstance(body, dict):
+        kind = body.get("kind")
+        tgt = body.get("target")
+        if kind == "call" and isinstance(tgt, dict) \
+                and tgt.get("kind") == "name" and tgt.get("id") in bind_service:
+            spec = (((services.get(bind_service[tgt["id"]]) or {})
+                     .get("methods") or {}).get(body.get("method")) or {})
+            if spec.get("emission"):
+                declared = spec.get("capabilities")
+                mult = _retry_mult(spec)
+                for cap in (sorted(declared) if declared is not None else ["*"]):
+                    total[cap] = total.get(cap, 0) + mult
+        if kind == "match":
+            _merge_sum(total, _count_arrow_body(
+                body.get("scrutinee"), bind_service, services))
+            _merge_max(total, [_count_arrow_body(arm.get("body"),
+                                                 bind_service, services)
+                               for arm in body.get("arms") or []])
+            return total
+        if kind == "if":
+            _merge_sum(total, _count_arrow_body(
+                body.get("cond"), bind_service, services))
+            _merge_max(total, [
+                _count_arrow_body(body.get("then"), bind_service, services),
+                _count_arrow_body(body.get("otherwise"), bind_service, services)])
+            return total
+        for value in body.values():
+            _merge_sum(total, _count_arrow_body(value, bind_service, services))
+    elif isinstance(body, list):
+        for value in body:
+            _merge_sum(total, _count_arrow_body(value, bind_service, services))
+    return total
+
+
 def cardinality(ir: dict) -> dict:
     """component name -> {"per_capability": {token: {...}}, "verdict": ...}.
 
@@ -492,6 +552,12 @@ def cardinality(ir: dict) -> dict:
     for comp in ir.get("components") or []:
         requires = comp.get("requires") or {}
 
+        # local arrow bindings in scope (`let f = (…) => …`), so the count fold
+        # can follow a service-typed arrow-parameter application exactly as
+        # `_boundary` does (arm 3 below, item 396).
+        arrow_defs: dict = {}
+        _collect_arrows(comp.get("body") or [], arrow_defs)
+
         # ---- Slice 2 resolution state: a certified/refused recursive-loop call
         # in this component body is resolved once (below) into either a folded
         # integer contribution (`resolutions`), a symbolic per-iteration ceiling
@@ -547,6 +613,34 @@ def cardinality(ir: dict) -> dict:
                                 _add(sorted(declared)
                                      if declared is not None else ["*"],
                                      _retry_mult(spec))
+                # arm 3: an application of a local arrow whose parameter is
+                # service-typed and receives a provision (`instance-get`) as its
+                # argument — the emission rides the parameter inside the arrow
+                # body (`let f = (t: Task, s) => t.run(s); f(w.task, s)`). Bind
+                # each service-typed parameter to the provided service and count
+                # the arrow body's crossings, so this spelling reports the SAME
+                # bound as the direct `emit w.<key>.<method>` (GHSA-wg4v residual,
+                # #396). Mirrors `_boundary`'s arrow-parameter arm (the §5.1 tie).
+                if kind == "call":
+                    callee = node.get("callee")
+                    if isinstance(callee, dict) and callee.get("kind") == "name" \
+                            and callee.get("id") in arrow_defs:
+                        arrow = arrow_defs[callee["id"]]
+                        svc_params = arrow.get("service_params") or {}
+                        params = arrow.get("params") or []
+                        call_args = node.get("args") or []
+                        bind_service: dict[str, str] = {}
+                        for i, param in enumerate(params):
+                            service = svc_params.get(param)
+                            if service is None or i >= len(call_args):
+                                continue
+                            arg = call_args[i]
+                            if isinstance(arg, dict) \
+                                    and arg.get("kind") == "instance-get":
+                                bind_service[param] = arg.get("service") or service
+                        if bind_service:
+                            _merge_sum(total, _count_arrow_body(
+                                arrow.get("body"), bind_service, services))
                 # branch nodes take the MAX over arms (a proved upper bound must
                 # hold on every path, so the worst arm is the ceiling); the
                 # scrutinee/cond is evaluated once, so it SUMS.
