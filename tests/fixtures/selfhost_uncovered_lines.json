@@ -338,7 +338,7 @@
       "uncovered_statements": 1105
     },
     "py": {
-      "statements": 2342,
+      "statements": 2348,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_ComponentEmitter._approval_step": 3,
@@ -432,10 +432,10 @@
         },
         "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
           "_emit_fault_tests": 11,
-          "_emit_lifecycle_harness": 8,
-          "_emit_lifecycle_test": 40,
+          "_emit_lifecycle_harness": 9,
+          "_emit_lifecycle_test": 43,
           "_emit_tests": 21,
-          "_lifecycle_step": 36,
+          "_lifecycle_step": 38,
           "_lifecycle_uses_abort": 1,
           "_lifecycle_uses_clock": 1
         },
@@ -443,7 +443,7 @@
           "_emit_memo_wrapper": 17
         }
       },
-      "uncovered_statements": 946
+      "uncovered_statements": 952
     },
     "rust": {
       "statements": 3160,
@@ -722,10 +722,10 @@
       "uncovered_statements": 672
     },
     "wasm": {
-      "statements": 2662,
+      "statements": 2691,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
-          "_ComponentEmitter.__init__": 60,
+          "_ComponentEmitter.__init__": 63,
           "_ComponentEmitter._boundary_wty": 6,
           "_ComponentEmitter._called_names": 12,
           "_ComponentEmitter._delegate": 15,
@@ -736,7 +736,7 @@
           "_ComponentEmitter._method_drain": 10,
           "_ComponentEmitter._method_undo_id": 6,
           "_ComponentEmitter._method_witnessed_step": 13,
-          "_ComponentEmitter._module": 109,
+          "_ComponentEmitter._module": 113,
           "_ComponentEmitter._module._dispatch": 13,
           "_ComponentEmitter._need_fn": 5,
           "_ComponentEmitter._op_spec": 13,
@@ -769,7 +769,7 @@
           "_V3Emitter._nullish_expr": 15,
           "_V3Emitter._nullish_type": 4,
           "_V3Emitter._opt_payload": 4,
-          "_assert_imports_within_requires": 3,
+          "_assert_imports_within_requires": 18,
           "_dedup_colour_erased_poly_externs._rewrite": 6,
           "_emit_extern_func": 17,
           "_extern_wasm_body": 2,
@@ -839,7 +839,8 @@
         "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
           "_ComponentEmitter._lower_instance_get_call": 37,
           "_ComponentEmitter._lower_spawn": 26,
-          "_ComponentEmitter._realm_sections": 15
+          "_ComponentEmitter._realm_sections": 15,
+          "_assert_realm_label": 2
         },
         "the demand-pulled helper preambles: emitted only for a document that reaches them, and the corpus reaches few.": {
           "_ComponentEmitter._route_helpers": 35,
@@ -853,7 +854,7 @@
           "_emit_v1": 14
         }
       },
-      "uncovered_statements": 1476
+      "uncovered_statements": 1500
     }
   },
   "selfhost": {
