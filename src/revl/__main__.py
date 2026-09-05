@@ -1090,6 +1090,47 @@ def _run_composition(args) -> int:
     return 0
 
 
+def _run_analyze(args) -> int:
+    """`revl analyze` — Petri-net reachability liveness (roadmap item 438).
+
+    Report-only. Compiles the composition sources (or loads a precompiled IR
+    with `--ir`), derives the net in `revl.liveness`, and prints a per-
+    composition verdict: live, deadlock (naming the stranded activation), or
+    bounded-inconclusive. Only a PROVEN deadlock exits nonzero — the check
+    reports the cycle, it does not refuse admission (question 3)."""
+    from .liveness import analyze_document, render, to_json  # noqa: PLC0415 — lazy
+
+    if args.ir:
+        try:
+            with open(args.ir, encoding="utf-8") as handle:
+                document = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"error: cannot read IR document {args.ir}: {error}", file=sys.stderr)
+            return 1
+        name = args.ir
+    else:
+        if not args.files:
+            print("error: `revl analyze` needs source files or --ir DOC.json",
+                  file=sys.stderr)
+            return 1
+        try:
+            document = compile_files(args.files)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        name = args.files[0]
+
+    report = analyze_document(
+        document, name=name,
+        max_states=args.max_states, max_tokens=args.max_tokens)
+    if args.json:
+        print(json.dumps(to_json(report), indent=2))
+    else:
+        for line in render(report):
+            print(line)
+    return report.exit_code()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1105,6 +1146,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_verify(args)
     if args.command == "composition":
         return _run_composition(args)
+    if args.command == "analyze":
+        return _run_analyze(args)
     if args.command == "layer":
         return _run_layer(args)
     if args.command == "emit":
