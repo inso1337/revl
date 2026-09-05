@@ -100,6 +100,8 @@ kept out so the slice stays byte-VERIFIED rather than byte-guessed.
 """
 
 import importlib.util
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -204,6 +206,7 @@ CORPUS = [
     "../../../backends/typescript/tests/fixtures/async_http.rvl",
     "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
     "branch_edges.rvl",
+    "destructuring.rvl",
     "../emit_go_corpus/variants.rvl",
     "../emit_py_corpus/services_method_effects.rvl",
 ]
@@ -293,3 +296,28 @@ def test_selfhosted_ts_emitter_in_file_tests_pass(emitted):
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+@pytest.mark.parametrize("side", ["reference", "selfhost"])
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("reserved({class: 7n, class_: 9n})", "79"),
+        ("mutable_record({class: 3n, class_: 9n})", "7"),
+        ("mutable_list([1n, 2n, 3n])", "15"),
+        ("immutable_list([4n])", "4"),
+    ],
+)
+def test_destructuring_runtime(emitted, reference, tmp_path, side, expression, expected):
+    if shutil.which("node") is None:
+        pytest.skip("node not on PATH")
+    ir = compile_files([str(CORPUS_DIR / "destructuring.rvl")])
+    src = reference.emit(ir) if side == "reference" else emitted["emit_ts_src"](ir)
+    (tmp_path / "runtime.ts").write_text("export const host = {};\n", encoding="utf-8")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    module = pkg / "mod.ts"
+    module.write_text(src + f"\nconsole.log(String({expression}));\n", encoding="utf-8")
+    proc = subprocess.run(["node", str(module)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expected

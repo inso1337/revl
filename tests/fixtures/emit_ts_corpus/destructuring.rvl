@@ -1,0 +1,24 @@
+type Keys = { class: Int, class_: Int }
+
+fn reserved(r: Keys) -> Int {
+  let { class, class_ } = r
+  return class * 10 + class_
+}
+
+fn mutable_record(r: Keys) -> Int {
+  var { class } = r
+  class = 7
+  return class
+}
+
+fn mutable_list(xs: List[Int]) -> Int {
+  var [head, ...tail] = xs
+  head = 7
+  tail = [8]
+  return head + tail[0]
+}
+
+fn immutable_list(xs: List[Int]) -> Int {
+  let [head] = xs
+  return head
+}
