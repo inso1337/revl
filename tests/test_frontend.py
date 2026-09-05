@@ -316,6 +316,8 @@ REJECTIONS = {
     # occupied in the amendment table), with a hint naming both fixes.
     "a9_provide_key_not_declared.rvl": "`skin` is not declared in the `provides` clause of S (A9)",
     "g1_template_undeclared.rvl": "`nobody` is not declared in this function",
+    "g1_unknown_upper_host.rvl":
+        "`StreamB` is not a declared requirement of C",
     "t3_config_default_type.rvl": "config field `n` default expects `Int`, got `Str`",
     "t4_field_arg_type.rvl": "`s.take` argument `s` expects `Str`, got `Int`",
     "t5_destructure_nonrecord.rvl": "record destructuring requires a record, but `List[Int]` is not a record",
