@@ -1,3 +1,6 @@
+type strings = { x: Int }
+type _revlStrings = { y: Int }
+
 fn reserved(xs: List[Str]) -> Str {
   var out = ""
   let _revlSB0 = "x"
