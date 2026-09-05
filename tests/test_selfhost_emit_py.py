@@ -335,6 +335,51 @@ def test_inline_templates_preserve_argument_evaluation(emitted):
     assert "return recursive_inline(x)" in source
     assert ns["guarded"](-1) == 0
     assert ns["guarded"](99) == 10
+    assert ns["eager_calls"](5) == 5
+
+
+def test_inline_callable_shadowing_is_rejected(tmp_path):
+    from revl.lower import RevlError
+
+    path = tmp_path / "shadowed.rvl"
+    path.write_text("fn identity(x: Int) -> Int { return x }\n"
+                    "fn shadowed(identity: (Int) -> Int) -> Int { return identity(3) }")
+    with pytest.raises(RevlError, match="a module function of that name is in scope"):
+        compile_files([str(path)])
+
+
+def test_record_fields_and_component_expressions_execute(emitted, monkeypatch):
+    class Frame:
+        begin = drain = None
+
+        def __init__(self, ctx, name):
+            pass
+
+        def install(self, body):
+            list(body())
+
+    runtime = types.ModuleType("runtime")
+    runtime.Frame = Frame
+    monkeypatch.setitem(sys.modules, "runtime", runtime)
+    ir = compile_files([str(CORPUS_DIR / "branches.rvl")])
+    ns = {}
+    exec(compile(emitted["emit_py_src"](ir), "branches_emitted.py", "exec"), ns)
+    services = {}
+    ctx = types.SimpleNamespace(provide=lambda key: None, set=services.__setitem__)
+    ns["ValuesProvider"]["apply"](ctx, {})
+    shapes = services["values"]
+    for record in ({}, types.SimpleNamespace(), None):
+        assert ns["read_optional"](record) is None
+        assert shapes.read_optional(record) is None
+    for record in ({"value": 3}, types.SimpleNamespace(value=3)):
+        assert ns["read_optional"](record) == 3
+        assert shapes.read_optional(record) == 3
+    assert shapes.length([1, 2]) == 2
+    assert shapes.block_match(3) == 7
+    assert shapes.block_match(None) == 0
+    assert shapes.parse("12") == 12
+    assert shapes.parse(None) is None
+    assert type(ns["widen_float"](3)) is float
 
 
 def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):

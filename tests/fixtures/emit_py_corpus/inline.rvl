@@ -25,3 +25,18 @@ fn pure_arguments(xs: List[Int]) -> Int {
   let b = guarded(3)
   return a + b
 }
+type InlineRecord = { value: Int }
+fn eager_list(x: Int) -> List[Int] { return [x, x] }
+fn eager_index(xs: List[Int]) -> Int { return xs[0] }
+fn eager_field(p: InlineRecord) -> Int { return p.value }
+fn eager_unary(x: Int) -> Int { return -x }
+fn eager_short(x: Bool) -> Bool { return x && false }
+fn eager_match(x: Opt[Int]) -> Int { return match x { Some(n) => n, None => 0 } }
+fn eager_calls(x: Int) -> Int {
+  let xs = eager_list(x)
+  let a = eager_index(xs)
+  let b = eager_field({ value: x })
+  let c = eager_unary(x)
+  let d = eager_short(true)
+  return a + b + c
+}

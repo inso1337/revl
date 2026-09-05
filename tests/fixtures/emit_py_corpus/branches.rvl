@@ -1,7 +1,9 @@
 type Point = { x: Int, y: Int }
 type Annotation = { real: Float, data: Bytes, unit: Unit, result: Result[Int, Str], callback: () -> Int }
 type Empty = {}
+type OptionalField = { value: Opt[Int] }
 
+fn read_optional(p: OptionalField) -> Opt[Int] { return p.value }
 fn mixed_float(a: Int, b: Float) -> Float { return a + b }
 fn widen_float(x: Int) -> Float { return x }
 fn negate_float(x: Float) -> Float { return -x }
@@ -40,6 +42,9 @@ service Values {
   fn wildcard(x: Opt[Int]) -> Int
   fn new_map() -> Map[Str, Int]
   fn arithmetic(x: Int, y: Int) -> Int
+  fn read_optional(p: OptionalField) -> Opt[Int]
+  fn length(xs: List[Int]) -> Int
+  fn block_match(x: Opt[Int]) -> Int
 }
 component ValuesProvider provides values: Values {
   provide values {
@@ -60,5 +65,8 @@ component ValuesProvider provides values: Values {
     fn wildcard(x) { return match x { _ => 7 } }
     fn new_map() { return Map.empty() }
     fn arithmetic(x, y) { return x * y }
+    fn read_optional(p) { return p.value }
+    fn length(xs) { return xs.length }
+    fn block_match(x) { return match x { Some(n) => { let doubled = n * 2 doubled + 1 }, None => 0 } }
   }
 }
