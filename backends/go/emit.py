@@ -3755,10 +3755,32 @@ def _go_v3_type(t, types: dict) -> str:
     return _v3_ident(t, "type name")
 
 
+def _go_v3_reserved_idents(node) -> set[str]:
+    """All user identifiers that can occupy a generated Go scope."""
+    reserved: set[str] = set()
+    for item in _v3_walk_nodes(node):
+        for key in ("name", "bind"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                reserved.add(_v3_ident(value, "binding"))
+    return reserved
+
+
+def _go_v3_fresh_ident(base: str, reserved: set[str]) -> str:
+    candidate = base
+    suffix = 0
+    while candidate in reserved:
+        candidate = f"{base}{suffix}"
+        suffix += 1
+    return candidate
+
+
 class _V3GoCtx:
     """Names and layouts visible to the v3 Go expression/statement emitters."""
 
-    def __init__(self, types: dict, functions: list, externs: list) -> None:
+    def __init__(
+        self, types: dict, functions: list, externs: list, tests: list | None = None,
+    ) -> None:
         self.types = types or {}
         self.var_types: dict[str, str | None] = {}
         self.function_ret: dict[str, str | None] = {
@@ -3786,6 +3808,14 @@ class _V3GoCtx:
         # see `_v3_str_accumulators` (item 434 (e)).
         self.str_builders: dict = {}
         self.str_builder_seq = 0
+        self.reserved_idents: set[str] = set()
+        module_idents = _go_v3_reserved_idents([
+            types, functions, externs, tests or [],
+        ])
+        self.strings_alias = (
+            _go_v3_fresh_ident("_revlStrings", module_idents)
+            if "strings" in module_idents else "strings"
+        )
         # `{id(while node): (str name, index name)}` for the code-point scan
         # loops of the current function, `{(str, index): rune var}` for the one
         # being rendered, and the counter that keeps two sibling scans from
@@ -4531,9 +4561,9 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     # HasPrefix/HasSuffix compare bytes, and a code-point prefix of a UTF-8
     # string is exactly a byte prefix.
     if method == "startsWith":
-        return f"strings.HasPrefix({target}, {args[0]})"
+        return f"{ctx.strings_alias}.HasPrefix({target}, {args[0]})"
     if method == "endsWith":
-        return f"strings.HasSuffix({target}, {args[0]})"
+        return f"{ctx.strings_alias}.HasSuffix({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): strconv.FormatInt
     # base 10 is exact decimal for an int64, and unlike fmt.Sprintf("%d", x) it
     # takes the int64 directly instead of boxing it into an `any` (item 434
@@ -5156,10 +5186,14 @@ def _go_v3_open_builders(loop: dict, ctx: _V3GoCtx, out: list, pad: str) -> list
     for name in _v3_str_accumulators(loop, ctx):
         ident = _v3_ident(name, "binding")
         builder = f"_revlSB{ctx.str_builder_seq}"
+        while builder in ctx.reserved_idents:
+            ctx.str_builder_seq += 1
+            builder = f"_revlSB{ctx.str_builder_seq}"
         ctx.str_builder_seq += 1
+        ctx.reserved_idents.add(builder)
         ctx.str_builders[name] = builder
         ctx.needs_strings = True
-        out.append(f"{pad}var {builder} strings.Builder")
+        out.append(f"{pad}var {builder} {ctx.strings_alias}.Builder")
         out.append(f"{pad}{builder}.WriteString({ident})")
         opened.append((name, ident, builder))
     return opened
@@ -5543,6 +5577,7 @@ def _emit_v3_go_functions(functions: list, ctx: _V3GoCtx) -> list[str]:
         ctx.ret_type = fn.get("returns")
         ctx.str_builders = {}
         ctx.str_builder_seq = 0
+        ctx.reserved_idents = _go_v3_reserved_idents(fn)
         ctx.scan_loops = _v3_scan_loops(fn)
         ctx.scan_cursors = {}
         ctx.scan_seq = 0
@@ -7186,7 +7221,7 @@ def _emit_v3_go(ir: dict, package: str) -> str:
             "v3 IR document has no types, functions, externs, or tests to emit"
         )
 
-    ctx = _V3GoCtx(types, functions, externs)
+    ctx = _V3GoCtx(types, functions, externs, tests)
     # Render bodies first so feature flags (fmt / stdlib) settle before imports.
     body: list[str] = []
     if types:
@@ -7235,17 +7270,21 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         imports.append('\t"fmt"')
     if ctx.needs_reflect:
         imports.append('\t"reflect"')
+    strings_import = (
+        '\t"strings"' if ctx.strings_alias == "strings"
+        else f'\t{ctx.strings_alias} "strings"'
+    )
     if ctx.used_stdlib:
-        imports.append('\t"strings"')
+        imports.append(strings_import)
         imports.append('\t"unicode/utf8"')
     if ctx.needs_ftoa:
         imports.append('\t"math"')
         imports.append('\t"strconv"')
-        imports.append('\t"strings"')
+        imports.append(strings_import)
     if ctx.needs_strconv:
         imports.append('\t"strconv"')
     if ctx.needs_strings:
-        imports.append('\t"strings"')
+        imports.append(strings_import)
     # _V3_MAP_PREAMBLE's revlMapKeys sorts with slices.Sort (item 434 (h)).
     if used_map:
         imports.append('\t"slices"')
@@ -7276,7 +7315,9 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append("func revlDiv(a, b float64) float64 { return a / b }")
         out.append("")
     if ctx.needs_ftoa:
-        out.append(_V3_FTOA_HELPER)
+        out.append(_V3_FTOA_HELPER.replace(
+            "strings.", f"{ctx.strings_alias}.",
+        ))
         out.append("")
     if ctx.needs_overflow:
         out.append("func revlAdd(a, b int64) int64 {")
@@ -7372,7 +7413,9 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     if used_map:
         out.append(_V3_MAP_PREAMBLE)
     if ctx.used_stdlib:
-        out.append(_V3_STDLIB_PREAMBLE)
+        out.append(_V3_STDLIB_PREAMBLE.replace(
+            "strings.", f"{ctx.strings_alias}.",
+        ))
     out.extend(body)
     return "\n".join(out).rstrip() + "\n"
 
