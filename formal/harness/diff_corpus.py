@@ -686,6 +686,13 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
 
             calls: list[tuple[str, str, str, str]] = []
             kinds: list[str] = []
+            terms: list[tuple[int, str, list[str], list[str]]] = []
+
+            def _term_heads(node: object, ctx: str = "plain") -> list[str]:
+                found: list[tuple[str, str, str]] = []
+                walk_calls(node, found, ctx)
+                return [f"{root}.{chain}" if chain else root
+                        for root, chain, _ in found]
 
             def classify_stmt(stmt: object) -> bool:
                 """Classify one statement; True when it holds a G4-shaped
@@ -694,6 +701,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 stmts += 1
                 if isinstance(stmt, (EffectStmt, LetEffect)):
                     kinds.append("effect")
+                    primary = _term_heads(getattr(stmt, "acquire"))
+                    inverse = _term_heads(getattr(stmt, "undo"))
+                    terms.append((len(terms), "effect", primary, inverse))
                     # effect-form calls are STILL plain context: an emission
                     # call whose pairing is an inverse is refused (the
                     # g4_unmarked_emission fixture) — only `emit` marks a
@@ -703,10 +713,12 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                     return _record(local_calls)
                 if isinstance(stmt, EmitStmt):
                     kinds.append("emit")
+                    terms.append((len(terms), "emit", _term_heads(stmt.expr, "emit"), []))
                     local_calls = []
                     walk_calls(stmt, local_calls, "emit")
                     return _record(local_calls)
                 local_calls: list[tuple[str, str, str]] = []
+                kind = "pure"
                 if type(stmt).__name__ == "CallStmt":
                     for a in getattr(stmt, "args", []):
                         walk_calls(a, local_calls, "plain")
@@ -714,6 +726,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                     local_calls.append((root, meth, "plain"))
                 else:
                     walk_calls(stmt, local_calls, "plain")
+                if type(stmt).__name__ not in ("CallStmt", "LetStmt"):
+                    kind = "raw"
+                terms.append((len(terms), kind, _term_heads(stmt), []))
                 return _record(local_calls)
 
             def _record(local_calls: list[tuple[str, str, str]]) -> bool:
@@ -749,6 +764,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         for inner in pm.body:
                             classify_stmt(inner)
             tsv.extend(f"T\t{rel}\t{c.name}\t{k}" for k in kinds)
+            for idx, kind, heads, inverse in terms:
+                tsv.append("\t".join(["I", rel, c.name, str(idx), kind,
+                                       ",".join(heads), ",".join(inverse)]))
             ff["components"][c.name] = {"calls": calls, "kinds": kinds}
         file_facts[rel] = ff
     # Z/Y decomposition rows go FIRST so the oracle can build its table in
@@ -1887,4 +1905,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
