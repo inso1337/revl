@@ -2292,13 +2292,212 @@ fn ir_uses_host_root(ir: Any, root: Str) -> Bool {
   return false
 }
 
+// Safe pure-function templates mirror the reference's evaluation-preserving
+// substitution. All rebuilt objects are fresh maps/lists; the caller's IR is
+// never mutated.
+fn inline_bound(node: Any) -> List[Str] {
+  var names = []
+  if (!value_is_null(value_field(node, "step"))) {
+    for (key of ["name", "bind", "rest"]) {
+      let v = value_field(node, key)
+      if (value_kind(v) == "str") { names = names.push(value_str(v)) }
+    }
+    for (v of value_list(value_field(node, "names"))) {
+      if (value_kind(v) == "str") { names = names.push(value_str(v)) }
+    }
+  } else if (node_kind(node) == "arrow") {
+    for (v of value_list(value_field(node, "params"))) {
+      if (value_kind(v) == "str") { names = names.push(value_str(v)) }
+    }
+  } else if (node_kind(node) == "match") {
+    for (arm of value_list(value_field(node, "arms"))) {
+      let v = value_field(arm, "bind")
+      if (value_kind(v) == "str") { names = names.push(value_str(v)) }
+    }
+  }
+  for (child of value_children(node)) { names = names.concat(inline_bound(child)) }
+  return names
+}
+
+fn inline_free(node: Any) -> List[Str] {
+  var names = []
+  let kind = node_kind(node)
+  if (kind == "var") { names = names.push(value_str(value_field(node, "name"))) }
+  if (kind == "name") { names = names.push(value_str(value_field(node, "id"))) }
+  for (child of value_children(node)) { names = names.concat(inline_free(child)) }
+  return names
+}
+
+fn inline_nodes(node: Any) -> Int {
+  var n = value_is_object(node) ? 1 : 0
+  for (child of value_children(node)) { n += inline_nodes(child) }
+  return n
+}
+
+fn inline_impure(node: Any) -> Bool {
+  if (list_contains(["call", "optcall", "req", "spawn", "instance-get", "host"], node_kind(node))) { return true }
+  for (child of value_children(node)) { if (inline_impure(child)) { return true } }
+  return false
+}
+
+fn inline_uses(node: Any, name: Str) -> Int {
+  var n = node_kind(node) == "var" && value_str(value_field(node, "name")) == name ? 1 : 0
+  for (child of value_children(node)) { n += inline_uses(child, name) }
+  return n
+}
+
+fn inline_eager(node: Any, name: Str) -> Bool {
+  let kind = node_kind(node)
+  if (kind == "var") { return value_str(value_field(node, "name")) == name }
+  if (kind == "bin") {
+    let left = inline_eager(value_field(node, "left"), name)
+    if (list_contains(["&&", "||", "??"], value_str(value_field(node, "op")))) { return left }
+    return left || inline_eager(value_field(node, "right"), name)
+  }
+  if (kind == "un") { return inline_eager(value_field(node, "operand"), name) }
+  if (kind == "if") {
+    return inline_eager(value_field(node, "cond"), name) || (inline_eager(value_field(node, "then"), name) && inline_eager(value_field(node, "else"), name))
+  }
+  if (kind == "builtin" || kind == "field" || kind == "optfield") { return inline_eager(value_field(node, "target"), name) }
+  if (kind == "index") { return inline_eager(value_field(node, "target"), name) || inline_eager(value_field(node, "index"), name) }
+  if (kind == "list") {
+    for (item of value_list(value_field(node, "items"))) { if (inline_eager(item, name)) { return true } }
+  }
+  if (kind == "match") { return inline_eager(value_field(node, "scrutinee"), name) }
+  return false
+}
+
+fn inline_replace(node: Any, name: Str, arg: Any) -> Any {
+  if (value_is_object(node)) {
+    if (node_kind(node) == "var" && value_str(value_field(node, "name")) == name) { return arg }
+    var fields: Map[Str, Any] = Map.empty()
+    for (key of value_keys(node)) { fields = fields.set(key, inline_replace(value_field(node, key), name, arg)) }
+    return fields
+  }
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(inline_replace(item, name, arg)) }
+    return items
+  }
+  return node
+}
+
+fn inline_substitute(param: Str, template: Any, arg: Any) -> Any {
+  if (param == "") { return template }
+  if (inline_eager(template, param)) {
+    if (inline_uses(template, param) != 1 && inline_impure(arg)) { return None }
+  } else {
+    if (!list_contains(["var", "name", "lit", "config", "maplit"], node_kind(arg))) { return None }
+  }
+  return inline_replace(template, param, arg)
+}
+
+fn inline_template(fnode: Any) -> Any {
+  if (value_bool(value_field(fnode, "async")) || is_cache_pure_fn(fnode)) { return None }
+  let params = value_list(value_field(fnode, "params"))
+  let body = value_list(value_field(fnode, "body"))
+  if (params.length() > 1 || body.length() == 0) { return None }
+  let last = value_at(body, body.length() - 1)
+  if (value_str(value_field(last, "step")) != "return" || value_is_null(value_field(last, "expr"))) { return None }
+  var expr = value_field(last, "expr")
+  var i = body.length() - 2
+  while (i >= 0) {
+    let guard = value_at(body, i)
+    let yes = value_list(value_field(guard, "then"))
+    if (value_str(value_field(guard, "step")) != "if" || value_list(value_field(guard, "else")).length() > 0) { return None }
+    if (yes.length() != 1 || value_str(value_field(value_at(yes, 0), "step")) != "return") { return None }
+    let ret = value_field(value_at(yes, 0), "expr")
+    let cond = value_field(guard, "cond")
+    if (value_is_null(ret) || value_is_null(cond)) { return None }
+    var folded: Map[Str, Any] = Map.empty()
+    folded = folded.set("kind", "if").set("cond", cond).set("then", ret).set("else", expr)
+    expr = folded
+    i -= 1
+  }
+  let param = params.length() == 0 ? "" : value_str(value_field(value_at(params, 0), "name"))
+  return { param: param, expr: expr }
+}
+
+fn inline_rewrite(node: Any, templates: Map[Str, Any], stack: List[Str], bound: List[Str], expanding: Bool) -> Any {
+  if (value_is_object(node)) {
+    var fields: Map[Str, Any] = Map.empty()
+    for (key of value_keys(node)) { fields = fields.set(key, inline_rewrite(value_field(node, key), templates, stack, bound, expanding)) }
+    let callee = value_field(fields, "callee")
+    let name = value_str(value_field(callee, "name"))
+    if (node_kind(fields) == "call" && node_kind(callee) == "var" && templates.has(name) && !list_contains(stack, name) && !list_contains(bound, name)) {
+      var tmpl = value_field(templates, name)
+      if (expanding) { tmpl = inline_expand(name, templates, stack) }
+      if (!value_is_null(tmpl)) {
+        let param = value_str(value_field(tmpl, "param"))
+        let args = value_list(value_field(fields, "args"))
+        if ((param == "") == (args.length() == 0)) {
+          let sub = inline_substitute(param, value_field(tmpl, "expr"), value_at(args, 0))
+          if (!value_is_null(sub)) { return sub }
+        }
+      }
+    }
+    return fields
+  }
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(inline_rewrite(item, templates, stack, bound, expanding)) }
+    return items
+  }
+  return node
+}
+
+fn inline_expand(name: Str, raw: Map[Str, Any], stack: List[Str]) -> Any {
+  let tmpl = value_field(raw, name)
+  let param = value_str(value_field(tmpl, "param"))
+  let expr = value_field(tmpl, "expr")
+  let bound = inline_bound(expr).push(param)
+  let result = inline_rewrite(expr, raw, stack.push(name), bound, true)
+  for (free of inline_free(result)) { if (free != param) { return None } }
+  if (inline_impure(result) || inline_nodes(result) > 24) { return None }
+  return { param: param, expr: result }
+}
+
+fn inline_pure_fns(ir: Any) -> Any {
+  let functions = value_list(value_field(ir, "functions"))
+  var raw: Map[Str, Any] = Map.empty()
+  for (fnode of functions) {
+    let tmpl = inline_template(fnode)
+    if (!value_is_null(tmpl)) { raw = raw.set(value_str(value_field(fnode, "name")), tmpl) }
+  }
+  var templates: Map[Str, Any] = Map.empty()
+  for (name of raw.keys()) {
+    let tmpl = inline_expand(name, raw, [])
+    if (!value_is_null(tmpl)) { templates = templates.set(name, tmpl) }
+  }
+  if (templates.size() == 0) { return ir }
+  var rewritten: List[Any] = []
+  for (fnode of functions) {
+    let body = value_field(fnode, "body")
+    var bound = inline_bound(body)
+    for (p of value_list(value_field(fnode, "params"))) { bound = bound.push(value_str(value_field(p, "name"))) }
+    var fields: Map[Str, Any] = Map.empty()
+    for (key of value_keys(fnode)) {
+      if (key == "body") { fields = fields.set(key, inline_rewrite(body, templates, [], bound, false)) }
+      else { fields = fields.set(key, value_field(fnode, key)) }
+    }
+    rewritten = rewritten.push(fields)
+  }
+  var result: Map[Str, Any] = Map.empty()
+  for (key of value_keys(ir)) {
+    if (key == "functions") { result = result.set(key, rewritten) }
+    else { result = result.set(key, value_field(ir, key)) }
+  }
+  return result
+}
+
 // The document assembly, mirroring `emit()` for functions + components/services.
 // Named `emit_py_src` (not a bare `emit_src`) so the whole self-host pipeline can
 // `use` emit_py.rvl BESIDE emit_rust.rvl in one composition: a `use`d module's
 // PRIVATE decls no longer leak (item 228), but the merge still flattens both
 // modules' PUBLIC decls by bare name, so the two emitter entrypoints must differ
 // (roadmap item 230 — enables the fully-native `compile.rvl`).
-pub fn emit_py_src(ir: Any) -> Str {
+pub fn emit_py_src(source_ir: Any) -> Str {
+  let ir = inline_pure_fns(source_ir)
   var out = []
   let ver = value_int(value_opt(ir, "ir_version") ?? 1)
   out = out.push(`"""Generated by the revl cordis-py backend (ir_version ${ver}) — do not edit.`)

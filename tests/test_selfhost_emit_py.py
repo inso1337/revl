@@ -181,6 +181,29 @@ CORPUS = [
     "adt.rvl",
     "cache_pure.rvl",
     "witnessed.rvl",
+    "branches.rvl",
+    "inline.rvl",
+    # Whole-tree differential survey's greedy joint-line selection: each input
+    # reaches a distinct branch on at least one side, with no copied fixtures.
+    "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
+    "../emit_go_corpus/control.rvl",
+    "../../../backends/typescript/tests/fixtures/unique_writes.rvl",
+    "../../../examples/v3_step_scheduler.rvl",
+    "../../../backends/typescript/tests/fixtures/conformance.rvl",
+    "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+    "../emit_wasm_corpus/builtins.rvl",
+    "../policy_agents.rvl",
+    "../../../bench/codegen/go/probe2.rvl",
+    "../../../bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl",
+    "../../../examples/java_match.rvl",
+    "../../../backends/go/scenarios/emitted/timer/timer.rvl",
+    "../emit_ts_corpus/unique_writes.rvl",
+    "../emit_wasm_corpus/forloop.rvl",
+    "../../../backends/typescript/tests/fixtures/str_scan.rvl",
+    "../../../bench/codegen/python/programs/maps.rvl",
+    "../../../src/revl/truc/components/cli.rvl",
+    "../emit_rust_corpus/reserved_names.rvl",
+    "../emit_rust_corpus/calls.rvl",
 ]
 
 
@@ -289,6 +312,29 @@ def test_selfhosted_cache_pure_functions_execute_through_memo_wrapper(emitted):
     assert ns["cached_record"]({"x": 2, "y": 5}) == 7
     assert "_revl_uncached_twice" in ns
     assert ns["twice"] is not ns["_revl_uncached_twice"]
+
+
+def test_inline_templates_preserve_argument_evaluation(emitted):
+    ir = compile_files([str(CORPUS_DIR / "inline.rvl")])
+    source = emitted["emit_py_src"](ir)
+    ns = {}
+    exec(compile(source, "inline_emitted.py", "exec"), ns)
+    calls = []
+
+    def next_value():
+        calls.append(len(calls) + 1)
+        return calls[-1]
+
+    assert ns["run_inline"](4, next_value) == 23
+    assert calls == [1, 2, 3, 4]
+    assert ns["pure_arguments"]([1, 2]) == 7
+    assert "a = next()" in source
+    assert "b = twice_inline(next())" in source
+    assert "c = ignores(next())" in source
+    assert "d = conditional_only(next())" in source
+    assert "return recursive_inline(x)" in source
+    assert ns["guarded"](-1) == 0
+    assert ns["guarded"](99) == 10
 
 
 def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):

@@ -51,7 +51,10 @@ fn restore(path: Str, bak: Str) -> Unit {
 component Stasher {
   effect stash("payload")
   let saved = effect {
-    let path = "second"
+    var path = "initial"
+    if (true) { path = "second" } else { path = "unused" }
+    assert path != ""
+    path
     stash(path)
   }
 }
