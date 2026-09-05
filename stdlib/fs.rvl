@@ -40,6 +40,11 @@
 // garbage dir + preimage snapshots live inside the root, so reversal itself
 // cannot escape. Without this guard, item 246 would auto-approve a witnessed fs
 // mutation anywhere the process can reach, invisible to the one commit prompt.
+// Python hosts may instead bind a physical root before first use through
+// revl.fs_workspace (docs/witnessed-fs.md). Bound mode requires absolute
+// original-label paths, refuses symlinks, and keeps every syscall/inverse on the
+// pinned directory even after a root rename. Its resolved strings are labels,
+// not paths a host can safely reopen by name for its own reads.
 //
 // The guard module enumerates FOUR path families and gives each one entry point
 // (`PATH_FAMILIES`): the named endpoints an op is handed, the sidecar
