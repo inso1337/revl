@@ -572,7 +572,7 @@ fn type_ctors(ts: Vec<Token>) -> Vec<String> {
                 if ((depth == 0i64) && ((t.kind == "=") || (t.kind == "|"))) {
                     ctor = true;
                 } else {
-                    if ((ctor && (t.kind == "ident")) && is_upper_head(&t.text)) {
+                    if ((ctor && (t.kind == "ident")) && is_upper_name(&t.text)) {
                         out = union_into(out.clone(), vec![t.text.clone()]);
                     }
                     ctor = false;
@@ -2023,6 +2023,10 @@ fn acq_root_of(s: Stmt) -> AcqRoot {
 }
 
 fn is_upper_head(name: &str) -> bool {
+    return ((((name == "Map") || (name == "Pool")) || (name == "Job")) || (name == "Stream"));
+}
+
+fn is_upper_name(name: &str) -> bool {
     if (name.revl_length() == 0i64) {
         return false;
     }

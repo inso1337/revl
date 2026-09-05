@@ -1,0 +1,13 @@
+// REJECTED — an Upper-cased receiver is only a host root when it names a
+// declared host callable. Unknown names must remain undeclared G1 heads.
+
+service S { fn go(u: Str) -> Int }
+
+component C provides s: S {
+  provide s {
+    fn go(u) {
+      let value = StreamB.source()
+      return 1
+    }
+  }
+}
