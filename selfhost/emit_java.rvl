@@ -602,6 +602,54 @@ fn render_record(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   return { text: `new ${mangle(tn)}(${out_args.join(", ")})`, counter: c }
 }
 
+// Component templates use positional $N substitutions and $$ dollar escapes.
+fn render_format(node: Any, ctx: Ctx, counter: Int) -> Rendered {
+  var args = []
+  var c = counter
+  for (arg of value_list(value_field(node, "args"))) {
+    let r = render_expr(arg, ctx, c)
+    args = args.push(r.text)
+    c = r.counter
+  }
+  let template = value_str(value_field(node, "template"))
+  var segs = []
+  var buf = ""
+  var i = 0
+  while (i < template.length()) {
+    let ch = template.charAt(i)
+    if (ch == "$") {
+      if (template.slice(i, i + 2) == "$$") {
+        buf = buf.concat("$")
+        i = i + 2
+        continue
+      }
+      var j = i + 1
+      var index = 0
+      while (j < template.length()) {
+        let digit = "0123456789".indexOf(template.charAt(j))
+        if (digit < 0) { break }
+        index = index * 10 + digit
+        j = j + 1
+      }
+      if (j > i + 1) {
+        if (buf != "" || segs.length() == 0) { segs = segs.push(json_dumps(buf)) }
+        if (index < args.length()) {
+          segs = segs.push(args[index])
+        } else {
+          segs = segs.push(json_dumps(""))
+        }
+        buf = ""
+        i = j
+        continue
+      }
+    }
+    buf = buf.concat(ch)
+    i = i + 1
+  }
+  if (buf != "" || segs.length() == 0) { segs = segs.push(json_dumps(buf)) }
+  return { text: segs.join(" + "), counter: c }
+}
+
 // `interp`: a `${..}` template as Java string `+` concatenation. A Float part
 // routes through the canonical `revlFtoa` (DEFERRED — such a part is excluded
 // from the corpus, since it also pulls in the `_emit_ftoa_helper` block).
@@ -667,7 +715,7 @@ fn opt_bind(arms: List[Any]) -> Str {
   for (arm of arms) {
     if (value_str(value_field(arm, "pattern")) == "Some") {
       let b = value_str(value_field(arm, "bind"))
-      if (b != "") { return mangle(b) }
+      if (b != "" && b != "_") { return mangle(b) }
     }
   }
   return "__revl_v"
@@ -703,7 +751,7 @@ fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
       var qualified = case_m
       if (resolved(owner)) { qualified = `${mangle(owner)}.${case_m}` }
       let bind = value_str(value_field(arm, "bind"))
-      if (bind != "") {
+      if (bind != "" && bind != "_") {
         c = c + 1
         let case_var = `__revl_case_${c}`
         lines = lines.push(`            case ${qualified} ${case_var} -> {`)
@@ -733,6 +781,7 @@ fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
 // The kind dispatch, mirroring `_expr`'s branch order (post-widen).
 fn render_inner(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let kind = node_kind(node)
+  if (kind == "format") { return render_format(node, ctx, counter) }
   if (kind == "lit") { return { text: java_lit(node), counter: counter } }
   if (kind == "var") { return { text: render_var(node, ctx), counter: counter } }
   if (kind == "name") {
@@ -1365,7 +1414,7 @@ fn list_nonempty(v: Any) -> Bool {
 // The SIMPLE-path predicate: a component this slice emits byte-exactly via the
 // legacy `_emit_component`. STRICTLY a subset of `not _component_needs_modern`
 // (config/requires/isolate/intercept absent, every step a `provide`, every method
-// empty or a lone `return <lit|name>`), so anything it admits the reference emits
+// empty or a lone `return [<lit|name>]`), so anything it admits the reference emits
 // via the legacy path with a lit/name body — and anything it rejects gets a loud
 // `<<DEFER-component-nonsimple:NAME>>` rather than a wrong-shaped emission.
 fn method_simple_ok(method: Any) -> Bool {
@@ -1375,7 +1424,7 @@ fn method_simple_ok(method: Any) -> Bool {
   let s0 = steps[0]
   if (value_str(value_field(s0, "step")) != "return") { return false }
   let e = value_field(s0, "expr")
-  if (value_is_null(e)) { return false }
+  if (value_is_null(e)) { return true }
   let k = node_kind(e)
   return k == "lit" || k == "name"
 }
