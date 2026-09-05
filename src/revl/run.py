@@ -1736,10 +1736,19 @@ def run_command(args) -> int:
         from cordis import Context  # noqa: PLC0415
         from cordis.fiber import FiberState  # noqa: PLC0415
     except ModuleNotFoundError as exc:
-        venv = backend_dir / ".venv" / "bin" / "python"
+        # The fix the setup script installs is the `revl` console script on
+        # PATH (issue #336). The `.venv/bin/python -P -m revl run …` spelling
+        # is only kept as a fallback because some agents always run a venv's
+        # interpreter by its absolute path; it stays a fallback rather than
+        # the headline because `-m` has the CWD-shadowing window issue #317
+        # closed by `drop_cwd_entry` but not removed (the `-P` closes the
+        # rest), and `revl` (a console script) is window-free by design. The
+        # next two lines point at both.
         print(f"error: the cordis-py runtime is not installed ({exc.name!r} missing).\n"
               f"       set it up:  sh {backend_dir / 'setup.sh'}\n"
-              f"       then run under that interpreter:  {venv} -m revl run ...",
+              f"       then either:\n"
+              f"         revl run ...                                       # the documented happy path\n"
+              f"         .venv/bin/python -P -m revl run ...                # absolute-interpreter fallback (the `-P` closes the CWD-shadowing window)",
               file=sys.stderr)
         return 3
 

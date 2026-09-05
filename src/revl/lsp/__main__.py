@@ -1,8 +1,10 @@
-"""`python -m revl.lsp` — run the language server over stdio.
-
-An editor launches this and speaks LSP on the process's stdin/stdout. A
-separate entry point rather than a `revl` subcommand, so it does not touch the
-CLI dispatch a parallel roadmap item owns.
+"""`revl lsp` (the documented happy path) — `python -P -m revl.lsp` (the
+`-P` is the PYTHONSAFEPATH safety bit, issue #317) is the
+absolute-interpreter fallback, kept in lockstep with the subcommand
+form because both spellings are real entry points for an editor
+launching the language server. A separate entry point rather than a
+`revl` subcommand, so it does not touch the CLI dispatch a parallel
+roadmap item owns.
 """
 
 from __future__ import annotations

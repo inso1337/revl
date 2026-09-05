@@ -1,12 +1,14 @@
 """Drop the working directory from `sys.path` in the CLI entry points.
 
-`python -m revl` is the documented invocation everywhere — README, `setup.sh`,
-the `revl run` diagnostic — and `-m` makes CPython put the process's working
-directory at `sys.path[0]`, ahead of site-packages. Every bare-name import the
-CLI makes from then on resolves there first, so a `cordis.py`, `yaml.py` or
-`wasmtime.py` sitting next to a composition is imported instead of the real
-module: host Python that runs before any admission check, without the `.rvl`
-ever having to compile (issue #317).
+`python -P -m revl` (the documented safe `-m` shape — the `-P` is the
+PYTHONSAFEPATH safety bit, issue #317) is one of the documented
+invocations; the documented HAPPY path is the `revl` console script
+(declared in `pyproject.toml`). `-m` makes CPython put the process's
+working directory at `sys.path[0]`, ahead of site-packages. Every
+bare-name import the CLI makes from then on resolves there first, so a
+`cordis.py`, `yaml.py` or `wasmtime.py` sitting next to a composition is
+imported instead of the real module: host Python that runs before any
+admission check, without the `.rvl` ever having to compile (issue #317).
 
 The console scripts (`revl`, `truc`, declared in `pyproject.toml`) never had
 this, because a script entry point puts the script's own directory on
