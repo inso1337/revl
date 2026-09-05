@@ -87,12 +87,14 @@ from revl.compiler import compile_source
 from revl.diagnostics import classify
 from revl.errors import RevlError
 from revl.typecheck import _HOST_ACQUIRE_VERBS  # the shipped acquire-verb table
+from revl.typecheck import parse_type  # the shipped type-head splitter
 from revl.wal import WAL_GUARANTEE, WAL_VERSION
 import runtime as _rt  # backends/python/runtime.py — the reference teardown
 from revl.parser import (
     EffectStmt,
     EmitExpr,
     EmitStmt,
+    ExprArrow,
     ExprCall,
     ExprField,
     ExprVar,
@@ -386,6 +388,88 @@ def collect_provision_aliases(node, handles: dict, aliases: dict) -> None:
     if isinstance(node, (list, tuple)):
         for x in node:
             collect_provision_aliases(x, handles, aliases)
+
+
+def _arg_provision(arg, handles: dict, aliases: dict) -> "tuple[str, str] | None":
+    """The (component, provide key) a call ARGUMENT reads, or None: a direct
+    spawn-handle provision (`w.task`) or a local aliasing one (`let t = w.task;
+    f(t, ...)`). The same resolution `collect_provision_aliases` records for a
+    `let` binding, applied to an argument expression."""
+    if isinstance(arg, ExprField) and isinstance(arg.target, ExprVar) \
+            and arg.target.name in handles:
+        return (handles[arg.target.name], arg.name)
+    if isinstance(arg, ExprVar) and arg.name in aliases:
+        return aliases[arg.name]
+    return None
+
+
+def collect_arrow_param_aliases(body, handles: dict, aliases: dict,
+                                services: dict) -> None:
+    """Follow a spawn-handle provision across an ARROW PARAMETER binding at the
+    application site, the sibling of `collect_provision_aliases` one indirection
+    further (GHSA-wg4v-r47x-52p2 residual, examples/rejections/
+    g4_arrow_param_emission.rvl).
+
+    `let f = (t: Task, s: Str) => t.run(s)` then `f(w.task, prompt)` reaches the
+    SAME crossing `w.task.run` is: the parameter's declared service type is the
+    provenance, so the application binds `w.task` into `t` and the arrow body's
+    `t.run` reads the provision. The checker follows exactly this
+    (`lower._check_arrow_param_crossings`); the exporter records the parameter
+    as a provision alias so `_resolve_emission` resolves the body crossing and
+    the model's G4 marker rule judges it as the direct/`let`-aliased spellings
+    are judged.
+
+    Two passes over the component body: collect `let`-bound arrows (var ->
+    arrow), then, at each application of one, alias every service-typed
+    parameter that receives a provision argument. Runs after
+    `collect_provision_aliases`, whose `aliases` it reads (an aliased argument)
+    and extends (the parameter)."""
+    arrows: dict[str, object] = {}
+
+    def collect_arrows(node) -> None:
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if type(node).__name__ == "LetStmt" \
+                and isinstance(getattr(node, "value", None), ExprArrow) \
+                and isinstance(getattr(node, "name", None), str):
+            arrows[node.name] = node.value
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for f in dataclasses.fields(node):
+                collect_arrows(getattr(node, f.name))
+            return
+        if isinstance(node, (list, tuple)):
+            for x in node:
+                collect_arrows(x)
+
+    def apply_bindings(node) -> None:
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar) \
+                and node.callee.name in arrows:
+            arrow = arrows[node.callee.name]
+            params = list(getattr(arrow, "params", None) or [])
+            ptypes = list(getattr(arrow, "param_types", None)
+                          or getattr(arrow, "written_param_types", None) or [])
+            ptypes += [None] * (len(params) - len(ptypes))
+            for param, ptype, arg in zip(params, ptypes, node.args):
+                head, _ = parse_type(ptype or "")
+                if head not in services:
+                    continue
+                prov = _arg_provision(arg, handles, aliases)
+                if prov is not None:
+                    aliases[param] = prov
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for f in dataclasses.fields(node):
+                apply_bindings(getattr(node, f.name))
+            return
+        if isinstance(node, (list, tuple)):
+            for x in node:
+                apply_bindings(x)
+
+    for stmt in body:
+        collect_arrows(stmt)
+    for stmt in body:
+        apply_bindings(stmt)
 
 
 def walk_reach(node, out: set[str], region: str, requires: dict, handles: dict,
@@ -812,6 +896,10 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             aliases: dict[str, tuple[str, str]] = {}
             for stmt in c.body:
                 collect_provision_aliases(stmt, handles, aliases)
+            # ... and the SERVICE-TYPED arrow parameters an application binds a
+            # provision into (`let f = (t: Task) => t.run(p); f(w.task, p)`),
+            # one indirection past the `let` alias above (GHSA-wg4v-r47x-52p2).
+            collect_arrow_param_aliases(c.body, handles, aliases, services)
 
             # activation emit-step surface (A): the component's OWN marked
             # crossings — the base of the attenuation reach.
