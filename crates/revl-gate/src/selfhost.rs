@@ -4020,14 +4020,15 @@ pub fn admit_src(src: String) -> String {
     if (fgn != "") {
         return tagged("FOREIGN", &fgn);
     }
-    if (nesting_depth(lex_src(src.clone())) > nesting_limit()) {
+    let ts0 = lex_src(src.clone());
+    if (nesting_depth(ts0.clone()) > nesting_limit()) {
         return tagged("BAD", &too_deep_msg());
     }
     let pg = parse_prog(src.clone());
     if (pg.bad != "") {
         return tagged("BAD", &pg.bad);
     }
-    let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(lex_src(src.clone())));
+    let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(ts0.clone()));
     let acq = check_reachable_fn_acquire(pg.clone());
     if (acq != "") {
         return acq;
