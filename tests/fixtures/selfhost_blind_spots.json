@@ -197,76 +197,60 @@
   },
   "py": {
     "blind": {
-      "NOT TRIAGED - both sides implement this and no corpus document reaches it. Recorded by `--write`; say WHY, or add the corpus case.": [
-        "class=witnessed"
-      ],
-      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: Float widening on a mixed-operand binary: no corpus document mixes Int and Float.": [
-        "widen=Float"
-      ],
-      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the `len`/`maplit`/`optfield` expression kinds and the `assert`/bare-`expr` statement steps. The module docstring lists all five as COVERED, and `src/revl/lower.py` emits all five, but no corpus document spells one: the claim of coverage is the docstring's, not the oracle's.": [
-        "kind=len",
-        "kind=maplit",
-        "kind=optfield",
-        "step=assert",
-        "step=expr"
-      ],
-      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: the bare `Some`/`None` constructor read as a variable (the `kind=var` arm, not a `match` pattern), and `Map.remove`.": [
-        "method=remove"
-      ],
-      "declared out of the slice by the oracle's own docstring: async coloring (async fns/methods/externs).": [
+      "Retained Path B async boundary (items 146/391): emit_py.rvl::emit_externs can spell async def but does not reproduce emit.py::_py_yields_coroutine/_py_async_arrow or await insertion. emit_ts_corpus/async_module_local.rvl and services_async.rvl reproduce missing async def/metadata; test_named_runtime_and_harness_boundaries pins both. An async extern declaration alone would falsely imply complete async support.": [
         "async=<true>"
-      ],
-      "declared out of the slice by the oracle's own docstring: the component-dialect surfaces beyond `cexpr`'s covered arms - a function VALUE (`kind=fn`) and the `text` node no covered component body produces.": [
-        "kind=fn"
       ]
     },
     "unported": {
-      "NOT TRIAGED - the reference implements this and the port does not, and no corpus document reaches it, so nothing would notice either way. Recorded by `--write` so the set is NAMED and cannot grow in silence. Moving an entry out of this bucket means someone decided what it is.": [
-        "body=<true>",
-        "class=emission",
+      "Async-runtime planner boundary: emit.py::_group_eligible requires idempotent emissions with safe compensation; _emit_parallel_group emits await/flush/raise ordering and emit adds service metadata. emit_py.rvl::emit_services_table/body_step has sequential dispatch only. tests/test_parallel_259.py::HDR and its commutative/disjoint cases reproduce the family. Witnessed undo_idempotent registration is separately supported.": [
         "commutative=<true>",
-        "config=<true>",
-        "deferred=<true>",
-        "else=<true>",
-        "fields=<true>",
-        "idempotency_key=<true>",
-        "idempotent=<true>",
-        "kind=__rendered__",
-        "kind=do",
+        "idempotent=<true>"
+      ],
+      "Deferred delivery runtime boundary: emit.py::_deferred_step/_deferred_register_kwargs register emit_deferred with argument-position idempotency keys; emit_py.rvl::body_step/method_step issue ordinary calls. tests/test_standing_approval.py::_SOURCE declares extern emission deferred fn deliver. This is distinct from the now-ported witnessed transactional registration.": [
+        "deferred=<true>"
+      ],
+      "Internal reference-only pseudo-node, not frontend syntax: emit.py::_RenderedBody wraps already rendered component match arms with kind=__rendered__; emit_py.rvl::cmatch_branch passes expression strings directly. emit_py_corpus/branches.rvl::block_match covers the corresponding source behavior.": [
+        "kind=__rendered__"
+      ],
+      "Component host-runtime boundary from the port banner: emit.py::_ComponentEmitter._expr lowers host roots and format via runtime imports; emit_py.rvl::cexpr returns named markers. backends/go/scenarios/advance.rvl reproduces host/format, pinned by test_named_runtime_and_harness_boundaries. Module builtins and interpolation are supported and not included.": [
         "kind=format",
-        "kind=hole",
-        "kind=host",
+        "kind=host"
+      ],
+      "Intentional refusal, not missing positive emission: emit.py::_refuse_holes rejects kind=hole before rendering. tests/test_holes.py supplies ?? source inputs. A successful byte-oracle document cannot contain an unresolved hole; adding one would incorrectly require reference emission.": [
+        "kind=hole"
+      ],
+      "Spawn/instance runtime boundary: emit.py::_ComponentEmitter._expr calls runtime spawn and handle.get; emit_py.rvl::cexpr emits markers. backends/go/scenarios/accessor.rvl reproduces both; the spawn marker is independently pinned by test_named_runtime_and_harness_boundaries.": [
         "kind=instance-get",
+        "kind=spawn"
+      ],
+      "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
         "kind=lease-acquire",
         "kind=lease-revoke",
-        "kind=spawn",
+        "step=approval"
+      ],
+      "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs.": [
         "kind=stream-merge",
         "kind=subscribe",
-        "lifecycle=<true>",
-        "pattern=list",
-        "pattern=record",
-        "register=<true>",
-        "setup=<true>",
-        "sized_length=<true>",
         "stage=take",
+        "step=await",
+        "step=stream-iter"
+      ],
+      "In-file harness boundary: emit.py::_emit_tests/_emit_lifecycle_test/_lifecycle_step emit Context/clock/abort/load/unload/call/residue orchestration; emit_py.rvl::emit_py_src has no REVL_TESTS generation. examples/lifecycle_wasm.rvl and examples/durable_log.rvl reproduce omission; tests/test_lifecycle_abort.py covers abort. Named boundary tests pin the missing trailer.": [
+        "lifecycle=<true>",
         "step=abort",
         "step=advance",
-        "step=approval",
         "step=assert_no_residue",
-        "step=await",
         "step=call",
-        "step=let_pattern",
         "step=load",
-        "step=stream-iter",
-        "step=unload",
-        "undo_idempotent=<true>",
+        "step=unload"
+      ],
+      "Existing deterministic-destructuring boundary: emit.py::_let_pattern_stmt emits record bindings and exact/rest list unpacking using _Lines.next_destructure_seq. emit_py.rvl::fn_stmt has no let_pattern arm. Representative let {a} = record and let [a, ...rest] = list forms are in tests/test_v2_language.py. Item 179 removed id-based naming, not this port omission.": [
+        "pattern=list",
+        "pattern=record",
+        "step=let_pattern"
+      ],
+      "Validated runtime/model-flow boundary: emit.py::_validated_call/_ctor_map/_ComponentEmitter._expr wrap completion in validate_response/validate_retry with schema/constructors; emit_py.rvl::cexpr emits raw calls. Named inputs: tests/test_validated_boundary.py::test_emit_wraps_validated_call_and_is_byte_identical_when_absent and tests/test_validated_retry_257s2.py::test_emit_wraps_only_the_completion_call_in_the_retry_thunk. Ordinary ADT construction/Secret[T] marking are supported.": [
         "validated=<true>"
-      ],
-      "item 310 `cache pure` landed in the reference after this ledger was first taken: backends/python/emit.py::_is_cache_pure reads `decl['cache']['class'] == 'pure_fn'` and gates a memo preamble on it. selfhost/emit_py.rvl has no `pure_fn` at all and no corpus document declares `cache pure`, so the oracle cannot see the difference. A new FEATURE rather than a fix, so item 391's standing port question owns it; named here so it is not invisible.": [
-        "class=pure_fn"
-      ],
-      "the `secrets=<true>` manifest flag the python reference reads when a document declares secret configuration. No corpus document declares one, and the port does not read the flag.": [
-        "secrets=<true>"
       ]
     }
   },
