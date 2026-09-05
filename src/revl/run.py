@@ -779,6 +779,7 @@ class _Driver:
         self.root.on("internal/status", self._on_fiber)
         self._baseline_hooks = self._hooks()
         self._baseline_disposables = self.root.fiber._disposables.length
+        self._compensation_residue: list[dict] = []
 
     # -- backwards replay (docs/replay.md) ---------------------------------
 
@@ -1269,7 +1270,12 @@ class _Driver:
             if fiber is None:
                 continue
             self._log("swap", name, "dispose -> inverses replay (LIFO)")
+            frame = self.runtime._frame_for_ctx(getattr(fiber, "ctx", None))
             await fiber.dispose()
+            if frame is not None:
+                self._compensation_residue.extend(
+                    getattr(frame, "compensation_residue", ())
+                )
             await self._flush()
         await self._flush()
 
@@ -1599,6 +1605,8 @@ class _Driver:
              f"disposables={self.root.fiber._disposables.length} (baseline {self._baseline_disposables})"),
             ("listeners", self._hooks() == self._baseline_hooks,
              "event hooks back to baseline"),
+            ("inverse residue", not self._compensation_residue,
+             f"{len(self._compensation_residue)} inverse failure(s) recorded"),
         ]
         for name, ok, detail in checks:
             self._log("ok" if ok else "FAIL", name, detail)
