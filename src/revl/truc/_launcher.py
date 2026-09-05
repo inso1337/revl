@@ -50,7 +50,8 @@ def _refuse(reason: str) -> BootstrapLockError:
         f"  lock: {_HERE / 'truc.lock'}\n"
         "  truc will not boot on a composition its own lock does not "
         "describe. If this change to truc's components is intended, "
-        "regenerate the lock (`python -m revl.truc._relock`) and commit it.")
+        "regenerate the lock (`python -P -m revl.truc._relock`; the `-P` is "
+        "the PYTHONSAFEPATH safety bit, issue #317) and commit it.")
 
 
 def _contained_path(rel: str) -> Path:
@@ -143,7 +144,9 @@ def component_files() -> list[str]:
     beside them — but that claim is now CHECKED rather than assumed: nothing
     outside the package can be dragged into stage 0 by a lock entry or a
     planted link, and a component whose bytes moved without the lock moving
-    with them refuses to boot. Regenerate with `python -m revl.truc._relock`.
+    with them refuses to boot. Regenerate with
+    `python -P -m revl.truc._relock` (the `-P` is the PYTHONSAFEPATH
+    safety bit, issue #317).
     """
     lock = _HERE / "truc.lock"
     if not lock.is_file():
@@ -167,10 +170,11 @@ def component_files() -> list[str]:
 
 def lock_document() -> dict:
     """The bootstrap lock as it should be for the components on disk — the
-    regenerator behind `python -m revl.truc._relock` and the
-    regenerate-or-red test in `tests/test_truc_bootstrap.py`. It reads the
-    committed lock only for the file LIST (which components make up truc is a
-    decision, not something to be discovered by globbing) and recomputes every
+    regenerator behind `python -P -m revl.truc._relock` (the `-P` is the
+    PYTHONSAFEPATH safety bit, issue #317) and the regenerate-or-red
+    test in `tests/test_truc_bootstrap.py`. It reads the committed lock
+    only for the file LIST (which components make up truc is a decision,
+    not something to be discovered by globbing) and recomputes every
     hash."""
     lock = _HERE / "truc.lock"
     data = json.loads(lock.read_text(encoding="utf-8"))
@@ -236,5 +240,5 @@ def main(argv: list[str] | None = None) -> int:
     return code
 
 
-if __name__ == "__main__":  # pragma: no cover — `python -m revl.truc`
+if __name__ == "__main__":  # pragma: no cover — `python -P -m revl.truc`
     raise SystemExit(main())
