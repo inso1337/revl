@@ -123,3 +123,18 @@ def test_line_check_fails_closed_on_malformed_maps_and_counts(lines, monkeypatch
     problems = lines.check(data)
     assert any("invalid uncovered count" in problem for problem in problems)
     assert any("invalid measured count" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("functions", [None, [], {"f": True}])
+def test_line_check_rejects_malformed_function_population(lines, monkeypatch, tmp_path, functions):
+    ledger = {half: {tier: {"uncovered": {"specific decision": {}}}
+                     for tier in TIERS} for half in ("reference", "selfhost")}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(lines, "LEDGER", path)
+    data = {half: {tier: {"functions": functions, "sizes": {}}
+                   for tier in TIERS} for half in ("reference", "selfhost")}
+    problems = lines.check(data)
+    assert any("survey functions are not a map" in problem
+               for problem in problems) or any("invalid measured count" in problem
+                                                for problem in problems)
