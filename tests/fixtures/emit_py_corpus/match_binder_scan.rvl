@@ -1,0 +1,36 @@
+// item 306: grade `arm_body_mentions` / `arm_body_is_bind` (selfhost/emit_py.rvl
+// and their `_`-prefixed reference twins in backends/python/emit.py) on the
+// binder-scan branches the rest of the corpus leaves unexercised. The whole
+// corpus reaches both functions, but only through arms whose body reads its
+// binder as a plain VALUE, so the conservative object-KEY retention, the
+// exhausted-LIST walk and the `Some`/`None`-binder short-circuit were emitted
+// but never run — the byte-agreement oracle certified them trivially. Each arm
+// below drives one of those branches and the two sides must still emit the
+// same Python for it (item 429's standing rule).
+
+fn add(a: Int, b: Int) -> Int { return a + b }
+
+// `arm_body_mentions` object-KEY retention: the binder name collides with an
+// AST field key (`kind` is present on every node), so the walk keeps the
+// binder conservatively even though the body never reads it as a value. Both
+// sides render the one-shot lambda.
+fn keyed_binder(o: Opt[Int]) -> Int {
+  return match o { Some(kind) => add(1, 1), None => 0 }
+}
+
+// `arm_body_mentions` LIST branch walked to exhaustion without a hit: the arm
+// binds a payload its body never reads (the body calls `add` on an unrelated
+// param), so the binder is dropped on both sides.
+fn unread_via_call(o: Opt[Int], w: Int) -> Int {
+  return match o { Some(v) => add(w, w), None => 0 }
+}
+fn unread_via_list(o: Opt[Int], w: Int) -> List[Int] {
+  return match o { Some(v) => [w, w], None => [w] }
+}
+
+// `arm_body_is_bind` `Some`/`None` short-circuit: a payload bound to the name
+// `Some` shadows the constructor, and both sides leave it to the special
+// renderer rather than inlining, returning false before the record check.
+fn some_binder(o: Opt[Int]) -> Int {
+  return match o { Some(Some) => 0, None => 0 }
+}
