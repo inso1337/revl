@@ -15,3 +15,13 @@ fn shadowed(xs: List[Str]) -> Str {
   for (x of xs) { out = out + strings }
   return out
 }
+
+fn appendSelf(n: Int) -> Str {
+  var s = "x"
+  var i = 0
+  while (i < n) {
+    s = s + s
+    i = i + 1
+  }
+  return s
+}
