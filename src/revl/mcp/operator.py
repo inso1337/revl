@@ -101,6 +101,15 @@ TOOL_VERB = {
     # while every live component is in `tenant_a*`; an operator who must be
     # able to hit the button always needs `may estop on *`.
     "revl_estop": "estop",
+    # Session-plane mutations are operator authority too.  The related tool
+    # variants share one capability so profiles do not need implementation
+    # details such as the two-step fork protocol.
+    "revl_call": "call",
+    "revl_lease": "lease",
+    "revl_fork": "fork",
+    "revl_fork_confirm": "fork",
+    "revl_step_back": "replay",
+    "revl_replay_forward": "replay",
 }
 
 # ---------------------------------------------------------- composed verbs
@@ -532,6 +541,17 @@ def _targets(verb: str, session, arguments: dict) \
         return _snapshot_targets(arguments.get("snapshot"))
     if verb == "approve":
         return _approve_targets(session, arguments)
+    if verb == "lease":
+        component = arguments.get("component")
+        if not component or not ir:
+            return _live_targets(ir)
+        return [target for target in _live_targets(ir) or []
+                if target[0] == component] or None
+    if verb in {"fork", "replay"}:
+        component = arguments.get("component")
+        if component and ir:
+            return [target for target in _live_targets(ir) or []
+                    if target[0] == component] or None
     # unload / edit / snapshot / undo operate on the whole running composition
     return _live_targets(ir)
 
