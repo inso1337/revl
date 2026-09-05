@@ -36,6 +36,7 @@ component Maps requires source: Source provides writer: Writer {
   provide writer {
     fn write(c, x) {
       effect ints.insert("field", c.value) undo ints.remove("field")
+      effect ints.insert("conditional", (if (config.active) { c } else { { value: 0 } }).value) undo ints.remove("conditional")
       effect ints.insert("coalesce", x ?? 0) undo ints.remove("coalesce")
     }
   }
