@@ -492,17 +492,11 @@ fn starts_with(s: Str, pre: Str) -> Bool {
   return s.slice(0, pre.length()) == pre
 }
 
-// Whether a rendered type is an async FUNCTION type `(…) -> Async[T]` — the one
-// spelling that colors a first-class callback (lower.py's `_is_async_fn_type`:
-// head is the fn-type head and the declared return's head is `Async`). The
-// parser renders a fn type as `(P1, P2) -> RET`, so: it must open with `(`, the
-// matching `)` closes the parameter list (paren depth handles a nested fn-typed
-// param), and the return part after `) -> ` must itself be an `Async[...]` type.
-// A bare `Async[T]` (not a fn type) is not one — the reference refuses those at
-// wellformedness, never colors them.
-fn is_async_fn_ty(ty: Str) -> Bool {
-  if (ty.length() == 0) { return false }
-  if (ty.charAt(0) != "(") { return false }
+// Read the return after the outer parameter list, not an arrow nested inside
+// a callback parameter. Shared by async coloring and typed call lowering.
+fn function_return_ty(ty: Str) -> Str {
+  if (ty.length() == 0) { return "" }
+  if (ty.charAt(0) != "(") { return "" }
   var depth = 0
   var i = 0
   var close = 0 - 1
@@ -515,11 +509,14 @@ fn is_async_fn_ty(ty: Str) -> Bool {
     }
     i += 1
   }
-  if (close == 0 - 1) { return false }
+  if (close == 0 - 1) { return "" }
   let rest = ty.slice(close + 1, ty.length())
-  if (!starts_with(rest, " -> ")) { return false }
-  let ret = rest.slice(4, rest.length())
-  return starts_with(ret, "Async[")
+  if (!starts_with(rest, " -> ")) { return "" }
+  return rest.slice(4, rest.length())
+}
+
+fn is_async_fn_ty(ty: Str) -> Bool {
+  return starts_with(function_return_ty(ty), "Async[")
 }
 
 // The parameter INDICES whose declared type is an async function type — the
@@ -5558,8 +5555,9 @@ fn infer_method(recv: Expr, method: Str, env: List[Bind]) -> Str {
 
 fn infer_callee(callee: Expr, env: List[Bind]) -> Str {
   return match callee {
-    Field(f) => infer_method(f.target, f.name, env),
-    _ => "",
+    Field(f) => is_empty_map_callee(callee) ? "Map[Str, Never]"
+      : infer_method(f.target, f.name, env),
+    _ => function_return_ty(infer(callee, env)),
   }
 }
 
@@ -5719,8 +5717,9 @@ fn lir_field(f: FieldN, env: List[Bind]) -> Str {
       return "{\"kind\":\"len\",\"target\":".concat(lir_expr(f.target, env)).concat("}")
     }
   }
+  let opt = parse_head(infer_field(infer(f.target, env), f.name, env)) == "Opt"
   return "{\"kind\":\"field\",\"target\":".concat(lir_expr(f.target, env))
-    .concat(",\"name\":").concat(jstr(f.name)).concat("}")
+    .concat(",\"name\":").concat(jstr(f.name)).concat(opt ? ",\"opt\":true" : "").concat("}")
 }
 
 fn lir_builtin(f: FieldN, args: List[Expr], env: List[Bind]) -> Str {
@@ -5864,7 +5863,21 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc) -> CaseAcc {
     return case_binds_walk(ts, skip_line(ts, i), a)
   }
   if (t.text == "extern") { return case_binds_walk(ts, p_extern(ts, i, empty_prog()).i, a) }
-  if (t.text == "fn") { return case_binds_walk(ts, p_fn(ts, i, empty_prog()).i, a) }
+  let public_fn = t.text == "pub" && atw(ts, i + 1, "fn")
+  if (t.text == "fn" || public_fn) {
+    let fi = public_fn ? i + 1 : i
+    let ps = params_at(ts, fi + 3)
+    let ret = atk(ts, ps.i, "arrow") ? taint_strip(type_at(ts, ps.i + 1).ty) : "Unit"
+    var param_types: List[Str] = []
+    var pi = 0
+    while (pi < ps.ps.length()) {
+      param_types = param_types.push(taint_strip(ps.ps[pi].ty))
+      pi += 1
+    }
+    let ty = "(".concat(param_types.join(", ")).concat(") -> ").concat(ret)
+    let binds = tenv_put(a.binds, tkc(ts, fi + 1).text, ty)
+    return case_binds_walk(ts, p_fn(ts, fi, empty_prog()).i, { binds: binds, amb: a.amb })
+  }
   if (t.text == "service") { return case_binds_walk(ts, p_service(ts, i, empty_prog()).i, a) }
   if (t.text == "component") { return case_binds_walk(ts, p_component(ts, i, empty_prog()).i, a) }
   return case_binds_walk(ts, skip_line(ts, i), a)
@@ -5924,7 +5937,17 @@ fn lir_receiver_first(free: Str, recv: Expr, args: List[Expr],
     .concat(args.length() > 0 ? "," : "").concat(lir_args(args, env)).concat("]}")
 }
 
+fn is_empty_map_callee(callee: Expr) -> Bool {
+  return match callee {
+    Field(f) => f.name == "empty" && match f.target { Var(n) => n == "Map", _ => false, },
+    _ => false,
+  }
+}
+
 fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
+  if (is_empty_map_callee(callee) && args.length() == 0) {
+    return "{\"kind\":\"maplit\",\"entries\":[]}"
+  }
   // ADT construction (Result / user variants) beats every other call shape: the
   // callee is a bare `Var` naming a case, not a callable.
   let ctor = match callee { Var(n) => tagged_case_adt(env, n), _ => "", }
@@ -6059,9 +6082,12 @@ fn lir_expr(e: Expr, env: List[Bind]) -> Str {
 
 // The `T` -> `Opt[T]` injection the checker accepts at a declared boundary
 // (lower.py's `_inject_opt`): materialised on a `return` whose value type is a
-// bare `T` where an `Opt[T]` is declared. (Widening markers are absent from the
-// covered corpus, so `_mark_widen` is not reproduced here.)
+// bare `T` where an `Opt[T]` is declared, plus numeric widening.
 fn apply_ret_markers(node: Str, expected: Str, actual: Str) -> Str {
+  if ((expected == "Float" && (actual == "Int" || actual == "Int32"))
+      || (expected == "Int" && actual == "Int32")) {
+    return node.slice(0, node.length() - 1).concat(",\"widen\":").concat(jstr(expected)).concat("}")
+  }
   if (actual != "" && parse_head(expected) == "Opt" && type_args(expected).length() > 0
       && parse_head(actual) != "Opt") {
     return "{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"Some\"},\"args\":["
@@ -6166,8 +6192,11 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     if (!r.ok) { return mk_one("", env, muts, hi) }
     let bindty = declared != "" ? declared : r.ty
     let env2 = bindty == "" ? env : tenv_put(env, name, bindty)
+    let value = declared != "" && r.js == "{\"kind\":\"maplit\",\"entries\":[]}"
+      ? r.js.slice(0, r.js.length() - 1).concat(",\"expected\":").concat(jstr(declared)).concat("}")
+      : r.js
     let js = "{\"step\":\"let\",\"name\":".concat(jstr(name)).concat(",\"value\":")
-      .concat(r.js).concat(",\"mutable\":").concat(mutable ? "true" : "false").concat("}")
+      .concat(value).concat(",\"mutable\":").concat(mutable ? "true" : "false").concat("}")
     return mk_one(js, env2, mutable ? muts.push(name) : muts, r.i)
   }
   if (t.kind == "kw" && t.text == "return") {
@@ -6544,6 +6573,10 @@ fn ir_type_decl(ts: List[Token], i: Int) -> LirFn {
     let bend = close_brace(ts, j)
     if (bend == 0 - 1) { return { js: "", i: lineHi } }
     let fields = ir_type_fields(ts, j + 1, bend - 1)
+    // Reference declaration lowering treats an empty field table as a variant.
+    if (fields == "") {
+      return { js: jstr(nm).concat(": {\"params\": [], \"kind\": \"variant\", \"cases\": []}"), i: bend }
+    }
     let js = jstr(nm).concat(": {\"params\": [], \"kind\": \"record\", \"fields\": {")
       .concat(fields).concat("}}")
     return { js: js, i: bend }

@@ -657,12 +657,12 @@ fn starts_with(s: &str, pre: &str) -> bool {
     return (s.revl_slice(0i64, pre.revl_length()) == pre);
 }
 
-fn is_async_fn_ty(ty: &str) -> bool {
+fn function_return_ty(ty: &str) -> String {
     if (ty.revl_length() == 0i64) {
-        return false;
+        return String::from("");
     }
     if ({ ty.chars().nth((0i64) as usize).unwrap().to_string() } != "(") {
-        return false;
+        return String::from("");
     }
     let mut depth = 0i64;
     let mut i = 0i64;
@@ -681,14 +681,17 @@ fn is_async_fn_ty(ty: &str) -> bool {
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     if (close == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-        return false;
+        return String::from("");
     }
     let rest = ty.revl_slice((close).checked_add(1i64).expect("revl: Int overflow"), ty.revl_length());
     if (!starts_with(&rest, " -> ")) {
-        return false;
+        return String::from("");
     }
-    let ret = rest.revl_slice(4i64, rest.revl_length());
-    return starts_with(&ret, "Async[");
+    return rest.revl_slice(4i64, rest.revl_length());
+}
+
+fn is_async_fn_ty(ty: &str) -> bool {
+    return starts_with(&function_return_ty(ty), "Async[");
 }
 
 fn async_slots_of(ps: Vec<ParamN>) -> Vec<i64> {
@@ -5198,9 +5201,9 @@ fn infer_method(recv: Expr, method: &str, env: Vec<Bind>) -> String {
 }
 
 fn infer_callee(callee: Expr, env: Vec<Bind>) -> String {
-    return match callee {
-    Expr::Field(f) => { let f = *f; infer_method(f.target.clone(), &f.name, env.clone()) },
-    _ => String::from(""),
+    return match callee.clone() {
+    Expr::Field(f) => { let f = *f; if is_empty_map_callee(callee.clone()) { String::from("Map[Str, Never]") } else { infer_method(f.target.clone(), &f.name, env.clone()) } },
+    _ => function_return_ty(&infer(callee.clone(), env.clone())),
 };
 }
 
@@ -5372,7 +5375,8 @@ fn lir_field(f: FieldN, env: Vec<Bind>) -> String {
             return (String::from("{\"kind\":\"len\",\"target\":").revl_concat(&lir_expr(f.target.clone(), env.clone()))).revl_concat("}");
         }
     }
-    return (((String::from("{\"kind\":\"field\",\"target\":").revl_concat(&lir_expr(f.target.clone(), env.clone()))).revl_concat(",\"name\":")).revl_concat(&jstr(&f.name))).revl_concat("}");
+    let opt = (parse_head(infer_field(infer(f.target.clone(), env.clone()), &f.name, env.clone())) == "Opt");
+    return ((((String::from("{\"kind\":\"field\",\"target\":").revl_concat(&lir_expr(f.target.clone(), env.clone()))).revl_concat(",\"name\":")).revl_concat(&jstr(&f.name))).revl_concat(&if opt { String::from(",\"opt\":true") } else { String::from("") })).revl_concat("}");
 }
 
 fn lir_builtin(f: FieldN, args: Vec<Expr>, env: Vec<Bind>) -> String {
@@ -5509,8 +5513,20 @@ fn case_binds_walk(ts: Vec<Token>, i: i64, a: CaseAcc) -> CaseAcc {
     if (t.text == "extern") {
         return case_binds_walk(ts.clone(), p_extern(ts.clone(), i, empty_prog()).i, a.clone());
     }
-    if (t.text == "fn") {
-        return case_binds_walk(ts.clone(), p_fn(ts.clone(), i, empty_prog()).i, a.clone());
+    let public_fn = ((t.text == "pub") && atw(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), "fn"));
+    if ((t.text == "fn") || public_fn) {
+        let fi = if public_fn { (i).checked_add(1i64).expect("revl: Int overflow") } else { i };
+        let ps = params_at(ts.clone(), (fi).checked_add(3i64).expect("revl: Int overflow"));
+        let ret = if atk(ts.clone(), ps.i, "arrow") { taint_strip(type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow")).ty) } else { String::from("Unit") };
+        let mut param_types: Vec<String> = vec![];
+        let mut pi = 0i64;
+        while (pi < ps.ps.revl_length()) {
+            param_types.push(taint_strip((ps.ps)[(pi) as usize].clone().ty));
+            pi = (pi).checked_add(1i64).expect("revl: Int overflow");
+        }
+        let ty = ((String::from("(").revl_concat(&param_types.revl_join(", "))).revl_concat(") -> ")).revl_concat(&ret);
+        let binds = tenv_put(a.binds.clone(), tkc(ts.clone(), (fi).checked_add(1i64).expect("revl: Int overflow")).text, ty);
+        return case_binds_walk(ts.clone(), p_fn(ts.clone(), fi.clone(), empty_prog()).i, CaseAcc { binds: binds.clone(), amb: a.amb.clone() });
     }
     if (t.text == "service") {
         return case_binds_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, a.clone());
@@ -5565,7 +5581,20 @@ fn lir_receiver_first(free: &str, recv: Expr, args: Vec<Expr>, env: Vec<Bind>) -
     return (((((String::from("{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":").revl_concat(&jstr(free))).revl_concat("},\"args\":[")).revl_concat(&lir_expr(recv.clone(), env.clone()))).revl_concat(&if (args.revl_length() > 0i64) { String::from(",") } else { String::from("") })).revl_concat(&lir_args(args.clone(), env.clone()))).revl_concat("]}");
 }
 
+fn is_empty_map_callee(callee: Expr) -> bool {
+    return match callee {
+    Expr::Field(f) => { let f = *f; ((f.name == "empty") && match f.target.clone() {
+    Expr::Var(n) => (n == "Map"),
+    _ => false,
+}) },
+    _ => false,
+};
+}
+
 fn lir_call(callee: Expr, args: Vec<Expr>, env: Vec<Bind>) -> String {
+    if (is_empty_map_callee(callee.clone()) && (args.revl_length() == 0i64)) {
+        return String::from("{\"kind\":\"maplit\",\"entries\":[]}");
+    }
     let ctor = match callee.clone() {
     Expr::Var(n) => tagged_case_adt(env.clone(), &n),
     _ => String::from(""),
@@ -5696,6 +5725,9 @@ fn lir_expr(e: Expr, env: Vec<Bind>) -> String {
 }
 
 fn apply_ret_markers(node: String, expected: String, actual: String) -> String {
+    if (((expected == "Float") && ((actual == "Int") || (actual == "Int32"))) || ((expected == "Int") && (actual == "Int32"))) {
+        return (((node.revl_slice(0i64, (node.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"widen\":")).revl_concat(&jstr(&expected))).revl_concat("}");
+    }
     if ((((actual != "") && (parse_head(expected.clone()) == "Opt")) && (type_args(&expected).revl_length() > 0i64)) && (parse_head(actual.clone()) != "Opt")) {
         return (String::from("{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"Some\"},\"args\":[").revl_concat(&node)).revl_concat("]}");
     }
@@ -5805,7 +5837,8 @@ fn lir_one_stmt(ts: Vec<Token>, i: i64, hi: i64, env: Vec<Bind>, muts: Vec<Strin
         }
         let bindty = if (declared != "") { declared.clone() } else { r.ty };
         let env2 = if (bindty == "") { env.clone() } else { tenv_put(env.clone(), name.clone(), bindty.clone()) };
-        let js = (((((String::from("{\"step\":\"let\",\"name\":").revl_concat(&jstr(&name))).revl_concat(",\"value\":")).revl_concat(&r.js)).revl_concat(",\"mutable\":")).revl_concat(&if mutable { String::from("true") } else { String::from("false") })).revl_concat("}");
+        let value = if ((declared != "") && (r.js == "{\"kind\":\"maplit\",\"entries\":[]}")) { (((r.js.revl_slice(0i64, (r.js.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))).revl_concat(",\"expected\":")).revl_concat(&jstr(&declared))).revl_concat("}") } else { r.js };
+        let js = (((((String::from("{\"step\":\"let\",\"name\":").revl_concat(&jstr(&name))).revl_concat(",\"value\":")).revl_concat(&value)).revl_concat(",\"mutable\":")).revl_concat(&if mutable { String::from("true") } else { String::from("false") })).revl_concat("}");
         return mk_one(js.clone(), env2, if mutable { muts.revl_push(name.clone()) } else { muts.clone() }, r.i);
     }
     if ((t.kind == "kw") && (t.text == "return")) {
@@ -6221,6 +6254,9 @@ fn ir_type_decl(ts: Vec<Token>, i: i64) -> LirFn {
             return LirFn { js: String::from(""), i: lineHi };
         }
         let fields = ir_type_fields(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"));
+        if (fields == "") {
+            return LirFn { js: jstr(&nm).revl_concat(": {\"params\": [], \"kind\": \"variant\", \"cases\": []}"), i: bend };
+        }
         let js = ((jstr(&nm).revl_concat(": {\"params\": [], \"kind\": \"record\", \"fields\": {")).revl_concat(&fields)).revl_concat("}}");
         return LirFn { js: js.clone(), i: bend };
     }
