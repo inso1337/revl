@@ -106,6 +106,16 @@ TIERS = {
 
 TRUE = "<true>"  # the value side of a boolean-flag construct
 
+# Only these IR fields are schema booleans. Other fields are frequently used
+# in truthiness guards as collections, names, or nested records; treating those
+# guards as boolean constructs creates false blind spots when the value is
+# populated. Keep this list explicit rather than inferring types from Python.
+BOOLEAN_FIELDS = frozenset({
+    "async", "commutative", "deferred", "has_config", "idempotent",
+    "intercepted", "lifecycle", "public", "secret", "secret_return",
+    "secret_witness", "subscribe", "undo_idempotent", "validated",
+})
+
 
 # --------------------------------------------------------------- reference
 
@@ -214,7 +224,7 @@ def reference_constructs(path: Path) -> dict[str, int]:
         for condition in conditions:
             for test in _test_operands(condition):
                 field = _field_of(test)
-                if field:
+                if field in BOOLEAN_FIELDS:
                     record(field, TRUE, getattr(test, "lineno", 0))
     return out
 
