@@ -222,7 +222,7 @@ type E = { wat: Str, ty: Str }
 // typename -> its spec, from which `_record_fields` reads the DECLARED field
 // order/types. It is document-global and constant like the string pool, so it
 // rides in the scope too rather than a separate parameter threaded everywhere.
-type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str], rectypes: Any, functions: List[Any] }
+type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str], rectypes: Any, functions: List[Any], tmp: Str }
 // A statement-emission result: the emitted lines, the threaded scope, and the
 // accumulated local-width map (the reference's function-global `_local_types`).
 // `loop` is the running pre-order `for`-loop counter (the reference's
@@ -265,7 +265,7 @@ fn loop_control_targets(nodes: List[Any], include_continue: Bool) -> Bool {
 }
 
 fn scope_bind(s: Scope, name: Str, slot: Str, ty: Str) -> Scope {
-  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs, rectypes: s.rectypes, functions: s.functions }
+  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs, rectypes: s.rectypes, functions: s.functions, tmp: s.tmp }
 }
 
 // ==================================================== the value/memory ABI (slice 3)
@@ -293,13 +293,23 @@ fn slot_load(addr: Str, ty: Str) -> Str {
 }
 
 // `_acquire_tmp` hands a record/list its base-pointer scratch by NESTING DEPTH:
-// depth 0 keeps the historical `__revl_tmp` (so non-nested output is unchanged),
-// a nested allocation gets `__revl_tmp_n<depth>`. Depth is the count of enclosing
+// depth 0 keeps the collision-free base, and a nested allocation appends
+// `_n<depth>` to that base. Depth is the count of enclosing
 // allocations under construction — purely the lexical allocation nesting, so it
 // is threaded as an argument rather than a mutable stack.
-fn tmp_name(depth: Int) -> Str {
-  if (depth == 0) { return "__revl_tmp" }
-  return "__revl_tmp_n".concat(num_str(depth))
+fn tmp_name(base: Str, depth: Int) -> Str {
+  if (depth == 0) { return base }
+  return `${base}_n${num_str(depth)}`
+}
+
+fn fresh_tmp(taken: List[Str]) -> Str {
+  var candidate = "__revl_tmp"
+  var counter = 1
+  while (list_contains(taken, candidate)) {
+    candidate = `__revl_tmp_${num_str(counter)}`
+    counter = counter + 1
+  }
+  return candidate
 }
 
 // `_is_list_type` / `_list_elem`: a list type is spelled `List[<elem>]`.
@@ -550,7 +560,7 @@ fn render_list(node: Any, s: Scope, expected: Str, depth: Int) -> E {
   let ty = list_type_of(node, s, expected)
   let elem = list_elem(ty)
   let items = value_list(value_field(node, "items"))
-  let tmp = tmp_name(depth)
+  let tmp = tmp_name(s.tmp, depth)
   let n = items.length()
   var lines = [
     `(call $alloc (i32.const ${num_str(8 * (n + 1))}))`,
@@ -575,7 +585,7 @@ fn render_record(node: Any, s: Scope, expected: Str, depth: Int) -> E {
   let ty = record_type_of(node, s, expected)
   let fieldsMap = value_field(value_field(s.rectypes, ty), "fields")
   let order = value_keys(fieldsMap)
-  let tmp = tmp_name(depth)
+  let tmp = tmp_name(s.tmp, depth)
   var lines = [
     `(call $alloc (i32.const ${num_str(8 * order.length())}))`,
     `(local.set $${tmp})`
@@ -1023,7 +1033,7 @@ fn make_tagged(ty: Str, case: Str, payload: Any, s: Scope, depth: Int) -> E {
   let layout = tagged_layout(s.rectypes, ty)
   let tag = tag_of(layout, case)
   let pty = payload_ty_of(layout, case)
-  let tmp = tmp_name(depth)
+  let tmp = tmp_name(s.tmp, depth)
   var lines = [
     `(call $alloc (i32.const 16))`,
     `(local.set $${tmp})`,
@@ -1466,7 +1476,8 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any, functions: List
   raw = collect_locals(body, raw)
   let names = list_sort(list_dedup(raw))
   var localOrder = []
-  var scope: Scope = { slots: slots, types: types, strs: strs, rectypes: rectypes, functions: functions }
+  let tmp = fresh_tmp(types.keys().concat(names))
+  var scope: Scope = { slots: slots, types: types, strs: strs, rectypes: rectypes, functions: functions, tmp: tmp }
   for (nm of names) {
     if (!scope.types.has(nm)) {
       localOrder = localOrder.push(`l_${nm}`)
@@ -1484,18 +1495,18 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any, functions: List
     localOrder = localOrder.push(`for_idx_${num_str(fk)}`)
     fk = fk + 1
   }
-  // the depth-0 scratch pointer, always declared; base name never collides.
-  localOrder = localOrder.push("__revl_tmp")
+  // The depth-0 scratch is declared even when the body does not allocate.
+  localOrder = localOrder.push(tmp)
   // deeper scratch pointers a nested allocation minted (`_tmp_extra`): the
-  // reference declares `__revl_tmp_n1..nD` for D = the max allocation nesting
-  // depth, and nesting is contiguous so the whole run appears. Numeric order is
-  // `sorted()` order for D < 10 (nesting never approaches that here).
+  // reference sorts the names lexically, including depths of ten or more.
   let maxd = body_max_depth(body)
+  var extra = []
   var d = 1
   while (d <= maxd) {
-    localOrder = localOrder.push(tmp_name(d))
+    extra = extra.push(tmp_name(tmp, d))
     d = d + 1
   }
+  localOrder = localOrder.concat(list_sort(extra))
 
   var wempty: Map[Str, Str] = Map.empty()
   let r = emit_stmts(body, scope, wempty, return_ty, 0, 0, no_loop())
@@ -2261,9 +2272,11 @@ test "bin_instr picks the width and the checked helpers" {
 
 test "the value-ABI scratch names and slot widths (slice 3)" {
   // `_acquire_tmp`: depth 0 keeps the historical name, deeper nestings index.
-  assert tmp_name(0) == "__revl_tmp"
-  assert tmp_name(1) == "__revl_tmp_n1"
-  assert tmp_name(2) == "__revl_tmp_n2"
+  assert tmp_name("__revl_tmp", 0) == "__revl_tmp"
+  assert tmp_name("__revl_tmp", 1) == "__revl_tmp_n1"
+  assert tmp_name("__revl_tmp", 2) == "__revl_tmp_n2"
+  assert tmp_name("__revl_tmp_2", 1) == "__revl_tmp_2_n1"
+  assert fresh_tmp(["__revl_tmp", "__revl_tmp_1"]) == "__revl_tmp_2"
   // `_slot_store`: an Int is stored natively, a Bool/pointer is widened in.
   assert slot_store(`(local.get $p)`, "(i64.const 1)", "Int") == `(i64.store (local.get $p) (i64.const 1))`
   assert slot_store(`(local.get $p)`, "(i32.const 0)", "Bool") == `(i64.store (local.get $p) (i64.extend_i32_u (i32.const 0)))`

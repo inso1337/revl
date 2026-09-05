@@ -630,7 +630,6 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
 // `_infer_arrow_param`: recover an untyped lambda parameter's type from its
 // first use as a binary operand in the body (pre-order DFS), or "".
 fn arrow_param_hint(node: Any, name: Str, ctx: Ctx) -> Str {
-  if (value_kind(node) != "record") { return "" }
   if (node_kind(node) == "bin") {
     let l = value_field(node, "left")
     let r = value_field(node, "right")

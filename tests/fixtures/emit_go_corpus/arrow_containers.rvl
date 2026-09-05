@@ -1,0 +1,16 @@
+type ArrowRecord = { value: Int }
+
+fn listArrow() -> List[Int] {
+  let k = (x) => [x + 1]
+  return k(2)
+}
+
+fn recordArrow() -> ArrowRecord {
+  let k = (x) => { value: x + 1 }
+  return k(3)
+}
+
+fn nestedArrow() -> List[List[Int]] {
+  let k = (x) => [[x + 1]]
+  return k(4)
+}

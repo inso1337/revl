@@ -77,6 +77,7 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_go_corpus"
 CORPUS = [
+    "arrow_containers.rvl",
     "match_edges.rvl",
     "accumulator_hygiene.rvl",
     "accumulators.rvl",
@@ -266,6 +267,32 @@ func TestAccumulatorHygiene(t *testing.T) {
             env={**os.environ, "GO111MODULE": "off"}, timeout=60,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("side", ["reference", "selfhost"])
+def test_arrow_container_parameter_inference_runtime(emitted, reference, tmp_path, side):
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("Go compiler not installed")
+    ir = compile_files([str(CORPUS_DIR / "arrow_containers.rvl")])
+    source = reference.emit(ir) if side == "reference" else emitted["emit_src"](ir)
+    module = tmp_path / "arrows.go"
+    module.write_text(source, encoding="utf-8")
+    test = tmp_path / "arrows_test.go"
+    test.write_text(
+        'package emitted\nimport "testing"\n'
+        'func TestArrows(t *testing.T) {\n'
+        '  if listArrow()[0] != 3 { t.Fatal("list arrow") }\n'
+        '  if recordArrow().Value != 4 { t.Fatal("record arrow") }\n'
+        '  if nestedArrow()[0][0] != 5 { t.Fatal("nested arrow") }\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [go, "test", str(module), str(test)], capture_output=True, text=True,
+        env={**os.environ, "GO111MODULE": "off"}, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_builder_text_literal_does_not_import_strings(emitted, reference):
