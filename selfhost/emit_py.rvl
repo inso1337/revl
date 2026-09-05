@@ -1522,13 +1522,15 @@ fn setup_step(step: Any, indent: Int) -> List[Str] {
 // `let-effect` (the spawn form — its `spawn` acquire cexpr lands in slice 5, so
 // it is implemented but not yet cross-checked), saga `emit ... compensate`,
 // plain `emit`, and `return`. (`await` stays slice 5.)
-fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int) -> Emit {
+fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> Emit {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let" || kind == "assign") {
     var out = [line(indent, `${mangle(value_str(value_field(step, "name")))} = ${cexpr(value_field(step, "value"))}`)]
     return { lines: out, counter: counter }
   }
   if (kind == "effect") {
+    let wit = witnessed_extern(value_field(step, "acquire"), externs)
+    if (!value_is_null(wit)) { return witnessed_step(step, indent, wit, counter, true) }
     let fname = `_effect_${counter}`
     var out = [line(indent, `def ${fname}():`)]
     out = out.push(line(indent + 1, cexpr(value_field(step, "acquire"))))
@@ -1539,6 +1541,8 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     return { lines: out, counter: c }
   }
   if (kind == "let-effect") {
+    let wit = witnessed_extern(value_field(step, "acquire"), externs)
+    if (!value_is_null(wit)) { return witnessed_step(step, indent, wit, counter, true) }
     let bind = mangle(value_str(value_field(step, "bind")))
     let acq = cexpr(value_field(step, "acquire"))
     let inv = cexpr(value_field(step, "undo"))
@@ -1598,7 +1602,7 @@ fn method_secret_params(m: Any, specs: Any) -> List[Str] {
 
 // `_method`: one provide-method as a Python `def` (sync only in this slice),
 // threading the shared timer/effect counter across its body steps.
-fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any) -> Emit {
+fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any, externs: List[Any]) -> Emit {
   let name = mangle(value_str(value_field(m, "name")))
   var head = `def ${name}(self`
   for (p of value_list(value_field(m, "params"))) { head = head.concat(", ").concat(mangle(value_str(p))) }
@@ -1624,7 +1628,7 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
   }
   var c = counter
   for (s of body) {
-    let se = method_step(s, indent + 1, provide_name, name, comp_name, c)
+    let se = method_step(s, indent + 1, provide_name, name, comp_name, c, externs)
     out = out.concat(se.lines)
     c = se.counter
   }
@@ -1634,7 +1638,7 @@ fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter:
 // `_provide`: the provision class, its methods, and the runtime-derived
 // revertible provision (yield the disposer, then populate). Threads the counter
 // across its methods (a method-body effect shares the component's counter).
-fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any) -> Emit {
+fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
   let name = mangle(value_str(value_field(step, "name")))
   let svc = value_str(value_field(step, "service"))
   // item 421 F6: the provided service's method specs, the only place the
@@ -1649,7 +1653,7 @@ fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services:
   var c = counter
   for (m of methods) {
     out = out.push("")
-    let me = method_lines(m, indent + 1, name, comp_name, c, specs)
+    let me = method_lines(m, indent + 1, name, comp_name, c, specs, externs)
     out = out.concat(me.lines)
     c = me.counter
   }
@@ -1690,15 +1694,26 @@ fn witnessed_extern(expr: Any, externs: List[Any]) -> Any {
   return None
 }
 
-fn witnessed_step(step: Any, indent: Int, ext: Any) -> List[Str] {
-  let tmp = "_revl_wit1"
+fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) -> Emit {
+  let c = counter + 1
+  let tmp = `_revl_wit${c}`
   let call_expr = cexpr(value_field(step, "acquire"))
   let inverse_expr = cexpr(value_field(ext, "undo"))
   var out = []
   out = out.push(line(indent, tmp.concat(" = ").concat(call_expr)))
   out = out.push(line(indent, "if isinstance(".concat(tmp).concat(", Ok):")))
-  out = out.push(line(indent + 1, "yield _revl_frame.transactional((lambda result: ".concat(inverse_expr).concat("), ").concat(tmp).concat(".value)")))
-  return out
+  let register = method ? "_revl_frame.transactional_method" : "yield _revl_frame.transactional"
+  var kwargs = ""
+  if (!method) {
+    if (value_bool(value_field(ext, "undo_idempotent"))) { kwargs = kwargs.concat(", undo_idempotent=True") }
+    if (!value_is_null(value_field(ext, "register"))) { kwargs = kwargs.concat(", register=").concat(py_repr(value_str(value_field(ext, "register")))) }
+    if (!value_is_null(value_field(ext, "idempotency_key"))) { kwargs = kwargs.concat(", idempotency=").concat(py_repr(value_str(value_field(ext, "idempotency_key")))) }
+  }
+  out = out.push(line(indent + 1, register.concat("((lambda result: ").concat(inverse_expr).concat("), ").concat(tmp).concat(".value").concat(kwargs).concat(")")))
+  if (value_str(value_field(step, "step")) == "let-effect") {
+    out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${tmp}`))
+  }
+  return { lines: out, counter: c }
 }
 
 fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> Emit {
@@ -1706,6 +1721,11 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   if (kind == "let-effect") {
     var out = []
     for (su of value_list(value_field(step, "setup"))) { out = out.concat(setup_step(su, indent)) }
+    let wit = witnessed_extern(value_field(step, "acquire"), externs)
+    if (!value_is_null(wit)) {
+      let e = witnessed_step(step, indent, wit, counter, false)
+      return { lines: out.concat(e.lines).push(""), counter: e.counter }
+    }
     out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${cexpr(value_field(step, "acquire"))}`))
     out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
     out = out.push("")
@@ -1716,7 +1736,8 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     for (su of value_list(value_field(step, "setup"))) { out = out.concat(setup_step(su, indent)) }
     let wit = witnessed_extern(value_field(step, "acquire"), externs)
     if (!value_is_null(wit)) {
-      out = out.concat(witnessed_step(step, indent, wit))
+      let e = witnessed_step(step, indent, wit, counter, false)
+      return { lines: out.concat(e.lines).push(""), counter: e.counter }
     } else {
       out = out.push(line(indent, cexpr(value_field(step, "acquire"))))
       out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
@@ -1768,7 +1789,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     return { lines: out, counter: e.counter }
   }
   if (kind == "provide") {
-    let pe = provide_lines(step, indent, comp_name, counter, services)
+    let pe = provide_lines(step, indent, comp_name, counter, services, externs)
     var out = pe.lines
     out = out.push("")
     return { lines: out, counter: pe.counter }
