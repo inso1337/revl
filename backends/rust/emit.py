@@ -5014,8 +5014,27 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         return "std::collections::HashMap::new()"
 
     if kind == "arrow":
-        params = ", ".join(_ident(p, "arrow parameter") for p in node.get("params") or [])
-        return f"move |{params}| {{ {_render_expr(node['body'], ctx, rename)} }}"
+        names = node.get("params") or []
+        declared = node.get("param_types") or []
+        params = []
+        saved_types, saved_borrows = ctx.var_types, ctx.borrowed_params
+        ctx.var_types = dict(saved_types)
+        ctx.borrowed_params = saved_borrows - set(names)
+        scope = {k: v for k, v in rename.items() if k not in names}
+        try:
+            for i, name in enumerate(names):
+                ptype = declared[i] if i < len(declared) else None
+                ctx.var_types[name] = ptype
+                param = _ident(name, "arrow parameter")
+                # Method resolution (e.g. checked_add) precedes call-site
+                # inference. Preserve the frontend's concrete parameter types.
+                if ptype and not _is_fn_type(ptype):
+                    param += f": {_rust_type(ptype, ctx.types)}"
+                params.append(param)
+            body = _render_expr(node["body"], ctx, scope)
+        finally:
+            ctx.var_types, ctx.borrowed_params = saved_types, saved_borrows
+        return f"move |{', '.join(params)}| {{ {body} }}"
 
     if kind == "len":
         target = _render_expr(node.get("target"), ctx, rename)
@@ -6023,7 +6042,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
                 ctx.char_view_vars[pname] = (view_id, view_id)
                 rendered_params.append(f"{view_id}: &[char]")
         params = ", ".join(rendered_params)
-        returns = _rust_type(fn.get("returns"), types, position="return")
+        returns = _rust_type(fn.get("returns") or "Unit", types, position="return")
         visibility = "pub " if is_public else ""
         out.append(f"{visibility}fn {name}({params}) -> {returns} {{")
         out.extend(view_prologue)
@@ -6158,7 +6177,7 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
             f"{_rust_type(p.get('type'), types, position='param')}"
             for p in ext.get("params") or []
         )
-        returns = _rust_type(ext.get("returns"), types, position="return")
+        returns = _rust_type(ext.get("returns") or "Unit", types, position="return")
         bodies = ext.get("bodies") or {}
         if "rs" not in bodies:
             raise EmitError(

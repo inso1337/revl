@@ -308,7 +308,7 @@ fn is_builtin_ctor(name: Str) -> Bool {
 // up the active rename for free, exactly as the reference's `rename` recursion.
 // `fb` holds the module-wide borrowed parameter indices; `bp` holds the borrowed
 // parameter names in the current function (empty in component methods).
-type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str] }
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str] }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds `_V3Ctx` per function-list, reusing
 // the same type tables); paired with the type-NAME set for `rust_type`.
@@ -322,15 +322,15 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
 }
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
-  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp }
+  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp }
 }
 // Swap in a fresh rename map (the component-capture scope for one render).
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
-  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rn: rn, fb: ctx.fb, bp: ctx.bp }
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp }
 }
 // Swap in a fresh var_types map (a provide-method seeds params/map-bindings).
 fn set_vts(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
-  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp }
+  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp }
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
@@ -1063,8 +1063,27 @@ fn render_list(node: Any, ctx: Ctx) -> Str {
 
 fn render_arrow(node: Any, ctx: Ctx) -> Str {
   var ps = []
-  for (p of value_list(value_field(node, "params"))) { ps = ps.push(mangle(value_str(p))) }
-  return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), ctx)} }`
+  let declared = value_list(value_field(node, "param_types"))
+  var vt = ctx.vt
+  var rn = ctx.rn
+  var bp = ctx.bp
+  var i = 0
+  for (p of value_list(value_field(node, "params"))) {
+    let name = value_str(p)
+    var ptype = ""
+    if (i < declared.length()) { ptype = value_str(declared[i]) }
+    vt = vt.set(name, ptype)
+    rn = rn.remove(name)
+    bp = bp.remove(name)
+    var param = mangle(name)
+    if (ptype != "" && !is_fn_type(ptype)) {
+      param = `${param}: ${rust_type_t(ptype, ctx.tn)}`
+    }
+    ps = ps.push(param)
+    i = i + 1
+  }
+  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp }
+  return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), inner)} }`
 }
 
 // `field`: `target.field`, the target parenthesized only when non-atomic.
@@ -1395,8 +1414,11 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
       ps = ps.push(`${mangle(pname)}: ${ptype}`)
       i = i + 1
     }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, rn: Map.empty(), fb: borrow, bp: bp }
-    let returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: bp }
+    var returns = "()"
+    if (!value_is_null(value_field(fnode, "returns"))) {
+      returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
+    }
     var vis = ""
     if (value_bool(value_field(fnode, "public"))) { vis = "pub " }
     out = out.push(`${vis}fn ${name}(${ps.join(", ")}) -> ${returns} {`)
@@ -1505,7 +1527,10 @@ fn emit_v3_externs(externs: List[Any], tnames: Map[Str, Str]) -> List[Str] {
     for (p of value_list(value_field(ext, "params"))) {
       ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_pos(value_field(p, "type"), tnames)}`)
     }
-    let returns = rust_type_pos(value_field(ext, "returns"), tnames)
+    var returns = "()"
+    if (!value_is_null(value_field(ext, "returns"))) {
+      returns = rust_type_pos(value_field(ext, "returns"), tnames)
+    }
     let rs_body = value_field(value_field(ext, "bodies"), "rs")
     if (value_is_null(rs_body)) {
       // The reference RAISES here (`extern ... has no @rs body`). This slice has
@@ -1979,7 +2004,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     var ret = "()"
     let r = value_field(svc_method, "returns")
     if (!value_is_null(r)) { ret = rust_type_t(r, tables.tn) }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, rn: Map.empty(), fb: borrow, bp: Map.empty() }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty() }
     if (effectful && method_has_effectful_steps(method)) {
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} {`)
       let bl = method_body_lines(comp, method, services, ctx, 2)
@@ -2603,7 +2628,7 @@ test "constructor lowers user variants and built-ins" {
   cp = cp.set("Node", "y")
   ca = ca.set("Leaf", "Tree")
   cp = cp.set("Leaf", "n")
-  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty() }
+  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty() }
   assert constructor(ctx, "Node", ["x"]) == "Tree::Node(x)"
   assert constructor(ctx, "Leaf", []) == "Tree::Leaf"
   assert constructor(ctx, "Some", ["v"]) == "Some(v)"
