@@ -291,6 +291,79 @@ def test_selfhosted_cache_pure_functions_execute_through_memo_wrapper(emitted):
     assert ns["twice"] is not ns["_revl_uncached_twice"]
 
 
+def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
+    ir = compile_files([str(CORPUS_DIR / "witnessed.rvl")])
+    source = emitted["emit_py_src"](ir)
+    frames = []
+
+    class Frame:
+        begin = drain = None
+
+        def __init__(self, ctx, name):
+            self.name = name
+            self.entries = []
+            frames.append(self)
+
+        def install(self, body):
+            list(body())
+
+        def transactional(self, inverse, witness, **kwargs):
+            self.entries.append(("activation", inverse, witness, kwargs))
+
+        def transactional_method(self, inverse, witness):
+            self.entries.append(("method", inverse, witness, {}))
+
+    runtime = types.ModuleType("runtime")
+    runtime.Frame = Frame
+    monkeypatch.setitem(sys.modules, "runtime", runtime)
+    ns = {}
+    exec(compile(source, "witnessed_emitted.py", "exec"), ns)
+    acquired, restored = [], []
+
+    def stash(path):
+        acquired.append(path)
+        if path == "fail":
+            return ns["Err"]({"code": "missing"})
+        return ns["Ok"]({"path": path, "ordinal": len(acquired)})
+
+    ns.update(stash=stash, unstash=restored.append)
+    services = {}
+    ctx = types.SimpleNamespace(provide=lambda key: None, set=services.__setitem__)
+    ns["Stasher"]["apply"](ctx, {})
+    ns["MethodStasher"]["apply"](ctx, {})
+    services["stashing"].save("success")
+    services["stashing"].save("fail")
+    assert acquired == ["payload", "second", "activation", "success", "success", "fail", "fail"]
+    assert [len(frame.entries) for frame in frames] == [2, 3]
+    assert [entry[0] for entry in frames[1].entries] == ["activation", "method", "method"]
+    for frame in frames:
+        for mode, inverse, witness, kwargs in frame.entries:
+            assert kwargs == ({"undo_idempotent": True, "register": "declared"}
+                              if mode == "activation" else {})
+            inverse(witness)
+    assert [witness["ordinal"] for witness in restored] == [1, 2, 3, 4, 5]
+    assert "saved = _revl_wit2" in source
+    assert "_revl_wit3 = stash(path)" in source
+
+
+@pytest.mark.parametrize("body, message", [
+    ('component C { if (true) { effect stash("x") } }',
+     "only `fail` .* may appear in a component guard"),
+    ('service S { emission fn save() }\n'
+     'component C provides s: S { provide s { fn save() {'
+     ' let saved = effect stash("x") } } }',
+     "only `spawn`"),
+])
+def test_witnessed_source_boundaries_are_frontend_rejections(tmp_path, body, message):
+    from revl.lower import RevlError
+
+    source = (CORPUS_DIR / "witnessed.rvl").read_text().split("component Stasher")[0]
+    path = tmp_path / "witnessed_boundary.rvl"
+    path.write_text(source + body)
+    with pytest.raises(RevlError, match=message):
+        compile_files([str(path)])
+
+
 def test_selfhosted_emitter_lowers_components_and_services(emitted):
     """Beyond byte-identity: a component/service document actually drives the
     slice-2 path — the emitted module populates SERVICES and COMPONENTS and its
