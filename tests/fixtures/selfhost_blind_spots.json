@@ -276,9 +276,6 @@
   },
   "rust": {
     "blind": {
-      "UNDECLARED GAP - reachable from surface revl and not on any exclusion list; the fix is a corpus document, not a ledger entry: a `pub fn`: every document in the rust corpus declares its functions private, so the `pub ` visibility prefix is emitted by neither side under test.": [
-        "public=<true>"
-      ],
       "declared out of the slice by the oracle's own docstring: `await`/`spawn` and the host `let-effect` binds (`Pool`/`Map`/`Job`).": [
         "step=await",
         "step=let-effect"
@@ -290,10 +287,8 @@
         "kind=fn",
         "kind=if"
       ],
-      "declared out of the slice by the oracle's own docstring: the canonical Float->Str helper: float interpolation and float arithmetic are both out.": [
-        "operands=Float",
-        "widen=Float",
-        "widen=Int"
+      "declared out of the slice by the oracle's own docstring: the canonical Float->Str helper remains out; Float arithmetic and Int-to-Float widening are covered by float_pub.rvl.": [
+        "operands=Float"
       ]
     },
     "unported": {
@@ -309,12 +304,10 @@
         "intercept=<true>",
         "isolate=<true>",
         "items=<true>",
-        "kind=builtin",
         "kind=format",
         "kind=hole",
         "kind=host",
         "kind=instance-get",
-        "kind=len",
         "kind=optcall",
         "kind=optfield",
         "kind=record_update",
