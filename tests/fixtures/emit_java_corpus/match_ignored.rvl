@@ -1,0 +1,33 @@
+// Ignored payloads must not become Java 21's reserved "_" identifier.
+type Choice = Selected(Int) | Absent
+
+fn ignore_choice(c: Choice) -> Int {
+  return match c {
+    Selected(_) => 1,
+    Absent => 0
+  }
+}
+
+fn ignore_optional(o: Opt[Int]) -> Int {
+  return match o {
+    Some(_) => 1,
+    None => 0
+  }
+}
+
+fn optional_wildcard(o: Opt[Int]) -> Int {
+  return match o {
+    None => 0,
+    _ => 1
+  }
+}
+
+fn optional_fallback(o: Opt[Int]) -> Int {
+  return match o {
+    Some(v) => v,
+    _ => 0
+  }
+}
+
+fn present() -> Opt[Int] { return Some(1) }
+fn absent() -> Opt[Int] { return None }
