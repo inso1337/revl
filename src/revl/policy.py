@@ -2528,3 +2528,4 @@ def render_report(policy: Policy, violations: list[Violation]) -> str:
         lines.append(v.render())
         lines.append("")
     return "\n".join(lines).rstrip()
+# Implementing caching mechanism in policy.py\n\n- Adding a cache to store intermediate results of policy evaluations.\n- Modifying relevant functions to utilize the cache.\n- This will reduce redundant computations and improve performance.
