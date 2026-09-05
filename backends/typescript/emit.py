@@ -3896,12 +3896,15 @@ def _ts_extern_config_bind(ext: dict) -> str:
 # error) and points at the two sanctioned alternatives: a `= @ts ref` extern
 # (#396 option B, a jailed/pinned reach) or `process.getBuiltinModule` (#382).
 #
-# The scan is textual on the author's verbatim body. `require` is matched only
-# as a bare call (a negative lookbehind keeps `createRequire(`, `foo.require(`
-# and the emitter's own `_revl_require` from matching the `require` arm); the
-# `createRequire` arm catches the synthesized loader whatever it is later called
-# `require("node:module")`'s own `createRequire` symbol import is emitter text,
-# never a user body, so it is never scanned.
+# The scan is textual on the author's verbatim body, but only after `//` and
+# `/* */` COMMENTS are scrubbed (`_strip_ts_comments`): a body that names
+# `createRequire` or `require(...)` in a comment to say it is NOT using it (the
+# ts-host-body conformance case does exactly this) is not a reach. `require` is
+# matched only as a bare call (a negative lookbehind keeps `createRequire(`,
+# `foo.require(` and the emitter's own `_revl_require` from matching the
+# `require` arm); the `createRequire` arm catches the synthesized loader
+# whatever it is later called. `require("node:module")`'s own `createRequire`
+# symbol import is emitter text, never a user body, so it is never scanned.
 _TS_REQUIRE_CALL_RE = re.compile(
     r"(?<![A-Za-z0-9_$.])require\s*\(\s*(['\"`])(.*?)\1", re.DOTALL)
 # `createRequire` is normally reached as a member (`...module").createRequire(`),
@@ -3910,12 +3913,63 @@ _TS_REQUIRE_CALL_RE = re.compile(
 _TS_CREATE_REQUIRE_RE = re.compile(r"(?<![A-Za-z0-9_$])createRequire\b")
 
 
+def _strip_ts_comments(body: str) -> str:
+    """Blank `//` line and `/* */` block comments out of a verbatim @ts body.
+
+    String and template literals are preserved intact (so a `require("<spec>")`
+    specifier is still extractable, and a `//` inside a URL string is not read
+    as a comment); comment bytes become spaces so the token scan cannot mistake
+    a mention-in-a-comment for a real install-tree reach."""
+    out: list[str] = []
+    i, n = 0, len(body)
+    quote: str | None = None  # active string delimiter: ' " or `
+    while i < n:
+        c = body[i]
+        if quote is not None:
+            out.append(c)
+            if c == "\\" and i + 1 < n:      # keep escaped char with its slash
+                out.append(body[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in "'\"`":
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and body[i + 1] == "/":
+            while i < n and body[i] != "\n":  # to end of line
+                out.append(" ")
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and body[i + 1] == "*":
+            out.append("  ")
+            i += 2
+            while i < n and not (body[i] == "*" and i + 1 < n
+                                 and body[i + 1] == "/"):
+                out.append("\n" if body[i] == "\n" else " ")
+                i += 1
+            if i < n:                          # consume the closing `*/`
+                out.append("  ")
+                i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _reject_install_tree_reach(name: str, body: str) -> None:
     """Refuse a verbatim `@ts` body that reaches an install-tree host module.
 
     Fires on `require("<spec>")` where `<spec>` is not a `node:` builtin, and on
     any `createRequire`. A `node:`-prefixed `require` is left entirely to #295's
-    runtime gate (issue #278, Option 1 — no install-tree door by design)."""
+    runtime gate (issue #278, Option 1 — no install-tree door by design).
+    Comments are scrubbed first, so a token named only in a comment is not a
+    reach."""
+    body = _strip_ts_comments(body)
     def _door(spec: str) -> EmitError:
         return EmitError(
             f"a verbatim @ts body (extern `{name}`) cannot load an install-tree "

@@ -941,7 +941,7 @@
       "uncovered_statements": 1213
     },
     "ts": {
-      "statements": 1979,
+      "statements": 2032,
       "uncovered": {
         "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), emits sync/async timer scheduling and in-flight tracking, and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards and fail are covered; witnessed transactions and timers are declared port boundaries": {
           "_component_step": 42
@@ -1026,9 +1026,10 @@
         "Test-mode statement rendering only: `_v3_stmt`'s remaining structural/truthy assertion lines emit vitest `expect` calls when `test_mode=True`, plus the final unknown-step rejection. Runtime function assertions use the covered throwing form; in-file test harness generation is a separate declared boundary": {
           "_v3_stmt": 8
         },
-        "The #278/#302 install-tree-reach refusal diagnostic: `_reject_install_tree_reach` and its `_door` closure refuse a verbatim @ts body that loads an install-tree host module. No corpus document reaches them because such a document is refused by this very check, and selfhost/emit_ts.rvl does not port the diagnostic.": {
+        "The #278/#302 install-tree-reach refusal diagnostic: `_reject_install_tree_reach`, its `_door` closure, and the `_strip_ts_comments` scrubber it runs first (so a token named only in a comment is not read as a reach) refuse a verbatim @ts body that loads an install-tree host module. No corpus document reaches them because such a document is refused by this very check, and selfhost/emit_ts.rvl does not port the diagnostic.": {
           "_reject_install_tree_reach": 5,
-          "_reject_install_tree_reach._door": 1
+          "_reject_install_tree_reach._door": 1,
+          "_strip_ts_comments": 9
         },
         "Top-level emitter dispatch: `emit` rejects non-object/unsupported versions, delegates temporal IR, and rejects mixed temporal documents. The corpus supplies valid v1/v2/v3 objects; temporal delegation is a declared separate backend": {
           "emit": 4
@@ -1055,7 +1056,7 @@
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 440
+      "uncovered_statements": 449
     },
     "wasm": {
       "statements": 2693,
