@@ -1,0 +1,47 @@
+// TAGGED ADT CONSTRUCTION (self-host port, item 391). `result.rvl` only ever
+// MATCHES on `Ok`/`Err`, and no corpus document built a user variant case at
+// all, so both differential oracles agreed trivially while `selfhost/lower.rvl`
+// lowered every constructor as a plain `call` of a function that does not exist
+// and `selfhost/emit_py.rvl` had no `adt` branch — the self-host could not
+// compile a program that BUILDS a Result or a variant. The absence, not a
+// divergence: exactly the blind spot a differential oracle cannot see.
+//
+// Covered here: the built-in `Result` (`Ok`/`Err`), a user variant case WITH a
+// payload, a NULLARY user case used as a bare value, a constructor in argument
+// position, and `Opt`'s `Some`/`None` alongside them — which must NOT become
+// `adt` nodes (they stay host-value/None, the reference's one untagged family).
+type Shape = Circle(Int) | Square(Int) | Empty
+
+fn parse(n: Int) -> Result[Int, Str] {
+  if (n < 0) { return Err("negative") }
+  return Ok(n)
+}
+
+fn describe(n: Int) -> Shape {
+  if (n == 0) { return Empty }
+  if (n < 10) { return Circle(n) }
+  return Square(n)
+}
+
+fn area(s: Shape) -> Int {
+  return match s { Circle(r) => r * r, Square(a) => a * a, Empty => 0 }
+}
+
+fn value_or(r: Result[Int, Str], fallback: Int) -> Int {
+  return match r { Ok(v) => v, Err(e) => fallback }
+}
+
+// `Some`/`None` stay untagged: identity and host None, never an `adt` node.
+fn maybe(n: Int) -> Opt[Int] {
+  if (n < 0) { return None }
+  return Some(n)
+}
+
+// A constructor in ARGUMENT position, and one nested inside another. No call to
+// a module `fn` here on purpose: the py tier INLINES a small pure helper into
+// its call sites (item 231a) and `selfhost/emit_py.rvl` carries no such pass, so
+// a cross-fn call would make this document fail for an unrelated, separately
+// tracked reason.
+fn wrapped(s: Shape) -> Result[Shape, Str] { return Ok(s) }
+fn boxed(n: Int) -> Result[Shape, Str] { return Ok(Circle(n)) }
+fn pair(n: Int) -> List[Shape] { return [Circle(n), Square(n), Empty] }

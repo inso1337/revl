@@ -161,6 +161,9 @@ REJECTIONS = {
     "v2_fail_in_pure_fn.rvl": "`fail` is only allowed in a component activation body (A8)",
     "arith_zero_divisor.rvl": "`mod` by a literal zero is undefined",
     "t20_int_literal_range.rvl": "Int literal `9223372036854775808` is outside the 64-bit range",
+    # issue #312: the Float twin of the bound above — `1e999` folds to IEEE
+    # infinity, which every emitter prints as an unbound name.
+    "t36_float_literal_range.rvl": "Float literal is infinite: it is outside the range of a 64-bit float",
     # Int32 (docs/arithmetic.md, "Sized integers"): lossless-widen /
     # checked-narrow, and no silent width-mixing in arithmetic.
     "t21_int32_narrow_implicit.rvl": "this function's return expects `Int32`, got `Int`",

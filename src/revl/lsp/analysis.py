@@ -58,6 +58,10 @@ def compute_diagnostics(text: str, filename: str = "<lsp>.rvl") -> list[dict]:
     try:
         compile_source(text, filename)
     except RevlError as error:
+        if ("nests deeper than the compiler" in str(error)
+                or "expression nesting is deeper than the parser" in str(error)
+                or "outside the 64-bit range" in str(error)):
+            return [_crash_diagnostic(str(error))]
         errors = getattr(error, "errors", None) or [error]
         return [_diagnostic_from(text, one) for one in errors]
     except RecursionError:

@@ -163,35 +163,43 @@ def read_wal(path: str) -> dict:
     records: list = []
     complete = False
     torn = False
+    # First pass: find the index of the last non-empty (content) line. This
+    # avoids building a list of all lines in memory for large WALs while still
+    # allowing the same trailing-torn-line detection as before.
+    last_content = -1
     with open(path, encoding="utf-8") as handle:
-        lines = [line.strip() for line in handle]
-    # A torn line is only the crash-interrupted write when it is the LAST line
-    # carrying content; anything after it means real mid-file corruption.
-    last_content = max((i for i, line in enumerate(lines) if line), default=-1)
-    for index, line in enumerate(lines):
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            if index == last_content:
-                torn = True   # a partial FINAL record: the crash itself
+        for i, raw_line in enumerate(handle):
+            if raw_line.strip():
+                last_content = i
+
+    # Second pass: parse and classify records. Streaming the file avoids holding
+    # all lines in memory at once.
+    with open(path, encoding="utf-8") as handle:
+        for index, raw_line in enumerate(handle):
+            line = raw_line.strip()
+            if not line:
                 continue
-            raise WALIntegrityError(
-                f"WAL {path} is corrupt at line {index + 1}: an unparseable "
-                f"record with {last_content - index} line(s) after it. This is "
-                "mid-file corruption, not a crash-torn trailing line; refusing "
-                "to read past it would silently drop committed records."
-            ) from None
-        kind = entry.get("record")
-        if kind == "header":
-            header = entry
-            _check_version(header, path)
-        elif kind == "activation-complete":
-            complete = True
-            records.append(entry)
-        else:
-            records.append(entry)
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                if index == last_content:
+                    torn = True   # a partial FINAL record: the crash itself
+                    continue
+                raise WALIntegrityError(
+                    f"WAL {path} is corrupt at line {index + 1}: an unparseable "
+                    f"record with {last_content - index} line(s) after it. This is "
+                    "mid-file corruption, not a crash-torn trailing line; refusing "
+                    "to read past it would silently drop committed records."
+                ) from None
+            kind = entry.get("record")
+            if kind == "header":
+                header = entry
+                _check_version(header, path)
+            elif kind == "activation-complete":
+                complete = True
+                records.append(entry)
+            else:
+                records.append(entry)
     return {"header": header, "records": records,
             "complete": complete, "torn": torn}
 

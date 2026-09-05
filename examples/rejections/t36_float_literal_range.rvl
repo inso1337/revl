@@ -1,0 +1,16 @@
+// REJECTED — a Float literal whose exponent leaves the binary64 range folds to
+// IEEE infinity, and revl has no spelling for it. Every emitter then prints
+// the host's repr of that value as a bare word — py `inf`, rust `inff64`,
+// java `infd`, go `float64(inf)` — an UNBOUND IDENTIFIER, so the program
+// either fails to compile or dies with a `NameError`, while TypeScript alone
+// renders `Infinity` and runs. The literal is refused here, where it is one
+// diagnostic instead of six behaviours (issue #312, docs/arithmetic.md).
+// The bound is the literal's, not arithmetic's: `1e308 * 10.0` still overflows
+// to infinity at runtime, exactly as IEEE 754 says it should.
+//
+// expected error:
+//   Float literal is infinite: it is outside the range of a 64-bit float
+
+fn huge() -> Float {
+  return 1e999
+}

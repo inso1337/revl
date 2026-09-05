@@ -1216,11 +1216,171 @@ component Twice requires db: Db provides cache: Cache {
   }
 }
 """, "G4"),
-    ("g4 host acquire two fn hops from a component body", """
-fn inner(u: Str) -> Int { let p = Pool.open(u, 1)   return 1 }
-fn outer(u: Str) -> Int { return inner(u) }
-service S { fn go(u: Str) -> Int }
-component C provides s: S { provide s { fn go(u) = outer(u) } }
+    # issue #285: FIRST refusal wins, inside one expression.
+    #
+    # `walk_expr`'s composite arms thread the accumulator through more than one
+    # sub-walk, and `ac_refuse` overwrites `msg`/`tag` unconditionally, so a
+    # refusal from the LEFT side was replaced by one from the RIGHT. The
+    # reference raises on the first thing it reaches, and `crates/revl-gate`
+    # promises its refusals are the reference's verbatim.
+    #
+    # The census surfaced this as a diagnostic naming a subject that reads like
+    # a truncated identifier: a source holding `st|ore` has two undeclared
+    # names, `st` and `ore`; the reference named `st` and the gate named `ore`,
+    # so the reader searched for a symbol their program does not contain. One
+    # case per unguarded arm — `Bin`, `Index`, `If` — because each threads the
+    # accumulator differently and a guard on one is not a guard on the others.
+    ("both operands of a binary op are undeclared: the LEFT one is named", """
+service Kv { fn put(key: Str, value: Str) }
+component C provides kv: Kv {
+  provide kv {
+    fn put(key, value) {
+      let n = alpha | beta.drop()
+    }
+  }
+}
+""", "G1"),
+    ("an index whose target and subscript are both undeclared names the target",
+     """
+service Kv { fn put(key: Str, value: Str) }
+component C provides kv: Kv {
+  provide kv {
+    fn put(key, value) {
+      let n = alpha[beta]
+    }
+  }
+}
+""", "G1"),
+    ("a ternary with three undeclared arms names the condition", """
+service Kv { fn put(key: Str, value: Str) }
+component C provides kv: Kv {
+  provide kv {
+    fn put(key, value) {
+      let n = alpha ? beta : gamma
+    }
+  }
+}
+""", "G1"),
+    # The half of #285 that is not cosmetic. Here the clobbered refusal carries
+    # a different TAG: the reference refuses the unmarked emission receiver
+    # (G4), and the gate replaced it with the G1 from the right operand — so a
+    # consumer switching on the refusal code was handed the wrong guarantee.
+    # Both operand orders are pinned; only one of them was ever wrong, which is
+    # precisely why the wrong one went unnoticed.
+    ("an unmarked emission left of an undeclared name is still G4", """
+service Kv { emission fn put(key: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires kv: Kv provides api: Api {
+  provide api {
+    fn go() { return kv.put("a") + beta }
+  }
+}
+""", "G4"),
+    ("an undeclared name left of an unmarked emission is still G1", """
+service Kv { emission fn put(key: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires kv: Kv provides api: Api {
+  provide api {
+    fn go() { return beta + kv.put("a") }
+  }
+}
+""", "G1"),
+    # The clobber does not need two different tags to be wrong. Two unmarked
+    # emissions in one expression are both G4, and the gate named the SECOND
+    # one — the same verdict pointing at the wrong call. This is the census's
+    # `msg-mismatch/G4` in a form that does not need a fuzzer to reach.
+    ("two unmarked emissions in one expression name the first (G4)", """
+service Db { emission fn run(sql: Str) -> Int }
+service Bus { emission fn send(m: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires db: Db, bus: Bus provides api: Api {
+  provide api {
+    fn go() { return db.run("a") + bus.send("b") }
+  }
+}
+""", "G4"),
+    # issue #285: FIRST refusal wins, inside one expression.
+    #
+    # `walk_expr`'s composite arms thread the accumulator through more than one
+    # sub-walk, and `ac_refuse` overwrites `msg`/`tag` unconditionally, so a
+    # refusal from the LEFT side was replaced by one from the RIGHT. The
+    # reference raises on the first thing it reaches, and `crates/revl-gate`
+    # promises its refusals are the reference's verbatim.
+    #
+    # The census surfaced this as a diagnostic naming a subject that reads like
+    # a truncated identifier: a source holding `st|ore` has two undeclared
+    # names, `st` and `ore`; the reference named `st` and the gate named `ore`,
+    # so the reader searched for a symbol their program does not contain. One
+    # case per unguarded arm — `Bin`, `Index`, `If` — because each threads the
+    # accumulator differently and a guard on one is not a guard on the others.
+    ("both operands of a binary op are undeclared: the LEFT one is named", """
+service Kv { fn put(key: Str, value: Str) }
+component C provides kv: Kv {
+  provide kv {
+    fn put(key, value) {
+      let n = alpha | beta.drop()
+    }
+  }
+}
+""", "G1"),
+    ("an index whose target and subscript are both undeclared names the target",
+     """
+service Kv { fn put(key: Str, value: Str) }
+component C provides kv: Kv {
+  provide kv {
+    fn put(key, value) {
+      let n = alpha[beta]
+    }
+  }
+}
+""", "G1"),
+    ("a ternary with three undeclared arms names the condition", """
+service Kv { fn put(key: Str, value: Str) }
+component C provides kv: Kv {
+  provide kv {
+    fn put(key, value) {
+      let n = alpha ? beta : gamma
+    }
+  }
+}
+""", "G1"),
+    # The half of #285 that is not cosmetic. Here the clobbered refusal carries
+    # a different TAG: the reference refuses the unmarked emission receiver
+    # (G4), and the gate replaced it with the G1 from the right operand — so a
+    # consumer switching on the refusal code was handed the wrong guarantee.
+    # Both operand orders are pinned; only one of them was ever wrong, which is
+    # precisely why the wrong one went unnoticed.
+    ("an unmarked emission left of an undeclared name is still G4", """
+service Kv { emission fn put(key: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires kv: Kv provides api: Api {
+  provide api {
+    fn go() { return kv.put("a") + beta }
+  }
+}
+""", "G4"),
+    ("an undeclared name left of an unmarked emission is still G1", """
+service Kv { emission fn put(key: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires kv: Kv provides api: Api {
+  provide api {
+    fn go() { return beta + kv.put("a") }
+  }
+}
+""", "G1"),
+    # The clobber does not need two different tags to be wrong. Two unmarked
+    # emissions in one expression are both G4, and the gate named the SECOND
+    # one — the same verdict pointing at the wrong call. This is the census's
+    # `msg-mismatch/G4` in a form that does not need a fuzzer to reach.
+    ("two unmarked emissions in one expression name the first (G4)", """
+service Db { emission fn run(sql: Str) -> Int }
+service Bus { emission fn send(m: Str) -> Int }
+service Api { fn go() -> Int }
+component C requires db: Db, bus: Bus provides api: Api {
+  provide api {
+    fn go() { return db.run("a") + bus.send("b") }
+  }
+}
 """, "G4"),
 ]
 

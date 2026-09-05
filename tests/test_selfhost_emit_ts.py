@@ -177,20 +177,11 @@ CORPUS = [
     # the oracle and `selfhost/emit_ts.rvl` emitted none of it while the suite was
     # green — item 429's trap, and a live security divergence.
     "secrets.rvl",
-    # item 435 (d) — the self-rebind (unique-ownership) lowering on item 445's
-    # frontend marker. `transforms.rvl` covers `push` only; this one adds `set`,
-    # `remove` and the record update (`Object.assign`), plus the NEGATIVE — a
-    # receiver retained by an earlier `out.push(m)`, whose write keeps the
-    # persistent `new Map(…)` IIFE. Without it three of the four in-place shapes
-    # would be invisible to the oracle (item 429's trap).
-    "unique_writes.rvl",
-    # A config default carrying the block-comment delimiters. The default is
-    # rendered into a `/** default: … */` doc line, and a comment has no escape
-    # syntax, so both emitters break the closer instead of escaping it. NO other
-    # fixture puts a delimiter in a default, so without this one the two escapes
-    # could disagree — or one emitter could carry none at all, which is a live
-    # injection on that tier — and the oracle would stay green (item 429's trap).
-    "config_default_comment.rvl",
+    # item 233 / 276 (self-host port, item 391): the ASCII classification
+    # builtins + `codepoint_at`, the ts tier's arrow-IIFE (`_rc`) forms and the
+    # astral-aware `revlCharCodeAt` redirect. Added red, exactly as on the py
+    # tier: no ts corpus document called any of them.
+    "classify.rvl",
 ]
 
 def _load_reference_emit():

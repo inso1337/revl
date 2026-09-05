@@ -24,6 +24,14 @@ structured and causal; we translate them.
 | a `requirements` edge (a load's resolved providers) | a **span link** per provider (relation `requirement`) to that provider's *load* span |
 | a `provider-withdrawn` edge (a teardown's cause) | a **span link** (relation `provider-withdrawn`) to the provider's *withdraw* span |
 | the root cause (`boot` or `trigger`) | a child of the synthetic **run root** span |
+| an `emit` event's item-121 `llm` payload | GenAI semantic-convention **span attributes**, plus a `model-produced` **span link** when `producedSeq` proves the edge |
+
+**No prompt or response text ever becomes a span attribute.** Only the salted
+digest may ride, as `revl.llm.prompt.sha256`, and a suppressed digest is simply
+absent. Provenance rides onto the span too, so a downstream dashboard cannot
+silently promote a host-reported number to ground truth. The `model-produced`
+link is emitted ONLY when `producedSeq` is present; without that fiber-local
+token the edge is not asserted. See `_llm_attributes` in `src/revl/otel.py`.
 
 ### Parent/child follows the cause chain
 

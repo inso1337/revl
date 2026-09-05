@@ -91,7 +91,7 @@ the drift gate.
 
 * Reference keywords the self-host does not lex: (none at this generation)
 * Reference stdlib builtins the self-host does not lower as builtins:
-  `.codepoint_at()`, `.field()`, `.is_alnum()`, `.is_alpha()`, `.is_digit()`, `.is_space()`, `.list()`, `.str()`
+  (none at this generation)
 
 ## What is deliberately absent
 
@@ -148,7 +148,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:c6d734eb3a584e2f"
+    // frontier "selfhost-admit:c4c4b1d42b9c42df"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the

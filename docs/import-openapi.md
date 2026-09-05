@@ -409,9 +409,9 @@ The URL, headers, auth, query-string encoding and status handling all belong
 inside them.
 
 `ts` (the default), `py` and `rust` are offered. There is deliberately **no
-`wasm`**: an HTTP client has no meaning on the cordis-wasm tier, which is
-i32-only today (`backends/wasm/emit.py`), and offering the flag would generate
-a plausible file that could never lower. `revl import wit` defaults to `wasm`
+`wasm`**: an HTTP client has no meaning on the cordis-wasm tier, which has no
+host network seam, and offering the flag would generate a plausible file that
+could never lower. `revl import wit` defaults to `wasm`
 for the opposite reason — that is where a WIT world lives.
 
 ## 7. JSON, and what happens to YAML

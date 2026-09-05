@@ -48,8 +48,11 @@ but only over a Unix socket. It gained the network endpoint shape:
   network target — presenting this process's cert/key, verifying the provider's
   against the same CA, hostname-checked (SNI = `server_hostname`). A TLS
   handshake failure is terminal; a bare TCP refusal (provider still coming up) is
-  retried, so start order stays irrelevant — the same policy as the py client's
-  `_connect_tcp`.
+  retried, so start order stays irrelevant for an acyclic process graph, the same
+  policy as the py client's `_connect_tcp`. A cycle over *processes* would exhaust
+  the retries on both sides instead; `placement.process_cycle_refusal` refuses
+  such a placement at plan time, before any child is spawned (item 171; background
+  in [design/438-petri-reachability.md](design/438-petri-reachability.md) §5.2).
 - The seam **deadline** is enforced in the one-shot child: a wedged provider
   trips an in-child timer and the call surfaces a distinguishable
   **`SeamDeadlineError`** (the node mirror of py's `SeamDeadline`), rather than
