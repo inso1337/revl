@@ -446,6 +446,16 @@ _BORROW_ARG_BUILTINS = _STR_READONLY_ARG_BUILTINS | frozenset({
 # recomputed without it, so no in-module call site ever gains a collect. That
 # retraction is the whole difference from the scoped shape that regressed.
 _STR_INDEX_BUILTINS = frozenset({"charAt", "charCodeAt", "codepoint_at"})
+# item 333: the builtins a `&[char]` view serves in O(1)/O(len) once it is in
+# scope, so a bare-parameter use of any of them SEEDS the view. `slice(a, b)`
+# belongs here even though it is not an element index: on a `str` it lowers to
+# `chars().skip(a)`, an O(a) front walk, so a scanner that slices its buffer at
+# rising offsets (the lexer's `op_at`/`is_triple_at`) is O(n^2) exactly as a
+# `charAt` scan is. `length` is deliberately NOT a seed — a lone `.length()`
+# bound is one O(n) walk, not a per-position cost, and seeding on it would grow
+# a view parameter on nearly every string helper; it still routes through a view
+# wherever one already exists for another reason.
+_STR_VIEW_SEED_BUILTINS = _STR_INDEX_BUILTINS | frozenset({"slice"})
 _CHAR_VIEW_SUFFIX = "_revl_cs"
 
 
@@ -457,15 +467,16 @@ def _var_ident(node: object) -> "str | None":
 
 
 def _str_params_indexed(body: object, params: "set[str]") -> "set[str]":
-    """The subset of `params` positionally indexed (`charAt`/`charCodeAt`/
-    `codepoint_at`) through a BARE reference — the accesses a `&[char]` view
-    can serve. An index on a computed receiver keeps the `chars().nth` walk."""
+    """The subset of `params` positionally scanned (`charAt`/`charCodeAt`/
+    `codepoint_at`/`slice`) through a BARE reference — the accesses a `&[char]`
+    view can serve in O(1)/O(len). A scan on a computed receiver keeps the
+    `chars().nth`/`chars().skip` front walk."""
     found: set[str] = set()
 
     def walk(node: object) -> None:
         if isinstance(node, dict):
             if (node.get("kind") == "builtin"
-                    and node.get("method") in _STR_INDEX_BUILTINS):
+                    and node.get("method") in _STR_VIEW_SEED_BUILTINS):
                 ident = _var_ident(node.get("target"))
                 if ident in params:
                     found.add(ident)
@@ -5176,13 +5187,35 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
                     and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
                 args[0] = f"{args[0]}.to_string()"
         view_ident = _var_ident(target_node)
-        if (method in _STR_INDEX_BUILTINS and view_ident in ctx.char_view_vars):
-            # item 277: O(1) code-point index through the threaded view instead
-            # of `chars().nth(i)`'s front walk. Both panic out of bounds.
-            elem = f"{ctx.char_view_vars[view_ident][0]}[({args[0]}) as usize]"
-            if method == "charAt":
-                return f"{{ {elem}.to_string() }}"
-            return f"{{ {elem} as u32 as i64 }}"
+        if view_ident in ctx.char_view_vars:
+            view = ctx.char_view_vars[view_ident][0]
+            if method in _STR_INDEX_BUILTINS:
+                # item 277: O(1) code-point index through the threaded view
+                # instead of `chars().nth(i)`'s front walk. Both panic OOB.
+                elem = f"{view}[({args[0]}) as usize]"
+                if method == "charAt":
+                    return f"{{ {elem}.to_string() }}"
+                return f"{{ {elem} as u32 as i64 }}"
+            if method == "length":
+                # item 333: O(1) length through the SAME view instead of
+                # `revl_length`'s `chars().count()` full walk. The view is
+                # `<param>.chars().collect()`, so `.len()` is that count
+                # exactly. A positional scanner recomputes `source.length()`
+                # once per token otherwise, an O(n) walk each, i.e. O(n^2).
+                return f"({view}.len() as i64)"
+            if method == "slice":
+                # item 333: O(b-a) slice through the SAME view instead of
+                # `revl_slice`'s `chars().skip(a)` front walk (O(a) per call,
+                # O(n^2) across a token scan that slices at rising offsets).
+                # Byte-identical to `revl_slice`: the same `skip(a.max(0))`/
+                # `take((b-a).max(0))` over the same code points. `a`/`b` are
+                # bound once so a computed bound is evaluated exactly as the
+                # trait call evaluated its arguments.
+                return (f"{{ let _rsa = ({args[0]}) as i64; "
+                        f"let _rsb = ({args[1]}) as i64; "
+                        f"{view}.iter().skip(_rsa.max(0) as usize)"
+                        f".take((_rsb - _rsa).max(0) as usize)"
+                        f".collect::<String>() }}")
         borrowed_lits = _v3_borrowed_lit_args(method, target_node, arg_nodes, args, ctx)
         return _v3_builtin(method, target, args, node.get("recv"), borrowed_lits)
 

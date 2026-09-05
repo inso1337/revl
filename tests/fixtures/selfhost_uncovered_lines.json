@@ -844,7 +844,6 @@
         },
         "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins.": {
           "_emit_v3_functions": 8,
-          "_render_expr": 57,
           "_v3_builtin": 29,
           "_v3_empty_vec_elem_types": 66,
           "_v3_empty_vec_elem_types.collect": 1,
@@ -935,9 +934,12 @@
           "_pure_method_statements": 1,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
+        },
+        "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`).": {
+          "_render_expr": 63
         }
       },
-      "uncovered_statements": 1213
+      "uncovered_statements": 1219
     },
     "ts": {
       "statements": 1979,
