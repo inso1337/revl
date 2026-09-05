@@ -191,8 +191,9 @@ _PORTABLE = (
 
 
 @pytest.mark.parametrize("backend, pinned", [
-    # a python default argument
-    ("python", "yield lambda k=k: store.remove(k)"),
+    # a python default argument (the method-body inverse is guard-wrapped for
+    # issue #321, but the by-value `k=k` pin this test proves is untouched)
+    ("python", "yield _revl_frame._guard(lambda k=k: store.remove(k))"),
     # a TypeScript IIFE around the arrow (a default parameter cannot spell it:
     # the initialiser's right-hand side resolves to the parameter and hits the TDZ)
     ("typescript", "((k: any) => () => store.remove(k))(k)"),
