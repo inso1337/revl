@@ -12,6 +12,8 @@ running system**:
 
     revl_swap  revl_unload  revl_restore  revl_rollback  revl_undo
     revl_edit  revl_load    revl_snapshot  revl_estop
+    revl_call  revl_lease   revl_fork      revl_fork_confirm
+    revl_step_back  revl_replay_forward
 
 Nothing in the session authenticates or scopes the caller. Anyone who reaches
 the transport is **root over the composition** — it can unload the system,
@@ -58,8 +60,8 @@ Grammar (blank lines and `#` comments ignored):
     operator <token> may     <verb>[, ...]                        # on *
 
 * **verbs** — `load`, `swap`, `edit`, `unload`, `restore`, `snapshot`, `undo`
-  (`rollback` is accepted as an alias for `undo`), `commit`, `approve`, and
-  `estop`. `*` matches every verb.
+  (`rollback` is accepted as an alias for `undo`), `commit`, `approve`, `estop`,
+  `call`, `lease`, `fork`, and `replay`. `*` matches every verb.
 * **subjects** — globs (`fnmatch`) matched against a target component's **name**
   *or* any **realm** it is isolated into. `tenant_a*` matches the realm
   `tenant_a` and the component `tenant_a_cache` alike; `*` matches anything.
@@ -133,6 +135,16 @@ The target set is computed **before** the action runs, from the session's IR:
   `may estop on tenant_a*` authorizes only while every live component is in
   `tenant_a*`; an operator who must always be able to hit the button needs
   `may estop on *`.
+
+* **call** — the whole running composition, because the provided key is resolved
+  by the live session and may dispatch through more than one component.
+* **lease** — the named component; an unknown or unloaded component fails closed
+  against the whole composition.
+* **fork** — the named component when supplied, otherwise the whole composition;
+  `revl_fork_confirm` is always the whole composition because its hash is the
+  authority-bound rewind decision.
+* **replay** — the named component when supplied, otherwise the whole composition
+  (`revl_step_back` and `revl_replay_forward`).
 
 `estop` is its own verb and is never folded into `unload` or `commit`. An
 operator trusted to unload a composition cleanly is not automatically trusted
