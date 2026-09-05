@@ -151,6 +151,12 @@ const INLINE: &[(&str, &str)] = &[
     ("empty", ""),
     ("syntax_error", "fn broken( {\n"),
     (
+        "public_cached_functions",
+        "pub fn exported(n: Int) -> Int { return n + 1 }\n\
+         fn cached(n: Int) -> Int cache pure { return n * 2 }\n\
+         pub fn exported_cache(n: Int) -> Int cache pure { return n + 2 }\n",
+    ),
+    (
         "in_frontier_g1",
         "fn add(a: Int, b: Int) -> Int {\n  return a + c\n}\n",
     ),
