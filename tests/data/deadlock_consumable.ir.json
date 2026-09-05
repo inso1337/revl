@@ -1,0 +1,14 @@
+{
+  "ir_version": 1,
+  "manifest": {
+    "components": [
+      { "name": "Ticker",
+        "inject": [],
+        "provides": ["ticks"],
+        "consumable": ["ticks"] },
+      { "name": "ConsumerA", "inject": ["ticks"], "provides": [] },
+      { "name": "ConsumerB", "inject": ["ticks"], "provides": [] }
+    ],
+    "loadOrder": ["Ticker", "ConsumerA", "ConsumerB"]
+  }
+}
