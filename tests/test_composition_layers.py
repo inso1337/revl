@@ -253,6 +253,27 @@ layer R for Demo { configure key("db", realm: "tenant_a") with { pool: 1 } }
     assert 'key("db", realm: "tenant_a")' in str(caught.value)
 
 
+def test_the_address_realm_is_held_to_the_realm_label_grammar(tmp_path):
+    """The third realm-label door agrees with the two declaring ones.
+
+    `realm(...)` and `realms(...)` hold a label to an address grammar, because a
+    realm label IS an authority address. This door only SELECTS — the label is
+    matched against the `(key, realm)` claims the folded rows carry, so it
+    reaches no emitter — but a label no declaring door could have written can
+    only ever select nothing, and a grammar that holds at two of three doors is
+    a grammar that drifts. The refusal names which door, so an author reading it
+    sees the form they wrote.
+    """
+    doc = _project(tmp_path, "r", r="""
+layer R for Demo { configure key("db", realm: "a\\") (export \\"PWNED") with { pool: 1 } }
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    message = str(caught.value)
+    assert "invalid realm label" in message
+    assert "key(..., realm: ...)" in message
+
+
 # ------------------------------------------------------------- peer conflicts
 
 CORP_SWAP = """

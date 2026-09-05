@@ -3023,7 +3023,17 @@ class Parser:
                 self.next()
                 self.expect("kw", "realm", what="`realm:` inside `key(...)`")
                 self.expect(":")
-                realm = self.expect("string", what="a realm name string").value
+                rtok = self.expect("string", what="a realm name string")
+                # The third realm-label door (426 S2). This one SELECTS rather
+                # than declares — the label is matched by equality against the
+                # `(key, realm)` claims the folded rows already carry
+                # (`composition._resolve_address`), so it reaches no emitter and
+                # mints no namespace. It is still held to the same grammar: a
+                # label that no declaring door could have written can only ever
+                # select nothing, and one grammar for one concept is the point.
+                # Refusing here says which of the two the author got wrong.
+                realm = self._check_realm_label(
+                    rtok.line, rtok.value, "`key(..., realm: ...)`")
             self.expect(")")
             if not key:
                 raise self.err(line, "`key(\"\")` names no provision key")
@@ -4493,6 +4503,32 @@ class Parser:
         self.expect("}")
         return stmts
 
+    def _check_realm_label(self, line: int, label: str, where: str) -> str:
+        """The one realm-label grammar, for every door that reads one.
+
+        A realm label is an authority address — it is a component of the wasm
+        tier's `coeffect:<realm>/<key>` import namespace, and the half of the
+        item-246/251 approval policy's `(component glob, realm)` scope that
+        actually discriminates — so it is held to an address grammar rather than
+        to `Str`. The rule lives here, once, because three doors read a label
+        (`realm(...)`, `realms(...)`, and `key("k", realm: "r")`) and a rule
+        that is copied is a rule that drifts: the third door is the one that had
+        no check at all while the other two did.
+
+        `where` names the spelling in the diagnostic, so an author reading the
+        refusal sees the form they wrote.
+        """
+        if not label:
+            raise self.err(line, "a realm label cannot be empty")
+        if not _REALM_LABEL_RE.fullmatch(label):
+            raise self.err(
+                line,
+                f"invalid realm label {label!r} in {where}",
+                hint="realm labels must start with an ASCII letter or digit and contain "
+                     "only ASCII letters, digits, `.`, `_`, or `-`",
+            )
+        return label
+
     def realm_label(self) -> str:
         """`realm("<label>")` — static string literals only (v2)."""
         line = self.expect("kw", "realm").line
@@ -4508,16 +4544,7 @@ class Parser:
                      "components (docs/design-v2-realms.md)",
             )
         self.next()
-        label = tok.value
-        if not label:
-            raise self.err(line, "a realm label cannot be empty")
-        if not _REALM_LABEL_RE.fullmatch(label):
-            raise self.err(
-                line,
-                f"invalid realm label {label!r}",
-                hint="realm labels must start with an ASCII letter or digit and contain "
-                     "only ASCII letters, digits, `.`, `_`, or `-`",
-            )
+        label = self._check_realm_label(line, tok.value, "`realm(...)`")
         self.expect(")")
         return label
 
@@ -4550,16 +4577,7 @@ class Parser:
                          "components (docs/design-v2-realms.md)",
                 )
             self.next()
-            label = tok.value
-            if not label:
-                raise self.err(line, "a realm label cannot be empty")
-            if not _REALM_LABEL_RE.fullmatch(label):
-                raise self.err(
-                    line,
-                    f"invalid realm label {label!r}",
-                    hint="realm labels must start with an ASCII letter or digit and contain "
-                         "only ASCII letters, digits, `.`, `_`, or `-`",
-                )
+            label = self._check_realm_label(line, tok.value, "`realms(...)`")
             if label in realms:
                 raise self.err(
                     line,
