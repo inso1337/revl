@@ -693,6 +693,39 @@ component Supervisor provides sup: Sup {
   }
 }
 """),
+    ("a provision through a service-typed arrow parameter, correctly marked", """
+service Task { emission[net] fn run(p: Str) -> Int }
+component Worker provides task: Task {
+  provide task { fn run(p) { return 1 } }
+}
+service Sup { emission fn go(p: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(p: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let f = (t: Task, s: Str) => emit t.run(s)
+      let r = f(w.task, p)
+      return r
+    }
+  }
+}
+"""),
+    ("a service-typed arrow parameter not applied to a provision", """
+service Task { emission[net] fn run(p: Str) -> Int }
+component Worker provides task: Task {
+  provide task { fn run(p) { return 1 } }
+}
+service Sup { emission fn go(p: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(p: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let f = (t: Task, s: Str) => t.run(s)
+      return 0
+    }
+  }
+}
+"""),
     ("a host acquisition in its bracket, the whole point of the rule", """
 service S { fn go(u: Str) -> Int }
 component C provides s: S {
@@ -1154,6 +1187,12 @@ component C requires kv: Kv {
     # the crate promises its refusals are the reference's verbatim.
     ("g4 unmarked emission through an aliased spawn-handle provision",
      _fixture("g4_unmarked_alias_emission"), "G4"),
+    # the sibling one indirection further (GHSA-wg4v-r47x-52p2 residual): the
+    # provision flows into a service-typed arrow PARAMETER at the application.
+    # Until the self-host followed it across the parameter binding the shipped
+    # gate admitted this too — the fail-open direction, same as the alias was.
+    ("g4 unmarked emission through a service-typed arrow parameter",
+     _fixture("g4_arrow_param_emission"), "G4"),
     ("g4 host acquire in a provide-method let",
      _fixture("g4_method_host_acquire"), "G4"),
     ("g4 host acquire in a teardown slot",
