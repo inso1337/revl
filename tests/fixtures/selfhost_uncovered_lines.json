@@ -338,7 +338,7 @@
       "uncovered_statements": 1105
     },
     "py": {
-      "statements": 2342,
+      "statements": 2348,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_ComponentEmitter._approval_step": 3,
@@ -432,10 +432,10 @@
         },
         "declared out of every self-host slice: in-file `test` / `fault_test` / `lifecycle test` emission.": {
           "_emit_fault_tests": 11,
-          "_emit_lifecycle_harness": 8,
-          "_emit_lifecycle_test": 40,
+          "_emit_lifecycle_harness": 9,
+          "_emit_lifecycle_test": 43,
           "_emit_tests": 21,
-          "_lifecycle_step": 36,
+          "_lifecycle_step": 38,
           "_lifecycle_uses_abort": 1,
           "_lifecycle_uses_clock": 1
         },
@@ -443,7 +443,7 @@
           "_emit_memo_wrapper": 17
         }
       },
-      "uncovered_statements": 946
+      "uncovered_statements": 952
     },
     "rust": {
       "statements": 3160,
