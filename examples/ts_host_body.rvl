@@ -34,9 +34,14 @@ service Cache {
 pub extern pure fn host_module_scope() -> Str
   = @py { return "TS-MODULE-SCOPE not-ts (py tier)" }
   = @ts {
+    // The blessed way to load a node builtin from a verbatim `@ts` body: no
+    // module-level import (a body cannot write one), synchronous, works on
+    // plain node and under vitest alike. See docs/ts-runtime-contract.md
+    // rules 1 and 4. `createRequire` is NOT in scope here.
+    const os = process.getBuiltinModule("node:os")
     const cjs = [typeof require, typeof module, typeof exports,
                  typeof __dirname, typeof __filename]
-    return cjs.every((t) => t === "undefined")
+    return cjs.every((t) => t === "undefined") && typeof os.EOL === "string"
       ? "TS-MODULE-SCOPE ESM"
       : "TS-MODULE-SCOPE CJS " + cjs.join(",")
   }
