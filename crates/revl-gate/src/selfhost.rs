@@ -3915,6 +3915,19 @@ fn extends_spine(k: &str, w: &str) -> bool {
     return false;
 }
 
+fn interp_levels(s: &str) -> i64 {
+    let mut c = 0i64;
+    let mut i = 0i64;
+    let m = s.revl_length();
+    while ((i).checked_add(1i64).expect("revl: Int overflow") < m) {
+        if (({ s.chars().nth((i) as usize).unwrap() as u32 as i64 } == 36i64) && ({ s.chars().nth(((i).checked_add(1i64).expect("revl: Int overflow")) as usize).unwrap() as u32 as i64 } == 123i64)) {
+            c = (c).checked_add(1i64).expect("revl: Int overflow");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return c;
+}
+
 fn nesting_depth(ts: Vec<Token>) -> i64 {
     let mut depth = 0i64;
     let mut run = 0i64;
@@ -3993,12 +4006,19 @@ fn nesting_depth(ts: Vec<Token>) -> i64 {
                 }
             }
         }
+        let mut tmpl = 0i64;
+        if (k == "template") {
+            tmpl = interp_levels(&w);
+        }
         let mut here = ((depth).checked_add(run).expect("revl: Int overflow")).checked_add(chain).expect("revl: Int overflow");
         if (spine > here) {
             here = spine;
         }
         if (sibs > here) {
             here = sibs;
+        }
+        if ((depth).checked_add(tmpl).expect("revl: Int overflow") > here) {
+            here = (depth).checked_add(tmpl).expect("revl: Int overflow");
         }
         if (here > worst) {
             worst = here;
