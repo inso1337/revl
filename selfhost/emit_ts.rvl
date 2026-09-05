@@ -1579,12 +1579,21 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   let a = acx
   if (step == "let_pattern") {
     let r = expr(value_field(node, "value"), counter, a)
+    let is_record = value_str(value_field(node, "pattern")) == "record"
+    var kw = "const"
+    if (value_bool(value_field(node, "mutable"))) { kw = "let" }
     var names = []
     for (name of value_list(value_field(node, "names"))) {
-      names = names.push(ident(value_str(name)))
+      let raw = value_str(name)
+      let binding = ident(raw)
+      if (is_record && raw != binding) {
+        names = names.push(`${prop_key(raw)}: ${binding}`)
+      } else {
+        names = names.push(binding)
+      }
     }
     var lhs = ""
-    if (value_str(value_field(node, "pattern")) == "record") {
+    if (is_record) {
       lhs = `{ ${names.join(", ")} }`
     } else {
       let rest = value_field(node, "rest")
@@ -1593,7 +1602,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
       }
       lhs = `[${names.join(", ")}]`
     }
-    return { lines: [`${pad}const ${lhs} = ${r.text}`], counter: r.counter }
+    return { lines: [`${pad}${kw} ${lhs} = ${r.text}`], counter: r.counter }
   }
   if (step == "let") {
     let r = expr(value_field(node, "value"), counter, a)
