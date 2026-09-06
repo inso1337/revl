@@ -259,6 +259,23 @@ buffer, and after a crash must reconstruct it), so it is opt-in and it is what
 gates crash-recovery reconstructibility (§4.9). An undeclared `replay` argument
 at `subscribe` is a compile error.
 
+**Shipped (frontend-only).** The `subscribe` head recognizes the two shapes,
+`replay(n)` (last-n) and `replay(from: <durable>)` (a durable cursor), as an
+order-free qualifier alongside `policy`/`buffer`/`drain`
+(`parser._parse_replay_qual`). Both are REFUSED in v1, with two distinct
+diagnostics: a malformed argument (`replay()`, `replay(0)`, `replay(x)`) is a
+syntax error that names the two accepted shapes, and a well-formed one
+(`replay(5)`, `replay(from: cursor)`) is refused as UNDECLARED — replay is a
+durability claim only the provider can make, and the provider-side declaration
+surface does not exist yet (it lands with the reconstructible crash-recovery it
+gates, §4.9). So every `replay(…)` at a `subscribe` is currently the "undeclared
+`replay` argument" compile error this section names. The refusal threads no IR
+key: the `"replay"` slot §5 reserves stays absent until the provider declaration
+and a tier that honors the backlog land together, so nothing ships a silently
+inert (vacuous) durability claim in the meantime. The surface grammar is the one
+seam this slice adds; flipping the refusal to an admission-plus-thread is the
+later slice's whole job.
+
 ### 4.6 The minimal six-tier protocol — subscribe / next / close, wasm REFUSES
 
 The protocol every tier that supports streams implements is exactly three
