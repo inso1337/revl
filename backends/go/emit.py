@@ -4091,13 +4091,14 @@ def _v3_has_any(surface) -> bool:
 def _go_v3_is_interface(surface, types) -> bool:
     """Whether a revl surface type needs discriminated `match` handling here.
 
-    True for the sum types whose `match` is more than a wildcard: Result[T,E]
-    -> RevlResult (a sealed interface, type-switched) and a declared user
-    variant -> its `is<Name>()` interface. Opt[T] is included even though it is
-    now a two-value STRUCT rather than an interface (item 434 (d)): its match
-    discriminates on `.Ok` (`_go_v3_match_opt`), so it must NOT be routed to the
-    concrete-scrutinee wildcard shortcut, and its `let` binding holds the
-    declared `RevlOpt[T]` type rather than an inferred case shape (item 280).
+    True for the sum types whose `match` is more than a wildcard: a declared
+    user variant -> its `is<Name>()` interface (still type-switched), and
+    Opt[T] / Result[T,E], which are now two-value STRUCTS rather than
+    interfaces (item 434 (d)) but are STILL included here: their match
+    discriminates on `.Ok` (`_go_v3_match_opt` / `_go_v3_match_result`), so
+    they must NOT be routed to the concrete-scrutinee wildcard shortcut, and
+    their `let` binding holds the declared `RevlOpt[T]` / `RevlResult[T,E]`
+    type rather than an inferred case shape (item 280).
     Records, lists, maps and scalars lower to plain concrete Go values.
     """
     if not isinstance(surface, str):
@@ -4188,9 +4189,12 @@ def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected,
         got_ok = _go_v3_type(ok, ctx.types) or "any"
         got_err = _go_v3_type(err, ctx.types) or "any"
         payload = arg_renders[0] if arg_renders else ""
+        # item 434 (d): the two-value struct. Ok sets OkV and the flag; Err
+        # sets ErrV and leaves the flag false. Both type params stay pinned to
+        # the concrete pair (item 280/302) so reflect.DeepEqual aligns.
         if case == "Ok":
-            return f"RevlOk[{got_ok}, {got_err}]{{Value: {payload}}}"
-        return f"RevlErr[{got_ok}, {got_err}]{{Value: {payload}}}"
+            return f"RevlResult[{got_ok}, {got_err}]{{OkV: {payload}, Ok: true}}"
+        return f"RevlResult[{got_ok}, {got_err}]{{ErrV: {payload}}}"
     raise EmitError(f"unknown ADT constructor {case!r}")
 
 
@@ -4258,8 +4262,8 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
                 # value-level sibling of 280). revlEq is reflect.DeepEqual,
                 # which is FALSE across two different generic instantiations:
                 # a bare `Err("")` / `None` / `[]` erases to
-                # RevlErr[any, string] / RevlOpt[any] / []any, and DeepEqual
-                # against the other side's concrete RevlErr[int64, string] /
+                # RevlResult[any, string] / RevlOpt[any] / []any, and DeepEqual
+                # against the other side's concrete RevlResult[int64, string] /
                 # RevlOpt[string] / []string reports unequal even though the
                 # values match on py. Pin BOTH sides to whichever operand type
                 # is fully concrete (no `any`), so equal values emit as the
@@ -4629,7 +4633,7 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     # operation, but a zero divisor yields Err(reason) instead of panicking —
     # `fail` is refused in a pure fn, so the error travels as a value. An
     # immediately-applied func literal evaluates each operand exactly once;
-    # the concrete RevlOk/RevlErr instantiations satisfy the interface.
+    # the Ok/Err arms are the two-value RevlResult struct (item 434 (d)).
     if method in _GO_CHECKED_DIV:
         if method != "checked_div_trunc":
             ctx.needs_int_arith = True
@@ -4639,12 +4643,12 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
                     "checked_mod": "revlMod(_a, _b)"}[method]
         overflow_err = "" if method == "checked_mod" else (
             'if _a == (-9223372036854775807 - 1) && _b == -1 { '
-            'return RevlErr[int64, string]{Value: "revl: Int overflow"} }; ')
+            'return RevlResult[int64, string]{ErrV: "revl: Int overflow"} }; ')
         return (f'func(_a, _b int64) RevlResult[int64, string] {{ '
-                f'if _b == 0 {{ return RevlErr[int64, string]'
-                f'{{Value: "{_GO_DIV_ZERO_MSG}"}} }}; '
+                f'if _b == 0 {{ return RevlResult[int64, string]'
+                f'{{ErrV: "{_GO_DIV_ZERO_MSG}"}} }}; '
                 f'{overflow_err}'
-                f'return RevlOk[int64, string]{{Value: {quotient}}} }}'
+                f'return RevlResult[int64, string]{{OkV: {quotient}, Ok: true}} }}'
                 f'({target}, {args[0]})')
     raise EmitError(f"unknown v3 builtin method {method!r}")
 
@@ -4823,6 +4827,92 @@ def _go_v3_match_opt(node, ctx: _V3GoCtx, expected, scrut_node, opt_inner,
     return "\n".join(lines)
 
 
+def _go_v3_match_result(node, ctx: _V3GoCtx, expected, scrut_node,
+                        res_ok, res_err, exp_t) -> str:
+    """A `match` over a Result scrutinee on the two-value struct (item 434 (d)).
+
+    Result is `struct { OkV T; ErrV E; Ok bool }`, so the match discriminates
+    on `.Ok` in an if/else instead of a type switch — the same shape as the Opt
+    match above. An `Ok` arm binds `_m.OkV`, an `Err` arm binds `_m.ErrV`, and a
+    wildcard `_` binds the whole Result and covers whichever arm is absent. A
+    composite-literal scrutinee (`match Ok(1) { .. }`, item 313) needs no
+    interface-typed temp here: `.Ok`/`.OkV`/`.ErrV` read straight off the value."""
+    arms = node.get("arms") or []
+    ok_arm = next((a for a in arms if a.get("pattern") == "Ok"), None)
+    err_arm = next((a for a in arms if a.get("pattern") == "Err"), None)
+    wild = next((a for a in arms if a.get("pattern") == "_"), None)
+    st = f"Result[{res_ok}, {res_err}]"
+    scrutinee = _go_v3_expr(scrut_node, ctx)
+    lines = [f"func() {exp_t} {{"]
+    lines.append(f"\t_m := {scrutinee}")
+
+    # A wildcard is the ONLY arm: no discrimination, evaluate its body once.
+    if ok_arm is None and err_arm is None and wild is not None:
+        wbind = wild.get("bind")
+        if wbind and wbind != "_":
+            ctx.var_types[wbind] = st
+            gobind = _v3_ident(wbind, "match bind")
+            lines.append(f"\t{gobind} := _m")
+            lines.append(f"\t_ = {gobind}")
+        else:
+            lines.append("\t_ = _m")
+        lines.append(f"\treturn {_go_v3_expr(wild.get('body'), ctx, expected)}")
+        lines.append("}()")
+        return "\n".join(lines)
+
+    # The Ok side.
+    lines.append("\tif _m.Ok {")
+    if ok_arm is not None:
+        bind = ok_arm.get("bind")
+        if bind and bind != "_":
+            ctx.var_types[bind] = res_ok
+            gobind = _v3_ident(bind, "match bind")
+            lines.append(f"\t\t{gobind} := _m.OkV")
+            lines.append(f"\t\t_ = {gobind}")
+        else:
+            lines.append("\t\t_ = _m.OkV")
+        lines.append(f"\t\treturn {_go_v3_expr(ok_arm.get('body'), ctx, expected)}")
+    elif wild is not None:
+        wbind = wild.get("bind")
+        if wbind and wbind != "_":
+            ctx.var_types[wbind] = st
+            gobind = _v3_ident(wbind, "match bind")
+            lines.append(f"\t\t{gobind} := _m")
+            lines.append(f"\t\t_ = {gobind}")
+        else:
+            lines.append("\t\t_ = _m")
+        lines.append(f"\t\treturn {_go_v3_expr(wild.get('body'), ctx, expected)}")
+    else:
+        lines.append('\t\tpanic("unreachable: non-exhaustive match")')
+    lines.append("\t}")
+
+    # The Err side.
+    if err_arm is not None:
+        bind = err_arm.get("bind")
+        if bind and bind != "_":
+            ctx.var_types[bind] = res_err
+            gobind = _v3_ident(bind, "match bind")
+            lines.append(f"\t{gobind} := _m.ErrV")
+            lines.append(f"\t_ = {gobind}")
+        else:
+            lines.append("\t_ = _m.ErrV")
+        lines.append(f"\treturn {_go_v3_expr(err_arm.get('body'), ctx, expected)}")
+    elif wild is not None:
+        wbind = wild.get("bind")
+        if wbind and wbind != "_":
+            ctx.var_types[wbind] = st
+            gobind = _v3_ident(wbind, "match bind")
+            lines.append(f"\t{gobind} := _m")
+            lines.append(f"\t_ = {gobind}")
+        else:
+            lines.append("\t_ = _m")
+        lines.append(f"\treturn {_go_v3_expr(wild.get('body'), ctx, expected)}")
+    else:
+        lines.append('\tpanic("unreachable: non-exhaustive match")')
+    lines.append("}()")
+    return "\n".join(lines)
+
+
 def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     scrut_node = node.get("scrutinee")
     scrutinee = _go_v3_expr(scrut_node, ctx)
@@ -4872,16 +4962,23 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
         # switch (the (T, bool) shape the component tier's tuple match uses).
         return _go_v3_match_opt(node, ctx, expected, scrut_node, opt_inner, exp_t)
 
+    if is_result:
+        # item 434 (d): Result is likewise a two-value struct now, so it
+        # discriminates on `.Ok` in an if/else (Ok payload `.OkV`, Err payload
+        # `.ErrV`) rather than the sealed-interface type switch below.
+        return _go_v3_match_result(node, ctx, expected, scrut_node,
+                                   res_ok, res_err, exp_t)
+
     lines = [f"func() {exp_t} {{"]
-    # item 313: a scrutinee that is not a bare identifier — an Opt/Result
-    # CONSTRUCTOR LITERAL such as `match Ok(1) { .. }` — renders to a composite
-    # literal (`RevlOk[int64, any]{Value: 1}`). Placed straight into the
-    # type-switch init clause that is invalid Go twice over: the `{` of the
-    # composite is read as the switch body (`expected '}', found Value`), and
-    # `.(type)` requires an interface but the composite is a concrete case
-    # struct. Bind it to an interface-typed temp first so the switch both
-    # parses and can discriminate; an identifier scrutinee keeps the inline
-    # form byte-for-byte (a variable is already interface-typed).
+    # item 313: a scrutinee that is not a bare identifier — a user-variant
+    # CONSTRUCTOR LITERAL such as `match SomeVariant(1) { .. }` — renders to a
+    # composite literal placed straight into the type-switch init clause, which
+    # is invalid Go twice over: the `{` of the composite is read as the switch
+    # body (`expected '}', found ..`), and `.(type)` requires an interface but
+    # the composite is a concrete case struct. Bind it to an interface-typed
+    # temp first so the switch both parses and can discriminate; an identifier
+    # scrutinee keeps the inline form byte-for-byte (a variable is already
+    # interface-typed). (Opt and Result returned early as two-value structs.)
     scrut_kind = scrut_node.get("kind") if isinstance(scrut_node, dict) else None
     if scrut_kind in ("var", "name"):
         switch_operand = scrutinee
@@ -4901,21 +4998,14 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
             body = _go_v3_expr(arm.get("body"), ctx, expected)
             lines.append(f"\t\treturn {body}")
             continue
-        # determine the case struct type and the bound payload's surface type
-        # (Opt returned early via `_go_v3_match_opt`; here it is a Result or a
-        # user variant, both of which stay sealed-interface type switches).
-        if is_result:
-            got_ok = _go_v3_type(res_ok, ctx.types)
-            got_err = _go_v3_type(res_err, ctx.types)
-            case_type = (f"RevlOk[{got_ok}, {got_err}]" if pattern == "Ok"
-                         else f"RevlErr[{got_ok}, {got_err}]")
-            payload_surface = res_ok if pattern == "Ok" else res_err
-        else:
-            adt = st if isinstance(st, str) else ctx.case_adt.get(pattern)
-            if adt is None:
-                raise EmitError(f"cannot resolve match case {pattern!r}")
-            case_type = f"{_v3_ident(adt, 'type name')}{pattern}"
-            payload_surface = ctx.case_payload.get(pattern)
+        # determine the case struct type and the bound payload's surface type.
+        # Opt and Result returned early as two-value structs; only a declared
+        # user variant reaches this sealed-interface type switch.
+        adt = st if isinstance(st, str) else ctx.case_adt.get(pattern)
+        if adt is None:
+            raise EmitError(f"cannot resolve match case {pattern!r}")
+        case_type = f"{_v3_ident(adt, 'type name')}{pattern}"
+        payload_surface = ctx.case_payload.get(pattern)
         lines.append(f"\tcase {case_type}:")
         # `bind == "_"` (`Case(_) => ..`) has no name to hold the value;
         # discard it the same way an unbound arm does, rather than declaring
@@ -5337,13 +5427,14 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         if go_t in ("int64", "float64"):
             out.append(f"{pad}var {name} {go_t} = {value}")
         elif inferred and _go_v3_is_interface(inferred, ctx.types):
-            # A Result/variant binding must hold its *interface* type, not the
-            # concrete case struct `:=` would infer (e.g. `RevlOk[int64, any]`)
+            # A user-variant binding must hold its *interface* type, not the
+            # concrete case struct `:=` would infer (e.g. `OutcomeFound`)
             # — otherwise a later `match` type-switch on it is a Go compile
             # error ("not an interface") and never discriminates (item 280).
-            # Opt is a struct now (item 434 (d)) so `:=` would already infer the
-            # right `RevlOpt[T]`, but pinning the declared type is still correct
-            # and keeps a bare `None` binding well-typed.
+            # Opt and Result are two-value structs now (item 434 (d)) so `:=`
+            # would already infer the right `RevlOpt[T]` / `RevlResult[T, E]`,
+            # but pinning the declared type is still correct and keeps a bare
+            # `None` / `Err(..)` binding well-typed.
             out.append(f"{pad}var {name} {go_t} = {value}")
         else:
             out.append(f"{pad}{name} := {value}")
@@ -6963,7 +7054,32 @@ func revlParseInt(s string) RevlOpt[int64] {
 }
 '''
 
-_V3_RESULT_PREAMBLE = '''// ---- built-in Result as a generic sealed interface --------------------
+_V3_RESULT_PREAMBLE = '''// ---- built-in Result as a two-value struct (item 434 (d)) -------------
+// An Ok/Err-flag + two payload struct, not a sealed interface: an Ok or Err
+// carrying a non-pointer payload no longer heap-boxes to satisfy an interface,
+// so a Result that escapes a function or lands in a collection costs no
+// allocation (the same argument, and the same shape, as the Opt conversion
+// above). `Ok` discriminates; `OkV` holds the Ok payload and `ErrV` the Err
+// payload, each the zero value on the other arm. reflect.DeepEqual stays a
+// correct value equality: two Ok values compare their `OkV` (matching `ErrV`
+// zero), an Ok and an Err differ on `Ok`.
+type RevlResult[T any, E any] struct {
+\tOkV  T
+\tErrV E
+\tOk   bool
+}
+'''
+
+# The COMPONENT (v1/v2 cordis-go) tier keeps Result as a sealed interface:
+# there, a regular Result flows as a `(T, E, bool)` tuple in call positions
+# (`_go_comp_match_tuple`), and the ONLY concrete RevlResult values are the
+# ones a witnessed `@go` extern hand-constructs — `return RevlOk[..]{Value: x}`
+# / `RevlErr[..]{..}` — for stc-go's single-value `ctx.Effect` acquire, which
+# `_emit_witnessed_step` then discriminates with a `RevlOk[..]` type assertion.
+# That hand-written extern surface is the load-bearing contract item 434 (d)'s
+# Opt conversion (PR #422) deliberately left the interface in place for, so the
+# struct rewrite is confined to the pure v3 tier and this tier is untouched.
+_COMP_RESULT_PREAMBLE = '''// ---- built-in Result as a generic sealed interface --------------------
 type RevlResult[T any, E any] interface{ isRevlResult() }
 type RevlOk[T any, E any] struct{ Value T }
 
@@ -7859,7 +7975,9 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     if _COMP_NEEDS_PARSE_INT:
         out.append(_V3_PARSE_INT_HELPER)
     if needs_result_preamble:
-        out.append(_V3_RESULT_PREAMBLE)
+        # component tier keeps the sealed interface (see _COMP_RESULT_PREAMBLE):
+        # witnessed `@go` externs hand-construct RevlOk/RevlErr.
+        out.append(_COMP_RESULT_PREAMBLE)
     if _COMP_NEEDS_TEARDOWN:
         out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
         if _RECORD_MODE:
