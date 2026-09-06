@@ -1,0 +1,37 @@
+name: arm64-smoke
+
+# arm64 architecture coverage on a self-hosted aarch64 runner (the Oracle box,
+# labels: self-hosted,linux,arm64,offload). GitHub's ubuntu-latest is x86_64, so
+# nothing else exercises revl on arm64. This lane proves revl's dependency tree
+# and core compiler build+run on aarch64, where an x86-only wheel or a
+# pointer-width assumption would break. It is DELIBERATELY not a PR gate: it runs
+# on main + a nightly schedule (and on demand), on a lane separate from the x86
+# runners, so it adds coverage and capacity without slowing any PR.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+# Least privilege: the smoke job only checks out and runs tests.
+permissions:
+  contents: read
+
+concurrency:
+  group: arm64-smoke-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  frontend-arm64:
+    runs-on: [self-hosted, linux, arm64]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: install revl (arm64)
+        run: pip install -e ".[test]"
+      - name: frontend + self-host oracles on arm64
+        run: PYTHONPATH=src python -m pytest tests/test_v2_emit.py tests/test_selfhost_lower_ir.py tests/test_selfhost_emit_py.py -q
