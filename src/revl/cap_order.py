@@ -140,9 +140,10 @@ def _parse_suffixed(raw: str, units: dict[str, int], name: str,
 # name -> (kind, order-key). The order-key selects the value order in
 # `_param_leq`; canonicalization is applied at parse by `_canon_value`.
 #
-# TODO(294-slice2): symbolic values (`path=config.job_root`), comparable only to
-# the identical symbol until a spawn-site `with { }` literal binding substitutes
-# them (per-instance attenuation).
+# Symbolic values (`path=config.job_root`, item 294 Slice 2) are `Symbol`s:
+# comparable ONLY to the identical symbol until a spawn-site `with { }` literal
+# binding substitutes them (`substitute`), giving per-instance attenuation. An
+# unresolved symbol is incomparable to a literal, hence refused (fail closed).
 # Ceiling-kind parameters ERASE at mint into a grant's `remainingUses` counter
 # and are EXEMPT from crossing-coverage (a crossing binds no ceiling): the
 # spawn-attenuation surface strips them (`split_ceilings`) before `covers_set`,
@@ -218,8 +219,19 @@ def _canon_value(name: str, value: object) -> object:
     """Canonicalize (and validate) a raw parameter value for its registered
     order. String literals are expected for resource kinds, integers for
     ceilings. The path order stores a component tuple; discrete stores the
-    string; ceiling stores the int."""
+    string; ceiling stores the int. A `Symbol` (a per-instance `config.` value)
+    is stored as-is on a resource kind and refused on a ceiling (a ceiling is a
+    STATIC bound, item 294 Slice 2)."""
     kind, order = _REGISTRY[name]
+    if isinstance(value, Symbol):
+        if kind == _CEILING:
+            raise CapError(
+                f"capability parameter `{name}` is a ceiling and takes a static "
+                f"integer, not a per-instance `{value.ref}` value",
+                hint=f"write `{name}=10` (a static bound); a per-instance "
+                     "`config.` value bounds a resource (`path`/`host`/`table`), "
+                     "not a count")
+        return value
     if order == "ceiling":
         if not isinstance(value, int) or isinstance(value, bool):
             raise CapError(
@@ -269,6 +281,30 @@ def _canon_value(name: str, value: object) -> object:
 
 
 @dataclass(frozen=True)
+class Symbol:
+    """A per-instance symbolic capability parameter value (item 294, Slice 2):
+    the `config.job_root` in `fs.write(path=config.job_root)`.
+
+    A symbol is OPAQUE to the static order - comparable only to the identical
+    symbol (`_param_leq`) - until a spawn-site `with { }` block binds its config
+    field to a string literal, where the checker substitutes it (`substitute`)
+    and the resolved literal enters the cone. An unresolved symbol is
+    incomparable to any literal, and incomparable means REFUSED, never admitted
+    (fail closed): a child reaching `path=config.job_root` under a parent holding
+    `path="/tmp"` is refused UNLESS the spawn resolves the symbol into the
+    parent's cone. This is the design's first symbol rule - only a literal
+    binding substitutes; anything else leaves the parameter symbolic."""
+
+    ref: str   # the source spelling, e.g. "config.job_root"
+
+    @property
+    def field(self) -> str:
+        """The config field the symbol names (`job_root` for `config.job_root`),
+        the key a spawn-site `with { }` binds."""
+        return self.ref.split(".", 1)[1] if "." in self.ref else self.ref
+
+
+@dataclass(frozen=True)
 class Cap:
     """A capability as a point in the partial order: a token and a valuation.
 
@@ -297,6 +333,9 @@ class Cap:
 
 
 def _render_value(name: str, value: object) -> str:
+    if isinstance(value, Symbol):
+        # unquoted, so it re-reads as a symbol and never as a discrete string
+        return value.ref
     _kind, order = _REGISTRY[name]
     if _kind == _CEILING:
         # every ceiling stores its canonical integer (a count, bytes, or ms);
@@ -350,8 +389,34 @@ def _make_cap(token: str, raw_params: list[tuple[str, object]]) -> Cap:
 
 def make_cap(token: str, raw_params: list[tuple[str, object]] | None = None) -> Cap:
     """Build a validated `Cap` from a token and raw `(name, value)` pairs (the
-    parser's entry point: values are already python `str`/`int` from literals)."""
+    parser's entry point: values are already python `str`/`int`/`Symbol`)."""
     return _make_cap(token, list(raw_params or []))
+
+
+def substitute(cap: Cap, bindings: dict[str, str]) -> Cap:
+    """Resolve a Cap's per-instance `config.` symbols against a spawn site's
+    literal `with { }` bindings (item 294, Slice 2).
+
+    `bindings` maps a config FIELD name to a python string literal. Each symbol
+    parameter whose field is bound is replaced by that literal and
+    re-canonicalized through the ONE canonical point (`make_cap`), so a resolved
+    `path` becomes a real cone element (a component tuple) comparable in the
+    order. A symbol whose field is unbound is left symbolic (the caller omits a
+    field bound to a non-literal, so its symbol also stays), hence still
+    incomparable to a literal parent - refused, never admitted (fail closed).
+
+    A cap carrying no symbol is returned unchanged (identity), so a
+    parameter-free or literal-only reach is byte-identical: substitution is inert
+    unless a per-instance symbol is actually present and actually bound."""
+    if not any(isinstance(v, Symbol) for _n, v in cap.params):
+        return cap
+    raw: list[tuple[str, object]] = []
+    for name, value in cap.params:
+        if isinstance(value, Symbol) and value.field in bindings:
+            raw.append((name, bindings[value.field]))
+        else:
+            raw.append((name, value))
+    return _make_cap(cap.token, raw)
 
 
 def parse_cap(text: str) -> Cap:
@@ -401,6 +466,9 @@ def _split_params(inner: str) -> list[str]:
 def _parse_value(raw: str) -> object:
     if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
         return raw[1:-1]
+    if raw.startswith("config."):
+        # a per-instance symbol re-read from its canonical (unquoted) spelling
+        return Symbol(raw)
     try:
         return int(raw)
     except ValueError as exc:
@@ -422,6 +490,12 @@ def _leq_path(narrow: tuple, wide: tuple) -> bool:
 def _param_leq(name: str, narrow: object, wide: object) -> bool:
     """`narrow <=_k wide` in parameter `k`'s value order (narrow is at-or-below
     wide, i.e. narrower authority)."""
+    if isinstance(narrow, Symbol) or isinstance(wide, Symbol):
+        # a per-instance symbol is comparable ONLY to the identical symbol
+        # (item 294, Slice 2): a symbol vs a literal - on either side - is
+        # incomparable, hence not `<=` (fail closed). Two equal `Symbol`s
+        # compare equal by frozen-dataclass identity of `ref`.
+        return narrow == wide
     _kind, order = _REGISTRY[name]
     if order == "path":
         return _leq_path(narrow, wide)

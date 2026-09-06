@@ -60,7 +60,8 @@ def test_bare_token_is_byte_identical():
     ('fs.write(path="/a/./b")', "`.` component"),
     ('fs.write(path="/a/../b")', "`..` component"),
     ('fs.write(path="/tmp",path="/etc")', "duplicate capability parameter"),
-    ('fs.write(path=notliteral)', "must be a string or integer literal"),
+    ('fs.write(path=notliteral)',
+     "must be a string literal, an integer, or a per-instance"),
 ])
 def test_parse_refusals(bad, needle):
     with pytest.raises(RevlError) as exc:
@@ -165,3 +166,59 @@ def test_parameter_free_attenuation_unchanged():
     assert by["TenantAWorker"]["attenuated"] == ["kv_b"]
     assert by["TenantBWorker"]["granted"] == ["kv_b"]
     assert by["TenantBWorker"]["attenuated"] == ["kv_a"]
+
+
+# ------------------------------------ per-instance substitution (Slice 2)
+#
+# The child's store is bounded to a per-instance `config.job_root`; the parent
+# holds `fs.write(path="/tmp")` and resolves the symbol at the spawn site's
+# `with { }` block. A resolution INTO the parent's cone admits and the chain
+# shows the resolved literal; a resolution OUTSIDE the cone, or a symbol left
+# unresolved (a non-literal binding), is refused (fail closed).
+
+PER_INSTANCE = """
+service TmpStore {{ emission[fs.write(path="/tmp")] fn ingest(row: Str) -> Int }}
+service KidStore {{ emission[fs.write(path=config.job_root)] fn ingest(row: Str) -> Int }}
+service Worker {{ emission fn run() -> Str }}
+component Kid requires fs: KidStore provides worker: Worker {{
+  config {{ job_root: Str }}
+  provide worker {{ fn run() {{ emit fs.ingest("row") return "k" }} }}
+}}
+component Router requires fs: TmpStore {{
+  config {{ root: Str }}
+  let w = effect spawn Kid with {{ job_root: {binding} }} undo w.dispose()
+}}
+"""
+
+
+def _per_instance(binding: str):
+    ir = compile_source(PER_INSTANCE.format(binding=binding), "t.rvl")
+    return {e["child"]: e for e in ir["manifest"]["instances"]}
+
+
+def test_per_instance_literal_binding_resolves_into_cone():
+    # the spawn binds `job_root` to a literal within `/tmp`: admitted, and the
+    # attenuation chain shows the RESOLVED path, not the symbol.
+    by = _per_instance('"/tmp/job-42"')
+    assert by["Kid"]["granted"] == ['fs.write(path="/tmp/job-42")']
+    assert by["Kid"]["holds"] == ['fs.write(path="/tmp")']
+    assert by["Kid"]["attenuated"] == ['fs.write(path="/tmp")']
+
+
+def test_per_instance_literal_outside_cone_refused():
+    with pytest.raises(RevlError) as exc:
+        _per_instance('"/etc"')
+    msg = str(exc.value)
+    assert 'fs.write(path="/etc")' in msg
+    assert "never widen them" in msg
+
+
+def test_per_instance_unresolved_symbol_refused_fail_closed():
+    # a NON-literal binding (a `config.` passthrough) leaves the symbol
+    # unresolved, so it is incomparable to the parent's literal cone: refused,
+    # never silently admitted. The message names the fix.
+    with pytest.raises(RevlError) as exc:
+        _per_instance("config.root")
+    msg = str(exc.value)
+    assert "config.job_root" in msg
+    assert "unresolved" in msg

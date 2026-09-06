@@ -12040,6 +12040,23 @@ def _activation_spawn_sites(comp: dict) -> "list[dict]":
     return sites
 
 
+def _spawn_literal_bindings(spawn: dict) -> dict:
+    """The spawn-site `with { field: <literal> }` bindings that resolve a child's
+    per-instance `config.` capability symbols (item 294, Slice 2).
+
+    Maps a config field to its python STRING-literal value. A field bound to any
+    NON-literal expression (a name, a call, a config passthrough) is OMITTED, so
+    its symbol stays unresolved - incomparable to a literal parent, hence refused
+    (fail closed). This is the design's first symbol rule: only a literal `with`
+    binding substitutes."""
+    out: dict = {}
+    for field, node in (spawn.get("config") or {}).items():
+        if (isinstance(node, dict) and node.get("kind") == "lit"
+                and isinstance(node.get("value"), str)):
+            out[field] = node["value"]
+    return out
+
+
 def _cap_offending(cap: "object") -> str:
     """Render an uncovered capability for a refusal message: the unnameable host
     boundary reads in words, everything else as its canonical `(T, P)` spelling
@@ -12059,7 +12076,18 @@ def _widening_reason(cap: "object", held: set) -> str | None:
                         key=lambda h: h.to_str())
     if not same_token:
         return None
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
     child_params = cap.param_map()
+    # an UNRESOLVED per-instance symbol (item 294 Slice 2): opaque to the order,
+    # so incomparable to the parent's literal cone. Names the fix - bind the
+    # config field to a literal at the spawn site so it resolves into the cone.
+    for name, cval in cap.params:
+        if isinstance(cval, cap_order.Symbol):
+            return (f"a per-instance value `{cval.ref}` on `{cap.token}` is "
+                    f"unresolved, so it is incomparable to the parent's cone "
+                    f"(`{_cap_render(same_token[0])}`); bind `{cval.field}` to a "
+                    f"string literal in the spawn's `with {{ }}` block so the "
+                    f"per-instance path resolves into the parent's cone")
     for h in same_token:
         for name, _wide in h.params:
             if name not in child_params:
@@ -12283,8 +12311,18 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
     the per-instance attenuation chain (spawner → child narrowing) for the G8
     audit surface. Raises on a widening spawn, naming the chain.
 
-    TODO(294-slice2): per-instance `with { }` literal substitution into
-    `config.`-valued parameters; the chain would then show resolved paths."""
+    Per-instance substitution (item 294, Slice 2): a child crossing spelled
+    `fs.write(path=config.job_root)` carries a `config.` SYMBOL, opaque to the
+    order. At a spawn site whose `with { }` block binds that field to a string
+    literal, the symbol is resolved (`cap_order.substitute`) so the per-instance
+    reach is compared - and the chain shown - as the resolved path. Substitution
+    is LEAF-SCOPED: it applies only when the child's reachable set is exactly its
+    OWN crossings (it spawns nothing transitively), because a symbol names the
+    config of the component that DECLARED the crossing, bound at the edge that
+    spawns THAT component. A child that itself spawns carries grandchild reach
+    whose symbols belong to a different config bound at a different edge, so
+    deeper per-instance resolution is left to a later slice and an unresolved
+    symbol stays refused (fail closed), never admitted."""
     edges = spawn_reg.get("edges") or []
     if not edges:
         return []
@@ -12299,7 +12337,24 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
                                         services)
         for spawn in _activation_spawn_sites(comp):
             child = spawn.get("component")
-            child_reach = reachable.get(child, set())
+            full_reach = reachable.get(child, set())
+            direct_reach = base.get(child, set())
+            # per-instance substitution (item 294, Slice 2): resolve the child's
+            # own `config.` capability symbols against this spawn's literal
+            # `with { }` bindings. Sound only when the child's reach is exactly
+            # its OWN crossings (`full_reach == direct_reach`, a leaf that spawns
+            # nothing): then every symbol names THIS child's config, bound here.
+            # A symbol left unresolved stays symbol-compared, hence refused
+            # against a literal parent (fail closed). Inert - byte-identical -
+            # when no symbol is present, so a parameter-free reach is unchanged.
+            bindings = _spawn_literal_bindings(spawn)
+            if (bindings and full_reach == direct_reach and any(
+                    isinstance(v, cap_order.Symbol)
+                    for c in direct_reach for _n, v in c.params)):
+                child_reach = {cap_order.substitute(c, bindings)
+                               for c in direct_reach}
+            else:
+                child_reach = full_reach
             line = spawn.get("line", comp.get("line", 1))
             # Crossing coverage (item 66/294): does the child reach only
             # boundaries the parent holds? Ceilings are EXEMPT from this question
