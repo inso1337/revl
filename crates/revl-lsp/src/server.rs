@@ -306,6 +306,10 @@ impl LspServer {
             "language": reference.get("language").cloned().unwrap_or(Value::Null),
             "frontier": "reference",
             "engine": "reference-diagnostics + native-navigation",
+            // which interpreter answers diagnostics: the self-contained bundled
+            // runtime, or a `revl` on the machine. A client can tell a one-file
+            // artifact from one leaning on an installed `revl` alongside it.
+            "embedding": self.engine.embedding(),
             "native": {
                 "api": gate.api,
                 "language": gate.language,

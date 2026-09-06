@@ -88,33 +88,43 @@ innermost scope and this path cannot see scopes; a `type` sharing a name with a
 reference spells it comes back without a signature, so hover defers while
 definition still answers.
 
-## Distribution: this is NOT a self-contained single file
+## Distribution: the private runtime, and the PATH fallback
 
-The design's slice 0 embeds a private interpreter (pyo3 +
-python-build-standalone + the frozen `revl` wheel) so the artifact is one file
-with no Python to install. **That spike has not been done, and this crate does
-not do it.** It takes the fallback the design records in the open (A2): the
-reference runs as a child process against a `revl` the machine already has.
+The engine picks an interpreter to run `reference/worker.py` (embedded in the
+binary with `include_str!`) in a fixed order (`runtime.rs`, `engine.rs`):
 
-So the distribution story here is **a native binary PLUS a reference `revl`
-alongside**, not a self-contained single file. What that changes:
+1. **`REVL_LSP_PYTHON`**, if set, wins — the explicit override CI and the
+   oracle use to pin the reference.
+2. otherwise a **bundled PRIVATE RUNTIME**, if one is resolvable: a pinned
+   `python-build-standalone` tree with the `revl` wheel frozen into its own
+   site, extracted **atomically into a versioned private cache**
+   (`<cache>/revl-lsp/runtime/<pin>/`) on first use and run in **isolated mode**
+   (`-I`), so the worker imports `revl` only from that private site and never
+   the machine's `PYTHONPATH`, user site, or a `python3` on `PATH`. This is the
+   self-contained single-file path. A runtime that is CONFIGURED but broken
+   fails closed (a visible `REVL-LSP-ENGINE` diagnostic), never a silent
+   degrade to PATH.
+3. otherwise **`python3` on PATH** — the honest fallback design A2 records, "a
+   native binary PLUS a reference `revl` alongside", so a bare `cargo` build and
+   every machine that already has `revl` keep working unchanged.
 
-- an editor plugin shipping this binary must also ship or require a `revl`
-  install — the "no Python to install" headline of slice 1 is NOT yet
-  delivered;
-- cold start and per-request latency are interpreter-bound, plus one process
-  spawn on first use;
-- what IS delivered is the native protocol layer every later slice reuses
-  unchanged, the reference-agreement oracle harness, and the fail-closed
-  contract above.
+A runtime is resolved from `REVL_LSP_RUNTIME` (an already-extracted directory),
+`REVL_LSP_RUNTIME_ARCHIVE` (a pinned `tar`, extracted atomically on first use),
+or a `runtime/<pin>/` tree / `runtime.tar` sitting beside the executable (the
+packaged install layout). `REVL_LSP_CACHE` and `REVL_LSP_RUNTIME_PIN` override
+where and under what key the cache lands.
 
-What was explicitly not done to avoid the dependency: substituting a native
-checker for the reference. That is the exact move A1 forbids.
-
-The engine is one long-lived worker process running `reference/worker.py`
-(embedded in the binary with `include_str!`, so nothing needs installing beside
-the executable). Point it at an interpreter that can `import revl` with
-`REVL_LSP_PYTHON`; it defaults to `python3`.
+**What this slice landed, and what it defers.** The runtime-management contract
+is here — the pin, the atomic versioned cache, the isolated-mode launch, and
+the fail-closed rule — and `revl/gateVersion` now reports an `embedding` of
+`private-runtime` or `system-python` so a client can tell a self-contained
+artifact from one leaning on an installed `revl`. What is NOT in this crate is
+shipping the pinned `python-build-standalone` archive itself, nor the in-process
+pyo3 link (`libpython`, `PyConfig.isolated`); those are the distribution/build
+step (338, and the design's slice-0 embed), which layer on this contract
+without changing it — a child process or a linked interpreter reads the same
+pin, cache and isolation. What was explicitly NOT done to avoid the dependency:
+substituting a native checker for the reference, the exact move A1 forbids.
 
 ## `revl/gateVersion`
 
@@ -165,6 +175,18 @@ REVL_LSP_PYTHON=/path/to/python cargo test   # plus the reference oracle
   one hover of every declaration kind with its full signature, so agreement
   cannot be bought by answering nothing.
 
+`tests/private_runtime.rs` is the one-file bundling exit check:
+
+- `a_bundled_runtime_answers_from_a_versioned_private_cache_in_isolated_mode`
+  builds a runtime archive around a real `revl`-capable interpreter, drives the
+  binary with only that archive to reach `revl` (no `REVL_LSP_PYTHON`), and
+  asserts the interpreter was extracted into the versioned cache, the binary
+  reports the `private-runtime` embedding, its published diagnostics equal the
+  reference server's byte for byte, and a second launch REUSES the cache rather
+  than re-extracting. It sources the interpreter from
+  `REVL_LSP_TEST_RUNTIME_PYTHON` (or `REVL_LSP_PYTHON`), skipping with a stated
+  reason when neither is set.
+
 **The corpus crosses the self-host frontier on purpose** (a required exit
 condition, not an optional extension). It is built from `examples/rejections/`
 and `examples/`, and spans G1 declared access over a component `requires`
@@ -193,8 +215,12 @@ oracle executes for real rather than skipping.
 - **Slice 3** (gated on item 391): the full native checker, the bundled
   interpreter dropped, the binary small and pure rust. Cannot start earlier for
   soundness, not scheduling.
-- Outstanding from slice 0: the bundled-interpreter spike that would make this
-  a genuine single file.
+- Outstanding from the one-file bundling slice: shipping the pinned
+  `python-build-standalone` archive with the crate (so a distributable actually
+  carries a runtime for the resolver above to find), and the in-process pyo3
+  link that replaces the child process with a linked `libpython`. The
+  runtime-management contract they build on — pin, atomic versioned cache,
+  isolated launch — landed here (`runtime.rs`, `tests/private_runtime.rs`).
 - Outstanding from slice 2: `hover`, `codeAction` and everything about
   diagnostics remain reference-served, and native navigation is confined to
   documents with no diagnostics and to declarations the self-host parser
