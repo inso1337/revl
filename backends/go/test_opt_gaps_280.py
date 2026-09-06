@@ -4,9 +4,10 @@ Four gaps, all reproduced on *plain fns* (not components), each of which used
 to emit go that did not compile or did not run correctly:
 
   1. a bare `None` (returned, annotated, or passed) emitted the undefined
-     identifier `None` instead of a typed `RevlNone[T]{}`;
-  2. `Some(literal)` erased to `RevlSome[any]`, so a later type-switch on the
-     concrete case never matched;
+     identifier `None` instead of a typed Opt zero value (`RevlOpt[T]{}`, item
+     434 (d): Opt is a two-value struct now, None is Ok==false);
+  2. `Some(literal)` erased to `RevlOpt[any]`, so a later structural match on
+     the concrete element never matched;
   3. an annotated empty list emitted `[]any{}` instead of the declared
      element type;
   4. a wildcard `match` on a concrete-typed (scalar) scrutinee emitted a
@@ -55,21 +56,23 @@ def _emit_go() -> str:
 
 def test_bare_none_lowers_to_typed_revl_none():
     src = _emit_go()
-    # gap 1: never the undefined identifier `None`; always a typed RevlNone,
-    # both where it is returned and where it is passed as an argument.
+    # gap 1: never the undefined identifier `None`; always a typed zero-value
+    # RevlOpt (item 434 (d): Opt is a two-value struct, None is Ok==false), both
+    # where it is returned and where it is passed as an argument.
     assert "return None" not in src
     assert "(None," not in src and "None)" not in src
-    assert "RevlNone[int64]{}" in src
+    assert "RevlOpt[int64]{}" in src
 
 
 def test_some_literal_keeps_its_concrete_element_type():
     src = _emit_go()
     # gap 2: the element type is int64, never erased to `any` — that erasure is
-    # exactly what defeats the type-switch below.
-    assert "RevlSome[int64]" in src
-    assert "RevlSome[any]" not in src
-    # the binding holds the *interface* type so the switch on it is legal go.
-    assert "var o RevlOpt[int64] = RevlSome[int64]{Value: 7}" in src
+    # exactly what defeats the structural match/equality below.
+    assert "RevlOpt[int64]{Value: 7, Ok: true}" in src
+    assert "RevlOpt[any]" not in src
+    # the binding holds the declared Opt type (item 434 (d): a struct now, so
+    # `:=` would already infer it, but the declared pin keeps a bare None typed).
+    assert "var o RevlOpt[int64] = RevlOpt[int64]{Value: 7, Ok: true}" in src
 
 
 def test_annotated_empty_list_infers_its_element_type():
@@ -81,9 +84,9 @@ def test_annotated_empty_list_infers_its_element_type():
 
 def test_wildcard_match_on_scalar_has_no_type_switch():
     src = _emit_go()
-    # gap 4: the scalar `wild(n)` match lowers to its arm directly. Only the
-    # interface-typed Opt matches keep a type-switch, so the sole `.(type)`
-    # occurrences are on Opt values — never on the bare `int64` scrutinee.
+    # gap 4: the scalar `wild(n)` match lowers to its arm directly, never a
+    # `x.(type)` switch (Go rejects that on a non-interface). Opt matches are
+    # `.Ok` if/else (item 434 (d)), so no `.(type)` lands on the int64 scrutinee.
     assert "n.(type)" not in src
 
 

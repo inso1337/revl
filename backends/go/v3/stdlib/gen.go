@@ -8,26 +8,27 @@ import (
 	"unicode/utf8"
 )
 
-// ---- built-in Opt as a generic sealed interface -----------------------
-type RevlOpt[T any] interface{ isRevlOpt() }
-type RevlSome[T any] struct{ Value T }
-
-func (RevlSome[T]) isRevlOpt() {}
-
-type RevlNone[T any] struct{}
-
-func (RevlNone[T]) isRevlOpt() {}
+// ---- built-in Opt as a two-value struct (item 434 (d)) ----------------
+// A present-flag + value struct, not a sealed interface: a Some carrying a
+// non-pointer payload no longer heap-boxes to satisfy an interface, so an Opt
+// that escapes a function or lands in a collection costs no allocation. `Ok`
+// discriminates; `None` is the zero value (Ok == false), matching the (T, bool)
+// return shape the component (v1/v2) tier already uses.
+type RevlOpt[T any] struct {
+	Value T
+	Ok    bool
+}
 
 func revlOptMap[A any, B any](o RevlOpt[A], f func(A) B) RevlOpt[B] {
-	if s, ok := o.(RevlSome[A]); ok {
-		return RevlSome[B]{Value: f(s.Value)}
+	if o.Ok {
+		return RevlOpt[B]{Value: f(o.Value), Ok: true}
 	}
-	return RevlNone[B]{}
+	return RevlOpt[B]{}
 }
 
 func revlOptOr[T any](o RevlOpt[T], d T) T {
-	if s, ok := o.(RevlSome[T]); ok {
-		return s.Value
+	if o.Ok {
+		return o.Value
 	}
 	return d
 }
@@ -303,18 +304,13 @@ func optCode(s RevlOpt[string]) RevlOpt[int64] {
 
 func unwrapOr(o RevlOpt[int64], d int64) int64 {
 	return func() int64 {
-		switch _m := o.(type) {
-		case RevlSome[int64]:
+		_m := o
+		if _m.Ok {
 			v := _m.Value
 			_ = v
 			return v
-		case RevlNone[int64]:
-			_ = _m
-			return d
-		default:
-			_ = _m
-			panic("unreachable: non-exhaustive match")
 		}
+		return d
 	}()
 }
 
