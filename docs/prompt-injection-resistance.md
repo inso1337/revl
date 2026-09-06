@@ -38,7 +38,7 @@ gap the gate already defends: *the distance between what a component declares
 and what its body (or the data steering it) tries to do.*
 
 What is explicitly **not** in this threat model, and why, is in
-[Residual risks](#residual-risks-what-confinement-does-not-cover) below — stated
+[Residual risks](#residual-risks--what-confinement-does-not-cover) below — stated
 before someone discovers them the hard way.
 
 ## Why confinement defeats it structurally
