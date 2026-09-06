@@ -99,16 +99,26 @@
 //
 // NATIVE-TIER PORT (item 391 / #106 — the `compile_to` Stage-4 blocker, #98/#332):
 // for the self-host rust emitter to run when COMPILED TO RUST (not just to py),
-// every one of these host-formatting externs needs an `@rs` body. The four that
-// take `Str`/`()` and return `Str` — `newline`, `mangle`, `snake`, `camel` — now
-// carry byte-identical `@rs` bodies (verified against the `@py` outputs in an
-// isolation crate). The two `Any`-typed escapers — `string_lit` and `num_str` —
-// stay `@py`-ONLY for now: `Any` erases to `cordis::Value` (an `Arc<dyn Any>`),
-// so a correct `@rs` body must know the concrete boxed representation the
-// self-host uses for a `str`/`int`/`float` IR value, and that representation is
-// owned by the still-`@py`/`@ts`-only `stdlib/value.rvl` accessors (rs tier
-// DEFERRED there). They are ported in the same wave that gives `value.rvl` its
-// `@rs` bodies — see the report/remainder plan on #106.
+// every one of these host-formatting externs needs an `@rs` body. All six now
+// carry them. The four that take `Str`/`()` — `newline`, `mangle`, `snake`,
+// `camel` — landed first (byte-identical to the `@py` outputs, isolation-crate
+// checked). The two `Any`-typed escapers — `string_lit` and `num_str` — now do
+// too: `Any` erases to `cordis::Value`, and the concrete boxed representation the
+// whole rust tier uses for a `str`/`int`/`float` IR value is a boxed
+// `serde_json::Value` (`stdlib/value.rvl`, `stdlib/json.rvl` — the same
+// `v.downcast::<serde_json::Value>()` those accessors speak). Each `@rs` body
+// recovers that box directly, so the port no longer waits on any other module.
+// The one required emitter change is the concrete->`Any` boxing coercion at the
+// call site (`backends/rust/emit.py::_coerce_any_arg`): the many `string_lit(<Str>)`
+// / `num_str(<Int>)` calls in this file pass a concrete scalar into an `Any`
+// slot, which is boxed as `Value::new(serde_json::Value::from(..))` there.
+// CAVEAT (mirrors the `stdlib/json.rvl` float note): `num_str`'s float path and
+// `string_lit`'s non-ASCII branch are byte-identical to `@py` on every input the
+// self-host actually emits (finite floats, ASCII source literals); a `str(float)`
+// with an extreme exponent or a non-ASCII code point whose Python
+// `str.isprintable()` verdict differs from `!is_control() && !is_whitespace()`
+// can still format differently across tiers, the known cross-tier float/Unicode
+// divergence, not a defect in this port.
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field, value_opt,
   value_list, value_at, value_str, value_int, value_bool, value_keys
@@ -126,9 +136,15 @@ use "../stdlib/str.rvl" { trim }
 // `string_lit` is backends/rust/emit.py::_string for a `str` input, verbatim: a
 // Rust double-quoted string literal escaped FROM code points (docs/strings.md).
 // The list form (`Inject::new([..])`) is components-only, deferred, so the str
-// path is all this slice needs. `@py`-ONLY pending the value.rvl `@rs` port
-// (item 391 / #106 — see the erased-IR-boundary note above).
-extern pure fn string_lit(v: Any) -> Str = @py {
+// path is all this slice needs.
+// The `@rs` body recovers the boxed `serde_json::Value::String` (the erased str
+// the whole rust tier speaks — value.rvl's `value_str` model) and escapes it by
+// code point, branch-for-branch with the `@py` body. Comparisons are by code
+// point (`0x22`, `0x5C`, ...) so the raw block carries no `'` char-literal quote
+// to confuse the extern-body brace scanner. The `isprintable` gate is the
+// documented cross-tier approximation `!is_control() && !is_whitespace()`.
+extern pure fn string_lit(v: Any) -> Str =
+  @py {
     out = ['"']
     for ch in v:
         cp = ord(ch)
@@ -150,11 +166,121 @@ extern pure fn string_lit(v: Any) -> Str = @py {
             out.append("\\u{%x}" % cp)
     out.append('"')
     return "".join(out)
-}
+  }
+  = @rs {
+    let s = match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::String(t) => t.clone(),
+            _ => String::new(),
+        },
+        Err(_) => String::new(),
+    };
+    let mut out = String::from("\"");
+    for ch in s.chars() {
+        let cp = ch as u32;
+        if cp == 0x22 {
+            out.push_str("\\\"");
+        } else if cp == 0x5C {
+            out.push_str("\\\\");
+        } else if cp == 0x0A {
+            out.push_str("\\n");
+        } else if cp == 0x0D {
+            out.push_str("\\r");
+        } else if cp == 0x09 {
+            out.push_str("\\t");
+        } else if cp >= 0x20 && cp <= 0x7E {
+            out.push(ch);
+        } else if cp >= 0x80 && !ch.is_control() && !ch.is_whitespace() {
+            out.push(ch);
+        } else {
+            out.push_str(&format!("\\u{{{:x}}}", cp));
+        }
+    }
+    out.push_str("\"");
+    out
+  }
 // The literal-body host numeral: `_rust_v3_lit` renders an int as `f"{value}i64"`
 // and a float as `f"{value}f64"`, both `str(value)`. Sourced here so the numeral
 // text is exactly Python's.
-extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
+// The `@rs` body recovers the boxed `serde_json::Value::Number` (value.rvl's
+// `value_int` / json.rvl's number model). An integer formats as plain decimal
+// (== Python `str(int)`); a float goes through `py_float`, a shortest-round-trip
+// formatter that reproduces Python's `repr(float)`/`str(float)`: `{:e}` supplies
+// the shortest digits and decimal exponent, then Python's own point-placement
+// rule (fixed unless the decimal point sits at position <= -4 or > 16, then
+// scientific with a signed, >=2-digit exponent, and a trailing `.0` on a
+// whole-valued fixed form). See the float caveat in the header note.
+extern pure fn num_str(v: Any) -> Str =
+  @py { return str(v) }
+  = @rs {
+    fn py_float(f: f64) -> String {
+        if f.is_nan() { return String::from("nan"); }
+        if f.is_infinite() {
+            if f < 0.0 { return String::from("-inf"); }
+            return String::from("inf");
+        }
+        let negative = f.is_sign_negative();
+        let mag = f.abs();
+        let e = format!("{:e}", mag);
+        let (mant, exp_str) = match e.split_once('e') {
+            Some(parts) => parts,
+            None => (e.as_str(), "0"),
+        };
+        let exp: i32 = exp_str.parse().unwrap_or(0);
+        let digits: String = mant.chars().filter(|c| *c != '.').collect();
+        let dv: Vec<char> = digits.chars().collect();
+        let ndigits = dv.len() as i32;
+        let decpt = exp + 1;
+        let body: String;
+        if decpt <= -4 || decpt > 16 {
+            let mut m = String::new();
+            m.push(dv[0]);
+            if dv.len() > 1 {
+                m.push('.');
+                for c in &dv[1..] { m.push(*c); }
+            }
+            let e2 = decpt - 1;
+            let eabs = e2.abs();
+            let edig = if eabs < 10 { format!("0{}", eabs) } else { format!("{}", eabs) };
+            let esign = if e2 < 0 { "-" } else { "+" };
+            body = format!("{}e{}{}", m, esign, edig);
+        } else if decpt <= 0 {
+            let mut m = String::from("0.");
+            for _ in 0..(-decpt) { m.push('0'); }
+            m.push_str(&digits);
+            body = m;
+        } else if decpt >= ndigits {
+            let mut m = digits.clone();
+            for _ in 0..(decpt - ndigits) { m.push('0'); }
+            m.push_str(".0");
+            body = m;
+        } else {
+            let mut m = String::new();
+            for i in 0..decpt { m.push(dv[i as usize]); }
+            m.push('.');
+            for i in decpt..ndigits { m.push(dv[i as usize]); }
+            body = m;
+        }
+        if negative { format!("-{}", body) } else { body }
+    }
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    format!("{}", i)
+                } else if let Some(u) = n.as_u64() {
+                    format!("{}", u)
+                } else if let Some(f) = n.as_f64() {
+                    py_float(f)
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        },
+        Err(_) => String::new(),
+    }
+  }
 // A real newline — the line SEPARATOR (`"\n".join(out)` in the reference).
 // The `@rs` body is the native-tier port (item 391 / #106): a single U+000A,
 // so the self-host rust emitter can join its lines when compiled to rust.
