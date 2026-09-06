@@ -158,12 +158,156 @@ def test_missing_container_runtime_is_a_refusal_naming_what_is_missing():
     assert "never downgraded" in err
 
 
-def test_a_cross_boundary_seam_refuses_until_the_transport_lands():
+def _seam(self_role="consumer", *, key="work", remote=False,
+          provider="prov", provider_backend="py", provider_deadline=5.0,
+          consumer="p", consumer_backend="py", consumer_deadline=5.0):
+    """One cross-boundary seam edge, the shape placement.sandbox_seam_roles
+    builds into ctx["seams"] (item 411 T1)."""
+    return {"key": key, "self_role": self_role, "remote": remote,
+            "provider": provider, "provider_backend": provider_backend,
+            "provider_deadline": provider_deadline, "consumer": consumer,
+            "consumer_backend": consumer_backend, "consumer_deadline": consumer_deadline}
+
+
+def _preflight_seams(seams):
+    # docker is never resolved: an unmet precondition returns before it.
     driver = _sb.ContainerDriver(docker="/nonexistent/docker")
-    achieved, err = driver.preflight(
-        "p", _ENV_NONE, {"backend": "py", "seam_dir": "/t", "seam_keys": ["work"]})
+    return driver.preflight("p", _ENV_NONE, {"backend": "py", "seam_dir": "/t",
+                                             "seams": seams})
+
+
+def test_a_cross_boundary_seam_refuses_until_the_transport_lands():
+    # retargeted (item 411 T1): the blanket "seam-free only" refusal became a
+    # per-precondition one. With every item-56 precondition satisfied, the only
+    # thing still missing is the T3 relay, so the refusal names reachability/T3.
+    achieved, err = _preflight_seams([_seam(consumer_backend="node")])
     assert achieved is None
-    assert "cross-boundary seam" in err and "work" in err
+    assert "relay-mtls" in err
+    assert "reachability" in err and "T3" in err
+    # and nothing else is falsely blamed
+    assert "backend:" not in err and "null" not in err
+
+
+def test_a_sandboxed_provider_with_a_rust_consumer_refuses_naming_the_tier():
+    # exit test 1: a sandboxed provider (py) whose consumer is rust — the
+    # rust runner holds only the UDS-only client, so the seam is refused
+    # naming the tier and the UDS-only client.
+    achieved, err = _preflight_seams(
+        [_seam(self_role="provider", provider="p", provider_backend="py",
+               consumer="c", consumer_backend="rust")])
+    assert achieved is None
+    assert "rust" in err
+    assert "UDS-only" in err or "socket" in err
+    assert "consumer 'c'" in err
+
+
+def test_a_null_seam_deadline_refuses_naming_the_deadline():
+    # exit test 2: a py consumer of a py provider whose provider has a null
+    # seam_deadline — the deadline precondition is named for that participant.
+    achieved, err = _preflight_seams(
+        [_seam(self_role="consumer", provider="prov", provider_deadline=None,
+               consumer="p", consumer_backend="py")])
+    assert achieved is None
+    assert "seam_deadline" in err and "null" in err
+    assert "'prov'" in err
+
+
+def test_a_provider_on_a_non_py_backend_refuses_naming_the_listener():
+    achieved, err = _preflight_seams(
+        [_seam(self_role="consumer", provider="prov", provider_backend="node")])
+    assert achieved is None
+    assert "provider 'prov'" in err and "py-only" in err
+
+
+def test_a_seam_free_sandbox_does_not_touch_the_transport_path():
+    # byte-identical to before T1: with no cross-boundary seam the descriptor is
+    # never built and preflight proceeds to its ordinary docker resolution.
+    driver = _sb.ContainerDriver(docker="")  # nothing on PATH
+    achieved, err = driver.preflight("p", _ENV_NONE, {"backend": "py", "seam_dir": "/t"})
+    assert achieved is None
+    assert "no container runtime is on PATH" in err
+    assert "relay-mtls" not in err and "reachability" not in err
+
+
+# -- the descriptor itself (plan-layer, no driver) -------------------------
+
+def test_a_fully_satisfied_descriptor_admits_at_the_plan_layer():
+    # every item-56 precondition met: the ONLY unmet precondition is the T3
+    # relay that does not exist yet — the plan layer itself admits.
+    desc = _sb.seam_transport_descriptor("p", [_seam(consumer_backend="node")])
+    assert desc["transport"] == "relay-mtls"
+    assert len(desc["unmet"]) == 1
+    assert "reachability" in desc["unmet"][0] and "T3" in desc["unmet"][0]
+
+
+def test_the_descriptor_names_every_unmet_precondition_at_once():
+    desc = _sb.seam_transport_descriptor("p", [
+        _seam(self_role="provider", provider="p", provider_backend="py",
+              consumer="c", consumer_backend="go", consumer_deadline=None)])
+    text = " || ".join(desc["unmet"])
+    assert "go" in text                 # consumer tier
+    assert "seam_deadline" in text      # null deadline
+    assert "reachability" in text       # T3
+    # three preconditions named, none swallowed
+    assert len(desc["unmet"]) == 3
+
+
+def test_a_seam_free_descriptor_has_no_unmet():
+    desc = _sb.seam_transport_descriptor("p", [])
+    assert desc["unmet"] == []
+
+
+def test_a_remote_consumer_does_not_check_the_remote_side():
+    # a sandboxed consumer dialing a [remotes] provider: the remote serves mTLS
+    # in another composition (py, deadline not visible), so only the consumer
+    # side and reachability are judged here.
+    desc = _sb.seam_transport_descriptor("p", [
+        _seam(self_role="consumer", remote=True, provider="remote 'work'",
+              provider_backend="py", provider_deadline=None,
+              consumer="p", consumer_backend="node", consumer_deadline=5.0)])
+    # only reachability remains; the remote provider's null deadline is not ours
+    assert len(desc["unmet"]) == 1
+    assert "reachability" in desc["unmet"][0]
+
+
+def test_sandbox_seam_roles_carry_role_peer_backend_and_deadline():
+    # the plan-layer wiring placement builds into ctx["seams"]: a provider "prov"
+    # of key "work" and its rust consumer "cons" (item 411 T1).
+    processes = {"prov": {"seam_deadline": 5.0}, "cons": {"seam_deadline": None}}
+    provides = {"prov": {"work": "Svc"}, "cons": {}}
+    requires = {"prov": {}, "cons": {"work": "Svc"}}
+    owner = {"work": "prov"}
+    backends = {"prov": "py", "cons": "rust"}
+
+    prov_roles = _placement.sandbox_seam_roles(
+        "prov", processes, requires, provides, owner, backends, {}, 3.0)
+    assert len(prov_roles) == 1
+    e = prov_roles[0]
+    assert e["self_role"] == "provider" and e["remote"] is False
+    assert e["provider"] == "prov" and e["consumer"] == "cons"
+    assert e["consumer_backend"] == "rust"
+    assert e["provider_deadline"] == 5.0 and e["consumer_deadline"] is None
+
+    cons_roles = _placement.sandbox_seam_roles(
+        "cons", processes, requires, provides, owner, backends, {}, 3.0)
+    assert len(cons_roles) == 1 and cons_roles[0]["self_role"] == "consumer"
+    assert cons_roles[0]["provider_backend"] == "py"
+
+
+def test_sandbox_seam_roles_are_empty_for_a_seam_free_process():
+    processes = {"solo": {}}
+    roles = _placement.sandbox_seam_roles(
+        "solo", processes, {"solo": {}}, {"solo": {}}, {}, {"solo": "py"}, {}, 3.0)
+    assert roles == []
+
+
+def test_sandbox_seam_roles_pick_up_a_remote_consumed_key():
+    processes = {"cons": {"seam_deadline": 5.0}}
+    roles = _placement.sandbox_seam_roles(
+        "cons", processes, {"cons": {"rem": "Svc"}}, {"cons": {}}, {},
+        {"cons": "py"}, {"rem": {"service": "Svc"}}, 3.0)
+    assert len(roles) == 1 and roles[0]["remote"] is True
+    assert roles[0]["self_role"] == "consumer"
 
 
 def test_a_non_py_backend_in_a_container_refuses():
