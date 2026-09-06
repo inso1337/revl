@@ -598,7 +598,7 @@
       "uncovered_statements": 914
     },
     "py": {
-      "statements": 2354,
+      "statements": 2355,
       "uncovered": {
         "Activation residuals: Map.cas conditional undo belongs to component host runtime; non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). Deferred/approval/await/stream paths belong to the named runtime boundaries. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms.": {
           "_ComponentEmitter._body_step": 16
@@ -763,12 +763,15 @@
         },
         "Witness lookup non-dict guard: after a witnessed table exists, _witnessed_extern returns None for a malformed/non-dict acquire. Legal effect acquires are expression dictionaries. witnessed.rvl covers matching and nonmatching fn lookups; the port's final missing-name return is equivalent.": {
           "_ComponentEmitter._witnessed_extern": 1
+        },
+        "Match-binder short-circuit made unreachable by #320: _arm_body_is_bind's `bind in (\"Some\", \"None\")` guard returns False for a payload bound to a constructor spelling, but the frontend now mangles a predeclared binder in lower.py `_predeclared_mangle` (`Some` -> `Some_`) BEFORE the emitter reads the IR, and `None` carries no payload so it is never a binder. So `bind` is never literally `Some`/`None` at this emitter and the guard's early `return False` is unreachable through the byte-agreement oracle. match_binder_scan.rvl's some_binder still drives the arm (`Some(Some) => 0`), but now through the mangled `Some_` binder, which the arm body never reads.": {
+          "_arm_body_is_bind": 1
         }
       },
-      "uncovered_statements": 627
+      "uncovered_statements": 628
     },
     "rust": {
-      "statements": 3240,
+      "statements": 3275,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and stream refusal. Those require the live plugin/frame runtime that the self-host component slice explicitly marks DEFER.": {
           "_emit_step": 95,
@@ -791,8 +794,8 @@
         },
         "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls.": {
           "_emit_component": 4,
-          "_emit_component_new": 25,
-          "_emit_components": 7,
+          "_emit_component_new": 26,
+          "_emit_components": 8,
           "_emit_req_bindings": 2,
           "_provide_let_type": 1
         },
@@ -811,7 +814,7 @@
           "_refuse_holes.walk": 1
         },
         "Extern-only boundary: these statements build extern config bindings, reject missing @rs bodies, and emit color-erased extern declarations. The corpus covers ordinary native Rust extern bodies but not runtime config scaffolding or invalid declarations.": {
-          "_emit_v3_externs": 3,
+          "_emit_v3_externs": 10,
           "_rust_extern_config_bind": 9
         },
         "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle.": {
@@ -847,7 +850,6 @@
         },
         "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins.": {
           "_emit_v3_functions": 8,
-          "_render_expr": 57,
           "_v3_builtin": 29,
           "_v3_empty_vec_elem_types": 66,
           "_v3_empty_vec_elem_types.collect": 1,
@@ -938,12 +940,23 @@
           "_pure_method_statements": 1,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
+        },
+        "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`).": {
+          "_render_expr": 63
+        },
+        "item 421 F6 (the rust half): the declared-`Secret[T]` runtime secret registry. `_declares_secret` scans the IR for a surviving `Secret[T]` marking (service param `secret`, extern `secret_return`, config-field `secret`) to gate `_SECRET_MODE`; `_emit_secret_registry` is the redaction preamble emitted into the crate once under that mode; `_secret_config_fields`/`_secret_config_mark` register a `Secret[T]` config field at the head of the plugin closure (`revl_mark_secret(&config.<f>)`, the register-at-load shape the go tier uses); `_secret_method_params` registers a `Secret[T]` provide-method parameter at the method head; `_stream_host_rust` funnels the host-trace choke point `revl_stream_record` through `revl_redact_text`. No rust corpus document declares a `Secret[T]`, so the positive branches never run, and selfhost/emit_rust.rvl does not port secret redaction (item-429(d)): a corpus document reaching them would flip the byte-agreement oracle red rather than close this gap.": {
+          "_declares_secret": 4,
+          "_emit_secret_registry": 1,
+          "_secret_config_fields": 1,
+          "_secret_config_mark": 2,
+          "_secret_method_params": 4,
+          "_stream_host_rust": 8
         }
       },
-      "uncovered_statements": 1213
+      "uncovered_statements": 1248
     },
     "ts": {
-      "statements": 1979,
+      "statements": 1994,
       "uncovered": {
         "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), emits sync/async timer scheduling and in-flight tracking, and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards and fail are covered; witnessed transactions and timers are declared port boundaries": {
           "_component_step": 42
@@ -1051,9 +1064,14 @@
         },
         "v1/v2 live-component routing is selected before the v3 emitter mirrored by `selfhost/emit_ts.rvl`; the remaining statements are the legacy runtime branch": {
           "_emit_v1": 7
+        },
+        "The #278/#302 install-tree-reach refusal diagnostic: `_reject_install_tree_reach`, its `_door` closure, and the `_strip_ts_comments` scrubber it runs first (so a token named only in a comment is not read as a reach) refuse a verbatim @ts body that loads an install-tree host module. No corpus document reaches them because such a document is refused by this very check, and selfhost/emit_ts.rvl does not port the diagnostic.": {
+          "_reject_install_tree_reach": 5,
+          "_reject_install_tree_reach._door": 1,
+          "_strip_ts_comments": 9
         }
       },
-      "uncovered_statements": 434
+      "uncovered_statements": 449
     },
     "wasm": {
       "statements": 2693,
@@ -1555,7 +1573,7 @@
       "uncovered_statements": 182
     },
     "py": {
-      "statements": 1875,
+      "statements": 1876,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
@@ -1588,9 +1606,6 @@
           "cmatch": 1,
           "match_expr": 2,
           "match_folds": 1
-        },
-        "Match source bookkeeping: arm_body_is_bind's non-record body guard returns false, and every match arm body is an expression record, so no document reaches this defensive branch (the reference folds the same guard into _arm_body_is_bind). Its Some/None-binder short-circuit, and arm_body_mentions' conservative object-KEY retention and exhausted-list walk, are now graded on both sides by match_binder_scan (#306); control/result/services_match exercise ordinary binder use and folding.": {
-          "arm_body_is_bind": 1
         },
         "Method let-effect lookup/acquire sequence is source-bound to spawn or result-declared host verbs; witnessed provide binds are frontend-refused, pinned in tests. Ordinary unbound witnessed/adopt/compensation are covered. Final method marker covers deferred await and invalid nested/unknown steps, not supported return/effect rendering.": {
           "method_step": 11
@@ -1661,9 +1676,12 @@
         },
         "witnessed_extern final miss after a nonempty table: legal matching fn acquires are covered, and unknown fn names are frontend-rejected. The lookup's None fallback mirrors the reference dictionary miss.": {
           "witnessed_extern": 1
+        },
+        "Match source bookkeeping: TWO statements of arm_body_is_bind are unreachable through the byte-agreement oracle. (1) The non-record body guard returns false, but every match arm body is an expression record, so no document reaches that defensive branch (the reference folds the same guard into _arm_body_is_bind). (2) The Some/None-binder short-circuit: #320 now mangles a predeclared binder in the frontend (`Some` -> `Some_`) before either emitter reads the IR, and `None` carries no payload, so `bind` is never literally `Some`/`None` here. match_binder_scan's some_binder still drives the arm but through the mangled `Some_` binder (an unread bind). arm_body_mentions' conservative object-KEY retention and exhausted-list walk stay graded on both sides by match_binder_scan (#306); control/result/services_match exercise ordinary binder use and folding.": {
+          "arm_body_is_bind": 2
         }
       },
-      "uncovered_statements": 94
+      "uncovered_statements": 95
     },
     "rust": {
       "statements": 1966,
