@@ -175,6 +175,17 @@ _BUILTIN_CASES = {"Ok", "Err", "Some", "None"}
 #: values cross as canonical-ABI pointers).
 _BACKEND_COMMENT = {"ts": "//", "py": "#", "rust": "//"}
 
+#: the `@<dialect>` token an emitted host block is written with, per backend.
+#: It is the backend name for every tier except `rust`, whose canonical host
+#: dialect token is `rs` (what `backends/rust/emit.py` reads, `bodies["rs"]`,
+#: and what the corpus writes) — `@rust` parses but the rust backend refuses it
+#: as "no @rs body", so a rust-tier import would generate source that cannot
+#: emit. Keyed identically to `_BACKEND_COMMENT`; the backend NAME (`rust`)
+#: stays user-facing (the `backend=` argument, the run.py `KNOWN_BACKENDS`
+#: spelling, and the "set it inside the `@rust` body" hint), only the emitted
+#: host-block token is canonicalised here (item 254 Slice 3, the ts/rust tiers).
+_BACKEND_DIALECT = {"ts": "ts", "py": "py", "rust": "rs"}
+
 _REF_PREFIX = "#/components/schemas/"
 
 
@@ -1166,7 +1177,7 @@ class _Generator:
                     hint="a header or cookie is transport, not an operation "
                          "argument, and dropping it silently would change what "
                          "the operation means. Set it inside the generated "
-                         f"`extern`'s `@{self.backend}` body (that is what the "
+                         f"`extern`'s `@{self._dialect}` body (that is what the "
                          "host block is for), then delete the parameter from "
                          "the document")
             if location not in ("path", "query"):
@@ -1371,6 +1382,17 @@ class _Generator:
                       "`emission` (G8)")
 
     # -- emission ----------------------------------------------------------
+    @property
+    def _dialect(self) -> str:
+        """The `@<dialect>` token an emitted host block is written with.
+
+        The backend name for every tier but `rust`, whose canonical host
+        dialect is `rs` (item 254 Slice 3): `@rust` parses, but the rust
+        backend reads `bodies["rs"]` and refuses a `@rust` body as
+        "no @rs body", so a rust-tier import must emit `@rs` to be portable.
+        """
+        return _BACKEND_DIALECT[self.backend]
+
     def _host_comment(self, text: str) -> str:
         marker = _BACKEND_COMMENT[self.backend]
         # braces would close the `@<backend> { ... }` block early; a newline
@@ -1750,19 +1772,19 @@ class _Generator:
                     f"extern emission[{net_cap}] fn "
                     f"{extern}({signature}){returns}\n"
                     f"  compensate {reversal}()\n"
-                    f"  = @{self.backend} {{ "
+                    f"  = @{self._dialect} {{ "
                     f"{self._host_comment(self._forward_stub(operation, target))}"
                     f" }}")
                 externs.append(
                     f"extern emission[{net_cap}] fn {reversal}() -> Unit\n"
-                    f"  = @{self.backend} {{ "
+                    f"  = @{self._dialect} {{ "
                     f"{self._host_comment(self._reversal_stub(operation, target))}"
                     f" }}")
             else:
                 externs.append(
                     f"extern {'emission' if operation.emission else 'pure'} fn "
                     f"{extern}({signature}){returns}\n"
-                    f"  = @{self.backend} {{ "
+                    f"  = @{self._dialect} {{ "
                     f"{self._host_comment(f'{operation.method.upper()} {target} — send the request and decode the JSON response here')}"
                     f" }}")
             args = ", ".join(pname for pname, _ in operation.params)
