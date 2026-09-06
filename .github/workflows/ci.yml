@@ -881,6 +881,14 @@ jobs:
       # declares. --require-execution makes an absent runtime fail the job
       # rather than quietly demote those rows to compile-only.
       - run: python3 tools/conformance.py --execute --require-execution
+      # Item 320 (A3 union reserved lexicon): the full one-name-per-program
+      # sweep across all six real toolchains needs them all present at once,
+      # which only this job has. Without REVL_SWEEP_ALL_TIERS the test skips
+      # (green while measuring nothing); set it so the sweep actually runs.
+      - name: reserved-lexicon sweep (all tiers)
+        env:
+          REVL_SWEEP_ALL_TIERS: "1"
+        run: pytest tests/test_reserved_lexicon_sweep.py -q
       # Roadmap item 25 — placement across the tier seams, on every commit.
       # The conformance gate above proves each tier's emitted code survives its
       # own compiler; it does NOT boot a composition SPLIT across tiers and run

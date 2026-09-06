@@ -76,6 +76,56 @@ The runtime proofs run against the real cordis-rs crate in
 (the per-tool-call H1 persist/revert loop, mirroring
 `tests/test_provide_method_witnessed.py`).
 
+## Declared `Secret[T]` values and the runtime registry (421 F6 / #392)
+
+A `Secret[T]` declaration authorises disclosure to the declared receiver. It
+does not authorise any sink this tier keeps to hold a copy. This tier carried
+only the emit-time `_REDACTED_SECRET` witness redaction (the `secret_witness`
+referent written into the WAL); it had no RUNTIME registry, so a driver error, a
+panic message, or any host string that quotes a held credential reached this
+tier's trace verbatim. The frontend refuses the crossings it can see
+statically; what is left is a value that reaches a host body legitimately (a
+config credential handed to the component's own binding, a parameter the
+service declared `Secret[T]`, a token an extern minted) and then turns up in a
+message the host wrote.
+
+The emitted crate carries a process-global registry for a document that
+declares a `Secret[T]` anywhere (`_SECRET_MODE`; a secret-free document is
+byte-identical to before), the same register-at-load shape the go tier uses.
+rust (native) has no reflection, so — unlike java, which binds its runners to
+the container reflectively — the emitted code populates the registry directly at
+each declared end and the emitted sinks read through it in line:
+
+* `revl_mark_secret(&config.<field>)` at the head of the plugin closure for a
+  config field declared `Secret[T]` (the one door every load goes through);
+* `revl_mark_secret(&<param>)` at the head of a provide method whose service
+  declares that parameter `Secret[T]` (the receiver end);
+* `revl_secret_result(...)` around an extern whose declared return was
+  `Secret[T]` (the origin end); the verbatim `@rs` body keeps its signature
+  under a private `_revl_secret_<name>` and the public one registers what it
+  returns, so no call site changes;
+* `revl_redact_text(String)` over the registered values (exact match, longest
+  first, values under four bytes are not remembered) at every emitted-runtime
+  free-form sink: the host trace `revl_stream_record` gathers (so a
+  `<redacted:secret>` mark replaces a secret an item quoted) and the WAL
+  descriptor arguments under `--record`.
+
+`<redacted:secret>` equals the py tier's `confidential.REDACTED`, so a polyglot
+composition redacts to the same marker whichever tier wrote the line.
+
+`test_secret_registry.py` proves it two ways: emit-shape assertions that the
+registration and the sink scrubs are present (and absent from a secret-free
+document), and — under a rust toolchain — by RUNNING the emitted crate under
+`cargo test` and grepping the real host trace `revl_stream_marks()`: the
+registered value is absent and its marker present, an ordinary value beside it
+is verbatim (no over-redaction), `revl_secret_result` returns its value
+unchanged, and with nothing registered the value flows verbatim (non-vacuity).
+
+The placement-runner seam-failure text (`src/main.rs`'s `FAILED … — {error}`)
+and cordis `fail`-message paths are a hand-written harness, not emitted output;
+closing those on a no-reflection tier without breaking byte-identity is a
+separate design step, tracked as a follow-up under item 421 F6.
+
 ## Verify
 
 ```bash
