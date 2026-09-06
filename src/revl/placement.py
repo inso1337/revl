@@ -919,6 +919,18 @@ def _seam_model(candidate: dict, component: str, backend: str,
     return model_requires, model_provides, model_owner, model_backends
 
 
+def _seam_gate_version() -> dict:
+    """The gate SURFACE this conductor admitted with, stamped onto every
+    Seam-2-eligible seam so the receiving process can compare it against its own
+    before trusting a re-admission (item 337 seam identity,
+    `_process_runner._gate_surface_compatible`). The conductor compiles once, so
+    this one reference surface admitted every crossing regardless of the tier it
+    is placed on. Lazily imported to match the module's other cross-seam calls
+    and to keep `revl.gate` off the import path of a conductor that never seams."""
+    from revl import gate  # noqa: PLC0415
+    return gate.gate_version()
+
+
 def seam_readmission(files, running_ir: dict, component: str, backend: str,
                      from_backend: str | None = None):
     """Re-admit `component` AS IT ALREADY IS, on the tier it is already placed
@@ -2939,6 +2951,14 @@ def run_placement(files, placement_path: str, once: bool = False,
     # base specs (backend-neutral)
     specs: dict[str, dict] = {}
     backends: dict[str, str] = {}
+    # item 337 seam identity: the gate SURFACE that admitted these components.
+    # The conductor compiled once, so every crossing was admitted by this one
+    # reference gate; each Seam-2-eligible proxy carries it, and the receiving
+    # process refuses a crossing whose declared gate `api` differs from its own
+    # (`_process_runner._gate_surface_compatible`) so two ends that do not cover
+    # the same surface never trust each other's agreement. On a homogeneous py
+    # fleet both ends share one install, so this matches and changes nothing.
+    seam_gate_version = _seam_gate_version()
     # item 337 Seam 2: a proxy entry's "backend" names its PROVIDER's tier,
     # which may be a process not yet reached by the per-process loop below (it
     # builds `backends` incrementally, in `processes` insertion order, while it
@@ -3011,6 +3031,7 @@ def run_placement(files, placement_path: str, once: bool = False,
                 # source (`spec["files"]`) and can re-admit it at boot.
                 entry["component"] = key_component.get(key)
                 entry["backend"] = backends.get(host)
+                entry["gate_version"] = seam_gate_version
                 entry["correlation"] = _network_correlation(pname)
             else:
                 entry["socket"] = sockets[host]
@@ -3021,6 +3042,7 @@ def run_placement(files, placement_path: str, once: bool = False,
                 # (`swap_admission`) moved one event earlier, no new transport.
                 entry["component"] = key_component.get(key)
                 entry["backend"] = backends.get(host)
+                entry["gate_version"] = seam_gate_version
                 # item 118 S1 / roadmap 421 F8: what THIS consumer needs to seal
                 # a correlation envelope on every call, namely its own identity
                 # and secret, plus the composition it is scoped to. The
@@ -3811,7 +3833,8 @@ def run_placement(files, placement_path: str, once: bool = False,
                     try:
                         qproc.stdin.write(json.dumps(
                             {"op": "repoint", "key": key, "socket": new_sock,
-                             "component": component, "backend": to_backend}) + "\n")
+                             "component": component, "backend": to_backend,
+                             "gate_version": _seam_gate_version()}) + "\n")
                         qproc.stdin.flush()
                     except OSError as exc:
                         print(f"swap: could not signal {qname}: {exc}", flush=True)
