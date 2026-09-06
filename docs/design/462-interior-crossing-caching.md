@@ -1,10 +1,10 @@
-# 461 (provisional): interior-crossing extern caching
+# 462 (provisional): interior-crossing extern caching
 
 **Provisional roadmap id.** This note is filed against GitHub issue
 [#97](https://github.com/inso1337/revl/issues/97) (roadmap item 310,
 capability-aware caching) and specifies its last remaining slice: design
 slice 4, `cache` on an extern declaration whose crossing happens INSIDE a
-body rather than at the seam. The number 461 is a placeholder chosen so the
+body rather than at the seam. The number 462 is a placeholder chosen so the
 file sorts after the last numbered design note; the orchestrator assigns the
 real item number at merge and renames this file. Every reference to "this
 slice" below means the slice-4 remainder of item 310 under issue #97.
