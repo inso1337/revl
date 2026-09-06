@@ -66,6 +66,7 @@
   "==" "===" "!=" "!==" "<" ">" "<=" ">="
   "+" "-" "*" "/" "%"
   "&&" "||" "??" "!"
+  "^" "&" "~" "<<" ">>"
   "->" "=>" "?." "?" ":" "|"
 ] @operator
 
@@ -94,5 +95,5 @@
 "assert" @keyword.exception
 
 ; contextual statement keywords (lifecycle / fault tests)
-[ "load" "unload" "call" "swap" ] @keyword
+[ "load" "unload" "call" ] @keyword
 [ "fault" "lifecycle" ] @keyword
