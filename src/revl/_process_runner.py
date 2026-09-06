@@ -21,7 +21,8 @@ live migration (docs/swap.md). Today one command is understood:
   {"op": "repoint", "key": "<k>", "socket": "<successor.sock>"}
 
   {"op": "repoint", "key": "<k>", "socket": "<successor.sock>",
-   "component": "<c>", "backend": "<tier>"}
+   "component": "<c>", "backend": "<tier>",
+   "gate_version": {"api": "...", "language": "...", "frontier": "..."}}
 
 which re-points the proxy for `<k>` from its current provider to a successor
 serving at `<socket>` — a *planned cutover*, not the peer-death withdrawal a
@@ -34,6 +35,10 @@ never an authorization: this process binds it to `<k>` against its own manifest
 (`_providers_of`) and sanctions `<socket>` against its own placement directory
 (`_sanction_address`) before the cutover is applied, so a selector naming an
 unrelated component, or an address the receiver does not sanction, is refused.
+`gate_version` names the gate SURFACE that admitted the successor upstream; the
+receiver compares it against its own (`_gate_surface_compatible`) and refuses a
+crossing whose gate `api` differs from its own, so two ends that do not cover
+the same surface never trust each other's agreement (item 337 seam identity).
 The process acknowledges an accepted repoint with `[name] REPOINTED <k> -> <socket>`.
 
 All output is line-prefixed with the process name so the conductor can
@@ -310,6 +315,50 @@ def _sanction_address(target, anchor: dict | None) -> str | None:
     return None
 
 
+def _gate_surface_compatible(claimed) -> str | None:
+    """Compare the gate SURFACE the seam declares against this receiver's own,
+    item 337 (`docs/design/337-polyglot-admission-mesh.md`, "What identity a
+    seam carries"). Returns None when the two ends may trust each other's
+    agreement, else the reason to REFUSE.
+
+    A seam re-admission is only meaningful if the two ends agree on what surface
+    each gate covers: the conductor stamps the surface that ADMITTED the crossing
+    upstream (`gate.gate_version()`, uniformly the reference gate, since the
+    conductor compiled once) onto the selector, and the receiver checks it
+    against `gate.gate_version()` of its OWN gate before it trusts a re-admission.
+    A differing gate `api` is a differing verdict/wire contract — the two gates
+    do not cover the same surface, so their agreement cannot be trusted — and is
+    REFUSED fail-closed, with both `frontier`s named so the skew is ATTRIBUTABLE
+    rather than mysterious (the design's "Skew attributable" exit).
+
+    This receiver is the py runner, whose gate is the FULL reference compiler
+    (`gate_version().frontier == reference-full:<lang>`, the maximal surface), so
+    a matching `api` is always coverable here and the check passes — the
+    frontier-SUBSET direction (a native receiver behind a reference sender
+    refusing a construct outside its self-host frontier) belongs to that tier's
+    own embedded gate and is deferred with it. On a homogeneous py fleet both
+    ends share one install, so `api` matches and this is a strict no-op.
+
+    A seam that declares NO surface (`claimed is None`) is tolerated: the
+    selector, binding, address and full re-admission checks still run unchanged,
+    so an entry written before this field existed keeps its verdict. A surface
+    that is declared but unreadable is a broken declaration and fails closed."""
+    if claimed is None:
+        return None
+    from revl import gate  # noqa: PLC0415
+    own = gate.gate_version()
+    if not isinstance(claimed, dict) or not claimed.get("api"):
+        return ("seam declares a gate surface this receiver cannot read "
+                f"({claimed!r}); refused fail-closed (item 337 gate-version skew)")
+    if claimed["api"] != own["api"]:
+        return (f"seam declares gate surface api {claimed['api']!r} "
+                f"(frontier {claimed.get('frontier')!r}) but this receiver's gate "
+                f"is api {own['api']!r} (frontier {own.get('frontier')!r}); the two "
+                "gates cover different surfaces, so their agreement cannot be "
+                "trusted — refused fail-closed (item 337 gate-version skew)")
+    return None
+
+
 def _selector_binding(running_ir: dict, key: str, component: str) -> str | None:
     """Bind the wire's SELECTOR to the key whose proxy actually moves. Returns
     None when `component` is genuinely a provider of `key` in this process's own
@@ -355,6 +404,11 @@ def _repoint_decision(spec_files: list, running_ir: dict, cmd: dict,
     `_sanction_address` refuses a `cmd["socket"]` outside the placement
     directory this process was handed its own spec in. Admitting a component
     while re-pointing a key at an unjudged address judged the wrong thing.
+
+    And before any of that, `_gate_surface_compatible` refuses a successor whose
+    declared gate `api` differs from this receiver's own: two ends that do not
+    cover the same surface cannot trust each other's admission agreement (item
+    337 seam identity). A repoint that declares no `gate_version` is tolerated.
     """
     key = cmd.get("key")
     component, backend = cmd.get("component"), cmd.get("backend")
@@ -363,6 +417,9 @@ def _repoint_decision(spec_files: list, running_ir: dict, cmd: dict,
     if not component or not backend:
         return False, ("repoint carries no admissible successor reference "
                        "(component/backend); refused fail-closed (item 337)")
+    problem = _gate_surface_compatible(cmd.get("gate_version"))
+    if problem:
+        return False, problem
     problem = _selector_binding(running_ir, key, component)
     if problem:
         return False, problem
@@ -429,7 +486,11 @@ def _boot_wiring_decision(spec_files: list, running_ir: dict, key: str, info: di
     to which admission question the bound selector is then put to: they run
     first and unchanged, so `seam_readmission` only ever judges a selector this
     manifest already names as the provider of `key`, at an address this receiver
-    already sanctions.
+    already sanctions. `_gate_surface_compatible` runs first of all: a provider
+    whose declared gate `api` differs from this receiver's own is refused before
+    binding or address, since two ends on different gate surfaces cannot trust
+    each other's admission agreement (item 337 seam identity); a proxy entry that
+    declares no `gate_version` is tolerated.
 
     The honest limit (named in the design, not smuggled past it): at boot the
     consumer holds the SAME centrally-sliced source the conductor already
@@ -442,6 +503,9 @@ def _boot_wiring_decision(spec_files: list, running_ir: dict, key: str, info: di
     if not component or not backend:
         return False, ("boot proxy carries no admissible provider reference "
                        "(component/backend); refused fail-closed (item 337)")
+    problem = _gate_surface_compatible(info.get("gate_version"))
+    if problem:
+        return False, problem
     problem = _selector_binding(running_ir, key, component)
     if problem:
         return False, problem
