@@ -967,18 +967,26 @@ class _Driver:
 
     @classmethod
     def _withdraw_cause(cls, name: str, component: str, to: str, err,
-                        cascade_causes: dict) -> dict:
+                        cascade_causes: dict, root_cause: dict | None = None) -> dict:
         """The cause a settled withdrawal carries (v2-aware, pure).
 
-        The withdrawn `component` roots at the operator `trigger`; every
-        dependent keeps its `provider-withdrawn` edge (read from the static
+        The withdrawn `component` roots at the operator `trigger` by default;
+        every dependent keeps its `provider-withdrawn` edge (read from the static
         prediction, so the oracle can never disagree with it). When the settle
         is into ``FAILED`` and its error classifies, the diagnostic `code` is
         attached to that cause *without changing its kind* — the causal edge is
         unchanged, the code is extra detail on how it went down. A FAILED with
-        no classifiable error omits `code` (never fabricated)."""
+        no classifiable error omits `code` (never fabricated).
+
+        `root_cause` (item 477) overrides the ROOT the target itself carries —
+        a `cause_liveness_expired` for a silence-driven expiry — so a hung
+        provider's withdrawal roots at the expiry, not at the operator trigger.
+        The dependents' edges are untouched: they cascade through the ordinary
+        `provider-withdrawn` edge whatever unseated their provider."""
         code = cls._failure_code(err) if to == "FAILED" else None
         if name == component:
+            if root_cause is not None:
+                return root_cause
             return why_runtime.cause_trigger(
                 f"withdrawn by operator (revl run --withdraw {component})",
                 code=code)
@@ -1310,6 +1318,68 @@ class _Driver:
 
         report = why_runtime.oracle(self.ir, component, why_runtime.Trace(self._events))
         return report
+
+    def _liveness_ceiling(self, component: str) -> int | None:
+        """The declared liveness ceiling (ms) for `component`, or ``None`` when
+        it declared none — read from the additive IR key the item-477
+        declared-ceiling slice lowers (`liveness_ceiling_ms`)."""
+        for comp in _components(self.ir or {}):
+            if comp.get("name") == component:
+                return comp.get("liveness_ceiling_ms")
+        return None
+
+    async def _perform_liveness_expiry(self, component: str,
+                                       silent_ms: int) -> dict | None:
+        """Withdraw a hung provider whose declared liveness ceiling has been
+        breached, recording the cascade with a LIVENESS_EXPIRED ROOT — the
+        runtime complement of the item-438 static dead-state finding (item 477).
+
+        This is the QUIET case, distinct from the fault path: nothing raised, no
+        diagnostic `code`, the provider simply went silent. The declared ceiling
+        is read from the IR; the gate `why_runtime.liveness_expired` decides
+        whether `silent_ms` actually breaks it, so a partial world (no ceiling
+        declared, a silence still inside the ceiling) fabricates NO expiry and
+        this is a no-op. When it does fire, the target roots at
+        `cause_liveness_expired` and its dependents cascade through the ordinary
+        `provider-withdrawn` edge, exactly as under any other withdrawal of their
+        provider. Returns the oracle report, or ``None`` on a bad name or a
+        non-expiry."""
+        fiber = self.fibers.get(component)
+        if fiber is None:
+            self._log("error", "liveness",
+                      f"no live component named {component!r} "
+                      f"(have: {', '.join(sorted(self.fibers)) or 'none'})")
+            return None
+
+        ceiling = self._liveness_ceiling(component)
+        if not why_runtime.liveness_expired(ceiling, silent_ms):
+            # defensive: no declared ceiling, or the silence is still within it —
+            # never fabricate an expiry for a provider that may yet answer.
+            self._log("liveness", component,
+                      f"silent {silent_ms}ms — within the "
+                      f"{'undeclared' if ceiling is None else str(ceiling) + 'ms'} "
+                      f"ceiling; not expired")
+            return None
+
+        self._log("liveness", component,
+                  f"silent {silent_ms}ms past its {ceiling}ms ceiling — "
+                  f"withdraw the hung provider, observe the cascade")
+        root_cause = why_runtime.cause_liveness_expired(ceiling_ms=ceiling,
+                                                        silent_ms=silent_ms)
+        self._observing = {n: self.FiberState(f.state).name
+                           for n, f in self.fibers.items()}
+        self._settled = []
+        cascade_causes = why_runtime.withdrawal_causes(self.ir, component)
+        await fiber.dispose()
+        await self._flush()
+        self._observing = None
+
+        for name, frm, to, err in self._settled:
+            cause = self._withdraw_cause(name, component, to, err,
+                                         cascade_causes, root_cause=root_cause)
+            self._record(why_runtime.WITHDRAW, name, f"{frm} -> {to}", cause)
+
+        return why_runtime.oracle(self.ir, component, why_runtime.Trace(self._events))
 
     # -- REPL --------------------------------------------------------------
 

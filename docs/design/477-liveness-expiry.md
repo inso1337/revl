@@ -76,7 +76,7 @@ the new kind slots in without touching them, and any producer built by the
 follow-ups below emits into a vocabulary that already exists and is already
 tested.
 
-## Follow-up 1: the declared liveness expectation (grammar and gate)
+## Follow-up 1: the declared liveness expectation (grammar and gate) — LANDED
 
 Operator-visible and gate-enforced means a source-level declaration, a lease
 ceiling attached per activation, in the shape `cache ... ttl` already
@@ -85,8 +85,50 @@ G-rule when it is declared on an activation that cannot hang (one with no
 emission or host-call reach has nothing to be silent about, so a ceiling on it
 is a category error worth refusing rather than silently ignoring). This is
 grammar plus parser plus lowering plus one admission check, the same surface
-item 310 touched, and it should land as its own slice with its own falsification
-tests rather than riding this note.
+item 310 touched.
+
+This slice landed, together with the runtime producer that wires the declaration
+into the vocabulary the note above added:
+
+* **Grammar + parser.** A contextual `liveness <dur>` clause in the component
+  header (after `requires`/`provides`, before `{`), read only in that slot so the
+  word is untouched as an ordinary name elsewhere. It funnels through the same
+  `policy._parse_ttl` duration surface as `cache ... ttl` (a shared
+  `_duration_literal`), and a non-positive ceiling is refused at parse.
+* **Lowering.** The ceiling lowers to the additive IR key `liveness_ceiling_ms`,
+  conditionally present, so a component that declares none is byte-identical
+  through the IR and every emitter.
+* **The admission G-rule.** `lower._activation_can_hang` decides whether the
+  activation body reaches an emission (`emit` step) or a host-call
+  (`effect`/`let-effect`), pruning `provide` methods (they run per call, not at
+  the activation transition). A ceiling on an activation that cannot hang is
+  refused (`category="liveness"`).
+* **The runtime producer.** `run._Driver._perform_liveness_expiry(component,
+  silent_ms)` reads the declared ceiling from the IR, consults the landed
+  `why_runtime.liveness_expired` gate (so a partial world fabricates no expiry),
+  and — when the silence genuinely breaks the ceiling — withdraws the hung
+  provider with a `cause_liveness_expired` ROOT while its dependents cascade
+  through the ordinary `provider-withdrawn` edge. `_withdraw_cause` gained an
+  optional `root_cause` override for the target so the QUIET root replaces the
+  operator `trigger` without touching the dependent edges. One small vocabulary
+  wiring change went with it: `why_runtime.actual_cascade` now recognises a
+  `liveness-expired` root as an ORIGINATING withdrawal (as it already did the
+  operator `trigger`), so the differential oracle observes a hung-provider
+  expiry cascade exactly as it observes an operator withdrawal.
+
+`tests/test_477_liveness_ceiling.py` pins all four: the ceiling lowers and its
+units match the `cache ttl` surface, a ceiling on a non-hangable activation is
+refused, `liveness` stays a plain name outside the header slot, and the producer
+withdraws a hung provider with a liveness-expiry root that is DISTINCT from a
+fault (which carries a diagnostic `code`) while the dependent still cascades. The
+producer's firing path runs with the fiber-settle boundary stubbed (the boundary
+cordis owns); a `@needs_cordis` end-to-end boots it on the real driver in CI.
+
+Silence DETECTION — a running heartbeat that measures `silent_ms` and calls the
+producer on its own — is deliberately not in this slice. The producer is driven
+with an observed silence (the operator-facing "what happens when this provider
+hangs past its ceiling" tool, and what the reconcile follow-up will call);
+wiring a background liveness monitor into the reactive loop is its own piece.
 
 ## Follow-up 2: reconcileLivenessFromWorld on restart
 

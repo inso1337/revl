@@ -464,11 +464,16 @@ def actual_cascade(trace: Trace, component: str) -> dict:
     root of its cause chain, the withdrawal of `component` — i.e. it went down
     because of this withdrawal, not a coincidental one."""
     withdraws = [e for e in trace.events if e.get("event") == WITHDRAW]
-    # the trigger event for the component under test
+    # the ORIGINATING event for the component under test: a withdrawal that
+    # starts AT the component, not one it inherited from a provider. An operator
+    # `trigger` is one; a silence-driven `liveness-expired` (item 477) is the
+    # other — both are roots that mean "the withdrawal begins here", so the
+    # oracle observes a hung-provider expiry exactly as it observes an operator
+    # withdrawal (a cascade rooted at either is a real, checkable cascade).
     root = None
     for event in withdraws:
         if event.get("component") == component \
-                and (event.get("cause") or {}).get("kind") == TRIGGER:
+                and (event.get("cause") or {}).get("kind") in (TRIGGER, LIVENESS_EXPIRED):
             root = event
     order: list[str] = []
     broken: list[str] = []
