@@ -8,17 +8,26 @@
  * (test/corpus + check.mjs) is the conformance gate.
  */
 
+// Precedence ladder, loosest to tightest, mirroring the reference parser's
+// recursive-descent chain (src/revl/parser.py `_ternary` … `_postfix`). The
+// bitwise operators `| ^ &` sit between `&&` and equality in C/TypeScript
+// order (loosest `|`, then `^`, then `&`), and the Int32 shifts `<< >>` sit
+// between comparison and additive (item 366, docs/arithmetic.md).
 const PREC = {
   ternary: 1,
   or: 2,
   nullish: 3,
   and: 4,
-  equality: 5,
-  comparison: 6,
-  additive: 7,
-  multiplicative: 8,
-  unary: 9,
-  postfix: 10,
+  bor: 5,
+  bxor: 6,
+  band: 7,
+  equality: 8,
+  comparison: 9,
+  shift: 10,
+  additive: 11,
+  multiplicative: 12,
+  unary: 13,
+  postfix: 14,
 };
 
 const commaSep = (rule) => optional(commaSep1(rule));
@@ -30,7 +39,12 @@ module.exports = grammar({
 
   externals: ($) => [$.template_string, $._host_body],
 
-  extras: ($) => [/\s/, $.comment],
+  // `;` is an OPTIONAL statement separator/terminator that carries no meaning
+  // of its own (parser.py `_skip_semis`, item 157): a leading, trailing, or
+  // repeated `;` is a harmless no-op, and a program written with no `;` parses
+  // to the same tree. Listing it as an extra models exactly that "skipped
+  // wherever statements are listed" behavior.
+  extras: ($) => [/\s/, ';', $.comment],
 
   conflicts: ($) => [
     [$.record_literal, $.block],
@@ -208,8 +222,8 @@ module.exports = grammar({
       ),
 
     // A test body accepts both pure statements and the lifecycle-test
-    // statements (load / unload / call / swap). The reference restricts the
-    // latter to `lifecycle test` bodies; that is a context-sensitive rule.
+    // statements (load / unload / call). The reference restricts the latter to
+    // `lifecycle test` bodies; that is a context-sensitive rule.
     test_body: ($) =>
       seq('{', repeat(choice($._lifecycle_statement, $._statement)), '}'),
 
@@ -276,7 +290,7 @@ module.exports = grammar({
       ),
 
     _lifecycle_statement: ($) =>
-      choice($.load_statement, $.unload_statement, $.call_statement, $.swap_statement),
+      choice($.load_statement, $.unload_statement, $.call_statement),
 
     let_statement: ($) =>
       seq(
@@ -411,9 +425,6 @@ module.exports = grammar({
     bound_call: ($) =>
       seq(choice('let', 'var'), field('binding', $.identifier), '=', $.call_statement),
 
-    swap_statement: ($) =>
-      seq('swap', field('from', $.identifier), '->', field('to', $.identifier)),
-
     expression_statement: ($) => $._expression,
 
     // --------------------------------------------------------- expressions
@@ -430,6 +441,7 @@ module.exports = grammar({
         $.null,
         $.hole,
         $.record_literal,
+        $.record_update,
         $.list_literal,
         $.match_expression,
         $.arrow_function,
@@ -450,7 +462,9 @@ module.exports = grammar({
     unary_expression: ($) =>
       prec.right(
         PREC.unary,
-        seq(field('operator', choice('!', '-')), field('operand', $._expression)),
+        // `~` is the Int32 bitwise complement, grouped with the other prefix
+        // unaries (item 366, docs/arithmetic.md).
+        seq(field('operator', choice('!', '-', '~')), field('operand', $._expression)),
       ),
 
     // `emit <call>` in value position (parser.py EmitExpr): the value of an
@@ -465,6 +479,9 @@ module.exports = grammar({
         ['||', PREC.or],
         ['??', PREC.nullish],
         ['&&', PREC.and],
+        ['|', PREC.bor],
+        ['^', PREC.bxor],
+        ['&', PREC.band],
         ['==', PREC.equality],
         ['===', PREC.equality],
         ['!=', PREC.equality],
@@ -473,6 +490,8 @@ module.exports = grammar({
         ['>', PREC.comparison],
         ['<=', PREC.comparison],
         ['>=', PREC.comparison],
+        ['<<', PREC.shift],
+        ['>>', PREC.shift],
         ['+', PREC.additive],
         ['-', PREC.additive],
         ['*', PREC.multiplicative],
@@ -534,6 +553,22 @@ module.exports = grammar({
     record_entry: ($) =>
       seq(field('name', $.identifier), ':', field('value', $._expression)),
 
+    // Functional record update `{ base | f = e, g = e2 }` (parser.py
+    // ExprRecordUpdate, docs/records.md §1). The top-level `|` separates the
+    // base expression from the `field = value` updates; it is the
+    // record-update separator here, not the bitwise-OR operator (item 366).
+    record_update: ($) =>
+      seq(
+        '{',
+        field('base', $._expression),
+        '|',
+        commaSep1($.record_update_field),
+        '}',
+      ),
+
+    record_update_field: ($) =>
+      seq(field('name', $.identifier), '=', field('value', $._expression)),
+
     list_literal: ($) => seq('[', commaSep($._expression), ']'),
 
     match_expression: ($) =>
@@ -584,10 +619,40 @@ module.exports = grammar({
     boolean: ($) => choice('true', 'false'),
     null: ($) => 'null',
 
-    integer: ($) => /\d+/,
-    float: ($) => token(choice(/\d+\.\d+([eE][+-]?\d+)?/, /\d+[eE][+-]?\d+/)),
+    // Integer literals: decimal plus the item-381 non-decimal radices
+    // (`0x`/`0b`/`0o`, either case) and `_` digit-group separators
+    // (docs/arithmetic.md). `_` is a separator only — it may not lead, trail,
+    // or double — which `(_?<digit>)*` enforces.
+    integer: ($) =>
+      token(
+        choice(
+          /0[xX][0-9a-fA-F](_?[0-9a-fA-F])*/,
+          /0[bB][01](_?[01])*/,
+          /0[oO][0-7](_?[0-7])*/,
+          /\d(_?\d)*/,
+        ),
+      ),
+    float: ($) =>
+      token(
+        choice(
+          /\d(_?\d)*\.\d(_?\d)*([eE][+-]?\d(_?\d)*)?/,
+          /\d(_?\d)*[eE][+-]?\d(_?\d)*/,
+        ),
+      ),
 
-    string: ($) => token(seq('"', /[^"\n]*/, '"')),
+    // String literals. revl has three spellings (docs/strings.md, item 382):
+    //   - `"..."` and `'...'` — the only escapes are `\"`/`\'` and `\\`; every
+    //     other backslash sequence is verbatim, and neither may span a newline.
+    //   - `"""..."""` — triple-quoted verbatim text that MAY span newlines and
+    //     closes only on `"""` (a lone `"` or `""` inside is ordinary text).
+    // The triple form is listed first so the lexer's longest-match picks it
+    // over an empty `""` when three quotes open.
+    string: ($) =>
+      choice(
+        token(seq('"""', repeat(choice(/[^"]/, /"[^"]/, /""[^"]/)), '"""')),
+        token(seq('"', repeat(choice(/[^"\\\n]/, /\\[^\n]/)), '"')),
+        token(seq("'", repeat(choice(/[^'\\\n]/, /\\[^\n]/)), "'")),
+      ),
 
     identifier: ($) => /[A-Za-z_][A-Za-z0-9_]*/,
   },

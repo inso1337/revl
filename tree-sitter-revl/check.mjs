@@ -32,11 +32,13 @@ const EXEMPT = new Map([
       'variant members.',
   ],
   [
-    'examples/rejections/v2_semicolon_separator.rvl',
-    'revl has no `;` statement separator; the reference lexer/parser rejects ' +
-      '`;` at the source character. Statements are newline-separated, so there ' +
-      'is no `;` token in the grammar and a stray `;` is an ERROR here, matching ' +
-      "the reference's own refusal.",
+    'examples/rejections/lifecycle_no_swap.rvl',
+    'revl has no `swap` statement: `swap C -> C2`. The reference parser ' +
+      'rejects it at parse time (parser.py, "there is no `swap` statement") ' +
+      'because G2 forbids two components in one document providing the same ' +
+      'key, so a swap between them is meaningless. `swap` is not a keyword and ' +
+      'the grammar has no swap_statement, so a `swap` line is an ERROR here, ' +
+      "matching the reference's own refusal.",
   ],
   [
     'examples/rejections/v2_provide_emission_fn.rvl',
