@@ -79,7 +79,7 @@ except ModuleNotFoundError:  # pragma: no cover - environment problem, not a fin
     sys.stderr.write(
         "check_workflow_permissions: PyYAML is required.\n"
         "  CI installs it in the `lint` job; locally use\n"
-        "    uv run --with pyyaml python3 tools/check_workflow_permissions.py\n"
+        "    uv run --with pyyaml==6.0.2 python3 tools/check_workflow_permissions.py\n"
         "  or `pip install pyyaml`.\n"
         "Refusing to run: a workflow gate that silently skips is the defect it exists to prevent.\n"
     )
