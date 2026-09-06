@@ -116,6 +116,7 @@ was corrected by hand and had drifted back within a day.
 | distribution-model.md | stale-fixed | 7 |  |
 | environment-binding.md | needs-work | 0 |  |
 | erase-report.md | needs-work | 19 |  |
+| eval-protocol.md | needs-work | 0 |  |
 | evolve-loop.md | current | 18 |  |
 | expressible-iteration.md | needs-work | 14 |  |
 | fault-tests.md | needs-work | 70 |  |
