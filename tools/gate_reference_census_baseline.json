@@ -23,6 +23,7 @@
    "examples/async_timer.rvl",
    "examples/budget_attenuation.rvl",
    "examples/durable_log.rvl",
+   "examples/interpose_observe.rvl",
    "examples/lifecycle_cache.rvl",
    "examples/lifecycle_leak.rvl",
    "examples/lifecycle_timer.rvl",
@@ -266,6 +267,18 @@
    }
   },
   "examples/durable_log.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/interpose_observe.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
