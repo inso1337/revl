@@ -131,7 +131,16 @@ def build_parser() -> argparse.ArgumentParser:
     composition.add_argument(
         "--admit", action="store_true",
         help="also COMPILE the rows the table names and print the resulting "
-             "load order (resolution alone lowers no component body)")
+             "load order (resolution alone lowers no component body). "
+             "INCREMENTAL by default (item 426 S3): a composition with layers "
+             "compiles its base once, then admits only the changed and "
+             "withdrawn rows into that running manifest")
+    composition.add_argument(
+        "--full", action="store_true",
+        help="with --admit, force WHOLE-COMPOSITION admission — every row is "
+             "compiled, never just the layer delta (item 426 S3, §5.1). The "
+             "verdict is identical to the incremental default; this is the "
+             "escape hatch for a cross-row rule a per-row admission cannot honour")
     composition.add_argument(
         "--root", default=None, metavar="DIR",
         help="the project root row provenance and origins are recorded "

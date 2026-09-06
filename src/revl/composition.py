@@ -1241,19 +1241,25 @@ def resolve_file(path: str, root: str | None = None,
     return fold(decl, path, root, overlay)
 
 
-def compile_composition(path: str, root: str | None = None,
-                        overlay: dict | None = None, **kwargs) -> dict:
-    """Compile a composition document: resolve the row table, compile the rows
-    it names, and carry the table into the IR and the manifest.
+def _carry_rows(document: dict, table: RowTable) -> dict:
+    """Carry the resolved row table into the IR and the manifest, so the
+    document names the composition object whichever admission path built it."""
+    document["rows"] = table.to_ir()
+    if isinstance(document.get("manifest"), dict):
+        document["manifest"]["rows"] = document["rows"]
+    return document
 
-    This is the bootstrap shrink 426 §6 point 3 claims: a declared composition
-    is compiled and READ (its rows are already in the IR) instead of compiled,
-    emitted, exec'd, called and parsed back out of a JSON string.
+
+def _admit_full(table: RowTable, root: str, **kwargs) -> dict:
+    """Compile every row a table names — whole-composition admission.
+
+    This is the admission path S1 shipped: the file list `compile_files` takes,
+    composition-declared rather than hand-listed (the 426 §6 point 3 bootstrap
+    shrink). `admit_composition(full=True)` and a layer-free composition both
+    reach this.
     """
     from .compiler import compile_files  # noqa: PLC0415 (cycle: compiler -> parser -> here)
 
-    root = os.path.abspath(root or os.getcwd())
-    table = resolve_file(path, root, overlay)
     # item 424 C2: a synthesized provider is compiled from memory. It is
     # ORDINARY revl source and the ordinary compiler compiles it, so `_link`
     # runs G2, G3 and G4 over it exactly as it does over a file row — which is
@@ -1263,7 +1269,128 @@ def compile_composition(path: str, root: str | None = None,
         sources[os.path.join(root, rel)] = text
     document = compile_files([os.path.join(root, p) for p in table.paths()],
                              sources=sources or None, **kwargs)
-    document["rows"] = table.to_ir()
-    if isinstance(document.get("manifest"), dict):
-        document["manifest"]["rows"] = document["rows"]
-    return document
+    return _carry_rows(document, table)
+
+
+def _resolved_delta(base: RowTable,
+                    final: RowTable) -> tuple[list[Row], tuple[str, ...]]:
+    """The resolved delta between an already-admitted base and the folded final
+    composition (426 §5.1): the rows to (re)compile, and the running-manifest
+    components the delta withdraws.
+
+    A final row with no base row of its label is an ADD; one whose source
+    component differs is a REPLACE; a base label absent from the final table is
+    a REMOVE. Only ADD and REPLACE rows are compiled — the change §5.1 names.
+    `replacing` withdraws every component a REMOVE drops or a REPLACE supersedes
+    UNDER A NEW NAME; an in-place swap (same component name) is withdrawn
+    implicitly by `compile_files`, so only a rename is named here. A
+    configure-only patch changes neither source nor component, so it enters
+    neither set — config never reaches the gate (§5.3), it lives in the rows IR.
+    """
+    base_by = {row.qualified: row for row in base.rows}
+    final_by = {row.qualified: row for row in final.rows}
+    delta: list[Row] = []
+    replacing: list[str] = []
+    for row in final.rows:
+        prior = base_by.get(row.qualified)
+        if prior is None:
+            delta.append(row)                          # ADD
+        elif prior.source != row.source or prior.component != row.component:
+            delta.append(row)                          # REPLACE
+            if prior.component != row.component:
+                replacing.append(prior.component)      # a rename: name it
+    for qualified, prior in base_by.items():
+        if qualified not in final_by:
+            replacing.append(prior.component)          # REMOVE
+    return delta, tuple(replacing)
+
+
+def _delta_sources(rows: list[Row], final: RowTable,
+                   root: str) -> tuple[list[str], dict[str, str]]:
+    """The compile roots for the delta rows — each row's source, deduplicated in
+    order — plus the in-memory source for any SYNTHESIZED (remote) provider
+    among them, keyed the way `compile_files` takes it (absolute path)."""
+    paths: list[str] = []
+    synth: dict[str, str] = {}
+    for row in rows:
+        if row.source not in paths:
+            paths.append(row.source)
+        text = final.sources.get(row.source)
+        if text is not None:
+            synth[os.path.join(root, row.source)] = text
+    return paths, synth
+
+
+def compile_composition(path: str, root: str | None = None,
+                        overlay: dict | None = None, **kwargs) -> dict:
+    """Compile a composition document: resolve the row table, compile the rows
+    it names, and carry the table into the IR and the manifest.
+
+    This is the bootstrap shrink 426 §6 point 3 claims: a declared composition
+    is compiled and READ (its rows are already in the IR) instead of compiled,
+    emitted, exec'd, called and parsed back out of a JSON string.
+
+    Whole-composition admission: every row is compiled. `admit_composition` is
+    the S3 incremental door onto the same verdict.
+    """
+    root = os.path.abspath(root or os.getcwd())
+    return _admit_full(resolve_file(path, root, overlay), root, **kwargs)
+
+
+def admit_composition(path: str, root: str | None = None,
+                      overlay: dict | None = None, full: bool = False,
+                      **kwargs) -> dict:
+    """Admit a composition, INCREMENTALLY by default (426 S3, §5.1).
+
+    A composition that declares layers is a DELTA over an already-admitted
+    base: the layers add, replace and remove rows. Incremental admission
+    compiles the base once, then admits only the changed and `replacing` rows
+    INTO that running manifest — `admit_into` over the resolved delta (§5.1) —
+    so the cost of the operator's decision is one compile of the patched rows,
+    not of the whole composition. `_link` still spans the union of the ambient
+    manifest and the delta (`compiler.py`, `lower.py:_link`), so the verdict
+    and the resulting manifest are the ones a whole-composition compile reaches
+    for the SAME final composition. That equivalence is the property S3 owes,
+    and it is why the fold stays off the trusted path (§3.3): a delta that would
+    collide with the running composition is refused with the collision's
+    why-trace, exactly as a full compile refuses it.
+
+    `full=True` forces whole-composition admission — every row compiled, the
+    behaviour `compile_composition` has always had. It is the escape hatch §5.1
+    (I1) names for a future cross-row invariant that a per-row admission cannot
+    honour, and it is what a caller reaches for to re-establish the base line
+    the incremental verdict is checked against.
+
+    A composition with no declared layer has no delta: the base IS the whole
+    composition, so both modes are the full compile and this returns that
+    document.
+    """
+    from .compiler import compile_files  # noqa: PLC0415 (cycle: compiler -> parser -> here)
+
+    root = os.path.abspath(root or os.getcwd())
+    decl = sole_composition(parse_file(path), path)
+    final = resolve_file(path, root, overlay)
+
+    if full or (not decl.stack and decl.site is None):
+        return _admit_full(final, root, **kwargs)
+
+    base = resolve(decl, path, root)
+    delta_rows, replacing = _resolved_delta(base, final)
+
+    # The already-admitted base: one whole compile, the running manifest every
+    # delta row is admitted INTO.
+    base_doc = _admit_full(base, root, **kwargs)
+    if not delta_rows and not replacing:
+        # A configure-only delta changes no wiring and no component, so the base
+        # manifest already IS the resulting one (§5.3). Only the rows IR carries
+        # the new config, so re-key the base document onto the folded table.
+        return _carry_rows(base_doc, final)
+
+    extra = dict(kwargs.pop("sources", None) or {})
+    paths, synth = _delta_sources(delta_rows, final, root)
+    extra.update(synth)
+    document = compile_files(
+        [os.path.join(root, p) for p in paths],
+        manifest=base_doc, replacing=replacing,
+        sources=extra or None, **kwargs)
+    return _carry_rows(document, final)
