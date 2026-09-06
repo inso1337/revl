@@ -198,12 +198,16 @@
 // residue below is either NOT a single-source verdict (so it has no `admit_src`
 // cross-check) or a shape the gate's verdict vocabulary cannot express:
 //   * The type/arg-checking spine (checker.rvl already cross-checks typing).
-//   * Refusal ORDER against the reference's collect-all sink (item 386): the
-//     reference orders its collected diagnostics by LINE, so an earlier-line
-//     link (G2) refusal outranks a later-line component refusal, while this gate
-//     reports the first refusal it reaches. The two agree on every program with
-//     ONE refusal; only a multi-defect program can separate them, and closing it
-//     needs line numbers on every gate refusal plus a collecting sink.
+//   * Refusal ORDER against the reference's collect-all sink (item 386) is now
+//     CLOSED (item 419c): every gate refusal carries the line the reference's
+//     diagnostic carries (see the anchor table above `pick_min`), collected into
+//     a sink per recovery unit — a module fn, a component, a post-pass, the link
+//     — and `admit_src` reports the minimum by `(line, seq)`, `seq` the append
+//     index, reproducing the reference's line order and its stable tie-break.
+//     Statement-level (Stage-2) recovery INSIDE a component body is still out of
+//     scope: the gate reports a component's first refusal, which is enough for
+//     the `diagnostics[0]` agreement, since a component's own first refusal by
+//     line is the one that competes with other components' and the link's.
 //   * The routing form's PARSE-level rules (an empty `realms()`, a dynamic label,
 //     a repeated label) stay unvalidated: the reference raises those from its
 //     parser, a family outside this gate's verdict vocabulary. The route clause
@@ -256,9 +260,12 @@ use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
 // `async_params`): a fn that CALLS such a parameter is itself colored (a
 // declaration-shaped seed), so `async_colored` unions `callees ∩ asyncParams`
 // into the fixed point exactly as the reference does.
+// `line` (item 419c): the fn/extern DECLARATION line. A module-fn twin refusal
+// (`_refuse_leaky_pure_arrow`, the first-class async-value refusal) is anchored
+// here, matching the reference, which reports those against the declaration.
 type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
              callees: List[Str], asyncSlots: List[Int], asyncParams: List[Str],
-             body: List[Stmt], cachePure: Bool }
+             body: List[Stmt], cachePure: Bool, line: Int }
 
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
@@ -284,7 +291,11 @@ type SvcD = { name: Str, methods: List[MSig] }
 // exact await/async pairing the whole-body name fence cannot express, and
 // `_async_reached_outside_provide`'s prune of an await-marked step is a flag
 // read rather than a positional guess.
-type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool }
+// `line` (item 419c): the SOURCE line the statement was read from, stamped by
+// `p_stmts` off the first token of the statement's line-run. It is the anchor a
+// component BODY refusal reports (`refusal_line`), so the collecting sink orders
+// an inline G4/A1/G1 by the same line the reference's diagnostic carries.
+type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int }
 
 // A provide method: its parameters feed the G1 scope (a param is a declared
 // name in the method body), and its body is walked for G4/A1/G1. `isAsync` is
@@ -304,9 +315,15 @@ type ProvKey = { key: Str, rlm: Str }
 // router's rotation is defined over it) and `strat` the strategy name ("" when
 // omitted — the router's default).
 type Route   = { key: Str, rlms: List[Str], strat: Str }
+// `line` (item 419c): the component DECLARATION line. It is the anchor for
+// every COMPOSITION-level refusal the reference reports against a component —
+// the G2 provision conflict (the second provider's line, `_link`'s
+// `_line(entry["name"])`), the ROUTE gap, the G3 cycle member, the setup
+// async-reach A1, and the `boot` count — as well as the parse-time metadata
+// refusal carried in `refuse`.
 type CompD   = { name: Str, provKeys: List[ProvKey], provs: List[Provide],
                  reqMap: List[Bind], setup: List[Stmt], iso: List[ProvKey],
-                 routes: List[Route], refuse: Str }
+                 routes: List[Route], refuse: Str, line: Int }
 
 type Bind = { name: Str, ty: Str }
 
@@ -656,9 +673,10 @@ fn mk_step(p: Prog, i: Int) -> PStep { return { pg: p, i: i } }
 // every construction from mutable state goes through one of these, exactly as
 // checker.rvl does.
 fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
-          aps: List[Str], bd: List[Stmt]) -> FnD {
+          aps: List[Str], bd: List[Stmt], ln: Int) -> FnD {
   return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs,
-           asyncSlots: slots, asyncParams: aps, body: bd, cachePure: false }
+           asyncSlots: slots, asyncParams: aps, body: bd, cachePure: false,
+           line: ln }
 }
 
 fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
@@ -667,9 +685,9 @@ fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
 
 fn mk_compd(nm: Str, pks: List[ProvKey], pvs: List[Provide],
             rq: List[Bind], su: List[Stmt], iso: List[ProvKey],
-            rts: List[Route], refuse: Str) -> CompD {
+            rts: List[Route], refuse: Str, ln: Int) -> CompD {
   return { name: nm, provKeys: pks, provs: pvs, reqMap: rq, setup: su, iso: iso,
-           routes: rts, refuse: refuse }
+           routes: rts, refuse: refuse, line: ln }
 }
 
 fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
@@ -682,11 +700,11 @@ fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
 // yields two statements.
 
 fn mkstmt(kind: Str, e: Expr) -> Stmt {
-  return { kind: kind, e: e, bind: "", spawnTarget: "", awaited: false }
+  return { kind: kind, e: e, bind: "", spawnTarget: "", awaited: false, line: 0 }
 }
 
 fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
-  return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: false }
+  return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: false, line: 0 }
 }
 
 // A forward `effect`/`emit`/`undo`/`compensate` statement carrying its item-131
@@ -694,7 +712,7 @@ fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
 // the marker belongs to the acquisition/emission it pairs with, not the
 // position after it, so per-statement pairing can read it directly.
 fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
-  return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: aw }
+  return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: aw, line: 0 }
 }
 
 // A `spawn <target>` acquisition bound to handle `bn`. It is an `effect`
@@ -703,7 +721,7 @@ fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool) -> Stmt {
 // not by walking an expression parser.rvl cannot produce.
 fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
   return { kind: "effect", e: int_lit0(), bind: bn, spawnTarget: target,
-           awaited: false }
+           awaited: false, line: 0 }
 }
 
 // An UNBOUND `effect spawn <target>` (no `let` handle). A spawn's inverse is the
@@ -713,7 +731,7 @@ fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
 // composes); the post-parse `spawn_form_verdict` reports it.
 fn mkstmt_spawn_unbound(target: Str) -> Stmt {
   return { kind: "spawn_unbound", e: int_lit0(), bind: "", spawnTarget: target,
-           awaited: false }
+           awaited: false, line: 0 }
 }
 
 fn int_lit0() -> Expr { return IntLit("0") }
@@ -928,12 +946,28 @@ fn append_stmts(a: List[Stmt], bs: List[Stmt]) -> List[Stmt] {
   return out
 }
 
+// item 419c: stamp every statement read off one line-run with that run's
+// SOURCE line, so a body refusal can report the line the reference's diagnostic
+// carries. `p_stmt_run` collapses `effect X undo Y` on one line into two
+// statements; both are on the same source line, so one line stamps the run.
+fn stamp_lines(ss: List[Stmt], ln: Int) -> List[Stmt] {
+  var out: List[Stmt] = []
+  var i = 0
+  while (i < ss.length()) {
+    let s = ss[i]
+    out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
+                     spawnTarget: s.spawnTarget, awaited: s.awaited, line: ln })
+    i += 1
+  }
+  return out
+}
+
 fn p_stmts(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> List[Stmt] {
   if (lo >= hi || atk(ts, lo, "}")) { return acc }
   let le = line_end(ts, lo, hi)
   let r = p_stmt_run(ts, lo, le)
   let nx = r.i > lo ? r.i : le
-  return p_stmts(ts, nx, hi, append_stmts(acc, r.ss))
+  return p_stmts(ts, nx, hi, append_stmts(acc, stamp_lines(r.ss, tkc(ts, lo).line)))
 }
 
 // ---------------------------------------------------------------- fn callees
@@ -1153,7 +1187,7 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   }
   return mk_step(push_fn(pg, mk_fnd(nm, isEm, isAsync, [],
                                     async_slots_of(ps.ps),
-                                    async_params_of(ps.ps), [])), k)
+                                    async_params_of(ps.ps), [], tkc(ts, i).line)), k)
 }
 
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -1175,7 +1209,8 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
                               callees: body_callees(body, 0, []),
                               asyncSlots: async_slots_of(ps.ps),
                               asyncParams: async_params_of(ps.ps),
-                              body: body, cachePure: cachePure }), bend)
+                              body: body, cachePure: cachePure,
+                              line: tkc(ts, i).line }), bend)
 }
 
 type MethsR = { xs: List[MSig], i: Int, ok: Bool }
@@ -1728,7 +1763,7 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
   }
   return mk_step(push_comp(pg,
                  mk_compd(nm, pks, body.provs, reqs, body.setup, body.iso,
-                          body.routes, body.refuse)),
+                          body.routes, body.refuse, tkc(ts, i).line)),
                  end)
 }
 
@@ -2832,6 +2867,113 @@ fn arrows_in(ss: List[Stmt], i: Int, m: Map[Str, ArrowN]) -> Map[Str, ArrowN] {
 
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
 
+// ============================================================ refusal sink
+//
+// item 419c. The reference collects every recoverable refusal (item 386) and
+// reports `diagnostics[0]` — the minimum by `(file rank, line)` under a STABLE
+// sort, so a tie on the line is broken by pipeline (append) order. In a
+// single-source compile the file rank is constant, so the order is by line,
+// ties in pipeline order.
+//
+// `admit_src` used to return the FIRST refusal it reached in its fixed PHASE
+// order, which agrees with the reference on every program carrying ONE refusal
+// but not on a multi-defect one (the phase-first refusal need not be the
+// lowest-line one). The sink closes that: a `Verd` carries the refusal's wire
+// (`v` = "<TAG>|<msg>", "" = none) and its `line`; `admit_src` collects one per
+// RECOVERY UNIT and returns the minimum by `(line, seq)`, where `seq` is the
+// append index (the stable-sort tie-break).
+//
+// Recovery granularity mirrors the reference's — and the reference has TWO
+// regimes, so this gate has two (see `collect_refusals`):
+//   * FAIL-FAST: cache-purity, host-acquire in a reachable fn, and the module-fn
+//     A1 twins RAISE in `check_and_lower` before its collect-all `errors` sink
+//     exists, so a program that trips one yields that single diagnostic. The
+//     gate returns it alone.
+//   * COLLECTED: the component loop (one refusal per component), the spawn
+//     post-passes, the boot count, and the link (every G2/ROUTE/G3) accumulate
+//     into the reference's `errors` and here into the sink, in pipeline order.
+// Inside one component body the reference's Stage-2 statement-level recovery is
+// NOT mirrored: the gate takes a component's FIRST refusal (in walk order),
+// which is enough for the `diagnostics[0]` agreement, because a component's own
+// first refusal by line is the one that competes with other components' and the
+// link's.
+type Verd = { v: Str, line: Int }
+
+fn no_verd() -> Verd { return { v: "", line: 0 } }
+fn mk_verd(v: Str, line: Int) -> Verd { return { v: v, line: line } }
+
+// The line the reference's diagnostic carries, per refusal family (item 419c's
+// anchor table). The next porter reads it here rather than re-deriving it:
+//
+//   module-fn twin (A1)            -> the fn DECLARATION line (`FnD.line`)
+//   cache-purity crossing (G4)     -> the offending fn's declaration line
+//   reachable-fn host acquire (G4) -> the offending fn's declaration line
+//   component body, inline         -> the offending STATEMENT's line
+//     (G4 emit-marker / G1 access)    (`refusal_line` over the walked body)
+//   component metadata, parse-time -> the component DECLARATION line
+//     (PRELUDE / G1 / HANDOFF wiring)  (`CompD.line`; carried in `refuse`)
+//   component post-walk            -> the component declaration line
+//     (aggregate G4/A1, sig parity,    (`CompD.line`)
+//      await, setup async-reach)
+//   spawn form (SPAWN)             -> the component declaration line
+//   spawn bounds / attenuation     -> the spawner component's declaration line
+//   BOOT count                     -> the SECOND boot component's line
+//   G2 provision conflict          -> the SECOND provider's declaration line
+//     (`_link`'s `_line(entry["name"])`)
+//   ROUTE multi-realm gap          -> the consumer component's declaration line
+//   G3 cycle / self-provision      -> a cycle member's declaration line
+//   FOREIGN / BAD (parse, nesting) -> a pre-collection early return: a parse
+//     refusal aborts before any body lowers, so it never competes with a
+//     collected refusal and rides the wire with no line, as the reference's
+//     parser raises it alone.
+//   an AMBIENT (running-manifest) entry has no declaration line; `_link`
+//     defaults it to 1 (slice B).
+//
+// Statement-level (Stage-2) recovery inside a component body is OUT of this
+// slice: the gate reports a component's first refusal, not every one.
+
+// The minimum refusal by `(line, seq)` — `seq` the append index, so a tie on
+// the line is broken by pipeline order exactly as the reference's stable sort
+// breaks it. "" when the sink is empty (the program is admitted).
+fn pick_min(rs: List[Verd]) -> Str {
+  if (rs.length() == 0) { return "" }
+  var best = rs[0]
+  var i = 1
+  // strictly-less keeps the FIRST-appended of an equal-line pair, which is the
+  // stable-sort tie-break: a later refusal on the same line never displaces it.
+  while (i < rs.length()) {
+    if (rs[i].line < best.line) { best = rs[i] }
+    i += 1
+  }
+  return best.v
+}
+
+fn append_verds(a: List[Verd], b: List[Verd]) -> List[Verd] {
+  var out = a
+  var i = 0
+  while (i < b.length()) { out = out.push(b[i]) i += 1 }
+  return out
+}
+
+// The offending statement's source line for an INLINE body refusal: the first
+// statement whose incremental walk sets `Ac.msg`. Re-walks the body (the walk
+// is pure) so `Ac` needs no extra field. 0 when no statement refuses (the
+// caller then falls back to the component line, e.g. a post-walk verdict).
+fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
+  if (i >= ss.length()) { return 0 }
+  let na = walk_one_stmt(ss[i], cx, a)
+  if (na.msg != "") { return ss[i].line }
+  return refusal_line(ss, i + 1, cx, na)
+}
+
+// The line for an inline body refusal, with the component line as the fallback
+// for a refusal that is not a plain statement walk (0 from `refusal_line`).
+fn body_line(ss: List[Stmt], cx: Ctx, fallback: Int) -> Int {
+  let ln = refusal_line(ss, 0, cx, empty_ac())
+  if (ln == 0) { return fallback }
+  return ln
+}
+
 // The A1 first-class-value verdict (lower.py's `passed_async`): a provide
 // method that references an async callable as a VALUE — in ANY method, sync or
 // async — cannot await a suspension through the value's colorless arrow type.
@@ -3487,22 +3629,31 @@ fn acq_body(ss: List[Stmt], i: Int) -> Str {
   return acq_body(ss, i + 1)
 }
 
-fn check_fn_acquire(fns: List[FnD], reached: List[Str], i: Int) -> Str {
-  if (i >= reached.length()) { return "" }
+// The declaration line of the named fn (item 419c: the anchor for a module-fn
+// and reachable-fn refusal), 0 if the name is not a declared fn.
+fn fnd_line(fns: List[FnD], n: Str, i: Int) -> Int {
+  if (i >= fns.length()) { return 0 }
+  if (fns[i].name == n) { return fns[i].line }
+  return fnd_line(fns, n, i + 1)
+}
+
+fn check_fn_acquire(fns: List[FnD], reached: List[Str], i: Int) -> Verd {
+  if (i >= reached.length()) { return no_verd() }
   let n = reached[i]
   let hit = acq_body(fnd_body(fns, n, 0), 0)
   if (hit != "") {
     let dot = hit.indexOf(".")
-    return tagged("G4", host_acquire_msg(
+    return mk_verd(tagged("G4", host_acquire_msg(
       hit.slice(0, dot), hit.slice(dot + 1, hit.length()),
       host_acquire_release(hit.slice(0, dot), hit.slice(dot + 1, hit.length())),
-      "`fn ".concat(n).concat("`, which a component body reaches")))
+      "`fn ".concat(n).concat("`, which a component body reaches"))),
+      fnd_line(fns, n, 0))
   }
   return check_fn_acquire(fns, reached, i + 1)
 }
 
-fn check_reachable_fn_acquire(pg: Prog) -> Str {
-  if (pg.comps.length() == 0 || pg.fns.length() == 0) { return "" }
+fn check_reachable_fn_acquire(pg: Prog) -> Verd {
+  if (pg.comps.length() == 0 || pg.fns.length() == 0) { return no_verd() }
   let seed = comps_called(pg.comps, 0, [])
   return check_fn_acquire(pg.fns, sort_strs(reached_fns(pg.fns, seed)), 0)
 }
@@ -3519,37 +3670,51 @@ fn fn_a1_verdict(f: FnD, base: Ctx) -> Str {
   return ""
 }
 
-fn check_module_fns(fns: List[FnD], i: Int, base: Ctx) -> Str {
-  if (i >= fns.length()) { return "" }
+// item 419c: the FIRST refusing MODULE FN, anchored at its declaration line.
+// The reference's module-fn twins (`_refuse_leaky_pure_arrow`, the first-class
+// async-value refusal) RAISE — they run before the collect-all `errors` sink is
+// even created (lower.py's fn loop precedes it), so a program that trips one
+// produces exactly that single diagnostic and never reaches the component loop.
+// The gate mirrors that FAIL-FAST recovery: `collect_refusals` returns this one
+// refusal alone rather than collecting past it. (The design note's "per module
+// fn" recovery describes the gate's own vocabulary; the reference code is
+// fail-fast here, and this gate follows the code.)
+fn first_module_fn(fns: List[FnD], i: Int, base: Ctx) -> Verd {
+  if (i >= fns.length()) { return no_verd() }
   let v = fn_a1_verdict(fns[i], base)
-  if (v != "") { return v }
-  return check_module_fns(fns, i + 1, base)
+  if (v != "") { return mk_verd(v, fns[i].line) }
+  return first_module_fn(fns, i + 1, base)
 }
 
-fn check_cache_fns(fns: List[FnD]) -> Str {
+fn check_cache_fns(fns: List[FnD]) -> Verd {
   var has_cache = false
   var n = 0
   while (n < fns.length()) {
     if (fns[n].cachePure) { has_cache = true }
     n += 1
   }
-  if (!has_cache) { return "" }
+  if (!has_cache) { return no_verd() }
   let caps = emit_caps_reach(fns, true)
   var i = 0
   while (i < fns.length()) {
     let f = fns[i]
     let crossed = sort_strs(caps_of(caps, f.name))
     if (f.cachePure && crossed.length() > 0) {
-      return tagged("G4", "the reach of fn `".concat(f.name).concat("` crosses ")
-        .concat(crossed[0]).concat(": a crossing result is not pure"))
+      return mk_verd(tagged("G4", "the reach of fn `".concat(f.name)
+        .concat("` crosses ").concat(crossed[0])
+        .concat(": a crossing result is not pure")), f.line)
     }
     i += 1
   }
-  return ""
+  return no_verd()
 }
 
-// G4 + A1 over one component. "" = admitted, else a tagged refusal.
-fn check_component(comp: CompD, cx: Ctx) -> Str {
+// G4 + A1 over one component. `no_verd()` = admitted, else a tagged refusal
+// carrying its LINE (item 419c): an inline body refusal reports the offending
+// statement's line (`body_line`), every whole-component verdict — signature
+// parity, the aggregate G4/A1 over a walked body, the setup async-reach — the
+// component's declaration line, matching the reference.
+fn check_component(comp: CompD, cx: Ctx) -> Verd {
   // setup gets G4/A1/G1 too: an undeclared access or unmarked emission in
   // setup is refused exactly as in a provide body, bare values included (see
   // `var_check`). There is no longer a per-body-kind context: the two bodies
@@ -3566,12 +3731,14 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
   let setupArrows = arrows_in(comp.setup, 0, Map.empty())
   let scx = ctx_arrows(ctx_alias(cx, setupAlias), setupArrows)
   let sa = walk_stmts(comp.setup, 0, scx, empty_ac())
-  if (sa.msg != "") { return tagged(sa.tag, sa.msg) }
+  if (sa.msg != "") {
+    return mk_verd(tagged(sa.tag, sa.msg), body_line(comp.setup, scx, comp.line))
+  }
   // the per-statement effect-composition A1 rules over the activation body
   // (`_admit_effect_async` / `_admit_emit_async`, run during lowering): the
   // exact await/async pairing and a suspending teardown, statement by statement.
   let sA1 = stmt_a1_verdict(comp, comp.setup, 0, scx)
-  if (sA1 != "") { return tagged("A1", sA1) }
+  if (sA1 != "") { return mk_verd(tagged("A1", sA1), comp.line) }
   let pcx = cx
   var pi = 0
   while (pi < comp.provs.length()) {
@@ -3585,35 +3752,38 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
       // the body is walked: an `async fn` op must be implemented by an `async fn`
       // method, and vice-versa.
       if (decl.name != "" && pm.isAsync != decl.isAsync) {
-        return tagged("A1", async_sig_msg(pv.key, pm.name, pv.svcName,
-                                          pm.isAsync, decl.isAsync))
+        return mk_verd(tagged("A1", async_sig_msg(pv.key, pm.name, pv.svcName,
+                                          pm.isAsync, decl.isAsync)), comp.line)
       }
       let mcx = ctx_arrows(
         ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
         arrows_in(pm.body, 0, setupArrows))
       let a = walk_stmts(pm.body, 0, mcx, empty_ac())
-      if (a.msg != "") { return tagged(a.tag, a.msg) }
+      if (a.msg != "") {
+        return mk_verd(tagged(a.tag, a.msg), body_line(pm.body, mcx, comp.line))
+      }
       // `await` outside a component body (lower.py's method-lowering AwaitStmt
       // check): an await in a SYNC provide method has no in-flight window; an
       // async method (or an activation body) may await. Fires during body
       // lowering, before the G4/A1 provider verdicts.
       if (decl.name != "" && !decl.isAsync && has_await(pm.body, 0)) {
-        return tagged("A1", "`await` is only allowed in a component body")
+        return mk_verd(tagged("A1", "`await` is only allowed in a component body"),
+                       comp.line)
       }
       if (decl.name != "") {
         let g4 = g4_verdict(pv.svcName, pm.name, decl, a)
-        if (g4 != "") { return tagged("G4", g4) }
+        if (g4 != "") { return mk_verd(tagged("G4", g4), comp.line) }
         let pa = passed_async_verdict(pv.svcName, pm.name, a, cx)
-        if (pa != "") { return tagged("A1", pa) }
+        if (pa != "") { return mk_verd(tagged("A1", pa), comp.line) }
         let a1 = a1_verdict(pv.svcName, pm.name, decl, a, cx)
-        if (a1 != "") { return tagged("A1", a1) }
+        if (a1 != "") { return mk_verd(tagged("A1", a1), comp.line) }
       }
       // the arrow-color LEAK (lower.py's `_refuse_leaky_arrow`) runs last and
       // for EVERY method, sync or async: a sync-typed (non-coerced) arrow whose
       // body reaches async has no color to carry the suspension. A coerced arrow
       // (in an `Async[T]` slot) is admitted.
       let leak = leaky_body(pm.body, 0, pcx, true)
-      if (leak != "") { return tagged("A1", leak) }
+      if (leak != "") { return mk_verd(tagged("A1", leak), comp.line) }
       mi += 1
     }
     pi += 1
@@ -3622,8 +3792,8 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
   // (the reference checks it once the whole component is lowered). It recomputes
   // reach over the activation body, pruning await-marked / await steps.
   let su = setup_async_verdict(comp, comp.setup, scx, cx)
-  if (su != "") { return tagged("A1", su) }
-  return ""
+  if (su != "") { return mk_verd(tagged("A1", su), comp.line) }
+  return no_verd()
 }
 
 // ============================================================ spawn boundary
@@ -3899,10 +4069,11 @@ fn bounds_comp(comp: CompD, cx: Ctx, closed: SurfMap) -> Str {
   return ""
 }
 
-fn check_spawn_bounds(comps: List[CompD], ci: Int, cx: Ctx, closed: SurfMap) -> Str {
-  if (ci >= comps.length()) { return "" }
+fn check_spawn_bounds(comps: List[CompD], ci: Int, cx: Ctx, closed: SurfMap) -> Verd {
+  if (ci >= comps.length()) { return no_verd() }
   let r = bounds_comp(comps[ci], cx, closed)
-  if (r != "") { return r }
+  // item 419c: the spawner component's declaration line anchors the bound.
+  if (r != "") { return mk_verd(tagged("G4", r), comps[ci].line) }
   return check_spawn_bounds(comps, ci + 1, cx, closed)
 }
 
@@ -3928,10 +4099,11 @@ fn atten_comp(comp: CompD, base: SurfMap, closed: SurfMap) -> Str {
   return ""
 }
 
-fn check_spawn_atten(comps: List[CompD], ci: Int, base: SurfMap, closed: SurfMap) -> Str {
-  if (ci >= comps.length()) { return "" }
+fn check_spawn_atten(comps: List[CompD], ci: Int, base: SurfMap, closed: SurfMap) -> Verd {
+  if (ci >= comps.length()) { return no_verd() }
   let r = atten_comp(comps[ci], base, closed)
-  if (r != "") { return r }
+  // item 419c: the spawner component's declaration line anchors the attenuation.
+  if (r != "") { return mk_verd(tagged("G4", r), comps[ci].line) }
   return check_spawn_atten(comps, ci + 1, base, closed)
 }
 
@@ -3990,17 +4162,17 @@ fn spawn_form_comp(comp: CompD, names: List[Str]) -> Str {
 
 // The spawn-boundary gate: bounds then attenuation, both `code="G4"`, run only
 // when the program spawns (empty edge list -> no obligation, as in the reference).
-fn check_spawn(pg: Prog, cx: Ctx) -> Str {
+fn check_spawn(pg: Prog, cx: Ctx) -> Verd {
   let edges = spawn_edges(pg.comps)
-  if (edges.length() == 0) { return "" }
+  if (edges.length() == 0) { return no_verd() }
   let emisClosed = surf_closure(emis_surface_map(pg.comps, cx), edges)
   let bv = check_spawn_bounds(pg.comps, 0, cx, emisClosed)
-  if (bv != "") { return tagged("G4", bv) }
+  if (bv.v != "") { return bv }
   let reachBase = reach_surface_map(pg.comps)
   let reachClosed = surf_closure(reachBase, edges)
   let av = check_spawn_atten(pg.comps, 0, reachBase, reachClosed)
-  if (av != "") { return tagged("G4", av) }
-  return ""
+  if (av.v != "") { return av }
+  return no_verd()
 }
 
 // The static composition excludes spawn templates (decision 5/6): a template is
@@ -4035,38 +4207,58 @@ fn find_provider(ps: List[Prov3], key: Str, rlm: Str, i: Int) -> Str {
   return find_provider(ps, key, rlm, i + 1)
 }
 
-type LinkR = { provs: List[Prov3], msg: Str }
+// item 419c: `_link` collects EVERY G2/ROUTE/G3 refusal (item 386), not the
+// first. `G2R` threads the first-provider table (`provs`, unchanged from the
+// old `LinkR` role — route/edge resolution reads it) alongside the collected
+// refusals (`refs`), each anchored at the SECOND provider's declaration line
+// (`_link`'s `_line(entry["name"])`).
+type G2R = { provs: List[Prov3], refs: List[Verd] }
 
 fn realm_where(rlm: Str) -> Str {
   if (rlm == "") { return "" }
   return " in realm `".concat(rlm).concat("`")
 }
 
-fn scan_prov_keys(comp: CompD, pks: List[ProvKey], ki: Int,
-                  acc: List[Prov3]) -> LinkR {
-  if (ki >= pks.length()) { return { provs: acc, msg: "" } }
-  let pk = pks[ki]
-  let first = find_provider(acc, pk.key, pk.rlm, 0)
-  if (first != "") {
-    return { provs: acc,
-             msg: "provision conflict: key `".concat(pk.key).concat("`")
-               .concat(realm_where(pk.rlm)).concat(" is provided by both ")
-               .concat(first).concat(" and ").concat(comp.name).concat(" (G2)") }
-  }
-  return scan_prov_keys(comp, pks, ki + 1,
-                        acc.push({ key: pk.key, rlm: pk.rlm, comp: comp.name }))
+// The declaration line of the named live component; 1 (the reference's `_line`
+// default for an entry with no local line, e.g. an ambient one) when unknown.
+fn comp_line(comps: List[CompD], name: Str, i: Int) -> Int {
+  if (i >= comps.length()) { return 1 }
+  if (comps[i].name == name) { return comps[i].line }
+  return comp_line(comps, name, i + 1)
 }
 
-fn g2_scan(comps: List[CompD], ci: Int, provs: List[Prov3]) -> LinkR {
-  if (ci >= comps.length()) { return { provs: provs, msg: "" } }
-  let r = scan_prov_keys(comps[ci], comps[ci].provKeys, 0, provs)
-  if (r.msg != "") { return r }
-  return g2_scan(comps, ci + 1, r.provs)
+fn collect_g2_keys(comp: CompD, pks: List[ProvKey], ki: Int,
+                   provs: List[Prov3], refs: List[Verd]) -> G2R {
+  if (ki >= pks.length()) { return { provs: provs, refs: refs } }
+  let pk = pks[ki]
+  let first = find_provider(provs, pk.key, pk.rlm, 0)
+  if (first != "") {
+    // the reference keeps the FIRST provider registered and reports the
+    // conflict against the SECOND (`comp`), then continues; the second is not
+    // registered, so downstream resolution still finds a provider.
+    let msg = "provision conflict: key `".concat(pk.key).concat("`")
+      .concat(realm_where(pk.rlm)).concat(" is provided by both ")
+      .concat(first).concat(" and ").concat(comp.name).concat(" (G2)")
+    return collect_g2_keys(comp, pks, ki + 1, provs,
+                           refs.push(mk_verd(tagged("G2", msg), comp.line)))
+  }
+  return collect_g2_keys(comp, pks, ki + 1,
+                         provs.push({ key: pk.key, rlm: pk.rlm, comp: comp.name }),
+                         refs)
+}
+
+fn collect_g2(comps: List[CompD], ci: Int, provs: List[Prov3],
+              refs: List[Verd]) -> G2R {
+  if (ci >= comps.length()) { return { provs: provs, refs: refs } }
+  let r = collect_g2_keys(comps[ci], comps[ci].provKeys, 0, provs, refs)
+  return collect_g2(comps, ci + 1, r.provs, r.refs)
 }
 
 // ---------------------------------------------------------------- G3 edges
 
-type EdgeR = { succ: Map[Str, List[Str]], msg: Str }
+// `line` (item 419c): the component declaration line for a G3 self-provision
+// refusal (0 on the edge-building paths that carry no refusal).
+type EdgeR = { succ: Map[Str, List[Str]], msg: Str, line: Int }
 
 fn succ_of(succ: Map[Str, List[Str]], name: Str) -> List[Str] {
   return match succ.lookup(name) { Some(v) => v, None => [] }
@@ -4093,7 +4285,7 @@ fn route_edges(rlms: List[Str], ri: Int, key: Str, cname: Str,
 
 fn scan_reqs(comp: CompD, provs: List[Prov3], keys: List[Str], ki: Int,
              succ: Map[Str, List[Str]]) -> EdgeR {
-  if (ki >= keys.length()) { return { succ: succ, msg: "" } }
+  if (ki >= keys.length()) { return { succ: succ, msg: "", line: 0 } }
   let key = keys[ki]
   // a ROUTED key resolves per-realm, not through the single-realm table — a
   // stray shared-realm provider must not shadow the route's own targets, and
@@ -4109,7 +4301,7 @@ fn scan_reqs(comp: CompD, provs: List[Prov3], keys: List[Str], ki: Int,
     return { succ: succ,
              msg: "component ".concat(comp.name)
                .concat(" requires a key it provides itself (`").concat(key)
-               .concat("`) (G3)") }
+               .concat("`) (G3)"), line: comp.line }
   }
   if (provider != "") {
     return scan_reqs(comp, provs, keys, ki + 1, add_edge(succ, provider, comp.name))
@@ -4119,7 +4311,7 @@ fn scan_reqs(comp: CompD, provs: List[Prov3], keys: List[Str], ki: Int,
 
 fn build_edges(comps: List[CompD], ci: Int, provs: List[Prov3],
                succ: Map[Str, List[Str]]) -> EdgeR {
-  if (ci >= comps.length()) { return { succ: succ, msg: "" } }
+  if (ci >= comps.length()) { return { succ: succ, msg: "", line: 0 } }
   let comp = comps[ci]
   let keys = sort_strs(bind_names(comp.reqMap, 0, []))
   let r = scan_reqs(comp, provs, keys, 0, succ)
@@ -4227,31 +4419,42 @@ fn route_comp_scan(rts: List[Route], i: Int, cname: Str,
   return route_comp_scan(rts, i + 1, cname, provs)
 }
 
-fn route_scan(comps: List[CompD], ci: Int, provs: List[Prov3]) -> Str {
-  if (ci >= comps.length()) { return "" }
+// item 419c: collect a ROUTE refusal per consumer component (the reference's
+// per-consumer recovery), anchored at the consumer's declaration line
+// (`_link`'s `_line(entry["name"])`).
+fn collect_routes(comps: List[CompD], ci: Int, provs: List[Prov3],
+                  refs: List[Verd]) -> List[Verd] {
+  if (ci >= comps.length()) { return refs }
   let r = route_comp_scan(comps[ci].routes, 0, comps[ci].name, provs)
-  if (r != "") { return r }
-  return route_scan(comps, ci + 1, provs)
+  let refs2 = r != "" ? refs.push(mk_verd(tagged("ROUTE", r), comps[ci].line)) : refs
+  return collect_routes(comps, ci + 1, provs, refs2)
 }
 
-fn link_g2_g3(pg: Prog) -> Str {
+// item 419c: `_link` as a collecting sink — every G2, then every ROUTE, then
+// the G3 refusals — in the reference's order (BOOT is decided ahead of these,
+// by `admit_src`). A cycle is capped at one per composition (the reference caps
+// at one per strongly-connected set), anchored at the cycle's entry component.
+fn link_refusals(pg: Prog) -> List[Verd] {
   // spawn templates are runtime instances, not static composition members — they
   // take no place in the G2/G3 table or loadOrder (decision 5/6).
   let live = non_template_comps(pg.comps, spawn_templates(pg.comps))
-  let g2 = g2_scan(live, 0, [])
-  if (g2.msg != "") { return tagged("G2", g2.msg) }
+  let g2 = collect_g2(live, 0, [], [])
+  var refs = g2.refs
   // the multi-realm bind verification (item 162) runs between G2 and the edges,
   // exactly where the reference runs it: the dual EXISTENCE check on the
   // consumption side, over the same per-(key, realm) provider table.
-  let rv = route_scan(live, 0, g2.provs)
-  if (rv != "") { return tagged("ROUTE", rv) }
+  refs = collect_routes(live, 0, g2.provs, refs)
   let edges = build_edges(live, 0, g2.provs, Map.empty())
-  if (edges.msg != "") { return tagged("G3", edges.msg) }
+  if (edges.msg != "") {
+    refs = refs.push(mk_verd(tagged("G3", edges.msg), edges.line))
+  }
   let cyc = find_cycle(live, 0, edges.succ, Map.empty())
   if (cyc.length() > 0) {
-    return tagged("G3", "dependency cycle: ".concat(arrow_join(cyc)).concat(" (G3)"))
+    refs = refs.push(mk_verd(
+      tagged("G3", "dependency cycle: ".concat(arrow_join(cyc)).concat(" (G3)")),
+      comp_line(live, cyc[0], 0)))
   }
-  return ""
+  return refs
 }
 
 // ==================================================== item 384: foreign-construct redirects
@@ -4800,6 +5003,80 @@ fn too_deep_msg() -> Str {
   return `expression nesting is deeper than the parser's limit of ${nesting_limit().to_str()} levels`
 }
 
+// item 419c: every recoverable refusal, in the reference's PIPELINE order, each
+// carrying its anchor line. The append order IS the stable-sort tie-break the
+// reference uses on an equal line, so `pick_min` (min by `(line, seq)`, `seq`
+// the index here) reproduces the reference's `diagnostics[0]`.
+fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
+  // the ADT constructors the program declares join the callable universe a bare
+  // call head resolves against (`call_head_declared`). Read off the token
+  // stream rather than out of `Prog`, because `p_top` steps over `type`
+  // declarations structurally — see `type_ctors`.
+  let base = ctx_with_callables(build_maps(pg), type_ctors(ts))
+  // ---- the FAIL-FAST phases (the reference RAISES these before its collect-all
+  // `errors` sink exists): a program that trips one produces that single
+  // diagnostic and never reaches the component loop, so the gate returns it
+  // alone. Order mirrors `check_and_lower`: cache-purity, host-acquire in a
+  // reachable fn, then the module-fn A1 twins, all ahead of the component loop.
+  let cachev = check_cache_fns(pg.fns)
+  if (cachev.v != "") { return [cachev] }
+  // G4: a host acquire verb in a `fn` body a component reaches. Decided over
+  // the whole program before any body is gated, exactly where `check_and_lower`
+  // places `_refuse_host_acquire_in_component_reachable_fn`.
+  let acq = check_reachable_fn_acquire(pg)
+  if (acq.v != "") { return [acq] }
+  // the module-fn A1 twins (first-class async value, leaky pure arrow), the
+  // first refusing fn in declaration order.
+  let mf = first_module_fn(pg.fns, 0, base)
+  if (mf.v != "") { return [mf] }
+  // ---- the COLLECTED sink (the reference's `errors`): the component loop, the
+  // spawn post-passes, the boot count, and the link, each recovering at its own
+  // unit so `admit_src` can order every refusal by `(line, seq)`.
+  var refs: List[Verd] = []
+  let cnames = comp_names(pg.comps, 0, [])
+  var ci = 0
+  while (ci < pg.comps.length()) {
+    let comp = pg.comps[ci]
+    // one refusal per component (item 419c: per-component recovery, NOT
+    // statement-level), the FIRST in the reference's own order: a body-scan
+    // metadata refusal (the PRELUDE rule, `intercept`/`isolate`/`handoff`
+    // validation — `comp.refuse`, already the full "<TAG>|<message>"), else a
+    // code-less spawn-form refusal (bind-to-a-handle, unknown target), else the
+    // component's own G4/A1/G1 verdict.
+    if (comp.refuse != "") {
+      refs = refs.push(mk_verd(comp.refuse, comp.line))
+    } else {
+      let sf = spawn_form_comp(comp, cnames)
+      if (sf != "") {
+        refs = refs.push(mk_verd(sf, comp.line))
+      } else {
+        let cx = ctx_for(base, comp)
+        let v = check_component(comp, cx)
+        if (v.v != "") { refs = refs.push(v) }
+      }
+    }
+    ci += 1
+  }
+  // the spawn-boundary bounds (G4/G6) and capability attenuation (item 66) run
+  // once every component is lowered, before the G2/G3 link — the reference's
+  // order (`_check_spawn_emission_bounds`, `_check_spawn_attenuation`, `_link`).
+  let sv = check_spawn(pg, base)
+  if (sv.v != "") { refs = refs.push(sv) }
+  // item 350: AT MOST ONE `boot` component. The reference decides this in
+  // `_link`, ahead of the G2 provision-conflict scan, so the gate collects it
+  // at the head of the link, anchored at the SECOND boot component's line
+  // (`_link`'s `_line(rest[0])`).
+  let boots = boot_names(ts)
+  if (boots.length() > 1) {
+    refs = refs.push(mk_verd(tagged("BOOT",
+      "a composition declares at most one `boot` component, found "
+        .concat(join_comma(boots, 0, ""))),
+      comp_line(pg.comps, boots[1], 0)))
+  }
+  // the G2/ROUTE/G3 link collects the rest, in that order.
+  return append_verds(refs, link_refusals(pg))
+}
+
 pub fn admit_src(src: Str) -> Str {
   let ts = lex_src(src)
   // item 384: the foreign-construct redirects run first — the reference's
@@ -4816,62 +5093,42 @@ pub fn admit_src(src: Str) -> Str {
   }
   let pg = parse_prog_ts(ts)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
-  // the ADT constructors the program declares join the callable universe a bare
-  // call head resolves against (`call_head_declared`). Read off the token
-  // stream rather than out of `Prog`, because `p_top` steps over `type`
-  // declarations structurally — see `type_ctors`.
-  let base = ctx_with_callables(build_maps(pg), type_ctors(ts))
-  let cachev = check_cache_fns(pg.fns)
-  if (cachev != "") { return cachev }
-  // G4: a host acquire verb in a `fn` body a component reaches. Decided over
-  // the whole program before any body is gated, exactly where `check_and_lower`
-  // places `_refuse_host_acquire_in_component_reachable_fn` — after the fn
-  // declarations are lowered and BEFORE the module-fn A1 twins below.
-  let acq = check_reachable_fn_acquire(pg)
-  if (acq != "") { return acq }
-  // the module-fn A1 twins (first-class async value, leaky pure arrow) are
-  // decided over the lowered fns BEFORE any component is lowered, so they are
-  // surfaced first, in declaration order (lower.py's fn loop precedes the
-  // component loop).
-  let fnv = check_module_fns(pg.fns, 0, base)
-  if (fnv != "") { return fnv }
-  let cnames = comp_names(pg.comps, 0, [])
-  var ci = 0
-  while (ci < pg.comps.length()) {
-    let comp = pg.comps[ci]
-    // a body-scan refusal (the PRELUDE rule, `intercept`/`isolate`/`handoff`
-    // metadata validation) is decided before the provide methods are gated, so
-    // it is surfaced first, in composition order. `comp.refuse` is already the
-    // full "<TAG>|<message>".
-    if (comp.refuse != "") { return comp.refuse }
-    // the code-less spawn-form refusals (bind-to-a-handle, unknown target) fire
-    // as a spawn statement lowers — before the component's G4/A1 provider
-    // verdicts and before the composition-time spawn bounds.
-    let sf = spawn_form_comp(comp, cnames)
-    if (sf != "") { return sf }
-    let cx = ctx_for(base, comp)
-    let v = check_component(comp, cx)
-    if (v != "") { return v }
-    ci += 1
+  // item 419c: collect every recoverable refusal and report the minimum by
+  // `(line, seq)` — the reference's `diagnostics[0]`. A single-refusal program
+  // yields exactly the wire it did before the sink existed.
+  return pick_min(collect_refusals(ts, pg))
+}
+
+// item 419c: the WHOLE collected sink, row-joined "<line>|<TAG>|<msg>", in
+// pipeline order. For TESTS ONLY — the cross-check against the reference's
+// `RevlErrors` carrier — and NOT part of the gate crate's surface (the crate
+// splits `admit_src`'s single wire at the first `|`). A parse/foreign refusal
+// aborts before collection, so it rides alone with line 0. The row separator is
+// the two characters `\n`: a revl PLAIN string preserves `\n` verbatim (the
+// lexer's only escapes are `\"` and `\\`), so this is a literal backslash-n, not
+// a newline — no refusal message carries that sequence, so the test splits on
+// it unambiguously.
+pub fn admit_all(src: Str) -> Str {
+  let ts = lex_src(src)
+  let fgn = foreign_scan_ts(ts)
+  if (fgn != "") { return fmt_all([mk_verd(tagged("FOREIGN", fgn), 0)]) }
+  if (nesting_depth(ts) > nesting_limit()) {
+    return fmt_all([mk_verd(tagged("BAD", too_deep_msg()), 0)])
   }
-  // the spawn-boundary bounds (G4/G6) and capability attenuation (item 66) run
-  // once every component is lowered, before the G2/G3 link — the reference's
-  // order (`_check_spawn_emission_bounds`, `_check_spawn_attenuation`, `_link`).
-  let sv = check_spawn(pg, base)
-  if (sv != "") { return sv }
-  // item 350: AT MOST ONE `boot` component. The reference decides this in
-  // `_link`, ahead of the G2 provision-conflict scan, so the gate does too —
-  // otherwise a composition with two contracts AND a provision conflict would
-  // get different verdicts from the two implementations. Two contracts cannot
-  // both be the exhaustive list of what the host must inject, and an admission
-  // check against "the" contract would silently check only one of them.
-  let boots = boot_names(ts)
-  if (boots.length() > 1) {
-    return tagged("BOOT",
-      "a composition declares at most one `boot` component, found "
-        .concat(join_comma(boots, 0, "")))
+  let pg = parse_prog_ts(ts)
+  if (pg.bad != "") { return fmt_all([mk_verd(tagged("BAD", pg.bad), 0)]) }
+  return fmt_all(collect_refusals(ts, pg))
+}
+
+fn fmt_all(rs: List[Verd]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < rs.length()) {
+    if (i > 0) { out = out.concat("\n") }
+    out = out.concat(rs[i].line.to_str()).concat("|").concat(rs[i].v)
+    i += 1
   }
-  return link_g2_g3(pg)
+  return out
 }
 
 // The bare verdict tag ("" | "G1" | "G2" | "G3" | "G4" | "A1" | "PRELUDE" |
