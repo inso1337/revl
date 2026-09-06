@@ -2513,3 +2513,4 @@ def prop_dossier(ir: dict, random_rounds: int = _PROP_RANDOM_ROUNDS) -> dict:
             "properties": [],
         }
     return run_prop_units(ir, units, out=lambda _line: None, random_rounds=random_rounds)[1]
+# Implementing re-issue live verified-effect inverses
