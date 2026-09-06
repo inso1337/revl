@@ -131,3 +131,20 @@ pub extern pure fn plan_reason(plan: Any) -> Str
 pub extern pure fn plan_op_count(plan: Any) -> Int
   = @py { return len(plan.get("ops", [])) }
   = @ts { return BigInt((plan.ops ?? []).length) }
+
+// The op NAME the witnessed op at `idx` lowered from — the recognized command
+// form (`ops[idx]["op"]`: "mv" / "rm" / "mkdir" / "cp" / "touch"). This is the
+// string an audit surface renders to say WHICH inverse a shell command lowered
+// onto (`witnessed[mkdir]`, not just `witnessed[1 op]`). Total, like the sibling
+// accessors: an out-of-range index or an emission plan (no `ops`) yields "".
+pub extern pure fn plan_op_name(plan: Any, idx: Int) -> Str
+  = @py {
+    ops = plan.get("ops", [])
+    return ops[idx]["op"] if 0 <= idx < len(ops) else ""
+  }
+  = @ts {
+    // `idx` is a revl Int == JS bigint; the array index must be a number.
+    const ops = plan.ops ?? [];
+    const i = Number(idx);
+    return (i >= 0 && i < ops.length) ? ops[i].op : '';
+  }
