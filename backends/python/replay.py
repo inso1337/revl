@@ -1775,6 +1775,60 @@ def _wal_record(step: "Step", component: str, seq: int,
     }
 
 
+def _last_newline_offset(handle, size: int) -> int:
+    """Offset of the last ``b"\\n"`` in an open binary file of ``size`` bytes, or
+    ``-1`` when it holds none. Scans backward in chunks so a large WAL is not read
+    whole into memory. Byte-identical in behaviour to ``revl.wal``'s copy."""
+    chunk = 4096
+    pos = size
+    while pos > 0:
+        step = min(chunk, pos)
+        pos -= step
+        handle.seek(pos)
+        buf = handle.read(step)
+        idx = buf.rfind(b"\n")
+        if idx != -1:
+            return pos + idx
+    return -1
+
+
+def _seal_torn_tail(path: str) -> None:
+    """Truncate a never-acknowledged partial trailing write so the WAL ends at a
+    clean record boundary before it is appended to (issue #535).
+
+    A durable WAL always ends in a newline (each record is one fsync'd
+    ``json + "\\n"``). A file that does not is carrying a torn final write (a real
+    ``kill -9`` can leave one). Reopening in append mode WITHOUT sealing merges
+    that torn tail into the next record — one unparseable line that swallows the
+    new record, then MID-FILE corruption the item 413 gate refuses forever. This
+    removes exactly the non-newline-terminated tail (truncating to just after the
+    last newline, or to empty when there is none) and fsyncs; a completed,
+    newline-terminated record is never touched. Behaviourally identical to
+    ``revl.wal.seal_torn_tail`` — the reader copies agree, and so do the sealers.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return
+    if size == 0:
+        return
+    with open(path, "rb") as handle:
+        handle.seek(size - 1)
+        if handle.read(1) == b"\n":
+            return
+        cut = _last_newline_offset(handle, size)
+    new_len = cut + 1
+    if new_len == size:
+        return
+    with open(path, "r+b") as handle:
+        handle.truncate(new_len)
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
+
+
 def _next_seq(path: str) -> int:
     """The seq a reopened WAL must resume from: one past the highest seq
     already on disk, or 0 for a new or empty log.
@@ -1842,6 +1896,11 @@ class WriteAheadLog:
         directory = os.path.dirname(os.path.abspath(self.path))
         if directory:
             os.makedirs(directory, exist_ok=True)
+        # A --watch reload reopens a WAL a prior generation may have left with a
+        # torn final write. Seal that never-acknowledged partial line FIRST, so
+        # this generation's records append onto a clean newline boundary instead
+        # of merging into it and corrupting the file mid-flight (issue #535).
+        _seal_torn_tail(self.path)
         # Resume this session's monotonic seq space from whatever is already on
         # disk. On the first open the log is new (or empty) and this is 0; on a
         # --watch reload the same file already carries the prior generation's
