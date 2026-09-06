@@ -70,11 +70,13 @@ component PoolWorker3 provides worker: Worker {
 }
 
 // The Router: requires `worker` across the three worker realms, provides
-// `worker` in the parent realm. `fn call` documents the forwarding intent; the
-// py-tier reference driver realizes the actual per-realm fan-out from the
-// `routes` IR this bind records (a routed require has no single-realm provider,
-// so the emitted body is not what routes — see docs/router.md).
+// `worker` in the parent realm. The `provides worker: Worker` header clause is
+// what the route needs — the py-tier reference driver realizes the actual
+// per-realm fan-out from the `routes` IR this bind records and installs the
+// `_Router` proxy as the sole provider of `worker` (a routed require has no
+// single-realm provider, so an emitted body is not what routes — see
+// docs/router.md). A `provide worker { … }` body here would be silently
+// discarded at load, so item 449 refuses it: carry only the header clause.
 component RoundRobin requires worker: Worker provides worker: Worker {
   isolate worker in realms("w1", "w2", "w3") strategy(round_robin)
-  provide worker { fn call(request) = worker.call(request) }
 }
