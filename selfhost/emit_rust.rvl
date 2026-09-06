@@ -90,11 +90,25 @@
 // Navigation of the IR is PURE revl through stdlib/value.rvl's `value_*` /
 // `value_keys` (items 180 / 188), exactly as selfhost/emit_py.rvl does after its
 // slice-2 rewrite: every byte of emitter LOGIC (dispatch, formatting, the
-// var_types threading, string building) is revl. Only HOST FORMATTING stays
-// `@py` — the item-180 "NOT obsoleted" category: `string_lit` (the reference
-// `_string` Rust-literal escaper, kin to py's `py_repr`), `num_str` (the
+// var_types threading, string building) is revl. What remains is HOST FORMATTING
+// — the item-180 "NOT obsoleted" category: `string_lit` (the reference `_string`
+// Rust-literal escaper, kin to py's `py_repr`), `num_str` (the
 // `f"{value}i64"` / `f"{value}f64"` body, i.e. `str(value)`), `newline` (the one
-// genuine U+000A), and `mangle` (the Rust-keyword rename `_mangle`).
+// genuine U+000A), `mangle` (the Rust-keyword rename `_mangle`), and the
+// `snake`/`camel` name transforms.
+//
+// NATIVE-TIER PORT (item 391 / #106 — the `compile_to` Stage-4 blocker, #98/#332):
+// for the self-host rust emitter to run when COMPILED TO RUST (not just to py),
+// every one of these host-formatting externs needs an `@rs` body. The four that
+// take `Str`/`()` and return `Str` — `newline`, `mangle`, `snake`, `camel` — now
+// carry byte-identical `@rs` bodies (verified against the `@py` outputs in an
+// isolation crate). The two `Any`-typed escapers — `string_lit` and `num_str` —
+// stay `@py`-ONLY for now: `Any` erases to `cordis::Value` (an `Arc<dyn Any>`),
+// so a correct `@rs` body must know the concrete boxed representation the
+// self-host uses for a `str`/`int`/`float` IR value, and that representation is
+// owned by the still-`@py`/`@ts`-only `stdlib/value.rvl` accessors (rs tier
+// DEFERRED there). They are ported in the same wave that gives `value.rvl` its
+// `@rs` bodies — see the report/remainder plan on #106.
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field, value_opt,
   value_list, value_at, value_str, value_int, value_bool, value_keys
@@ -108,11 +122,12 @@ use "../stdlib/list.rvl" { list_sort, str_lt }
 // extern's `@rs` body before splicing it. No re-hand-roll (item 194).
 use "../stdlib/str.rvl" { trim }
 
-// ------------------------------------------------- host formatting (kept @py)
+// --------------------------------------------------------------- host formatting
 // `string_lit` is backends/rust/emit.py::_string for a `str` input, verbatim: a
 // Rust double-quoted string literal escaped FROM code points (docs/strings.md).
 // The list form (`Inject::new([..])`) is components-only, deferred, so the str
-// path is all this slice needs.
+// path is all this slice needs. `@py`-ONLY pending the value.rvl `@rs` port
+// (item 391 / #106 — see the erased-IR-boundary note above).
 extern pure fn string_lit(v: Any) -> Str = @py {
     out = ['"']
     for ch in v:
@@ -141,7 +156,11 @@ extern pure fn string_lit(v: Any) -> Str = @py {
 // text is exactly Python's.
 extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
 // A real newline — the line SEPARATOR (`"\n".join(out)` in the reference).
-extern pure fn newline() -> Str = @py { return chr(10) }
+// The `@rs` body is the native-tier port (item 391 / #106): a single U+000A,
+// so the self-host rust emitter can join its lines when compiled to rust.
+extern pure fn newline() -> Str
+  = @py { return chr(10) }
+  = @rs { String::from("\n") }
 // `_mangle` verbatim: mirror BOTH `_RUST_RESERVED` and `_EMITTER_RESERVED`
 // so user identifiers cannot collide with keywords or generated scaffolding.
 // INJECTIVE: escape a name iff the name
@@ -151,7 +170,12 @@ extern pure fn newline() -> Str = @py { return chr(10) }
 // distinct revl identifiers onto one Rust identifier. A tuple, not a set, keeps
 // the host body free of `{}` (the @py raw-brace balancer counts structural
 // braces; a set literal would unbalance the block).
-extern pure fn mangle(name: Str) -> Str = @py {
+// The `@rs` body is the native-tier port (item 391 / #106): the same keyword
+// list, the same `kw`/`kw_`/`kw__` ladder over `&str` sub-slices, native `String`
+// in and out. Byte-identical to the `@py` body (isolation-crate-checked over the
+// reserved set, the ladder, and plain identifiers).
+extern pure fn mangle(name: Str) -> Str
+  = @py {
     reserved = ("as", "break", "const", "continue", "crate", "else", "enum",
                 "extern", "false", "fn", "for", "if", "impl", "in", "let",
                 "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
@@ -166,25 +190,87 @@ extern pure fn mangle(name: Str) -> Str = @py {
             break
         root = root[:-1]
     return name
-}
+  }
+  = @rs {
+    let reserved = [
+        "as", "break", "const", "continue", "crate", "else", "enum",
+        "extern", "false", "fn", "for", "if", "impl", "in", "let",
+        "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+        "self", "Self", "static", "struct", "super", "trait", "true",
+        "type", "unsafe", "use", "where", "while", "async", "await",
+        "dyn", "ctx", "config", "root", "plugin",
+    ];
+    let mut root: &str = name.as_str();
+    while !root.is_empty() {
+        if reserved.contains(&root) {
+            return format!("{}_", name);
+        }
+        if !root.ends_with('_') {
+            break;
+        }
+        root = &root[..root.len() - 1];
+    }
+    name
+  }
 // `_snake` verbatim: the component/service name -> the snake-case plugin-fn /
 // dispatch-fn name (`Hello` -> `hello`, `EmitRust` -> `emit_rust`). A word
 // boundary is an upper following a lower/digit; every char is lowercased. Host
 // `str.lower()`/`str.isupper()` is exactly Python's, so it is bridged rather than
 // re-derived from code points (the `mangle`/`string_lit` category).
-extern pure fn snake(name: Str) -> Str = @py {
+// The `@rs` body is the native-tier port (item 391 / #106): the same
+// boundary rule (an upper following a lower/digit) over a `Vec<char>`, each char
+// lowercased. Byte-identical to the `@py` body over the identifier domain
+// (isolation-crate-checked: `EmitRust`->`emit_rust`, `a1B`->`a1_b`, ...).
+extern pure fn snake(name: Str) -> Str
+  = @py {
     out = []
     for i, ch in enumerate(name):
         if ch.isupper() and i > 0 and (name[i - 1].islower() or name[i - 1].isdigit()):
             out.append("_")
         out.append(ch.lower())
     return "".join(out)
-}
+  }
+  = @rs {
+    let mut out = String::new();
+    let chars: Vec<char> = name.chars().collect();
+    for i in 0..chars.len() {
+        let ch = chars[i];
+        if ch.is_uppercase() && i > 0 && (chars[i - 1].is_lowercase() || chars[i - 1].is_ascii_digit()) {
+            out.push('_');
+        }
+        for lc in ch.to_lowercase() {
+            out.push(lc);
+        }
+    }
+    out
+  }
 // `_camel` verbatim: a provision key -> its PascalCase struct suffix
 // (`greeting` -> `Greeting`), splitting on `_` and capitalising each part.
-extern pure fn camel(name: Str) -> Str = @py {
+// The `@rs` body is the native-tier port (item 391 / #106): split on `_`,
+// `str::capitalize` each part (first char upper, the rest lower — mirroring
+// Python's `str.capitalize`). Byte-identical to the `@py` body
+// (isolation-crate-checked: `emit_rust`->`EmitRust`, `AB_cd`->`AbCd`, ...).
+extern pure fn camel(name: Str) -> Str
+  = @py {
     return "".join(part.capitalize() for part in name.split("_"))
-}
+  }
+  = @rs {
+    let mut out = String::new();
+    for part in name.split('_') {
+        let mut cs = part.chars();
+        if let Some(first) = cs.next() {
+            for uc in first.to_uppercase() {
+                out.push(uc);
+            }
+            for ch in cs {
+                for lc in ch.to_lowercase() {
+                    out.push(lc);
+                }
+            }
+        }
+    }
+    out
+  }
 
 // `_mname`: the one method rename this tier carries — `drop` collides with
 // Rust's `Drop::drop` destructor (`_METHOD_RENAMES = {"drop": "drop_"}`).
