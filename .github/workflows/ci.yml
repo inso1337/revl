@@ -281,6 +281,13 @@ jobs:
 
   backend-python:
     runs-on: ubuntu-latest
+    # Fail fast to save compute: this heavy backend job is skipped entirely if
+    # the cheap `lint` gate or the `frontend` suite is red, rather than running
+    # a full matrix that a lint/frontend failure has already doomed. This only
+    # reorders execution — the required-check context is unchanged, so branch
+    # protection still requires it, and a skip only happens when an upstream gate
+    # has already failed the run.
+    needs: [lint, frontend]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -442,6 +449,9 @@ jobs:
 
   backend-typescript:
     runs-on: ubuntu-latest
+    # Fail fast: skip this heavy job when `lint` or `frontend` is red (see
+    # backend-python for the rationale — required context unchanged).
+    needs: [lint, frontend]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -496,6 +506,9 @@ jobs:
 
   backend-wasm:
     runs-on: ubuntu-latest
+    # Fail fast: skip this heavy job when `lint` or `frontend` is red (see
+    # backend-python for the rationale — required context unchanged).
+    needs: [lint, frontend]
     # The cordis-wasm checkout this job provisions below. Declared as a JOB env
     # rather than exported into $GITHUB_ENV so that
     # tests/test_env_gated_skips_run_somewhere.py can read WHICH job sets it and
@@ -636,6 +649,9 @@ jobs:
 
   backend-rust:
     runs-on: ubuntu-latest
+    # Fail fast: skip this heavy job (5+ min of cargo) when `lint` or `frontend`
+    # is red (see backend-python for the rationale — required context unchanged).
+    needs: [lint, frontend]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -754,6 +770,9 @@ jobs:
 
   backend-java:
     runs-on: ubuntu-latest
+    # Fail fast: skip this heavy job when `lint` or `frontend` is red (see
+    # backend-python for the rationale — required context unchanged).
+    needs: [lint, frontend]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -790,6 +809,9 @@ jobs:
 
   backend-go:
     runs-on: ubuntu-latest
+    # Fail fast: skip this heavy job when `lint` or `frontend` is red (see
+    # backend-python for the rationale — required context unchanged).
+    needs: [lint, frontend]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -851,6 +873,10 @@ jobs:
   # the one place every tier's compiler exists at once.
   conformance:
     runs-on: ubuntu-latest
+    # Fail fast: this job provisions six toolchains and runs for minutes, so
+    # skip it entirely when `lint` or `frontend` is red (see backend-python for
+    # the rationale — required context unchanged).
+    needs: [lint, frontend]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -1081,6 +1107,10 @@ jobs:
   # gets softened". STATUS.md tracks proved/stuck/TODO per guarantee.
   formal:
     runs-on: ubuntu-latest
+    # Fail fast: the Lean `lake build` is heavy, so skip it when `lint` or
+    # `frontend` is red (see backend-python for the rationale — required context
+    # unchanged).
+    needs: [lint, frontend]
     steps:
       - uses: actions/checkout@v4
       - uses: leanprover/lean-action@50fcf42d2e460296f1a34b402e990d1b24f8b596  # v1 (v1.6.0)
