@@ -179,7 +179,7 @@ was corrected by hand and had drifted back within a day.
 | stdlib-json.md | needs-work | 41 |  |
 | stdlib-list.md | current | 14 |  |
 | stdlib-str.md | current | 16 |  |
-| stdlib-value.md | current | 25 |  |
+| stdlib-value.md | current | 26 |  |
 | stdlib-version.md | needs-work | 11 |  |
 | strings.md | needs-work | 39 |  |
 | swap.md | needs-work | 19 |  |
