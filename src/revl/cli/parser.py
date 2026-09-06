@@ -1248,6 +1248,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--topology", default=None, metavar="PLACEMENT",
         help="a placement/topology map (TOML or JSON) to carry in the bundle as "
              "topology.json; omit for a single-process bundle")
+    bundle_cmd.add_argument(
+        "--one-file", default=None, metavar="FILE",
+        help="also pack the bundle into ONE self-contained file (e.g. "
+             "app.revlbundle1) beside the --out directory; `revl verify FILE` "
+             "checks it exactly as the directory (item 305)")
     bundle_cmd.add_argument("--json", action="store_true",
                             help="print the bundle path and its runtime-manifest as JSON")
 
@@ -1280,7 +1285,9 @@ def build_parser() -> argparse.ArgumentParser:
              "to each backend, capabilities match policy, evidence is present "
              "(item 305, docs/bundle.md)")
     verify_cmd.add_argument("bundle", metavar="BUNDLE",
-                            help="a bundle directory written by `revl bundle`")
+                            help="a bundle written by `revl bundle`: either the "
+                                 ".revlbundle directory or a one-file bundle "
+                                 "(--one-file); both verify identically")
     verify_cmd.add_argument("--json", action="store_true",
                             help="machine-readable tier-by-tier report")
 
