@@ -129,10 +129,12 @@ def _emit_ts_classifier(dest: Path) -> None:
     """Emit the real `stdlib/shell.rvl` (its `classify` + accessors) to ts, into
     the generated dir so its `import ... from '../../runtime.ts'` resolves."""
     tsemit = _load_ts_emit()
-    # shell.rvl's `classify` @py body imports a backend module; #302 refuses that
-    # for a context-free / user-origin compile. It is first-party stdlib, so
-    # compile it through the stdlib-aware path (its real path under stdlib_root())
-    # where the install-origin exemption applies. The ts emission is unchanged.
+    # shell.rvl's `classify` @py body imports a backend module; the user @py
+    # backend-import rule refuses that for a context-free / user-origin compile.
+    # It is first-party stdlib, so compile it through the stdlib-aware path (its
+    # real path under stdlib_root()) where the install-origin exemption applies.
+    # Its `classify` ts body is now a `= @ts ref` (issue #460), so the emitted
+    # extern loads the classifier module through the stdlib host-ref door.
     ir = compile_files([str(_ROOT / "stdlib" / "shell.rvl")])
     dest.write_text(tsemit.emit(ir, runtime_import="../../runtime.ts"), encoding="utf-8")
 
@@ -151,12 +153,15 @@ def _run_ts_classify(commands: list[str]) -> list[dict]:
 
     harness = generated / "_shell_parity_harness.ts"
     harness.write_text(
-        # imports: the node shell host (installs globalThis.__revlShell) then the
-        # emitted classify extern (whose @ts body delegates to that global).
+        # `classify` reaches its host through the item-410 stdlib host-ref door
+        # (`= @ts ref`, issue #460), so the runner-provided install root is set
+        # here — the way any consumer of a stdlib ref is wired — and the emitted
+        # extern imports the classifier module itself. No pre-installed
+        # `globalThis.__revlShell` is needed (that seam now backs only `sh`).
         "import { readFileSync } from 'node:fs'\n"
-        "import '../../revl_shell_ts.ts'\n"
-        "import { classify } from './shell_parity.ts'\n"
-        "const cmds = JSON.parse(readFileSync(process.argv[2], 'utf-8'))\n"
+        ";(globalThis as any).__REVL_STDLIB_REF_ROOT__ = process.argv[2]\n"
+        "const { classify } = await import('./shell_parity.ts')\n"
+        "const cmds = JSON.parse(readFileSync(process.argv[3], 'utf-8'))\n"
         "const out = cmds.map((c: string) => classify(c))\n"
         "process.stdout.write(JSON.stringify(out))\n",
         encoding="utf-8",
@@ -164,7 +169,7 @@ def _run_ts_classify(commands: list[str]) -> list[dict]:
 
     try:
         proc = subprocess.run(
-            ["node", str(harness), cmds_path],
+            ["node", str(harness), str(_ROOT), cmds_path],
             capture_output=True,
             text=True,
             cwd=str(_BACKEND_TS),
