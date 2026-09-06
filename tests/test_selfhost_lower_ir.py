@@ -143,32 +143,24 @@ def _corpus_params(gap: dict[str, str]):
     ]
 
 
-# item 445: the reference frontend now proves UNIQUE OWNERSHIP of an
-# accumulation local once (`src/revl/ownership.py`) and stamps the answer on the
-# IR — `"unique"` on a self-rebinding `assign`, `"unique_birth"` on the `let`
-# that would need the defensive copy — instead of each emitter re-deriving the
-# same aliasing rule (the go and python tiers had written it twice). The
-# self-host lowering gate has no such stage: `selfhost/lower.rvl` streams tokens
-# straight to IR JSON in one pass, and the analysis is a FORWARD DATAFLOW with a
-# fixpoint over each loop back edge, which needs the statement tree the streaming
-# producer never builds. So the native IR carries no marker and diverges from the
-# reference on any document with an in-place accumulation loop — one in this
-# corpus, `transforms.rvl`'s `list_map` / `list_filter`.
-#
-# Marked strict-xfail rather than dropped, on the terms the `Secret[T]` gap
-# above was recorded on before it was closed: it is red
-# for a NAMED reason and will XPASS loudly the day the pass is ported. The
-# emit_py port item 445 DID land is unaffected and stays green — `emit_py.rvl`
-# now READS the two markers where it used to carry ~130 lines of its own copy of
-# the analysis, and the emitters consume the REFERENCE IR, which carries them.
-UNIQUE_MARKER_GAP = {
-    "transforms.rvl": (
-        "item 445: selfhost/lower.rvl has no unique-ownership stage, so the "
-        "native IR carries neither `unique` nor `unique_birth`"
-    ),
-}
-
-CORPUS_UNIQUE_AWARE = _corpus_params(UNIQUE_MARKER_GAP)
+# item 445: the reference frontend proves UNIQUE OWNERSHIP of an accumulation
+# local once (`src/revl/ownership.py`) and stamps the answer on the IR —
+# `"unique"` on a self-rebinding `assign`, `"unique_birth"` on the `let` that
+# would need the defensive copy — instead of each emitter re-deriving the same
+# aliasing rule (the go and python tiers had written it twice). The self-host
+# lowering gate streams tokens straight to IR JSON in one pass, so it grew a
+# SECOND scan over the same body tokens (`selfhost/lower.rvl`'s `own_*` block)
+# that builds the small statement view the FORWARD DATAFLOW needs, runs the
+# flow-sensitive analysis with a fixpoint over each loop back edge, and stamps the
+# decided markers where the streaming producer emits the assign/let. The native
+# IR now carries the same markers as the reference over the whole corpus — the
+# one document with an in-place accumulation loop, `transforms.rvl`'s `list_map` /
+# `list_filter`, agrees byte-for-byte, so the gap that stood strict-xfail here is
+# CLOSED and the corpus runs through the same unmarked projection as every other
+# document. (The whole-program retention summary — item 445 (b) — and the
+# token-level record-update write shape are the remaining follow-ons; both only
+# ever WITHHOLD a marker the corpus does not exercise, never add a wrong one.)
+CORPUS_UNIQUE_AWARE = CORPUS
 
 # item 429 / item 386: the extern DECLARATION shapes `witnessed.rvl` carries.
 # The `externs`-section half of the gap is CLOSED (`selfhost/lower.rvl`'s
