@@ -1700,3 +1700,65 @@ def test_float_interpolation_wasm_exponent_is_fenced(name: str):
     if status == "skip":
         pytest.skip(f"wasm: {message}")
     assert status == "pass", f"wasm renders the Float differently: {message}"
+
+
+# ---------------------------------- static guards on the canonical Float renderer
+#
+# The executed probes above prove the VALUE is canonical on each tier, but they
+# only run where the tier's toolchain exists: `test_float_interpolation_is_
+# canonical` needs node/go, the `*_slow` variants need cargo/javac behind
+# `REVL_CROSS_TIER_SLOW` (set nowhere in this repo), and wasm needs wasmtime. So
+# the exact regression the equality wave already learned to fear — an emitter
+# quietly reverting a Float render to its host default (`str(x)` -> "3.0",
+# `fmt.Sprintf("%v")`, `format!("{}")` -> "-0"/"1000...", `String.valueOf` ->
+# "1.0E21") — would sail through the toolchain-free `frontend` job untouched,
+# because nothing there reads the emitted Float lowering. These guards do: they
+# run under plain `_emit` (no toolchain), one per tier, and pin that the render
+# routes through the shared canonical renderer that the executed probes confirm
+# is byte-correct. This is the same "one static guard per lowering per tier"
+# line of defence the structural-equality defect ended up with (contract-errata
+# "Semantic divergences": Float -> Str rendering), for the sibling divergence.
+#
+# ts is the exception on purpose: its `${x}` template interpolation IS the
+# ECMAScript `Number::toString` this whole decision canonicalizes on, so the
+# emitter needs no helper at all — and emitting one would signal that someone
+# mistook the JS prior for a thing to reimplement. Its guard asserts the native
+# template and the ABSENCE of a helper.
+_FLOAT_RENDERER_CALLSITES = {
+    # backend dir -> (call the render routes through, helper that must travel)
+    "python": ("_revl_ftoa(", "def _revl_ftoa("),
+    "go": ("revlFtoa(", "func revlFtoa("),
+    "rust": ("revl_ftoa(", "fn revl_ftoa("),
+    "java": ("revlFtoa(", "String revlFtoa("),
+}
+
+
+@pytest.mark.parametrize("backend", sorted(_FLOAT_RENDERER_CALLSITES))
+def test_float_interpolation_routes_through_canonical_renderer(backend: str):
+    """Toolchain-free guard: a `${aFloat}` template must lower through the
+    shared canonical `Float -> Str` renderer (ECMAScript `Number::toString`,
+    docs/strings.md), NOT the host's default float formatting, and the helper
+    must travel with the module. Runs in `frontend`, where the executed float
+    probes do not."""
+    source, _note = FLOAT_INTERP_PROBES["large magnitude uses exponent"]
+    callsite, helper = _FLOAT_RENDERER_CALLSITES[backend]
+    emitted = _emit(backend, source)
+    assert callsite in emitted, (
+        f"{backend}: `${{aFloat}}` must render through the canonical "
+        f"Float renderer ({callsite}...), not the host default (docs/strings.md)")
+    assert helper in emitted, (
+        f"{backend}: the canonical Float renderer must travel with the module")
+
+
+def test_typescript_float_interpolation_is_the_native_template():
+    """ts needs no renderer: its `${x}` template already spells the canonical
+    ECMAScript `Number::toString` form (docs/strings.md), which is why this
+    whole decision took the JS prior as canon. The guard pins the native
+    template and the absence of a reimplemented helper — a helper here would
+    mean someone mistook the primitive for something to rebuild."""
+    source, _note = FLOAT_INTERP_PROBES["large magnitude uses exponent"]
+    emitted = _emit("typescript", source)
+    assert "`${" in emitted, (
+        "ts must interpolate the Float with a native template literal")
+    assert "ftoa" not in emitted.lower(), (
+        "ts must NOT carry a Float renderer: `${x}` already is the canon")
