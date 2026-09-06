@@ -10,14 +10,25 @@
 //! matches `python -m revl.lsp` by construction, over the whole language, not
 //! over a frontier.
 //!
-//! SLICE-1 FALLBACK, STATED IN THE OPEN. The design's slice 0 embeds a private
-//! interpreter (pyo3 + python-build-standalone + the frozen wheel) so the
-//! artifact is ONE file. That spike is not done, so this crate takes the
-//! design's recorded honest fallback (A2): the reference runs as a child
-//! process against a `revl` the machine already has. The distribution story is
-//! therefore "a native binary PLUS a reference `revl` alongside", not
-//! "self-contained single file". What is not taken is the other option A2
-//! forbids: substituting a native checker to avoid the dependency.
+//! ONE-FILE BUNDLING (item 336, issue #102). The distribution story has two
+//! interpreters, in a fixed order of preference:
+//!
+//!   1. A PRIVATE RUNTIME the distributable carries — a pinned
+//!      `python-build-standalone` tree with the `revl` wheel frozen into its own
+//!      site, extracted atomically into a versioned cache and run in ISOLATED
+//!      mode (`-I`). This is the self-contained single-file path; `runtime`
+//!      resolves it and this engine launches under it when present.
+//!   2. A `revl`-capable interpreter the machine already has, on PATH or named
+//!      by `REVL_LSP_PYTHON`. This is the honest fallback design A2 records —
+//!      "a native binary PLUS a reference `revl` alongside" — taken only when no
+//!      private runtime is bundled, so a bare `cargo` build and every editor
+//!      that already has `revl` installed keep working unchanged.
+//!
+//! `REVL_LSP_PYTHON`, when set, wins over the private runtime: it is the
+//! explicit override CI and the oracle harness use to pin the reference. What is
+//! NOT taken, in either mode, is the option A2 forbids: substituting a native
+//! checker off the self-host frontier to avoid the dependency, which is the
+//! silent editor false-admit (A1).
 //!
 //! Fail-closed. A worker that will not start, dies, or errors yields `Err`, and
 //! the server renders that as a visible diagnostic. An engine failure must
@@ -29,6 +40,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use serde_json::{json, Value};
 
 use crate::pyjson;
+use crate::runtime;
 
 /// The reference analysis worker, embedded in the binary rather than installed
 /// beside it, so the only external requirement is an interpreter that can
@@ -40,6 +52,15 @@ const PYTHON_ENV: &str = "REVL_LSP_PYTHON";
 
 pub struct Engine {
     python: String,
+    /// Launch the interpreter in isolated mode (`-I`): true for a bundled
+    /// private runtime, so it reads `revl` only from its own site and ignores
+    /// the machine's `PYTHONPATH`, user site, and `PATH`. False for the PATH
+    /// fallback, whose whole job is to find the machine's installed `revl`.
+    isolated: bool,
+    /// A runtime that was CONFIGURED but could not be prepared. Held so the
+    /// first request fails closed with the reason (rendered as a visible engine
+    /// diagnostic), rather than silently degrading to a `python3` on PATH.
+    init_error: Option<String>,
     worker: Option<Worker>,
 }
 
@@ -51,10 +72,48 @@ struct Worker {
 
 impl Engine {
     pub fn new() -> Self {
-        let python = std::env::var(PYTHON_ENV).unwrap_or_else(|_| "python3".to_string());
+        let (python, isolated, init_error) = Self::resolve_interpreter();
         Engine {
             python,
+            isolated,
+            init_error,
             worker: None,
+        }
+    }
+
+    /// Pick the interpreter this engine drives, and how to launch it.
+    ///
+    ///   1. `REVL_LSP_PYTHON`, if set, is the explicit override — it wins over
+    ///      any bundled runtime so CI and the oracle can pin the reference.
+    ///   2. otherwise a bundled private runtime, if one is resolvable
+    ///      (`runtime::locate`), launched in isolated mode.
+    ///   3. otherwise `python3` on PATH, the unchanged slice-1 fallback.
+    ///
+    /// A runtime that is configured but broken becomes `init_error`, not a
+    /// silent fall-through to PATH.
+    fn resolve_interpreter() -> (String, bool, Option<String>) {
+        if let Ok(explicit) = std::env::var(PYTHON_ENV) {
+            if !explicit.is_empty() {
+                return (explicit, false, None);
+            }
+        }
+        match runtime::locate() {
+            Some(Ok(rt)) => (rt.python, rt.isolated, None),
+            Some(Err(reason)) => ("python3".to_string(), false, Some(reason)),
+            None => ("python3".to_string(), false, None),
+        }
+    }
+
+    /// Which interpreter this engine analyses with — `"private-runtime"` for the
+    /// self-contained bundled path, `"system-python"` for the PATH fallback.
+    /// Surfaced in `revl/gateVersion` so a client can tell a self-contained
+    /// artifact from one leaning on a `revl` alongside it (design: skew and
+    /// distribution made legible, not hidden).
+    pub fn embedding(&self) -> &'static str {
+        if self.isolated {
+            "private-runtime"
+        } else {
+            "system-python"
         }
     }
 
@@ -158,7 +217,21 @@ impl Engine {
         if self.worker.is_some() {
             return Ok(());
         }
-        let mut child = Command::new(&self.python)
+        // A runtime that was bundled but could not be prepared fails closed: the
+        // server renders this as a visible engine diagnostic, never as a clean
+        // document.
+        if let Some(reason) = &self.init_error {
+            return Err(format!("the bundled revl runtime is unavailable: {reason}"));
+        }
+        let mut command = Command::new(&self.python);
+        // Isolated mode for a private runtime (`-I`): import `revl` only from the
+        // runtime's own site, never the machine's `PYTHONPATH`, user site, or
+        // `sys.path[0]`. The PATH fallback runs WITHOUT `-I`, because its job is
+        // to find the machine's installed `revl`.
+        if self.isolated {
+            command.arg("-I");
+        }
+        let mut child = command
             .arg("-c")
             .arg(WORKER_SOURCE)
             .stdin(Stdio::piped())

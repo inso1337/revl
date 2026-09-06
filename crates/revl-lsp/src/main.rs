@@ -13,6 +13,7 @@ mod engine;
 mod native;
 mod protocol;
 mod pyjson;
+mod runtime;
 mod server;
 
 use std::io::{self, BufReader};
@@ -28,8 +29,18 @@ usage:
   revl-lsp --help         print this message
 
 environment:
-  REVL_LSP_PYTHON         interpreter used to run the reference front end
-                          (default: python3; it must be able to `import revl`)
+  REVL_LSP_PYTHON         interpreter used to run the reference front end; wins
+                          over a bundled runtime (default: python3; it must be
+                          able to `import revl`)
+  REVL_LSP_RUNTIME        an already-extracted private runtime directory (one
+                          containing bin/python3) to analyse with, in isolated
+                          mode, instead of a python on PATH
+  REVL_LSP_RUNTIME_ARCHIVE  a pinned runtime archive, extracted atomically into
+                          a versioned private cache on first use, then run in
+                          isolated mode (the one-file bundling path)
+  REVL_LSP_CACHE          cache root the versioned runtime is extracted under
+                          (default: the platform cache dir)
+  REVL_LSP_RUNTIME_PIN    override the pin the runtime cache is keyed by
   REVL_LSP_NATIVE_ONLY    do not fall back to the reference for hover and
                           definition, so the native answers are observable on
                           their own (the agreement oracle uses this)
