@@ -168,6 +168,62 @@ def test_machine_emit_is_parseable():
     assert "FULL 1" in full
 
 
+# --- selfhost/<stem>.rvl -> narrow self-host oracle set (issue #431) -------- #
+def test_selfhost_lower_selects_ir_oracle_not_the_slow_descent_test():
+    # The whole point of issue #431: a lower.rvl edit must run the fast IR oracle
+    # + the line-coverage gate, NOT the FULL suite, and NOT the >120s descent
+    # test that made the FULL fallback time out under the hook's --timeout.
+    r = sel("selfhost/lower.rvl")
+    assert r["full"] is False
+    assert "tests/test_selfhost_lower_ir.py" in r["pytest"]
+    assert "tests/test_selfhost_line_coverage.py" in r["pytest"]
+    assert "tests/test_selfhost_lower.py" not in r["pytest"]
+    assert r["backends"] == []
+
+
+def test_selfhost_emit_selects_only_its_own_oracle():
+    r = sel("selfhost/emit_py.rvl")
+    assert r["full"] is False
+    assert "tests/test_selfhost_emit_py.py" in r["pytest"]
+    assert "tests/test_selfhost_line_coverage.py" in r["pytest"]
+    # tightness: a sibling emitter's oracle is not dragged in.
+    assert "tests/test_selfhost_emit_ts.py" not in r["pytest"]
+
+
+def test_selfhost_checker_and_parser_get_oracle_plus_coverage():
+    for stem, oracle in (("checker", "tests/test_selfhost_checker.py"),
+                         ("parser", "tests/test_selfhost_parser.py")):
+        r = sel(f"selfhost/{stem}.rvl")
+        assert r["full"] is False
+        assert oracle in r["pytest"]
+        assert "tests/test_selfhost_line_coverage.py" in r["pytest"]
+
+
+def test_selfhost_non_source_change_is_full():
+    assert sel("selfhost/scratch.bin")["full"] is True
+
+
+def test_selfhost_oracle_map_covers_the_tree():
+    """Every selfhost/*.rvl file must map to an oracle and every mapped test must
+    exist, so a new self-host file (or a renamed oracle) cannot silently fall
+    back to the unmapped FULL gate the hook was timing out on (issue #431)."""
+    from tools.affected_tests import SELFHOST_ALWAYS, SELFHOST_ORACLE_TESTS
+
+    root = Path(__file__).resolve().parent.parent
+    on_disk = {p.stem for p in (root / "selfhost").glob("*.rvl")}
+    mapped = set(SELFHOST_ORACLE_TESTS)
+    assert mapped == on_disk, (
+        "SELFHOST_ORACLE_TESTS has drifted from selfhost/*.rvl.\n"
+        f"  unmapped self-host files (would fall back to FULL): "
+        f"{sorted(on_disk - mapped)}\n"
+        f"  stale keys (no such selfhost file): {sorted(mapped - on_disk)}\n"
+        "Update tools/affected_tests.py::SELFHOST_ORACLE_TESTS."
+    )
+    for stem, tests in SELFHOST_ORACLE_TESTS.items():
+        for t in tuple(tests) + tuple(SELFHOST_ALWAYS):
+            assert (root / t).is_file(), f"{stem} maps to a missing test {t}"
+
+
 def test_bench_dependent_tests_is_the_actual_set_of_bench_readers():
     """`bench/` selects BENCH_DEPENDENT_TESTS instead of the FULL gate, so that
     tuple has to BE the set of test modules that depend on a bench artifact.
