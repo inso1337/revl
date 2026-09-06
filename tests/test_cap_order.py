@@ -165,3 +165,68 @@ def test_covers_set_reports_uncovered():
     reach = {cap('fs.write(path="/tmp/job")'), cap('fs.write(path="/etc")')}
     uncovered = co.covers_set(held, reach)
     assert [c.to_str() for c in uncovered] == ['fs.write(path="/etc")']
+
+
+# ------------------------------------------- per-instance symbols (Slice 2)
+
+
+def test_symbol_round_trips_unquoted():
+    # a `config.` value re-reads from its canonical (unquoted) spelling as a
+    # Symbol, never as a discrete string.
+    c = cap("fs.write(path=config.job_root)")
+    val = c.param_map()["path"]
+    assert isinstance(val, co.Symbol)
+    assert val.field == "job_root"
+    assert c.to_str() == "fs.write(path=config.job_root)"
+
+
+def test_symbol_incomparable_to_literal_fail_closed():
+    # an UNRESOLVED symbol is incomparable to any literal, on either side:
+    # covered by neither, covering neither (fail closed).
+    sym = cap("fs.write(path=config.job_root)")
+    lit = cap('fs.write(path="/tmp")')
+    assert not co.covers(lit, sym)
+    assert not co.covers(sym, lit)
+
+
+def test_identical_symbol_covers_itself():
+    # a symbol can be passed down and is covered ONLY by the identical symbol.
+    a = cap("fs.write(path=config.job_root)")
+    b = cap("fs.write(path=config.job_root)")
+    other = cap("fs.write(path=config.other)")
+    assert co.covers(a, b)
+    assert not co.covers(a, other)
+
+
+def test_bare_token_covers_a_symbol_child():
+    # the bare token tops its cone: a parent holding bare `fs.write` covers a
+    # child reaching a per-instance `fs.write(path=config.x)`.
+    assert co.covers(cap("fs.write"), cap("fs.write(path=config.x)"))
+
+
+def test_substitute_resolves_into_the_cone():
+    sym = cap("fs.write(path=config.job_root)")
+    resolved = co.substitute(sym, {"job_root": "/tmp/job-42"})
+    assert resolved.to_str() == 'fs.write(path="/tmp/job-42")'
+    assert co.covers(cap('fs.write(path="/tmp")'), resolved)
+    # a resolution OUTSIDE the cone is refused, same order as any literal.
+    outside = co.substitute(sym, {"job_root": "/etc"})
+    assert not co.covers(cap('fs.write(path="/tmp")'), outside)
+
+
+def test_substitute_leaves_unbound_symbol_and_is_inert_on_literals():
+    sym = cap("fs.write(path=config.job_root)")
+    # a field the bindings do not carry stays symbolic (fail closed).
+    assert co.substitute(sym, {"other": "/x"}) == sym
+    # a literal-only or bare cap is returned unchanged (byte-identical).
+    lit = cap('fs.write(path="/tmp")')
+    assert co.substitute(lit, {"job_root": "/tmp"}) is lit
+    bare = cap("fs.write")
+    assert co.substitute(bare, {"job_root": "/tmp"}) is bare
+
+
+def test_ceiling_symbol_refused():
+    # a ceiling is a STATIC bound; a per-instance `config.` value is not one.
+    with pytest.raises(co.CapError) as exc:
+        cap("model.complete(calls=config.n)")
+    assert "ceiling" in str(exc.value)
