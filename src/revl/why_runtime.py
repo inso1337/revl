@@ -52,6 +52,11 @@ BOOT = "boot"                          # root: the composition booted
 TRIGGER = "trigger"                    # root: an external cause withdrew it
 REQUIREMENTS = "requirements"          # loaded once its providers were up
 PROVIDER_WITHDRAWN = "provider-withdrawn"  # went down because a provider did
+LIVENESS_EXPIRED = "liveness-expired"  # root: silent past its declared ceiling
+                                       # (item 477: the QUIET case — neither
+                                       # faulted nor answered — distinct from a
+                                       # fault, which is a TRIGGER carrying a
+                                       # classifiable diagnostic `code`)
 
 
 # --------------------------------------------------------------------------
@@ -167,6 +172,46 @@ def cause_provider_withdrawn(component: str, key: str,
     if code is not None:
         cause["code"] = code
     return cause
+
+
+def liveness_expired(ceiling_ms, silent_ms) -> bool:
+    """The pure gate the runtime complement (item 477) consults to decide
+    whether a DECLARED liveness expectation has been broken: an activation is
+    expected to show a sign of life within ``ceiling_ms``; a silence longer
+    than that ceiling is an expiry.
+
+    This is the QUIET case, not a fault: it fires on the ABSENCE of a signal
+    (a deadlock, a stuck host-call, a partition with no failure signal), never
+    on a classifiable error. It is deliberately kept separate from the fault
+    path — a fault is a :func:`cause_trigger` carrying a diagnostic ``code``;
+    an expiry is a :func:`cause_liveness_expired`.
+
+    Defensive by construction so a partial world never fabricates an expiry:
+    a non-positive or absent `ceiling_ms` means "no ceiling declared" and can
+    never expire; an absent `silent_ms` (no liveness observation recorded yet)
+    is treated as not-yet-expired rather than as an infinite silence. Strictly
+    ``silent_ms > ceiling_ms``: meeting the ceiling exactly is still live."""
+    if ceiling_ms is None or ceiling_ms <= 0:
+        return False
+    if silent_ms is None:
+        return False
+    return silent_ms > ceiling_ms
+
+
+def cause_liveness_expired(ceiling_ms, silent_ms) -> dict:
+    """Root cause: the activation was withdrawn because it went silent past its
+    declared liveness ceiling (item 477 — the runtime complement of the item-438
+    static reachable-dead-state finding).
+
+    Distinct in KIND from :func:`cause_trigger` (the fault/operator path) so the
+    cause-chain walk, the oracle and every trace consumer can tell a hung
+    provider apart from one that faulted or was withdrawn by an operator. It
+    carries the operator-visible accounting — the declared `ceilingMs` and the
+    observed `silentMs` — and no diagnostic ``code``: an expiry classifies no
+    ``RevlError`` (there is no error to classify), and a fabricated code would
+    make the QUIET case masquerade as a fault."""
+    return {"kind": LIVENESS_EXPIRED,
+            "ceilingMs": ceiling_ms, "silentMs": silent_ms}
 
 
 # --------------------------------------------------------------------------
@@ -365,6 +410,10 @@ def _cause_note(cause: dict) -> str:
         return "the composition booted"
     if kind == TRIGGER:
         return cause.get("detail") or "external trigger"
+    if kind == LIVENESS_EXPIRED:
+        return (f"went silent for {cause.get('silentMs')}ms, past its declared "
+                f"liveness ceiling of {cause.get('ceilingMs')}ms "
+                f"(hung — neither faulted nor answered)")
     if kind == PROVIDER_WITHDRAWN:
         return (f"injects `{cause.get('key')}`, provided by "
                 f"{cause.get('component')}, which withdrew")
@@ -389,7 +438,7 @@ def render_chain(component: str, frames: list[Frame]) -> str:
     for i, frame in enumerate(frames):
         arrow = "" if i == 0 else "-> "
         root = "   (root cause)" if i == len(frames) - 1 and \
-            frame.cause.get("kind") in (BOOT, TRIGGER) else ""
+            frame.cause.get("kind") in (BOOT, TRIGGER, LIVENESS_EXPIRED) else ""
         lines.append(f"  {arrow}{frame.component.ljust(width)}  "
                      f"{frame.transition}   because {frame.note}{root}")
     return "\n".join(lines)
