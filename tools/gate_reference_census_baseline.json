@@ -3,8 +3,67 @@
   "false-admit/A1": [
    "examples/rejections/t34_arrow_self_declared_async.rvl"
   ],
+  "false-admit/A6": [
+   "examples/rejections/a6_method_not_in_service.rvl"
+  ],
+  "false-admit/G1": [
+   "examples/rejections/g1_template_undeclared.rvl",
+   "examples/rejections/v2_undeclared_fn_var.rvl"
+  ],
   "false-admit/G4": [
    "examples/rejections/g4_spawn_widens_parameter.rvl"
+  ],
+  "false-admit/G6": [
+   "examples/rejections/g6_closure_mutates_capture.rvl",
+   "examples/rejections/g6_method_local_shadows_component.rvl",
+   "examples/rejections/shadowed_module_fn_call.rvl",
+   "examples/rejections/v2_compound_assign_on_let.rvl",
+   "examples/rejections/v2_duplicate_let_block_scope.rvl",
+   "examples/rejections/v2_let_reassignment.rvl"
+  ],
+  "false-admit/HOST-METHOD": [
+   "examples/rejections/host_method_not_on_surface.rvl",
+   "examples/rejections/t24_opaque_receiver_builtin.rvl"
+  ],
+  "false-admit/T1": [
+   "examples/rejections/g4_extern_undo_wrong_arg_type.rvl",
+   "examples/rejections/t10_call_arity.rvl",
+   "examples/rejections/t11_field_through_opt.rvl",
+   "examples/rejections/t12_str_index.rvl",
+   "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
+   "examples/rejections/t15_generic_call_site.rvl",
+   "examples/rejections/t16_provide_method_missing_return.rvl",
+   "examples/rejections/t17_arrow_body_unchecked.rvl",
+   "examples/rejections/t1_service_arg_type.rvl",
+   "examples/rejections/t21_int32_narrow_implicit.rvl",
+   "examples/rejections/t22_int32_width_mix.rvl",
+   "examples/rejections/t23_int32_remainder.rvl",
+   "examples/rejections/t26_anon_record_update_wrong_type.rvl",
+   "examples/rejections/t28_bitwise_non_int32.rvl",
+   "examples/rejections/t31_index_non_int_provide_method.rvl",
+   "examples/rejections/t32_arrow_value_result_flows.rvl",
+   "examples/rejections/t33_arrow_value_arity.rvl",
+   "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
+   "examples/rejections/t3_config_default_type.rvl",
+   "examples/rejections/t4_field_arg_type.rvl",
+   "examples/rejections/t6_bare_generic.rvl",
+   "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
+   "examples/rejections/t8_missing_return.rvl",
+   "examples/rejections/t9_return_path_incomplete.rvl",
+   "examples/rejections/v2_map_set_value_mismatch.rvl",
+   "examples/rejections/v2_map_value_unknown_method.rvl",
+   "examples/rejections/v2_match_nonexhaustive.rvl"
+  ],
+  "false-admit/T2": [
+   "examples/rejections/t2_null_in_expression.rvl"
+  ],
+  "false-admit/TYPE": [
+   "examples/rejections/arith_zero_divisor.rvl",
+   "examples/rejections/t13_unknown_match_case.rvl",
+   "examples/rejections/t18_type_alias_cycle.rvl",
+   "examples/rejections/t27_anon_record_update_undeclared_field.rvl",
+   "examples/rejections/t36_float_literal_range.rvl",
+   "examples/rejections/t5_destructure_nonrecord.rvl"
   ],
   "false-reject/BAD": [
    "backends/go/scenarios/advance.rvl",
@@ -49,6 +108,12 @@
   ],
   "tag-mismatch/G4->BAD": [
    "examples/rejections/g4_spawn_widens_budget.rvl"
+  ],
+  "tag-mismatch/T1->BAD": [
+   "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl",
+   "examples/rejections/t25_explicit_tparam_heuristic_off.rvl",
+   "examples/rejections/t29_field_read_on_any.rvl",
+   "examples/rejections/t30_field_read_on_any_provide_method.rvl"
   ]
  },
  "corpus_dirs": [
@@ -230,6 +295,18 @@
     "tag": ""
    }
   },
+  "backends/typescript/tests/fixtures/dynamic_reserved_key.rvl": {
+   "bucket": "tag-mismatch/T1->BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "field read `.function` on a value of type `Any` \u2014 an erased value has no known fields",
+    "tag": "T1"
+   }
+  },
   "backends/wasm/scenarios/crashproof/crashproof.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
@@ -362,6 +439,54 @@
     "tag": ""
    }
   },
+  "examples/rejections/a6_method_not_in_service.rvl": {
+   "bucket": "false-admit/A6",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`db.execute` is not a method of service Database",
+    "tag": "A6"
+   }
+  },
+  "examples/rejections/arith_zero_divisor.rvl": {
+   "bucket": "false-admit/TYPE",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`mod` by a literal zero is undefined",
+    "tag": "TYPE"
+   }
+  },
+  "examples/rejections/g1_template_undeclared.rvl": {
+   "bucket": "false-admit/G1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`nobody` is not declared in this function",
+    "tag": "G1"
+   }
+  },
+  "examples/rejections/g4_extern_undo_wrong_arg_type.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "argument 1 of `close_ledger(...)` expects `Int`, got `Str`",
+    "tag": "T1"
+   }
+  },
   "examples/rejections/g4_spawn_widens_budget.rvl": {
    "bucket": "tag-mismatch/G4->BAD",
    "gate": {
@@ -386,6 +511,342 @@
     "tag": "G4"
    }
   },
+  "examples/rejections/g6_closure_mutates_capture.rvl": {
+   "bucket": "false-admit/G6",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "a closure cannot assign to `n`: captures are by value, not by reference (G6)",
+    "tag": "G6"
+   }
+  },
+  "examples/rejections/g6_method_local_shadows_component.rvl": {
+   "bucket": "false-admit/G6",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`store` is already bound in `set`",
+    "tag": "G6"
+   }
+  },
+  "examples/rejections/host_method_not_on_surface.rvl": {
+   "bucket": "false-admit/HOST-METHOD",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`Map` has no method `putt` (its surface: drop, get, insert, insert_if_absent, new, remove)",
+    "tag": "HOST-METHOD"
+   }
+  },
+  "examples/rejections/shadowed_module_fn_call.rvl": {
+   "bucket": "false-admit/G6",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`helper` is bound here and called in this body, and a module function of that name is in scope",
+    "tag": "G6"
+   }
+  },
+  "examples/rejections/t10_call_arity.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`scale` takes 1 argument(s), 2 given",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t11_field_through_opt.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "field access `.name` on `Opt[Row]`: the optional wrapper has no such member \u2014 `T` flows into `Opt[T]`, never silently back out",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t12_str_index.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`Str` has no index operator \u2014 `[...]` indexes a `List` only",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t13_unknown_match_case.rvl": {
+   "bucket": "false-admit/TYPE",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`Pending` is not a case of `Status` (cases: `Active`, `Retired`)",
+    "tag": "TYPE"
+   }
+  },
+  "examples/rejections/t14_optional_chain_on_nonoptional.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`?.` needs an optional on the left, got `Row`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t15_generic_call_site.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "this function's return expects `Int`, got `Str`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t16_provide_method_missing_return.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`get` implements `Store.get`, which returns `Str`, but this body never returns a value",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t17_arrow_body_unchecked.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "field access `.name` on `Opt[Row]`: the optional wrapper has no such member \u2014 `T` flows into `Opt[T]`, never silently back out",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t18_type_alias_cycle.rvl": {
+   "bucket": "false-admit/TYPE",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "type alias cycle: Handle -> Ref -> Handle",
+    "tag": "TYPE"
+   }
+  },
+  "examples/rejections/t1_service_arg_type.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`db.query` argument `sql` expects `Str`, got `Int`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t21_int32_narrow_implicit.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "this function's return expects `Int32`, got `Int`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t22_int32_width_mix.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`+` does not mix `Int32` and `Int`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t23_int32_remainder.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`%` is Int-only; widen the Int32 operands with `.to_int()` first (docs/arithmetic.md)",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t24_opaque_receiver_builtin.rvl": {
+   "bucket": "false-admit/HOST-METHOD",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "stdlib method `remove` on a value of unknown type \u2014 no constructor pins this receiver as a Str/List/Int/Int32/Bytes/Map value, so the checker refuses to lower the call as the builtin",
+    "tag": "HOST-METHOD"
+   }
+  },
+  "examples/rejections/t25_explicit_tparam_heuristic_off.rvl": {
+   "bucket": "tag-mismatch/T1->BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected { after fn signature"
+   },
+   "reference": {
+    "message": "argument 1 of `typo(...)` expects `List[U]`, got `List[Int]`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t26_anon_record_update_wrong_type.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "update of field `h` expects `Str`, got `Int`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t27_anon_record_update_undeclared_field.rvl": {
+   "bucket": "false-admit/TYPE",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "record update names `missing`, which is not a field of `{h: Str}`",
+    "tag": "TYPE"
+   }
+  },
+  "examples/rejections/t28_bitwise_non_int32.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`|` requires `Int32` operands, got `Float`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t29_field_read_on_any.rvl": {
+   "bucket": "tag-mismatch/T1->BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "field read `.kind` on a value of type `Any` \u2014 an erased value has no known fields",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t2_null_in_expression.rvl": {
+   "bucket": "false-admit/T2",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`null` has no type in revl \u2014 absence is `Opt[T]`",
+    "tag": "T2"
+   }
+  },
+  "examples/rejections/t30_field_read_on_any_provide_method.rvl": {
+   "bucket": "tag-mismatch/T1->BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "field read `.kind` on a value of type `Any` \u2014 an erased value has no known fields",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t31_index_non_int_provide_method.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "index expects `Int`, got `Str`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t32_arrow_value_result_flows.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "argument 1 of `takes_int(...)` expects `Int`, got `Str`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t33_arrow_value_arity.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`f` is a `(Any) -> Str` and takes 1 argument(s), 2 given",
+    "tag": "T1"
+   }
+  },
   "examples/rejections/t34_arrow_self_declared_async.rvl": {
    "bucket": "false-admit/A1",
    "gate": {
@@ -396,6 +857,198 @@
    "reference": {
     "message": "an arrow may not declare its own async colour",
     "tag": "A1"
+   }
+  },
+  "examples/rejections/t35_arrow_annotation_not_quantified.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "argument 1 of `f` expects `Q`, got `Int`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t36_float_literal_range.rvl": {
+   "bucket": "false-admit/TYPE",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "Float literal is infinite: it is outside the range of a 64-bit float",
+    "tag": "TYPE"
+   }
+  },
+  "examples/rejections/t3_config_default_type.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "config field `n` default expects `Int`, got `Str`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t4_field_arg_type.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`s.take` argument `s` expects `Str`, got `Int`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t5_destructure_nonrecord.rvl": {
+   "bucket": "false-admit/TYPE",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "record destructuring requires a record, but `List[Int]` is not a record",
+    "tag": "TYPE"
+   }
+  },
+  "examples/rejections/t6_bare_generic.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`Opt` takes 1 type argument(s), got 0 (`Opt`)",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t7_provide_param_annotation_mismatch.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "parameter `sql` of `query` (from service `Db`) expects `Str`, got `Int`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t8_missing_return.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`budget` is declared to return `Int` but its body never returns a value",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/t9_return_path_incomplete.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`rank` is declared to return `Int` but control can reach the end of its body without a `return`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/v2_compound_assign_on_let.rvl": {
+   "bucket": "false-admit/G6",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "cannot reassign `n` \u2014 it is `let` (single-assignment)",
+    "tag": "G6"
+   }
+  },
+  "examples/rejections/v2_duplicate_let_block_scope.rvl": {
+   "bucket": "false-admit/G6",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`y` is already declared in this function",
+    "tag": "G6"
+   }
+  },
+  "examples/rejections/v2_let_reassignment.rvl": {
+   "bucket": "false-admit/G6",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "cannot reassign `n` \u2014 it is `let` (single-assignment)",
+    "tag": "G6"
+   }
+  },
+  "examples/rejections/v2_map_set_value_mismatch.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "builtin `set` argument expects `Int`, got `Str`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/v2_map_value_unknown_method.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "no builtin method `fetch` on values \u2014 the stdlib surface is charAt, charCodeAt, checked_div_euclid, checked_div_floor, checked_div_trunc, checked_mod, codepoint_at, concat, div_euclid, div_floor, div_trunc, endsWith, field, has, indexOf, is_alnum, is_alpha, is_digit, is_space, join, keys, length, list, lookup, mod, push, remove, repeat, set, size, slice, split, startsWith, str, to_int, to_int32, to_str (docs/stdlib-2.0.md)",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/v2_match_nonexhaustive.rvl": {
+   "bucket": "false-admit/T1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "non-exhaustive match: missing case `Invalid`",
+    "tag": "T1"
+   }
+  },
+  "examples/rejections/v2_undeclared_fn_var.rvl": {
+   "bucket": "false-admit/G1",
+   "gate": {
+    "code": "",
+    "kind": "no_objection",
+    "message": ""
+   },
+   "reference": {
+    "message": "`missing` is not declared in this function",
+    "tag": "G1"
    }
   },
   "examples/ts_host_body.rvl": {
