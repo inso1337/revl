@@ -134,7 +134,8 @@ def seam_latency_ms(host: str, port: int, samples: int = 5,
             pass
     if not rtts:
         return None
-    rtts.sort()
+    mid = len(rtts) // 2
+    median = sorted(rtts)[mid] if len(rtts) % 2 != 0 else sum(sorted(rtts)[mid-1:mid+1]) / 2
     return round(rtts[len(rtts) // 2], 3)
 
 
