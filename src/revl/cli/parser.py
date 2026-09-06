@@ -894,6 +894,30 @@ def build_parser() -> argparse.ArgumentParser:
                          help="on rejection, print a structured diagnostic instead "
                               "of the human rendering")
 
+    # `revl export client` — item 424 gap (c) slice C1: a typed remote client
+    # for a NON-revl consumer, over the canonical value encoding
+    # (docs/interop-bridge.md). Pure IR codegen, no runtime, no language change.
+    exp_client = exp_sub.add_parser(
+        "client",
+        help="generate a typed remote client (TypeScript) for a revl service "
+             "or composition, over the canonical wire encoding "
+             "(docs/interop-bridge.md, item 424 gap c)")
+    exp_client.add_argument("files", nargs="+", help=".rvl source files")
+    exp_client.add_argument("--lang", default="ts", choices=("ts",),
+                            help="target language for the generated client "
+                                 "(default: ts)")
+    exp_client_group = exp_client.add_mutually_exclusive_group(required=True)
+    exp_client_group.add_argument("--service", default=None, metavar="NAME",
+                                  help="export a client for a single service by name")
+    exp_client_group.add_argument("--composition", action="store_true",
+                                  help="export a client for every service the "
+                                       "composition provides")
+    exp_client.add_argument("-o", "--output", default=None,
+                            help="output path (default: stdout)")
+    exp_client.add_argument("--json-diagnostics", action="store_true",
+                            help="on rejection, print a structured diagnostic "
+                                 "instead of the human rendering")
+
     serve = sub.add_parser(
         "serve",
         help="serve a composition's OWN provided operations as MCP tools "
