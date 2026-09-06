@@ -305,6 +305,7 @@ below; the exhaustive per-command flag reference is
 | `revl emit FILES` | render one backend's source directly, no IR round-trip (`--backend`, `--target temporal`) | [backends-roadmap.md](backends-roadmap.md) |
 | `revl bundle FILES --out DIR` | emit every tier plus the runtime manifest into one portable bundle (`--backend`, `--topology`) | [deploy.md](deploy.md) |
 | `revl verify BUNDLE` | check a bundle tier by tier; nonzero on a failing tier, so it is usable as a release gate | [commands-reference.md](commands-reference.md#revl-verify) |
+| `revl deploy MAP` | deploy a composition across process seams with attested admission (the receiver re-hashes IR+artifact and checks the signed evidence chain) and coordinated two-phase rollback; `--dry-run`, `--json` | [deploy.md](deploy.md) |
 | `revl truc VERB …` | the component manager namespaced under the compiler, `add`/`rm`/`assemble`/`ship`/`reproduce`, tail passed through unchanged | [truc.md](truc.md) |
 
 Two module entry points sit outside the `revl` subcommand tree. `python -m

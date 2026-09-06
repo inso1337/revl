@@ -232,6 +232,83 @@ def test_every_via_maps_to_a_boundary_with_a_recorded_teardown_promise():
 
 
 # ==========================================================================
+# 1b. `revl deploy MAP --dry-run` — the CLI over plan-time admission
+# ==========================================================================
+#
+# The command wraps `admit_deploy_map` and opens no boundary (design §1.1). It
+# is driven through the real `revl.__main__.main` dispatch so the parser wiring
+# is exercised, not just the handler.
+
+from revl.__main__ import main as _cli  # noqa: E402
+
+
+def _write_map(tmp_path, **processes) -> str:
+    import tomllib  # noqa: PLC0415 — round-trip check that the map is valid TOML
+    # Author the map as JSON (a deploy map is byte-identical in either), which
+    # the loader reads by extension — no TOML serializer needed in the test.
+    path = tmp_path / "deploy.json"
+    path.write_text(json.dumps({"processes": processes}), encoding="utf-8")
+    assert tomllib is not None
+    return str(path)
+
+
+def test_deploy_dry_run_admits_a_local_only_map(tmp_path, capsys):
+    """A map with no boundary-crossing target admits and exits 0."""
+    mp = _write_map(tmp_path,
+                    a={"components": ["A"]},
+                    b={"components": ["B"], "deploy": {"via": "local"}})
+    assert _cli(["deploy", mp, "--dry-run"]) == 0
+    assert "admitted" in capsys.readouterr().out
+
+
+def test_deploy_dry_run_refuses_a_machine_boundary(tmp_path, capsys):
+    """A `via = ssh` machine boundary is refused outright, exit 1."""
+    mp = _write_map(tmp_path,
+                    db={"components": ["Db"],
+                        "deploy": {"via": "ssh", "host": "deploy@10.0.0.5",
+                                   "trust": "/etc/revl/trust.d"}})
+    assert _cli(["deploy", mp, "--dry-run"]) == 1
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "machine-boundary" in out
+
+
+def test_deploy_without_dry_run_refuses_even_an_admitted_map(tmp_path, capsys):
+    """The COMMIT/launch phase is not wrapped yet, so an admitted map without
+    `--dry-run` is refused (exit 1) rather than reported as deployed — the plan
+    is still printed."""
+    mp = _write_map(tmp_path, a={"components": ["A"]})
+    assert _cli(["deploy", mp]) == 1
+    err = capsys.readouterr().err
+    assert "--dry-run" in err
+
+
+def test_deploy_json_output_shape(tmp_path, capsys):
+    """`--json` prints a machine-readable verdict with the refusal enumerated."""
+    mp = _write_map(tmp_path,
+                    db={"components": ["Db"],
+                        "deploy": {"via": "ssh", "trust": "/t"}})
+    assert _cli(["deploy", mp, "--dry-run", "--json"]) == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["ok"] is False
+    assert doc["refusals"][0]["rule"] == "machine-boundary"
+
+
+def test_deploy_unreadable_map_is_an_error_not_a_crash(tmp_path, capsys):
+    """A missing map file is a diagnostic and a nonzero exit, never a traceback."""
+    missing = str(tmp_path / "nope.json")
+    assert _cli(["deploy", missing, "--dry-run"]) == 1
+    assert "cannot read deploy map" in capsys.readouterr().err
+
+
+def test_deploy_malformed_map_is_an_error_not_a_crash(tmp_path, capsys):
+    """A syntactically broken map is a diagnostic and a nonzero exit."""
+    path = tmp_path / "broken.json"
+    path.write_text("{not json at all", encoding="utf-8")
+    assert _cli(["deploy", str(path), "--dry-run"]) == 1
+    assert "cannot read deploy map" in capsys.readouterr().err
+
+
+# ==========================================================================
 # 2. a real container boundary (gated on REVL_SANDBOX_DOCKER)
 # ==========================================================================
 

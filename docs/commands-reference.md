@@ -14,7 +14,7 @@ compile  explain  grammar  adapt  doctor  scaffold  composition  layer
 audit  policy  diff  changelog  version  contract  erase-report  plan
 apply  undo  canary  query  fmt  quarantine  analyze  test  mcp  import
 export  serve  run  recover  estop  branch  compare  why  metrics  trace
-profile  attest  dash  repair  bundle  emit  verify  truc
+profile  attest  dash  repair  bundle  emit  verify  deploy  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -898,6 +898,33 @@ gate.
 ```bash
 revl verify app.revlbundle
 revl verify app.revlbundle --json    # CI: parse the per-tier verdict
+```
+
+### `revl deploy`
+
+Deploy a compiled composition across process seams with attested admission and
+coordinated rollback (roadmap item 118, Slice 1). Every seam is a local process
+seam today; cross-machine control-plane pieces are deliberately deferred.
+
+- `MAP` - the deploy/placement map (TOML or JSON): `[processes.<p>]` with an
+  optional attestation bundle per process (required).
+- `--dry-run` - run the admission plan and stop before any COMMIT; reports the
+  targets, refusals and boundaries without mutating any participant.
+- `--json` - machine-readable verdict (targets, refusals, boundaries).
+
+Admission is the load-bearing half: the receiver re-hashes the IR and artifact
+bytes it will actually execute and verifies item 127's signed `evidence_bindings`
+chain (`source -> IR -> artifact -> policy -> evidence`) against a local trust
+store, never trusting a self-declared `backend`/`artifact_hash`. Rollback is a
+two-phase PREPARE/COMMIT over participant processes: the coordinator holds only
+an ordered commit ledger and, on failure, drives ABORT in reverse ledger order
+so each participant runs its own local LIFO unwind. Each seam records the
+identity level it actually achieved (`sealed`/`peer-bound`/`peer-pinned`/
+`unverified`) rather than overclaiming under a shared name.
+
+```bash
+revl deploy deploy.toml --dry-run     # plan admission, stop before COMMIT
+revl deploy deploy.toml --json        # machine-readable verdict
 ```
 
 ## Interop: MCP, import, export, serve
