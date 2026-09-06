@@ -50,14 +50,19 @@ auditable rather than assumed.
 
 What is NOT in this slice
 -------------------------
-* The per-rung SEAM TRANSPORT. The 363 seam is a Unix socket in the placement
-  directory. Crossing a container boundary with it is a bind mount, which does
-  not carry a Unix socket on every host (verified non-functional in both
-  directions over a Docker Desktop bind mount on macOS: the container binds the
-  socket and a host connect gets ECONNREFUSED). So a container-sandboxed
-  process that has a cross-boundary seam is REFUSED here rather than launched
-  into a boundary its seam cannot cross. The transport variant (TCP+mTLS over
-  item 56's network seam, or a shared netns) is the next sub-slice.
+* The per-rung SEAM TRANSPORT REACHABILITY. The 363 seam is a Unix socket in
+  the placement directory. Crossing a container boundary with it is a bind
+  mount, which does not carry a Unix socket on every host (verified
+  non-functional in both directions over a Docker Desktop bind mount on macOS:
+  the container binds the socket and a host connect gets ECONNREFUSED). The
+  seam-only network and the conductor-owned relay that carry item-56 TCP+mTLS
+  across the boundary are item 411 T3, not yet built. Until then a
+  container-sandboxed process with a cross-boundary seam is still REFUSED, but
+  as of T1 (`seam_transport_descriptor`) the refusal is PER-PRECONDITION: the
+  gate builds the `relay-mtls` descriptor, checks the item-56 role rule and the
+  item-54 deadline rule per seam, and names each unmet precondition — the T3
+  reachability precondition among them — instead of the old blanket
+  "seam-free only" refusal.
 * The conductor-served approval-across-boundary channel.
 * The `wasm-cell` and `microvm` rungs (`resolve_driver` returns None, and the
   caller refuses).
@@ -354,6 +359,86 @@ def source_mounts(files, cwd: str) -> list[tuple[str, str]]:
 
 
 # --------------------------------------------------------------------------
+# the seam transport descriptor (item 411 T1)
+# --------------------------------------------------------------------------
+
+# The plan-layer transport a cross-boundary sandbox seam would ride: item 56's
+# TCP+mTLS between the two processes, carried over a conductor-owned relay on a
+# per-process network (docs/design/411-seam-transport.md, "The decision"). T1
+# builds the descriptor and its preconditions only; the relay/network/canary
+# that make it REACHABLE are T3, so the reachability precondition below is
+# always unmet in this slice and every cross-boundary sandbox seam still
+# refuses — now naming the precondition it fails instead of the blanket
+# "seam-free only" refusal it replaced.
+SEAM_TRANSPORT = "relay-mtls"
+
+# item 411 T3 has not landed: the seam-only network and the conductor-owned
+# relay that carry a seam across the container boundary do not exist yet.
+_REACHABILITY_UNMET = (
+    "reachability: nothing carries a seam across the container boundary in this "
+    "slice — the seam-only per-process network and the conductor-owned relay "
+    "that forward item-56 TCP+mTLS are item 411 T3, not yet built; until T3 "
+    "lands a cross-boundary sandboxed seam has no transport (a UDS in the "
+    "placement directory does not cross a container bind mount portably)")
+
+
+def seam_transport_descriptor(pname: str, seams: list) -> dict:
+    """The `relay-mtls` transport descriptor for a sandboxed process's
+    cross-boundary seams (item 411 T1): `{"transport", "unmet": [...]}`, where
+    `unmet` names every precondition NOT satisfied, one human refusal fragment
+    each. The item-56 role rule (a provider is py; a consumer is py/node, the
+    rust/go/java runners holding only the UDS-only client) and the item-54
+    deadline rule (every in-placement participant's `seam_deadline` is non-null)
+    are checked here per seam; the T3 reachability precondition is appended once
+    while T3 is unbuilt. An empty `unmet` means the plan layer admits and only a
+    landed T3 is missing; a seam-free process passes an empty `seams` and no
+    descriptor is built at all."""
+    unmet: list[str] = []
+
+    def add(fragment: str) -> None:
+        if fragment not in unmet:
+            unmet.append(fragment)
+
+    for e in seams:
+        key = e["key"]
+        pb = e.get("provider_backend", "py")
+        cb = e.get("consumer_backend", "py")
+        # provider role: the mTLS listener is py-only (item 56). A remote
+        # provider lives in another composition that already serves mTLS (py),
+        # so its backend is not this placement's to check.
+        if not e.get("remote") and pb != "py":
+            add(f"provider {e['provider']!r} of seam {key!r} is on the {pb} "
+                f"backend: the TCP+mTLS listener (item 56) is py-only, so a "
+                f"sandboxed provider — and any host-side provider serving a "
+                f"sandbox — must be a py process")
+        # consumer role: the TCP+mTLS client ships on py and node/ts only
+        # (item 149); rust/go/java read only the local `socket` (UDS-only) form.
+        if cb not in ("py", "node"):
+            add(f"consumer {e['consumer']!r} of seam {key!r} is on the {cb} "
+                f"backend: the TCP+mTLS client ships on the py and node/ts "
+                f"runners only (item 149); the {cb} runner reads only the local "
+                f"`socket` (UDS-only) client, so a {cb} consumer of a sandboxed "
+                f"provider is refused — put it on py or node/ts")
+        # deadline rule (item 54): every participant this placement can see must
+        # carry a non-null seam_deadline. The remote provider's deadline is not
+        # visible here and is not this side's to enforce.
+        parts = [("provider", e["provider"], e.get("provider_deadline"))]
+        if e.get("remote"):
+            parts = []
+        parts.append(("consumer", e["consumer"], e.get("consumer_deadline")))
+        for _role, part, dl in parts:
+            if dl is None:
+                add(f"participant {part!r} of seam {key!r} has a null "
+                    f"seam_deadline: a cross-boundary round-trip needs a deadline "
+                    f"(item 54); set seam_deadline on {part!r} or leave it at the "
+                    f"default")
+
+    if seams:
+        add(_REACHABILITY_UNMET)
+    return {"transport": SEAM_TRANSPORT, "unmet": unmet}
+
+
+# --------------------------------------------------------------------------
 # the container rung driver
 # --------------------------------------------------------------------------
 
@@ -384,18 +469,24 @@ class ContainerDriver:
                 f"covers the `py` backend only in this slice (the other tiers "
                 f"need their own in-image runner form). Move the process to the "
                 f"`py` tier, or take it out of the sandbox.")
-        seam_keys = sorted(ctx.get("seam_keys") or [])
-        if seam_keys:
-            return None, (
-                f"process {pname!r} is placed in a `container` sandbox but has "
-                f"cross-boundary seam(s) ({', '.join(seam_keys)}): the 363 seam "
-                f"is a Unix socket in the placement directory, and a Unix socket "
-                f"does not cross a container bind mount portably (verified "
-                f"non-functional in both directions on a Docker Desktop bind "
-                f"mount). The per-rung seam transport is the next sub-slice; "
-                f"until it lands, a container-sandboxed process must be "
-                f"seam-free. Place {pname!r}'s component(s) with the process "
-                f"they talk to, or run them unsandboxed.")
+        # item 411 T1: a cross-boundary seam no longer refuses in a blanket way.
+        # The gate builds the relay-mtls transport descriptor and refuses naming
+        # each precondition it fails — the item-56 role and item-54 deadline
+        # rules per seam, plus the T3 reachability precondition that is unmet
+        # until the relay lands. A seam-free process carries no seams and this
+        # block is inert (byte-identical to a seam-free boot before T1).
+        seams = ctx.get("seams") or []
+        if seams:
+            desc = seam_transport_descriptor(pname, seams)
+            if desc["unmet"]:
+                bullets = "".join(f"\n  - {u}" for u in desc["unmet"])
+                return None, (
+                    f"process {pname!r} is placed in a `container` sandbox with "
+                    f"cross-boundary seam(s); the {desc['transport']} transport "
+                    f"cannot be admitted until every precondition is met. "
+                    f"Unmet:{bullets}\n"
+                    f"Place {pname!r}'s component(s) with the process they talk "
+                    f"to, run them unsandboxed, or fix each precondition above.")
 
         docker = self._resolve_docker()
         if docker is None:

@@ -656,6 +656,63 @@ def _reach_descriptor(pname: str, sandboxes: dict, backends: dict) -> str:
     return f"{pname}[{backend}, unsandboxed: full host reach]"
 
 
+def sandbox_seam_roles(pname: str, processes: dict, requires: dict,
+                       provides: dict, owner: dict, backends: dict,
+                       remote_specs: dict, default_deadline) -> list[dict]:
+    """The cross-boundary seams of a sandboxed process, one directed edge per
+    (key, peer) with each side's ROLE, backend, and per-process seam deadline
+    (item 411 T1). This is the plan-layer input the sandbox gate turns into a
+    relay-mtls transport descriptor and its per-precondition refusals: the
+    item-56 role rule (a provider is py, a consumer is py/node) and the item-54
+    deadline rule (every participant's deadline is non-null), restated as
+    sandbox-gate preconditions naming the offending seam instead of the blanket
+    "seam-free only" refusal. A seam-free process yields `[]` and the gate is
+    byte-identical to before. `owner[key]` is the local provider; a key with no
+    local owner but a `[remotes]` entry is a sandboxed consumer dialing another
+    composition (whose provider serves item-56 mTLS, hence py, and whose
+    deadline this placement cannot see)."""
+
+    def deadline(p: str):
+        return processes[p].get("seam_deadline", default_deadline)
+
+    edges: list[dict] = []
+    # this process as PROVIDER: every other process that consumes a key it owns.
+    for key in provides.get(pname, {}):
+        if owner.get(key) != pname:
+            continue
+        for consumer in processes:
+            if consumer == pname:
+                continue
+            if key in requires.get(consumer, {}) and key not in provides.get(consumer, {}):
+                edges.append({
+                    "key": key, "self_role": "provider", "remote": False,
+                    "provider": pname, "provider_backend": backends.get(pname, "py"),
+                    "provider_deadline": deadline(pname),
+                    "consumer": consumer, "consumer_backend": backends.get(consumer, "py"),
+                    "consumer_deadline": deadline(consumer)})
+    # this process as CONSUMER: every key it requires from someone else.
+    for key in requires.get(pname, {}):
+        if key in provides.get(pname, {}):
+            continue
+        prov = owner.get(key)
+        if prov is not None:
+            edges.append({
+                "key": key, "self_role": "consumer", "remote": False,
+                "provider": prov, "provider_backend": backends.get(prov, "py"),
+                "provider_deadline": deadline(prov),
+                "consumer": pname, "consumer_backend": backends.get(pname, "py"),
+                "consumer_deadline": deadline(pname)})
+        elif key in (remote_specs or {}):
+            edges.append({
+                "key": key, "self_role": "consumer", "remote": True,
+                "provider": f"remote {key!r}", "provider_backend": "py",
+                "provider_deadline": None,
+                "consumer": pname, "consumer_backend": backends.get(pname, "py"),
+                "consumer_deadline": deadline(pname)})
+    edges.sort(key=lambda e: (e["key"], e["provider"], e["consumer"]))
+    return edges
+
+
 def process_tag(pname: str, processes: dict, backends: dict, sandboxes: dict) -> str:
     """The boot-summary tag for one process. A non-sandboxed process is
     byte-identical to the pre-411 tag (`p[backend]=[comps]`); a sandboxed one
@@ -3361,6 +3418,12 @@ def run_placement(files, placement_path: str, once: bool = False,
             "seam_dir": str(tmp),
             "seam_keys": sorted(set(spec.get("proxies") or {})
                                 | set((spec.get("serve") or {}).get("keys") or [])),
+            # item 411 T1: the seam ROLES (provider/consumer, peer, peer backend,
+            # per-participant deadline) the gate turns into a relay-mtls transport
+            # descriptor and its per-precondition refusals.
+            "seams": sandbox_seam_roles(pname, processes, requires, provides,
+                                        owner, backends, remote_specs,
+                                        default_deadline),
             "files": [str(f) for f in files],
             "cwd": os.getcwd(),
         }
