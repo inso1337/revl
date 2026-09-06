@@ -420,7 +420,8 @@ the reactive layer, not a change to it.
   machinery, no new transport, since every spec already carries the source and
   the provider component name.
 - The seam-identity discipline (selector not IR; `gate_version()` skew check).
-  All reference-layer, all shippable on py now.
+  All reference-layer, and LANDED on py: the seam carries and compares the gate
+  surface (`_process_runner.py`, `placement._seam_gate_version`, PR #446).
 
 **Needs the rust `revl-gate` crate (per-tier native admission), 332/336 frontier:**
 
