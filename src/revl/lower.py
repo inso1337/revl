@@ -7697,6 +7697,38 @@ def _async_reached_outside_provide(node, async_names: set, acc: set) -> None:
             _async_reached_outside_provide(value, async_names, acc)
 
 
+def _activation_can_hang(body) -> bool:
+    """Whether this activation body has anything that can go silently hung —
+    the admission signal item 477's declared-ceiling G-rule reads.
+
+    A hung provider is one stuck mid-activation on a call that neither returns
+    nor faults. The activation-time surface for that (docs/design/async-extern.md
+    §"Component bodies" already fixes the vocabulary, and A1 forbids an *async*
+    reach here) is:
+
+      * an `emit` step — an emission crossing to a host boundary; and
+      * an `effect`/`let-effect` step — a host acquisition (`kind: "host"`) or a
+        cross to a required service (`kind: "call"` on a `req` receiver), either
+        of which can block.
+
+    A `provide` step is PRUNED: its method bodies run per call, not during the
+    activation transition, so a ceiling on the activation does not measure them
+    (mirrors `_async_reached_outside_provide`'s prune). A body with none of the
+    above — only pure `let`s and its `provide` registrations — completes without
+    any crossing that can stall, so it has nothing to be silent about, and a
+    declared ceiling on it is a category error the G-rule refuses."""
+    if isinstance(body, dict):
+        step = body.get("step")
+        if step == "provide":
+            return False
+        if step in ("emit", "effect", "let-effect"):
+            return True
+        return any(_activation_can_hang(value) for value in body.values())
+    if isinstance(body, list):
+        return any(_activation_can_hang(item) for item in body)
+    return False
+
+
 def _async_service_op(node, env):
     """The async service operation a lowered call/emit node reaches directly, as
     `(display_name, method, op_decl)` — else `None`.
@@ -9952,6 +9984,31 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     # no boot component is byte-identical through the IR and every emitter.
     if getattr(comp, "boot", False):
         lowered["boot"] = True
+    # item 477 (follow-up 1): the DECLARED liveness ceiling, additive and
+    # conditionally present. It is refused by an admission G-rule when declared on
+    # an activation that CANNOT hang — one whose body reaches no emission and no
+    # host-call, so it completes without any crossing that can stall and has
+    # nothing to be silent about. A ceiling there is a category error (like a
+    # `ttl` on `cache pure`), worth refusing rather than lowering to metadata no
+    # runtime could ever act on. A clean, hangable activation lowers the ceiling
+    # to `liveness_ceiling_ms`; a component that declares no ceiling carries no
+    # key, so its IR and every emitted tier stay byte-identical
+    # (docs/design/477-liveness-expiry.md, Follow-up 1).
+    _liveness_ms = getattr(comp, "liveness_ms", None)
+    if _liveness_ms is not None:
+        if not _activation_can_hang(body):
+            raise RevlError(
+                comp.source or filename, comp.line,
+                f"component `{comp.name}` declares a `liveness` ceiling but its "
+                f"activation cannot hang — it reaches no emission and no "
+                f"host-call, so it has nothing to be silent about",
+                hint="a liveness ceiling bounds the silence of a provider stuck "
+                     "mid-activation on a host-call or emission; an activation "
+                     "that only registers `provide` blocks and binds pure values "
+                     "never stalls, so a ceiling on it can never fire — drop the "
+                     "`liveness` clause (docs/design/477-liveness-expiry.md)",
+                category="liveness")
+        lowered["liveness_ceiling_ms"] = _liveness_ms
     # v2 fields appear only when used, so v1 documents stay byte-identical
     if isolate:
         lowered["isolate"] = isolate
