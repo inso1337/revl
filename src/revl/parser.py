@@ -3982,12 +3982,23 @@ class Parser:
 
         Bare-ident qualifiers, not reserved words, order-free, each at most once
         — exactly the `effect lease … ttl … uses …` shape (`_lease_acquire`).
-        Returns `(policy, buffer, drain_ms)`."""
+        Returns `(policy, buffer, drain_ms)`.
+
+        `replay(n)` / `replay(from: <durable>)` (§4.5) is recognized here so its
+        surface is a first-class part of the `subscribe` head, but it is REFUSED
+        in v1: replay is a provider-side durability claim (the provider must hold
+        the backlog and, after a crash, reconstruct it — §4.9), and no provider
+        can yet declare replay. So every `replay(…)` at a `subscribe` is an
+        undeclared argument, which §4.5's last sentence makes a compile error.
+        `_parse_replay_qual` raises; it never returns a threaded value, so the IR
+        and the byte-identity of a replay-free program are untouched."""
         policy = None
         buffer = None
         drain_ms = None
         while (self.at("ident", "policy") or self.at("ident", "buffer")
-               or self.at("ident", "drain")):
+               or self.at("ident", "drain") or self.at("ident", "replay")):
+            if self.at("ident", "replay"):
+                self._parse_replay_qual()      # always raises (§4.5)
             qual = self.next().value
             if qual == "policy":
                 if policy is not None:
@@ -4030,6 +4041,49 @@ class Parser:
                      "the `drop_*`/`error` policies resolve an overflow "
                      "immediately (item 130 §4.4, §8)")
         return policy or "error", buffer, drain_ms
+
+    def _parse_replay_qual(self) -> None:
+        """Parse a `replay(n)` / `replay(from: <durable>)` qualifier in the
+        `subscribe` head and REFUSE it (item 130 §4.5).
+
+        The surface is recognized in full so the two diagnostics are honest and
+        distinct: a MALFORMED argument (`replay()`, `replay(0)`, `replay(x)`) is
+        a syntax error naming the two accepted shapes, and a WELL-FORMED one
+        (`replay(5)`, `replay(from: cursor)`) is refused as UNDECLARED — replay
+        is a durability claim only the provider can make, and no provider can
+        declare it yet (its declaration surface and the reconstructible
+        crash-recovery it gates are a later slice, §4.9). Never returns; it
+        raises before the caller consumes the `replay` token, so nothing is
+        threaded and a replay-free program is byte-identical."""
+        rline = self.peek().line
+        self.next()                            # `replay`
+        malformed = self.err(
+            rline,
+            "malformed `replay` argument on a `subscribe`",
+            hint="`replay` takes last-n `replay(<positive int>)` or a durable "
+                 "cursor `replay(from: <durable>)` (item 130 §4.5)")
+        if not self.at("("):
+            raise malformed
+        self.next()                            # `(`
+        if self.at("int") and self.peek().value >= 1:
+            self.next()
+        elif self.at("ident", "from"):
+            self.next()                        # `from`
+            self.expect(":")
+            self.pure_expr()                   # the durable cursor
+        else:
+            raise malformed
+        self.expect(")", what="`)` closing the `replay(…)` argument")
+        raise self.err(
+            rline,
+            "`replay` at a `subscribe` requires a provider that declares it "
+            "(item 130 §4.5)",
+            hint="replay is a provider-side durability claim — the provider must "
+                 "hold the backlog and, after a crash, reconstruct it (§4.9). No "
+                 "provider can declare replay yet, so every `replay(…)` at a "
+                 "`subscribe` is undeclared and refused. Drop the `replay` "
+                 "argument; provider-declared replay and its crash-recovery "
+                 "reconstruction are a later slice.")
 
     def _at_stream_merge(self) -> bool:
         """True at the head of a `merge(` fan-in (item 130 Slice 3)."""
