@@ -3875,6 +3875,31 @@ class Parser:
             self.next()
             undo = self.pure_expr()
             return acquire, undo, line, [], is_async
+        # ownership modes `shared` / `transfer` (item 308, issue #96): the acquire
+        # binding may one day carry an explicit ownership mode marker between
+        # `effect` and the acquisition — `effect shared <cap>.open() undo …` /
+        # `effect transfer <cap>.open() undo …`. `owned` (implicit at acquire) and
+        # `borrowed` (the positional default) shipped inferred in v1 (5601d70, no
+        # grammar); `shared` and `transfer` are RESERVED for a later tier but not
+        # implemented. Both are CONTEXTUAL keywords, exactly like `lease` above:
+        # the marker form is `effect shared <ident…>` / `effect transfer <ident…>`
+        # (the acquire head is an ident), so `effect shared()`, `effect shared.m()`
+        # and any binding named `shared`/`transfer` stay ordinary acquisitions.
+        # Reserving the marker turns the otherwise-generic parse error into a clear
+        # "reserved for a later tier" refusal.
+        if self.peek().value in ("shared", "transfer") \
+                and self.at("ident") and self.peek_ahead(1).kind == "ident":
+            mode = self.peek().value
+            raise self.err(
+                self.peek().line,
+                f"`{mode}` ownership mode is reserved for a later tier (shared: "
+                "item 294 leases; transfer: realm transfer) and is not implemented "
+                "in v1",
+                hint="v1 infers ownership over the teardown accumulator — `owned` is "
+                     "implicit at the acquire and `borrowed` is the positional "
+                     "default; write `let h = effect <cap>.open() undo …` with no "
+                     "mode marker (item 308)",
+            )
         setup: list = []
         if self.at("{"):
             self.next()
