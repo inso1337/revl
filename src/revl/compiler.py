@@ -60,6 +60,47 @@ def _backend_python_module_names() -> set[str]:
     return {path.stem for path in root.glob("*.py") if path.stem != "__init__"}
 
 
+#: Backend modules whose trusted surface is re-exported through a revl stdlib
+#: module, and the `use` a user-origin author reaches it through instead of
+#: importing the backend module directly. These are the sanctioned doors the
+#: refusal below points at (issue #460): the stdlib module is install-origin, so
+#: its own `@py`/`@ts ref` bodies reach the backend module through the door only
+#: install-origin modules have, and a user-origin consumer imports the stdlib
+#: module rather than the install-tree backend module.
+_STDLIB_BACKEND_DOORS: dict[str, str] = {
+    "revl_shell_classify": 'use "stdlib/shell.rvl" { classify }',
+    "revl_shell_host": 'use "stdlib/shell.rvl" { sh, classify }',
+    "revl_fs_workspace": 'use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }',
+    "revl_fs_ts": 'use "stdlib/fs.rvl" { resolve_within, lexists, is_dir }',
+}
+
+
+def _backend_import_hint(offender: str) -> str:
+    """The actionable hint for a refused user-origin backend import.
+
+    The old hint sent the reader to `@py ref`, which cannot reach the module it
+    is about: a user-origin ref is jailed to the compile root (item 396 option
+    B) and every backend module lives in the INSTALL tree, so both doors were
+    shut and the suggestion cost a round of debugging (issue #460). The trusted
+    surface a backend module exposes is reached through the revl stdlib, whose
+    install-origin modules hold the sole sanctioned door to the install tree.
+    Where the offender has such a surface, name the exact `use`; otherwise say
+    what the general answer is."""
+    door = _STDLIB_BACKEND_DOORS.get(offender)
+    reach = (
+        f"reach it through the revl stdlib instead — `{door}`"
+        if door is not None
+        else "expose the trusted surface you need on a revl stdlib module and "
+             "reach it with `use`"
+    )
+    return (
+        "the user @py backend-import rule refuses ambient backends/python "
+        f"access. {reach}. `@py ref` cannot reach a backend module: a "
+        "user-origin ref is jailed to the compile root (item 396 option B) and "
+        "backend modules live in the install tree."
+    )
+
+
 def _check_user_py_body_imports(program: Program, install_origin: bool) -> None:
     """Refuse backend imports in inline `@py` bodies from user modules."""
     if install_origin:
@@ -88,9 +129,7 @@ def _check_user_py_body_imports(program: Program, install_origin: bool) -> None:
                         body.line + max(node.lineno - 1, 0),
                         f"user-origin @py body for extern `{extern.name}` imports "
                         f"backend module `{offender}`",
-                        hint="the user @py backend-import rule refuses ambient "
-                             "backends/python access; declare trusted host code "
-                             "with `@py ref` instead",
+                        hint=_backend_import_hint(offender),
                     )
 
 
