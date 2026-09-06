@@ -512,6 +512,23 @@ class TrustStore:
     read in full either way: an unreadable one, a verdict that is not
     `admissible`, and one graded over another composition are all refusals.
 
+    `require_conformance` is the same fail-closed opt-in for the item-306
+    conformance cert — the chain's `runtime-target` link (§2.3), the portable
+    evidence that this backend's artifact means what the reference tier does.
+    Off (the default), an absent `conformance/<backend>` facet is unchecked: a
+    bundle built without the six-tier suite still admits, exactly as it does with
+    no gauntlet, so an honest degrade is not punished. That silence is the whole
+    hazard, though — a receiver that WANTS runtime-target evidence got none and
+    was told nothing (the `unbound-means-unchecked` shape roadmap 428 F4 named
+    and left open for this facet). On, a chain that binds no
+    `conformance/<backend>` for this receiver's backend is REFUSED rather than
+    admitted on absent evidence. A cert that IS bound is re-hashed against the
+    signed facet either way; its own signature is NOT independently trusted —
+    Slice 1 trusts it transitively through the bound hash (design R3(d)), so a
+    receiver never re-verifies the cert's HMAC, and interpreting the cert's
+    per-tier verdict is deferred with the backend-name reconciliation it needs
+    (the cert's `tiers` are spelled `py`/`ts`, a deploy backend `python`).
+
     `recheck_source` is the receiver's answer to "a signature is not a check".
     Off (the default), admission trusts the SIGNER's gate run: the attestation
     is only issuable from a real admitted verdict over this exact
@@ -530,6 +547,7 @@ class TrustStore:
     cross_domain: bool = False
     recheck_source: bool = False
     require_gauntlet: bool = False
+    require_conformance: bool = False
     clock_skew_seconds: float = DEFAULT_CLOCK_SKEW_SECONDS
     not_before: Optional[float | str] = None
 
@@ -740,6 +758,19 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
             return _refusal(LINK_EVIDENCE,
                             f"the staged conformance cert for {trust.backend} is "
                             "not the bound one (re-hashed here, and it differs)")
+    elif trust.require_conformance:
+        # Unbound is NOT unchecked when the receiver demands the runtime-target
+        # link. The gauntlet facet already fails closed this way (`require_
+        # gauntlet` below); the conformance facet was left with the `unbound-
+        # means-unchecked` shape roadmap 428 F4 named. Absent runtime-target
+        # evidence is refused, never counted as a pass.
+        return _refusal(
+            LINK_EVIDENCE,
+            f"this receiver requires item-306 conformance evidence for its "
+            f"backend {trust.backend!r} and the signed chain binds no "
+            f"{cert_facet!r} facet; absent runtime-target evidence is refused, "
+            "never counted as evidence that the artifact means on this runtime "
+            "what the reference tier does")
 
     # (f2) the gauntlet VERDICT, and the composition it was graded over.
     #
