@@ -161,10 +161,13 @@ bodies a pure host-local read with no cordis config-resolution dependency.
 A future tier / item 294 (parameterized capabilities) can promote this to a
 typed session capability; for the py H1 slice it is one env var.
 
-The root itself is opened by name once per operation; it is the trust anchor
-the session configures, not attacker-supplied input, and everything below it is
-reached only through fds. A root that is itself moved or replaced mid-session
-is out of scope for this guard.
+Without binding, the root is opened by name once per operation; moving or
+replacing it remains out of scope for that legacy mode. The opt-in Python API
+`revl.fs_workspace.bind_workspace_root` instead pins a physical directory for
+the process lifetime. Bound paths are absolute names under an immutable label,
+not paths to reopen: every lookup starts from the pinned fd, including sidecars
+and inverse sources. Root renames continue on the original directory. Bound
+mode refuses symlinks and relative paths rather than widening the legacy jail.
 
 The ts tier (`backends/typescript/revl_fs_ts.ts`) carries this same shape now:
 the same `PATH_FAMILIES` enumeration, the same table-driven totality wrapper,
@@ -181,9 +184,13 @@ from __future__ import annotations
 
 import errno
 import functools
+import hashlib
 import os
+import re
 import stat
+import threading
 import uuid
+from typing import NamedTuple
 
 #: The environment variable naming the session workspace root (py tier).
 WORKSPACE_ENV = "REVL_FS_WORKSPACE"
@@ -249,6 +256,23 @@ SYSCALL_PATH_ARGS: dict[str, tuple[int, ...]] = {
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+#: The supported host binding contract, also exported by `revl.fs_workspace`.
+PINNED_ROOT_API_VERSION = 1
+COMMITTED_SIDECAR_API_VERSION = 1
+COMMITTED_SIDECAR_CLEANUP_API_VERSION = 1
+
+
+class _PinnedRoot(NamedTuple):
+    fd: int
+    label: str
+    dev: int
+    ino: int
+
+
+_pinned_root: _PinnedRoot | None = None
+_workspace_used = False
+_binding_lock = threading.Lock()
 
 
 class FsOpError(Exception):
@@ -354,12 +378,84 @@ def _make_total(name: str, fn):
     return total
 
 
+def bind_workspace_root(root_fd: int, expected_dev: int, expected_ino: int,
+                        *, root_label: str) -> None:
+    """Pin a caller-owned directory before any workspace use, once per process.
+
+    The private duplicate is non-inheritable and intentionally retained until
+    process exit. There is no unbind/close: this module cannot prove that all
+    sessions, write handles and retained witnesses have discharged their root.
+    Binding never commits, aborts, or discards a witness.
+    """
+    global _pinned_root
+    with _binding_lock:
+        if _pinned_root is not None or _workspace_used:
+            raise ConfinementError(
+                "EBOUND", "workspace binding must precede all filesystem use "
+                "and cannot be repeated", _sanitized(root_label))
+        required = (os.open, os.stat, os.lstat, os.mkdir, os.unlink, os.rmdir,
+                    os.rename)
+        if (not _O_DIRECTORY or not _O_NOFOLLOW
+                or any(fn not in os.supports_dir_fd for fn in required)
+                or os.stat not in os.supports_follow_symlinks
+                or os.utime not in os.supports_fd
+                or not hasattr(os, "pread")):
+            raise ConfinementError(
+                "ENOTSUP", "pinned workspace requires directory-fd and "
+                "no-follow filesystem support", _sanitized(root_label))
+        if (not isinstance(root_label, str) or not root_label
+                or "\x00" in root_label or not os.path.isabs(root_label)
+                or os.path.normpath(root_label) != root_label
+                or root_label.startswith("//")
+                or any(type(n) is not int or n < 0
+                       for n in (root_fd, expected_dev, expected_ino))):
+            raise ConfinementError(
+                "EINVAL", "binding requires an absolute normalized root label "
+                "and nonnegative integer descriptor/device/inode",
+                _sanitized(root_label))
+        fd = None
+        try:
+            fd = os.dup(root_fd)
+            os.set_inheritable(fd, False)
+            st = os.fstat(fd)
+            if (not stat.S_ISDIR(st.st_mode)
+                    or (st.st_dev, st.st_ino) != (expected_dev, expected_ino)):
+                raise ConfinementError(
+                    "EIDENTITY", "root descriptor is not the admitted directory",
+                    root_label)
+            label_fd = os.open(root_label, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+            try:
+                named = os.fstat(label_fd)
+                if (named.st_dev, named.st_ino) != (expected_dev, expected_ino):
+                    raise ConfinementError(
+                        "EIDENTITY", "root label does not name the admitted directory",
+                        root_label)
+            finally:
+                os.close(label_fd)
+            _pinned_root = _PinnedRoot(fd, root_label, expected_dev, expected_ino)
+            fd = None
+        except (ValueError, OverflowError) as exc:
+            raise ConfinementError(
+                "EINVAL", f"cannot represent workspace binding ({exc})",
+                _sanitized(root_label)) from None
+        except OSError as exc:
+            raise ConfinementError(
+                _errno_code(exc), f"cannot bind workspace ({exc})",
+                root_label) from None
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+
 def workspace_root() -> str:
     """The configured session workspace root, realpath-resolved (so the root
     itself is symlink-canonical and membership tests compare like with like).
 
     Raises `ConfinementError` when unset: an fs op with no configured root is
     refused, never silently allowed to touch the whole filesystem."""
+    binding = _binding_for_use()
+    if binding is not None:
+        return binding.label
     root = os.environ.get(WORKSPACE_ENV)
     if not root:
         raise ConfinementError(
@@ -377,11 +473,339 @@ def workspace_root() -> str:
     return real
 
 
+def _binding_for_use() -> _PinnedRoot | None:
+    global _workspace_used
+    with _binding_lock:
+        _workspace_used = True
+        return _pinned_root
+
+
 def _is_within(root: str, real: str) -> bool:
     """True iff `real` is the root itself or a descendant of it. Compares
     realpath'd, normalized absolute paths; the `+ os.sep` guards against a
     sibling whose name merely shares the root as a prefix (`/ws` vs `/ws-evil`)."""
     return real == root or real.startswith(root + os.sep)
+
+
+def _bound_path(path: str) -> str:
+    """Validate a label-relative namespace without consulting any pathname."""
+    root = workspace_root()
+    refuse_unusable_path(path)
+    if (not isinstance(path, str) or not os.path.isabs(path)
+            or path.startswith("//")
+            or ".." in path.split(os.sep)):
+        raise ConfinementError(
+            "EOUTSIDE", "bound paths must be absolute original-root-label "
+            "paths without parent traversal", _sanitized(path))
+    real = os.path.normpath(path)
+    if real != root and not real.startswith(root.rstrip(os.sep) + os.sep):
+        raise ConfinementError(
+            "EOUTSIDE", "path escapes the bound workspace label", real)
+    return real
+
+
+def _root_dirfd() -> int:
+    root = workspace_root()
+    if _pinned_root is None:
+        return os.open(root, os.O_RDONLY | _O_DIRECTORY)
+    fd = os.dup(_pinned_root.fd)
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISDIR(st.st_mode)
+                or (st.st_dev, st.st_ino) != (_pinned_root.dev, _pinned_root.ino)):
+            raise ConfinementError(
+                "EIDENTITY", "pinned root descriptor lost its identity", root)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _bound_stat(real: str):
+    """No-follow lookup; missing names alone mean absence, not refusal."""
+    real = _bound_path(real)
+    if real == workspace_root():
+        fd = _root_dirfd()
+        try:
+            return os.fstat(fd)
+        finally:
+            os.close(fd)
+    parent, leaf = _split(real)
+    try:
+        fd = _open_dirfd(parent)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            return os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+    finally:
+        os.close(fd)
+
+
+def _resolve_bound(path: str) -> str:
+    real = _bound_path(path)
+    root = workspace_root()
+    rel = os.path.relpath(real, root)
+    parts = [] if rel == os.curdir else rel.split(os.sep)
+    fd = _root_dirfd()
+    try:
+        for index, part in enumerate(parts):
+            try:
+                st = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                break
+            if stat.S_ISLNK(st.st_mode):
+                raise ConfinementError(
+                    "EOUTSIDE", "bound workspace paths may not contain symlinks",
+                    real)
+            if index < len(parts) - 1:
+                nxt = os.open(part, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW,
+                              dir_fd=fd)
+                os.close(fd)
+                fd = nxt
+    finally:
+        os.close(fd)
+    return real
+
+
+def finalize_committed_sidecar(path: str, expected_sha256: str, *,
+                               expected_dev: int, expected_ino: int) -> None:
+    """Delete one captured, committed preimage under exclusive metadata access.
+
+    Trusted host only: the caller must hold exclusive sidecar-directory write
+    ownership, drain cooperative actors/inverses, and possess both captured
+    witness ownership and durable acknowledgment of the actual session commit.
+    This helper proves none of those lifecycle facts. POSIX has no portable
+    inode-conditional unlink; external writers violating exclusivity can race
+    the final check and unlink. Detectable mismatch and missing evidence raise.
+    """
+    if _binding_for_use() is None:
+        raise ConfinementError(
+            "EWORKSPACE", "committed sidecar finalization requires a pinned root",
+            _sanitized(path))
+    if (not isinstance(expected_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+            or any(type(n) is not int or n < 0
+                   for n in (expected_dev, expected_ino))):
+        raise FsOpError(
+            "EINVAL", "finalization requires a lowercase SHA-256 digest and "
+            "captured nonnegative device/inode integers", _sanitized(path))
+    real = _bound_path(path)
+    parent, leaf = _split(real)
+    if (real != path
+            or parent != os.path.join(workspace_root(), PREIMAGE_DIRNAME)
+            or re.fullmatch(r"pre-[0-9a-f]{32}", leaf) is None):
+        raise ConfinementError(
+            "EOUTSIDE", "only an exact runtime preimage sidecar may be finalized",
+            real)
+    try:
+        dirfd = _open_dirfd(parent)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ConfinementError(
+                "EOUTSIDE", "preimage directory is not a no-follow directory",
+                real) from None
+        raise
+    try:
+        directory = os.fstat(dirfd)
+        if (directory.st_uid != os.geteuid()
+                or stat.S_IMODE(directory.st_mode) & 0o077):
+            raise ConfinementError(
+                "EOUTSIDE", "preimage directory must be owned by the caller "
+                "and private (no group/other permissions)", real)
+        try:
+            fd = os.open(leaf, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK,
+                         dir_fd=dirfd)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ConfinementError(
+                    "EOUTSIDE", "preimage sidecar may not be a symlink", real) from None
+            raise
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise ConfinementError(
+                    "EOUTSIDE", "preimage sidecar must be a regular file", real)
+            if ((before.st_dev, before.st_ino) != (expected_dev, expected_ino)
+                    or before.st_nlink != 1):
+                raise ConfinementError(
+                    "EIDENTITY", "preimage sidecar identity or link count changed",
+                    real)
+            digest = hashlib.sha256()
+            while chunk := os.read(fd, 1 << 20):
+                digest.update(chunk)
+            after = os.fstat(fd)
+            named = os.stat(leaf, dir_fd=dirfd, follow_symlinks=False)
+
+            def identity(st: os.stat_result):
+                return (st.st_dev, st.st_ino, st.st_mode, st.st_nlink,
+                        st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+            if (digest.hexdigest() != expected_sha256
+                    or identity(before) != identity(after)
+                    or identity(after) != identity(named)):
+                raise ConfinementError(
+                    "EIDENTITY", "preimage sidecar contents or identity changed",
+                    real)
+            os.unlink(leaf, dir_fd=dirfd)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dirfd)
+
+
+# ---------------------------------------------------------------------------
+# runtime-owned committed-sidecar cleanup (item 486)
+# ---------------------------------------------------------------------------
+# `finalize_committed_sidecar` proves none of the lifecycle facts it needs: the
+# host reconstructs the sidecar's ownership, asserts the actual commit landed,
+# and calls the finalizer with the pieces spread across its own bookkeeping.
+# This handle folds ownership AND commit-acknowledgment into one opaque token
+# the runtime issues, so a host holds a thing it cannot forge instead of a
+# recipe it must reassemble. The exclusivity premise is unchanged: the handle
+# owns cleanup only under the exclusive sidecar-metadata access revl already
+# requires, and makes no claim that a portable `unlink` is atomic against an
+# external writer violating it.
+
+
+class CleanupOutcome(NamedTuple):
+    """What one committed-sidecar cleanup attempt achieved.
+
+    `completed` is True only when the runtime removed the owned preimage (this
+    run, or an earlier run of the same handle). Otherwise the sidecar is
+    UNRESOLVED and `(code, message, path)` carry the finalizer's own refusal
+    verbatim, so a host can drain cooperative actors and retry the same handle
+    rather than reconstruct the failure from a raised exception."""
+
+    completed: bool
+    code: str | None = None
+    message: str | None = None
+    path: str | None = None
+
+    @property
+    def state(self) -> str:
+        return "completed" if self.completed else "unresolved"
+
+
+class _CommitReceiptGrant:
+    """Module-private capability. The singleton never leaves this module, so a
+    host cannot construct a `CommittedSidecarReceipt` directly: it must obtain
+    one from the runtime commit path, which is the only place the actual-commit
+    acknowledgment the finalizer refuses to assume actually exists."""
+
+    __slots__ = ()
+
+
+_COMMIT_RECEIPT_GRANT = _CommitReceiptGrant()
+
+
+class CommittedSidecarReceipt:
+    """Opaque, runtime-issued proof that a session commit was durably
+    acknowledged for one captured preimage sidecar.
+
+    Minted only by `issue_committed_sidecar_receipt`, which the trusted commit
+    path calls once it holds the durable acknowledgment `finalize_committed_
+    sidecar` leaves to the host. A `CommittedSidecarCleanup` refuses to act
+    without one, so ownership and commit-ack stop being scattered host state and
+    ride inside a single unforgeable token. Single use: binding it to a cleanup
+    handle consumes it, so one receipt authorizes cleanup of exactly the one
+    sidecar it named."""
+
+    __slots__ = ("_dev", "_ino", "_path", "_sha256", "_spent")
+
+    def __init__(self, grant, *, path, expected_sha256, expected_dev,
+                 expected_ino) -> None:
+        if grant is not _COMMIT_RECEIPT_GRANT:
+            raise ConfinementError(
+                "ERECEIPT", "a committed-sidecar receipt may only be issued by "
+                "the runtime commit path", _sanitized(path))
+        # Validate the finalizer's argument shape up front, so a receipt can
+        # never encode a target the finalizer would only reject later.
+        if (not isinstance(expected_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+                or any(type(n) is not int or n < 0
+                       for n in (expected_dev, expected_ino))):
+            raise FsOpError(
+                "EINVAL", "a committed-sidecar receipt requires a lowercase "
+                "SHA-256 digest and captured nonnegative device/inode integers",
+                _sanitized(path))
+        self._path = path
+        self._sha256 = expected_sha256
+        self._dev = expected_dev
+        self._ino = expected_ino
+        self._spent = False
+
+    def _consume(self) -> tuple:
+        if self._spent:
+            raise ConfinementError(
+                "ERECEIPT", "this committed-sidecar receipt was already bound to "
+                "a cleanup handle", _sanitized(self._path))
+        self._spent = True
+        return (self._path, self._sha256, self._dev, self._ino)
+
+
+def issue_committed_sidecar_receipt(path: str, expected_sha256: str, *,
+                                    expected_dev: int,
+                                    expected_ino: int) -> CommittedSidecarReceipt:
+    """Mint a runtime receipt for one committed preimage sidecar.
+
+    Trusted commit path only: call AFTER the actual session commit is durably
+    acknowledged, passing the captured witness ownership (sidecar path, content
+    digest, device, inode). This is where the acknowledgment the finalizer
+    declines to assume is asserted. The runtime still cannot prove the host's
+    storage flushed, so this widens nothing the finalizer docstring promised;
+    it only gives that assertion one owner and one opaque carrier."""
+    return CommittedSidecarReceipt(
+        _COMMIT_RECEIPT_GRANT, path=path, expected_sha256=expected_sha256,
+        expected_dev=expected_dev, expected_ino=expected_ino)
+
+
+class CommittedSidecarCleanup:
+    """Opaque, runtime-owned cleanup for one committed preimage sidecar.
+
+    Constructed from a `CommittedSidecarReceipt`, so it cannot act without proof
+    of a successful commit; the host no longer reconstructs the sidecar's
+    ownership to call `finalize_committed_sidecar` itself. `run()` performs the
+    finalize under the exclusive sidecar-metadata access revl already requires —
+    it does NOT make `unlink` atomic against an external writer violating that
+    exclusivity — and REPORTS completed vs. unresolved instead of raising the
+    finalizer's refusal, so a lost race or a detectable mismatch is a retryable
+    outcome rather than an exception the host must classify."""
+
+    __slots__ = ("_dev", "_done", "_ino", "_path", "_sha256")
+
+    def __init__(self, receipt: CommittedSidecarReceipt) -> None:
+        if not isinstance(receipt, CommittedSidecarReceipt):
+            raise ConfinementError(
+                "ERECEIPT", "committed sidecar cleanup requires a runtime commit "
+                "receipt", _sanitized(getattr(receipt, "_path", "")))
+        self._path, self._sha256, self._dev, self._ino = receipt._consume()
+        self._done = False
+
+    @property
+    def completed(self) -> bool:
+        """Whether this handle has already removed its owned preimage."""
+        return self._done
+
+    def run(self) -> CleanupOutcome:
+        """Attempt the finalize once and report the outcome.
+
+        Idempotent after success: a completed handle re-reports completed
+        without touching the filesystem again. On an unresolved outcome the
+        handle stays live, so the host may drain actors and call `run()` again.
+        """
+        if self._done:
+            return CleanupOutcome(True)
+        try:
+            finalize_committed_sidecar(
+                self._path, self._sha256,
+                expected_dev=self._dev, expected_ino=self._ino)
+        except FsOpError as exc:
+            return CleanupOutcome(False, exc.code, exc.message, exc.path)
+        self._done = True
+        return CleanupOutcome(True)
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +837,8 @@ def resolve_within(path: str) -> str:
     # and every inverse endpoint (`resolve_sidecar` routes through here too).
     refuse_unusable_path(path)
     root = workspace_root()
+    if _pinned_root is not None:
+        return _resolve_bound(path)
     target = path if os.path.isabs(path) else os.path.join(root, path)
     real = os.path.realpath(target)
     if not _is_within(root, real):
@@ -444,10 +870,12 @@ def _open_dirfd(real_dir: str) -> int:
     `OSError` (`ENOENT` for a missing component, `ELOOP` for a swapped one) for
     the caller to translate."""
     root = workspace_root()
-    if not _is_within(root, real_dir):
+    if _pinned_root is not None:
+        real_dir = _bound_path(real_dir)
+    elif not _is_within(root, real_dir):
         raise ConfinementError(
             "EOUTSIDE", "path escapes the session workspace root", real_dir)
-    fd = os.open(root, os.O_RDONLY | _O_DIRECTORY)
+    fd = _root_dirfd()
     try:
         rel = os.path.relpath(real_dir, root)
         parts = [] if rel == os.curdir else rel.split(os.sep)
@@ -466,6 +894,8 @@ def _split(real: str) -> tuple[str, str]:
     """A resolved path as (parent directory, leaf name), refusing the root
     itself — no op may replace or remove the workspace root."""
     root = workspace_root()
+    if _pinned_root is not None:
+        real = _bound_path(real)
     if real == root:
         raise ConfinementError(
             "EWORKSPACE", "the workspace root itself is not a valid target", real)
@@ -490,7 +920,7 @@ def _sidecar_dir_real(kind: str, create: bool) -> str:
     `resolve_within` then confirms containment."""
     name = SIDECAR_KINDS[kind]
     root = workspace_root()
-    rootfd = os.open(root, os.O_RDONLY | _O_DIRECTORY)
+    rootfd = _root_dirfd()
     try:
         if create:
             try:
@@ -508,7 +938,8 @@ def _sidecar_dir_real(kind: str, create: bool) -> str:
                 "EOUTSIDE",
                 f"the `{name}` sidecar directory is a symlink; the reversal "
                 "machinery must live inside the session workspace root",
-                os.path.realpath(os.path.join(root, name)),
+                (os.path.join(root, name) if _pinned_root is not None
+                 else os.path.realpath(os.path.join(root, name))),
             )
         if not stat.S_ISDIR(st.st_mode):
             raise ConfinementError(
@@ -999,6 +1430,8 @@ def lexists_confined(real: str) -> bool:
     idempotent no-op. It decides nothing about confinement — the mutation that
     follows re-establishes containment through fds regardless of what this said,
     so a lost race here costs an error message, never an escape."""
+    if _binding_for_use() is not None:
+        return _bound_stat(real) is not None
     return os.path.lexists(real)
 
 
@@ -1017,6 +1450,9 @@ def is_dir_confined(real: str) -> bool:
     is what the ts peer's `fs.statSync(real).isDirectory()` does, and the two
     tiers must answer the same question. Total on its own (it swallows the
     stat error and answers False), and total again through `_make_total`."""
+    if _binding_for_use() is not None:
+        st = _bound_stat(real)
+        return st is not None and stat.S_ISDIR(st.st_mode)
     return os.path.isdir(real)
 
 
@@ -1034,4 +1470,6 @@ for _family in PATH_FAMILIES.values():
         globals()[_entry] = _make_total(_entry, globals()[_entry])
 for _entry in READ_HELPERS:
     globals()[_entry] = _make_total(_entry, globals()[_entry])
+finalize_committed_sidecar = _make_total(
+    "finalize_committed_sidecar", finalize_committed_sidecar)
 del _family, _entry
