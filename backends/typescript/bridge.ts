@@ -25,6 +25,12 @@ import tls from 'node:tls'
 // remembered values would be a second thing to keep in step.
 import { redactText } from './runtime.ts'
 
+// item 443 / issue #122: the operator E-Stop. Once an operator arms the latch,
+// this process must stop dispatching NEW crossings — the seam is where a node
+// child does that (`estopEngaged` reads the same latch the py runtime and the
+// conductor read). See `estop.ts` and docs/design/443-estop.md.
+import { estopEngaged } from './estop.ts'
+
 // --- seam endpoints: a local UDS (default) or a network TCP + mTLS seam -------
 //
 // The node client mirrors backends/python/bridge.py's `Endpoint`/`TlsConfig`
@@ -618,7 +624,22 @@ export async function serve(
         try {
           const req = JSON.parse(line)
           callArgs = req.args ?? []
-          if (!table.has(req.key)) {
+          if (estopEngaged()) {
+            // The E-Stop verdict, not a fault: an armed latch means an operator
+            // hit the button, so this crossing is REFUSED before the service
+            // method runs — nothing new crosses the boundary. The reply is an
+            // error rather than a value, and (unlike a cooperative teardown) no
+            // inverse is replayed and nothing is discharged: the caller's
+            // attempt lands in item 440's ambiguous tier, which is the designed
+            // outcome of a halt (docs/design/443-estop.md).
+            reply = {
+              ok: false,
+              error:
+                `revl E-Stop engaged: this process is HALTED and refuses new ` +
+                `crossings (key ${req.key}, method ${req.method}) — ` +
+                `docs/design/443-estop.md`,
+            }
+          } else if (!table.has(req.key)) {
             reply = { ok: false, error: `key ${req.key} is not exported by this process` }
           } else {
             const service = (ctx as any)[req.key]

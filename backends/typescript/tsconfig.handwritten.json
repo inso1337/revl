@@ -38,6 +38,7 @@
   "include": [
     "bridge.ts",
     "bridge_node.ts",
+    "estop.ts",
     "placement_runner.ts",
     "revl_fs_ts.ts",
     "revl_shell_classify_ts.ts",
