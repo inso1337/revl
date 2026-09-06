@@ -415,6 +415,54 @@ def test_the_reach_token_is_folded_from_the_host_alone():
     assert cap_token("127.0.0.1:80") == "net.h_127_0_0_1"
 
 
+# ----------------------------------------------- the transport (`through`)
+
+def test_a_named_through_transport_is_refused(tmp_path):
+    """`through <wire>` names the transport a remote row crosses (D-424c.1's
+    `through billing_wire`). The synthesizer speaks exactly one wire, the
+    canonical envelope selected by OMITTING `through`, and no named transport
+    is bound yet. A named one is refused naming the transport and the row
+    rather than emitted as the canonical wire under a header that claims
+    otherwise — the honesty rule the version, redirect and modality checks
+    keep, on the transport axis.
+
+    `through a2a` in particular is item 439's A2A 1.0.0 binding, still gated on
+    its Task-lifecycle decision, so it refuses here until that binding lands.
+    """
+    for wire in ("a2a", "jsonrpc", "grpc"):
+        write(tmp_path, services=BILLING, base="""
+composition Shop {
+  use "services.rvl"
+  remote @billing provides billing: Billing
+    at host("billing.internal:8443")
+    through %s
+}
+""" % wire)
+        with pytest.raises(RevlError) as excinfo:
+            resolve(tmp_path)
+        message = str(excinfo.value)
+        assert f"names transport `{wire}`" in message
+        assert "`@billing`" in message
+        assert "binds no transport by that name" in message
+
+
+def test_the_default_wire_needs_no_through_and_still_compiles(tmp_path):
+    """Omitting `through` is the one wire this slice speaks, so the row that a
+    named transport is refused on compiles cleanly without it. This pins the
+    refusal to the NAMED case rather than to the clause's existence."""
+    write(tmp_path, services=BILLING, base="""
+composition Shop {
+  use "services.rvl"
+  remote @billing provides billing: Billing at host("billing.internal:8443")
+}
+""")
+    table = resolve(tmp_path)
+    row, = table.rows
+    assert row.remote.get("transport") is None
+    # The synthesized wire is the canonical envelope, not a named binding.
+    assert "\"key\"" in table.sources[row.source]
+
+
 # --------------------------------------------- what the projection refuses
 
 def test_a_record_return_is_refused_naming_the_method_and_the_type(tmp_path):
