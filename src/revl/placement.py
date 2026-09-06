@@ -79,6 +79,7 @@ from .errors import RevlError
 from .estop import (HALTED_LINE, LATCH_ENV, TIERS_WITH_ESTOP, latch_path,
                     read_latch)
 from .sandbox_runtime import resolve_driver as resolve_sandbox_driver
+from .sandbox_runtime import _OCI_ARCH_UNAME, accepted_uname
 
 KNOWN_BACKENDS = ("py", "node", "ts", "rust", "java", "go")
 
@@ -477,7 +478,27 @@ def _normalize_sandbox_table(sb) -> tuple[dict | None, str | None]:
                       "confinement is a generated import set (no_extern plus the "
                       "seam-only imports), so `fs`/`net` bind nothing here; "
                       "remove them, or use the `container` rung for an OS envelope")
-    return {"isolation": iso, "image": image, "fs": fs, "net": net}, None
+    # item 411 (mixed-arch): the OPTIONAL OCI `platform` string. It is an OS-rung
+    # concept — the runtime runs the container of that arch under emulation or a
+    # native node — so a cell (in-process, no OS boundary) cannot carry one. The
+    # arch must be one the in-sandbox canary can CONFIRM by `uname -m`; a
+    # platform the driver could not verify from inside is refused at plan time
+    # rather than trusted, the same discipline as every other envelope clause.
+    platform = sb.get("platform")
+    if platform is not None:
+        platform = str(platform)
+        if iso == "wasm-cell":
+            return None, ("the `wasm-cell` rung takes no `platform`: it runs "
+                          "in-process, not as a container of some arch; remove "
+                          "it, or use the `container` rung for a mixed-arch "
+                          "component")
+        if accepted_uname(platform) is None:
+            return None, (
+                f"`platform` must be an OCI `os/arch[/variant]` string with an "
+                f"arch this driver can confirm in-sandbox by `uname -m` "
+                f"({', '.join(sorted(_OCI_ARCH_UNAME))}); got {platform!r}")
+    return {"isolation": iso, "image": image, "fs": fs, "net": net,
+            "platform": platform}, None
 
 
 def _parse_need(resource: str) -> tuple[str, str | None, str | None]:
@@ -615,9 +636,13 @@ def _component_reach(ir: dict) -> dict[str, set]:
 
 
 def _envelope_str(env: dict) -> str:
-    """`net=none fs=none` / `net=all fs=/scratch:rw`; the one-line envelope."""
+    """`net=none fs=none` / `net=all fs=/scratch:rw`; the one-line envelope. A
+    mixed-arch process appends ` arch=<platform>`; without a `platform` the
+    string is byte-identical to the pre-mixed-arch spelling."""
     fs = env.get("fs") or []
-    return f"net={env.get('net', 'none')} fs={','.join(fs) if fs else 'none'}"
+    base = f"net={env.get('net', 'none')} fs={','.join(fs) if fs else 'none'}"
+    platform = env.get("platform")
+    return f"{base} arch={platform}" if platform else base
 
 
 def _reach_descriptor(pname: str, sandboxes: dict, backends: dict) -> str:
