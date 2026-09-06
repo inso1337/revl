@@ -929,27 +929,39 @@ revl verify app.revlbundle --json    # CI: parse the per-tier verdict
 ### `revl deploy`
 
 Deploy a compiled composition across process seams with attested admission and
-coordinated rollback (roadmap item 118, Slice 1). Every seam is a local process
-seam today; cross-machine control-plane pieces are deliberately deferred.
+coordinated rollback (roadmap item 118). Every seam is a local process seam
+today; cross-machine control-plane pieces are deliberately deferred.
 
 - `MAP` - the deploy/placement map (TOML or JSON): `[processes.<p>]` with an
-  optional attestation bundle per process (required).
+  optional `[processes.<p>.deploy]` table per process.
 - `--dry-run` - run the admission plan and stop before any COMMIT; reports the
-  targets, refusals and boundaries without mutating any participant.
-- `--json` - machine-readable verdict (targets, refusals, boundaries).
+  targets, refusals and boundaries without opening a boundary or activating any
+  participant.
+- `--json` - machine-readable verdict: the admission plan under `--dry-run` (or
+  on a refusal), otherwise the coordinated deploy report.
 
 Admission is the load-bearing half: the receiver re-hashes the IR and artifact
 bytes it will actually execute and verifies item 127's signed `evidence_bindings`
 chain (`source -> IR -> artifact -> policy -> evidence`) against a local trust
-store, never trusting a self-declared `backend`/`artifact_hash`. Rollback is a
-two-phase PREPARE/COMMIT over participant processes: the coordinator holds only
-an ordered commit ledger and, on failure, drives ABORT in reverse ledger order
-so each participant runs its own local LIFO unwind. Each seam records the
-identity level it actually achieved (`sealed`/`peer-bound`/`peer-pinned`/
-`unverified`) rather than overclaiming under a shared name.
+store, never trusting a self-declared `backend`/`artifact_hash`. A machine
+boundary is refused outright, an unknown `via` is refused rather than read as
+local, and a container target is refused unless it is proven seam-free.
+
+Without `--dry-run`, an admitted map is DEPLOYED over the process boundary
+(`via = local`): one participant per process is spawned and driven through the
+two-phase PREPARE/COMMIT protocol. The coordinator holds only an ordered commit
+ledger and, on any COMMIT failure, drives ABORT in reverse ledger order so each
+participant runs its own local LIFO unwind — a participant it cannot reach is
+reported `unresolved`, never rolled back. The aggregate verdict is `applied`
+only when every participant applied, `aborted-clean` only when every committed
+participant rolled back clean, otherwise `aborted-with-residue`. Because
+admission supplies no seam set here, only a process-boundary target reaches the
+COMMIT path; the cross-machine / container launch orchestration and the
+host-side chain verify at admission are following slices.
 
 ```bash
 revl deploy deploy.toml --dry-run     # plan admission, stop before COMMIT
+revl deploy deploy.toml               # deploy over the process boundary
 revl deploy deploy.toml --json        # machine-readable verdict
 ```
 

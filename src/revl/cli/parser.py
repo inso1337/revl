@@ -1349,27 +1349,29 @@ def build_parser() -> argparse.ArgumentParser:
     verify_cmd.add_argument("--json", action="store_true",
                             help="machine-readable tier-by-tier report")
 
-    # `revl deploy MAP --dry-run` — plan-time admission of a deploy map (roadmap
-    # item 118, docs/design/118-revl-deploy.md §1.1). The deploy analogue of
-    # `revl plan`: it runs the whole fallible, effect-free admission half and
-    # prints the verdict each target would return, opening no boundary. The
-    # COMMIT/launch orchestration is a following slice, so a non-dry-run
-    # invocation prints the plan and then refuses.
+    # `revl deploy MAP [--dry-run]` — admit a deploy map (roadmap item 118,
+    # docs/design/118-revl-deploy.md §1.1). With --dry-run it is the deploy
+    # analogue of `revl plan`: it runs the fallible, effect-free admission half
+    # and prints the verdict each target would return, opening no boundary.
+    # Without it, an admitted map is DEPLOYED over the process boundary
+    # (`via = local`): the coordinated PREPARE/COMMIT/ABORT protocol runs across
+    # one participant per process. The cross-machine / container launch
+    # orchestration remains a following slice.
     deploy_cmd = sub.add_parser(
         "deploy",
         help="admit a deploy map (an item-56 placement map with per-process "
-             "[deploy] tables) at plan time and print the verdict — the deploy "
-             "analogue of `revl plan`, opening no boundary (item 118)")
+             "[deploy] tables) and, without --dry-run, deploy it over the "
+             "process boundary via the coordinated PREPARE/COMMIT protocol "
+             "(item 118)")
     deploy_cmd.add_argument("map", metavar="MAP",
                             help="the deploy/placement map (TOML or JSON): "
                                  "[processes.<p>] with an optional "
                                  "[processes.<p>.deploy] table per process")
     deploy_cmd.add_argument(
         "--dry-run", action="store_true",
-        help="run the admission plan and stop before any COMMIT (design §1.1). "
-             "Required in this slice: the launch/COMMIT phase is not yet wrapped "
-             "by the CLI, so without it an admitted map is still refused rather "
-             "than deployed")
+        help="run the admission plan and stop before any COMMIT (design §1.1): "
+             "print the targets, refusals and boundaries without opening a "
+             "boundary or activating any participant")
     deploy_cmd.add_argument("--json", action="store_true",
                             help="machine-readable verdict (targets, refusals, "
                                  "boundaries)")

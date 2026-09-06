@@ -2568,23 +2568,26 @@ def _load_deploy_map(path: str) -> dict:
 
 
 def deploy_command(args) -> int:
-    """`revl deploy MAP --dry-run` — plan-time admission of a deploy map.
+    """`revl deploy MAP [--dry-run] [--json]` — admit a deploy map and, without
+    `--dry-run`, drive the coordinated deploy over its LOCAL participants.
 
-    The deploy analogue of `revl plan` (design §1.1): it runs the whole
-    fallible, EFFECT-FREE half — parse the map, admit every `[deploy]` target
-    against the boundary rules (:func:`admit_deploy_map`) — and prints the
+    `--dry-run` is the deploy analogue of `revl plan` (design §1.1): it runs the
+    whole fallible, EFFECT-FREE half — parse the map, admit every `[deploy]`
+    target against the boundary rules (:func:`admit_deploy_map`) — and prints the
     verdict each target would return WITHOUT opening any boundary. A machine
     boundary is refused outright, an unknown `via` is refused rather than read
     as local, and a container target whose seam set this plan cannot prove
-    seam-free (it has no IR wiring here) fail-closes to `seam-set-unknown` —
-    every rule refuses rather than downgrades, because the map is unauthenticated
-    operator input (design R4).
+    seam-free fail-closes to `seam-set-unknown` — every rule refuses rather than
+    downgrades, because the map is unauthenticated operator input (design R4).
 
-    This is the CLI wrapper for the landed library surface; the COMMIT/launch
-    orchestration (remote staging, the `deploy-admit` runner, the signed commit
-    receipt the conductor compares) is a following slice, so a non-`--dry-run`
-    invocation prints the admission plan and then refuses rather than pretending
-    to have deployed.
+    Without `--dry-run`, the admitted map is DEPLOYED over the process boundary
+    (`via = local`): :func:`deploy_local_map` builds one participant per process
+    and drives the coordinated PREPARE/COMMIT/ABORT protocol (:func:`run_deploy`)
+    — the coordinator holds only the commit ledger and, on any COMMIT failure,
+    aborts in reverse commit order. The attested-bundle staging plus host-side
+    chain verify (§2) and the cross-machine / container launch orchestration are
+    following slices; because admission here supplies no seam set, only a
+    process-boundary target ever reaches the COMMIT path.
     """
     try:
         placement = _load_deploy_map(args.map)
@@ -2595,37 +2598,43 @@ def deploy_command(args) -> int:
         return 1
 
     verdict = admit_deploy_map(placement)
+    as_json = getattr(args, "json", False)
+    dry_run = getattr(args, "dry_run", False)
 
-    if getattr(args, "json", False):
-        print(json.dumps({
-            "ok": verdict.ok,
-            "targets": {p: {"via": t.via, "boundary": t.boundary}
-                        for p, t in verdict.targets.items()},
-            "refusals": [dict(r) for r in verdict.refusals],
-            "boundaries": verdict.boundaries,
-        }, indent=2))
+    # The plan-time surface: `--dry-run`, or ANY refusal, reports the admission
+    # plan and stops before opening a boundary.
+    if dry_run or not verdict.ok:
+        if as_json:
+            print(json.dumps({
+                "ok": verdict.ok,
+                "targets": {p: {"via": t.via, "boundary": t.boundary}
+                            for p, t in verdict.targets.items()},
+                "refusals": [dict(r) for r in verdict.refusals],
+                "boundaries": verdict.boundaries,
+            }, indent=2))
+        else:
+            n = len(verdict.targets) if verdict.ok else 0
+            head = (f"deploy map {args.map}: admitted, {n} boundary-crossing "
+                    f"target(s)" if verdict.ok
+                    else f"deploy map {args.map}: REFUSED")
+            print(head)
+            for line in verdict.render():
+                print(line)
+        return 0 if verdict.ok else 1
+
+    # COMMIT: drive the coordinated protocol over the map's local participants.
+    from . import wal  # noqa: PLC0415 — lazy; only the COMMIT path needs a WAL dir
+
+    state_dir = (Path(wal.default_wal_dir()) / "deploy"
+                 / Path(args.map).stem / str(0))
+    report = deploy_local_map(placement, state_dir=state_dir,
+                              federation_id=Path(args.map).stem, generation=0)
+    if as_json:
+        print(json.dumps(report, indent=2))
     else:
-        n = len(verdict.targets) if verdict.ok else 0
-        head = (f"deploy map {args.map}: admitted, {n} boundary-crossing "
-                f"target(s)" if verdict.ok
-                else f"deploy map {args.map}: REFUSED")
-        print(head)
-        for line in verdict.render():
+        for line in _render_deploy_report(args.map, report):
             print(line)
-
-    if not verdict.ok:
-        return 1
-
-    if not getattr(args, "dry_run", False):
-        print(
-            "the deploy map is admitted, but this build wraps only the "
-            "plan-time (`--dry-run`) phase: the COMMIT/launch orchestration "
-            "is a following slice. Re-run with --dry-run to make the admission "
-            "plan the result, or drive the coordinated PREPARE/COMMIT protocol "
-            "through the `revl.deploy` library surface.",
-            file=sys.stderr)
-        return 1
-    return 0
+    return 0 if report.get("verdict") == DEPLOY_APPLIED else 1
 
 
 # ---------------------------------------------------------------------------
@@ -2805,3 +2814,214 @@ def launch_container_participant(
                       f"container ({error})")
     return ContainerParticipant(identity=target.process, process=process,
                                 container=name, docker=exe), None
+
+
+# ---------------------------------------------------------------------------
+# §5c. the local (process-boundary) participant, and the CLI's COMMIT path
+#      (roadmap item 118, Slice 2b)
+# ---------------------------------------------------------------------------
+#
+# Slice 1 built `run_deploy` and left the caller to construct `Participant`s in
+# Python; Slice 2a added the written map and its plan-time admission but wired
+# the CLI to only the effect-free `--dry-run` half. This slice closes the gap
+# the two left: it drives the coordinated PREPARE/COMMIT/ABORT protocol from a
+# map, over the ONE boundary Slice 1 actually proved out — the process boundary
+# (`via = local`). A container target is opened by `launch_container_participant`
+# and a machine boundary never admits; both stay outside this entry point, which
+# is honest because `admit_deploy_map` (called with no seam set here) admits only
+# `via = local` targets, so every participant this path builds is the conductor's
+# own child on this kernel.
+#
+# What is deliberately NOT here, and named so the boundary is explicit:
+#   * the attested-bundle staging and the host-side chain verify (§2, `admit`):
+#     PREPARE here is the landed effect-free admission, not the attestation half;
+#   * cross-machine / container launch orchestration;
+#   * a real `apply.py`-backed load of backend runtime — a local participant
+#     activates its declared components as reversible boundary state with its own
+#     WAL and LIFO teardown (the `_deploy_participant` model item 118 runs behind
+#     every boundary, container included), which is exactly enough to exercise
+#     the coordinated protocol end-to-end from a map.
+
+
+def _local_participant_spec(process: str, components: Sequence[str],
+                            state_dir: Path) -> Path:
+    """Write one LOCAL process's participant spec, derived from its declared
+    components.
+
+    Each component becomes a reversible boundary-state activation the child
+    OWNS, recorded in its own world file and WAL under `state_dir`. On ABORT the
+    child runs its own newest-first unwind over exactly these — the conductor
+    holds only a pipe and a name (`TEARDOWN_PROMISE[BOUNDARY_PROCESS]`).
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    spec = {
+        "identity": process,
+        "world": str((state_dir / f"{process}.world.json").resolve()),
+        "wal": str((state_dir / f"{process}.wal").resolve()),
+        "effects": [{"name": str(c), "reversible": True} for c in components],
+    }
+    spec_path = state_dir / f"{process}.spec.json"
+    spec_path.write_text(json.dumps(spec, sort_keys=True, indent=1) + "\n",
+                         encoding="utf-8")
+    return spec_path
+
+
+def launch_local_participant(
+        target: DeployTarget, *, spec_path: Path | str,
+        python: Optional[str] = None,
+        participant_module: Optional[Path | str] = None,
+        timeout: float = 20.0
+        ) -> tuple[Optional[ProcessParticipant], Optional[str]]:
+    """Open a PROCESS boundary and put one participant behind it — the
+    conductor's own child on this kernel (`via = local`, design §1.3 step 2's
+    "path handoff, no copy").
+
+    The mirror of :func:`launch_container_participant` for the boundary Slice 1
+    proved out. It runs the same `_deploy_participant` runner (stdlib-only, so no
+    PYTHONPATH plumbing is needed — the file is invoked by path) as a plain
+    child; the coordinator then speaks the newline-JSON control channel to it
+    exactly as it does across a container's stdio.
+
+    Returns `(participant, None)` or `(None, diagnostic)`; a diagnostic is a
+    REFUSAL and the caller must not proceed — a boundary that could not be
+    established is never downgraded to running the slice inline in the
+    conductor's own process.
+    """
+    if target.via != VIA_LOCAL:
+        return None, (f"target {target.process!r} is `via = {target.via}`, not "
+                      f"`{VIA_LOCAL}`; this launcher opens the process boundary "
+                      f"only")
+    module = Path(participant_module) if participant_module is not None else (
+        Path(__file__).resolve().parent / "_deploy_participant.py")
+    if not module.is_file():  # pragma: no cover — a broken checkout/wheel
+        return None, (f"the participant runner {module} is missing, so nothing "
+                      f"can be put behind the boundary")
+    spec_path = Path(spec_path).resolve()
+    if not spec_path.is_file():
+        return None, (f"target {target.process!r}: the participant spec "
+                      f"{spec_path} does not exist, so the boundary has nothing "
+                      f"to run behind it")
+    exe = python or sys.executable
+    argv = [exe, "-u", str(module), str(spec_path)]
+    try:
+        process = subprocess.Popen(  # noqa: S603 — argv built above, no shell
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+    except OSError as error:
+        return None, (f"target {target.process!r}: could not start the local "
+                      f"participant ({error})")
+    return ProcessParticipant(identity=target.process, process=process,
+                              timeout=timeout), None
+
+
+def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
+                     approval_path: Optional[str] = None,
+                     federation_id: str = "deploy",
+                     generation: int = 0,
+                     python: Optional[str] = None,
+                     on_event: Optional[Callable[[str, str, dict], None]] = None
+                     ) -> dict:
+    """Drive the coordinated PREPARE/COMMIT/ABORT protocol (:func:`run_deploy`)
+    over the LOCAL process participants a deploy map declares.
+
+    This is the CLI's COMMIT path (design §1.3, `via = local`). It:
+
+      1. admits the map (:func:`admit_deploy_map`) — the effect-free half that
+         refuses a machine boundary, an unknown `via`, a network provider, and
+         (with no seam set supplied here) every container target, so the only
+         thing left to build is a process-boundary child;
+      2. builds one :class:`ProcessParticipant` per process from that process's
+         declared components (:func:`_local_participant_spec`);
+      3. hands the ordered list to :func:`run_deploy`, which owns the commit
+         ledger and drives ABORT in REVERSE commit order on any COMMIT failure,
+         each unwind performed by the participant that holds the inverses.
+
+    Returns the :func:`run_deploy` report unchanged on the happy/rollback paths,
+    or a `DEPLOY_REFUSED` report when admission refuses or a participant will not
+    even spawn (a PREPARE-time refusal: nothing committed, nothing to undo).
+    """
+    verdict = admit_deploy_map(placement)
+    if not verdict.ok:
+        return {
+            "protocol": PROTOCOL,
+            "verdict": DEPLOY_REFUSED,
+            "phase": "admit",
+            "reason": "the deploy map did not admit; no boundary was opened",
+            "refusals": [dict(r) for r in verdict.refusals],
+        }
+
+    # After a clean admission with no seam set, every admitted target is
+    # `via = local` (a container needs a proven-seam-free set this entry point
+    # does not supply, and a machine boundary is refused outright), so a process
+    # with no `[deploy]` table and one that wrote `via = local` are the same
+    # process-boundary child here.
+    processes = placement.get("processes") or {}
+    state_dir = Path(state_dir)
+    participants: list[ProcessParticipant] = []
+    for pname in sorted(processes):
+        pconf = processes.get(pname) or {}
+        components = pconf.get("components") or []
+        target = verdict.targets.get(pname) or DeployTarget(
+            process=pname, via=VIA_LOCAL, raw={})
+        spec_path = _local_participant_spec(pname, components, state_dir)
+        participant, error = launch_local_participant(
+            target, spec_path=spec_path, python=python)
+        if error is not None:
+            for started in participants:
+                started.stop()
+            return {
+                "protocol": PROTOCOL,
+                "verdict": DEPLOY_REFUSED,
+                "phase": "launch",
+                "refusedBy": pname,
+                "reason": error,
+                "proof": ("a participant that could not be spawned is a "
+                          "PREPARE-time refusal: no participant committed, so "
+                          "there is nothing to roll back."),
+            }
+        participants.append(participant)
+
+    try:
+        report = run_deploy(participants, approval_path=approval_path,
+                            federation_id=federation_id, generation=generation,
+                            on_event=on_event)
+    finally:
+        for participant in participants:
+            participant.stop()
+    return report
+
+
+def _render_deploy_report(map_path: str, report: Mapping) -> list[str]:
+    """Human-readable form of a :func:`deploy_local_map` / :func:`run_deploy`
+    report: the aggregate verdict, each participant's outcome, the commit ledger
+    and — on an abort — the reverse-order teardown and any residue."""
+    lines = [f"deploy map {map_path}: {report.get('verdict')} "
+             f"({report.get('protocol')})"]
+    if report.get("reason"):
+        lines.append(f"  {report['reason']}")
+    if report.get("refusedBy"):
+        lines.append(f"  refused by: {report['refusedBy']}")
+    for refusal in report.get("refusals") or ():
+        lines.append(f"  REFUSED [{refusal.get('rule')}] "
+                     f"{refusal.get('process')}: {refusal.get('reason')}")
+    participants = report.get("participants") or {}
+    for identity in sorted(participants):
+        lines.append(f"  participant {identity}: "
+                     f"{participants[identity].get('outcome')}")
+    ledger = report.get("commitLedger") or []
+    if ledger:
+        lines.append("  commit ledger: "
+                     + " -> ".join(f"{e['identity']}(#{e['order']})"
+                                   for e in ledger))
+    if report.get("failedAt"):
+        lines.append(f"  COMMIT failed at: {report['failedAt']}")
+    if report.get("abortOrder"):
+        lines.append("  abort order (reverse commit): "
+                     + " -> ".join(report["abortOrder"]))
+    residue = report.get("residue") or {}
+    if residue:
+        lines.append("  residue: "
+                     + ("clean" if residue.get("clean") else "PRESENT"))
+        for item in residue.get("outstanding") or ():
+            lines.append(f"    outstanding: {item}")
+    return lines

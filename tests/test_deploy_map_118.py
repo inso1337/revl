@@ -272,14 +272,35 @@ def test_deploy_dry_run_refuses_a_machine_boundary(tmp_path, capsys):
     assert "REFUSED" in out and "machine-boundary" in out
 
 
-def test_deploy_without_dry_run_refuses_even_an_admitted_map(tmp_path, capsys):
-    """The COMMIT/launch phase is not wrapped yet, so an admitted map without
-    `--dry-run` is refused (exit 1) rather than reported as deployed — the plan
-    is still printed."""
+def test_deploy_without_dry_run_deploys_a_local_map(tmp_path, capsys, monkeypatch):
+    """Without `--dry-run`, an admitted local map is DEPLOYED: the coordinated
+    PREPARE/COMMIT protocol runs over one participant per process and the CLI
+    reports `applied` (exit 0). The WAL dir is pinned into the test tree so the
+    deploy leaves nothing under the real per-user state directory."""
+    monkeypatch.setenv("REVL_WAL_DIR", str(tmp_path / "wal"))
+    mp = _write_map(tmp_path,
+                    a={"components": ["A"]},
+                    b={"components": ["B"], "deploy": {"via": "local"}})
+    assert _cli(["deploy", mp]) == 0
+    out = capsys.readouterr().out
+    assert "applied" in out
+    # both processes committed, and the commit ledger names them
+    assert "participant a: applied" in out
+    assert "participant b: applied" in out
+    assert "commit ledger:" in out
+
+
+def test_deploy_without_dry_run_json_reports_the_run_verdict(
+        tmp_path, capsys, monkeypatch):
+    """`--json` on the COMMIT path prints the coordinated deploy report, not the
+    admission plan: the aggregate verdict plus the commit ledger."""
+    monkeypatch.setenv("REVL_WAL_DIR", str(tmp_path / "wal"))
     mp = _write_map(tmp_path, a={"components": ["A"]})
-    assert _cli(["deploy", mp]) == 1
-    err = capsys.readouterr().err
-    assert "--dry-run" in err
+    assert _cli(["deploy", mp, "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["verdict"] == deploy.DEPLOY_APPLIED
+    assert doc["protocol"] == deploy.PROTOCOL
+    assert [row["identity"] for row in doc["commitLedger"]] == ["a"]
 
 
 def test_deploy_json_output_shape(tmp_path, capsys):
@@ -306,6 +327,112 @@ def test_deploy_malformed_map_is_an_error_not_a_crash(tmp_path, capsys):
     path.write_text("{not json at all", encoding="utf-8")
     assert _cli(["deploy", str(path), "--dry-run"]) == 1
     assert "cannot read deploy map" in capsys.readouterr().err
+
+
+# ==========================================================================
+# 1b. the local (process-boundary) COMMIT path (no container runtime needed)
+#
+# Slice 2b: the CLI `deploy_local_map` builds one participant per process from
+# the map and drives the coordinated PREPARE/COMMIT/ABORT protocol. Every
+# participant is the conductor's own child on this kernel, so these need no
+# container runtime.
+# ==========================================================================
+
+
+def _local_spec(state_dir: Path, identity: str, effects, **extra) -> Path:
+    """A participant spec on disk, one file per identity (unlike the container
+    tests' shared `spec.json`), so several can be spawned side by side."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    spec = {"identity": identity,
+            "world": str((state_dir / f"{identity}.world.json").resolve()),
+            "wal": str((state_dir / f"{identity}.wal").resolve()),
+            "effects": effects, **extra}
+    path = state_dir / f"{identity}.spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    return path
+
+
+def test_deploy_local_map_applies_a_process_boundary_map(tmp_path):
+    """The core Slice 2b property: a local map is admitted, one participant per
+    process is spawned from its components, and the coordinated protocol commits
+    every one. The commit ledger names them all."""
+    placement = _map(db={"components": ["Db"], "deploy": {"via": "local"}},
+                     edge={"components": ["Edge"]})  # no [deploy]: still local
+    report = deploy.deploy_local_map(placement, state_dir=tmp_path / "state")
+    assert report["protocol"] == deploy.PROTOCOL
+    assert report["verdict"] == deploy.DEPLOY_APPLIED, report
+    assert report["participants"]["db"]["outcome"] == deploy.APPLIED
+    assert report["participants"]["edge"]["outcome"] == deploy.APPLIED
+    assert {row["identity"] for row in report["commitLedger"]} == {"db", "edge"}
+
+
+def test_deploy_local_commit_failure_aborts_in_reverse_order(tmp_path):
+    """PREPARE/COMMIT then a COMMIT failure on the LAST participant: the two that
+    committed are aborted in REVERSE commit order, each unwinding its own slice
+    in its own process, and the deploy aborts clean with no residue. This drives
+    the protocol through the NEW local launcher (`launch_local_participant`)."""
+    state = tmp_path / "state"
+    db = _local_spec(state, "db", [{"name": "row1", "reversible": True},
+                                   {"name": "row2", "reversible": True}])
+    cache = _local_spec(state, "cache", [{"name": "c1", "reversible": True}])
+    edge = _local_spec(state, "edge", [{"name": "e1", "reversible": True}],
+                       failAt=0)
+
+    participants = []
+    for identity, spec in (("db", db), ("cache", cache), ("edge", edge)):
+        target = deploy.DeployTarget(process=identity, via=deploy.VIA_LOCAL,
+                                     raw={})
+        p, error = deploy.launch_local_participant(target, spec_path=spec)
+        assert error is None, error
+        participants.append(p)
+    try:
+        report = deploy.run_deploy(participants)
+    finally:
+        for p in participants:
+            p.stop()
+
+    assert report["verdict"] == deploy.DEPLOY_ABORTED_CLEAN, report
+    assert report["failedAt"] == "edge"
+    # db and cache committed, in that order; the abort went out reversed
+    assert [row["identity"] for row in report["commitLedger"]] == ["db", "cache"]
+    assert report["abortOrder"] == ["cache", "db"]
+    assert report["participants"]["db"]["outcome"] == deploy.ROLLED_BACK_CLEAN
+    assert report["participants"]["cache"]["outcome"] == deploy.ROLLED_BACK_CLEAN
+    # edge's own local apply failed, so it never counted as committed
+    assert report["participants"]["edge"]["outcome"] == deploy.NEVER_COMMITTED
+    assert report["residue"]["clean"] is True
+
+
+def test_deploy_local_map_refuses_a_machine_boundary_before_spawning(tmp_path):
+    """A map that does not admit never spawns a participant: the refusal is the
+    admission verdict, and no boundary is opened."""
+    placement = _map(db={"components": ["Db"],
+                         "deploy": {"via": "ssh", "host": "h", "trust": "/t"}})
+    report = deploy.deploy_local_map(placement, state_dir=tmp_path / "state")
+    assert report["verdict"] == deploy.DEPLOY_REFUSED
+    assert report["phase"] == "admit"
+    assert report["refusals"][0]["rule"] == "machine-boundary"
+
+
+def test_launch_local_participant_refuses_a_non_local_via(tmp_path):
+    """The local launcher opens the process boundary only; a container target is
+    a refusal, never silently run as a plain child."""
+    spec = _local_spec(tmp_path, "db", [])
+    target = deploy.DeployTarget(process="db", via=deploy.VIA_CONTAINER,
+                                 image="x", raw={})
+    p, error = deploy.launch_local_participant(target, spec_path=spec)
+    assert p is None
+    assert "process boundary" in error
+
+
+def test_launch_local_participant_refuses_a_missing_spec(tmp_path):
+    """A spec that does not exist is a refusal (nothing to run behind the
+    boundary), not a spawned child that dies."""
+    target = deploy.DeployTarget(process="db", via=deploy.VIA_LOCAL, raw={})
+    p, error = deploy.launch_local_participant(
+        target, spec_path=tmp_path / "nope.json")
+    assert p is None
+    assert "does not exist" in error
 
 
 # ==========================================================================
