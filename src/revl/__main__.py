@@ -1143,13 +1143,17 @@ def _run_composition(args) -> int:
     Header-only by default: every row id resolves and the whole wiring renders
     without lowering a single component body (426 exit test 12). `--admit` also
     compiles the rows the table names, which is where `_link` runs G2/G3 — the
-    resolver itself never calls the gate (§3.3)."""
-    from .composition import compile_composition, resolve_file  # noqa: PLC0415
+    resolver itself never calls the gate (§3.3). Admission is INCREMENTAL by
+    default (S3): a composition with layers admits only the resolved delta into
+    its already-admitted base; `--full` forces the whole composition, to the
+    same verdict."""
+    from .composition import admit_composition, resolve_file  # noqa: PLC0415
 
     try:
         overlay = _parse_overlay(getattr(args, "overrides", []))
         table = resolve_file(args.file, args.root, overlay)
-        document = compile_composition(args.file, args.root, overlay) \
+        document = admit_composition(args.file, args.root, overlay,
+                                     full=getattr(args, "full", False)) \
             if args.admit else None
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)

@@ -161,7 +161,14 @@ without lowering a single component body.
 - `FILE` - the `.rvl` document declaring the composition (required).
 - `--json` - the row table as JSON instead of the ROWS/WIRING panels.
 - `--admit` - also COMPILE the rows the table names and print the resulting
-  load order. Resolution alone compiles nothing.
+  load order. Resolution alone compiles nothing. Admission is INCREMENTAL by
+  default (item 426 S3): a composition with layers compiles its base once, then
+  admits only the changed and withdrawn rows into that running manifest, so the
+  cost is one compile of the layer delta, not of the whole composition.
+- `--full` - with `--admit`, force WHOLE-COMPOSITION admission: every row is
+  compiled, never just the delta. The verdict and resulting manifest are
+  identical to the incremental default; this is the escape hatch for a
+  cross-row rule a per-row admission cannot honour (426 §5.1).
 - `--root DIR` - the project root row provenance and origins are recorded
   against (default: the working directory). A document under `trucs/<key>/`
   is scoped to the origin `<key>`; anything else to the project origin `.`.

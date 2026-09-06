@@ -28,8 +28,17 @@ Which of 426 §12's exit tests this file covers:
 Item 424 R2's third rule (`granted` is never writable in a stack layer), which
 S1 could not enforce because it needs layers, is covered here.
 
- 10, 11             need S3 (incremental admission)
+ 10  incremental admission             COVERED (S3): a `replace`+`add` layer
+                                       compiles only the delta and reaches the
+                                       full verdict and manifest; a cross-row
+                                       require is resolved from the ambient base
+ 11                need S3's activation half (`_wire_turn`, out of this cut)
  13, 14, 15, 16, 17 need S4/S5/S6 (confinement, the panel, distribution)
+
+S3 (incremental admission, §11) is the `admit_into`-over-the-delta half of item
+426: `admit_composition` admits only the layer delta into the already-admitted
+base, and `--full` forces the whole composition to the SAME verdict. The
+equivalence is the property this slice owes and the tests below prove it.
 """
 
 from __future__ import annotations
@@ -44,7 +53,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl.__main__ import main  # noqa: E402
-from revl.composition import resolve_file  # noqa: E402
+from revl.composition import admit_composition, resolve_file  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 
 SERVICES = """
@@ -688,3 +697,163 @@ def test_admit_compiles_the_folded_rows(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "ADMITTED" in out and "PgDatabase" in out
     assert "SqliteDatabase" not in out
+
+
+# --------------------------------------------- S3: incremental admission (§5.1)
+
+
+def _resulting_manifest(document) -> tuple[frozenset, dict, list]:
+    """The resulting composition a document names, in the shape that is invariant
+    under WHICH rows were compiled to reach it: the component set, each
+    component's wiring keyed by name, and the load order as a set. The load
+    order's *sequence* is a valid topological order either way but is free to
+    differ for independent components — full lists them in declaration order,
+    incremental appends the delta after the ambient base — so equivalence is
+    over the set plus the per-name wiring, which pins every dependency edge."""
+    manifest = document["manifest"]
+    wiring = {c["name"]: (sorted(c["inject"]), sorted(c["provides"]))
+              for c in manifest["components"]}
+    return frozenset(wiring), wiring, sorted(manifest["loadOrder"])
+
+
+READER = """
+use "services.rvl" { }
+component Reader requires db: Database provides metrics: Metrics {
+  provide metrics { fn tick() = 1 }
+}
+"""
+
+INCR_STACK = """
+layer PgAndReader for Demo {
+  replace key("db") with row @db from "../postgres.rvl" provides db
+    config { url: "postgres://primary:5432/app" }
+  add row @reader from "../reader.rvl" provides metrics
+}
+"""
+
+
+def test_incremental_admission_compiles_only_the_delta(tmp_path):
+    """426 exit test 10. A `replace`+`add` layer compiles ONLY the changed and
+    added rows, yet reaches the SAME verdict and the same resulting manifest as
+    a `--full` recompile of the whole composition. That equivalence is the
+    property S3 owes: the cost of the operator's decision is one compile of the
+    patched rows, not of the composition (§5.1)."""
+    (tmp_path / "reader.rvl").write_text(READER)
+    doc = _project(tmp_path, "mix", mix=INCR_STACK)
+
+    full = admit_composition(str(doc), str(tmp_path), full=True)
+    incr = admit_composition(str(doc), str(tmp_path), full=False)
+
+    # the delta path compiles strictly fewer components — the whole point
+    full_names = [c["name"] for c in full["components"]]
+    incr_names = [c["name"] for c in incr["components"]]
+    assert sorted(full_names) == ["MemCache", "PgDatabase", "Reader"]
+    # MemCache is unchanged base, so incremental never recompiles it
+    assert sorted(incr_names) == ["PgDatabase", "Reader"]
+    assert len(incr["components"]) < len(full["components"])
+
+    # ... and reaches the identical resulting composition and row table
+    assert _resulting_manifest(incr) == _resulting_manifest(full)
+    assert incr["rows"] == full["rows"]
+    assert incr["manifest"]["rows"] == full["manifest"]["rows"]
+
+
+def test_incremental_admission_spans_the_running_manifest(tmp_path):
+    """The delta is admitted INTO the base, not in isolation: `Reader` requires
+    `db`, which only the base row provides, and the incremental compile — which
+    never compiles the db provider — is admitted because `_link` spans the union
+    of the ambient manifest and the delta (§5.1). Here the load order is pinned
+    by the dependency, so it is byte-identical to the full compile."""
+    (tmp_path / "reader.rvl").write_text(READER)
+    doc = _project(tmp_path, "add", add="""
+layer AddReader for Demo {
+  add row @reader from "../reader.rvl" provides metrics
+}
+""")
+
+    full = admit_composition(str(doc), str(tmp_path), full=True)
+    incr = admit_composition(str(doc), str(tmp_path), full=False)
+
+    assert [c["name"] for c in incr["components"]] == ["Reader"]
+    # Reader lands AFTER the db provider it consumes, in both — the ambient
+    # SqliteDatabase satisfies the cross-row require without being recompiled
+    assert incr["manifest"]["loadOrder"] == full["manifest"]["loadOrder"]
+    assert incr["manifest"]["loadOrder"][-1] == "Reader"
+    assert _resulting_manifest(incr) == _resulting_manifest(full)
+
+
+def test_full_flag_forces_whole_composition_admission(tmp_path):
+    """`--full` (I1's escape hatch, §5.1) compiles every row, base included, and
+    reaches the verdict the incremental default reaches."""
+    (tmp_path / "reader.rvl").write_text(READER)
+    doc = _project(tmp_path, "mix", mix=INCR_STACK)
+
+    full = admit_composition(str(doc), str(tmp_path), full=True)
+    assert sorted(c["name"] for c in full["components"]) == [
+        "MemCache", "PgDatabase", "Reader"]
+
+
+def test_a_layer_free_composition_admits_identically_either_way(tmp_path):
+    """No layers means no delta: the base IS the whole composition, so the
+    incremental default and `--full` are the same compile."""
+    doc = _project(tmp_path)  # base Demo, no stack, no site
+
+    incr = admit_composition(str(doc), str(tmp_path), full=False)
+    full = admit_composition(str(doc), str(tmp_path), full=True)
+    assert incr["manifest"] == full["manifest"]
+    assert incr["rows"] == full["rows"]
+
+
+def test_configure_only_delta_carries_config_without_recompiling_it(tmp_path):
+    """A `configure`-only patch changes no wiring and no component, so it enters
+    neither the compile set nor `replacing` — config never reaches the gate
+    (§5.3). The base manifest already IS the resulting one, and the folded
+    config still reaches the rows IR."""
+    doc = _project(tmp_path, "tune", tune="""
+layer Tune for Demo {
+  configure @db with { pool: 32 }
+}
+""")
+    incr = admit_composition(str(doc), str(tmp_path), full=False)
+    full = admit_composition(str(doc), str(tmp_path), full=True)
+
+    assert _resulting_manifest(incr) == _resulting_manifest(full)
+    rows = {r["label"]: r for r in incr["rows"]["rows"]}
+    assert rows["db"]["config"]["pool"] == 32
+
+
+def test_incremental_admission_refuses_what_full_refuses(tmp_path):
+    """A delta that does not admit is refused on the SAME ground either way: the
+    incremental path is a better message over the same gate, never a weaker one
+    (§3.3 soundness). Here an added row claims a key the base already claims."""
+    doc = _project(tmp_path, "clash", clash="""
+layer Clash for Demo {
+  add row @db2 from "../postgres.rvl" provides db
+    config { url: "postgres://x:5432/y" }
+}
+""")
+    with pytest.raises(RevlError) as full_err:
+        admit_composition(str(doc), str(tmp_path), full=True)
+    with pytest.raises(RevlError) as incr_err:
+        admit_composition(str(doc), str(tmp_path), full=False)
+    assert str(full_err.value) == str(incr_err.value)
+
+
+def test_cli_full_flag_admits_the_whole_composition(tmp_path, capsys):
+    """`revl composition --admit --full` reaches the same load order the
+    incremental default prints — the flag changes the cost, not the verdict."""
+    doc = _project(tmp_path, "pg", pg=PG_SWAP)
+
+    assert main(["composition", str(doc), "--root", str(tmp_path),
+                 "--admit", "--full"]) == 0
+    full_out = capsys.readouterr().out
+    assert main(["composition", str(doc), "--root", str(tmp_path),
+                 "--admit"]) == 0
+    incr_out = capsys.readouterr().out
+
+    def _load_order(text):
+        line = next(l for l in text.splitlines() if "load order" in l)
+        return {name.strip() for name in line.split("load order", 1)[1].split("->")}
+
+    assert "ADMITTED" in full_out and "ADMITTED" in incr_out
+    assert _load_order(full_out) == _load_order(incr_out)
