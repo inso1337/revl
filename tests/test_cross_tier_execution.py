@@ -713,7 +713,93 @@ DIVERGENCES = {
     # `Math.negateExact`; the checked forms return `Err("revl: Int overflow")`.
     # rust/wasm/ts already trapped. Asserted positively below
     # (test_div_int_min_traps + the checked-Err and per-tier emit checks).
+    #
+    # ---- issue #549: stdlib cross-tier divergences, pinned not fixed ----
+    # Each entry below asserts the INTENDED (majority/reference) behaviour, so
+    # the tier that diverges is exactly the tier whose status is "fail" here
+    # (or, for a value the reference rejects, the diverging tier is the one that
+    # answers "pass"). The per-tier map records what every tier does TODAY,
+    # empirically measured on py/ts/go/rust/java. Closing any of these for real
+    # is a per-tier emitter change (docs/contract-errata.md) — the point of the
+    # pin is that the divergence can no longer drift or grow silently. The
+    # marker after each name says which tier(s) diverge from the reference.
+    #
+    # `split("")` on an astral scalar. Reference: `""`-split walks CODE POINTS,
+    # so a single U+1F600 is ONE element. ts and java split by UTF-16 code
+    # UNITS, seeing the surrogate pair as two — DIVERGE (ts, java).
+    "split('') counts code points, not UTF-16 units": (
+        'pub fn units() -> Int { return "\U0001F600".split("").length() }\n'
+        'test "an astral scalar is one code point" { assert units() == 1 }\n',
+        {"py": "pass", "ts": "fail", "go": "pass", "rust": "pass", "java": "fail"},
+    ),
+    # `Str.to_int()` on a `+`-prefixed number. Reference: the parse is
+    # sign-optional with a bare `-` only, so `"+7"` is NOT an integer and
+    # `to_int()` is `None`. rust's `str::parse::<i64>()` accepts a leading `+`
+    # and returns `Some(7)` — DIVERGES (rust).
+    "'+7'.to_int() is None (no leading plus)": (
+        'pub fn parsed() -> Bool { return "+7".to_int() == None }\n'
+        'test "a leading + is not an integer" { assert parsed() }\n',
+        {"py": "pass", "ts": "pass", "go": "pass", "rust": "fail", "java": "pass"},
+    ),
+    # A negative list index. Reference: an out-of-range index FAULTS — there is
+    # no wrap. python's `xs[-1]` silently reads the LAST element instead, so the
+    # assertion of the wrapped value passes on py alone and every other tier
+    # faults — DIVERGES (py). (ts reads `undefined`; both are the silent-answer
+    # bug, pinned here from py's side because py returns a comparable value.)
+    "xs[0-1] wraps to the last element on py": (
+        'pub fn read() -> Int { let xs = [10, 20, 30]  return xs[0 - 1] }\n'
+        'test "a negative index reads the wrapped last element" { assert read() == 30 }\n',
+        {"py": "pass", "ts": "fail", "go": "fail", "rust": "fail", "java": "fail"},
+    ),
+    # A negative slice `xs.slice(-2, -1)`. Three answers across the matrix:
+    # py and ts take a python/JS end-relative slice (one element), while go,
+    # rust and java FAULT on the negative bound — DIVERGE (py+ts vs go/rust/java;
+    # the reference end-relative semantics is still undecided, docs/errata).
+    "negative slice bounds: py/ts slice, others fault": (
+        'pub fn n() -> Int { let xs = [10, 20, 30, 40]  return xs.slice(0 - 2, 0 - 1).length() }\n'
+        'test "a negative slice yields one element" { assert n() == 1 }\n',
+        {"py": "pass", "ts": "pass", "go": "fail", "rust": "fail", "java": "fail"},
+    ),
+    # `Str + Int`. The frontend accepts the mixed `+` (arguably it should not —
+    # see the follow-up note below), and the tiers then scatter: py raises a
+    # `TypeError`, go REFUSES TO COMPILE (`mismatched types`), while rust, java
+    # and ts coerce the int and render `"n=3"` — DIVERGE (py, go vs rust/ts/java).
+    "Str + Int: py raises, go won't compile, others coerce": (
+        'pub fn s() -> Str { return "n=" + 3 }\n'
+        'test "Str + Int renders the int" { assert s() == "n=3" }\n',
+        {"py": "fail", "ts": "pass", "go": "fail", "rust": "pass", "java": "pass"},
+    ),
+    # `div_trunc(Int.MIN, -1)`. The true quotient is 2^63, one past Int.MAX, so
+    # the reference behaviour is an overflow TRAP (py/go/rust/ts all fault). java
+    # computes `Long.MIN_VALUE / -1L`, which wraps back to `Int.MIN` with no
+    # trap — DIVERGES (java). NOTE: the "closed" note above claims java traps
+    # this via `Math.divideExact`; that holds for the `/` operator but NOT for
+    # the named `div_trunc`, which #549 caught still wrapping.
+    "div_trunc(Int.MIN, -1) traps everywhere but java": (
+        'pub fn dt(a: Int, b: Int) -> Int { return a.div_trunc(b) }\n'
+        'pub fn imin() -> Int { return 0 - 9223372036854775807 - 1 }\n'
+        'test "Int.MIN div_trunc -1 traps" { assert dt(imin(), 0 - 1) == imin() }\n',
+        {"py": "fail", "ts": "fail", "go": "fail", "rust": "fail", "java": "pass"},
+    ),
 }
+
+# Divergences from #549 that are NOT pinned above, recorded so they are not
+# mistaken for closed — each needs machinery this executable pin cannot express:
+#   - `xs[5]` out of bounds: every executable tier FAULTS (the reference), and
+#     the divergence is ts (`undefined`) and wasm (`0`), which a value-equality
+#     assert cannot tell apart from the fault (both read back as a failing
+#     compare) and wasm is not in this file's runner set. Needs a static
+#     emitted-code guard per tier (the shape of `test_typescript_...` below).
+#   - `Map.keys()` order with astral keys: ts sorts by UTF-16 code unit, so the
+#     divergence only shows at a BMP-vs-astral boundary where unit order and
+#     code-point order actually differ (e.g. U+FFFF vs U+10000); a lone emoji
+#     key does not expose it, so it needs a hand-built boundary fixture.
+#   - `Str < Str` above the BMP: java does not compile `<` on String at all and
+#     ts compares by UTF-16 unit; `test_str_ordering_agrees_everywhere` already
+#     covers the ASCII case where all tiers agree.
+# FIXED (not pinned): `List[Int].join(sep)` crashed the py runtime while ts
+# coerced; it is now a compile error on every tier (typecheck.builtin_check
+# pins `join`'s receiver to `List[Str]`, matching docs/stdlib-2.0.md).
 
 
 def _observed(tier: str, source: str) -> str:
@@ -743,6 +829,19 @@ def test_pinned_divergence_has_not_drifted_rust(name: str):
     observed = _observed("rust", source)
     assert observed == pinned["rust"], (
         f"rust now {observed}es {name!r}, pinned as {pinned['rust']}")
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("name", sorted(DIVERGENCES))
+def test_pinned_divergence_has_not_drifted_java(name: str):
+    # java carries two of the #549 divergences (`split('')` by UTF-16 units and
+    # the `div_trunc(Int.MIN, -1)` wrap), so it gets its own slow pin alongside
+    # rust — `test_pinned_divergence_has_not_drifted` only walks FAST_TIERS.
+    source, pinned = DIVERGENCES[name]
+    observed = _observed("java", source)
+    assert observed == pinned["java"], (
+        f"java now {observed}es {name!r}, pinned as {pinned['java']}")
 
 
 def test_str_ordering_agrees_everywhere():
