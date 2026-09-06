@@ -1,0 +1,39 @@
+name: x64-smoke
+
+# Supplementary x86-64 coverage/capacity on a self-hosted runner (the Azure box,
+# labels: self-hosted,X64,azure,light). It mirrors the arm64 smoke lane on x86 so
+# the frontend + self-host oracles get an extra, independent signal off the
+# GitHub-hosted pool. It is DELIBERATELY not a PR gate: it runs on main + a
+# nightly schedule (and on demand), so it adds coverage without putting any PR at
+# the mercy of a single small self-hosted box. The runner is memory-small
+# (B2ats_v2, 1 GiB + swap), so this lane stays a light subset, not the heavy
+# backend jobs.
+#
+# Python comes from uv (pre-installed on the box), not actions/setup-python.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '45 3 * * *'
+  workflow_dispatch:
+
+# Least privilege: the smoke job only checks out and runs tests.
+permissions:
+  contents: read
+
+concurrency:
+  group: x64-smoke-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  frontend-x64:
+    runs-on: [self-hosted, linux, X64, azure]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: install revl + run frontend/self-host oracles (x64, uv py3.11)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -e ".[test]"
+          PYTHONPATH=src .venv/bin/python -m pytest tests/test_v2_emit.py tests/test_selfhost_lower_ir.py tests/test_selfhost_emit_py.py -q

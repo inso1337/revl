@@ -7,6 +7,10 @@ name: arm64-smoke
 # pointer-width assumption would break. It is DELIBERATELY not a PR gate: it runs
 # on main + a nightly schedule (and on demand), on a lane separate from the x86
 # runners, so it adds coverage and capacity without slowing any PR.
+#
+# Python comes from uv (not actions/setup-python): the box is Ubuntu 20.04 and
+# setup-python@v5 has no 3.11 arm64 build for 20.04, so it always failed. uv
+# provides a standalone 3.11 on any distro/arch and is pre-installed on the box.
 on:
   push:
     branches: [main]
@@ -28,10 +32,9 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: install revl (arm64)
-        run: pip install -e ".[test]"
-      - name: frontend + self-host oracles on arm64
-        run: PYTHONPATH=src python -m pytest tests/test_v2_emit.py tests/test_selfhost_lower_ir.py tests/test_selfhost_emit_py.py -q
+      - name: install revl + run frontend/self-host oracles (arm64, uv py3.11)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv --python 3.11 .venv
+          uv pip install --python .venv/bin/python -e ".[test]"
+          PYTHONPATH=src .venv/bin/python -m pytest tests/test_v2_emit.py tests/test_selfhost_lower_ir.py tests/test_selfhost_emit_py.py -q
