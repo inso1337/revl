@@ -280,10 +280,18 @@ DSL.
 - `--key PATH` - an attestation verification key.
 - `--mcp-scope COMPONENT` - treat COMPONENT as MCP/agent-admitted; `*` means
   every component.
+- `--recompute` - run the operator's own local producers (the fault sweep, the
+  inverse round-trip, and a cold gauntlet) against the component in hand and
+  grade that freshly produced dossier instead of the published bundle. The
+  evidence is operator-run at evaluation time, so it needs no attestation root,
+  and each facet is marked `recomputed` (as opposed to `published`) in the
+  report and in `--json`. A producer whose runtime is absent is skipped, never
+  faked, and that facet stays as the published bundle carried it.
 
 ```bash
 revl policy evaluate prod.policy app.rvl
 revl policy evaluate prod.policy app.rvl --json --component Billing
+revl policy evaluate local.policy app.rvl --recompute
 ```
 
 ### `revl audit`

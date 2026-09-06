@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 
 from . import cap_order
@@ -1505,9 +1505,47 @@ def _clause_verdict(facet: str, threshold: str, assessment, bundle,
     return ClauseVerdict(facet, threshold, status, False, standing, "")
 
 
+def _recompute_component(ir: dict, name: str, published,
+                         *, gauntlet_dossier) -> tuple:
+    """Item 290 §4, slice 3 (`--recompute`): run the operator's OWN local
+    producers against the component in hand and return
+    ``(bundle, recomputed_facets)``.
+
+    The producers are the shipped entry points, reused verbatim (never
+    re-derived here): `fault.sweep_dossier` (the per-component fault sweep),
+    `fault.roundtrip_dossier` (the composition's inverse round-trip), and the
+    caller-supplied cold `mcp.gauntlet.run` dossier. Operator-run evidence needs
+    no attestation root — the operator produced it — so the facets it yields are
+    marked `recomputed` (§6.3: rooted by construction). A producer whose runtime
+    is absent is honestly skipped (never faked): that facet is left as the
+    PUBLISHED bundle carried it and stays out of `recomputed_facets`, so the
+    report keeps marking it `published`.
+    """
+    from . import fault  # noqa: PLC0415 — lazy: the runtime-tested producers
+    from . import registry as reg  # noqa: PLC0415
+    fields: dict = {}
+    recomputed: set = set()
+    try:
+        fields["fault_sweep"] = fault.sweep_dossier(ir, only=name)
+        recomputed.add("fault-sweep")
+    except (ModuleNotFoundError, ImportError):
+        pass  # cordis-py absent: honestly unavailable, never faked
+    try:
+        fields["inverse_roundtrip"] = fault.roundtrip_dossier(ir)
+        recomputed.add("inverse-roundtrip")
+    except (ModuleNotFoundError, ImportError):
+        pass
+    if gauntlet_dossier is not None:
+        fields["gauntlet"] = gauntlet_dossier
+        recomputed.add("gauntlet")
+    base = published if published is not None else reg.EvidenceBundle()
+    return replace(base, **fields), frozenset(recomputed)
+
+
 def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                   *, evidence, origins, trusted_publishers, key,
-                  evidence_ir) -> dict:
+                  evidence_ir, recompute=False, recompute_ir=None,
+                  recompute_gauntlet=None) -> dict:
     """The single comparison site: every evidence rule against every component,
     every clause verdict (pass and fail). `evaluate` turns failing clauses into
     violations; `revl policy evaluate` renders the whole thing. Register rules
@@ -1515,11 +1553,15 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
     component; higher floors are parse-rejected until 309's ledger).
 
     Returns {component: {"evidence": [RuleReport], "registers": [RuleReport]}}.
+
+    Slice 3 (`--recompute`, §4): when `recompute` is set, the operator's OWN
+    local producers are run against each component in `recompute_ir` (plus the
+    caller-supplied cold gauntlet dossier `recompute_gauntlet`) and the facets
+    they yield OVERLAY the published bundle before grading. Those facets are
+    marked `recomputed` (standing) — operator-run at evaluation time, rooted by
+    construction (§6.3); facets no local producer ran stay as the published
+    bundle carried them and keep their published standing.
     """
-    # TODO(slice 3: --recompute): run the operator's local producers (gauntlet,
-    # fault sweep, inverse round-trip) against the component in hand and grade
-    # THAT dossier, marking each facet `recomputed` vs `published` (§4). Until
-    # then, evidence is whatever the supplied bundle carries.
     from . import registry as reg  # noqa: PLC0415 — lazy, pulls the compiler
     evidence = evidence or {}
     key_bytes = bytes(key) if key is not None else None
@@ -1533,6 +1575,11 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
         reach_tokens = frozenset(r.token for r in component_reach(audit, name))
         origin = _component_origin(audit, origins, name)
         bundle = evidence.get(name)
+        recomputed_facets: frozenset = frozenset()
+        if recompute and recompute_ir is not None and name in recompute_ir:
+            bundle, recomputed_facets = _recompute_component(
+                recompute_ir[name], name, bundle,
+                gauntlet_dossier=recompute_gauntlet)
         assessment = None
         att_detail = ""
         ev_reports: list[RuleReport] = []
@@ -1560,7 +1607,11 @@ def _rule_reports(policy: Policy, audit: dict, mcp_components: frozenset,
                 f == "attestation" and t == "valid" for f, t in rule.require)
             clauses = []
             for facet, threshold in rule.require:
-                if facet in _SELF_ATTESTING_FACETS:
+                if facet in recomputed_facets:
+                    # §4/§6.3: run locally against the component in hand, so
+                    # rooted in the operator's own run — marked `recomputed`.
+                    standing = "recomputed"
+                elif facet in _SELF_ATTESTING_FACETS:
                     if facet == "gauntlet" and rule.scope == "mcp":
                         standing = "operator-run"
                     elif (has_valid_attest
@@ -1829,6 +1880,8 @@ def evaluate(policy: Policy, audit: dict,
              origins: dict | None = None,
              trusted_publishers=frozenset(), key=None,
              evidence_ir: dict | None = None,
+             recompute: bool = False, recompute_ir: dict | None = None,
+             recompute_gauntlet: dict | None = None,
              profile=None) \
         -> list[Violation]:
     """Evaluate `policy` against an audit graph — the whole gate decision.
@@ -1843,6 +1896,13 @@ def evaluate(policy: Policy, audit: dict,
     admission origin (`registry`/`source`), `trusted_publishers` the operator
     trust set, `key` the attestation verification key, and `evidence_ir` the
     per-component rebuilt IR an `attestation valid` clause verifies against.
+
+    Slice 3 (`--recompute`, §4): with `recompute` set and `recompute_ir` a
+    per-component `{name: ir}` map, the operator's own local producers are run
+    against each component and OVERLAY the published evidence before grading, so
+    the gate and `revl policy evaluate` threshold the freshly recomputed facts;
+    `recompute_gauntlet` is the caller-supplied cold gauntlet dossier. All three
+    default off, so an ordinary evaluation is byte-identical to before.
     """
     mcp_components = frozenset(mcp_components or ())
     manifest = audit.get("manifest") or {}
@@ -1938,7 +1998,8 @@ def evaluate(policy: Policy, audit: dict,
         reports = _rule_reports(
             policy, audit, mcp_components, evidence=evidence, origins=origins,
             trusted_publishers=trusted_publishers, key=key,
-            evidence_ir=evidence_ir)
+            evidence_ir=evidence_ir, recompute=recompute,
+            recompute_ir=recompute_ir, recompute_gauntlet=recompute_gauntlet)
         violations.extend(_evidence_violations(policy, reports, manifest,
                                                profile))
         violations.extend(_register_violations(policy, reports, manifest))
@@ -2407,20 +2468,31 @@ def explain(policy: Policy, audit: dict,
             *, evidence: dict | None = None, origins: dict | None = None,
             trusted_publishers=frozenset(), key=None,
             evidence_ir: dict | None = None,
+            recompute: bool = False, recompute_ir: dict | None = None,
+            recompute_gauntlet: dict | None = None,
             component: str | None = None) -> dict:
     """The `revl policy evaluate` dry-run: run the SAME `evaluate` (the gate's
     refusal set is authoritative), plus the per-clause reports for the explain
     body. Returns a JSON-able dict; `render_explain` prints it. Nothing is
-    admitted, refused, or mutated (§7)."""
+    admitted, refused, or mutated (§7).
+
+    With `recompute` (slice 3, §4), the same recompute inputs feed BOTH the
+    authoritative `evaluate` and the report, so the recomputed facts the report
+    shows are exactly the facts the verdict was reached on (one comparison
+    site)."""
     mcp_components = frozenset(mcp_components or ())
     violations = evaluate(
         policy, audit, mcp_components, evidence=evidence, origins=origins,
-        trusted_publishers=trusted_publishers, key=key, evidence_ir=evidence_ir)
+        trusted_publishers=trusted_publishers, key=key, evidence_ir=evidence_ir,
+        recompute=recompute, recompute_ir=recompute_ir,
+        recompute_gauntlet=recompute_gauntlet)
     reports = _rule_reports(
         policy, audit, mcp_components, evidence=evidence, origins=origins,
         trusted_publishers=trusted_publishers, key=key,
-        evidence_ir=evidence_ir) if (policy.evidence_rules
-                                     or policy.register_rules) else {}
+        evidence_ir=evidence_ir, recompute=recompute,
+        recompute_ir=recompute_ir,
+        recompute_gauntlet=recompute_gauntlet) if (
+            policy.evidence_rules or policy.register_rules) else {}
     refused = {v.component for v in violations}
     inert = _inert_evidence_selectors(policy, reports) if reports else []
     comps = []
@@ -2463,6 +2535,7 @@ def explain(policy: Policy, audit: dict,
             "rules": rule_objs, "refused": refused_here, "verdict": verdict})
     return {
         "policy": policy.source,
+        "recomputed": bool(recompute),
         "components": comps,
         "inertSelectors": [
             {"kind": kind,
@@ -2481,7 +2554,10 @@ def render_explain(result: dict) -> str:
     """Human-readable `revl policy evaluate` report (§7)."""
     lines: list[str] = []
     where = f" ({result['policy']})" if result.get("policy") else ""
-    lines.append(f"policy evaluate{where}: dry-run, nothing admitted or refused")
+    recomputed = (", evidence recomputed locally" if result.get("recomputed")
+                  else "")
+    lines.append(f"policy evaluate{where}: dry-run, nothing admitted or "
+                 f"refused{recomputed}")
     lines.append("")
     for comp in result["components"]:
         origin = f" [origin: {comp['origin']}]" if comp.get("origin") else ""
