@@ -31,10 +31,11 @@ Conventions used below:
   the per-command notes call out which.
 
 Two module entry points sit outside this subcommand tree and are documented at
-the end: `revl lsp` (the language server) and `python -P -m revl.otel` (the
-OpenTelemetry exporter — `-m` because the otel subcommand is reached by
-running a module directly, with the `-P` safety bit so a composition
-directory cannot shadow `opentelemetry` itself).
+the end: `python -P -m revl.lsp` (the language server) and `python -P -m
+revl.otel` (the OpenTelemetry exporter). Both are reached by running a module
+directly rather than as a `revl` subcommand (`revl lsp` is not a valid choice),
+with the `-P` safety bit so a composition directory cannot shadow a same-named
+import.
 
 ---
 
@@ -1223,13 +1224,14 @@ cordis-py runtime installed (`sh backends/python/setup.sh`); without it, any
 
 Two Python module entry points are not `revl` subcommands.
 
-`revl lsp` runs the human-facing language server over stdio (the
-absolute-interpreter fallback is `python -P -m revl.lsp` — the `-P` is
-PYTHONSAFEPATH, the safety bit that closes the CWD-shadowing window
-issue #317 names). It pushes `textDocument/publishDiagnostics` from the
-checker, answers `textDocument/hover` from the diagnostic explanations and
-symbol info, and answers `textDocument/definition` from the resolver,
-reusing the compiler surfaces read-only (`src/revl/lsp/`).
+`python -P -m revl.lsp` runs the human-facing language server over stdio
+(`revl lsp` is not a subcommand; the parser rejects it as an invalid choice,
+and the module is the only spelling). The `-P` is PYTHONSAFEPATH, the safety bit
+that closes the CWD-shadowing window issue #317 names. It pushes
+`textDocument/publishDiagnostics` from the checker, answers
+`textDocument/hover` from the diagnostic explanations and symbol info, and
+answers `textDocument/definition` from the resolver, reusing the compiler
+surfaces read-only (`src/revl/lsp/`).
 
 `python -P -m revl.otel run.jsonl` exports a `revl run --trace` lifecycle
 trace to OpenTelemetry spans, events, and links (a transition is a span, its
