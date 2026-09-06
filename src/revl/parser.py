@@ -2428,14 +2428,25 @@ class Parser:
             if vtok.kind in ("string", "int"):
                 self.next()
                 value: object = vtok.value
+            elif vtok.kind == "kw" and vtok.value == "config":
+                # a per-instance value (item 294 Slice 2): `path=config.job_root`
+                # names a config field the spawn site's `with { }` block binds to
+                # a literal; opaque to the static order until then.
+                self.next()
+                self.expect(".", what="`.` after `config` in a per-instance "
+                                      "capability value")
+                field = self.expect(
+                    "ident", what="a config field name after `config.`").value
+                value = cap_order.Symbol("config." + field)
             else:
                 raise self.err(
                     vtok.line,
-                    "a capability parameter value must be a string or integer "
-                    f"literal, found {vtok.value!r}",
-                    hint='write `path="/data/incoming"` or `calls=10`; a '
-                         "per-instance value (`config.job_root`) is item 294 "
-                         "Slice 2")
+                    "a capability parameter value must be a string literal, an "
+                    "integer, or a per-instance `config.<field>` value, found "
+                    f"{vtok.value!r}",
+                    hint='write `path="/data/incoming"`, `calls=10`, or '
+                         "`path=config.job_root` (a spawn `with { }` binding "
+                         "resolves the per-instance value)")
             raw.append((name, value))
             if self.at(","):
                 self.next()
