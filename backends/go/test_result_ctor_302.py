@@ -54,25 +54,25 @@ def _emit_go() -> str:
 def test_bare_ok_recovers_both_result_type_params():
     src = _emit_go()
     # The RHS `Ok(1)` carries the concrete (int64, string) it recovers from the
-    # equality's other operand - never `RevlOk[int64, any]`, which would defeat
-    # reflect.DeepEqual against the returned `RevlOk[int64, string]`.
-    assert "RevlOk[int64, string]{Value: 1}" in src
-    assert "RevlOk[int64, any]" not in src
+    # equality's other operand - never `RevlResult[int64, any]`, which would
+    # defeat reflect.DeepEqual against the returned `RevlResult[int64, string]`.
+    assert "RevlResult[int64, string]{OkV: 1, Ok: true}" in src
+    assert "RevlResult[int64, any]" not in src
 
 
 def test_bare_err_recovers_the_unseen_ok_type_param():
     src = _emit_go()
     # `Err("boom")` knows only its own (string) err side from its argument; the
     # ok side (int64) must be recovered from the concrete operand, never `any`.
-    assert 'RevlErr[int64, string]{Value: "boom"}' in src
-    assert "RevlErr[any, string]" not in src
-    assert "RevlErr[any, any]" not in src
+    assert 'RevlResult[int64, string]{ErrV: "boom"}' in src
+    assert "RevlResult[any, string]" not in src
+    assert "RevlResult[any, any]" not in src
 
 
 def test_float_result_equality_keeps_float64():
     src = _emit_go()
-    assert "RevlOk[float64, string]{Value: float64(1.5)}" in src
-    assert 'RevlErr[float64, string]{Value: "bad"}' in src
+    assert "RevlResult[float64, string]{OkV: float64(1.5), Ok: true}" in src
+    assert 'RevlResult[float64, string]{ErrV: "bad"}' in src
 
 
 def test_empty_list_equality_recovers_element_type():

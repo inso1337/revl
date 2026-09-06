@@ -276,9 +276,11 @@ fn has(o: Outcome) -> Bool {
 
 def test_v3_stdlib_emit_shapes():
     src = emit.emit(_load(V3_STDLIB), package="stdlib")
-    # Opt as a two-value struct (item 434 (d)); Result still a sealed interface
+    # Opt and Result both two-value structs on the pure v3 tier (item 434 (d))
     _has(src, "type RevlOpt[T any] struct {")
-    _has(src, "type RevlResult[T any, E any] interface { isRevlResult() }")
+    _has(src, "type RevlResult[T any, E any] struct {")
+    assert "interface{ isRevlResult() }" not in src
+    assert "interface { isRevlResult() }" not in src
     # optfield/optcall -> revlOptMap over the payload; the record field is
     # exported (item 390: json_stringify(record) needs exported struct fields)
     _has(src, "revlOptMap(row, func(_x Row) string { return _x.Name })")
@@ -293,7 +295,7 @@ def test_v3_stdlib_emit_shapes():
     _has(src, '("hi " + name + "#" + strconv.FormatInt(n, 10) + "!")')
     assert '"hi %v#%v!"' not in src
     _has(src, "func(y int64) int64 { return (y + 1) }")
-    _has(src, "RevlOk[int64, string]{Value: n}")
+    _has(src, "RevlResult[int64, string]{OkV: n, Ok: true}")
 
 
 # ---------------------------------------------------------------------------
