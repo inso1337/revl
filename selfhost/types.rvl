@@ -1,0 +1,764 @@
+// The revl type-SPELLING algebra, in revl — the leaf module of the self-host
+// type layer (docs/design/457-selfhost-type-layer.md §3.1). It is a direct,
+// AST-free port of the type-string half of src/revl/typecheck.py: the two
+// implementations are one algebra forced to agree on every generated type
+// string (tests/test_selfhost_types.py), so a disagreement is a real defect in
+// one of them, never a spec question.
+//
+// Ported, function for function, from typecheck.py at 0e3eaf37:
+//   _split_top_level / _split_fn_type  -> split_top_ty / split_fn_type
+//   parse_type / format_type
+//   structural_fields / format_structural
+//   is_poison / is_wildcard / render_type
+//   is_tparam_name / mark_tparams / collect_tparams / validate_explicit_tparams
+//   compatible / join / widen_bottom / unify / substitute
+//   check_type_wellformed (message shapes)
+//
+// Everything here is string algebra with no dependency on the parser or the
+// AST, which is exactly why it ports FIRST and under a fuzzable oracle (the
+// design's slice T1): the expression walk (checker.rvl) and the refusing walk
+// (lower.rvl) consume it as a black box.
+//
+// NOT in this slice (deferred to the checker/lower `use`-and-drop follow-up,
+// where a declared-type table is threaded): `nominal_record_fields` and the
+// structural-vs-NOMINAL branch of `compatible`. With no table the reference's
+// `types=None` path leaves that mixed case unresolved and it falls through to
+// the head algebra (a structural head matches no scalar/container -> refused),
+// which is exactly what this module reproduces. Structural-vs-structural IS
+// ported (it needs no table).
+
+use "../stdlib/str.rvl" { trim }
+use "../stdlib/list.rvl" { list_sort, list_contains, list_dedup }
+
+// ---------------------------------------------------------------- constants
+
+// typecheck.py: FN_HEAD = "->", _TPARAM = "?", POISON = "!poison".
+fn fn_head() -> Str { return "->" }
+fn tparam_mark() -> Str { return "?" }
+fn poison() -> Str { return "!poison" }
+
+// typecheck._BUILTIN_TYPE_NAMES: heads an explicit `[T]` list may not shadow.
+fn builtin_type_names() -> List[Str] {
+  return ["Int", "Int32", "Float", "Str", "Bool", "Bytes", "Unit",
+          "Opt", "List", "Map", "Result", "Any", "Never", "Value"]
+}
+
+// ---------------------------------------------------------------- helpers
+
+fn starts_with(s: Str, p: Str) -> Bool {
+  if (p.length() > s.length()) { return false }
+  return s.slice(0, p.length()) == p
+}
+
+fn is_space_ch(c: Str) -> Bool {
+  return c == " " || c == "\t" || c == "\n" || c == "\r"
+}
+
+// A single-uppercase test, code-point exact against Python's `str.isupper()`
+// for the one-character strings `is_tparam_name` asks about (A..Z).
+fn is_upper1(c: Str) -> Bool {
+  return c >= "A" && c <= "Z"
+}
+
+// Port of typecheck._split_top_level: split on commas at bracket depth zero,
+// counting `[`, `(` and `{` up and `]`, `)`, `}` down (the brace clause keeps a
+// structural record type atomic when it is a field value or type argument).
+// Each part trimmed. NOTE: stdlib `split_top` does NOT count braces, so this is
+// re-hand-rolled here to match the reference byte for byte.
+fn split_top_ty(text: Str) -> List[Str] {
+  var parts: List[Str] = []
+  var depth = 0
+  var cur = ""
+  var i = 0
+  let n = text.length()
+  while (i < n) {
+    let ch = text.slice(i, i + 1)
+    if (ch == "[" || ch == "(" || ch == "{") {
+      depth += 1
+      cur = cur.concat(ch)
+    } else {
+      if (ch == "]" || ch == ")" || ch == "}") {
+        depth -= 1
+        cur = cur.concat(ch)
+      } else {
+        if (ch == "," && depth == 0) {
+          parts = parts.push(trim(cur))
+          cur = ""
+        } else {
+          cur = cur.concat(ch)
+        }
+      }
+    }
+    i += 1
+  }
+  parts = parts.push(trim(cur))
+  return parts
+}
+
+// Port of typecheck._split_fn_type. A LEADING parenthesised list followed by
+// `->` (arrow at paren/bracket depth zero) is a function type. Counts only
+// `[(` up and `])` down (NOT braces), exactly as the reference does.
+type FnParse = { ok: Bool, params: List[Str], returns: Str }
+
+fn split_fn_type(name: Str) -> FnParse {
+  if (!starts_with(name, "(")) { return { ok: false, params: [], returns: "" } }
+  var depth = 0
+  var i = 0
+  let n = name.length()
+  while (i < n) {
+    let ch = name.slice(i, i + 1)
+    if (ch == "[" || ch == "(") { depth += 1 }
+    if (ch == "]" || ch == ")") {
+      depth -= 1
+      if (depth == 0) {
+        var j = i + 1
+        while (j < n && is_space_ch(name.slice(j, j + 1))) { j += 1 }
+        let rest = name.slice(j, n)
+        if (!starts_with(rest, "->")) {
+          return { ok: false, params: [], returns: "" }
+        }
+        let inner = trim(name.slice(1, i))
+        var params: List[Str] = []
+        if (inner != "") { params = split_top_ty(inner) }
+        let ret = trim(rest.slice(2, rest.length()))
+        return { ok: true, params: params, returns: ret }
+      }
+    }
+    i += 1
+  }
+  return { ok: false, params: [], returns: "" }
+}
+
+// ---------------------------------------------------------------- parse/format
+
+// The result of parse_type. head == "" is the reference's None (an empty/None
+// spelling). A function type normalises to (FN_HEAD, params ++ [returns]).
+type Parsed = { head: Str, args: List[Str] }
+
+pub fn parse_type(name: Str) -> Parsed {
+  if (name == "") { return { head: "", args: [] } }
+  let s = trim(name)
+  let ft = split_fn_type(s)
+  if (ft.ok) {
+    return { head: fn_head(), args: ft.params.push(ft.returns) }
+  }
+  let b = s.indexOf("[")
+  if (b == 0 - 1 || s.slice(s.length() - 1, s.length()) != "]") {
+    return { head: s, args: [] }
+  }
+  let inner = s.slice(b + 1, s.length() - 1)
+  return { head: s.slice(0, b), args: split_top_ty(inner) }
+}
+
+// Inverse of parse_type. head == "" -> "" (the reference's None).
+pub fn format_type(head: Str, args: List[Str]) -> Str {
+  if (head == "") { return "" }
+  if (head == fn_head()) {
+    if (args.length() == 0) { return head }
+    let ret = args[args.length() - 1]
+    var params: List[Str] = []
+    var i = 0
+    while (i < args.length() - 1) { params = params.push(args[i]); i += 1 }
+    return "(".concat(params.join(", ")).concat(") -> ").concat(ret)
+  }
+  if (args.length() == 0) { return head }
+  return head.concat("[").concat(args.join(", ")).concat("]")
+}
+
+// ---------------------------------------------------------------- structural
+
+// A field of a structural record type. `ty == ""` is the reference's None
+// (an unknown field type), which format_structural renders as `Any`.
+type Field = { name: Str, ty: Str }
+
+// The parse of a structural record spelling. `is_rec == false` is the
+// reference's None ("not a structural record type at all").
+type StructParse = { is_rec: Bool, fields: List[Field] }
+
+pub fn structural_parse(name: Str) -> StructParse {
+  if (name == "") { return { is_rec: false, fields: [] } }
+  let s = trim(name)
+  if (!(starts_with(s, "{") && s.slice(s.length() - 1, s.length()) == "}")) {
+    return { is_rec: false, fields: [] }
+  }
+  let inner = trim(s.slice(1, s.length() - 1))
+  if (inner == "") { return { is_rec: true, fields: [] } }
+  var fields: List[Field] = []
+  let parts = split_top_ty(inner)
+  var i = 0
+  while (i < parts.length()) {
+    let part = parts[i]
+    let c = part.indexOf(":")
+    // a part with no colon is skipped (the reference's `if not sep: continue`).
+    if (c != 0 - 1) {
+      let key = trim(part.slice(0, c))
+      let val = trim(part.slice(c + 1, part.length()))
+      fields = fields.push({ name: key, ty: val })
+    }
+    i += 1
+  }
+  return { is_rec: true, fields: fields }
+}
+
+// Canonical spelling of a structural record type, fields sorted, an unknown
+// field type rendered `Any`. Port of typecheck.format_structural.
+pub fn format_structural(fields: List[Field]) -> Str {
+  var keys: List[Str] = []
+  var i = 0
+  while (i < fields.length()) { keys = keys.push(fields[i].name); i += 1 }
+  let sorted = list_sort(keys)
+  var body: List[Str] = []
+  var j = 0
+  while (j < sorted.length()) {
+    let k = sorted[j]
+    let v = field_ty(fields, k)
+    let shown = v == "" ? "Any" : v
+    body = body.push(k.concat(": ").concat(shown))
+    j += 1
+  }
+  return "{".concat(body.join(", ")).concat("}")
+}
+
+fn field_ty(fields: List[Field], name: Str) -> Str {
+  var i = 0
+  while (i < fields.length()) {
+    if (fields[i].name == name) { return fields[i].ty }
+    i += 1
+  }
+  return ""
+}
+
+// ---------------------------------------------------------------- sentinels
+
+pub fn is_poison(name: Str) -> Bool { return name == poison() }
+
+// Port of typecheck._is_wildcard: None ("") / Any / Never / POISON / a marked
+// implicit fn type parameter (`?T`).
+pub fn is_wildcard(name: Str) -> Bool {
+  if (name == "") { return true }
+  if (name == "Any" || name == "Never") { return true }
+  if (name == poison()) { return true }
+  return starts_with(name, tparam_mark())
+}
+
+// Port of typecheck.render_type: the author's spelling, stripping the `?`
+// type-parameter marker. `replace("?", "")` removes EVERY marker byte.
+pub fn render_type(name: Str) -> Str {
+  if (name == "") { return "" }
+  var out = ""
+  var i = 0
+  while (i < name.length()) {
+    let ch = name.slice(i, i + 1)
+    if (ch != "?") { out = out.concat(ch) }
+    i += 1
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- tparams
+
+// Port of typecheck.is_tparam_name: a one-character uppercase name not already
+// declared would be an IMPLICIT type parameter.
+pub fn is_tparam_name(name: Str, declared: List[Str]) -> Bool {
+  if (name.length() != 1) { return false }
+  if (!is_upper1(name)) { return false }
+  return !list_contains(declared, name)
+}
+
+// Port of typecheck.mark_tparams: rewrite `T` -> `?T` for every name in
+// `tparams`, recursing into type arguments. Empty `tparams` -> unchanged.
+pub fn mark_tparams(name: Str, tparams: List[Str]) -> Str {
+  if (name == "" || tparams.length() == 0) { return name }
+  let p = parse_type(name)
+  if (p.head != "" && p.args.length() == 0) {
+    if (list_contains(tparams, p.head)) {
+      return tparam_mark().concat(p.head)
+    }
+    return p.head
+  }
+  var marked: List[Str] = []
+  var i = 0
+  while (i < p.args.length()) {
+    marked = marked.push(mark_tparams(p.args[i], tparams))
+    i += 1
+  }
+  return format_type(p.head, marked)
+}
+
+// Port of typecheck.collect_tparams: the type parameters mentioned anywhere in
+// these declared types. An explicit list turns the single-uppercase heuristic
+// OFF (declared means declared); an explicit name is included unconditionally.
+// The returned list is deduped and sorted (the reference returns a set; the
+// oracle compares sorted).
+pub fn collect_tparams(type_names: List[Str], declared: List[Str],
+                       explicit: List[Str]) -> List[Str] {
+  let implicit = explicit.length() == 0
+  var found: List[Str] = explicit
+  var i = 0
+  while (i < type_names.length()) {
+    found = collect_walk(type_names[i], declared, explicit, implicit, found)
+    i += 1
+  }
+  return list_sort(list_dedup(found))
+}
+
+fn collect_walk(name: Str, declared: List[Str], explicit: List[Str],
+                implicit: Bool, acc: List[Str]) -> List[Str] {
+  if (name == "") { return acc }
+  let p = parse_type(name)
+  var out = acc
+  if (p.head != "" && p.args.length() == 0) {
+    let hit = list_contains(explicit, p.head)
+             || (implicit && is_tparam_name(p.head, declared))
+    if (hit) { out = out.push(p.head) }
+  }
+  var i = 0
+  while (i < p.args.length()) {
+    out = collect_walk(p.args[i], declared, explicit, implicit, out)
+    i += 1
+  }
+  return out
+}
+
+// Port of typecheck.validate_explicit_tparams (raising mode). ok == false
+// carries the reference's message byte for byte; ok == true carries the set,
+// sorted. A duplicate or a builtin/declared shadow is refused.
+type VetR = { ok: Bool, msg: Str, names: List[Str] }
+
+pub fn validate_explicit_tparams(names: List[Str],
+                                 declared: List[Str]) -> VetR {
+  var seen: List[Str] = []
+  var i = 0
+  while (i < names.length()) {
+    let name = names[i]
+    if (list_contains(seen, name)) {
+      return { ok: false,
+               msg: "duplicate type parameter `".concat(name).concat("`"),
+               names: [] }
+    }
+    if (list_contains(builtin_type_names(), name)) {
+      return { ok: false,
+               msg: "type parameter `".concat(name)
+                    .concat("` shadows a builtin type"),
+               names: [] }
+    }
+    if (list_contains(declared, name)) {
+      return { ok: false,
+               msg: "type parameter `".concat(name)
+                    .concat("` shadows a declared type"),
+               names: [] }
+    }
+    seen = seen.push(name)
+    i += 1
+  }
+  return { ok: true, msg: "", names: list_sort(seen) }
+}
+
+// ---------------------------------------------------------------- wellformed
+
+// typecheck._GENERIC_ARITY.
+fn generic_arity(h: Str) -> Int {
+  if (h == "Opt" || h == "List") { return 1 }
+  if (h == "Map" || h == "Result") { return 2 }
+  return 0 - 1
+}
+
+fn arity_example(h: Str) -> Str {
+  if (h == "Opt") { return "Opt[Int]" }
+  if (h == "List") { return "List[Int]" }
+  if (h == "Map") { return "Map[Str, Int]" }
+  return "Result[Int, Str]"
+}
+
+// Port of typecheck.check_type_wellformed / _check_type_wf (message SHAPES).
+// ok == false carries the reference message byte for byte. `allow_async_param`
+// mirrors the reference flag (async fn type permitted as a module `fn`
+// parameter). Result carried in a struct because revl's pure stratum has no
+// exceptions.
+type WfR = { ok: Bool, msg: Str }
+
+pub fn check_type_wellformed(name: Str, allow_async_param: Bool) -> WfR {
+  return wf_walk(name, name, allow_async_param, false)
+}
+
+fn wf_walk(name: Str, root: Str, allow_async: Bool, in_fn_return: Bool) -> WfR {
+  if (name == "") { return { ok: true, msg: "" } }
+  let p = parse_type(name)
+  let head = p.head
+  let args = p.args
+  if (head == "Approval") {
+    return { ok: false,
+             msg: "`".concat(name).concat("` cannot be written as a type — an `Approval[C]` is produced only by `await approval[C] { ... }` and cannot be stored, returned, or persisted") }
+  }
+  if (head == "Async") {
+    if (!in_fn_return) {
+      return { ok: false,
+               msg: "`Async[T]` is not a value type (`".concat(name).concat("`) — it may only be the return type of a function type, e.g. `(List[Msg]) -> Async[Str]`") }
+    }
+    if (!allow_async) {
+      return { ok: false,
+               msg: "an async function type (`".concat(root).concat("`) is only supported as a module `fn` parameter in v1, not in this position") }
+    }
+    if (args.length() != 1) {
+      return { ok: false,
+               msg: "`Async` takes 1 type argument, got ".concat(int_str(args.length())).concat(" (`").concat(name).concat("`)") }
+    }
+    return wf_walk(args[0], root, false, false)
+  }
+  let arity = generic_arity(head)
+  if (arity != 0 - 1 && args.length() != arity) {
+    return { ok: false,
+             msg: "`".concat(head).concat("` takes ").concat(int_str(arity))
+                  .concat(" type argument(s), got ").concat(int_str(args.length()))
+                  .concat(" (`").concat(name).concat("`)") }
+  }
+  var i = 0
+  while (i < args.length()) {
+    if (head == fn_head()) {
+      let is_return = i == args.length() - 1
+      let r = wf_walk(args[i], root, allow_async && is_return, is_return)
+      if (!r.ok) { return r }
+    } else {
+      let r = wf_walk(args[i], root, false, false)
+      if (!r.ok) { return r }
+    }
+    i += 1
+  }
+  return { ok: true, msg: "" }
+}
+
+fn int_str(n: Int) -> Str {
+  if (n == 0) { return "0" }
+  var v = n
+  var neg = false
+  if (v < 0) { neg = true; v = 0 - v }
+  var digits = ""
+  while (v > 0) {
+    let d = v % 10
+    digits = digit_char(d).concat(digits)
+    v = v.div_trunc(10)
+  }
+  if (neg) { return "-".concat(digits) }
+  return digits
+}
+
+fn digit_char(d: Int) -> Str {
+  if (d == 0) { return "0" }
+  if (d == 1) { return "1" }
+  if (d == 2) { return "2" }
+  if (d == 3) { return "3" }
+  if (d == 4) { return "4" }
+  if (d == 5) { return "5" }
+  if (d == 6) { return "6" }
+  if (d == 7) { return "7" }
+  if (d == 8) { return "8" }
+  return "9"
+}
+
+// ---------------------------------------------------------------- compatible
+
+// Port of typecheck.compatible for the `types=None` path (no declared-type
+// table): wildcards, Value's two-way laundering, equality, structural-vs-
+// STRUCTURAL field-wise resolution, Int->Float / Int32 widening, Async on the
+// expected side, contravariant fn types, the Opt injection, and the same-head
+// elementwise recursion. The structural-vs-NOMINAL mixed case needs the table
+// and is deferred with the checker/lower `use`-and-drop.
+pub fn compatible(expected: Str, actual: Str) -> Bool {
+  // `Never` is one-way: it flows OUT of a bottom into anything (nothing
+  // inhabits it) and NOTHING flows in.
+  if (parse_type(expected).head == "Never" && !is_wildcard(actual)) {
+    return false
+  }
+  if (is_wildcard(expected) || is_wildcard(actual)) { return true }
+  // `Value` (stdlib erased-dynamic type) launders in both directions.
+  if (parse_type(expected).head == "Value" || parse_type(actual).head == "Value") {
+    return true
+  }
+  if (expected == actual) { return true }
+  let es = structural_parse(expected)
+  let as_ = structural_parse(actual)
+  if (es.is_rec && as_.is_rec) {
+    return struct_compatible(es.fields, as_.fields)
+  }
+  // One side structural, the other not: with no declared-type table the
+  // nominal side stays unresolved (reference `types=None`), so this falls
+  // through to the head algebra below, where a structural head (`{a: Int}`
+  // parses to itself with no args) matches no scalar/container/arrow and the
+  // tail returns false — UNLESS Opt/Async on the expected side reaches in.
+  let ep = parse_type(expected)
+  let ap = parse_type(actual)
+  let ehead = ep.head
+  let ahead = ap.head
+  let eargs = ep.args
+  let aargs = ap.args
+  if (ehead == "Float" && ahead == "Int") { return true }
+  if ((ehead == "Int" || ehead == "Float") && ahead == "Int32") { return true }
+  if (ehead == "Async") {
+    if (ahead != "Async") {
+      let inner = eargs.length() > 0 ? eargs[0] : ""
+      return compatible(inner, actual)
+    }
+  }
+  if (ehead == fn_head()) {
+    if (ehead != ahead || eargs.length() != aargs.length()) { return false }
+    var i = 0
+    var ok = true
+    // parameters contravariant, result covariant
+    while (i < eargs.length() - 1) {
+      if (!compatible(aargs[i], eargs[i])) { ok = false }
+      i += 1
+    }
+    let er = eargs.length() > 0 ? eargs[eargs.length() - 1] : ""
+    let ar = aargs.length() > 0 ? aargs[aargs.length() - 1] : ""
+    if (!compatible(er, ar)) { ok = false }
+    return ok
+  }
+  if (ehead == "Opt") {
+    let einner = eargs.length() > 0 ? eargs[0] : ""
+    if (ahead == "Opt") {
+      let ainner = aargs.length() > 0 ? aargs[0] : ""
+      return compatible(einner, ainner)
+    }
+    return compatible(einner, actual)  // T -> Opt[T] injection
+  }
+  if (ehead == ahead && eargs.length() == aargs.length()) {
+    var i = 0
+    var ok = true
+    while (i < eargs.length()) {
+      if (!compatible(eargs[i], aargs[i])) { ok = false }
+      i += 1
+    }
+    return ok
+  }
+  return false
+}
+
+// Two record shapes unify field-wise: same field set, each value type
+// compatible (the reference's `set(e)==set(a)` then per-field `compatible`).
+fn struct_compatible(ef: List[Field], af: List[Field]) -> Bool {
+  if (ef.length() != af.length()) { return false }
+  var i = 0
+  while (i < ef.length()) {
+    let k = ef[i].name
+    if (!has_field(af, k)) { return false }
+    if (!compatible(ef[i].ty, field_ty(af, k))) { return false }
+    i += 1
+  }
+  // same length + every expected key present in actual => equal key sets
+  // (keys within one structural spelling are distinct, as the reference's
+  // dict guarantees).
+  return true
+}
+
+fn has_field(fields: List[Field], name: Str) -> Bool {
+  var i = 0
+  while (i < fields.length()) {
+    if (fields[i].name == name) { return true }
+    i += 1
+  }
+  return false
+}
+
+// ---------------------------------------------------------------- join / widen
+
+// Port of typecheck.join: the common type of two branches, "" (None) when
+// there is none.
+pub fn join(a: Str, b: Str) -> Str {
+  if (a == "" || b == "") { return "" }
+  if (compatible(a, b)) { return a }
+  if (compatible(b, a)) { return b }
+  return ""
+}
+
+// Port of typecheck.widen_bottom: widen a binding whose declared type still
+// carries the inferred BOTTOM (`Never`), when `actual` only fills bottoms in.
+// "" (None) when it is not a pure bottom-fill (the caller then reports the
+// mismatch). Deliberately NOT `join`.
+pub fn widen_bottom(declared: Str, actual: Str) -> Str {
+  if (declared == "" || actual == "") { return "" }
+  if (declared == "Never") { return actual }
+  let dp = parse_type(declared)
+  let ap = parse_type(actual)
+  if (dp.args.length() == 0 || dp.head != ap.head
+      || dp.args.length() != ap.args.length()) {
+    return ""
+  }
+  var widened: List[Str] = []
+  var grew = false
+  var i = 0
+  while (i < dp.args.length()) {
+    let d = dp.args[i]
+    let a = ap.args[i]
+    let inner = widen_bottom(d, a)
+    if (inner != "" && inner != d) {
+      widened = widened.push(inner)
+      grew = true
+    } else {
+      if (compatible(d, a)) {
+        widened = widened.push(d)
+      } else {
+        return ""
+      }
+    }
+    i += 1
+  }
+  if (grew) { return format_type(dp.head, widened) }
+  return ""
+}
+
+// ---------------------------------------------------------------- unify
+
+// A unifier substitution, threaded (the reference mutates a dict; revl's pure
+// stratum returns the grown map). `ok == false` is a definite conflict.
+type UniR = { ok: Bool, subst: Map[Str, Str] }
+
+// Port of typecheck.unify: match a (marked) parameter type against an argument
+// type, growing `subst`. Returns ok == false only on a definite conflict;
+// unknowns pass.
+pub fn unify(param: Str, actual: Str, subst: Map[Str, Str]) -> UniR {
+  if (param == "" || actual == "") { return { ok: true, subst: subst } }
+  let p = parse_type(param)
+  if (starts_with(p.head, tparam_mark()) && p.args.length() == 0) {
+    if (is_wildcard(actual)) { return { ok: true, subst: subst } }
+    if (parse_type(actual).head == "Async") {
+      return { ok: false, subst: subst }  // no async smuggled through `?T`
+    }
+    if (!subst.has(p.head)) {
+      return { ok: true, subst: subst.set(p.head, actual) }
+    }
+    let prior = match subst.lookup(p.head) { Some(v) => v, None => "" }
+    let widened = join(prior, actual)
+    if (widened == "") { return { ok: false, subst: subst } }
+    return { ok: true, subst: subst.set(p.head, widened) }
+  }
+  let ap = parse_type(actual)
+  if (p.head == "Opt" && p.args.length() > 0 && ap.head != "Opt") {
+    return unify(p.args[0], actual, subst)  // T -> Opt[T] injection
+  }
+  if (p.head == ap.head && p.args.length() == ap.args.length()) {
+    var cur = subst
+    var ok = true
+    var i = 0
+    while (i < p.args.length()) {
+      let r = unify(p.args[i], ap.args[i], cur)
+      cur = r.subst
+      if (!r.ok) { ok = false }
+      i += 1
+    }
+    return { ok: ok, subst: cur }
+  }
+  if (compatible(param, actual)) { return { ok: true, subst: subst } }
+  return { ok: false, subst: subst }
+}
+
+// Port of typecheck.substitute: apply a unifier; a type parameter the unifier
+// did not bind keeps its marker (and so stays a wildcard downstream).
+pub fn substitute(name: Str, subst: Map[Str, Str]) -> Str {
+  if (name == "") { return "" }
+  let p = parse_type(name)
+  if (p.head != "" && p.args.length() == 0) {
+    return match subst.lookup(p.head) { Some(v) => v, None => p.head }
+  }
+  var out: List[Str] = []
+  var i = 0
+  while (i < p.args.length()) {
+    out = out.push(substitute(p.args[i], subst))
+    i += 1
+  }
+  return format_type(p.head, out)
+}
+
+// ---------------------------------------------------------------- oracle shims
+//
+// String-in / string-out entry points the differential (tests/test_selfhost_
+// types.py) drives, so the FFI carries only Str / Bool / List[Str]. Lists cross
+// the boundary as ";"-joined strings (a type spelling never contains a
+// newline). These are thin wrappers over the algebra above; they add no rule.
+
+fn split_nl(s: Str) -> List[Str] {
+  if (s == "") { return [] }
+  var out: List[Str] = []
+  var cur = ""
+  var i = 0
+  while (i < s.length()) {
+    let ch = s.slice(i, i + 1)
+    if (ch == ";") { out = out.push(cur); cur = "" } else { cur = cur.concat(ch) }
+    i += 1
+  }
+  out = out.push(cur)
+  return out
+}
+
+// parse_type -> "head;arg0;arg1..." (head first, then each arg).
+pub fn o_parse(name: Str) -> Str {
+  let p = parse_type(name)
+  var parts: List[Str] = [p.head]
+  var i = 0
+  while (i < p.args.length()) { parts = parts.push(p.args[i]); i += 1 }
+  return parts.join(";")
+}
+
+// format_type(head, args) with args as a ";"-joined list.
+pub fn o_format(head: Str, args_nl: Str) -> Str {
+  return format_type(head, split_nl(args_nl))
+}
+
+// structural_parse + format_structural: canonical spelling, or "!notrec" when
+// the input is not a structural record type (the reference's None).
+pub fn o_struct(name: Str) -> Str {
+  let s = structural_parse(name)
+  if (!s.is_rec) { return "!notrec" }
+  return format_structural(s.fields)
+}
+
+pub fn o_render(name: Str) -> Str { return render_type(name) }
+pub fn o_wildcard(name: Str) -> Bool { return is_wildcard(name) }
+pub fn o_poison(name: Str) -> Bool { return is_poison(name) }
+pub fn o_tparam_name(name: Str, declared_nl: Str) -> Bool {
+  return is_tparam_name(name, split_nl(declared_nl))
+}
+pub fn o_mark(name: Str, tparams_nl: Str) -> Str {
+  return mark_tparams(name, split_nl(tparams_nl))
+}
+pub fn o_collect(names_nl: Str, declared_nl: Str, explicit_nl: Str) -> Str {
+  return collect_tparams(split_nl(names_nl), split_nl(declared_nl),
+                         split_nl(explicit_nl)).join(";")
+}
+// validate_explicit_tparams -> "ok:<sorted names>" or "err:<message>".
+pub fn o_vet(names_nl: Str, declared_nl: Str) -> Str {
+  let r = validate_explicit_tparams(split_nl(names_nl), split_nl(declared_nl))
+  if (r.ok) { return "ok:".concat(r.names.join(";")) }
+  return "err:".concat(r.msg)
+}
+// check_type_wellformed -> "" when ok, else "err:<message>".
+pub fn o_wf(name: Str, allow_async_param: Bool) -> Str {
+  let r = check_type_wellformed(name, allow_async_param)
+  if (r.ok) { return "" }
+  return "err:".concat(r.msg)
+}
+pub fn o_compatible(expected: Str, actual: Str) -> Bool {
+  return compatible(expected, actual)
+}
+pub fn o_join(a: Str, b: Str) -> Str { return join(a, b) }
+pub fn o_widen(declared: Str, actual: Str) -> Str {
+  return widen_bottom(declared, actual)
+}
+// Run unify over a param/actual list pairwise (growing one subst), then
+// substitute the return type. "!conflict" on a definite conflict, else the
+// substituted return spelling.
+pub fn o_unify_call(params_nl: Str, actuals_nl: Str, ret: Str) -> Str {
+  let params = split_nl(params_nl)
+  let actuals = split_nl(actuals_nl)
+  var subst: Map[Str, Str] = Map.empty()
+  var ok = true
+  var i = 0
+  let n = params.length() < actuals.length() ? params.length() : actuals.length()
+  while (i < n) {
+    let r = unify(params[i], actuals[i], subst)
+    subst = r.subst
+    if (!r.ok) { ok = false }
+    i += 1
+  }
+  if (!ok) { return "!conflict" }
+  return substitute(ret, subst)
+}

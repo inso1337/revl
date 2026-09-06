@@ -125,6 +125,7 @@ SELFHOST_ORACLE_TESTS = {
     "lexer": ("tests/test_selfhost_lexer.py",),
     "lower": ("tests/test_selfhost_lower_ir.py",),
     "parser": ("tests/test_selfhost_parser.py",),
+    "types": ("tests/test_selfhost_types.py",),
 }
 
 # The item-429 line-coverage gate re-runs on ANY self-host source change (it
