@@ -1,21 +1,38 @@
-# revl cordis-py backend (v0)
+# revl cordis-py backend
 
 The Python backend for revl's backend IR (`docs/backend-ir.md`): an emitter
 that lowers an IR document to one cordis-py plugin module, the runtime
-adapter + stub stdlib the emitted code imports, and a demo/test suite that
+adapter + host support the emitted code imports, and a demo/test suite that
 proves the contract's required semantics R1–R5 against the real runtime.
+
+This is the REFERENCE tier: the other backends target the behaviour this one
+executes, and it has grown well past its original v0 core. Beyond the R1–R5
+lifecycle it now carries witnessed/transactional teardown with `emit …
+compensate …` (items 243/245/247), a write-ahead log with `revl recover`
+crash-recovery and backwards replay (`replay.py`, `docs/replay.md`), declared
+`Secret[T]` confidentiality that redacts at capture (`confidential.py`, item
+256), a py<->py interop bridge (`bridge.py`), and workspace-confined witnessed
+`fs`/`shell` host support (`revl_fs_workspace.py` / `revl_shell_*.py`, items
+244/252).
 
 ## Layout
 
 | file | role |
 |---|---|
 | `emit.py` | `emit(ir: dict) -> str` — IR document → Python module source |
-| `runtime.py` | adapter (`Frame`, `ConfigSchema`, `fmt`) + host builtins (`Pool`, `Map`) |
+| `runtime.py` | adapter (`Frame`, `ConfigSchema`, `fmt`) + host builtins (`Pool`, `Map`); the per-activation LIFO accumulator and witnessed/transactional teardown, incl. `emit … compensate …` (items 243/245/247) |
+| `loader.py` | the single place that execs an emitted IR as an importable module (`load(ir)`), shared by `demo.py`, the tests, and `demo/live.py` |
+| `confidential.py` | the `Secret[T]` confidentiality choke point (item 256): redacts declared-secret values at capture (WAL record, timeline, config echo) so no downstream printer can leak them |
+| `replay.py` | backwards replay over the effect accumulator, the `WriteAheadLog`, the `Timeline`, and the `revl recover` crash-recovery reader (`docs/replay.md`) |
+| `bridge.py` | py<->py interop bridge (`docs/interop-bridge.md` §3): a service provided in one process, consumed in another over an AF_UNIX socket, with peer-death withdrawal and seam deadlines |
+| `revl_fs_workspace.py` | session workspace-root confinement for the witnessed `stdlib/fs.rvl` externs (item 244); imported by the `@py` fs bodies |
+| `revl_shell_classify.py` | pure, total shell-command classifier (item 252): lowers a provably-fs-local command onto the witnessed catalog, else one honest `emission` |
+| `revl_shell_host.py` | py-tier host bodies for `stdlib/shell.rvl` (item 252): the opaque `sh -c` fallback plus the re-exported classifier |
 | `golden/user_cache.py` | emitter output for `examples/user_cache.ir.json`, checked in |
 | `demo.py` | load → put/get → hot-swap the Database provider → unload, with event log |
 | `tests/` | pytest suite; each test names the R1–R5 requirement it covers |
 | `tests/user_cache.ir.json` | byte-identical vendored copy of the reference IR |
-| `REPORT.md` | impedance mismatches, IR contract gaps, LOC, ship recommendation |
+| `REPORT.md` | impedance mismatches, IR contract gaps, LOC, ship recommendation (a frozen early artifact; its LOC counts are not kept current) |
 
 ## Setup (one command)
 
