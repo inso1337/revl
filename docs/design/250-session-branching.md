@@ -3,10 +3,12 @@
 Status: Slice 1 landed 2026-09-01 (the live fork: `revl_fork` /
 `revl_fork_confirm`, the scope-gated rewind, the parent freeze). Slice 2 landed
 2026-09-02 (the durable lineage and the offline `revl branch` / `revl compare`
-surface). This composes machinery that has already landed; the value here is
-composing it correctly and stating, exactly, what the composition can and cannot
-honestly claim. The language `fork` form, parallel copy-on-write branches,
-`revl replay branch` and the LLM-aware replay modes of the item-121 overlap are
+surface). Slice 3a (the LLM-aware WAL: one durable `model-decision` record per
+completion crossing) is specified below and lands with this revision. This
+composes machinery that has already landed; the value here is composing it
+correctly and stating, exactly, what the composition can and cannot honestly
+claim. The language `fork` form, parallel copy-on-write branches, `revl replay
+branch` and the LLM-aware replay MODES (Slice 3b) of the item-121 overlap are
 deferred with rationale.
 
 ## Revision (adversarial review 2026-09-01)
@@ -717,17 +719,89 @@ The headline test is that the offline classifier reproduces the LIVE partition,
 bucket for bucket, over a timeline touching all seven kinds. Without that pin the
 offline surface would be a second, drifting opinion about what a fork means.
 
+### Slice 3a (the LLM-aware WAL: the model decision becomes durable)
+
+Slice 2 could only say, on every compare document, that a comparison shows what
+each branch did and never why: the model-decision vocabulary item 121 landed
+lives on the TRACE, assembled by the driver at step-back time from an
+observation the `validate_retry` seam stashes in the fiber, and nothing about
+it reached the WAL. So a branch's model decisions died with the process, and
+the replay modes the item asks for had nothing durable to substitute against.
+Slice 3a bridges that one observation into the WAL at the crossing. It records;
+it does not replay. The modes are Slice 3b.
+
+1. **The record.** `model-decision {component, stepIndex, outcome, llm}`,
+   appended by `WriteAheadLog.record_model_decision` right after the completion
+   crossing's own `effect` record and keyed on it. `llm` is the trace hop's
+   payload verbatim (`runtime.revl_model_hop`): the revl-measured latency
+   bracket, the revl-controlled attempt count against the static item-257
+   ceiling, and the host-reported model / tokens / cost, each field tagged with
+   its provenance so nothing host-reported is promoted to ground truth.
+   `outcome` is `validated` or `exhausted`: an exhausted retry budget still
+   crossed and still cost tokens, so it is still written. Consumes no seq (it
+   names a fact about an existing step, like `fork-begin`).
+2. **Where it is written from, and why there.** The seam that measures a
+   completion runs AFTER `make_call` returns, in the runtime, with no WAL
+   handle; the recorder that holds the WAL runs INSIDE `make_call`, when it
+   records the crossing, before the observation exists. The two already share
+   one channel: the item-242 crossing key the recorder publishes fiber-locally
+   at record time. Slice 3a publishes a sink beside it (the third argument of
+   `revl_note_emission_index`), a closure over the attached WAL and the step,
+   and the seam consumes it when the observation lands. No new registry, no WAL
+   in the runtime, the same fiber-locality and the same consumed-on-use
+   discipline as the keyed observation. The sink checks the WAL is still open
+   at write time, so a WAL closed in between degrades the decision to
+   trace-only instead of raising out of a completion that succeeded.
+3. **Absent by default.** Only a crossing that carried a completion gets a
+   record. Every other record is byte-identical, a run with no completion writes
+   a byte-identical WAL, and no WAL golden moves: the same additive discipline
+   as Slice 2's `scope` / `compensated` / `undoIdempotent`. Recovery ignores
+   the kind (it filters by record kind, and this one is not an effect), and the
+   fork partition never sees it.
+4. **What it deliberately does NOT carry, stated so nobody infers it from
+   silence.** The prompt and response TEXT are never written anywhere. The
+   `promptDigest` the trace carries is ABSENT here: its suppression gate is the
+   compile-side taint certificate the driver reads off the IR (item 444), which
+   the crossing does not hold, and a digest written without that gate is
+   exactly the confirmation oracle item 121 §4 closes. `producedSeq` is a trace
+   seq and does not exist on the WAL. The request-side parameters the roadmap
+   text names (temperature, seed, tool calls) are made inside the opaque host
+   body; revl does not see them and does not pretend to. Slice 3b decides
+   whether any of these needs a new seam.
+5. **The readers.** `revl.wal` mirrors the record name and gains
+   `model_decisions(records)`, an index by `(component, stepIndex)`, pinned to
+   the py writer by `test_wal_core_agrees_with_py_replay`. `revl compare` lists
+   each side's decisions (`modelDecisions` per side, counts in `delta`) and its
+   `notComparable` wording is made precise: `decisionCause` now says the record
+   carries model, usage, latency and attempts and NOT the digest, tool calls,
+   temperature or seed, so a comparison shows which model each side asked and
+   what it cost, never the reasoning. The axis list is unchanged. The branch
+   lineage's `notPreserved` entry for `modelDecisions` is reworded the same way:
+   each session's own WAL records its decisions, the branch does not copy the
+   parent's decisions below the fork point onto its record.
+
+The honesty line Slice 3a holds: the record makes durable exactly what the
+trace already measured, at the same seam, with the same provenance tags, and
+writes nothing the trace's own gates would have suppressed. Exit tests
+(`tests/test_250_model_decision_wal.py`): one record per completion, keyed on
+its effect record, shaped like the trace hop, no text and no digest; nothing
+extra for a non-model crossing and byte-identity for a run with none; the last
+attempt's crossing under retry with every attempt counted; an exhausted budget
+written with its outcome; the async seam; invisibility to partition and
+recover; reader agreement and `compare` listing it.
+
 ### Deferred to later slices (with rationale)
 
-- **`revl replay branch` and the LLM-aware replay modes.** Re-executing a branch,
-  and the exact / tool-only / model-substitute / counterfactual modes, need a WAL
-  that records each model decision (model, provider, prompt/response digests, tool
-  calls, tokens, temperature, seed, latency). Item 121 Slice 1 landed that
-  vocabulary on the TRACE; it is not on the WAL, so a counterfactual replay has
-  nothing durable to substitute against. Slice 2 states the gap rather than
-  papering over it: every compare document carries `notComparable` (a diff of two
-  branches shows what each did, never why), and every branch's lineage carries
-  `modelDecisions` in `notPreserved`.
+- **Slice 3b: `revl replay branch` and the LLM-aware replay modes.**
+  Re-executing a branch, and the exact / tool-only / model-substitute /
+  counterfactual modes, need Slice 3a's durable record (now written) AND their
+  own design for the substitution semantics: what a substituted model is fed
+  when the prompt is not on the record (only its absence is), how determinism
+  is stated when no seed or clock is recorded (the `seedsAndClock` axis of
+  `notPreserved`), and which of the request-side parameters need a new seam
+  through the host body. Every compare document still carries `notComparable`,
+  and every branch's lineage still carries `modelDecisions` in `notPreserved`,
+  each now worded to say precisely what 3a recorded and what it did not.
 - **Parallel branches with copy-on-write workspaces.** Needed for true concurrent
   N-branch exploration with isolated divergent fs state (self-review attack 3).
   Requires a per-branch workspace snapshot layer that does not exist yet; Slice 1
