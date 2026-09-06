@@ -10,8 +10,10 @@ The fifth member of the import codegen family, after `revl mcp import`,
 `extern` per skill, and a provider component, so a revl composition can consume
 an external agent as an ordinary coeffect.
 
-This is **slice 1 of roadmap item 439**. It binds the Agent Card and the
-single-crossing `message/send` call. Read "What this slice does not do" before
+This is **roadmap item 439**. It binds the Agent Card and the single-crossing
+`message/send` call over the two JSON-body transports A2A 1.0.0 defines —
+**JSON-RPC 2.0** and **HTTP+JSON/REST** — selected by the card's
+`preferredTransport`. gRPC is refused. Read "What this slice does not do" before
 you plan around it.
 
 ---
@@ -147,8 +149,23 @@ an Agent Card carries no parameter or result schema for a skill, so text is all
 there is to transcribe, and nothing richer is invented.
 
 Unlike its siblings the extern bodies are **real, not stubs**: `--backend ts`
-and `--backend py` each emit a working JSON-RPC 2.0 `message/send` crossing that
-posts the message, checks the reply, and raises on anything it cannot honour.
+and `--backend py` each emit a working `message/send` crossing that posts the
+message, checks the reply, and raises on anything it cannot honour. Which wire
+that crossing speaks is the card's own choice:
+
+* `preferredTransport: "JSONRPC"` (the A2A default) posts the JSON-RPC 2.0
+  envelope (`{"jsonrpc", "id", "method": "message/send", "params"}`) to `url`
+  and unwraps the `result`.
+* `preferredTransport: "HTTP+JSON"` posts a bare `{ message }` body to
+  `<url>/v1/message:send` and reads the `Task`/`Message` back directly — an A2A
+  error arrives as a non-2xx status, which is a fault on the same branch a
+  transport failure is.
+
+Both are one crossing, both refuse a redirect and a non-terminal task, both are
+`emission` with no inverse, and both return `Untrusted[Str]`: the wire differs,
+the boundary guarantees do not. gRPC is a binary transport over HTTP/2 with
+protobuf framing — not that crossing — so a card that prefers it is refused
+naming the transport rather than approximated.
 
 ### The colour of the crossing
 
@@ -228,7 +245,7 @@ one under its `redirect(refuse | same_origin)` clause
 | the `remote` row, `on_failure`, per-realm peers | item 424(c)'s slice C2, which is not built. A card imports as an ordinary provider component. Turning a transport failure into provider **withdrawal** (D-424c.3) arrives with that row; here it is a fault raised out of the host body. |
 | the A2A Task lifecycle | item 439's load-bearing open question (does an A2A Task map to one emission, to a stream (item 130), or to a session (item 250)?) is **not answered here and not pre-empted**. This slice binds only the subset where the question does not arise. |
 | `message/stream`, `tasks/resubscribe`, push notifications | need the lifecycle answer first. A card's `capabilities.streaming` / `pushNotifications` are recorded in the generated header as NOT PROJECTED rather than silently dropped. |
-| gRPC and HTTP+JSON transports | refused naming the transport. They are a transport each, not an approximation of JSON-RPC. `additionalInterfaces` are recorded, not projected. |
+| the gRPC transport | refused naming the transport: it is a binary HTTP/2 + protobuf transport, not the JSON-body crossing this binds. JSON-RPC 2.0 and HTTP+JSON/REST are both bound (§3). `additionalInterfaces` advertising a transport other than the one bound are recorded, not projected. |
 | non-text modalities | a `FilePart` or `DataPart` has no transcription this slice defines. |
 | `capabilities.extensions` | recorded, not projected. An extension is one more unchecked claim by the same peer; no extension can grant this boundary a property revl would otherwise have had to check. |
 
@@ -248,7 +265,7 @@ Nothing is guessed. The importer refuses, naming the JSON pointer:
 | refused | reason |
 |---|---|
 | a missing `protocolVersion`, or any value other than `"1.0.0"` | version honesty (decision (3)) |
-| a `preferredTransport` other than `JSONRPC` | slice 1 speaks JSON-RPC 2.0 only |
+| a `preferredTransport` that is neither `JSONRPC` nor `HTTP+JSON` (e.g. `GRPC`) | this binds the two JSON-body transports; gRPC is a binary HTTP/2 + protobuf transport, refused rather than approximated |
 | a missing `url`, or one outside a strict absolute-http(s) character class | the endpoint is interpolated into a generated comment **and** a generated host body, so it is validated up front rather than escaped afterwards. Quotes, braces, backslashes, whitespace and control characters are refused, never repaired. This is the same class of hole as item 416f in the sibling importer, closed by refusing. |
 | a plaintext `http` endpoint | an A2A peer sits outside the trust boundary and everything crossing to it is authority leaving the process. `--allow-plaintext` imports it anyway (a loopback development agent) and the generated header records that you did. |
 | a redirect, at run time rather than at import time | the endpoint is part of what was declared and admitted; see §3a. `--follow-redirects` allows a same-origin 307/308 and nothing else. |
