@@ -4773,13 +4773,29 @@ fn ir_methods(ts: Vec<Token>, i: i64, end: i64, acc: String, v3: bool) -> IrMeth
     let nm = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
     let mut retJson = String::from("null");
+    let mut term = String::from("");
     let mut nexti = ps.i;
     if atk(&ts, ps.i, "arrow") {
         let tr = type_at(ts.clone(), (ps.i).checked_add(1i64).expect("revl: Int overflow"));
-        retJson = jstr(&taint_strip(tr.ty.clone()));
+        let rawRet = taint_strip(tr.ty.clone());
+        if (rawRet == "Criterion") {
+            term = String::from("criterion");
+            retJson = jstr("Opt[Bool]");
+        } else {
+            if (rawRet == "Guard") {
+                term = String::from("guard");
+                retJson = jstr("Opt[Bool]");
+            } else {
+                retJson = jstr(&rawRet);
+            }
+        }
         nexti = tr.i;
     }
-    let mut mj = (((((jstr(&nm).revl_concat(": {\"params\": [")).revl_concat(&ir_params_json(&ps.ps))).revl_concat("], \"returns\": ")).revl_concat(&retJson)).revl_concat(", \"emission\": ")).revl_concat(&if em { String::from("true") } else { String::from("false") });
+    let mut mj = (((jstr(&nm).revl_concat(": {\"params\": [")).revl_concat(&ir_params_json(&ps.ps))).revl_concat("], \"returns\": ")).revl_concat(&retJson);
+    if (term != "") {
+        mj = (mj.revl_concat(", \"termination\": ")).revl_concat(&jstr(&term));
+    }
+    mj = (mj.revl_concat(", \"emission\": ")).revl_concat(&if em { String::from("true") } else { String::from("false") });
     if scoped {
         mj = ((mj.revl_concat(", \"capabilities\": [")).revl_concat(&ir_caps_json(&caps))).revl_concat("]");
     }
