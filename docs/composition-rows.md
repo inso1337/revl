@@ -458,6 +458,54 @@ bootstrap that today compiles a manifest document, emits it to Python, execs it,
 calls it, and parses the JSON string it returns becomes "compile, read the
 manifest" ([composition-bootstrap.md](composition-bootstrap.md)).
 
+## Interposition: standing in front of a provision edge
+
+A third party that wants to OBSERVE every call across a provision edge (an audit
+log, a rate limiter, a tracer) has no declared surface of its own yet. That is
+roadmap item 424(b), and its full answer is a `seam` row placed by the
+composition, which is not built. Until it lands, one pattern is sanctioned and
+one is a trap.
+
+The SANCTIONED pattern is the distinct-key wrapper. A wrapping component requires
+the inner provider under a re-keyed name and provides the consumer's key, so
+every call runs the wrapper body first:
+
+```revl
+service Db { fn execute(q: Str) -> Str }
+
+component Inner provides inner_db: Db {          // re-keyed in its OWN source
+  provide inner_db { fn execute(q) = "row" }
+}
+
+component Seam requires inner_db: Db provides db: Db {
+  provide db {
+    fn execute(q) {
+      let r = inner_db.execute(q)
+      // observe here
+      return r
+    }
+  }
+}
+```
+
+Its cost is exact, and it is the whole of 424(b)'s complaint that a third party
+has no place to stand: `Inner` had to be re-keyed from `db` to `inner_db` IN ITS
+OWN SOURCE for the seam to sit in front of it. Inserting the wrapper is a source
+edit to a component the seam author does not own, which is a fork by another
+name. The seam is otherwise an ordinary row: G2 keeps it the sole provider of
+`db`, so every consumer resolves it with no enumeration.
+
+The TRAP is the same-key shape that avoids the re-key. Interposing through a
+one-element route (the inner provider writes `isolate db in realm("inner")` and
+the seam writes `isolate db in realms("inner")`, requiring `db` in the inner
+realm and providing `db` in the parent realm) compiles, admits and passes G4.
+Its provide body, which is the whole interception, is then silently discarded by
+the reference driver. A component carrying a `routes` entry is realized as a
+router rather than plugged as a fiber, so its body never runs; see
+[the router note](router.md). `tests/test_424_b1_interposition.py` pins both
+halves: the distinct-key wrapper observes each call, and the same-key wrapper's
+body does not run.
+
 ## What is not here yet
 
 The row table is the object everything else in item 426 needs, and it is

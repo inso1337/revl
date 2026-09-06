@@ -95,6 +95,20 @@ prerequisite the routing needs and which aligns the standalone driver with the
 emitted lifecycle-test driver. For a component with no placements this is
 byte-identical to a bare `ctx.plugin`.
 
+### A consequence for interception (item 424 b)
+
+Because a `routes`-carrying component is realized rather than plugged, ANY body
+it declares is discarded, not only a router forwarder. This is the reason a
+same-key interposition wrapper does not work: a component that requires `db` in
+an inner realm and provides `db` in the parent realm, hoping to observe every
+call in its `provide` body, carries a `routes` entry and so its body never runs.
+The observation is silently dropped while the call still succeeds through the
+route. The sanctioned interception shape is therefore the distinct-key wrapper
+in [composition rows](composition-rows.md), which is an ordinary fiber and runs.
+`tests/test_424_b1_interposition.py` pins this: it asserts that a routed seam is
+absent from the driver's `fibers`, installed in its `routers`, and that its
+observation store stays empty across calls that succeed.
+
 ---
 
 ## 3. What the tests prove
