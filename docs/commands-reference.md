@@ -226,6 +226,17 @@ and optionally synthesize the adapter that makes it so.
 - `--require-key KEY` - the alias the candidate is required under for
   `--emit` (default: `backing`).
 
+The output carries `chainDepth`: the total composed depth a bridge onto this
+candidate would have (1 onto ordinary code). When the candidate is itself a
+committed adapter (it carries the section-4 derivation marking), the check
+FLATTENS the chain and adds a `chain` array listing the proposed hop and the
+committed inner hop end to end, so the review sees the composed loss - every
+merge, default and drop across all hops - in one place, not just the last hop's
+slice of it. An inner hop whose committed body uses a construct outside the
+flagship reconstruction (a per-variant closed merge, an explicit default, a
+fabricated field) is reported `opaque`, pointing at that adapter's own
+attestation rather than inventing a plan it never ran.
+
 ```bash
 revl adapt need.rvl candidate.rvl
 revl adapt need.rvl candidate.rvl --adapt map.json --emit
