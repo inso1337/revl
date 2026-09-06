@@ -376,6 +376,25 @@ Two limits, both refusals rather than approximations:
   projection waits on the async crossing rather than shipping a body that does
   not typecheck.
 
+### The transport (`through`)
+
+`through <wire>` names the transport a row crosses (D-424c.1's sketch writes
+`through billing_wire`). The synthesizer speaks exactly one wire, the canonical
+envelope above, and it is selected by OMITTING `through`. No named transport is
+bound yet, so a named one is refused naming the transport and the row:
+
+```text
+remote row `@billing` names transport `a2a` with `through`, but the
+synthesizer binds no transport by that name
+```
+
+This is the same honesty the version, redirect and modality checks keep, on the
+transport axis: a named wire the generated body would not actually speak must
+not ship as the default one wearing its label. `through a2a` is roadmap item
+439's A2A 1.0.0 binding; it joins the bound set only once item 439's
+load-bearing question is decided — does an A2A Task map to one emission, to a
+stream (item 130), or to a session (item 250)? — and refuses until then.
+
 ### Values are not tainted yet
 
 Item 424 D-424c.9 requires every value a remote provider returns to be

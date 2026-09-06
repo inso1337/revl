@@ -107,6 +107,14 @@ from .import_openapi import _authority_host, _comment_safe
 #: builds; the other three of §4's table are callers to add.
 KINDS = ("remote",)
 
+#: The NAMED transports the synthesizer can actually speak. The default wire —
+#: `through` omitted, `transport is None` — is the canonical envelope over
+#: HTTPS (`{"key","method","args"}` -> `{"ok","value"|"error"}`, the placement
+#: bridge's own). No named wire is bound yet, so this is empty and every
+#: `through <name>` is refused; `through a2a` is item 439's A2A 1.0.0 binding
+#: and joins here only once its Task-lifecycle question is decided.
+BOUND_TRANSPORTS: tuple[str, ...] = ()
+
 #: Scalars that cross the canonical encoding untagged and unchanged.
 _SCALARS = ("Str", "Int", "Int32", "Float", "Bool")
 
@@ -329,6 +337,11 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
     doc, line = params["doc"], params["line"]
     in_band = on_failure == "result"
 
+    # A named `through <wire>` is refused before a single line is synthesized:
+    # the only wire below is the canonical envelope, and a named one the body
+    # would not speak must not ship under its label (424 D-424c.1, item 439).
+    check_transport(transport, doc=doc, line=line, label=label)
+
     component = f"Remote{_pascal(label)}Provider"
     externs: list[str] = []
     provides: list[str] = []
@@ -520,6 +533,45 @@ def synthesize_provider(service, kind: str, params: dict) -> tuple[str, str]:
             f"unknown provider kind {kind!r}; this slice ships "
             f"{', '.join(repr(k) for k in KINDS)}")
     return _remote_source(service, params)
+
+
+def check_transport(transport: str | None, *, doc: str, line: int,
+                    label: str) -> None:
+    """D-424c.1's `through <wire>` names the transport a remote row crosses.
+
+    The synthesizer speaks exactly one wire, the canonical envelope over HTTPS
+    (`{"key","method","args"}` -> `{"ok","value"|"error"}`, the placement
+    bridge's own), and it is selected by OMITTING `through`. No NAMED transport
+    is bound yet, so a `through <name>` clause is refused naming the transport
+    and the row rather than emitted as the canonical wire wearing a header
+    comment that claims the named one.
+
+    This is the honesty rule the version, redirect and modality checks already
+    keep, restated for the transport axis: a named wire the generated body would
+    not actually speak must not ship as the default one under its label. Before
+    this refusal a `through a2a` row parsed, synthesized the canonical envelope,
+    and annotated the header `Transport requested: a2a` — three statements the
+    crossing did not honour.
+
+    `through a2a` is item 439's A2A 1.0.0 binding. It stays refused here until
+    that binding lands, and it lands only once item 439's load-bearing open
+    question is decided: does an A2A Task map to one emission, to a stream
+    (item 130), or to a session (item 250)?
+    """
+    if transport is None or transport in BOUND_TRANSPORTS:
+        return
+    raise RevlError(
+        doc, line,
+        f"remote row `@{label}` names transport `{transport}` with `through`, "
+        "but the synthesizer binds no transport by that name",
+        hint="omit `through` for the one wire this slice speaks — the canonical "
+             'envelope over HTTPS (`{"key","method","args"}` -> '
+             '`{"ok","value"|"error"}`, docs/composition-rows.md). No named '
+             "transport is bound yet; `through a2a` is item 439's A2A 1.0.0 "
+             "binding, still gated on its Task-lifecycle decision. Refusing a "
+             "named wire the generated body would not actually speak is the "
+             "honesty rule the version and redirect checks already keep "
+             "(424 D-424c.1, item 439)")
 
 
 def check_address(host: str, *, doc: str, line: int, label: str) -> None:
