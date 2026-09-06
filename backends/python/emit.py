@@ -1030,6 +1030,23 @@ class _ComponentEmitter:
             ext["name"]: ext for ext in (externs or [])
             if ext.get("class") == "emission" and ext.get("deferred")
         }
+        # item 254 (docs/design/254-witnessed-network.md): emission externs that
+        # DECLARE a `compensate` slot, by name. An `emit` of one registers the
+        # extern's OWN declared compensation onto the activation frame's LIFO at
+        # teardown — no site-spelled `compensate` needed, the extern owns the
+        # reversal exactly as a `witnessed` extern owns its `undo`. It is a
+        # first-class COMPENSATION entry (item 247, two-phase): discharged on a
+        # clean commit, best-effort in Phase 2 of an abort after every proof
+        # inverse. Absent/empty for every program that declares no
+        # compensate-bearing emission extern, so their emission stays
+        # byte-identical (a `deferred`/`async`/`fn|async` emission cannot carry a
+        # compensate — lower refuses that — so only sync immediate emissions land
+        # here). A service-method emission is a `call` through a `req`, never a
+        # `fn` extern node, so it never matches this table.
+        self.compensated = {
+            ext["name"]: ext for ext in (externs or [])
+            if ext.get("class") == "emission" and ext.get("compensate") is not None
+        }
         self.name = _ident(component.get("name"), "component name")
         self.requires = {
             _ident(local, "requires key"): service
@@ -1720,6 +1737,20 @@ class _ComponentEmitter:
                 # compensation, not inversion (§6.1).
                 out.add(indent, "yield _revl_frame.compensation(lambda: "
                                  f"{self._expr(step.get('compensate'), where)})")
+            ext_comp = self._compensated_extern(step.get("expr"))
+            if ext_comp is not None:
+                # item 254: the emitted extern DECLARES its own `compensate` (the
+                # extern owns the reversal, so no site spelling is required — the
+                # item-254 network case is `emit put_endpoint(...)` with the
+                # compensating restore carried on the extern). Register it as the
+                # SAME first-class COMPENSATION entry as a site-spelled compensate
+                # (item 247, two-phase): discharged on a clean commit, best-effort
+                # in Phase 2 of an abort after every proof inverse. The reversal
+                # expression is the extern's lowered `compensate` slot (a bare
+                # call, no `result` binding — lower.py `_check_extern_undo`), the
+                # same shape `_witnessed_step` renders for a witnessed `undo`.
+                out.add(indent, "yield _revl_frame.compensation(lambda: "
+                                 f"{self._expr(ext_comp['compensate'], where)})")
         elif kind == "approval":
             self._approval_step(out, indent, step, where)
         elif kind == "await":
@@ -2042,6 +2073,22 @@ class _ComponentEmitter:
                 f"_revl_frame.enqueue_deferred({method!r}, {method!r}, "
                 f"[{', '.join(args)}], lambda: {fire}"
                 f"{_deferred_register_kwargs(ext, args)})")
+
+    def _compensated_extern(self, expr: Any) -> Optional[dict]:
+        """The emission extern (one DECLARING a `compensate`) an `emit` step's
+        expression calls, or None (item 254).
+
+        A compensate-bearing emission is spelled `emit <extern>(...)` whose callee
+        renders as an IR `fn` node — the same shape a witnessed/deferred call takes
+        — so matching its name against the compensated table is how the emitter
+        tells it apart from a plain one-way emission. Returns None for every other
+        expression (a service-method emission is a `call` through a `req`, not a
+        `fn`), so an emit with no extern-declared compensate stays byte-identical."""
+        if not self.compensated or not isinstance(expr, dict):
+            return None
+        if expr.get("kind") != "fn":
+            return None
+        return self.compensated.get(expr.get("name"))
 
     def _witnessed_extern(self, acquire: Any) -> Optional[dict]:
         """The witnessed extern descriptor a step's acquisition calls, or None.
