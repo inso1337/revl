@@ -2352,10 +2352,17 @@ class Session:
 
     def _commit_wal(self, driver) -> None:
         """Stamp `activation-complete` and close the session's WAL (the recorder
-        owns it in a Session; the driver's own `_commit_wal` is for `revl run`)."""
+        owns it in a Session; the driver's own `_commit_wal` is for `revl run`).
+
+        A session `commit` is a TERMINAL event, so the WAL closes here — unlike
+        `revl run`, whose driver keeps the log open for the run's whole life so
+        steady-state crossings are recorded and closes it at teardown (issue
+        #536). `Recorder.commit_wal` no longer closes, so this closes explicitly
+        and keeps the session's on-disk log byte-identical to before."""
         if self.recorder is not None and self.recorder.wal is not None:
             names = [c.get("name") for c in (self.ir or {}).get("components") or []]
             self.recorder.commit_wal(names)
+            self.recorder.wal.close()
 
     def _close_wal(self) -> None:
         if self.recorder is not None and self.recorder.wal is not None:

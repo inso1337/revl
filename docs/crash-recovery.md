@@ -127,8 +127,15 @@ the write-ahead discipline). Three record shapes:
               "compensated": false, "detail": {"key":"db","method":"execute","args":["…"]}},
  "inverse": {"reconstructible": false, "reason": "an emission is a one-way crossing…"}}
 
-// 3. terminal marker — present iff activation finished cleanly
+// 3. activation marker — present iff activation finished cleanly. NOT the end
+//    of the log: the WAL stays open for the whole run, so steady-state effects
+//    (below) are appended AFTER this line.
 {"record": "activation-complete", "generation": 7, "components": ["PgDatabase","UserCache"]}
+
+// 3b. shutdown marker — written at ORDERLY teardown, so its ABSENCE tells a
+//     steady-state `kill -9` from a clean exit (issue #536). A crash never
+//     reaches teardown, so it never writes this.
+{"record": "run-complete", "generation": 7}
 
 // 4. discharge-descriptor — a witnessed (`transactional`) inverse or a
 //    `compensation`, as a re-issuable NAMED CALL (items 243 / 247)
@@ -232,8 +239,14 @@ schema, the discharged-seq skip, and the merged residue records are specified in
 `docs/design/teardown-contract.md` (WAL descriptor + the owned py-tier migration).
 
 Wire it up with `revl run … --wal FILE` (implies `--record`). The log is opened
-before activation; each effect is appended as it commits; a clean activation
-stamps the marker.
+before activation and **stays open for the whole run** (issue #536): each effect
+is appended as it commits — during activation AND in steady state after it — a
+clean activation stamps `activation-complete`, and an orderly teardown stamps
+`run-complete` and closes the log. Closing at `activation-complete` (the old
+behaviour) made every steady-state crossing after activation invisible, so a
+`kill -9` in steady state read as `ROLLED-FORWARD [CLEAN]` while the crossings
+sat unrecorded — the log now carries them, and their `run-complete`-less tail is
+what recovery reads as a steady-state crash.
 
 ---
 
@@ -287,6 +300,34 @@ residue proof [CLEAN]:
   a completed activation left the accumulator balanced; there is nothing
   half-done to roll back.
 ```
+
+This `[CLEAN]` verdict holds when the log also carries `run-complete` (an
+orderly shutdown) **or** the crash landed before any steady-state crossing.
+
+#### Roll forward, but crashed in steady state (issue #536)
+
+`activation-complete` is present but `run-complete` is not, and the log carries
+effects appended *after* the activation marker: the process was `kill -9`'d in
+steady state. The composition's shape is still durable via item 15, so the
+verdict stays `ROLLED-FORWARD` — but the post-activation crossings are in-flight,
+not accounted, so recovery surfaces them as residue rather than claiming CLEAN.
+A durable crossing (an emission that left the process, an acquire whose resource
+outlives it) is **still out in the world**; an in-process crossing is **moot**.
+
+```
+verdict: ROLLED-FORWARD
+  committed effects (all balanced): 4
+  components: UserCache
+  RESIDUE  db.execute             steady-state crossing — still out …
+residue proof [RESIDUE]:
+  RESIDUE: 1 boundary crossing(s) committed AFTER activation-complete with no
+  `run-complete` shutdown marker — the run was `kill -9`'d in steady state …
+```
+
+`revl recover` exits `1` here, as for any honest residue. Recovery does not
+auto-reverse a steady-state crossing (it was committed, intended work, not a
+half-run activation); it reports it so an operator reconciles it or resumes the
+generation.
 
 ### Roll back — the process died mid-activation
 
