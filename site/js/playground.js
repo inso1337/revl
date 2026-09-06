@@ -623,7 +623,8 @@ function renderAudit(data) {
   if (distNames.length) {
     html += `<div class="section-title">distributability — which services may cross a process seam</div>`;
     html += `<table class="audit"><thead><tr><th>service</th><th>verdict</th><th>reasons</th></tr></thead><tbody>`;
-    for (const s of distNames.sort()) {
+    const sortedDistNames = distNames.sort();
+    for (const s of sortedDistNames) {
       const v = dist[s];
       html += `<tr><td class="comp">${esc(s)}</td><td><span class="pill">${esc(v.verdict)}</span></td>
         <td>${esc((v.reasons || []).join("; "))}</td></tr>`;
