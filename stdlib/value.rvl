@@ -36,12 +36,28 @@
 // representation:
 //   * py  — the native object graph (dict / list / bool / int / float / str /
 //            None); executed by the test suite (tests/test_value_stdlib.py).
-//   * ts / rs / go / java / wasm — DEFERRED to a follow-up. Each needs its
-//            `@<backend>` bodies added here against that tier's dynamic value
-//            (TS `any`/`unknown`; rust `cordis::Value` / `serde_json::Value` as
-//            json.rvl already boxes; go `any` with type switches; java a
-//            provider's JSON tree; wasm has no Float/Map/record substrate, so —
-//            as with json.rvl — a full `Value` has no representation there).
+//   * ts  — the JS value model (`any`/`unknown`): a record is a plain object, a
+//            list a JS array, an Int a `bigint`, a Float a `number`.
+//   * rs  — `Value` erases to `cordis::Value` (an `Arc<dyn Any>`), and the boxed
+//            concrete type is a `serde_json::Value`, EXACTLY as stdlib/json.rvl
+//            already boxes (`json_parse` hands back a `cordis::Value` wrapping a
+//            `serde_json::Value`; these accessors walk it and re-box each child
+//            the same way). The item 391 / #106 native-tier port toward
+//            `compile_to` rust (#98 Stage 4): a self-hosted emitter that reads a
+//            json_parse'd backend-IR document now walks it in PURE revl when
+//            COMPILED TO RUST, not just to py. `value_keys` / `value_children`
+//            over a RECORD read the host map in insertion order, which serde_json
+//            preserves only with its `preserve_order` feature — the crate that
+//            compiles a `Value`-walking self-host must enable it, the identical
+//            requirement stdlib/json.rvl's `json_stringify` canonical key order
+//            already imposes (see each body's note). Verified byte-for-byte
+//            against the @py outputs in an isolation cargo crate over records,
+//            lists, nested shapes, every scalar, and mismatched receivers.
+//   * go / java / wasm — DEFERRED to a follow-up. Each needs its `@<backend>`
+//            bodies added here against that tier's dynamic value (go `any` with
+//            type switches; java a provider's JSON tree; wasm has no
+//            Float/Map/record substrate, so — as with json.rvl — a full `Value`
+//            has no representation there).
 //
 // Import with a named `use`:
 //
@@ -73,10 +89,36 @@ pub extern pure fn value_kind(v: Value) -> Str =
     if (typeof v === "object") return "record";
     return "null";
   }
+  = @rs {
+    // The discriminant is the boxed `serde_json::Value`'s variant. serde_json
+    // keeps `Bool` a distinct variant, so — unlike the @py body, where `bool`
+    // is an `int` subclass and MUST be tested first — no ordering is needed;
+    // an integer JSON number is `is_i64`/`is_u64`, a float is neither. A box
+    // that is not a `serde_json::Value`, or a `Null`, reads back "null".
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Object(_) => String::from("record"),
+            serde_json::Value::Array(_) => String::from("list"),
+            serde_json::Value::Bool(_) => String::from("bool"),
+            serde_json::Value::Number(n) => {
+                if n.is_i64() || n.is_u64() { String::from("int") } else { String::from("float") }
+            }
+            serde_json::Value::String(_) => String::from("str"),
+            serde_json::Value::Null => String::from("null"),
+        },
+        Err(_) => String::from("null"),
+    }
+  }
 
 pub extern pure fn value_is_null(v: Value) -> Bool =
   @py { return v is None }
   = @ts { return v === null || v === undefined; }
+  = @rs {
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => matches!(&*j, serde_json::Value::Null),
+        Err(_) => true,
+    }
+  }
 
 // ------------------------------------------------------- shape discrimination
 // The is-object / is-list / is-scalar trio (roadmap item 380). A tolerant JSON
@@ -113,6 +155,20 @@ pub extern pure fn value_field(v: Value, name: Str) -> Value =
     }
     return null;
   }
+  = @rs {
+    // A record field as a fresh boxed child; a missing key, or a non-record
+    // receiver, boxes `Null`. `serde_json::Value::get(&str)` indexes objects
+    // only (an array or scalar receiver yields None), mirroring the @py
+    // `isinstance(v, dict)` guard. The child is re-boxed as a `cordis::Value`
+    // wrapping a `serde_json::Value`, so a chained walk stays total.
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match j.get(name.as_str()) {
+            Some(child) => Value::new(child.clone()),
+            None => Value::new(serde_json::Value::Null),
+        },
+        Err(_) => Value::new(serde_json::Value::Null),
+    }
+  }
 
 // The same lookup as an `Opt`: `None` for a missing key, a null value, or a
 // non-record receiver; otherwise `Some(child)`. Use it where "absent" and
@@ -133,6 +189,19 @@ pub extern pure fn value_opt(v: Value, name: Str) -> Opt[Value] =
       return (r === null || r === undefined) ? undefined : r;
     }
     return undefined;
+  }
+  = @rs {
+    // `Opt[Value]` lowers to `Option<cordis::Value>`. `None` for a missing key,
+    // a present-null value, or a non-record receiver — matching the @py
+    // `v.get(name)`, which returns Python `None` in every one of those cases;
+    // otherwise `Some` of the boxed child.
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match j.get(name.as_str()) {
+            Some(child) if !child.is_null() => Some(Value::new(child.clone())),
+            _ => None,
+        },
+        Err(_) => None,
+    }
   }
 
 // The `dict.get(k, default)` analog (roadmap item 368): read a field if present,
@@ -162,6 +231,15 @@ pub extern pure fn value_has(v: Value, name: Str) -> Bool =
     }
     return false;
   }
+  = @rs {
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match j.get(name.as_str()) {
+            Some(child) => !child.is_null(),
+            None => false,
+        },
+        Err(_) => false,
+    }
+  }
 
 // A record's field NAMES, in the host dict's INSERTION order — the order the
 // document was built/parsed in, which for the backend-IR records `services` /
@@ -185,6 +263,21 @@ pub extern pure fn value_keys(v: Value) -> List[Str] =
     return (v !== null && typeof v === "object" && !Array.isArray(v))
       ? Object.keys(v) : [];
   }
+  = @rs {
+    // Field names in the host map's INSERTION order — exactly `list(d.keys())`
+    // on the @py side. serde_json preserves insertion order ONLY with its
+    // `preserve_order` feature (backed by an IndexMap); the crate that compiles
+    // a `Value`-walking self-host must enable it — the identical requirement
+    // stdlib/json.rvl's `json_stringify` already imposes for its canonical key
+    // order. A non-record receiver (list, scalar, null) yields `[]`.
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Object(m) => m.keys().cloned().collect(),
+            _ => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    }
+  }
 
 // ---------------------------------------------------------------- list access
 // The elements of a list, each a `Value`. Total: a non-list receiver yields `[]`.
@@ -194,6 +287,15 @@ pub extern pure fn value_list(v: Value) -> List[Value] =
   }
   = @ts {
     return Array.isArray(v) ? [...v] : [];
+  }
+  = @rs {
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Array(a) => a.iter().map(|e| Value::new(e.clone())).collect(),
+            _ => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    }
   }
 
 // One list element by index as a `Value`. Total: an out-of-range index or a
@@ -208,6 +310,19 @@ pub extern pure fn value_at(v: Value, i: Int) -> Value =
     // `i` is a revl Int == JS bigint; the array index must be a number.
     const idx = Number(i);
     return (Array.isArray(v) && idx >= 0 && idx < v.length) ? v[idx] : null;
+  }
+  = @rs {
+    // `i` is a revl Int == i64; index a list only, and only in range, else a
+    // boxed `Null` (matching the @py out-of-range / non-list default).
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Array(a) if i >= 0 && (i as usize) < a.len() => {
+                Value::new(a[i as usize].clone())
+            }
+            _ => Value::new(serde_json::Value::Null),
+        },
+        Err(_) => Value::new(serde_json::Value::Null),
+    }
   }
 
 // The children of a container — a record's values or a list's elements, `[]`
@@ -226,6 +341,18 @@ pub extern pure fn value_children(v: Value) -> List[Value] =
     if (v !== null && typeof v === "object") return Object.values(v);
     return [];
   }
+  = @rs {
+    // A record's values (in insertion order — same `preserve_order` requirement
+    // noted on `value_keys`) or a list's elements; `[]` for a scalar or null.
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Object(m) => m.values().map(|e| Value::new(e.clone())).collect(),
+            serde_json::Value::Array(a) => a.iter().map(|e| Value::new(e.clone())).collect(),
+            _ => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    }
+  }
 
 // The number of elements (list), fields (record), or characters (str); `0` for
 // a scalar or null. Total.
@@ -241,6 +368,20 @@ pub extern pure fn value_len(v: Value) -> Int =
     if (v !== null && typeof v === "object") return BigInt(Object.keys(v).length);
     return 0n;
   }
+  = @rs {
+    // elements (list), fields (record), or CHARACTERS (str: Unicode scalar
+    // values via `chars().count()`, matching Python `len(str)` — code points,
+    // not UTF-8 bytes); 0 for a scalar/null. Returns a revl Int == i64.
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Array(a) => a.len() as i64,
+            serde_json::Value::Object(m) => m.len() as i64,
+            serde_json::Value::String(s) => s.chars().count() as i64,
+            _ => 0,
+        },
+        Err(_) => 0,
+    }
+  }
 
 // ---------------------------------------------------------------- scalar exits
 // The checked exits back to concrete types. Each coerces its own shape and
@@ -248,12 +389,44 @@ pub extern pure fn value_len(v: Value) -> Int =
 pub extern pure fn value_str(v: Value) -> Str =
   @py { return v if isinstance(v, str) else "" }
   = @ts { return typeof v === "string" ? v : ""; }
+  = @rs {
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::String(s) => s.clone(),
+            _ => String::new(),
+        },
+        Err(_) => String::new(),
+    }
+  }
 pub extern pure fn value_int(v: Value) -> Int =
   @py { return v if isinstance(v, int) and not isinstance(v, bool) else 0 }
   = @ts {
     // a revl Int is a JS bigint (json.rvl); a bool is never one, so no guard
     return typeof v === "bigint" ? v : 0n;
   }
+  = @rs {
+    // a revl Int == i64; a JSON integer reads back, everything else (a float,
+    // a bool — a distinct serde_json variant, so no bool guard is needed — a
+    // string, a container, null, or a non-serde_json box) yields 0. A float
+    // like `3.0` is a `Number` but `as_i64()` is None, so it too yields 0,
+    // matching the @py `isinstance(v, int)` (a Python float is not an int).
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Number(n) => n.as_i64().unwrap_or(0),
+            _ => 0,
+        },
+        Err(_) => 0,
+    }
+  }
 pub extern pure fn value_bool(v: Value) -> Bool =
   @py { return v if isinstance(v, bool) else False }
   = @ts { return typeof v === "boolean" ? v : false; }
+  = @rs {
+    match v.downcast::<serde_json::Value>() {
+        Ok(j) => match &*j {
+            serde_json::Value::Bool(b) => *b,
+            _ => false,
+        },
+        Err(_) => false,
+    }
+  }
