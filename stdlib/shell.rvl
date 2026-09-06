@@ -57,10 +57,13 @@
 // ------------------------------------------------------------------ tier status
 // py + ts tiers (the H1 reference on each), matching stdlib/fs.rvl. The py `sh`
 // + `classify` bodies delegate to backends/python/revl_shell_host.py and
-// backends/python/revl_shell_classify.py; the ts bodies delegate to
-// backends/typescript/revl_shell_ts.ts (node opaque `sh`) and
-// backends/typescript/revl_shell_classify_ts.ts (the pure classifier port),
-// reached via globalThis.__revlShell (item 369). The classifier is pure and
+// backends/python/revl_shell_classify.py. On ts, `sh` (the opaque emission
+// fallback, node:child_process) delegates to backends/typescript/revl_shell_ts.ts
+// via globalThis.__revlShell (item 369), while `classify` reaches the pure
+// classifier port (backends/typescript/revl_shell_classify_ts.ts) through the
+// item-410 stdlib host-ref door (`= @ts ref`) — the same door stdlib/fs.rvl's
+// observation externs use, so a USER-ORIGIN consumer can reach `classify`
+// without the fragile global seam (issue #460). The classifier is pure and
 // tier-agnostic, so py and ts return byte-identical plans (proven over the full
 // corpus in tests/test_ts_witnessed_parity.py). rs / go / java / wasm bodies
 // get theirs when the fs catalog's Slice 2b lands theirs.
@@ -84,9 +87,23 @@ pub extern emission fn sh(cmd: Str) -> Str
 // below (or the stdlib/value.rvl accessors for the nested `ops`). PURE: no IO,
 // total (never faults), two-valued. This is the module's headline: the terminal
 // tool's reversibility decision is a pure, testable function of the command text.
+//
+// The ts body reaches its host through the item-410 stdlib host-ref door
+// (`= @ts ref`, the same door stdlib/fs.rvl's observation externs use since
+// #264), NOT the `globalThis.__revlShell` seam the ts `sh` fallback still uses.
+// The difference is what makes `classify` reachable by a USER-ORIGIN consumer
+// (issue #460): a `= @ts ref` emits a `_revl_require` of the classifier module
+// resolved against the runner-provided install root, so a consumer that writes
+// `use "stdlib/shell.rvl" { classify }` gets the host loaded by importing this
+// module — nothing to guess, and no dependency on some OTHER module having first
+// been imported to install a global. The py body stays an ambient import: this
+// module is install-origin, so the user @py backend-import rule does not apply
+// to it, and `backends/python` is on the runtime's `sys.path` (the py analog of
+// the stdlib-ref root). Both tiers delegate to the one pure classifier
+// (backends/python/revl_shell_classify.py, backends/typescript/revl_shell_classify_ts.ts).
 pub extern pure fn classify(cmd: Str) -> Any
   = @py { import revl_shell_classify; return revl_shell_classify.classify(cmd) }
-  = @ts { return (globalThis as any).__revlShell.classify(cmd) }
+  = @ts ref classify from "../backends/typescript/revl_shell_classify_ts.ts"
 
 // --------------------------------------------------------------- plan accessors
 // Thin, total, pure readers over a plan, so a consumer can branch on the verdict
