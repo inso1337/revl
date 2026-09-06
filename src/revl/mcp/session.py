@@ -273,6 +273,21 @@ class Session:
         # it on. This is the "which world" a live query answers for — see
         # `live_state` and docs/queries.md §9.
         self._generation = 0
+        # the surface epoch (two-phase-admission Slice 0,
+        # docs/design/460-two-phase-admission-forward-recovery.md §3): a monotonic
+        # counter that increments at EVERY class-map install — `load`, `swap`
+        # (so `rollback`/`undo`, which route through it), and `_wire_turn`. It is
+        # the finer key the generation number leaves open: `_generation` does NOT
+        # move on `_wire_turn` (426 §5.2, an `add` layer is "incremental, no
+        # generation change"), yet `_wire_turn` REBUILDS the class map, so the
+        # SURFACE a decision was checked against can change while the generation
+        # holds. The epoch closes that gap: the generation says which composition
+        # is live, the epoch says which surface (class map, auto-approve rules,
+        # cache index, candidate hashes) is live. Slice 0 COMPUTES it and the
+        # content digests (`_surface_digests`) but nothing yet DRIVES recovery off
+        # them (the #268 compute-but-do-not-yet-decide discipline); Slices 1-3
+        # add the decision record, the stage records and forward recovery.
+        self._surface_epoch = 0
         # the agent-sandbox profile (roadmap item 33): a `revl.policy.Policy`
         # whose `mcp` allow-list bounds what agent-generated code admitted here
         # may reach — "agent output may reach [llm, kv*] and nothing else",
@@ -545,6 +560,9 @@ class Session:
         # a class-(c) emission does not boot without approval (Fix 1). Off when no
         # policy is configured, so nothing below runs and the load is byte-identical.
         self._class_map = self._build_class_map(ir)
+        # design 460 §3: a class-map install moves the surface epoch. A fresh load
+        # takes it from 0 to 1, alongside `_generation` below.
+        self._surface_epoch += 1
         # item 251 Slice 2: materialize the bound policy's distilled auto-approve
         # rules against this generation, atomically with the class map so a call is
         # never decided against a stale rule set. Inert (empty) when the policy
@@ -1052,6 +1070,10 @@ class Session:
         # issued against the previous generation is gone, not stale — its hash
         # gets the unknown-hash refusal and the caller re-issues).
         self._class_map = new_map
+        # design 460 §3: the new generation installs a new class map, so the
+        # surface epoch moves. `rollback` and `undo` both route through `swap`, so
+        # each of them moves the epoch exactly once here.
+        self._surface_epoch += 1
         self._tickets = {}
         # item 251 Slice 2: re-materialize the distilled rules against the new
         # generation. The H1 review bind (`_auto_reviewed`) persists across the
@@ -2489,6 +2511,10 @@ class Session:
         self.previous_origin = None
         self.draft = None
         self._generation = 0
+        # the surface epoch resets with the generation: a fresh (unloaded) session
+        # is at 0, and the next `load` moves it to 1 alongside the generation
+        # (design 460 §3).
+        self._surface_epoch = 0
         self._history = []
         # item 246: the class map, the outstanding-ticket table, and the approval
         # ledger are session-scoped — a new session starts with none, so a token
@@ -2704,6 +2730,11 @@ class Session:
         # and in the same order `load` and `swap` install them, so no call is ever
         # decided against a map that predates the keys it is deciding about.
         self._class_map = self._build_class_map(self.ir)
+        # design 460 §3: wiring a turn REBUILDS the class map but does NOT move
+        # `_generation` (426 §5.2 keeps an `add` layer generation-stable), so the
+        # surface epoch is the only counter that catches a turn's surface change.
+        # This is precisely the gap the epoch exists to close.
+        self._surface_epoch += 1
         self._install_auto_approve_rules()
         self._install_cache_index(self.ir)
         # invariant 4: the runtime frame check compares a typed `Approval[C]`
@@ -4780,6 +4811,71 @@ class Session:
             replayed.append(outcome)
         return {**plan, "replayed": replayed}
 
+    # -- two-phase-admission Slice 0: the surface epoch + content digests -----
+    # (design 460 §3). COMPUTED here; nothing yet DRIVES recovery off them — the
+    # decision record, the stage records and forward recovery are Slices 1-3.
+
+    def _base_manifest_hash(self) -> str | None:
+        """The content digest of the LIVE composition manifest — the across-restart
+        half of the surface CAS key (design 460 §3). Recomputed from `self.ir`, so
+        a restart derives it from the restored base rather than trusting a recorded
+        value. Same canonical shape as the commit gate's `_hash_manifest` (sorted
+        keys, no whitespace variance, `sha256:` prefix) so the two hashes read the
+        same on the WAL. None when nothing is loaded."""
+        return _base_manifest_hash_of(self.ir)
+
+    def _class_map_digest(self, class_map=None) -> str | None:
+        """The content digest of the class map over the live composition (design
+        460 §3): the per-(key, realm) provider assignments AND the per-scope class,
+        sorted and hashed. The load-bearing half — a base whose manifest matches
+        but whose policy reclassified a granted provider's crossing is a surface a
+        decision never saw, and this digest moves where `baseManifestHash` would
+        not. Recomputed, never trusted from a record. None when the policy is off
+        (no class map). Pass `class_map` to digest a map other than the live one
+        (e.g. the merged map a not-yet-wired turn builds)."""
+        return _class_map_digest_of(self._class_map if class_map is None
+                                    else class_map)
+
+    def _surface_digests(self) -> dict:
+        """The across-restart content form of the surface CAS key, recomputed from
+        the live composition (design 460 §3)."""
+        return {"baseManifestHash": self._base_manifest_hash(),
+                "classMapDigest": self._class_map_digest()}
+
+    def _surface_expected(self) -> dict:
+        """A snapshot of the current surface, in the shape a decision record's
+        `expected` block carries (design 460 §2.1): the in-process pair
+        `(generation, surfaceEpoch)` and the across-restart content digests. A
+        later slice writes this at `admit-decided`; here it is the value
+        `_cas_surface` compares against."""
+        return {"generation": self._generation,
+                "surfaceEpoch": self._surface_epoch,
+                **self._surface_digests()}
+
+    def _cas_surface(self, expected: dict) -> None:
+        """Compare-and-swap the current surface against `expected`; raise
+        `SessionError` on any drift (design 460 §3). The in-process transition
+        (`applied`/`finalized`) compares the `(generation, surfaceEpoch)` pair;
+        forward recovery across a restart compares the `baseManifestHash`/
+        `classMapDigest` content digests, where the generation and epoch have died
+        with the process. Whichever keys `expected` carries are checked, and the
+        helper refuses if EITHER half moved — the epoch/generation pair or the
+        content digests. In `_wire_turn` as it stands the stages run in one
+        synchronous block with no `await` between them, so a mismatch is
+        unreachable today; the check is here for the places the block will be split
+        (the queued `_drain_pending_admits` path and the conductor's multi-process
+        apply)."""
+        live = self._surface_expected()
+        drifted = [k for k, v in expected.items()
+                   if k in live and live[k] != v]
+        if drifted:
+            detail = ", ".join(
+                f"{k}: {expected[k]!r} -> {live[k]!r}" for k in drifted)
+            raise SessionError(
+                "surface changed since the decision was taken, so the admission "
+                f"cannot be applied against it ({detail}). A decision must never "
+                "be finalized onto a surface it did not see (design 460 §3).")
+
     def state(self, drain: bool = False) -> dict:
         if self._driver is None:
             # even with nothing loaded, the workspace's active leases (item 61)
@@ -4808,12 +4904,61 @@ class Session:
             # active component leases (item 61): holder, component, expiry — the
             # multi-agent workspace, visible before anyone acts.
             "leases": self.leases.document(),
+            # design 460 Slice 0: the surface-CAS primitives. The in-process key
+            # is `(generation, surfaceEpoch)`; `baseManifestHash`/`classMapDigest`
+            # are its across-restart content form, recomputed from the LIVE
+            # composition (never trusted from a record). Gated on the policy, like
+            # the auto-approve metrics below, so an off-policy `state()` stays
+            # byte-identical — the sessions that carry class-(c) authority (and so
+            # will drive the two-phase commit) are exactly the policy-enabled ones.
+            **({"surfaceEpoch": self._surface_epoch, **self._surface_digests()}
+               if self.approval_policy is not None else {}),
             # item 246: the auto-approve metrics, present only when a policy is
             # configured (off-policy `state()` is byte-identical).
             **({"approval": self.approval_metrics()}
                if self.approval_policy is not None else {}),
             **({"trace": driver.drain_events()} if drain else {}),
         }
+
+
+def _base_manifest_hash_of(ir: dict | None) -> str | None:
+    """The content digest of a composition's manifest (design 460 §3). Pure and
+    recomputable — the forward-recovery discipline is that this is DERIVED from the
+    restored base, never read back from a decision record. `None` for a composition
+    with no manifest (nothing loaded)."""
+    manifest = (ir or {}).get("manifest")
+    if manifest is None:
+        return None
+    import json  # noqa: PLC0415 — stdlib
+    payload = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _class_map_digest_of(class_map) -> str | None:
+    """The content digest of a `ClassMap` (design 460 §3): the per-(key, realm)
+    provider assignments AND the per-scope worst-class fold, canonicalized (sorted,
+    no whitespace variance) and hashed. `None` when there is no class map (policy
+    off). Pure over the class map's derived facts, so two builds of the same
+    composition digest identically, and any reclassification of a provider's
+    crossing — the class its scope folds to — moves the digest."""
+    if class_map is None:
+        return None
+    import json  # noqa: PLC0415 — stdlib
+    index = class_map.index
+    # (key, realm) -> provider, sorted; the resolution surface a call classifies
+    # against.
+    providers = sorted([key, realm, provider]
+                       for (key, realm), provider in index.provider_of.items())
+    # scope id -> the class its reach closure folds to (the worst class over the
+    # scope and everything it reaches). `_reach` is the checked fold every gate
+    # decision already reads; a provider whose crossing is reclassified (an
+    # `emission` that gains a registered inverse, say) folds to a different class
+    # here and the digest moves — the load-bearing case in §3.
+    classes = sorted([sid, (reach.get("class") or "")]
+                     for sid, reach in class_map._reach.items())
+    payload = json.dumps({"providers": providers, "classes": classes},
+                         sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _ir_has_approval_edges(ir: dict) -> bool:
