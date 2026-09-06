@@ -178,7 +178,10 @@ the item-37 verified-idempotent upgrade.
 
 ---
 
-Status: design proposed. No implementation. Grounds on the landed
+Status: SLICES 1-3 LANDED. Slice 1 (compensate-grade `PUT`-with-`GET`-preimage
+reversal on py, merged d9b5658), Slice 2 (the routed `DELETE`/`POST` forms + the
+concurrency-token policy, §8), and Slice 3 (the ts and rust host tiers, merged
+b9538ba8) are all on main. Grounds on the landed
 witnessed-externs machinery (item 243, `docs/design/243-witnessed-externs.md`),
 the idempotency-evidence IR (item 44, `docs/delivery-semantics.md`), the
 OpenAPI importer (`docs/import-openapi.md`, `src/revl/import_openapi.py`), and
@@ -651,8 +654,9 @@ are untouched beyond the py host-body stub.
 
 Slice 2 takes three of the four items Slice 1 deferred: the `DELETE`-recreate
 form, the `POST`-with-documented-delete form, and the richer concurrency-token
-story. **Other tiers stay deferred** (Slice 3, per item 243 Slice 2b's per-tier
-runtime-seam contract; rust still waits on item 278). Everything Slice 1 fixed
+story. **Other tiers landed later in Slice 3** (the ts and rust host tiers,
+merged b9538ba8, per item 243 Slice 2b's per-tier runtime-seam contract).
+Everything Slice 1 fixed
 holds unchanged: the ceiling is `compensate`, the reversal lands on the audit
 surface, it makes no `noResidue`/witness claim, its cap scope is a network cap
 the item-250 rewind enumerates-not-runs, and an unannotated document emits
@@ -740,7 +744,7 @@ resource came back, rather than overwrite whatever took its place.
 
 ### 8.5 Still deferred after Slice 2
 
-- **Other tiers** (ts/rust/…) - Slice 3.
+- **Other tiers** (ts/rust) - LANDED in Slice 3 (merged b9538ba8).
 - **A genuine proof-surface network witness** - a new language construct, its
   own item.
 - **Verified-idempotent upgrade** (attack 3's real closure, item 37).

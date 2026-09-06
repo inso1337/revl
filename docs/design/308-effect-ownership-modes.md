@@ -1,7 +1,14 @@
 # Design: effect ownership modes, owned / borrowed / shared (item 308)
 
-Status: design pass (PRODUCT-VISION, 243-261 arc). No implementation in this
-doc. Companion docs: [243-witnessed-externs.md](243-witnessed-externs.md),
+Status: OWNED+BORROWED v1 LANDED (2026-08-31, merged 5601d70) — owned/borrowed
+inferred over the teardown accumulator with zero new grammar: R0 (acquire/
+witnessed returns are nominal opaque handles), O1 (no hand-call of a declared
+inverse), B1 (the seven-clause borrow-does-not-escape). F10 retention audit
+SHIPPED and F9 method-scope early-release DECIDED/closed (the early-release form
+is already refused, count zero); the inline § markers below are authoritative
+per decision. SHARED + TRANSFER stay reserved contextual keywords, deferred to
+item 294 leases. PRODUCT-VISION, 243-261 arc.
+Companion docs: [243-witnessed-externs.md](243-witnessed-externs.md),
 [teardown-contract.md](teardown-contract.md),
 [247-compensate.md](247-compensate.md),
 [294-parameterized-capabilities.md](294-parameterized-capabilities.md),
