@@ -782,6 +782,27 @@ output, the port can be deferred with the gap named in the self-host
 stage map; if rejection parity is asserted, the flow walk ports to
 lower.rvl. Decide at slice 2, do not let it be discovered by a red oracle.
 
+**DECIDED (slice 2): port DEFERRED, gap named.** The self-host checker's
+second half is not expression-only — it walks component/provide bodies for
+G4 emission-declaration and call-site typing, message-for-message with the
+reference (`selfhost/checker.rvl` slice two, `tests/test_selfhost_checker.py`).
+But it carries NO O1/B1 flow walk: those live in `src/revl/lower.py` over the
+resource-taint base, and are not ported. Measured on the reference base
+(a nominal `Sock`, its declared inverse, an `acquire`): a POSITIVE
+owner-holds-and-lends program is admitted by BOTH sides — they AGREE, so a
+positive ownership program is safe in the self-host corpus — while an O1
+borrower-close and a B1 non-owner-return are REFUSED by the reference (with
+the item-308 message) and ACCEPTED by the self-host. So rejection parity
+holds for everything the self-host actually checks, and the ONLY divergence
+is an O1/B1 REJECTION, which no self-host corpus fixture spells today. The
+port is deferred to the ownership-dialect self-host slice; until then no
+O1/B1 rejection fixture may enter the self-host corpus (adding one would red
+the oracle for this designed gap — the "discovered by a red oracle" outcome
+this note forbids). The gap is pinned executably in
+`tests/test_selfhost_ownership_gap_308.py`: its two divergence pins flip when
+the flow walk is ported, directing the porter to move the rejection fixtures
+into the shared corpus and strike this deferral.
+
 ## Staged plan and exit tests
 
 Slices are additive and land in order; each leaves the suite green and
@@ -869,5 +890,9 @@ per-backend goldens byte-identical (checker-only until the shared slice).
    its scope. B1 admits it; whether the schedule-testing work (295) can
    interleave an owner teardown into that window on any tier decides if
    the rule needs an await clause.
-3. **Rejection-parity oracle for self-host** (see the self-host note):
-   which oracle family owns O1/B1 parity, decided at slice 2.
+3. **Rejection-parity oracle for self-host: DECIDED (slice 2). See the
+   self-host note.** The self-host checker covers component/provide typing and
+   G4 but not the O1/B1 flow walk; the port is deferred and the one divergence
+   (an O1/B1 REJECTION, which no self-host corpus fixture spells) is named and
+   pinned in `tests/test_selfhost_ownership_gap_308.py` so it cannot be
+   discovered by a red oracle.
