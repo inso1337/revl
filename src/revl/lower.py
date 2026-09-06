@@ -2221,7 +2221,17 @@ def _collect_arm_names(node, referenced: set[str], bound: set[str]) -> None:
     A generic AST walk: only the name-reading node (`ExprVar`, and the target of
     an assignment) and the name-binding nodes (`let`/`var`, `let`-pattern, `for`)
     are special-cased; every other node recurses over its dataclass fields."""
-    if isinstance(node, list):
+    if isinstance(node, (list, tuple)):
+        # A tuple carries names exactly as a list does. The case that matters is
+        # `Interp.parts`, a list of `("text", str)` / `("expr", <ast>)` tuples:
+        # the interpolated `${...}` expression rides in the tuple's second slot,
+        # so a walk that stops at the tuple never sees the names a template
+        # reads. That left every capture inside a template in a block-bodied
+        # match arm uncollected, so the lifted helper missed the parameter and
+        # the arm was refused with "`x` is not declared in this function" (#548
+        # item 8). The scalar slots (the `"text"`/`"expr"` tag, line ints)
+        # recurse to the scalar no-op below, so recursing over every element is
+        # safe.
         for item in node:
             _collect_arm_names(item, referenced, bound)
         return
