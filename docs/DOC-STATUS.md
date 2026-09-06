@@ -196,5 +196,5 @@ was corrected by hand and had drifted back within a day.
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |
-| witnessed-fs.md | needs-work | 0 |  |
+| witnessed-fs.md | needs-work | 5 |  |
 <!-- docgen:doc-status end -->
