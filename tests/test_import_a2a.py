@@ -217,6 +217,51 @@ def test_streaming_is_recorded_not_projected():
         "`message/stream` and", "")
 
 
+def test_an_optional_extension_is_recorded_not_projected():
+    """An optional extension is surfaced as unbound (like streaming), not
+    silently dropped and not refused: it does not change what the boundary must
+    honour."""
+    doc = _card()
+    doc["capabilities"] = dict(doc["capabilities"])
+    doc["capabilities"]["extensions"] = [
+        {"uri": "https://ext.example/trace", "required": False},
+        {"uri": "https://ext.example/hints"},
+    ]
+    source = import_a2a(doc, filename="card.json")
+    assert "NOT" in source and "projected" in source
+    assert "`capabilities.extensions`" in source
+    assert "https://ext.example/trace" in source
+    assert "https://ext.example/hints" in source
+
+
+def test_a_required_extension_is_refused_not_recorded():
+    """A2A 1.0.0's `required` means the client must comply to interact. This
+    slice projects no extension, so a mandatory one is refused (naming it and
+    its pointer) rather than recorded as if the plain provider satisfied it —
+    the honesty rule the version and transport checks already enforce."""
+    doc = _card()
+    doc["capabilities"] = dict(doc["capabilities"])
+    doc["capabilities"]["extensions"] = [
+        {"uri": "https://ext.example/must", "required": True},
+    ]
+    message = _refusal(doc)
+    assert "REQUIRED" in message
+    assert "https://ext.example/must" in message
+    assert "#/capabilities/extensions/0" in message
+
+
+def test_a_required_extension_without_a_uri_is_still_refused():
+    """A required extension the client cannot even identify is no less binding;
+    it is refused by index rather than let through."""
+    doc = _card()
+    doc["capabilities"] = dict(doc["capabilities"])
+    doc["capabilities"]["extensions"] = [{"required": True}]
+    message = _refusal(doc)
+    assert "REQUIRED" in message
+    assert "index 0" in message
+    assert "#/capabilities/extensions/0" in message
+
+
 def test_a_non_terminal_task_is_a_fault_not_a_poll():
     for backend in ("ts", "py"):
         source = import_a2a_file(BILLING, backend=backend)

@@ -130,6 +130,13 @@ Not in this slice, and deliberately
     `pushNotifications` are recorded in the header as NOT PROJECTED rather
     than quietly ignored. `message/stream`, `tasks/resubscribe` and webhook
     delivery need the lifecycle answer above first.
+  * **Capability extensions.** An OPTIONAL `capabilities.extensions` entry is
+    recorded as NOT PROJECTED, like streaming. A REQUIRED one is refused: A2A
+    1.0.0's `required` means a client must comply with the extension to
+    interact, and this slice projects no extension, so it cannot comply.
+    Recording it and emitting a plain provider anyway would drop a contract the
+    agent declared mandatory — the honesty rule the version and transport
+    checks already enforce.
   * **Transports other than JSON-RPC 2.0.** gRPC and HTTP+JSON are refused
     naming the transport; `additionalInterfaces` are recorded, not projected.
   * **Non-text modalities.** A `FilePart` or a `DataPart` has no transcription
@@ -377,17 +384,48 @@ class _Card:
                 "slice observes one terminal crossing and no history")
         extensions = caps.get("extensions")
         if isinstance(extensions, list) and extensions:
-            uris = sorted({
-                str(ext.get("uri")) for ext in extensions
-                if isinstance(ext, dict) and ext.get("uri")
-            })
-            if uris:
+            optional: set[str] = set()
+            for index, ext in enumerate(extensions):
+                if not isinstance(ext, dict):
+                    continue
+                # A2A 1.0.0 AgentExtension.required: the client MUST understand
+                # and comply with the extension to interact with the agent. This
+                # slice projects NO extension, so it cannot comply with a
+                # mandatory one. Recording it as "not projected" and emitting a
+                # plain provider anyway would drop a contract the agent declared
+                # mandatory — the same dishonesty a non-JSON-RPC transport or a
+                # non-terminal task is refused for. So a required extension is a
+                # refusal (naming it), and only an optional one is recorded.
+                if ext.get("required"):
+                    raw_uri = ext.get("uri")
+                    named = (_comment_safe(json.dumps(raw_uri))
+                             if isinstance(raw_uri, str) and raw_uri
+                             else f"the extension at index {index}")
+                    self._refuse(
+                        f"this Agent Card declares the REQUIRED capability "
+                        f"extension {named}, and this binding projects no "
+                        f"extension",
+                        pointer=_pointer("capabilities", "extensions", index),
+                        hint="A2A 1.0.0's `required` means a client must "
+                             "understand and comply with the extension to "
+                             "interact with the agent. Slice 1 binds only the "
+                             "plain `message/send` crossing and projects no "
+                             "extension, so it cannot comply; generating a "
+                             "provider anyway would silently drop a contract "
+                             "the agent declared mandatory. Mark the extension "
+                             "optional on the agent, or this needs a binding "
+                             "that implements it")
+                uri = ext.get("uri")
+                if isinstance(uri, str) and uri:
+                    optional.add(uri)
+            if optional:
                 self.unprojected.append(
                     "`capabilities.extensions` declaring "
-                    f"{_comment_safe(', '.join(uris))} — NOT projected. An "
-                    "extension is one more unchecked claim by the same peer; "
-                    "no extension can grant this boundary a property revl "
-                    "would otherwise have had to check")
+                    f"{_comment_safe(', '.join(sorted(optional)))} — NOT "
+                    "projected. An optional extension is one more unchecked "
+                    "claim by the same peer; no extension can grant this "
+                    "boundary a property revl would otherwise have had to "
+                    "check")
         if self.doc.get("securitySchemes") or self.doc.get("security"):
             self.notes.append(
                 "the card declares a security scheme. No credential is "
