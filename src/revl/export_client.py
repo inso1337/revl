@@ -34,10 +34,12 @@ copy, so it has no client-side value (docs/interop-bridge.md §3); and a
 `Map[K, V]` whose key is not `Str` cannot be a JSON object. Both are refused
 here rather than emitted as something that would not round-trip.
 
-NOTE (the paired server face, not built here): `revl serve --http` is C1's other
-half (D-424c.6) and the remoteness LANGUAGE constructs (`remote` rows, the G4
+The paired server face is `revl serve --http` (D-424c.6, `revl.mcp.http_face`):
+it serves a booted composition's operations as `POST /<composition>/<key>/<op>`
+over this same canonical encoding, so the generated `httpTransport` below drops
+onto it directly. The remoteness LANGUAGE constructs (`remote` rows, the G4
 admissibility check, per-realm peers) are C2, which waits on item 426 S1's row
-table. This slice ships the client generator alone.
+table; this slice is codegen and transport only, no language change.
 """
 
 from __future__ import annotations
@@ -301,6 +303,32 @@ class _ClientExporter:
             " *  bridge by construction. Supply a transport for your endpoint. */\n"
             "export interface Transport {\n"
             "  call(method: string, args: unknown[]): Promise<unknown>;\n"
+            "}")
+        parts.append(
+            "/** A Transport onto a `revl serve --http` face (D-424c.6). `base`\n"
+            " *  is the service's route prefix, `http://host:port/<composition>/\n"
+            " *  <key>`; each call POSTs the positional args as a JSON array to\n"
+            " *  `<base>/<method>` and reads the `{ok, value}` reply. The value\n"
+            " *  IS the canonical encoding, so it is already this client's types.\n"
+            " *  This is transport only: it makes no claim about the remote. */\n"
+            "export function httpTransport(base: string): Transport {\n"
+            "  const root = base.replace(/\\/$/, \"\");\n"
+            "  return {\n"
+            "    async call(method: string, args: unknown[]): Promise<unknown> {\n"
+            "      const res = await fetch(`${root}/${method}`, {\n"
+            "        method: \"POST\",\n"
+            "        headers: { \"Content-Type\": \"application/json\" },\n"
+            "        body: JSON.stringify(args),\n"
+            "      });\n"
+            "      const reply = await res.json();\n"
+            "      if (!reply || reply.ok !== true) {\n"
+            "        throw new Error(\n"
+            "          `revl remote call ${method} failed: ` +\n"
+            "          JSON.stringify(reply?.diagnostics ?? reply));\n"
+            "      }\n"
+            "      return reply.value;\n"
+            "    },\n"
+            "  };\n"
             "}")
         if type_decls:
             parts.append("\n\n".join(type_decls))

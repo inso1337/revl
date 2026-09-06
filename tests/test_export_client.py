@@ -108,6 +108,20 @@ def test_carries_the_frontier_and_makes_no_safety_claim(tmp_path):
     assert "no claim" in lowered
 
 
+def test_emits_an_http_transport_onto_the_serve_http_face(tmp_path):
+    # D-424c.6: the client ships a ready Transport onto `revl serve --http`, so
+    # the two C1 halves connect without the consumer hand-writing a fetch. It
+    # POSTs the positional args as a JSON array and reads `{ok, value}`.
+    ir = _compile(_INVENTORY, tmp_path)
+    ts = export_client(ir, lang="ts", service="Inventory")
+    assert "export function httpTransport(base: string): Transport {" in ts
+    assert "method: \"POST\"" in ts
+    assert "JSON.stringify(args)" in ts
+    assert "return reply.value;" in ts
+    # transport only — it still makes no claim about the remote
+    assert "no claim about the remote" in ts.lower()
+
+
 def test_composition_exports_every_provided_service(tmp_path):
     ir = _compile(_INVENTORY, tmp_path)
     ts = export_client(ir, lang="ts", composition=True)
