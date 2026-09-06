@@ -102,6 +102,7 @@ retain every argument it is given, which is what leaves `list_dedup`'s
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any
 
 # The lattice, low to high; a name absent from a state is NOT owned.
@@ -582,8 +583,39 @@ def _visible(summary: dict, fn_like: dict) -> dict:
     return {name: keeps for name, keeps in summary.items() if name not in shadowed}
 
 
+def _callee_names(node: Any, found: set) -> set:
+    """Every name this body calls through a plain `var` callee — exactly the
+    names `_summary_walk` may look up in a summary (`_arg_retention` reads no
+    other). Collected once so a recompute needs only these entries, not the
+    whole summary."""
+    if isinstance(node, list):
+        for item in node:
+            _callee_names(item, found)
+        return found
+    if not isinstance(node, dict):
+        return found
+    if node.get("kind") == "call":
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var":
+            name = callee.get("name")
+            if isinstance(name, str):
+                found.add(name)
+    for child in node.values():
+        _callee_names(child, found)
+    return found
+
+
 def retention_summary(functions: Any) -> dict:
-    """`{fn name: (retains param 0, retains param 1, ...)}` over one program."""
+    """`{fn name: (retains param 0, retains param 1, ...)}` over one program.
+
+    A monotone least fixpoint over a finite lattice (each entry only rises
+    False -> True), so the answer is independent of evaluation order. Rather
+    than recompute every body every round and rebuild the whole visible summary
+    each time — O(F^2) per round — this drives a WORKLIST: a body is recomputed
+    only when a callee's retention actually changed, and each recompute reads a
+    SHADOW-VIEW patched onto a copy of just that body's callee summaries. The
+    least fixpoint reached is byte-identical to the round-based one.
+    """
     bodies: dict = {}
     for fn in functions or []:
         if not isinstance(fn, dict):
@@ -594,30 +626,43 @@ def retention_summary(functions: Any) -> dict:
                 isinstance(p, str) for p in params):
             bodies[name] = (fn.get("body"), params)
     summary = {name: (False,) * len(params) for name, (_, params) in bodies.items()}
-    # each round can only turn a False into a True, and there are finitely many
-    shadows = {name: _bound_names(body, {p for p in params})
-               for name, (body, params) in bodies.items()}
-    for _ in range(sum(len(p) for _, p in bodies.values()) + 2):
-        changed = False
-        visible = {
-            fname: {k: v for k, v in summary.items() if k not in shadowed}
-            for fname, shadowed in shadows.items()
-        }
-        for name, (body, params) in bodies.items():
-            state = {param: _FRESH for param in params}
-            _summary_walk(body, state, visible[name])
-            keeps = tuple(
-                held or param not in state
-                for held, param in zip(summary[name], params))
-            if keeps != summary[name]:
-                summary[name] = keeps
-                changed = True
-        if not changed:
-            return summary
-    # unreachable: the chain is bounded by the number of parameters. Fall back
-    # to "everything retains", which is the pre-summary behaviour.
-    return {name: (True,) * len(params)  # pragma: no cover
-            for name, (_, params) in bodies.items()}
+    # The callee names each body may look up, minus anything it binds (a local
+    # that shadows a module `fn` is not that `fn`, exactly as `visible` dropped
+    # the shadowed keys). Intersected with the module fns, these are the summary
+    # entries a recompute of this body actually depends on.
+    fn_names = set(bodies)
+    depends: dict = {}
+    callers: dict = {name: set() for name in bodies}
+    for name, (body, params) in bodies.items():
+        shadowed = _bound_names(body, {p for p in params})
+        deps = (_callee_names(body, set()) & fn_names) - shadowed
+        depends[name] = deps
+        for dep in deps:
+            callers[dep].add(name)
+    # Every body starts on the worklist; a body re-enters only when a callee it
+    # depends on gains retention. Finitely many False -> True flips, so it drains.
+    worklist = deque(bodies)
+    queued = set(bodies)
+    while worklist:
+        name = worklist.popleft()
+        queued.discard(name)
+        body, params = bodies[name]
+        # the shadow-view: a copy holding just this body's dependencies' current
+        # retention. Every other lookup misses and defaults to "retains", which
+        # is what the full visible summary did for a non-fn or shadowed callee.
+        visible = {dep: summary[dep] for dep in depends[name]}
+        state = {param: _FRESH for param in params}
+        _summary_walk(body, state, visible)
+        keeps = tuple(
+            held or param not in state
+            for held, param in zip(summary[name], params))
+        if keeps != summary[name]:
+            summary[name] = keeps
+            for caller in callers[name]:
+                if caller not in queued:
+                    queued.add(caller)
+                    worklist.append(caller)
+    return summary
 
 
 # -------------------------------------------------------------------- entry
