@@ -4,9 +4,10 @@ A LAYER is a patch over a composition's [row table](composition-rows.md). It
 says what to change, not what the result is: four operations over rows that have
 names, checked before anything compiles.
 
-This is roadmap item 426, slice S2, and the design note is
-[design/426-composition-layers.md](design/426-composition-layers.md) §2 and §3.
-Slice S1 built the object a layer patches; this slice builds the patch.
+This is roadmap item 426, slices S2 and S3, and the design note is
+[design/426-composition-layers.md](design/426-composition-layers.md) §2, §3 and
+§5. Slice S1 built the object a layer patches; S2 builds the patch (the fold);
+S3 admits the resolved delta incrementally, below.
 
 The property worth stating first, because it is the reason the shape is what it
 is: **no provider is ever chosen by precedence.** Two third-party layers that
@@ -253,11 +254,47 @@ Every input is an ordered list in a file. Nothing here depends on filesystem
 iteration order, directory listing order, wall-clock time, or fetch completion
 order.
 
+## Incremental admission (S3)
+
+A composition with declared layers is a DELTA over an already-admitted base: the
+layers add, replace and remove rows. `revl composition FILE --admit` admits that
+delta INCREMENTALLY by default — it compiles the base once, then admits only the
+changed and withdrawn rows INTO that running manifest (`admit_into` over the
+resolved delta). The cost of the operator's decision is one compile of the
+patched rows, not of the whole composition.
+
+- an **add** row and a **replace** row are compiled;
+- a **remove**, and a **replace** that changes the component's name, withdraw the
+  old component through the `replacing` set (an in-place swap under the same name
+  is withdrawn implicitly);
+- a **configure**-only patch changes no wiring and no component, so it compiles
+  nothing new — its value lands in the row table, never at the gate.
+
+`_link` still spans the union of the ambient manifest and the delta, so the
+verdict and the resulting manifest are the ones a whole-composition compile
+reaches for the same final composition. A cross-row `requires` is satisfied by
+the ambient base without recompiling the provider. The load order's *sequence* is
+free to differ for independent components — full lists them in declaration order,
+incremental appends the delta after the ambient base — but every dependency edge,
+the component set and each component's wiring are identical.
+
+```bash
+revl composition base.rvl --admit         # incremental over the layer delta
+revl composition base.rvl --admit --full  # every row compiled, same verdict
+```
+
+`--full` forces whole-composition admission. It is the escape hatch for a
+future cross-row rule that a per-row admission cannot honour (design §5.1, I1),
+and it is the base line the incremental verdict is checked against.
+
+Activation is unchanged and stays whole-generation: item 426 ships incremental
+ADMISSION and inherits whole-generation ACTIVATION. Per-key re-resolution plus a
+partial dispose in dependency order is a separate project (design §5.2).
+
 ## What is not here yet
 
 | next | what it adds | what it waits on |
 |---|---|---|
-| incremental admission | admitting the resolved delta through `admit_into` with a `replacing` withdrawal set, so the cost is one compile of the patched rows | this slice only |
 | confinement | non-first-party rows compiled under the untrusted-author profile, and the per-root profile split in `compile_files` | roadmap 425 F1's decision |
 | the authority panel | crossing tokens re-keyed by row label, a `config:` token carrying a value digest, a fail-closed headline, a printed blind-spots block | confinement, and roadmap 428 F3 |
 | distribution | a layer is a truc, the `[trucs]` origin namespace becomes real, the pin becomes mandatory | roadmap 428 F3 |
