@@ -1,0 +1,42 @@
+// item 437(f): a `for` iterable that is DEAD after the loop MOVES instead of
+// cloning. `for x of v` consumes `v`; the emitter used to clone `v` whenever the
+// name was referenced more than once ANYWHERE in the body, which copied the
+// whole Vec -- every String field included -- only to drop it, when `v` was
+// built up before the loop and read nowhere after. The move is byte-for-byte the
+// shape a rust developer writes, and it is also what selfhost/emit_rust.rvl has
+// always emitted (it never cloned a for-iterable), so before this optimisation
+// the reference CLONED here and diverged from the self-host port with no fixture
+// to catch it -- the item-429 trap. This fixture closes it.
+//
+// Everything here stays in the covered subset: no stdlib `builtin`/`len` node,
+// which selfhost/emit_rust.rvl does not emit. The reused-BUT-LIVE case (an
+// iterable read again after the loop, which MUST still clone on the reference
+// tier) cannot live in a byte-agreement fixture, because the self-host port does
+// not clone at all; it is pinned in backends/rust/test_emit_rust.py instead.
+
+// `xs` is read once before the loop (the `==`, which borrows on both tiers) and
+// then consumed by the loop: dead after, so the loop moves it.
+fn walk_after_eq(xs: List[Int], ys: List[Int]) -> Int {
+  var n = 0
+  if (xs == ys) { n = 1 }
+  for (v of xs) { n = n + v }
+  return n
+}
+
+// Two reads strictly before the loop (both `==`, both borrow) still leave `xs`
+// dead at the loop, so it still moves.
+fn walk_after_two_reads(xs: List[Int], ys: List[Int], zs: List[Int]) -> Int {
+  var n = 0
+  if (xs == ys) { n = 1 }
+  if (xs == zs) { n = 2 }
+  for (v of xs) { n = n + v }
+  return n
+}
+
+// The plain single-use iterable: already a move before this item, still a move.
+// Pins that the new liveness path did not perturb the common case.
+fn walk_once(xs: List[Int]) -> Int {
+  var n = 0
+  for (v of xs) { n = n + v }
+  return n
+}
