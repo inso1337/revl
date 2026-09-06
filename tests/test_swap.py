@@ -1272,3 +1272,117 @@ def test_network_seam_is_sanctioned_by_the_receivers_own_mtls_identity(tmp_path)
     ok, reason = _pr._boot_wiring_decision([src], running, "cache", stripped, anchor)
     assert ok is False
     assert reason and "no complete mTLS material" in reason
+
+
+# ---------------------------------------------------------------------------
+# item 337 seam identity: the seam carries the gate SURFACE that admitted the
+# crossing (`gate_version()`), and the receiver compares it against its own
+# before it trusts a re-admission (docs/design/337-...md, "What identity a seam
+# carries"). A crossing whose declared gate `api` differs from the receiver's
+# is refused fail-closed, with the frontier named so the skew is attributable;
+# a matching or absent surface changes no verdict. On a homogeneous py fleet
+# both ends share one install, so this is a strict no-op — which is why the
+# refusal below has to construct the skew by hand.
+# ---------------------------------------------------------------------------
+
+
+def _receiver_gate_version() -> dict:
+    from revl import gate  # noqa: PLC0415
+    return gate.gate_version()
+
+
+def test_boot_wiring_matching_gate_surface_is_admitted_and_absent_is_tolerated(tmp_path):
+    """Verdict-invariance: a proxy that declares the receiver's OWN gate surface
+    is admitted exactly as one that declares none (the homogeneous-fleet case,
+    and every entry written before the field existed). The selector, binding,
+    address and re-admission checks decide, and the surface check waves both
+    through."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
+    base = {"socket": str(plc / "provider.sock"), "methods": ["get", "put"],
+            "service": "Cache", "component": "MemCache", "backend": "rust"}
+
+    absent = dict(base)
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", absent, anchor)
+    assert ok is True and reason is None
+
+    matching = {**base, "gate_version": _receiver_gate_version()}
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", matching, anchor)
+    assert ok is True and reason is None
+
+
+def test_boot_wiring_refused_when_the_declared_gate_surface_is_incompatible(tmp_path):
+    """A provider admitted by a gate whose `api` this receiver does not share is
+    refused BEFORE binding/address/admission: two ends that do not cover the same
+    surface cannot trust each other's agreement. The refusal names both frontiers
+    (attributable skew), and it blocks the wiring rather than logging it."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
+    mine = _receiver_gate_version()
+    skewed = {"api": mine["api"] + "-other", "language": mine["language"],
+              "frontier": "some-other-tier:frontier"}
+    info = {"socket": str(plc / "provider.sock"), "methods": ["get", "put"],
+            "service": "Cache", "component": "MemCache", "backend": "rust",
+            "gate_version": skewed}
+
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", info, anchor)
+    assert ok is False
+    assert reason and "gate-version skew" in reason
+    assert "some-other-tier:frontier" in reason and mine["frontier"] in reason
+
+    wired = []
+
+    async def wire():
+        wired.append(info["socket"])
+
+    accepted = _run(_pr._apply_boot_wiring("cache", info, [src], running, wire,
+                                           anchor=anchor))
+    assert accepted is False
+    assert wired == []
+
+
+def test_boot_wiring_refused_when_the_declared_gate_surface_is_unreadable(tmp_path):
+    """A declared-but-malformed surface is a broken declaration, not an absence,
+    and fails closed."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
+    info = {"socket": str(plc / "provider.sock"), "methods": ["get", "put"],
+            "service": "Cache", "component": "MemCache", "backend": "rust",
+            "gate_version": "not-a-surface"}
+
+    ok, reason = _pr._boot_wiring_decision([src], running, "cache", info, anchor)
+    assert ok is False
+    assert reason and "cannot read" in reason and "gate-version skew" in reason
+
+
+def test_repoint_refused_when_the_declared_gate_surface_is_incompatible(tmp_path):
+    """The same discipline on the repoint seam: a successor admitted by a foreign
+    gate surface is refused and the proxy keeps serving its current target (no
+    blip), while the receiver's own surface (or none) re-points as before."""
+    src = _write(tmp_path, "app.rvl", _CACHE_RVL)
+    running = compile_files([src])
+    plc, anchor = _seam_dir(tmp_path)
+    successor = str(plc / "cache-succ.sock")
+    mine = _receiver_gate_version()
+
+    skewed = {"op": "repoint", "key": "cache", "socket": successor,
+              "component": "MemCache", "backend": "rust",
+              "gate_version": {"api": mine["api"] + "-other",
+                               "frontier": "some-other-tier:frontier"}}
+    ok, reason = _pr._repoint_decision([src], running, skewed, anchor)
+    assert ok is False
+    assert reason and "gate-version skew" in reason
+
+    stub = _StubClient(target=str(plc / "orig.sock"))
+    accepted = _pr._apply_repoint(skewed, {"cache": stub}, [src], running, anchor=anchor)
+    assert accepted is False
+    assert stub.repoints == [] and stub.target == str(plc / "orig.sock")
+
+    # the matching-surface command still re-points, so the guard is not a blanket
+    # refusal of every gate_version-carrying repoint
+    faithful = {**skewed, "gate_version": mine}
+    ok, reason = _pr._repoint_decision([src], running, faithful, anchor)
+    assert ok is True and reason is None

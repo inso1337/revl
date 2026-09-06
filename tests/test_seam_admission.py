@@ -768,6 +768,29 @@ def test_a_declared_peer_must_be_a_declared_operator(tmp_path, monkeypatch, caps
     assert "not a declared operator" in err
 
 
+def test_the_conductor_stamps_the_gate_surface_onto_a_seam_2_proxy(tmp_path, monkeypatch):
+    """item 337 seam identity, the CARRY half: the conductor stamps the gate
+    surface that admitted the crossing (`gate.gate_version()`) onto every
+    Seam-2-eligible proxy, so the receiving process can compare it against its
+    own before trusting a re-admission. The consumer's `cache` proxy is a local
+    UDS seam this composition provides, so it carries the surface next to its
+    `component`/`backend` selector; a genuine cross-composition (Seam 3) proxy
+    would not, and there is none here."""
+    from revl import gate  # noqa: PLC0415
+    local = """
+[processes.provider]
+components = ["MemCache"]
+
+[processes.consumer]
+components = ["Consumer"]
+"""
+    rc, procs = _conduct(tmp_path, monkeypatch, local)
+    assert rc == 0, rc
+    proxy = procs["consumer"].spec["proxies"]["cache"]
+    assert proxy["gate_version"] == gate.gate_version()
+    assert proxy["gate_version"]["api"] == gate.GATE_API_VERSION
+
+
 def test_a_local_uds_seam_still_reports_sealed(tmp_path, monkeypatch, capsys):
     """The unchanged half: a py->py UDS seam still gets the correlation guard,
     and the report names the level it achieved rather than only its absence."""
