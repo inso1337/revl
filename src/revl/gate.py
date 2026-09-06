@@ -413,15 +413,26 @@ class ProposeResult:
     * `admitted` True, `swapped` True — the swap took: gen N+1 is live, `keys`
       are what it ACTUALLY provides (the live `providedKeys`, not the candidate's
       declarations — a declared key with no live provider is never reported), and
-      `state` is the resulting session state."""
+      `state` is the resulting session state. `migration` is the live-state
+      reconciliation the swap carried across (roadmap item 334, "hot-swap with
+      live instances"): when gen N had spawned template instances or a provider
+      that declared a `handoff`, their state is captured before teardown and
+      re-seated onto gen N+1, and this names what moved (per template/provider:
+      the instance count and the resource count actually carried). `None` when
+      the swap was stateless (nothing spawned, no hand-off) — the byte-identical
+      case. A candidate whose successor CANNOT hold gen N's live state (a dropped
+      or retyped resource) does not reach this shape: the state-compat gate
+      rejects it and the swap reverts to gen N (the `SWAP_REVERTED` shape above),
+      because silently dropping the state would be residue."""
 
     __slots__ = ("admitted", "swapped", "reverted", "code", "message", "keys",
-                 "state")
+                 "state", "migration")
 
     def __init__(self, admitted: bool, *, swapped: bool = False,
                  reverted: bool = False, code: str | None = None,
                  message: str | None = None, keys: tuple[str, ...] = (),
-                 state: dict | None = None) -> None:
+                 state: dict | None = None,
+                 migration: dict | None = None) -> None:
         self.admitted = bool(admitted)
         self.swapped = bool(swapped)
         self.reverted = bool(reverted)
@@ -429,11 +440,13 @@ class ProposeResult:
         self.message = message
         self.keys = tuple(keys)
         self.state = state
+        self.migration = migration
 
     def as_dict(self) -> dict:
         return {"admitted": self.admitted, "swapped": self.swapped,
                 "reverted": self.reverted, "code": self.code,
-                "message": self.message, "keys": list(self.keys)}
+                "message": self.message, "keys": list(self.keys),
+                "migration": self.migration}
 
 
 # The service names that reach the decider — the admit/swap/owner-state control
@@ -774,7 +787,26 @@ class Gate:
         # a refusal-shaped condition dressed as an admission. Reading the single
         # live source means the report and the health gate cannot disagree.
         keys = tuple(state.get("providedKeys") or ())
-        return ProposeResult(True, swapped=True, keys=keys, state=state)
+        # item 334 (live-instance/provider-state migration across a proposed
+        # swap): surface what the generational swap carried across as a first-
+        # class field, so the loop reads the reconciliation without digging into
+        # `state`. `Session.swap` reconciles two live layers the static swap
+        # never saw — spawned template instances (`state["migration"]`, item 10)
+        # and a provider that declared a `handoff` (`state["handoff"]`, item 53)
+        # — capturing each before teardown and re-seating it onto the successor.
+        # `None` for a stateless swap (nothing spawned, no hand-off), the
+        # byte-identical case that needs no reconciliation.
+        templates = (state.get("migration") or {}).get("templates")
+        handoff = state.get("handoff")
+        migration = None
+        if templates or handoff:
+            migration = {}
+            if templates:
+                migration["templates"] = templates
+            if handoff:
+                migration["handoff"] = handoff
+        return ProposeResult(True, swapped=True, keys=keys, state=state,
+                             migration=migration)
 
     def _compile_candidate_composition(self, source: str,
                                        providers: Mapping[str, str] | None
