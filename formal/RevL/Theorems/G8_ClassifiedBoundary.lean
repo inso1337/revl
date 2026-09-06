@@ -254,4 +254,31 @@ theorem witness_surface_traces_to_its_declaration :
     rw [surface_of_heads heads_pureWrappedCrossing]; decide
   simp [bodySurface, s5]
 
+/-! ## The oracle's S8 row is mutation-sensitive (issue 276)
+
+The differential harness exports an `S8` boundary-surface row for every
+reconstructed statement and compares the Lean `stmtSurface` against an
+independent Python fold (`formal/harness/diff_corpus.py`). A row that was
+empty on every statement — or non-empty on every statement — would agree
+vacuously, so the row's ratchet demands both. This is the model side: the
+surface turns on whether the wrapping `fn` reaches the crossing. -/
+
+/-- The wrapping fn with the emission removed — the shipped-side perturbation
+the S8 row's coverage names. -/
+def auditLogClean : FnDecl := ⟨"audit_log", []⟩
+
+def witProgClean : Prog := ⟨[memRestore, dbInsert, rowInsert], [auditLogClean]⟩
+
+/-- **The S8 row flips under perturbation.** A `pure` statement reaching the
+crossing through a `fn` has a non-empty surface exactly while the `fn` reaches
+the emission; the surface goes empty the moment it does not. So a non-empty
+`S8 surface=db_insert` is a claim about the reach fold, and the differential
+would catch a Python fold that lost the wrapped crossing. -/
+theorem g8_row_not_vacuous :
+    stmtSurface witProg 3 pureWrappedCrossing = ["db_insert"] ∧
+    stmtSurface witProgClean 3 pureWrappedCrossing = [] := by
+  refine ⟨?_, ?_⟩
+  · rw [surface_of_heads heads_pureWrappedCrossing]; decide
+  · rw [surface_of_heads heads_pureWrappedCrossing]; decide
+
 end RevL.G8Classified

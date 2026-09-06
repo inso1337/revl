@@ -339,4 +339,32 @@ theorem clean_inverse_run_is_silent :
   intro c hr
   exact clean_inverse_run_logs_nothing (by decide) [] [] hr
 
+/-! ## The oracle's U5 row is mutation-sensitive (issue 276)
+
+The differential harness exports a `U5` teardown-registration row for every
+effect statement and compares the Lean fold against an independent Python
+fold (`formal/harness/diff_corpus.py`, `examples/rejections/g5_undo_fn_emission.rvl`).
+A row that scored `0` on every corpus effect would agree vacuously, so the
+row's non-vacuity ratchet demands a caught violation: an effect whose
+teardown registers a crossing. This is the model side of that demand —
+`registrations` is not a constant, it turns on the exact perturbation the
+`prog_coverage` ratchet exercises. -/
+
+/-- The wrapping fn with the emission removed from its body — the shipped-side
+perturbation the row's coverage names ("the wrapping fn stops calling the
+emission"). -/
+def auditLogClean : FnDecl := ⟨"audit_log", []⟩
+
+def wrappedProgClean : Prog := ⟨[memRestore, dbInsert, wrappedInsert], [auditLogClean]⟩
+
+/-- **The U5 row flips under perturbation.** The `fn`-wrapped teardown
+registers a crossing while `audit_log` reaches `db_insert`, and registers
+nothing the moment it does not. So `U5 teardown=1` is a claim about the reach
+fold, not a structural constant — the differential would catch a Python fold
+that stopped seeing the wrapped crossing, and catch a Lean fold that invented
+one. -/
+theorem g5_row_not_vacuous :
+    registrations wrappedProg 3 wrappedUndo = 1 ∧
+    registrations wrappedProgClean 3 wrappedUndo = 0 := by decide
+
 end RevL.G5Classified

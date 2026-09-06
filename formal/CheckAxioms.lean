@@ -250,6 +250,7 @@ import RevL
 #print axioms RevL.G5Classified.fold_must_run_to_stability
 #print axioms RevL.G5Classified.sneaky_inverse_run_emits
 #print axioms RevL.G5Classified.clean_inverse_run_is_silent
+#print axioms RevL.G5Classified.g5_row_not_vacuous
 
 -- Item 418 step 4 — G8 computed from the classification instead of from
 -- `boundaryOf`'s per-constructor cases: completeness and soundness kept,
@@ -263,6 +264,7 @@ import RevL
 #print axioms RevL.G8Classified.raw_leak_is_on_the_surface
 #print axioms RevL.G8Classified.g8_surface_is_not_universal
 #print axioms RevL.G8Classified.witness_surface_traces_to_its_declaration
+#print axioms RevL.G8Classified.g8_row_not_vacuous
 
 -- Item 418 step 8: the non-vacuity witnesses added so that every
 -- registered theorem has a row in formal/scripts/nonvacuity.tsv naming
