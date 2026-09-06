@@ -11,7 +11,9 @@ package stream130
 
 import (
 	stdctx "context"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -514,5 +516,175 @@ func TestSubscribeAfterProviderClose_TerminatesImmediately(t *testing.T) {
 	sub.Close()
 	if n := StreamPending(); n != 0 {
 		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// -------------------------------------------------------------------------
+// Slice 4 — `every o in sub { … }` iteration on the blocking tier. The
+// emitted loop delivers each item to the effectful body, a `Closed` terminal
+// ends the loop WITHOUT entering the body, and unloading the owner while parked
+// closes the subscription. This drives the EMITTED Iterate component (the loop
+// is codegen inside LoadIterate, not a runtime primitive), so it is the proof
+// the for-loop the emitter now renders actually runs.
+// -------------------------------------------------------------------------
+
+// collectSink is a hand-written impl of the emitted Sink service interface —
+// the observable the iteration body emits into (`every o in sub { emit
+// sink.write(o) }`), so a delivered item is a recorded write.
+type collectSink struct {
+	mu  sync.Mutex
+	got []string
+}
+
+func (s *collectSink) Write(v string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.got = append(s.got, v)
+}
+
+func (s *collectSink) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.got...)
+}
+
+// sinkProvider provides the emitted `_keySink` so the Iterate consumer's Inject
+// gate resolves and its activation runs — mirroring how a provide/inject graph
+// wires a required service (reference_test.go's TestRef_ReactiveProvideInject).
+func sinkProvider(impl *collectSink) stc.Component {
+	return stc.Component{
+		Name:    "SinkProvider",
+		Provide: []stc.Key{_keySink},
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
+			if _, err := ctx.Provide(_keySink, Sink(impl)); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		},
+	}
+}
+
+func TestEmitted_Iteration_DeliversEachItemThenEndsOnTheClosedTerminal(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	sink := &collectSink{}
+	provider := root.Load(sinkProvider(sink))
+	if err := provider.Ready(bg()); err != nil {
+		t.Fatalf("SinkProvider: %v", err)
+	}
+
+	type loaded struct {
+		f   *stc.Fiber
+		err error
+	}
+	done := make(chan loaded, 1)
+	go func() {
+		f := LoadIterate(root)
+		done <- loaded{f, f.Ready(bg())}
+	}()
+
+	// The loop parks in `next` on its own source.
+	waitFor(t, "the iteration to subscribe", func() bool {
+		return StreamLiveSubscriptions() == 1
+	})
+	providers := StreamProviders()
+	if len(providers) != 1 {
+		t.Fatalf("providers = %d, want 1 (the iteration's source)", len(providers))
+	}
+	src := providers[0]
+
+	// Two items, then an orderly close. Each item runs the body once; the
+	// `Closed` terminal ends the loop and is never delivered as an item.
+	src.Emit("a")
+	src.Emit("b")
+	src.Close()
+
+	var got loaded
+	select {
+	case got = <-done:
+		if got.err != nil {
+			t.Fatalf("the iteration activation failed: %v", got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the Closed terminal never ended the loop")
+	}
+
+	if g := sink.snapshot(); !reflect.DeepEqual(g, []string{"a", "b"}) {
+		t.Fatalf("delivered items = %v, want [a b] (the Closed terminal must "+
+			"not enter the body)", g)
+	}
+
+	got.f.Dispose()
+	if err := got.f.Gone(bg()); err != nil {
+		t.Fatalf("Gone: %v", err)
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("stream residue after unload = %d, want 0", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources after unload = %d, want 0 (R1)", n)
+	}
+}
+
+// The core guarantee for the loop: unloading the owner while the iteration is
+// PARKED in `next` closes the subscription — teardown trips the cancel channel,
+// the parked `next` resolves as `Closed`, the loop exits, and the bracket
+// inverse runs on the same LIFO stack, all without an item ever arriving.
+func TestEmitted_Iteration_UnloadWhileParkedClosesTheStream(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	sink := &collectSink{}
+	provider := root.Load(sinkProvider(sink))
+	if err := provider.Ready(bg()); err != nil {
+		t.Fatalf("SinkProvider: %v", err)
+	}
+
+	type loaded struct {
+		f   *stc.Fiber
+		err error
+	}
+	done := make(chan loaded, 1)
+	go func() {
+		f := LoadIterate(root)
+		done <- loaded{f, f.Ready(bg())}
+	}()
+	waitFor(t, "the iteration to park in next", func() bool {
+		return StreamLiveSubscriptions() == 1
+	})
+
+	// The provider never emits and never terminates: the loop is parked in the
+	// cancel-channel select. The orderly close of the LAST source ends it.
+	StreamProviders()[0].Close()
+
+	var got loaded
+	select {
+	case got = <-done:
+		if got.err != nil {
+			t.Fatalf("an orderly source close must end the loop cleanly: %v", got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the source close never unparked the loop")
+	}
+	if g := sink.snapshot(); len(g) != 0 {
+		t.Fatalf("the body ran on a terminal: delivered %v, want none", g)
+	}
+
+	got.f.Dispose()
+	if err := got.f.Gone(bg()); err != nil {
+		t.Fatalf("Gone: %v", err)
+	}
+	marks := HostMarks()
+	if marksIndex(marks, "stream.close") < 0 {
+		t.Fatalf("unloading the iteration did not close the subscription: %v", marks)
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("stream residue after unload = %d, want 0", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources after unload = %d, want 0 (R1)", n)
 	}
 }
