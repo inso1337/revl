@@ -1034,6 +1034,41 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
               f"{' -> '.join(document['manifest']['loadOrder'])}")
 
 
+def _run_layer_admit(args) -> int:
+    """`revl layer admit FILE [--full]` — admit the folded composition
+    incrementally (roadmap item 426, slice S3).
+
+    Only the delta the layers introduce is recompiled, against the base as the
+    running manifest; `--full` re-admits the whole table, which is the oracle
+    the incremental path is byte-identical to (exit test 10). The resolver never
+    calls the gate (§3.3): `_link` runs G2/G3 over the union and decides
+    admission, so a bug on this path can only over-refuse."""
+    from .composition import admit_layers  # noqa: PLC0415
+
+    try:
+        document = admit_layers(args.file, args.root,
+                                _parse_overlay(args.overrides), full=args.full)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(document, indent=2))
+        return 0
+
+    record = document.get("admission", {})
+    manifest = document.get("manifest", {})
+    print(f"admitted ({record.get('mode', 'full')}): "
+          + " -> ".join(manifest.get("loadOrder") or []))
+    if record.get("recompiled"):
+        print("  recompiled:", ", ".join(record["recompiled"]))
+    if record.get("carried"):
+        print("  carried:   ", ", ".join(record["carried"]))
+    if record.get("withdrawn"):
+        print("  withdrawn: ", ", ".join(record["withdrawn"]))
+    return 0
+
+
 def _run_layer(args) -> int:
     """`revl layer check FILE` — fold a composition's declared layers into its
     row table (roadmap item 426, slice S2).
@@ -1042,6 +1077,9 @@ def _run_layer(args) -> int:
     component body lowered. The fold itself never calls the gate (§3.3), so a
     bug here can only over-refuse; `_link` still decides admission."""
     from .composition import resolve_file  # noqa: PLC0415
+
+    if getattr(args, "layer_command", None) == "admit":
+        return _run_layer_admit(args)
 
     try:
         table = resolve_file(args.file, args.root, _parse_overlay(args.overrides))

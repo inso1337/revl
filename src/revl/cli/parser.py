@@ -168,6 +168,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--set", action="append", default=[], metavar="@ROW.FIELD=VALUE",
         dest="overrides", help="the invocation overlay (see `revl composition`)")
 
+    # item 426 S3: incremental admission of the fold's delta.
+    layer_admit = layer_sub.add_parser(
+        "admit",
+        help="ADMIT the folded composition incrementally: recompile only the "
+             "delta the layers introduce against the base as the running "
+             "manifest, and print the resulting load order (426 S3)")
+    layer_admit.add_argument(
+        "file", help="the .rvl document declaring the base composition")
+    layer_admit.add_argument(
+        "--full", action="store_true",
+        help="re-admit the WHOLE folded table instead of just the delta — the "
+             "oracle the incremental path is identical to (426 exit test 10)")
+    layer_admit.add_argument(
+        "--json", action="store_true",
+        help="the admitted IR document as JSON (folded rows, manifest, and the "
+             "`admission` record of what was recompiled, carried and withdrawn)")
+    layer_admit.add_argument(
+        "--root", default=None, metavar="DIR",
+        help="the project root provenance and origins are recorded against")
+    layer_admit.add_argument(
+        "--set", action="append", default=[], metavar="@ROW.FIELD=VALUE",
+        dest="overrides", help="the invocation overlay (see `revl composition`)")
+
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")

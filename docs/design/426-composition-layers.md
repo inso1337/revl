@@ -34,7 +34,19 @@ they land:
   lives and is never minted by a document (§1.2), so writing it on the head
   would be the one place a document names its own origin.
 
-S3 through S6 are still design only, and §11 says what each waits on.
+Slice S3 (§11), incremental admission, is BUILT: the base composition is the
+running manifest and only the fold's delta (added and replaced rows) is
+recompiled against it through `compile_files(manifest=, replacing=)`, with every
+untouched row carried from the manifest; a `configure`-only patch recompiles
+nothing; `--full` is the whole-table oracle the incremental verdict and manifest
+are byte-identical to (exit test 10). `admit_layers` in `src/revl/composition.py`,
+`revl layer admit`, `docs/composition-layers.md`, `tests/test_composition_admit.py`.
+Activation stays whole-generation (§5.2), and the I2 cross-import group widening
+and the I3 per-row fact cache are named limits, not built. This slice leans
+entirely on the existing incremental-admission seam (§5.1, `tests/test_manifest.py:44`)
+and adds no new checker, exactly as §11 predicted.
+
+S4 through S6 are still design only, and §11 says what each waits on.
 
 **This document supersedes two earlier notes and they are both kept:**
 
@@ -1405,11 +1417,18 @@ and refusal-never-no-op (§2.4), `revl layer check` over headers only. Still no
 truc, still no distribution: layers are files in a directory. This is where the
 determinism properties are testable and it unblocks S3 and S4.
 
-**S3. Incremental admission, buildable after S2, depends on nothing new.**
+**S3. Incremental admission, buildable after S2, depends on nothing new. BUILT.**
 `admit_into` over the resolved delta (§5.1), the `replacing` withdrawal set, the
 class partition and invariants I1 through I3, `--full`. Activation stays
 whole-generation (§5.2). Evidence already exists in
-`tests/test_manifest.py:44`.
+`tests/test_manifest.py:44`. As built: `admit_layers` recompiles the structural
+delta (added and replaced rows) against the base manifest and carries every
+untouched row, a `configure`-only patch recompiles nothing, and `--full` is the
+whole-table oracle exit test 10 compares against. I1 holds through the declared
+interfaces the fold already checks; the I2 cross-import group widening and the
+I3 per-row fact cache are named as limits and left to a follow-on, since the
+resolver is off the trusted path (§3.3) and the equality-to-`--full` assertion
+guards the narrower recompile set.
 
 **S4. The confinement split, and it genuinely waits.** Decision 6 (§4) plus the
 §9.3 Part 2 per-root profile split in `compile_files`. This waits on **425 F1**,
