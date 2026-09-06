@@ -25,16 +25,20 @@ only if it parses every `examples/*.rvl` and `selfhost/*.rvl` file with zero
   List[Row]`, generics `Map[Str, Int]`, optionals `T?`, function types `(Int,
   Str) -> Bool`, and `type Id[T] = …` parameters.
 - **Functions**: `fn`, `pub fn`, `verified fn`, `fn id[T](…)` type parameters,
-  and the full pure-expression stratum — ternary, `||` / `??` / `&&`,
+  and the full pure-expression stratum — ternary, `||` / `??` / `&&`, the
+  Int32 bitwise `|` / `^` / `&` / `~` and shift `<<` / `>>` operators,
   equality/comparison/arithmetic, `!` / unary `-`, calls, `.`/`?.` member
-  access, indexing, records, lists, arrows (`x => …`, `(a: Int) => …`),
-  `match`, string / template (`` `…${expr}…` ``) / number / boolean / `null`
-  literals, and typed `hole` placeholders.
+  access, indexing, records, functional record update (`{ base | f = e }`),
+  lists, arrows (`x => …`, `(a: Int) => …`), `match`, string / template
+  (`` `…${expr}…` ``) / number / boolean / `null` literals, and typed `hole`
+  placeholders. String literals cover all three spellings — `"…"`, `'…'`, and
+  triple-quoted `"""…"""` — with the `\"` / `\'` / `\\` escapes, and number
+  literals cover the `0x` / `0b` / `0o` radices and `_` digit-group separators.
 - **Externs & host blocks**: `extern pure|acquire|emission fn … = @backend { …
   }`. The `@backend { … }` body is brace-balanced host text, consumed verbatim
   by the external scanner (`src/scanner.c`), exactly as the reference lexer does.
 - **Tests**: `test "…" { … }`, `lifecycle test "…" { load / unload / call /
-  swap / assert … }`, and `fault test "…" for C { fail at … assert … }`.
+  assert … }`, and `fault test "…" for C { fail at … assert … }`.
 
 Highlighting lives in [`queries/highlights.scm`](queries/highlights.scm):
 keywords (with a distinct `@keyword.effect` group for the effect/emission
@@ -78,10 +82,11 @@ non-exempt file produces an `ERROR` (or `MISSING`) node**:
 node check.mjs          # or: npm run check
 ```
 
-Current result: **83 / 86 files parse with zero `ERROR` nodes**, with **3 named
-exemptions**. Every file the **reference parser accepts** parses clean here —
-the exemptions are all among the files the reference itself rejects at parse
-time.
+Current result: **151 / 185 files parse with zero `ERROR` nodes**, with **3
+named exemptions**; **31 non-exempt files still `ERROR`, so the gate is
+currently RED**. The remaining errors are all a batch of larger constructs the
+grammar does not yet model — see [Not yet covered](#not-yet-covered). The
+exemptions are all among the files the reference itself rejects at parse time.
 
 `tree-sitter test` additionally runs the structural fixtures in
 [`test/corpus/`](test/corpus).
@@ -96,7 +101,7 @@ reports every one.
 | File | Reason |
 | --- | --- |
 | `examples/rejections/t19_union_type.rvl` | `type Payload = List[Row] \| Str` — revl has **no union types**; `\|` separates the *cases* of a variant (constructor names), not type applications. The grammar accepts variant cases (`Name(payload)`) but not a `\|`-separated list of type applications, so it produces an `ERROR` here — matching the reference's own refusal. |
-| `examples/rejections/v2_semicolon_separator.rvl` | revl has **no `;` statement separator** (statements are newline-separated). There is no `;` token in the grammar, so a stray `;` is an `ERROR`, matching the reference lexer's refusal. |
+| `examples/rejections/lifecycle_no_swap.rvl` | `swap C -> C2` — revl has **no `swap` statement**. `swap` is not a keyword, and the reference parser rejects the form at parse time (*"there is no `swap` statement"*) because G2 forbids two components in one document providing the same key, making a swap between them meaningless. The grammar has no `swap_statement`, so a `swap` line is an `ERROR` here, matching the reference's own refusal. |
 | `examples/rejections/v2_provide_emission_fn.rvl` | a provide-method carries **no purity modifier** — it is a plain `fn`, emission-ness is inherited from the service (G4). The reference rejects `emission fn` inside `provide` at parse time, so `provide_method` (plain `fn`) errors here too. |
 
 ### A note on the reference's other parse-time refusals
@@ -110,8 +115,6 @@ syntactically well-formed, so this grammar parses them cleanly (with zero
 - `a1_await_in_method` — `await` outside a component body (position rule).
 - `g4_missing_undo` — `effect` without `undo` (G4 pairing rule).
 - `g6_impure_statement` — a bare expression statement in a component body (G6).
-- `lifecycle_no_swap` — a `swap` statement (the grammar accepts it as a
-  lifecycle statement; the reference forbids it because G2 makes it meaningless).
 - `lifecycle_stmt_in_pure_test` — `load` in a plain (non-`lifecycle`) `test`.
 - `v2_dynamic_realm` — `realm(config.x)` with a non-literal label.
 - `v2_extern_unclassified` — `extern fn` with no `pure`/`acquire`/`emission`.
@@ -119,5 +122,38 @@ syntactically well-formed, so this grammar parses them cleanly (with zero
 - `v2_nullish_mixed_with_or` — `a ?? b || c` without parentheses.
 - `v2_optional_chain_nonoptional` — `a?.b.c` (a plain access after `?.`).
 
-Only `t19_union_type` names a construct that is genuinely absent from revl's
-context-free syntax, which is why it is the single exemption above.
+`t19_union_type` (`|`-separated type applications), `lifecycle_no_swap` (a
+`swap` statement), and `v2_provide_emission_fn` (a purity modifier on a
+provide-method) each name a construct that is genuinely absent from revl's
+context-free syntax and is rejected by the reference at parse time, which is why
+they are the three exemptions above.
+
+### Not yet covered
+
+The gate is **RED**: **31 non-exempt files still `ERROR`**, all because the
+grammar does not yet model a batch of larger constructs that the reference
+parser accepts. These are tracked and are the next work on the grammar:
+
+- **Timers** — `every 30s { … }` periodic-timer blocks
+  (`heartbeat`, `async_timer`, `lifecycle_timer`).
+- **Parameterised capabilities** — `emission[net(requests=100)]`
+  (`budget_attenuation`, `g4_spawn_widens_*`, …), where a capability token
+  carries a parenthesised argument list.
+- **`boot component`** — the `boot` component modifier (`environment_contract`).
+- **`handoff` clause** — `handoff key: T` state-contract declarations
+  (`handoff_cache`, `live_counter`).
+- **Property tests** — the `prop_test` block form (`prop_test`).
+- **Arrow refinements** — a block-bodied arrow `(x) => { … }` and a
+  return-type-annotated arrow `(x: T): R => …` (`g6_closure_mutates_capture`,
+  `t34_arrow_self_declared_async`, `t35_arrow_annotation_not_quantified`,
+  several `a1_async_*`).
+- **`@ts` type references** and **record-update / cap edge cases** noted in the
+  private review.
+
+A second group of `ERROR`ing files carries **genuinely foreign syntax** the
+reference itself rejects at parse time — `def`, `lambda`, tuples `(a, b)`,
+slices `a[1:2]`, keyword arguments `f(x=1)`, C-style / `for … in` loops, `i++`,
+the Python `a if c else b` (the `foreign_*` corpus). These are candidates for
+explicit exemptions (the reference rejects them at parse time), pending a
+per-file audit that the refusal is a parse-time one; they are left un-exempt for
+now so the count stays honest.
