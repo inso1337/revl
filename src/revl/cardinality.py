@@ -444,7 +444,7 @@ def cardinality(ir: dict) -> dict:
     # Lazy imports mirror `_boundary`/`audit_report`: cardinality is imported by
     # both `__main__` and `audit_diff`, so importing their internals at module
     # load would cycle.
-    from .__main__ import (  # noqa: PLC0415
+    from .boundary import (  # noqa: PLC0415
         _UNKNOWN_DISPATCH, _extern_reachability, _fn_call_names)
     from .emission_analysis import _calls_in, _emitting_capabilities  # noqa: PLC0415
     from .lower import _find_loop_step  # noqa: PLC0415

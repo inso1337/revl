@@ -629,7 +629,7 @@ def _summary(ir: dict) -> dict:
 def _boundary_of(ir: dict) -> dict:
     # the CLI owns the G8 walk; import lazily so the module works whether
     # revl is running as `python -m revl` or imported as a library
-    from ..__main__ import _boundary
+    from ..boundary import _boundary
 
     return _boundary(ir)
 

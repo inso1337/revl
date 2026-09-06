@@ -38,7 +38,7 @@ def audit_report(ir: dict) -> dict:
     Reuses the one authoritative boundary computation (`_boundary`) rather
     than recomputing the surface a second, divergent way.
     """
-    from .__main__ import _boundary  # noqa: PLC0415 — lazy, avoids import cycle
+    from .boundary import _boundary  # noqa: PLC0415 — lazy, avoids import cycle
 
     boundary = _boundary(ir)
     manifest = ir.get("manifest") or {}
