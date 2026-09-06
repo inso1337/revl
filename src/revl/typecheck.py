@@ -292,6 +292,31 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
         _check_type_wf(filename, line, args[0], root,
                        allow_async=False, in_fn_return=False)
         return
+    if head in ("Criterion", "Guard"):
+        # roadmap item 441 / issue #120 (L4,
+        # docs/design/458-termination-language-surface.md §2.1, §3): the two
+        # termination markers are builtin type heads with no constructor. The
+        # ONLY position that admits one is a service-operation return, where
+        # `service()` (parser) has already ERASED it to `Opt[Bool]` before this
+        # pass runs — so by the time a `Criterion`/`Guard` head reaches here it
+        # is in some OTHER position (a `let` annotation, a record field, a
+        # parameter, a nested/`List[Criterion]` argument, an arrow return, or a
+        # `Criterion[..]` application that never erased), and every one of those
+        # is refused. This is what keeps the marker honest: the type names an
+        # obligation on the provider, and nothing an agent writes can conjure the
+        # obligation onto an unchecked method or fabricate a value of the type.
+        kind = "criterion" if head == "Criterion" else "guard"
+        raise RevlError(
+            filename, line,
+            f"`{type_name}` is a termination {kind} marker, not a value type — it "
+            f"may appear ONLY as the return type of a service operation "
+            f"(`fn done() -> {head}`), where it erases to `Opt[Bool]`",
+            hint=f"a {kind} is declared on the service so every provider is held to "
+                 f"it (L1); it has no constructor, no alias and no first-class value "
+                 f"— write `Opt[Bool]` for a plain optional "
+                 f"(docs/design/458-termination-language-surface.md)",
+            code="L4", category="termination",
+        )
     arity = _GENERIC_ARITY.get(head or "")
     if arity is not None and len(args) != arity:
         example = {"Opt": "Opt[Int]", "List": "List[Int]",
