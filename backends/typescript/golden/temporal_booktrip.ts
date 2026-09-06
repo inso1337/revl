@@ -20,7 +20,7 @@ const AT_MOST_ONCE = { maximumAttempts: 1 }
 // is the remote's dedup, not a second effect. BOUNDED on purpose —
 // an unbounded forward retry never reaches the catch, so the
 // compensation phase would never run and the saga could not abort.
-const DEDUP_SAFE_RETRY = { initialInterval: "1 second", backoffCoefficient: 2, maximumInterval: "30 seconds", maximumAttempts: 5 }
+const DEDUP_SAFE_RETRY = { initialInterval: "1 second", backoffCoefficient: 2, maximumInterval: "15 seconds", maximumAttempts: 3 }
 const { flightsCancel, flightsReserve, paymentsCharge, paymentsRefund, recordResidue } = proxyActivities<typeof activities>({
   startToCloseTimeout: "1 minute",  // revl perCallMs — per-call, Temporal-honoured (HIGH 1)
   retry: AT_MOST_ONCE,
