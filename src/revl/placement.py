@@ -3922,3 +3922,5 @@ def run_placement(files, placement_path: str, once: bool = False,
         # process, so a halted placement cannot pass as a finished one.
         rc = rc or 1
     return rc
+import concurrent.futures
+def seam_latency_ms_parallel(host: str, port: int, samples: int = 5, timeout: float = 1.0) -> float | None:\n    """Parallelized version of seam_latency_ms."""\n    def measure_latency():\n        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n        sock.settimeout(timeout)\n        start = time.perf_counter()\n        try:\n            sock.connect((host, port))\n            return (time.perf_counter() - start) * 1000.0\n        except OSError:\n            return None\n        finally:\n            sock.close()\n\n    with concurrent.futures.ThreadPoolExecutor() as executor:\n        futures = [executor.submit(measure_latency) for _ in range(max(1, samples))]\n        rtts = [future.result() for future in concurrent.futures.as_completed(futures) if future.result() is not None]\n\n    if not rtts:\n        return None\n    rtts.sort()\n    return round(rtts[len(rtts) // 2], 3)
