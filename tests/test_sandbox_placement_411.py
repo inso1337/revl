@@ -175,6 +175,32 @@ def test_cell_refuses_non_default_fs_net_as_unmappable():
     assert err2 is None and ok["isolation"] == "wasm-cell"
 
 
+def test_platform_accepted_on_container_and_carried():
+    norm, err = _normalize_sandbox_table(
+        {"isolation": "container", "image": "i", "platform": "linux/arm64"})
+    assert err is None and norm["platform"] == "linux/arm64"
+
+
+def test_no_platform_normalizes_to_none():
+    norm, err = _normalize_sandbox_table({"isolation": "container", "image": "i"})
+    assert err is None and norm["platform"] is None
+
+
+def test_platform_with_an_unconfirmable_arch_refused():
+    # an arch the in-sandbox canary could not confirm by `uname -m` is refused
+    # at plan time, not trusted to the runtime.
+    norm, err = _normalize_sandbox_table(
+        {"isolation": "container", "image": "i", "platform": "linux/sparc"})
+    assert norm is None and "platform" in err
+
+
+def test_platform_refused_on_the_wasm_cell_rung():
+    # the cell is in-process: there is no container-of-an-arch to run.
+    norm, err = _normalize_sandbox_table(
+        {"isolation": "wasm-cell", "platform": "linux/arm64"})
+    assert norm is None and "wasm-cell" in err and "platform" in err
+
+
 def test_parse_need_vocabulary():
     assert _parse_need("net") == ("net", None, None)
     assert _parse_need("fs:/scratch:rw") == ("fs", "/scratch", "rw")

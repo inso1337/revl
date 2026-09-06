@@ -111,6 +111,31 @@ def test_envelope_mounts_default_to_read_only():
         ("/a", "ro"), ("/b", "rw"), ("/c", "ro")]
 
 
+# -- mixed-arch: the OCI `platform` flag and its uname confirmation ----------
+
+def test_a_declared_platform_threads_the_run_flag():
+    flags = _sb.container_flags(
+        {**_ENV_NONE, "platform": "linux/arm64"}, name="c", mounts=[])
+    assert "--platform" in flags
+    assert flags[flags.index("--platform") + 1] == "linux/arm64"
+
+
+def test_no_platform_adds_no_run_flag():
+    # the common case stays byte-identical: a placement with no `platform` gets
+    # no `--platform`, so the derived flag set is unchanged.
+    assert "--platform" not in _sb.container_flags(_ENV_NONE, name="c", mounts=[])
+
+
+def test_accepted_uname_maps_known_arches_and_rejects_the_rest():
+    assert "aarch64" in _sb.accepted_uname("linux/arm64")
+    assert _sb.accepted_uname("linux/amd64") == ("x86_64",)
+    assert _sb.accepted_uname("linux/arm/v7") == ("armv7l", "armv6l", "armv8l")
+    assert _sb.accepted_uname("linux/sparc") is None   # arch with no confirmation map
+    assert _sb.accepted_uname("arm64") is None         # missing os segment
+    assert _sb.accepted_uname("linux/ARM64") is None   # OCI strings are lowercase
+    assert _sb.accepted_uname("linux//v7") is None      # empty arch segment
+
+
 def test_only_the_container_rung_has_a_driver():
     assert _sb.resolve_driver("container") is not None
     # the other two rungs are NOT quietly treated as the rung below them
@@ -216,6 +241,37 @@ def test_net_all_confines_nothing_and_says_so():
                         env={**_ENV_NONE, "net": "all"})
     assert err is None
     assert any("nothing confined" in ln for ln in lines)
+
+
+def test_a_declared_platform_is_confirmed_by_uname_in_sandbox():
+    lines, err = _judge(_report(ARCH="aarch64"),
+                        env={**_ENV_NONE, "platform": "linux/arm64"})
+    assert err is None
+    assert any("platform linux/arm64 confirmed in-sandbox" in ln for ln in lines)
+
+
+def test_amd64_is_confirmed_by_its_own_uname():
+    lines, err = _judge(_report(ARCH="x86_64"),
+                        env={**_ENV_NONE, "platform": "linux/amd64"})
+    assert err is None
+    assert any("platform linux/amd64 confirmed" in ln for ln in lines)
+
+
+def test_a_platform_the_runtime_ran_as_host_arch_refuses():
+    # emulation absent: the manifest asked for arm64 but the boundary reports
+    # x86_64 from inside. An unconfirmed arch is a boundary that did not take,
+    # never a silent host-arch run.
+    _, err = _judge(_report(ARCH="x86_64"),
+                    env={**_ENV_NONE, "platform": "linux/arm64"})
+    assert err and "did not run under the requested architecture" in err
+    assert "linux/arm64" in err and "x86_64" in err
+
+
+def test_a_platform_with_no_arch_reading_refuses():
+    # `_report()` carries no ARCH; a missing reading cannot confirm the arch, so
+    # the boundary is refused rather than trusted.
+    _, err = _judge(_report(), env={**_ENV_NONE, "platform": "linux/arm64"})
+    assert err and "linux/arm64" in err and "unknown" in err
 
 
 # -- the placement-level refusal --------------------------------------------

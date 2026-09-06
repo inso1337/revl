@@ -86,6 +86,7 @@ _CANARY_TIMEOUT = 60.0
 # The in-sandbox boot canary. Mostly POSIX `sh` reading what the KERNEL reports
 # from inside the boundary rather than what the flags asked for:
 #
+#   ARCH=<uname -m>      the kernel's machine arch inside the boundary
 #   ROUTES=<n>            IPv4 route entries in this network namespace
 #   EGRESS=blocked:<e>    an ACTIVE outbound connect attempt's errno (net=none)
 #   ROOTFS=ro|rw          whether the root filesystem accepts a write
@@ -117,6 +118,7 @@ _EGRESS_PY = (
 )
 
 _CANARY_SH = r"""
+echo "ARCH=$(uname -m)"
 echo "ROUTES=$(tail -n +2 /proc/net/route | wc -l | tr -d ' ')"
 if touch /.revl-canary-probe 2>/dev/null; then
   echo "ROOTFS=rw"
@@ -176,6 +178,53 @@ def _tail(text: str, limit: int = 240) -> str:
 
 
 # --------------------------------------------------------------------------
+# mixed-arch: the OCI platform string, and what `uname -m` must report under it
+# --------------------------------------------------------------------------
+#
+# The `container` rung is an arch bridge (411 design, "Mixed-arch
+# compositions"): a component placed with `platform = "linux/arm64"` runs in a
+# container OF THAT ARCH — the runtime supplies emulation (qemu/binfmt, Rosetta)
+# or a native node — and composes with the host-arch placement over the
+# arch-agnostic seam. revl REQUESTS the platform (`--platform`) and then, in the
+# same "confirm from inside, never trust the flag" discipline as the rest of the
+# canary, CONFIRMS the boundary actually came up under that arch by reading
+# `uname -m` from inside it. A platform the runtime silently ran as the host
+# arch (emulation absent) is refused, not accepted: an unconfirmed arch is a
+# boundary that did not take, like any other.
+#
+# The map is OCI arch -> the `uname -m` value(s) a correct kernel reports for it.
+# A `platform` whose arch is not in this map is refused where it ENTERS
+# (`placement._normalize_sandbox_table`), so the driver never reaches an arch it
+# could not have confirmed.
+_OCI_ARCH_UNAME: dict[str, tuple[str, ...]] = {
+    "amd64": ("x86_64",),
+    "386": ("i686", "i386"),
+    "arm64": ("aarch64", "arm64"),
+    "arm": ("armv7l", "armv6l", "armv8l"),
+    "ppc64le": ("ppc64le",),
+    "s390x": ("s390x",),
+    "riscv64": ("riscv64",),
+}
+
+
+def accepted_uname(platform: str) -> tuple[str, ...] | None:
+    """The `uname -m` values a correct kernel reports for an OCI platform string
+    (`os/arch[/variant]`), or None when the string is malformed or names an arch
+    this driver has no confirmation mapping for.
+
+    None is the signal `placement` refuses on: a platform the canary could not
+    verify from inside is not accepted at plan time, so a declared arch is never
+    a claim the runtime is merely trusted to have honored."""
+    parts = platform.split("/")
+    if len(parts) not in (2, 3) or not all(parts):
+        return None
+    # os/arch/variant are lowercase alphanumeric tokens (linux, arm64, v7)
+    if not all((seg.isalnum() and seg.islower()) or seg.isdigit() for seg in parts):
+        return None
+    return _OCI_ARCH_UNAME.get(parts[1])
+
+
+# --------------------------------------------------------------------------
 # derived confinement: envelope -> container flags
 # --------------------------------------------------------------------------
 
@@ -207,6 +256,13 @@ def container_flags(env: dict, *, name: str, mounts: list[tuple[str, str]],
         "--pids-limit", "512",
         "--label", "revl.sandbox=411",
     ]
+    platform = env.get("platform")
+    if platform:
+        # the mixed-arch bridge: run the container OF the declared arch and let
+        # the runtime supply emulation. The canary confirms the arch actually
+        # took from inside (`_evaluate`), so a runtime that ignored the flag is
+        # a refusal, not a silent host-arch run.
+        flags += ["--platform", platform]
     if env.get("net", "none") == "none":
         flags += ["--network=none"]
     uid_gid = _uid_gid()
@@ -426,6 +482,7 @@ class ContainerDriver:
             "runtime": f"{Path(docker).name} server {server}",
             "enforced": True,
             "image": image,
+            "platform": env.get("platform"),
             "workdir": cwd,
             "mounts": final,
             "host_mounts": host_mounts,
@@ -468,12 +525,24 @@ class ContainerDriver:
                 + [image, "sh", "-c", _canary_script(env.get("net", "none"))])
         rc, out, err = _run(argv, timeout=_CANARY_TIMEOUT)
         if rc != 0 or "CANARY=done" not in out:
+            # the canary IS the platform preflight: it runs with the same
+            # `--platform` the launch would, so a host that cannot run the
+            # requested arch fails HERE, at plan time, not as a dead child. Name
+            # the platform as the likely cause rather than leaving a bare runtime
+            # error (411 design: "one diagnostic, not a spawn failure").
+            hint = ""
+            if env.get("platform"):
+                hint = (f" This process requests platform {env['platform']!r}; if "
+                        f"this host cannot run that architecture (no qemu/binfmt "
+                        f"or Rosetta emulation, and no native node), that is the "
+                        f"likely cause — install the platform's emulation, or "
+                        f"place the process on a host of its arch.")
             return {}, (
                 f"process {pname!r}: the in-sandbox boot canary did not run in "
                 f"{image!r} ({_tail(err) or _tail(out)}). The canary is a POSIX "
                 f"`sh` one-shot reading /proc from inside the boundary; an image "
                 f"without `sh` cannot be verified, and an unverified boundary is "
-                f"refused rather than trusted.")
+                f"refused rather than trusted." + hint)
         report: dict = {"MOUNTS": {}}
         for line in out.splitlines():
             key, _, value = line.partition("=")
@@ -550,6 +619,22 @@ class ContainerDriver:
                     f"not take, so the placement refuses rather than running under "
                     f"a mount set nobody declared.")
             lines.append(f"mount {path} {mode}, confirmed in-sandbox")
+
+        platform = env.get("platform")
+        if platform:
+            want = accepted_uname(platform) or ()
+            seen = report.get("ARCH", "unknown")
+            if seen not in want:
+                return [], (
+                    f"process {pname!r}: the sandbox asked for platform "
+                    f"{platform!r}, but the boot canary reports `uname -m` = "
+                    f"{seen!r} inside the boundary (expected one of "
+                    f"{', '.join(want) or '?'}). The container did not run under "
+                    f"the requested architecture — the runtime applied no "
+                    f"emulation for it — and an unconfirmed platform is refused "
+                    f"like any boundary that did not take, never silently run as "
+                    f"the host arch.")
+            lines.append(f"platform {platform} confirmed in-sandbox (uname -m = {seen})")
 
         lines.append("all capabilities dropped, no-new-privileges")
         return lines, None
