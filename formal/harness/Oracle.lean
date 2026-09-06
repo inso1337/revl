@@ -1,6 +1,8 @@
 import RevL.Manifest
 import RevL.Lemmas.CapLemmas
 import RevL.Theorems.CapCeilings
+import RevL.Theorems.G5_ClassifiedTeardownPure
+import RevL.Theorems.G8_ClassifiedBoundary
 import RevL.Theorems.G7_LifoComplete
 import RevL.Theorems.A8_WalDischarge
 import RevL.Theorems.R4_NoResidue
@@ -932,6 +934,130 @@ theorem confinedB_iff (C : List String) (s : RevL.Syntax.Stmt) :
     confinedB C s = true ↔ (∀ k ∈ RevL.Typing.stmtHeads s, k ∈ C) := by
   simp only [confinedB, List.all_eq_true, decide_eq_true_eq]
 
+/-! ## Reconstructing `RevL.Lemmas.Prog` for G5/G8 (issue 276)
+
+G6 above decides a per-statement predicate; G5 (teardown purity) and G8
+(the boundary surface) are stated over a whole `Prog` — the extern table and
+the fn call graph (`RevL.Lemmas.Prog`, `ClassLemmas.lean:233`) — because their
+load-bearing statements (`RevL.G5Classified.registrations`,
+`RevL.G8Classified.stmtSurface`) fold the classification reach over that graph.
+The `EX`/`FN`/`PG` rows carry the graph; the parsers below rebuild it, and the
+two deciders decide the model's own `stmtSurface` / `registrations`, verbatim
+(`stmtSurfaceB_iff` / `registrationsB_iff`, both by `rfl` — the printed value
+IS the model function applied, the whole-Prog analog of `confinedB_iff`). -/
+
+structure PGRow where
+  path : String
+  fuel : Nat
+
+structure EXRow where
+  path : String
+  name : String
+  cls : String
+  undo : String
+  compensate : String
+  caps : List String
+
+structure FNRow where
+  path : String
+  name : String
+  calls : List String
+  star : Bool
+
+def parsePG (f : List String) : Option PGRow :=
+  match f with
+  | ["PG", path, fuel] => some ⟨path, fuel.toNat!⟩
+  | _ => none
+
+def parseEX (f : List String) : Option EXRow :=
+  match f with
+  | ["EX", path, name, cls, undo, compensate, caps] =>
+      some ⟨path, name, cls, undo, compensate, splitKeys caps⟩
+  | _ => none
+
+def parseFN (f : List String) : Option FNRow :=
+  match f with
+  | ["FN", path, name, calls, star] =>
+      some ⟨path, name, splitKeys calls, star == "star"⟩
+  | _ => none
+
+/-- The `EX` row's class string as the model's four-point lattice. An
+unrecognised string is `pure` — the fail-safe reading, since `pure` reaches
+and crosses nothing. -/
+def clsOf : String → Cls
+  | "acquire" => .acquire
+  | "witnessed" => .witnessed
+  | "emission" => .emission
+  | _ => .pure
+
+/-- `-` (the exporter's empty-slot sentinel) is `none`. -/
+def optName (s : String) : Option String := if s == "-" then none else some s
+
+/-- Rebuild the file's `RevL.Lemmas.Prog` from its `EX`/`FN` rows. `star` is
+carried separately (`starTainted`): the model has no first-class dispatch, so
+a `star`-reaching statement is decided `n/a`, never folded. -/
+def progOf (exs : List EXRow) (fns : List FNRow) : Prog :=
+  { externs := exs.map fun e =>
+      { name := e.name, cls := clsOf e.cls, undo := optName e.undo,
+        compensate := optName e.compensate, caps := e.caps },
+    fns := fns.map fun f => { name := f.name, calls := f.calls } }
+
+/-- One `.call` per inverse head, `seq`-folded (the `UndoBody` whose
+teardown `registrations` counts), `nil` for the empty body. The G5 analog of
+`exprOfHeads`; `bodyNames_bodyOfHeads` proves it non-lossy. -/
+def bodyOfHeads : List String → RevL.G5Classified.UndoBody
+  | [] => .nil
+  | h :: rest => .seq (.call h) (bodyOfHeads rest)
+
+/-- **The teardown body is non-lossy**: every exported inverse head is a call
+`registrations` counts, so no crossing on the teardown path is dropped. -/
+theorem bodyNames_bodyOfHeads : ∀ hs : List String,
+    RevL.G5Classified.bodyNames (bodyOfHeads hs) = hs := by
+  intro hs
+  induction hs with
+  | nil => rfl
+  | cons h rest ih =>
+    simp [bodyOfHeads, RevL.G5Classified.bodyNames, ih]
+
+/-- **G8 decider.** The boundary surface of a reconstructed statement is the
+model's `stmtSurface` — `stmtHeads` composed with the classification reach
+fold — with no per-constructor case. -/
+def stmtSurfaceB (p : Prog) (fuel : Nat) (s : RevL.Syntax.Stmt) : List String :=
+  RevL.G8Classified.stmtSurface p fuel s
+
+/-- **The G8 verdict is the model's boundary surface**, verbatim: the caps
+the oracle prints are `RevL.G8Classified.stmtSurface` applied, so a row is a
+claim about the reach fold `surface_only_declared_crossings` /
+`surface_enumerates_reached_crossings` are stated over, not a restatement. -/
+theorem stmtSurfaceB_iff (p : Prog) (fuel : Nat) (s : RevL.Syntax.Stmt) :
+    stmtSurfaceB p fuel s = RevL.G8Classified.stmtSurface p fuel s := rfl
+
+/-- **G5 decider.** How many of a teardown body's calls transitively reach a
+host crossing — the model's `registrations`, which reads its argument. -/
+def registrationsB (p : Prog) (fuel : Nat) (b : RevL.G5Classified.UndoBody) : Nat :=
+  RevL.G5Classified.registrations p fuel b
+
+/-- **The G5 verdict is the model's registration count**, verbatim: the
+number the oracle prints is `RevL.G5Classified.registrations` applied, so
+`teardown=0` asserts exactly `registrations p fuel b = 0`
+(`registrations_zero_iff`), the pure-teardown rule G5 enforces. -/
+theorem registrationsB_iff (p : Prog) (fuel : Nat)
+    (b : RevL.G5Classified.UndoBody) :
+    registrationsB p fuel b = RevL.G5Classified.registrations p fuel b := rfl
+
+/-- Names reaching a `star` (first-class dispatch) fn, closed transitively.
+`fuel` bounds the closure; `fns.length` reaches its fixed point. A statement
+touching one of these is decided `n/a` — the shape is outside the model. -/
+def starClosure : Nat → List FNRow → List String → List String
+  | 0, _, acc => acc
+  | n + 1, fns, acc =>
+      let acc' := ((fns.filter (fun f => f.calls.any (fun c => acc.contains c))
+                   ).map (·.name) ++ acc).eraseDups
+      if acc'.length ≤ acc.length then acc else starClosure n fns acc'
+
+def starTainted (fns : List FNRow) : List String :=
+  starClosure fns.length fns ((fns.filter (·.star)).map (·.name))
+
 /-- `key=realm` pairs from a component's `isolate` clauses. -/
 def parseRealms (s : String) : List (String × String) :=
   (splitKeys s).filterMap fun chunk =>
@@ -1174,6 +1300,9 @@ def main (args : List String) : IO UInt32 := do
     let xrows := fields.filterMap parseX
     let harows := fields.filterMap parseHA
     let irows := fields.filterMap parseI
+    let pgrows := fields.filterMap parsePG
+    let exrows := fields.filterMap parseEX
+    let fnrows := fields.filterMap parseFN
     let erows := fields.filterMap parseE
     let jrows := fields.filterMap parseJ
     let lrecs := fields.filterMap parseL
@@ -1305,6 +1434,34 @@ def main (args : List String) : IO UInt32 := do
         for r in cis do
           let cv := if confinedB ctx (stmtOf r) then "ok" else "fail"
           out := out ++ s!"C\t{p}\t{cn}\t{r.index}\tconfined={cv}\n"
+      -- S8 / U5 verdicts (G8 boundary surface, G5 teardown purity; issue
+      -- 276), decided over the file's reconstructed `Prog`. The extern table
+      -- and fn call graph come off the `EX`/`FN` rows, the fold's `fuel` off
+      -- the `PG` row (`fns.length`, enough to reach the reach fixed point).
+      -- A statement whose heads reach a first-class-dispatch `star` fn is
+      -- `n/a`: that shape is outside the model, so neither side folds it.
+      let pex := exrows.filter (fun r => r.path == p)
+      let pfn := fnrows.filter (fun r => r.path == p)
+      let prog := progOf pex pfn
+      let fuel := match pgrows.find? (fun r => r.path == p) with
+        | some r => r.fuel
+        | none => pfn.length
+      let tainted := starTainted pfn
+      for r in pi do
+        let s := stmtOf r
+        -- S8: the boundary surface of every reconstructed statement.
+        if (RevL.Typing.stmtHeads s).any (fun h => tainted.contains h) then
+          out := out ++ s!"S8\t{p}\t{r.comp}\t{r.index}\tsurface=n/a\n"
+        else
+          out := out ++ s!"S8\t{p}\t{r.comp}\t{r.index}\t" ++
+            s!"surface={csv (stmtSurfaceB prog fuel s).eraseDups}\n"
+        -- U5: the teardown registration count of an effect's inverse body.
+        if r.kind == "effect" then
+          if r.inverse.any (fun h => tainted.contains h) then
+            out := out ++ s!"U5\t{p}\t{r.comp}\t{r.index}\tteardown=n/a\n"
+          else
+            let n := registrationsB prog fuel (bodyOfHeads r.inverse)
+            out := out ++ s!"U5\t{p}\t{r.comp}\t{r.index}\tteardown={n}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -1334,6 +1491,9 @@ runs, proved equivalent to the judgment the theorems are about. -/
 
 #print axioms RevLOracle.heads_exprOfHeads
 #print axioms RevLOracle.confinedB_iff
+#print axioms RevLOracle.bodyNames_bodyOfHeads
+#print axioms RevLOracle.stmtSurfaceB_iff
+#print axioms RevLOracle.registrationsB_iff
 #print axioms RevLOracle.linkOKB_iff
 #print axioms RevLOracle.pathPrefixB_iff
 #print axioms RevLOracle.pleqB_iff

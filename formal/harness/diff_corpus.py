@@ -338,6 +338,145 @@ def _fn_emitting(prog) -> set[str]:
     return emitting
 
 
+# -------------------------------------------------- whole-Prog export (#276)
+#
+# G5 (teardown purity) and G8 (boundary surface) are stated over a `Prog` —
+# the extern table plus the fn call graph — not over one statement (design
+# docs/design/456-ambient-and-prog-export.md, slice C). The `I` row carries a
+# statement's call heads and nothing about what those heads REACH, so it
+# cannot feed `RevL.G5Classified.registrations` / `RevL.G8Classified.stmtSurface`.
+# The `EX`/`FN`/`PG` rows below carry the reach graph itself; the oracle
+# rebuilds `RevL.Lemmas.Prog` from them, and `reference_from_tsv` recomputes
+# the same reach INDEPENDENTLY in Python (a small fixed point) so the diff is
+# two implementations of the model's fold over one set of facts.
+
+
+def _undo_callee(expr: object) -> str | None:
+    """The bare name an extern `undo`/`compensate` slot's top-level call
+    names, mirroring `lower._undo_callee_name` (item 440): a plain call to a
+    bare name, or a bare var. Any other shape (an arrow, a field chain) is
+    unresolvable and reported as `-`, which is the fail-closed reading the
+    reach fold then gives it (`lookupExtern`/`lookupFn` both miss)."""
+    if isinstance(expr, ExprCall) and isinstance(expr.callee, ExprVar):
+        return expr.callee.name
+    if isinstance(expr, ExprVar):
+        return expr.name
+    return None
+
+
+def _fn_body_calls(body: object) -> tuple[list[str], set[str]]:
+    """`(bare-name callees in order, value-position names)` for one fn body,
+    over the PARSER ast. A callee is bare when `_route` gives it an empty
+    chain — a `send(x)` or `wrap(x)`, the shape `RevL.Lemmas.calleesOf`
+    resolves; a `store.insert(...)` field crossing is not a fn/extern call and
+    is skipped. A value-position name is a bare var that is NOT the callee of
+    its call — the first-class reference `_emitting_capabilities` records in
+    its `passed` set, from which the `star` marker (D9) is derived."""
+    calls: list[str] = []
+    values: set[str] = set()
+
+    def walk(node: object, callee_pos: bool = False) -> None:
+        if isinstance(node, ExprCall):
+            rt = _route(node.callee)
+            if rt and rt[1] == "" and rt[0] not in calls:
+                calls.append(rt[0])
+            walk(node.callee, callee_pos=True)
+            for a in node.args:
+                walk(a)
+            return
+        if isinstance(node, ExprVar):
+            if not callee_pos and "." not in node.name:
+                values.add(node.name)
+            return
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for f in dataclasses.fields(node):
+                walk(getattr(node, f.name))
+            return
+        if isinstance(node, (list, tuple)):
+            for x in node:
+                walk(x)
+
+    for stmt in body:
+        walk(stmt)
+    return calls, values
+
+
+def _prog_reach(externs: dict[str, tuple[str, list[str]]],
+                fns: dict[str, list[str]]
+                ) -> tuple[dict[str, frozenset[str]], dict[str, bool],
+                           dict[str, set[str]]]:
+    """The model's reach fold, recomputed in Python from the `EX`/`FN` facts.
+
+    `externs` is `name -> (class, caps)`, `fns` is `name -> [callees]`. Returns
+    `(reach_caps, reach_crosses, reach_names)`:
+
+      * `reach_caps[n]` mirrors `RevL.Lemmas.reachCaps`: the union of
+        `capsOfDecl` over every name reachable from `n` (an emission
+        contributes its own name; a witnessed extern its declared scope, or
+        its own name when unscoped; nothing else contributes);
+      * `reach_crosses[n]` mirrors `(RevL.Lemmas.reachCls n).crosses`: some
+        reachable name is `witnessed`/`emission` classified;
+      * `reach_names[n]` is the transitive callee closure incl. `n`, stopping
+        at externs exactly as `calleesOf` returns `[]` for one.
+
+    Computed as a true fixed point (iterate to stability): the model uses a
+    bounded `fuel = len(fns)`, which is exactly enough to reach this closure
+    (a shortest path to a crossing visits each fn at most once), so the two
+    agree and an under-fuelled oracle would show up as a mismatch."""
+    def calleesof(n: str) -> list[str]:
+        if n in externs:
+            return []
+        return fns.get(n, [])
+
+    def declcaps(n: str) -> set[str]:
+        if n in externs:
+            cls, caps = externs[n]
+            if cls == "emission":
+                return {n}
+            if cls == "witnessed":
+                return set(caps) if caps else {n}
+        return set()
+
+    def declcrosses(n: str) -> bool:
+        return n in externs and externs[n][0] in ("witnessed", "emission")
+
+    names = set(externs) | set(fns)
+    reach: dict[str, set[str]] = {n: {n} for n in names}
+    changed = True
+    while changed:
+        changed = False
+        for n in names:
+            if n in externs:
+                continue
+            before = len(reach[n])
+            for c in calleesof(n):
+                reach[n] |= reach.get(c, {c})
+            if len(reach[n]) != before:
+                changed = True
+    reach_caps: dict[str, frozenset[str]] = {}
+    reach_crosses: dict[str, bool] = {}
+    for n in names:
+        caps: set[str] = set()
+        crosses = False
+        for m in reach[n]:
+            caps |= declcaps(m)
+            crosses = crosses or declcrosses(m)
+        reach_caps[n] = frozenset(caps)
+        reach_crosses[n] = crosses
+    return reach_caps, reach_crosses, reach
+
+
+def _star_tainted(fns_star: dict[str, bool], reach_names: dict[str, set[str]]
+                  ) -> set[str]:
+    """Names that reach a first-class-dispatch (`star`) fn (D9). A `star` fn
+    hands an emitting callable to a dispatcher, so what it runs is not
+    statically boundable and sits OUTSIDE the Lean model; every row touching
+    such a name prints `n/a` on both sides. Transitive: a fn calling a star fn
+    is tainted too."""
+    star = {n for n, s in fns_star.items() if s}
+    return {n for n, ns in reach_names.items() if ns & star}
+
+
 def _resolve_emission(root: str, chain: str, requires: dict, handles: dict,
                       psvc: dict, aliases: dict | None = None
                       ) -> tuple[str, str] | None:
@@ -826,6 +965,35 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         fns_by_name = {fn.name: fn for fn in prog.fn_decls}
         # provide-key -> service, file-wide (children resolve handle receivers).
         psvc = {c.name: {k: s for k, s, _ln in c.provides} for c in prog.components}
+
+        # whole-Prog export (#276): the extern table (EX), the fn call graph
+        # (FN, with the first-class-dispatch `star` marker), and the fuel the
+        # oracle folds under (PG). File-wide, once, so the oracle rebuilds one
+        # `RevL.Lemmas.Prog` per file. `fuel = len(fns)`: a shortest reach path
+        # to a crossing visits each fn at most once, so that many unrollings
+        # reach the fixed point (D8). Parsed but UNUSED until the oracle's
+        # deciders read them (the #268 land-the-export-first discipline).
+        ex_norm: dict[str, tuple[str, list[str]]] = {
+            e.name: (e.classification, list(e.capabilities or ()))
+            for e in prog.externs}
+        fn_calls: dict[str, list[str]] = {}
+        fn_values: dict[str, set[str]] = {}
+        for fn in prog.fn_decls:
+            fn_calls[fn.name], fn_values[fn.name] = _fn_body_calls(fn.body)
+        _rc, reach_crosses, _rn = _prog_reach(ex_norm, fn_calls)
+        crossing_names = {n for n, x in reach_crosses.items() if x}
+        star_fns = {name: bool(vals & crossing_names)
+                    for name, vals in fn_values.items()}
+        tsv.append("\t".join(["PG", rel, str(len(prog.fn_decls))]))
+        for e in prog.externs:
+            tsv.append("\t".join([
+                "EX", rel, e.name, e.classification,
+                _undo_callee(e.undo) or "-", _undo_callee(e.compensate) or "-",
+                ",".join(e.capabilities or ())]))
+        for fn in prog.fn_decls:
+            tsv.append("\t".join([
+                "FN", rel, fn.name, ",".join(fn_calls[fn.name]),
+                "star" if star_fns.get(fn.name) else "plain"]))
 
         ff: dict = {"components": {}}
         for c in prog.components:
@@ -1729,6 +1897,66 @@ def confinement_coverage() -> list[str]:
     return findings
 
 
+#: non-vacuity ratchet for the S8/U5 rows (G8/G5, issue 276). Filled by
+#: `reference_from_tsv`, read by `prog_coverage`. `_G8_SURFACES` is
+#: `key -> caps tuple` for every compared (non-`n/a`) surface; `_G5_REGS` is
+#: `key -> crossing count` for every compared (non-`n/a`) teardown.
+_G8_SURFACES: dict = {}
+_G5_REGS: dict = {}
+
+
+def prog_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `S8`/`U5` rows (G8/G5, issue 276).
+
+    Same discipline as `confinement_coverage`: a surface row that is empty on
+    every statement, or a teardown row that is `0` on every effect, certifies
+    nothing. The differential is model-vs-model (the Lean fold vs the Python
+    fold over one `Prog`), so it agrees vacuously unless the corpus EXERCISES
+    both classes of each verdict:
+
+      * G8: some statement has a NON-EMPTY boundary surface (a crossing the
+        reach fold actually enumerates) AND some statement has an empty one;
+      * G5: some effect's teardown registers ZERO crossings (a clean inverse)
+        AND some registers a POSITIVE count — the caught violation. That
+        second witness cannot come from an admitted file (an admitted
+        witnessed inverse registers nothing, by G5), so it comes from a
+        refused fixture that still parses and exports rows
+        (`examples/rejections/g5_undo_fn_emission.rvl`).
+
+    The Lean side's `g5_row_not_vacuous` / `g8_row_not_vacuous` prove the same
+    verdicts are mutation-sensitive, so a reference that drifted would diverge
+    from the oracle here. Returns findings, treated as gate failures."""
+    surf_nonempty = surf_empty = None
+    for key, caps in _G8_SURFACES.items():
+        if caps:
+            surf_nonempty = surf_nonempty or key
+        else:
+            surf_empty = surf_empty or key
+    reg_zero = reg_pos = None
+    caught = 0
+    for key, n in _G5_REGS.items():
+        if n == 0:
+            reg_zero = reg_zero or key
+        elif n > 0:
+            caught += 1
+            reg_pos = reg_pos or key
+    findings: list[str] = []
+    for label, witness in (
+            ("a statement with a non-empty G8 boundary surface", surf_nonempty),
+            ("a statement with an empty G8 boundary surface", surf_empty),
+            ("an effect whose teardown registers no crossings", reg_zero),
+            ("an effect whose teardown registers a crossing (caught G5 "
+             "violation)", reg_pos)):
+        if witness is None:
+            findings.append(f"prog coverage: NO witness of {label} — "
+                            "the S8/U5 rows would agree vacuously")
+    if not findings:
+        print(f"prog coverage: {len(_G8_SURFACES)} surfaces, "
+              f"{len(_G5_REGS)} teardowns, {caught} caught G5 violations; "
+              f"surface={surf_nonempty} teardown_pos={reg_pos}")
+    return findings
+
+
 def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
     """Run the Lean oracle over the corpus TSV; None if lake is absent."""
     if shutil.which("lake") is None:
@@ -1752,7 +1980,9 @@ class Verdicts(NamedTuple):
     `dispositions` D rows (G7 teardown: replayed / discharged / stranded),
     `recoveries` O rows (A8/R4 crash recovery: outcome / applied / residue),
     `confinements` C rows (G6: a reconstructed statement's reach surface is
-    within its component's declared context)."""
+    within its component's declared context), `g8surface` S8 rows (G8: a
+    statement's boundary surface over the reconstructed `Prog`), `g5reg` U5
+    rows (G5: an effect's teardown registration count)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -1761,12 +1991,15 @@ class Verdicts(NamedTuple):
     dispositions: dict[str, tuple[tuple, tuple, tuple]]
     recoveries: dict[str, tuple]
     confinements: dict[tuple[str, str, str], str]
+    g8surface: dict[tuple[str, str, str], object]
+    g5reg: dict[tuple[str, str, str], object]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
                 + len(self.spawns) + len(self.refused)
                 + len(self.dispositions) + len(self.recoveries)
-                + len(self.confinements))
+                + len(self.confinements) + len(self.g8surface)
+                + len(self.g5reg))
 
 
 def _cols(field: str) -> list[str]:
@@ -1785,6 +2018,8 @@ def parse_verdicts(text: str) -> Verdicts:
     dispositions: dict[str, tuple[tuple, tuple, tuple]] = {}
     recoveries: dict[str, tuple] = {}
     confinements: dict[tuple[str, str, str], str] = {}
+    g8surface: dict[tuple[str, str, str], object] = {}
+    g5reg: dict[tuple[str, str, str], object] = {}
     for line in text.splitlines():
         parts = line.split("\t")
         if parts[0] == "V" and len(parts) == 5:
@@ -1826,10 +2061,24 @@ def parse_verdicts(text: str) -> Verdicts:
         elif parts[0] == "C" and len(parts) == 5:
             # G6 confinement: (file, comp, statement index) -> ok|fail.
             confinements[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
+        elif parts[0] == "S8" and len(parts) == 5:
+            # G8 boundary surface: (file, comp, index) -> sorted cap set, or
+            # 'n/a' for a first-class-dispatch statement. Compared as a SET:
+            # the model's `stmtSurface` folds heads in source order, which is
+            # not an order either side claims, so both sort before comparing.
+            body = parts[4].split("=", 1)[1]
+            g8surface[(parts[1], parts[2], parts[3])] = (
+                "n/a" if body == "n/a" else tuple(sorted(_cols(parts[4]))))
+        elif parts[0] == "U5" and len(parts) == 5:
+            # G5 teardown registrations: (file, comp, index) -> crossing count,
+            # or 'n/a'. An integer, so a widened teardown is a larger number.
+            body = parts[4].split("=", 1)[1]
+            g5reg[(parts[1], parts[2], parts[3])] = (
+                "n/a" if body == "n/a" else int(body))
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements)
+                    recoveries, confinements, g8surface, g5reg)
 
 
 def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
@@ -1896,6 +2145,9 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     srows = [r for r in rows if r and r[0] == "S" and len(r) == 4]
     harows = [r for r in rows if r and r[0] == "HA" and len(r) == 5]
     irows = [r for r in rows if r and r[0] == "I" and len(r) == 7]
+    pgrows = [r for r in rows if r and r[0] == "PG" and len(r) == 3]
+    exrows = [r for r in rows if r and r[0] == "EX" and len(r) == 7]
+    fnrows = [r for r in rows if r and r[0] == "FN" and len(r) == 5]
 
     ems_by_file: dict[str, set[tuple[str, str]]] = {}
     bounds_by_file: dict[tuple[str, str, str], tuple[str, set[str]]] = {}
@@ -2066,8 +2318,57 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         confinements[(rel, compn, index)] = "ok" if not leaked else "fail"
         _CONFINEMENTS[(rel, compn, index)] = (not leaked, len(reach), len(leaked))
 
+    # S8/U5 rows (G8 boundary surface, G5 teardown purity; issue 276),
+    # recomputed INDEPENDENTLY from the EX/FN/PG rows: the same model fold the
+    # oracle runs, implemented a second time in Python, so the diff is two
+    # implementations over one `Prog`. `_prog_reach` is the reach fixed point;
+    # `star`-tainted statements are `n/a` (outside the model), decided from
+    # the same FN `star` column both sides read.
+    externs_by_file: dict[str, dict[str, tuple[str, list[str]]]] = {}
+    fns_by_file: dict[str, dict[str, list[str]]] = {}
+    fnstar_by_file: dict[str, dict[str, bool]] = {}
+    for r in exrows:
+        externs_by_file.setdefault(r[1], {})[r[2]] = (
+            r[3], [c for c in r[6].split(",") if c])
+    for r in fnrows:
+        fns_by_file.setdefault(r[1], {})[r[2]] = [c for c in r[3].split(",") if c]
+        fnstar_by_file.setdefault(r[1], {})[r[2]] = r[4] == "star"
+
+    _G8_SURFACES.clear()
+    _G5_REGS.clear()
+    g8surface: dict[tuple[str, str, str], object] = {}
+    g5reg: dict[tuple[str, str, str], object] = {}
+    reach_cache: dict[str, tuple] = {}
+    for r in irows:
+        rel, compn, index, kind = r[1], r[2], r[3], r[4]
+        heads = [h for h in r[5].split(",") if h]
+        inverse = [h for h in r[6].split(",") if h]
+        if rel not in reach_cache:
+            rc, rx, rn = _prog_reach(externs_by_file.get(rel, {}),
+                                     fns_by_file.get(rel, {}))
+            reach_cache[rel] = (rc, rx, _star_tainted(
+                fnstar_by_file.get(rel, {}), rn))
+        reach_caps, reach_crosses, tainted = reach_cache[rel]
+        stmt_heads = heads + inverse if kind == "effect" else heads
+        if any(h in tainted for h in stmt_heads):
+            g8surface[(rel, compn, index)] = "n/a"
+        else:
+            caps: set[str] = set()
+            for h in stmt_heads:
+                caps |= reach_caps.get(h, frozenset())
+            surf = tuple(sorted(caps))
+            g8surface[(rel, compn, index)] = surf
+            _G8_SURFACES[(rel, compn, index)] = surf
+        if kind == "effect":
+            if any(h in tainted for h in inverse):
+                g5reg[(rel, compn, index)] = "n/a"
+            else:
+                n = sum(1 for h in inverse if reach_crosses.get(h, False))
+                g5reg[(rel, compn, index)] = n
+                _G5_REGS[(rel, compn, index)] = n
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries, confinements)
+                    recoveries, confinements, g8surface, g5reg)
 
 
 # The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
@@ -2225,7 +2526,9 @@ def main() -> int:
             ("refusal", ref.refused, formal.refused),
             ("teardown", ref.dispositions, formal.dispositions),
             ("recovery", ref.recoveries, formal.recoveries),
-            ("confinement", ref.confinements, formal.confinements)):
+            ("confinement", ref.confinements, formal.confinements),
+            ("g8_surface", ref.g8surface, formal.g8surface),
+            ("g5_registration", ref.g5reg, formal.g5reg)):
         for key, want in refmap.items():
             got = gotmap.get(key)
             if got is None:
@@ -2240,13 +2543,16 @@ def main() -> int:
         f"{len(ref.refused)} parse refusals + "
         f"{len(ref.dispositions)} teardowns + "
         f"{len(ref.recoveries)} recoveries + "
-        f"{len(ref.confinements)} confinements) — "
+        f"{len(ref.confinements)} confinements + "
+        f"{len(ref.g8surface)} surfaces + "
+        f"{len(ref.g5reg)} teardowns) — "
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))
     mismatches.extend(recovery_coverage(ref.recoveries))
     mismatches.extend(attenuation_coverage())
     mismatches.extend(confinement_coverage())
+    mismatches.extend(prog_coverage())
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
     if len(mismatches) > 10:

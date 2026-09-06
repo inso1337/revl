@@ -161,23 +161,25 @@ RevL.G5Classified.registrations_seq	instance	RevL.G5Classified.registrations_cou
 RevL.G5Classified.registrations_zero_iff	instance	RevL.G5Classified.registrations_counts,RevL.G5Classified.registrations_depends_on_its_argument	both sides of the equivalence are exercised on concrete bodies
 RevL.G5Classified.inverse_reaches_no_emission	instance	RevL.G5Classified.sneaky_undo_is_refused,RevL.G5Classified.sneaky_inverse_run_emits	CheckerAdmits holds of a program with a witnessed extern and a declared undo, and the refused inverse really does emit
 RevL.G5Classified.admitted_inverse_registers_nothing	instance	RevL.G5Classified.sneaky_undo_is_refused,RevL.G5Classified.registrations_counts	the same admitted program, whose host-local inverse counts zero while the emission inverse counts one
-RevL.G5Classified.admitted_inverse_body_registers_nothing	instance	RevL.G5Classified.sneaky_undo_is_refused,RevL.G5Classified.registrations_counts	the same, with a body whose names are reachable from the declared inverse
+RevL.G5Classified.admitted_inverse_body_registers_nothing	instance	RevL.G5Classified.sneaky_undo_is_refused,RevL.G5Classified.registrations_counts,RevL.G5Classified.g5_row_not_vacuous	the same, with a body whose names are reachable from the declared inverse
 RevL.G5Classified.pureOnly_run	instance	RevL.G5Classified.clean_inverse_run_is_silent	a pure-only run the semantics genuinely takes
 RevL.G5Classified.clean_inverse_run_logs_nothing	instance	RevL.G5Classified.clean_inverse_run_is_silent	a body with registrations zero, and a run of it
 RevL.G5Classified.admitted_inverse_run_logs_nothing	instance	RevL.G5Classified.clean_inverse_run_is_silent,RevL.G5Classified.sneaky_undo_is_refused	the admitted program, its inverse, and the run
 RevL.G5Classified.registrations_depends_on_its_argument	concrete	-	refutes the review's constant-function probe
 RevL.G5Classified.registrations_counts	concrete	-	0 for the host-local inverse, 1 for the emission inverse and its fn-wrapped twin
+RevL.G5Classified.g5_row_not_vacuous	concrete	-	registrations counts 1 for the fn-wrapped teardown and 0 once the wrapping fn stops calling the emission, so the oracle U5 row is mutation-sensitive rather than a constant zero
 RevL.G5Classified.sneaky_undo_is_refused	concrete	-	clean program admitted, emission inverse and fn-wrapped inverse refused
 RevL.G5Classified.fold_must_run_to_stability	concrete	-	the wrapped escape is admitted at fuel 0 and refused at fuel 1
 RevL.G5Classified.sneaky_inverse_run_emits	concrete	-	the refused inverse takes an emit step and logs a one-way record
 RevL.G5Classified.clean_inverse_run_is_silent	concrete	-	the admitted inverse takes a pure step and every run of it is silent
 RevL.G8Classified.surface_enumerates_reached_crossings	instance	RevL.G8Classified.witness_surface_traces_to_its_declaration	every hypothesis exhibited at one declaration, with a non-empty surface
-RevL.G8Classified.surface_only_declared_crossings	instance	RevL.G8Classified.g8_surface_is_not_universal,RevL.G8Classified.witness_surface_traces_to_its_declaration,RevL.G8Classified.surface_agrees_with_an_honest_marker,RevL.G8Classified.raw_leak_is_on_the_surface	a non-empty surface beside a non-empty body with an empty one; the marker agrees where it is honest, and a raw leak is enumerated without a typing hypothesis
+RevL.G8Classified.surface_only_declared_crossings	instance	RevL.G8Classified.g8_surface_is_not_universal,RevL.G8Classified.witness_surface_traces_to_its_declaration,RevL.G8Classified.surface_agrees_with_an_honest_marker,RevL.G8Classified.raw_leak_is_on_the_surface,RevL.G8Classified.g8_row_not_vacuous	a non-empty surface beside a non-empty body with an empty one; the marker agrees where it is honest, and a raw leak is enumerated without a typing hypothesis
 RevL.G8Classified.surface_implies_crossing	instance	RevL.G8Classified.effect_carrying_emission_is_on_the_surface	a non-empty stmtSurface on a concrete statement
 RevL.G8Classified.effect_carrying_emission_is_on_the_surface	concrete	-	the two models disagree in both directions on concrete statements
 RevL.G8Classified.surface_agrees_with_an_honest_marker	concrete	-	where the emit marker is honest the two models agree
 RevL.G8Classified.raw_leak_is_on_the_surface	concrete	-	a raw leak is enumerated without needing Typed to exclude it
 RevL.G8Classified.g8_surface_is_not_universal	concrete	-	a body on the surface, and a non-empty body off it
+RevL.G8Classified.g8_row_not_vacuous	concrete	-	stmtSurface is db_insert for the fn-wrapped pure statement and empty once the wrapping fn stops calling the emission, so the oracle S8 row is mutation-sensitive rather than a foregone empty
 RevL.G8Classified.witness_surface_traces_to_its_declaration	concrete	-	the entry traces through a fn to the emission that owns it
 RevL.G1.g1_not_vacuous	concrete	-	a component admitted under its own requires, and the same body refused under a smaller manifest
 RevL.G3.g3_not_vacuous	concrete	-	a link, a layering, a dependency path with a strict rank drop, and a genuine self-path on the cyclic composition
