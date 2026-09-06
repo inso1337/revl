@@ -42,6 +42,16 @@ echo "== workflow permissions =="
 uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --self-test || fail=1
 uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --strict || fail=1
 
+# issue #292: each fail-silent `revl_*` runtime seam is defined exactly once
+# with the arity its getattr caller uses. The merge queue closes the whole
+# merge-interaction class; this is the static half that catches the one of the
+# three defects a linter could -- a cross-module duplicate/incompatible-arity
+# definition F811 and the type checker walk past because the read crosses a
+# getattr string literal. Stdlib-only, so no uv wrapper needed.
+echo "== runtime seams =="
+python3 tools/check_runtime_seams.py --self-test || fail=1
+python3 tools/check_runtime_seams.py || fail=1
+
 echo "== roadmap markers =="
 # --head-branch is the cheap half of the PR-context check: a marker saying work
 # is IN FLIGHT on the branch you are about to open the PR from goes stale the

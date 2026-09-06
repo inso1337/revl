@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo pre-merge pre-merge-affected formal roadmap-check workflow-permissions
+.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo pre-merge pre-merge-affected formal roadmap-check workflow-permissions runtime-seams
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -53,6 +53,19 @@ roadmap-check-all:
 workflow-permissions:
 	uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --self-test
 	uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --strict
+
+# issue #292: each fail-silent `revl_*` runtime seam (read through a getattr
+# string literal in backends/python/replay.py and src/revl/run.py) is defined
+# exactly once with the arity its caller uses. The merge_group trigger in
+# ci.yml closes the merge-interaction class by construction; this is the static
+# half that catches the one of the three defects a linter could -- a
+# cross-module duplicate/incompatible-signature definition, which F811 and
+# every type checker walk past because the seam is resolved by string name.
+# `--self-test` reds the gate against the issue-#292 collision itself. Both run
+# in the `lint` job and in tools/pre_pr.sh. Stdlib-only, so no uv wrapper.
+runtime-seams:
+	python3 tools/check_runtime_seams.py --self-test
+	python3 tools/check_runtime_seams.py
 
 # Regenerate the docs/conformance.md conformance + performance matrix in place.
 matrix:
