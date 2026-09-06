@@ -486,6 +486,58 @@ def test_drain_is_refused_without_the_block_policy():
 
 
 # ---------------------------------------------------------------------------
+# Replay: provider-declared only, so every `replay(…)` at a `subscribe` is an
+# undeclared argument and a compile error (§4.5)
+# ---------------------------------------------------------------------------
+
+def _replay(qual: str) -> str:
+    return _refusal(f"""
+    component C {{
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src {qual} undo sub.close()
+      await sub.next()
+    }}
+    """)
+
+
+@pytest.mark.parametrize("qual", ["replay(5)", "replay(from: cursor)"])
+def test_a_well_formed_replay_is_refused_as_undeclared(qual):
+    """§4.5: replay is a provider-side durability claim; no provider can declare
+    it yet, so a well-formed `replay(n)` / `replay(from: <durable>)` at a
+    `subscribe` is an UNDECLARED argument and a compile error, not a silently
+    inert (vacuous) durability claim."""
+    msg = _replay(qual)
+    assert "`replay`" in msg and "requires a provider that declares it" in msg
+    assert "§4.5" in msg
+
+
+@pytest.mark.parametrize("qual", ["replay()", "replay(0)", "replay(-1)",
+                                  "replay(foo)", "replay 5"])
+def test_a_malformed_replay_argument_names_the_two_shapes(qual):
+    """The other half of §4.5's compile error: a malformed argument is a syntax
+    error distinct from the undeclared refusal, and it names the two accepted
+    shapes so the fix is obvious."""
+    msg = _replay(qual)
+    assert "malformed `replay` argument" in msg
+    assert "replay(<positive int>)" in msg and "replay(from: <durable>)" in msg
+
+
+def test_replay_is_order_free_with_the_other_qualifiers():
+    """`replay` is recognized in the order-free qualifier run, so it is refused
+    (not mis-parsed) even after a `policy`/`buffer` qualifier."""
+    msg = _replay("policy block buffer 2 replay(3)")
+    assert "requires a provider that declares it" in msg
+
+
+def test_a_replay_free_program_is_byte_identical():
+    """The refusal threads no IR: a subscription with no `replay` lowers exactly
+    as before, and the key never appears (§5 additive-key discipline)."""
+    body = compile_source(_CONSUMER, "s.rvl")["components"][0]["body"]
+    sub = next(s for s in body if s.get("subscribe"))
+    assert "replay" not in sub and "replay" not in sub.get("acquire", {})
+
+
+# ---------------------------------------------------------------------------
 # Emission: py renders the chain/policy/window; wasm still REFUSES (§4.6)
 # ---------------------------------------------------------------------------
 
