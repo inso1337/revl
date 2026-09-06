@@ -356,6 +356,127 @@ def test_a_chain_ranks_below_a_fresh_single_bridge(tmp_path):
     assert "ranks below a fresh single bridge" in chained["why"]
 
 
+def _run_check(tmp_path, need_src, cand_src, *extra):
+    """`revl adapt --check` (no --emit), returning the parsed JSON plan."""
+    import contextlib
+
+    from revl.__main__ import main
+    need_file = tmp_path / "need.rvl"
+    need_file.write_text(need_src)
+    cand_file = tmp_path / "cand.rvl"
+    cand_file.write_text(cand_src)
+    out_file = tmp_path / "out.json"
+    with open(out_file, "w", encoding="utf-8") as handle:
+        with contextlib.redirect_stdout(handle):
+            code = main(["adapt", str(need_file), str(cand_file), *extra])
+    return code, json.loads(out_file.read_text())
+
+
+def test_check_flattens_a_committed_chain_end_to_end(tmp_path):
+    """E12, the `revl adapt --check` half of section 6.4. A bridge proposed in
+    front of the committed `ScopedCacheAdapter` re-displays the COMPOSITE plan:
+    the proposed hop (KV <- ScopedCache, `scope` defaulted) and the committed
+    hop (ScopedCache <- PlainVendor, `scope` DROPPED, `options` defaulted), so
+    the composed loss across both hops is in one listing, not just the last
+    hop's slice of it."""
+    code, plan = _run_check(tmp_path, NEED, COMMITTED_ADAPTER,
+                            "--candidate-service", "ScopedCache")
+    assert code == 0
+    assert plan["verdict"] == "compatible-with-adapter"
+    assert plan["chainDepth"] == 2
+
+    hops = {h["kind"]: h for h in plan["chain"]}
+    proposed, committed = hops["proposed"], hops["committed"]
+    assert proposed["hop"] == 2 and committed["hop"] == 1
+    assert (proposed["from"], proposed["to"]) == ("KV", "ScopedCache")
+    assert (committed["from"], committed["to"]) == ("ScopedCache", "PlainVendor")
+    assert committed["requireKey"] == "backing"
+    assert "opaque" not in committed
+
+    def _positions(hop):
+        return {s["position"]: s["transformation"]
+                for s in hop["methods"][0]["steps"]}
+    # the proposed hop defaults `scope`; the committed hop DROPS `scope` (B2)
+    # and defaults the vendor's `options` (B1) - the loss the flattening exists
+    # to surface in one place.
+    assert _positions(proposed)["scope"] == "B1"
+    assert _positions(committed)["scope"] == "B2"
+    assert _positions(committed)["options"] == "B1"
+
+
+def test_check_on_ordinary_code_is_depth_one_with_no_chain(tmp_path):
+    """The honest default: an unmarked candidate is ordinary code, so `--check`
+    reports `chainDepth` 1 and emits no `chain` - there is no committed hop to
+    flatten."""
+    code, plan = _run_check(tmp_path, NEED, PLAIN_VENDOR)
+    assert code == 0
+    assert plan["chainDepth"] == 1
+    assert "chain" not in plan
+
+
+def _committed_adapter(merge, backing_service_src, backing_name, provided_src,
+                       provided_name):
+    """A committed adapter over `backing_name`, rendered by the real emitter so
+    its body has the exact shape the flattener reconstructs, then prefixed with
+    both service declarations so the candidate file compiles standalone."""
+    from revl.adapt import render_adapter, service_surface, derivation_hash
+    from revl.admission import _service_from_ir
+    src_ir = compile_source(
+        _TYPES + backing_service_src + provided_src
+        + f"\ncomponent _Impl provides k: {backing_name} {{ provide k {{"
+        + " fn get(key, options) = Ok(key) } }\n", "impl.rvl")
+    req = _service_from_ir(provided_name, src_ir["services"][provided_name])
+    prov = _service_from_ir(backing_name, src_ir["services"][backing_name])
+    derivation = derivation_hash(service_surface(req), service_surface(prov),
+                                 "0" * 64, json.dumps({}))
+    body = render_adapter(
+        "ChainAdapter", req, prov, {"get": {"return": {"merge": merge}}},
+        provide_key="cache", require_key="backing",
+        prov_types=src_ir["types"], derivation=derivation, chain_depth=1)
+    return _TYPES + backing_service_src + provided_src + body
+
+
+def test_check_flattens_a_committed_total_waiver_merge(tmp_path):
+    """The merge a committed adapter performs is recovered from its body so the
+    flattened committed hop names it (`merge-total`), not just the proposed
+    hop's identity return: the composed loss includes the error-to-absence
+    merge the committed adapter carried."""
+    cand = _committed_adapter(
+        "total",
+        "service VendorCache { fn get(key: Str, options: Options)"
+        " -> Result[Str, Error] }\n", "VendorCache",
+        "service Cache { fn get(key: Str) -> Opt[Str] }\n", "Cache")
+    code, plan = _run_check(tmp_path, NEED, cand, "--candidate-service", "Cache")
+    assert code == 0
+    assert plan["chainDepth"] == 2
+    committed = [h for h in plan["chain"] if h["kind"] == "committed"][0]
+    assert "opaque" not in committed
+    assert committed["merges"] == ["merge-total"]
+    ret = [s for s in committed["methods"][0]["steps"]
+           if s["position"] == "return"][0]
+    assert ret["merge_shape"] == "merge-total"
+
+
+def test_check_marks_an_unreconstructable_committed_hop_opaque(tmp_path):
+    """Honest degradation: a committed adapter whose body merges a CLOSED error
+    per variant is outside the flagship reconstruction, so the flattened hop is
+    reported `opaque` (pointing at the committed adapter's own attestation)
+    rather than inventing a plan it never ran."""
+    cand = _committed_adapter(
+        {"NotFound": "None", "Unavailable": "None"},
+        "type VErr = NotFound | Unavailable\n"
+        "service VendorCache { fn get(key: Str, options: Options)"
+        " -> Result[Str, VErr] }\n", "VendorCache",
+        "service Cache { fn get(key: Str) -> Opt[Str] }\n", "Cache")
+    code, plan = _run_check(tmp_path, NEED, cand, "--candidate-service", "Cache")
+    assert code == 0
+    assert plan["chainDepth"] == 2
+    committed = [h for h in plan["chain"] if h["kind"] == "committed"][0]
+    assert "opaque" in committed
+    assert "attestation" in committed["opaque"]
+    assert "methods" not in committed
+
+
 # ------------------------------------------------- E13: §6.1 evidence discount
 
 def test_an_outcome_merge_discounts_the_error_semantics_evidence(tmp_path):

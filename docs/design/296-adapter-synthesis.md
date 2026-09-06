@@ -758,8 +758,16 @@ precisely backwards. Three rules close both:
    authority, reads chain depth off the section-4 marking and ranks a chain
    below a fresh single bridge, discounts the error-semantics evidence class
    behind an outcome merge, and rides near-miss refusals out under
-   `nearMisses`. `revl adapt --check` FLATTENING, `revl diff` and the
-   federation pin remain.) `resolve` reports
+   `nearMisses`. `revl adapt --check` FLATTENING also LANDED
+   (`adapt.flatten_committed_hop` + the CLI `chainDepth`/`chain` output):
+   a check over a candidate that is itself a committed adapter reconstructs the
+   committed inner hop from the candidate's own file - drops recovered from the
+   two service declarations, the total-error waiver read back from the committed
+   body - and re-derives it through the same `bridge_plan`, so the composite
+   plan is re-displayed end to end; an inner hop outside the flagship
+   reconstruction degrades to an honest `opaque` marker naming the committed
+   adapter's own attestation. `revl diff` and the federation pin remain.)
+   `resolve` reports
    compatible-with-adapter below direct-compatible at equal authority, with
    plan, generated `adapt` text, and near-miss refusals inline; chain
    depth read from the derivation marking, chains ranked below fresh
