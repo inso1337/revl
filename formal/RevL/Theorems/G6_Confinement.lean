@@ -64,4 +64,26 @@ theorem g6_not_vacuous :
   have hbad := confinement _ _ h "net" (by simp [leakStmt, stmtHeads, heads])
   simp [declared] at hbad
 
+/-- **The confinement ROW is load-bearing** (issue 276, G6 oracle row). The
+oracle's `C` row prints `∀ k ∈ stmtHeads s, k ∈ C` (`RevLOracle.confinedB_iff`);
+this guards it against being a foregone `ok`. `leakStmt` reaches the undeclared
+key `net`, so the confinement check REFUSES it under `declared` — and the
+shipped-side perturbation the row exists to catch, extending the declared
+context to ACCEPT that very leaking head, flips the verdict to accept. The
+predicate genuinely turns on the leaking head; a vacuous row would be blind to
+the difference, so this exhibits exactly the divergence the differential would
+report if the reference drifted too permissive. -/
+theorem g6_row_not_vacuous :
+    ¬ (∀ k ∈ stmtHeads leakStmt, k ∈ declared)
+    ∧ (∀ k ∈ stmtHeads leakStmt, k ∈ "net" :: declared) := by
+  refine ⟨?_, ?_⟩
+  · intro h
+    have := h "net" (by simp [leakStmt, stmtHeads, heads])
+    simp [declared] at this
+  · intro k hk
+    simp only [leakStmt, stmtHeads, heads, List.flatMap_cons, List.flatMap_nil,
+      List.append_nil, List.mem_append, List.mem_cons, List.not_mem_nil,
+      or_false] at hk
+    rcases hk with rfl | rfl <;> simp [declared]
+
 end RevL.G6

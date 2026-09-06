@@ -877,9 +877,27 @@ def parseI (f : List String) : Option IRow :=
       some ⟨path, comp, index, kind, splitKeys heads, splitKeys inverse⟩
   | _ => none
 
+/-- Reconstruct an expression whose reach surface is EXACTLY the exported
+head list — one `.call k []` per head, nested so the tail's heads survive.
+The pre-276 version kept only the FIRST head (`h :: _ => .call h []`), which
+dropped every subsequent crossing of a statement (`kv.set,status.shared`
+became `kv.set` alone), so the confinement check below could not see the
+heads it silently discarded. `heads_exprOfHeads` proves the reconstruction is
+faithful. -/
 def exprOfHeads : List String → Expr
   | [] => .lit "unit"
-  | h :: _ => .call h []
+  | h :: rest => .call h [exprOfHeads rest]
+
+/-- **The reconstruction is non-lossy** (issue 276, step 1): the reach
+surface of `exprOfHeads hs` is exactly `hs`, so no exported head escapes the
+confinement check. -/
+theorem heads_exprOfHeads : ∀ hs : List String,
+    RevL.Typing.heads (exprOfHeads hs) = hs := by
+  intro hs
+  induction hs with
+  | nil => simp [exprOfHeads, RevL.Typing.heads]
+  | cons h rest ih =>
+    simp [exprOfHeads, RevL.Typing.heads, ih]
 
 def stmtOf (r : IRow) : RevL.Syntax.Stmt :=
   match r.kind with
@@ -887,6 +905,32 @@ def stmtOf (r : IRow) : RevL.Syntax.Stmt :=
   | "emit" => .emit (exprOfHeads r.heads)
   | "raw" => .raw (exprOfHeads r.heads)
   | _ => .pure (exprOfHeads r.heads)
+
+/-- The receiver ROOT of a reconstructed head: the segment before the first
+`.` (`w.task.run` → `w`, a bare `db` → `db`). This is the granularity the
+confinement context is expressed in — a declared require local or a
+require-held binding — so a crossing is confined exactly when its root is
+declared. `String.splitOn` never returns `[]`, so the fallback is dead. -/
+def rootOf (s : String) : String :=
+  match s.splitOn "." with
+  | h :: _ => h
+  | [] => s
+
+/-- G6 confinement (issue 276): a statement is confined under declared
+context `C` when every reconstructed call head it reaches is in `C`. `C` is
+carried at head granularity (the component's own heads whose root is
+declared), so membership decides `stmtHeads ⊆ C` directly. -/
+def confinedB (C : List String) (s : RevL.Syntax.Stmt) : Bool :=
+  (RevL.Typing.stmtHeads s).all (fun k => decide (k ∈ C))
+
+/-- **The confinement verdict is the model's confinement surface.** The Bool
+the oracle prints is `decide`d from `RevL.Typing.stmtHeads` — the very reach
+surface `RevL.G6.confinement` quantifies over (`typedIn_confined`) — so a row
+that says `confined=ok` asserts exactly `∀ k ∈ stmtHeads s, k ∈ C`, and a
+reference that accepted a head outside `C` disagrees with it. -/
+theorem confinedB_iff (C : List String) (s : RevL.Syntax.Stmt) :
+    confinedB C s = true ↔ (∀ k ∈ RevL.Typing.stmtHeads s, k ∈ C) := by
+  simp only [confinedB, List.all_eq_true, decide_eq_true_eq]
 
 /-- `key=realm` pairs from a component's `isolate` clauses. -/
 def parseRealms (s : String) : List (String × String) :=
@@ -1136,7 +1180,6 @@ def main (args : List String) : IO UInt32 := do
     let lruns := fields.filterMap parseLRun
     let lfails := fields.filterMap parseLFail
     let capTable := buildCapTable (fields.filterMap parseZ) (fields.filterMap parseY)
-    let _statementTerms := irows.map stmtOf
     -- A capability with no decomposition row would silently become the
     -- bare token; refuse instead.
     let allCaps := ((arows.map (·.cap)) ++ (frows.map (·.cap))
@@ -1242,6 +1285,26 @@ def main (args : List String) : IO UInt32 := do
         let heldCaps := (lookupCaps held e.1).filterMap (capOf capTable)
         let av := if attenuatesB heldCaps childCaps then "ok" else "fail"
         out := out ++ s!"W\t{p}\t{e.1}\t{e.2}\tatten={av}\n"
+      -- C verdicts (G6 confinement, issue 276), one per reconstructed
+      -- statement. The declared context is the component's require locals (M)
+      -- together with the roots its require-held caps bind (K); a statement is
+      -- confined iff every reconstructed head reaches a declared root. `ctx`
+      -- lifts those roots to head granularity — the component's own heads whose
+      -- root is declared — so `confinedB ctx (stmtOf r)` decides
+      -- `∀ k ∈ stmtHeads (stmtOf r), k ∈ ctx`, faithful by `confinedB_iff`.
+      let pi := irows.filter (fun r => r.path == p)
+      for cn in (pi.map (·.comp)).eraseDups do
+        let reqs := match fm.find? (fun r => r.name == cn) with
+          | some r => r.requires
+          | none => []
+        let kbinds := (uk.filter (fun r => r.comp == cn)).map (·.bindn)
+        let declaredRoots := (reqs ++ kbinds).eraseDups
+        let cis := pi.filter (fun r => r.comp == cn)
+        let compHeads := (cis.flatMap (fun r => r.heads ++ r.inverse)).eraseDups
+        let ctx := compHeads.filter (fun h => declaredRoots.contains (rootOf h))
+        for r in cis do
+          let cv := if confinedB ctx (stmtOf r) then "ok" else "fail"
+          out := out ++ s!"C\t{p}\t{cn}\t{r.index}\tconfined={cv}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -1269,6 +1332,8 @@ and feeds the block below to `scripts/axioms_gate.py`. Each of these is a
 `... = true ↔ <model predicate>` bridge: the decision procedure the oracle
 runs, proved equivalent to the judgment the theorems are about. -/
 
+#print axioms RevLOracle.heads_exprOfHeads
+#print axioms RevLOracle.confinedB_iff
 #print axioms RevLOracle.linkOKB_iff
 #print axioms RevLOracle.pathPrefixB_iff
 #print axioms RevLOracle.pleqB_iff

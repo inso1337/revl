@@ -36,7 +36,7 @@ RevL.G3.mutual_cycle_refused	concrete	-	g3_dependency_cycle.rvl refused in both 
 RevL.G3.layering_exists_for_admitted	concrete	-	the layering certificate is reachable, not only refutable
 RevL.G4.inverse_or_emit	instance	RevL.G4.g4_shape_not_vacuous,RevL.G4Classified.g4_not_vacuous	Typed and IsMutation hold together in both conclusion branches; the raw branch closes because Typed has no constructor for it, which is why the lattice restatement carries the real refusal
 RevL.G5.teardown_registers_nothing	contentless	RevL.G5.registrations_ignores_its_argument,RevL.G5Classified.registrations_depends_on_its_argument	FINDING: registrations is the constant zero function, so the conclusion holds by definition and not by any property of undo bodies. The counting statement is G5Classified's
-RevL.G6.confinement	instance	RevL.G6.g6_not_vacuous	TypedIn admits a statement with a non-empty reach surface and refuses the same shape reaching an undeclared key
+RevL.G6.confinement	instance	RevL.G6.g6_not_vacuous,RevL.G6.g6_row_not_vacuous	TypedIn admits a statement with a non-empty reach surface and refuses the same shape reaching an undeclared key; the oracle C row's verdict flips when that undeclared head is accepted
 RevL.Semantics.replays_or_discharges	instance	RevL.G7.replay_table,RevL.G7.estop_strands_the_bracket,RevL.G7.settles_iff_strands_nothing	the equivalence is computed at all six SETTLING kind and verdict points; item 443 added the settling hypothesis and the witness exhibits the E-Stop point it excludes
 RevL.Semantics.phase_lengths_add	instance	RevL.G7.abort_runs_the_proof_pass_then_the_drain	a stack on which both phases are non-empty
 RevL.Semantics.teardown_length	instance	RevL.G7.commit_runs_the_bracket_only,RevL.G7.abort_runs_the_proof_pass_then_the_drain	the same stack replays one entry on commit and three on abort
@@ -184,6 +184,7 @@ RevL.G3.g3_not_vacuous	concrete	-	a link, a layering, a dependency path with a s
 RevL.G4.g4_shape_not_vacuous	concrete	-	both conclusion branches inhabited, and the raw shape typed out rather than refused
 RevL.G5.registrations_ignores_its_argument	concrete	-	FINDING: the review's constant-function probe, proved, plus an undo body that calls an emission and still scores zero
 RevL.G6.g6_not_vacuous	concrete	-	an admitted statement with a non-empty reach surface and a refused one
+RevL.G6.g6_row_not_vacuous	concrete	-	the confinement check refuses leakStmt's undeclared head under the declared context and accepts it once that head is added, so the oracle C row's verdict is mutation-sensitive rather than a foregone ok
 RevL.G8.g8_marker_level_not_vacuous	concrete	-	a typed body with a non-empty surface, and the effect whose surface is empty by definition
 RevL.CrossTier.conformance_hypotheses_are_inhabited	concrete	-	two conformant tiers and a well-annotated map IR, agreeing on a re-ordered non-empty value
 RevL.CapCeilings.capceilings_hypotheses_are_inhabited	concrete	-	a lineage built from a real spawn edge, a Descends, a Resolves, NameableEmission, and a counter run with an overdraw refused
