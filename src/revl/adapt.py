@@ -20,13 +20,14 @@ structural-meets-nominal rule that returns True only because no type table is
 present). A permissive True at a bridged position would prove nothing, so those
 positions refuse (`non-total-conversion`).
 
-TODO(296-slice2): IR-level synthesis + the alias-token-carry gate change land
-alongside this module (see emission_analysis / lower). Slice 3 landed the
+Slice 2 landed IR-level synthesis (`render_adapter`) + the alias-token-carry
+gate change (see parser `require_carry` / emission_analysis). Slice 3 landed the
 resolver surface (`registry.resolve` reports `compatible-with-adapter` below
 direct-compatible, with chain depth and the outcome-merge evidence discount) on
-the `adapter_marking` header this module renders. TODO(296-slice3, remaining):
-`revl adapt --check` chain FLATTENING, `revl diff`, the federation pin.
-TODO(296-slice4): the 414 matrix rows and the generative dichotomy test.
+the `adapter_marking` header this module renders, and `revl adapt --check` chain
+FLATTENING (`flatten_committed_hop`, section 6.4). TODO(296-slice3, remaining):
+`revl diff` and the federation pin. TODO(296-slice4): the 414 matrix rows and
+the generative dichotomy test.
 """
 
 from __future__ import annotations
@@ -922,3 +923,126 @@ def chain_depth_for(candidate_source: str) -> int:
     (section 6.4, "depth only ever ranks down")."""
     mark = adapter_marking(candidate_source)
     return 1 + (mark["depth"] if mark else 0)
+
+
+# --------------------------------------------------- section 6.4: flatten a chain
+#
+# A committed adapter is an ordinary component providing the consumer-facing key,
+# so a later `revl adapt --check` can find IT as a candidate and propose a second
+# bridge in front of it. The composed loss then lives in no single reviewed
+# artifact (a merge in the committed hop, a default in the new one), which is the
+# failure mode section 6.4 closes. `flatten_committed_hop` reconstructs the
+# committed inner hop from the candidate's own file so `--check` can re-display
+# every hop's merges, defaults and drops in one listing (E12): what gets attested
+# is the actual composed loss, not the last hop's slice of it.
+
+
+@dataclass(frozen=True)
+class InnerHop:
+    """One committed hop a flattened chain re-displays (section 6.4). `result`
+    is the re-derived committed plan; `opaque` is set (with a reason) when the
+    committed body uses a construct outside the flagship reconstruction, so the
+    listing degrades honestly to "see the committed adapter's attestation"
+    rather than inventing a plan the committed adapter never ran."""
+    require_key: str
+    provided_service: str      # the consumer-facing service this hop yields
+    backing_service: str       # the service this committed hop requires
+    result: BridgeResult
+    opaque: str | None = None
+
+
+def _committed_method_opt_ins(method_ir: dict, req_m, prov_m) -> dict:
+    """Recover the opt-in map (`D`) a committed adapter method's body encodes, so
+    re-deriving its plan with `bridge_plan` reproduces the COMMITTED plan rather
+    than refusing a discard/merge the author already opted into and had audited
+    at commit time. Bounded to the `render_adapter` body shape; a shape it does
+    not recognize leaves the corresponding opt-in unset, and the re-derivation
+    then refuses (the hop is reported opaque)."""
+    opt: dict = {}
+    # B2 drops: v1 pairs by name and has no rename mapping (section 8), so a
+    # consumer parameter with no same-named backing parameter was necessarily
+    # dropped - exactly the `supplied-value-dropped` opt-in the committed
+    # adapter carried.
+    prov_names = {pn for pn, _pt in prov_m.params}
+    drops = [rn for rn, _rt in req_m.params if rn not in prov_names]
+    if drops:
+        opt["drop"] = drops
+    # B4 outcome merge: only when the shapes force one (Opt <- Result). The
+    # total waiver is `Err(_) => None` (a single wildcard-bound Err arm); a
+    # per-variant closed mapping is left unrecovered on purpose - its arm map is
+    # attested in the committed adapter itself, and reconstructing it here would
+    # duplicate that record in a place no one reviewed.
+    rhead, _ = parse_type(req_m.returns)
+    phead, _ = parse_type(prov_m.returns)
+    if rhead == "Opt" and phead == "Result":
+        body = method_ir.get("body") or []
+        if len(body) == 1 and body[0].get("step") == "return":
+            expr = body[0].get("expr") or {}
+            if expr.get("kind") == "match":
+                err_arms = [a for a in (expr.get("arms") or [])
+                            if a.get("pattern") == "Err"]
+                if (len(err_arms) == 1
+                        and err_arms[0].get("bind") in ("_", "__")):
+                    opt["return"] = {"merge": "total"}
+    return opt
+
+
+def flatten_committed_hop(candidate_ir: dict,
+                          provided_service: str) -> InnerHop | None:
+    """Reconstruct the committed inner hop of a candidate that is itself an
+    adapter (section 6.4, E12), so `revl adapt --check` can flatten the chain.
+
+    Finds the component in `candidate_ir` that provides `provided_service` and,
+    for the single backing service it requires, re-derives the committed hop's
+    plan with `bridge_plan` over the two service declarations in the candidate's
+    own file. Returns `None` when the providing component is ordinary code with
+    no single-backing require to flatten (the honest reading: there is no inner
+    hop visible in this file)."""
+    from .admission import _service_from_ir  # noqa: PLC0415 — avoids a cycle
+
+    services = candidate_ir.get("services") or {}
+    types = candidate_ir.get("types") or {}
+    component = None
+    provide_key = None
+    for comp in candidate_ir.get("components") or []:
+        for key, svc in (comp.get("provides") or {}).items():
+            if svc == provided_service:
+                component, provide_key = comp, key
+                break
+        if component is not None:
+            break
+    if component is None:
+        return None
+    requires = component.get("requires") or {}
+    if len(requires) != 1:
+        # zero (a leaf) or several backings: no single committed hop to
+        # re-derive here. Deeper structure is out of this file's scope.
+        return None
+    require_key, backing_service = next(iter(requires.items()))
+    if backing_service not in services or provided_service not in services:
+        return None
+    req = _service_from_ir(provided_service, services[provided_service])
+    prov = _service_from_ir(backing_service, services[backing_service])
+    # the committed method bodies, by provided method name.
+    bodies: dict[str, dict] = {}
+    for step in component.get("body") or []:
+        if step.get("step") == "provide" and step.get("name") == provide_key:
+            for m in step.get("methods") or []:
+                bodies[m.get("name")] = m
+    opt_ins: dict = {}
+    for mname, rm in req.methods.items():
+        pm = prov.methods.get(mname)
+        if pm is None:
+            continue
+        recovered = _committed_method_opt_ins(bodies.get(mname) or {}, rm, pm)
+        if recovered:
+            opt_ins[mname] = recovered
+    result = bridge_plan(req, prov, opt_ins, req_types=types, prov_types=types)
+    opaque = None
+    if not result.ok:
+        opaque = ("the committed adapter uses a construct outside the flagship "
+                  "reconstruction (per-variant merge, explicit default, or "
+                  "fabrication); its own attestation carries the audited plan")
+    return InnerHop(require_key=require_key, provided_service=provided_service,
+                    backing_service=backing_service, result=result,
+                    opaque=opaque)
