@@ -52,7 +52,7 @@ Two distinct adversaries, one per item, and they compose:
 | --- | --- | --- |
 | who is hostile | the model that wrote the `.rvl` source | the content a running composition consumes |
 | the attack | declare an escape hatch, reach past the grant | steer a granted channel via injected text |
-| the defense | admission profile: `no_extern` + the granted allowlist ([admit_profile.py](../../src/revl/admit_profile.py:49)) | G9: untrusted data cannot directly create authority |
+| the defense | admission profile: `no_extern` + the granted allowlist ([admit_profile.py](../../src/revl/admit_profile.py)) | G9: untrusted data cannot directly create authority |
 | status | landed (329/330) | Slice A landed; this note designs the rest |
 
 The composed case is the lighthouse one: a model-authored turn (untrusted
@@ -64,15 +64,15 @@ is authored by the party 329 refuses to trust.
 ### What Slice A models today
 
 A boundary return declared `Untrusted[T]` mints a coarse origin (`web`, `net`,
-`fs`, `model`, `input`, `secret`; [taint.py](../../src/revl/taint.py:56),
+`fs`, `model`, `input`, `secret`; [taint.py](../../src/revl/taint.py),
 derived from the crossing's capability scope at
-[taint.py](../../src/revl/taint.py:115), never guessed). A parameter declared
+[taint.py](../../src/revl/taint.py), never guessed). A parameter declared
 `Trusted[T]` marks a sink. A per-body walk joins taint through expressions and
 refuses an untrusted value reaching a sink, as a compile error tagged G9
-([diagnostics.py](../../src/revl/diagnostics.py:33)). Two declassifiers exist:
+([diagnostics.py](../../src/revl/diagnostics.py)). Two declassifiers exist:
 a `verified fn` whose return mentions `Trusted[...]`, and the ambient
 `endorse(v)` builtin. Provenance lands on the G8 audit surface as `taint:` and
-`declassify:` crossing tokens ([audit_diff.py](../../src/revl/audit_diff.py:59))
+`declassify:` crossing tokens ([audit_diff.py](../../src/revl/audit_diff.py))
 so `revl audit --diff` fails on a newly-routed taint edge or a newly-added
 endorse, the same way it fails on one more emission.
 
@@ -89,7 +89,7 @@ endorse, the same way it fails on one more emission.
 3. **The sink set is opt-in.** Every sink exists only where an author wrote
    `Trusted[T]`. Nothing derives sinks from the classification machinery, the
    policy engine has no taint vocabulary
-   ([policy.py](../../src/revl/policy.py:169) parses only reach and approval
+   ([policy.py](../../src/revl/policy.py) parses only reach and approval
    rules), and the model-prompt and admission crossings have no story.
 
 Slices B, C and D close these in order. The organizing rule for all three,
@@ -105,50 +105,50 @@ The mechanism, with its seams, since B, C and D all extend it in place:
 
 - **Qualifier surface.** `Untrusted[T]` / `Trusted[T]` are qualifiers
   orthogonal to the base type, stripped into a side table before base
-  typecheck ([taint.py](../../src/revl/taint.py:61) `strip_qualifiers`,
-  extraction at [taint.py](../../src/revl/taint.py:165)
+  typecheck ([taint.py](../../src/revl/taint.py) `strip_qualifiers`,
+  extraction at [taint.py](../../src/revl/taint.py)
   `extract_and_normalize`, called from
-  [lower.py](../../src/revl/lower.py:4160)). A qualifier-free type is returned
+  [lower.py](../../src/revl/lower.py)). A qualifier-free type is returned
   verbatim, never round-tripped, so a program using no qualifier is
   byte-identical across parse, IR and every backend
-  ([taint.py](../../src/revl/taint.py:49) is the fast path; the
+  ([taint.py](../../src/revl/taint.py) is the fast path; the
   `test_program_without_qualifiers_is_untouched` family in
   [tests/test_taint_provenance.py](../../tests/test_taint_provenance.py) pins
   it).
 - **The lattice** (unchanged from the original Decision 2): a value's taint is
   a set of origin labels ordered by inclusion; bottom `{}` is trusted, join is
-  set union ([taint.py](../../src/revl/taint.py:257) `_join`), so a trusted
+  set union ([taint.py](../../src/revl/taint.py) `_join`), so a trusted
   prefix never launders an untrusted suffix. Deliberately the same shape as
   the emission-capability sets `_emitting_capabilities` computes
-  ([emission_analysis.py](../../src/revl/emission_analysis.py:99)), which is
+  ([emission_analysis.py](../../src/revl/emission_analysis.py)), which is
   the machinery Slice B reuses.
-- **The walk.** `_FlowChecker` ([taint.py](../../src/revl/taint.py:268))
+- **The walk.** `_FlowChecker` ([taint.py](../../src/revl/taint.py))
   threads a per-binding environment through one callable body. Concatenation
   and interpolation join; every unmodelled node falls through to a
-  union-of-children rule ([taint.py](../../src/revl/taint.py:378)) so taint
+  union-of-children rule ([taint.py](../../src/revl/taint.py)) so taint
   only ever disappears at a literal or a declassifier, the no-false-clean
   invariant *within a body*. An ordinary call's result is tainted iff any
-  argument is ([taint.py](../../src/revl/taint.py:387)), the intra-body
+  argument is ([taint.py](../../src/revl/taint.py)), the intra-body
   over-approximation.
 - **The refusal.** An untrusted value into a `Trusted[T]` parameter raises G9
   with the origin, the sink kind, and the shortest tainting path; refusals
   ride the item-386 multi-error collection
-  ([lower.py](../../src/revl/lower.py:4424)). G9 is registered with its fix
-  line ([diagnostics.py](../../src/revl/diagnostics.py:33) and `:64`), covered
+  ([lower.py](../../src/revl/lower.py)). G9 is registered with its fix
+  line ([diagnostics.py](../../src/revl/diagnostics.py) and `:64`), covered
   by the guarantee-totality test.
 - **Declassifiers.** A `verified fn` whose return mentions `Trusted[...]`
   (total by G7, so the failure branch is a typed `Result`, not a smuggled
   string), and `endorse(v)`, an ambient builtin
-  ([lower.py](../../src/revl/lower.py:671)) that is identity on the base type
+  ([lower.py](../../src/revl/lower.py)) that is identity on the base type
   and is spliced out of the IR after the verdict
-  ([taint.py](../../src/revl/taint.py:501), applied at
-  [lower.py](../../src/revl/lower.py:4609)) so no emitter or golden ever sees
+  ([taint.py](../../src/revl/taint.py), applied at
+  [lower.py](../../src/revl/lower.py)) so no emitter or golden ever sees
   it.
 - **Provenance.** Per-component origins that reach an emission, and origins
   declassified, fold onto the IR entry and the G8 boundary table
-  ([__main__.py](../../src/revl/__main__.py:221)), becoming
+  ([__main__.py](../../src/revl/__main__.py)), becoming
   `taint:<component>:<origin>` and `declassify:<component>:<origin>` crossing
-  tokens ([audit_diff.py](../../src/revl/audit_diff.py:59)) that the drift
+  tokens ([audit_diff.py](../../src/revl/audit_diff.py)) that the drift
   gate treats as widenings.
 
 What Slice A honestly is: a sound per-body checker for a **trusted author**
@@ -226,7 +226,7 @@ If the granting side forgets the qualifier on the shell extern, there is no
 defense at all; nothing in the classification machinery says "a shell-scoped
 parameter is a sink". The policy engine cannot say "web taint may not reach
 `send.*`" because its grammar has only `may reach` / `may not reach` /
-`requires approval` ([policy.py](../../src/revl/policy.py:169), enforcement at
+`requires approval` ([policy.py](../../src/revl/policy.py), enforcement at
 `:668` walking capability reach, not taint tokens), even though the
 `taint:` / `declassify:` tokens it would need already land on the audit
 surface. And the two crossings that matter most to the lighthouse workload,
@@ -266,7 +266,7 @@ For a value `v` with taint `t(v)`, a set of origin labels:
 
 Lift the per-body walk to a least fixed point over the same call graph
 `_emitting_capabilities` walks
-([emission_analysis.py](../../src/revl/emission_analysis.py:99)). For every
+([emission_analysis.py](../../src/revl/emission_analysis.py)). For every
 callable (top-level fn, component provide method, service operation resolved
 through a required key), infer a **taint signature**:
 
@@ -286,7 +286,7 @@ call site applies the callee's signature: a tainted argument in a
 crosses component boundaries (the relay program above refuses at
 `emit relay.pass_on(page)` naming `Middle.pass_on -> run` as the path). The
 witness-chain shape already exists in the landed `via` tuples
-([taint.py](../../src/revl/taint.py:242)); B extends it across bodies, the
+([taint.py](../../src/revl/taint.py)); B extends it across bodies, the
 same way `_EmissionEvidence` names a G4 chain.
 
 Body-local back edges use the same fixpoint: iterate a body's walk until its
@@ -325,10 +325,10 @@ what cannot be named cannot be proven safe.
 ### Where it is enforced
 
 Entirely in [taint.py](../../src/revl/taint.py): the `TaintModel` gains the
-signature tables, `check_taint` ([taint.py](../../src/revl/taint.py:461))
+signature tables, `check_taint` ([taint.py](../../src/revl/taint.py))
 gains the fixpoint driver, and the call site in
-[lower.py](../../src/revl/lower.py:4424) is unchanged. No backend is touched;
-the `model.active` gate ([taint.py](../../src/revl/taint.py:149)) keeps a
+[lower.py](../../src/revl/lower.py) is unchanged. No backend is touched;
+the `model.active` gate ([taint.py](../../src/revl/taint.py)) keeps a
 qualifier-free program byte-identical, and B widens `active` to include
 derived sources/sinks only when Slice D's profile turns them on.
 
@@ -373,7 +373,7 @@ Three properties, each on an existing seam:
   `{origin, method, reason, line}`; the crossing *token* stays
   `declassify:<component>:<origin>` so `audit --diff` keys are stable and a
   new endorse still fails the drift gate as a widening (landed behavior,
-  [audit_diff.py](../../src/revl/audit_diff.py:59));
+  [audit_diff.py](../../src/revl/audit_diff.py));
 - **policy-forbiddable**: the item-33 policy grammar gains a declassify verb
   (Slice D carries the grammar change; the rule reads the landed tokens):
 
@@ -387,9 +387,9 @@ capability declassify.web   requires approval
 
 Item 246 shipped typed approvals: `capability C requires approval [ttl]` in
 policy, `await approval[C] { fields }` producing a non-persistent
-`Approval[C]` ([policy.py](../../src/revl/policy.py:106), the approval body
-step at [lower.py](../../src/revl/lower.py:7022), non-persistence enforced at
-[typecheck.py](../../src/revl/typecheck.py:220)). C reuses it wholesale: an
+`Approval[C]` ([policy.py](../../src/revl/policy.py), the approval body
+step at [lower.py](../../src/revl/lower.py), non-persistence enforced at
+[typecheck.py](../../src/revl/typecheck.py)). C reuses it wholesale: an
 `endorse[origin]` under a `capability declassify.<origin> requires approval`
 policy rule must be covered by a live `Approval[declassify.<origin>]`, exactly
 as an approval-required extern crossing must be. The approval is the
@@ -410,7 +410,7 @@ fn deploy(url: Str) {
 ### Closing hole 2 for the untrusted author
 
 `AdmissionProfile` gains `no_declassify` (on by default in
-`untrusted_author`, [admit_profile.py](../../src/revl/admit_profile.py:68)):
+`untrusted_author`, [admit_profile.py](../../src/revl/admit_profile.py)):
 
 - the admitted root module may not call `endorse` in any form;
 - a `verified fn` declared in the admitted root whose return mentions
@@ -449,7 +449,7 @@ not annotated:
 | secret sinks | item 256's rows, folded in when 256 lands: `secret:<name>` origin refused at every sink except its bound emission |
 
 The derivation lives beside the landed origin derivation
-([taint.py](../../src/revl/taint.py:115) `_origin_of` gets a `_sink_of`
+([taint.py](../../src/revl/taint.py) `_origin_of` gets a `_sink_of`
 sibling over the same declared capability scopes). The stdlib annotates what
 derivation cannot see; the admission crossing's declaration becomes:
 
@@ -477,7 +477,7 @@ landed tokens:
 - an outbound send (`net` / `web` / `send` scopes) carrying `web` / `model` /
   `fs` taint is the canonical exfiltration edge of the lethal trifecta; the
   `taint:<component>:<origin>` token already lands
-  ([taint.py](../../src/revl/taint.py:441)); D adds the policy vocabulary and
+  ([taint.py](../../src/revl/taint.py)); D adds the policy vocabulary and
   enforcement:
 
 ```
@@ -485,8 +485,8 @@ web-taint    may not reach net without approval
 model-taint  may not reach fs
 ```
 
-  parsed next to the existing rules ([policy.py](../../src/revl/policy.py:169)),
-  enforced in `enforce` ([policy.py](../../src/revl/policy.py:668)) by reading
+  parsed next to the existing rules ([policy.py](../../src/revl/policy.py)),
+  enforced in `enforce` ([policy.py](../../src/revl/policy.py)) by reading
   the taint tokens off the same audit graph, violations carrying a
   `taint-flow` why-trace. "without approval" reuses the 246 surface: the flow
   admits iff covered by an `Approval[...]`, which is declassifier three.
@@ -561,7 +561,7 @@ the data-side strictness exactly when the author is the adversary.
 ## Byte-identity and additivity (the permanent contract)
 
 - No qualifier, no profile, no policy taint rules: the taint model is
-  inactive ([taint.py](../../src/revl/taint.py:149)), the walk and fixpoint
+  inactive ([taint.py](../../src/revl/taint.py)), the walk and fixpoint
   are skipped, `splice_declassifiers` rebuilds identically, every golden and
   every tier byte-identical. B, C and D all preserve this gate; D's derived
   sources and sinks activate only under the profile or an explicit policy
