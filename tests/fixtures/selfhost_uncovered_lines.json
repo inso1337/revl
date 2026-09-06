@@ -708,9 +708,12 @@
         "Malformed ownership annotation: _py_inplace_write returns None when an assign stamped unique has a non-dict value. Frontend ownership marks expression dictionaries only; port is_inplace_write also declines this shape.": {
           "_py_inplace_write": 1
         },
-        "Match helper invariant cases: _arm_body_mentions keeps a binder when a _RenderedBody has no source node (the component render path, which the emit corpus does not reach); _match_expr synthesizes a non-exhaustive throw for zero arms. Frontend arms carry expressions and exhaustiveness checks; component rendered arms pass their source. Ordinary and wildcard matching is covered in control/result/branches/services_match, and match_binder_scan grades the conservative key/list scan and the Some/None-binder short-circuit (#306).": {
+        "Match helper invariant cases: _arm_body_mentions keeps a binder when a _RenderedBody has no source node (the component render path, which the emit corpus does not reach); _match_expr synthesizes a non-exhaustive throw for zero arms. Frontend arms carry expressions and exhaustiveness checks; component rendered arms pass their source. Ordinary and wildcard matching is covered in control/result/branches/services_match, and match_binder_scan grades the conservative object-KEY retention and exhausted-LIST walk (#306).": {
           "_arm_body_mentions": 1,
           "_match_expr": 1
+        },
+        "Match-binder short-circuit made unreachable by #320: _arm_body_is_bind's `bind in (\"Some\", \"None\")` guard returns False for a payload bound to a constructor spelling, but the frontend now mangles a predeclared binder in lower.py `_predeclared_mangle` (`Some` -> `Some_`) BEFORE the emitter reads the IR, and `None` carries no payload so it is never a binder. So `bind` is never literally `Some`/`None` at this emitter and the guard's early `return False` is unreachable through the byte-agreement oracle. match_binder_scan.rvl's some_binder still drives the arm (`Some(Some) => 0`), but now through the mangled `Some_` binder, which the arm body never reads.": {
+          "_arm_body_is_bind": 1
         },
         "Method declaration rejection only: _method rejects a method absent from its service or wrong arity. Frontend checking supplies matching names/arity; services_methods.rvl covers ordinary rendering.": {
           "_ComponentEmitter._method": 2
@@ -1586,8 +1589,8 @@
           "match_expr": 2,
           "match_folds": 1
         },
-        "Match source bookkeeping: arm_body_is_bind's non-record body guard returns false, and every match arm body is an expression record, so no document reaches this defensive branch (the reference folds the same guard into _arm_body_is_bind). Its Some/None-binder short-circuit, and arm_body_mentions' conservative object-KEY retention and exhausted-list walk, are now graded on both sides by match_binder_scan (#306); control/result/services_match exercise ordinary binder use and folding.": {
-          "arm_body_is_bind": 1
+        "Match source bookkeeping: TWO statements of arm_body_is_bind are unreachable through the byte-agreement oracle. (1) The non-record body guard returns false, but every match arm body is an expression record, so no document reaches that defensive branch (the reference folds the same guard into _arm_body_is_bind). (2) The Some/None-binder short-circuit: #320 now mangles a predeclared binder in the frontend (`Some` -> `Some_`) before either emitter reads the IR, and `None` carries no payload, so `bind` is never literally `Some`/`None` here. match_binder_scan's some_binder still drives the arm but through the mangled `Some_` binder (an unread bind). arm_body_mentions' conservative object-KEY retention and exhausted-list walk stay graded on both sides by match_binder_scan (#306); control/result/services_match exercise ordinary binder use and folding.": {
+          "arm_body_is_bind": 2
         },
         "Method let-effect lookup/acquire sequence is source-bound to spawn or result-declared host verbs; witnessed provide binds are frontend-refused, pinned in tests. Ordinary unbound witnessed/adopt/compensation are covered. Final method marker covers deferred await and invalid nested/unknown steps, not supported return/effect rendering.": {
           "method_step": 11

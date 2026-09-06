@@ -6535,6 +6535,37 @@ fn lir_arrow(a: ArrowN, env: List[Bind]) -> Str {
   return s.concat("}")
 }
 
+// issue #320 (self-host port of reference `_predeclared_mangle` /
+// `_HOST_PREDECLARED`, src/revl/lower.py): a value/binding identifier that
+// spells a host predeclared name (a builtin an emitter writes verbatim next to
+// the user's name, an ADT-constructor / host-root spelling like `Some`/`Map`, a
+// #320 tier identifier) is escaped by one `_` so it is safe verbatim on every
+// tier. The set below is the reference's keyword-DISJOINT `_HOST_PREDECLARED`
+// (its `_PREDECLARED_CANDIDATES` minus every host keyword — that filter drops
+// `None`/`range`, which are python keyword/soft-keyword); keep the two in sync,
+// the byte-agreement oracle catches drift the day a predeclared name enters a
+// binding position in the corpus. The escape is the same pure, injective
+// ladder-shift the reference and the backends use, so a declaration and its use
+// sites agree without a table, and it is IDENTITY on every ordinary name (a
+// program that binds no predeclared name lowers byte-identically).
+fn is_host_predeclared(n: Str) -> Bool {
+  return contains(["Array", "Err", "JSON", "Job", "Map", "Number", "Object",
+                   "Ok", "Pool", "Some", "Stream", "String", "TypeError",
+                   "abs", "arguments", "eval", "expect", "float64", "int64",
+                   "isinstance", "len", "ord", "revlEq", "revlLen",
+                   "revlStrLen", "sorted", "str", "strconv"], n)
+}
+
+fn predeclared_mangle(name: Str) -> Str {
+  var root = name
+  while (root != "") {
+    if (is_host_predeclared(root)) { return name.concat("_") }
+    if (root.slice(root.length() - 1, root.length()) != "_") { return name }
+    root = root.slice(0, root.length() - 1)
+  }
+  return name
+}
+
 fn lir_match(m: MatchN, env: List[Bind]) -> Str {
   let scrutTy = infer(m.scrut, env)
   var arms = ""
@@ -6545,7 +6576,7 @@ fn lir_match(m: MatchN, env: List[Bind]) -> Str {
     var inner = env
     if (a.bind != "" && pay != "") { inner = tenv_put(inner, a.bind, pay) }
     var arm = "{\"pattern\":".concat(jstr(a.pat))
-      .concat(",\"bind\":").concat(a.bind == "" ? "null" : jstr(a.bind))
+      .concat(",\"bind\":").concat(a.bind == "" ? "null" : jstr(predeclared_mangle(a.bind)))
       .concat(",\"body\":").concat(lir_expr(a.body, inner))
     if (pay != "") { arm = arm.concat(",\"payload_type\":").concat(jstr(pay)) }
     arm = arm.concat("}")
@@ -6571,7 +6602,8 @@ fn lir_expr(e: Expr, env: List[Bind]) -> Str {
                     && !tagged_case_adt(env, n).startsWith("Result")
                     && !tagged_case_adt(env, n).startsWith("Opt"))
                      ? lir_adt(tagged_case_adt(env, n), n, [], env)
-                     : "{\"kind\":\"var\",\"name\":".concat(jstr(n)).concat("}"),
+                     : "{\"kind\":\"var\",\"name\":".concat(
+                         jstr(tenv_get(env, n) != "" ? predeclared_mangle(n) : n)).concat("}"),
     Bin(b)      => lir_bin(b, env),
     Un(u)       => lir_un(u, env),
     Emit(u)     => "{\"kind\":\"bad\"}",
@@ -6726,7 +6758,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     let value = declared != "" && r.js == "{\"kind\":\"maplit\",\"entries\":[]}"
       ? r.js.slice(0, r.js.length() - 1).concat(",\"expected\":").concat(jstr(declared)).concat("}")
       : r.js
-    let js = "{\"step\":\"let\",\"name\":".concat(jstr(name)).concat(",\"value\":")
+    let js = "{\"step\":\"let\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
       .concat(value).concat(",\"mutable\":").concat(mutable ? "true" : "false").concat("}")
     return mk_one(js, env2, mutable ? muts.push(name) : muts, r.i)
   }
@@ -6800,7 +6832,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
       if (el != "") { inner = tenv_put(env, bind, el) }
     }
     let bodyjs = lir_stmts(ts, it.i + 2, bend - 1, inner, muts, ret)
-    let js = "{\"step\":\"for\",\"bind\":".concat(jstr(bind)).concat(",\"iterable\":")
+    let js = "{\"step\":\"for\",\"bind\":".concat(jstr(predeclared_mangle(bind))).concat(",\"iterable\":")
       .concat(lir_expr(it.e, env)).concat(",\"body\":[").concat(bodyjs).concat("]}")
     return mk_one(js, env, muts, bend)
   }
@@ -6808,7 +6840,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     let name = t.text
     let r = expr_at(ts, i + 2)
     if (is_bad(r.e) || r.i <= i + 2) { return mk_one("", env, muts, hi) }
-    let js = "{\"step\":\"assign\",\"name\":".concat(jstr(name)).concat(",\"value\":")
+    let js = "{\"step\":\"assign\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
       .concat(lir_expr(r.e, env)).concat("}")
     return mk_one(js, assign_env(env, name, r.e), muts, r.i)
   }
@@ -6818,7 +6850,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     let r = expr_at(ts, i + 3)
     if (is_bad(r.e) || r.i <= i + 3) { return mk_one("", env, muts, hi) }
     let binE = Bin({ op: baseop, l: Var(name), r: r.e, paren: false })
-    let js = "{\"step\":\"assign\",\"name\":".concat(jstr(name)).concat(",\"value\":")
+    let js = "{\"step\":\"assign\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
       .concat(lir_expr(binE, env)).concat("}")
     return mk_one(js, assign_env(env, name, binE), muts, r.i)
   }
