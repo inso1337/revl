@@ -2221,12 +2221,22 @@ class ProcessParticipant(Participant):
 VIA_LOCAL = "local"
 VIA_CONTAINER = "container"
 VIA_SSH = "ssh"
+#: A verifiable private peer pool target (issue #480, design note
+#: docs/design/461-verifiable-private-peer-pool.md). This is SLICE 0: the word
+#: is in the vocabulary so it is refused BY NAME — pointing at the design and
+#: the missing network seam — rather than as an `unknown-via` or, worse, as a
+#: plain local child. The offer record, dispatcher and formal binding (slices
+#: 1-4) are gated on the seam and do not land here.
+VIA_PEER = "peer"
 
 #: Every `via` this build knows how to reason about. A `via` outside this set is
 #: REFUSED, never treated as `local`: "the operator wrote a word we do not
 #: implement" and "the operator wants a plain child process" are different
 #: statements, and guessing the second from the first is the fail-open shape.
-KNOWN_VIA = (VIA_LOCAL, VIA_CONTAINER, VIA_SSH)
+#: `peer` is IN this set even though it never admits: it is a `via` this build
+#: reasons about (by refusing it with its own reason, :data:`admit_deploy_map`'s
+#: `peer-pool-unavailable`), not one it fails to recognize.
+KNOWN_VIA = (VIA_LOCAL, VIA_CONTAINER, VIA_SSH, VIA_PEER)
 
 BOUNDARY_PROCESS = "process"
 BOUNDARY_CONTAINER = "container"
@@ -2239,6 +2249,10 @@ VIA_BOUNDARY = {
     VIA_LOCAL: BOUNDARY_PROCESS,
     VIA_CONTAINER: BOUNDARY_CONTAINER,
     VIA_SSH: BOUNDARY_MACHINE,
+    #: A peer is a machine boundary (design §7: "A peer is a machine
+    #: boundary."). Its teardown promise is the machine one — nothing — which is
+    #: half of why slice 0 refuses it.
+    VIA_PEER: BOUNDARY_MACHINE,
 }
 
 #: What a deploy can and cannot promise about TEARDOWN across each boundary.
@@ -2445,6 +2459,33 @@ def admit_deploy_map(placement: Mapping, *,
                 f"implements ({', '.join(KNOWN_VIA)}). An unimplemented `via` "
                 f"is refused, never quietly run as a local child: the boundary "
                 f"the operator asked for would not be the boundary they got."))
+            continue
+
+        if target.via == VIA_PEER:
+            # SLICE 0 of the verifiable private peer pool (issue #480, design
+            # note docs/design/461-verifiable-private-peer-pool.md §5). A peer
+            # IS a machine boundary, so the generic `machine-boundary` refusal
+            # below would already catch it — but a peer target is refused with
+            # its OWN reason, naming the design and the seam it waits on, so an
+            # operator who wrote `via = peer` learns why the pool is not open
+            # yet rather than reading a generic SSH-flavoured refusal. It is
+            # emphatically NOT treated as `local`: the boundary the operator
+            # asked for would not be the boundary they got.
+            refusals.append(_map_refusal(
+                pname, "peer-pool-unavailable",
+                f"`via = peer` places {pname!r} on a verifiable private peer "
+                f"pool (design docs/design/461-verifiable-private-peer-pool.md, "
+                f"issue #480). A peer is a MACHINE boundary, and the network "
+                f"seam a peer is dispatched over — item 56/#107 (the 411 T3 "
+                f"seam transport across a container/machine boundary, and its "
+                f"peer admission) — has not landed. Until it does, `via = peer` "
+                f"is refused BY NAME and never quietly run as a local child: "
+                f"the pool the operator asked for would not be the boundary "
+                f"they got. This is slice 0 of the design; the signed offer "
+                f"record, the lawful-retry dispatcher and the "
+                f"authority-monotonicity binding (slices 1-4) are gated on the "
+                f"same seam and do not ship here. Teardown across the boundary "
+                f"promises nothing either: {TEARDOWN_PROMISE[BOUNDARY_MACHINE]}"))
             continue
 
         if target.boundary == BOUNDARY_MACHINE:
