@@ -59,7 +59,13 @@ def read_latch(path: str | None) -> dict | None:
     A latch that exists but does not parse still reads as HALTED. Failing open
     on a malformed emergency stop is the one failure mode this feature exists
     to prevent, so every reader — the runtime seam, the CLI and the conductor —
-    applies this same rule."""
+    applies this same rule. The same reasoning covers a latch we cannot READ:
+    an EACCES on a latch whose permissions changed, or an EISDIR on a path an
+    operator turned into a directory, is an existing-but-unreadable latch, not
+    an absent one, so it too reads as HALTED. Only a genuinely absent latch
+    (`FileNotFoundError`) reads as not-halted; every other `OSError` fails
+    CLOSED, because an operator halt no reader can inspect must never be
+    mistaken for the absence of a halt."""
     if not path:
         return None
     try:
@@ -68,7 +74,7 @@ def read_latch(path: str | None) -> dict | None:
     except FileNotFoundError:
         return None
     except OSError:
-        return None
+        return _unreadable()
     except (ValueError, TypeError):
         return _unreadable()
     return record if isinstance(record, dict) else _unreadable()

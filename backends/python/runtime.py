@@ -1881,7 +1881,12 @@ def _latch_record() -> Optional[dict]:
     """The halt an operator wrote to the latch file, or None when the latch is
     absent. A latch that exists but does not parse still HALTS: a malformed
     emergency stop is still an emergency stop, and failing open here would be
-    the one failure mode this feature exists to prevent."""
+    the one failure mode this feature exists to prevent. The same reasoning
+    covers a latch we cannot READ (EACCES on changed permissions, EISDIR on a
+    path turned into a directory): an existing-but-unreadable latch is not an
+    absent one, so only a genuinely absent latch (FileNotFoundError) reads as
+    not-halted — every other OSError fails CLOSED. Kept byte-for-byte in step
+    with `revl.estop.read_latch`, which the CLI and conductor read through."""
     path = estop_latch_path()
     if not path:
         return None
@@ -1891,7 +1896,8 @@ def _latch_record() -> Optional[dict]:
     except FileNotFoundError:
         return None
     except OSError:
-        return None
+        return {"reason": "operator halt (unreadable latch file)",
+                "operator": "unknown"}
     except (ValueError, TypeError):
         return {"reason": "operator halt (unreadable latch file)",
                 "operator": "unknown"}

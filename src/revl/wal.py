@@ -151,6 +151,15 @@ def read_wal(path: str) -> dict:
       it is MID-FILE corruption and is refused, because silently skipping it
       would drop a committed record and corrupt cleanup replay.
 
+    "Unparseable" covers a line that is not valid UTF-8, not only one that is not
+    valid JSON: a ``kill -9`` mid-write can tear a record in the middle of a
+    multibyte character, so the file is read as BYTES and each line is decoded
+    individually. A torn trailing multibyte record is classified ``torn`` exactly
+    as a torn trailing JSON record is, rather than tracebacking with a
+    ``UnicodeDecodeError`` the recovery exists to absorb; a non-UTF-8 line with
+    content after it is the same mid-file corruption a non-JSON one is, and is
+    refused the same way.
+
     A missing header is left as ``{}`` (an empty or pre-header WAL is a valid
     nothing-to-recover input); the version gate only fires when a header exists.
     The gate reads no approval or grant record, so authority injection stays
@@ -167,21 +176,22 @@ def read_wal(path: str) -> dict:
     # avoids building a list of all lines in memory for large WALs while still
     # allowing the same trailing-torn-line detection as before.
     last_content = -1
-    with open(path, encoding="utf-8") as handle:
+    with open(path, "rb") as handle:
         for i, raw_line in enumerate(handle):
             if raw_line.strip():
                 last_content = i
 
     # Second pass: parse and classify records. Streaming the file avoids holding
-    # all lines in memory at once.
-    with open(path, encoding="utf-8") as handle:
-        for index, raw_line in enumerate(handle):
-            line = raw_line.strip()
-            if not line:
+    # all lines in memory at once. The file is read as BYTES so a trailing record
+    # torn mid-multibyte-character decodes as `torn` rather than raising.
+    with open(path, "rb") as handle:
+        for index, raw_byte_line in enumerate(handle):
+            if not raw_byte_line.strip():
                 continue
             try:
+                line = raw_byte_line.decode("utf-8").strip()
                 entry = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 if index == last_content:
                     torn = True   # a partial FINAL record: the crash itself
                     continue

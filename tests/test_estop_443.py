@@ -310,6 +310,56 @@ def test_a_malformed_latch_still_halts(tmp_path):
         rt.plug(None, {"name": "Payments"})
 
 
+def test_an_unreadable_latch_reads_as_halted_not_absent(tmp_path):
+    """R-C11 (issue #538): a latch that EXISTS but cannot be READ must fail
+    CLOSED. An EISDIR (a path an operator turned into a directory) or an EACCES
+    (permissions changed) is an existing-but-unreadable latch, not an absent
+    one — reading it as not-halted would be the fail-open this feature exists to
+    prevent. Only a genuinely absent latch (FileNotFoundError) reads as absent.
+
+    Pinned on all three readers that must agree: the shared vocabulary
+    (`revl.estop.read_latch`), the py runtime seam (`runtime._latch_record`),
+    and the crossing gate (`estop_engaged`)."""
+    from revl import estop as estop_mod  # noqa: PLC0415
+
+    # A path that exists as a DIRECTORY: open() raises IsADirectoryError (EISDIR).
+    latch_dir = tmp_path / "run.estop"
+    latch_dir.mkdir()
+
+    record = estop_mod.read_latch(str(latch_dir))
+    assert record is not None and record.get("halted") is True
+
+    rt.arm_estop_latch(str(latch_dir))
+    assert rt._latch_record() is not None
+    assert rt.estop_engaged()
+    with pytest.raises(rt.EstopHalted):
+        rt.plug(None, {"name": "Payments"})
+
+    # And a genuinely ABSENT latch still reads as not-halted (no false positive).
+    absent = tmp_path / "nope.estop"
+    assert estop_mod.read_latch(str(absent)) is None
+
+
+def test_an_unreadable_latch_by_permission_fails_closed(tmp_path):
+    """The EACCES half of R-C11: a latch whose permissions were changed so it
+    can no longer be opened must still read as HALTED, not absent."""
+    import os as _os  # noqa: PLC0415
+
+    from revl import estop as estop_mod  # noqa: PLC0415
+
+    latch = tmp_path / "locked.estop"
+    latch.write_text(json.dumps({"halted": True, "reason": "operator halt",
+                                 "operator": "alice"}), encoding="utf-8")
+    _os.chmod(latch, 0)
+    try:
+        if _os.access(str(latch), _os.R_OK):
+            pytest.skip("cannot revoke read permission (running as root)")
+        record = estop_mod.read_latch(str(latch))
+        assert record is not None and record.get("halted") is True
+    finally:
+        _os.chmod(latch, 0o600)
+
+
 def test_the_latch_is_read_from_the_environment(tmp_path, monkeypatch):
     latch = tmp_path / "amb.estop"
     monkeypatch.setenv("REVL_ESTOP_LATCH", str(latch))
