@@ -73,6 +73,7 @@ from .mcp.schema import (
     json_schema_for,
 )
 from .resources import (
+    DELEGATE_HEAD,
     NO_HANDLE_RETURNS,
     _callee_name,
     acquire_return_is_nominal_handle,
@@ -1235,6 +1236,31 @@ def _subst_body_annotations(stmts: list, subst) -> None:
         walk_stmt(stmt)
 
 
+def _validate_delegate_service(filename: str, line: int, ptype: str | None,
+                               service_names: set[str]) -> None:
+    """item 442 (issue #121): the argument of a `Delegate[S]` parameter must
+    name a declared service. `S` is the interface the delegated reference
+    exposes, so a `Delegate[Int]` or a `Delegate[Nope]` is meaningless and is
+    refused here (arity and position are already enforced by
+    `check_type_wellformed`)."""
+    if not ptype:
+        return
+    head, args = parse_type(ptype)
+    if head != DELEGATE_HEAD or len(args) != 1:
+        return
+    inner_head, _ = parse_type(args[0])
+    if inner_head not in service_names:
+        raise RevlError(
+            filename, line,
+            f"`Delegate[{args[0]}]` must name a declared service — `{args[0]}` "
+            "is not a service in this composition",
+            hint="a delegated reference exposes a service interface; write "
+                 "`Delegate[S]` where `S` is a `service` this composition "
+                 "declares (item 442, docs/design/442-typed-delegation.md §4.1)",
+            code="G1", category="delegation",
+        )
+
+
 def _validate_declared_types(program: Program, filename: str) -> None:
     """Reject malformed type annotations (bare builtin generics like `Opt`,
     `List[]`) at every declaration site before checking begins — otherwise a
@@ -1250,10 +1276,18 @@ def _validate_declared_types(program: Program, filename: str) -> None:
         for p in ext.params:
             check_type_wellformed(filename, p.line, p.type)
         check_type_wellformed(filename, ext.line, ext.returns)
+    # item 442 (issue #121): a service method is the one v1 position that admits
+    # a `Delegate[S]` parameter — a bounded, revocable view of an authority the
+    # caller holds, handed for the duration of one call. `S` must name a service
+    # this composition declares (the interface the delegated reference exposes).
+    service_names = {svc.name for svc in program.services}
     for svc in program.services:
         for m in svc.methods.values():
             for _, ptype in m.params:
-                check_type_wellformed(filename, m.line, ptype)
+                check_type_wellformed(filename, m.line, ptype,
+                                      allow_delegate_param=True)
+                _validate_delegate_service(filename, m.line, ptype,
+                                           service_names)
             check_type_wellformed(filename, m.line, m.returns)
     for decl in program.type_decls:
         for field in decl.fields:
@@ -1266,7 +1300,7 @@ def _validate_declared_types(program: Program, filename: str) -> None:
     # Resolve nominal record/ADT/alias heads through a lightweight type-table and
     # the set of declared service names. A duplicate type/field is reported by the
     # dedicated lowering pass; `setdefault` here just avoids raising twice.
-    service_names = {svc.name for svc in program.services}
+    # (`service_names` was computed above for the item-442 `Delegate[S]` check.)
     config_type_defs: dict[str, dict] = {}
     for decl in program.type_decls:
         if decl.fields:
@@ -8973,7 +9007,16 @@ def _resource_ctx(types: dict) -> tuple[set, set]:
         return cache
     idx = (types.get(APPROVAL_KEY) or {}).get("externs") or {}
     externs = list(idx.values())
-    ctx = (resource_taint(externs, types), closing_ops(externs))
+    # item 442 (issue #121): a delegated reference `Delegate[S]` is a borrow, so
+    # the frontend borrow walk must confine it exactly as it confines an acquire
+    # handle (design §3.3 D2, §4.3 C3/C4: no escape into activation state, a
+    # carrier, a return, a spawn config, a handoff, or an inverse position).
+    # `Delegate` is NOT an acquire return, so it is kept out of `resource_taint`
+    # (whose base is `resource_base`, the acquire handles the seam/placement
+    # analyses read); it is added HERE, to the frontend taint only, so B1/O1
+    # visit it while the seam and audit surfaces stay defined by real handles.
+    ctx = (resource_taint(externs, types) | {DELEGATE_HEAD},
+           closing_ops(externs))
     try:
         types["__resource_ctx__"] = ctx
     except Exception:  # pragma: no cover - types is always a plain dict
@@ -10152,7 +10195,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         ):
             if annotation is None:
                 continue
-            check_type_wellformed(filename, method.line, annotation)
+            # item 442: a provide method may re-spell a `Delegate[S]` parameter
+            # (it mirrors the service signature, which `compatible` re-checks
+            # below), so the delegate position is admitted here as well.
+            check_type_wellformed(filename, method.line, annotation,
+                                  allow_delegate_param=True)
             if svc_ptype and not (compatible(svc_ptype, annotation, env.types)
                                   and compatible(annotation, svc_ptype, env.types)):
                 raise mismatch(
