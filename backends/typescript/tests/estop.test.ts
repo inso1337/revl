@@ -12,27 +12,33 @@
 //     `backends/python/runtime.py::_latch_record` already apply, so the two
 //     tiers cannot drift on what an operator's armed — or corrupted — latch
 //     means;
-//   * the SEAM (`bridge.ts::serve`) stops dispatching NEW crossings the instant
-//     the latch is armed: the request is refused with an error reply and the
-//     service method is NOT invoked. That is the "stop dispatching new
-//     crossings" half of the py semantics the issue asks each tier to honor.
+//   * the ACCEPT seam (`bridge.ts::serve`) stops ACCEPTING new crossings the
+//     instant the latch is armed: the request is refused with an error reply
+//     and the service method is NOT invoked (slice 1);
+//   * the DISPATCH seam (`bridge.ts::makeProxy`) stops DISPATCHING new
+//     crossings the instant the latch is armed: an outgoing proxy call is
+//     refused before it leaves the process — no child is spawned, nothing
+//     crosses the boundary (slice 2). A node process is a consumer as well as a
+//     provider, and the py design puts `_estop_check` at every point that
+//     dispatches OR accepts a crossing, so both directions honor the latch.
 //
 // What is deliberately NOT here (issue #122 remainder): the conductor still
 // SIGKILLs the node child and reports it as no-seam, because `node` is not yet
 // in `src/revl/estop.py::TIERS_WITH_ESTOP` and the runner
 // (`placement_runner.ts`) does not yet print its inventory. Flipping that, and
-// the idle-process watcher, is the next slice.
+// the idle-process watcher, is a later slice.
 import { afterEach, describe, expect, it } from 'vitest'
 import net from 'node:net'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { serve } from '../bridge.ts'
+import { makeProxy, serve } from '../bridge.ts'
 import { estopEngaged, latchPath, readLatch } from '../estop.ts'
 
 const dirs: string[] = []
 const servers: net.Server[] = []
+const closers: Array<() => void> = []
 const priorEnv = process.env.REVL_ESTOP_LATCH
 
 function tmpdir(): string {
@@ -42,6 +48,7 @@ function tmpdir(): string {
 }
 
 afterEach(() => {
+  for (const close of closers.splice(0)) close()
   for (const server of servers.splice(0)) server.close()
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
   if (priorEnv === undefined) delete process.env.REVL_ESTOP_LATCH
@@ -141,5 +148,50 @@ describe('the ts E-Stop crossing seam (item 443)', () => {
     expect(after.ok).toBe(false)
     expect(String(after.error)).toContain('E-Stop engaged')
     expect(calls).toEqual(['SELECT 1']) // 'SELECT 2' never ran
+  })
+})
+
+describe('the ts E-Stop DISPATCH seam — outgoing proxy (item 443, slice 2)', () => {
+  // `makeProxy`'s seam is a SYNCHRONOUS `execFileSync` child, so a provider in
+  // THIS process would deadlock (the child dials an in-process server the
+  // blocked event loop cannot answer — a same-process artifact that never
+  // arises in production, where the provider is a separate process; the real
+  // cross-process round-trip is verified with plain node, as slice 1 was). So
+  // this suite proves the DISPATCH GATE without a same-process provider: point
+  // the proxy at a socket with no provider and a short deadline, so an
+  // attempted dispatch fails FAST on the wire, and contrast the two verdicts.
+  //   * UNARMED: the gate is open — the call goes to the wire and comes back a
+  //     seam DEADLINE (no provider), never the refusal. Dispatch was attempted.
+  //   * ARMED: the gate is shut — the call throws the dispatch-side E-Stop
+  //     refusal IMMEDIATELY, never reaching the wire.
+
+  it('attempts dispatch while UNARMED (reaches the wire), then refuses to dispatch once armed', () => {
+    const dir = tmpdir()
+    const sock = path.join(dir, 'no-provider.sock') // nothing listens here
+    const latch = path.join(dir, 'halt.estop')
+    process.env.REVL_ESTOP_LATCH = latch
+
+    // A short per-call deadline so the UNARMED attempt fails fast on the wire
+    // instead of retrying a missing provider for seconds.
+    const { proxy, close } = makeProxy('db', ['query'], sock, 150)
+    closers.push(close)
+
+    // Before the button: the gate is OPEN, so the proxy DISPATCHES. With no
+    // provider the crossing breaches its deadline — a wire outcome, proving the
+    // call left the process. It is NOT the E-Stop refusal.
+    let unarmedError: unknown
+    try { proxy.query('SELECT 1') } catch (e) { unarmedError = e }
+    expect(unarmedError).toBeInstanceOf(Error)
+    expect(String((unarmedError as Error).message)).not.toContain('E-Stop')
+    expect(String((unarmedError as Error).message)).toMatch(/deadline/)
+
+    // The operator hits the button.
+    fs.writeFileSync(latch, JSON.stringify({ halted: true, reason: 'runaway loop', operator: 'ops@example' }))
+
+    // After the button: the gate is SHUT. The proxy throws the dispatch-side
+    // E-Stop refusal — before any child seam call is spawned, so nothing new
+    // crosses the boundary. (It would also be instant rather than wait out the
+    // deadline, since it never reaches the wire.)
+    expect(() => proxy.query('SELECT 2')).toThrowError(/E-Stop engaged.*refuses to dispatch/)
   })
 })

@@ -446,6 +446,24 @@ export function makeProxy(
   const proxy: Record<string, (...args: unknown[]) => unknown> = {}
   for (const method of methods) {
     proxy[method] = (...args: unknown[]) => {
+      // item 443 / issue #122 — the DISPATCH side of the E-Stop seam. Slice 1
+      // stopped this process ACCEPTING new crossings at `serve`; this stops it
+      // DISPATCHING them. A node process is a consumer as well as a provider —
+      // it holds a proxy to every seam it depends on — and the py design puts
+      // `_estop_check` at every point that dispatches OR accepts a crossing.
+      // So once the latch is armed, the outgoing call is REFUSED before it is
+      // dispatched: nothing new crosses the boundary. It THROWS rather than
+      // firing `fireLost`, because a halt is not a peer death: reactive
+      // withdrawal would propagate a cooperative teardown to this proxy's
+      // dependents, which is exactly the graceful unwind the E-Stop exists to
+      // avoid. The refused caller's attempt lands in item 440's ambiguous tier,
+      // the designed outcome of a halt (docs/design/443-estop.md).
+      if (estopEngaged()) {
+        throw new Error(
+          `revl E-Stop engaged: this process is HALTED and refuses to dispatch ` +
+            `new crossings (key ${key}, method ${method}) — docs/design/443-estop.md`,
+        )
+      }
       try {
         return seamCall(target, key, method, args, deadlineMs, correlation)
       } catch (error) {
