@@ -443,7 +443,7 @@
       "uncovered_statements": 976
     },
     "rust": {
-      "statements": 3155,
+      "statements": 3162,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "_V3Ctx._same_shape": 2,
@@ -474,7 +474,7 @@
           "_host_of": 12,
           "_is_map_cas": 1,
           "_is_stream_next": 7,
-          "_list_element_type": 5,
+          "_list_element_type": 1,
           "_main": 11,
           "_map_expr_inserts": 20,
           "_map_insert_candidates": 15,
@@ -551,7 +551,7 @@
           "_refuse_deferred_emissions": 10,
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1,
-          "_render_expr": 97,
+          "_render_expr": 96,
           "_render_param_type": 1,
           "_rust_fn_type": 1,
           "_rust_type": 2,
@@ -565,7 +565,8 @@
           "_uses_timer.walk": 2,
           "_v3_empty_vec_elem_types": 66,
           "_v3_empty_vec_elem_types.collect": 1,
-          "_v3_infer_type": 22,
+          "_v3_index_place": 1,
+          "_v3_infer_type": 17,
           "_v3_interp": 3,
           "_v3_is_float": 4,
           "_v3_is_str": 2,
@@ -619,7 +620,7 @@
           "_emit_v2": 6
         }
       },
-      "uncovered_statements": 1556
+      "uncovered_statements": 1547
     },
     "ts": {
       "statements": 1967,
@@ -1064,7 +1065,7 @@
       "uncovered_statements": 269
     },
     "rust": {
-      "statements": 2094,
+      "statements": 2100,
       "uncovered": {
         "NEVER ENTERED - no corpus document calls this function at all. Not on any declared exclusion list either, so this is an untriaged hole: someone has to decide whether it needs a corpus document or an exclusion.": {
           "default_for_rust_type": 15,
@@ -1116,7 +1117,7 @@
           "render_component_call": 3,
           "render_expr": 2,
           "render_field": 1,
-          "render_index": 1,
+          "render_index_place": 1,
           "render_inner": 12,
           "render_interp": 2,
           "render_un": 3,

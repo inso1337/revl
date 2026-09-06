@@ -4162,6 +4162,27 @@ def _v3_str_eq_borrow(node: dict, left: str, right: str,
     return left, right
 
 
+def _v3_index_place(node: dict, ctx: "_V3Ctx", rename) -> str:
+    """The bare `v[i]` place expression for a `List` index read, WITHOUT the
+    trailing `.clone()` an owning read appends (item 437d, the `==`/`!=`-operand
+    subset).
+
+    A read owns the element because revl `List` is persistent and the element
+    must not be moved out of the shared `Vec`. But `==`/`!=` desugar to
+    `PartialEq::eq(&a, &b)`, which borrows both operands, so an index read
+    compared in place needs no clone: `xs[i] == probe` measured at 150,000 heap
+    allocations against ZERO for the same comparison written by hand. Dropping
+    the clone cannot change what compiles — an element type without `PartialEq`
+    already failed to build with the clone — so this is a pure allocation win.
+    """
+    target_node = node.get("target")
+    target = _render_expr(target_node, ctx, rename)
+    if target_node.get("kind") not in _ATOMIC_KINDS:
+        target = f"({target})"
+    # revl Int is i64; Rust indexing wants usize.
+    return f"({target})[({_render_expr(node['index'], ctx, rename)}) as usize]"
+
+
 def _list_element_type(surface: object) -> str | None:
     """The element surface type of a `List[T]` surface type, else None."""
     if isinstance(surface, str):
@@ -4800,6 +4821,11 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             return f"(({left}) as f64 / ({right}) as f64)"
         if node.get("op") in ("==", "!="):
             left, right = _v3_str_eq_borrow(node, left, right, ctx)
+            lnode, rnode = node.get("left"), node.get("right")
+            if isinstance(lnode, dict) and lnode.get("kind") == "index":
+                left = _v3_index_place(lnode, ctx, rename)
+            if isinstance(rnode, dict) and rnode.get("kind") == "index":
+                right = _v3_index_place(rnode, ctx, rename)
         return f"({left} {op} {right})"
 
     if kind == "un":
@@ -4933,12 +4959,10 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":
-        target_node = node.get("target")
-        target = _render_expr(target_node, ctx, rename)
-        if target_node.get("kind") not in _ATOMIC_KINDS:
-            target = f"({target})"
-        # revl Int is i64; Rust indexing wants usize.
-        return f"({target})[({_render_expr(node['index'], ctx, rename)}) as usize].clone()"
+        # A read OWNS the element (`.clone()`): revl `List` is persistent, so the
+        # element must not be moved out of the shared `Vec`. The `==`/`!=` arm in
+        # `bin` borrows the place instead (item 437d).
+        return f"{_v3_index_place(node, ctx, rename)}.clone()"
 
     if kind == "if":
         # Each branch tail is a value position: a bare non-Copy binding reused

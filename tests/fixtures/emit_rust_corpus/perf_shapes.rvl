@@ -51,3 +51,18 @@ fn prefix_all(parts: List[Str], head: Str) -> Str {
   }
   return text
 }
+
+// 437(d), the `==`/`!=`-operand subset: an index read compared in place borrows
+// the element instead of cloning it out of the persistent list. `==`/`!=`
+// desugar to `PartialEq::eq(&a, &b)`, so `xs[i]` needs no `.clone()` here.
+// Both operand orders, both operators, an index against a literal (which also
+// borrows), and an index against another index. A non-`==` index read (the
+// `return`) keeps its owning `.clone()`, so the two paths are pinned together.
+fn count_hits(xs: List[Str], probe: Str, i: Int, j: Int) -> Str {
+  var n = 0
+  if (xs[i] == probe) { n = n + 1 }
+  if (probe != xs[j]) { n = n + 2 }
+  if (xs[i] == "sentinel") { n = n + 3 }
+  if (xs[i] == xs[j]) { n = n + 4 }
+  return xs[n]
+}

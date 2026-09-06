@@ -769,6 +769,8 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
     let rlit = borrowed_str_lit(rn)
     if (rlit != "" && eq_operand_borrowable(ln, ctx)) { right = rlit }
     if (llit != "" && eq_operand_borrowable(rn, ctx)) { left = llit }
+    if (node_kind(ln) == "index") { left = render_index_place(ln, ctx) }
+    if (node_kind(rn) == "index") { right = render_index_place(rn, ctx) }
   }
   let opnd = node_operands(node)
   if (is_addsubmul(op) && opnd == "Int") {
@@ -862,11 +864,19 @@ fn render_call(node: Any, ctx: Ctx) -> Str {
   return `${callee}(${bv.join(", ")})`
 }
 
-fn render_index(node: Any, ctx: Ctx) -> Str {
+// `_v3_index_place`: the bare `v[i]` place for a `List` index read, WITHOUT the
+// owning read's trailing `.clone()`. `==`/`!=` desugar to `PartialEq::eq(&a,&b)`
+// and borrow both operands, so an index read compared in place needs no clone
+// (item 437d, the `==`-operand subset). Every other read still owns the element.
+fn render_index_place(node: Any, ctx: Ctx) -> Str {
   let tn = value_field(node, "target")
   var target = render_expr(tn, ctx)
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
-  return `(${target})[(${render_expr(value_field(node, "index"), ctx)}) as usize].clone()`
+  return `(${target})[(${render_expr(value_field(node, "index"), ctx)}) as usize]`
+}
+
+fn render_index(node: Any, ctx: Ctx) -> Str {
+  return `${render_index_place(node, ctx)}.clone()`
 }
 
 fn render_list(node: Any, ctx: Ctx) -> Str {
