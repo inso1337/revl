@@ -337,6 +337,117 @@ def test_topology_is_carried_and_verified(tmp_path):
     assert _tier(report2, "topology").status == B.UNVERIFIED
 
 
+# ------------------------------------------------------- one-file bundle
+
+def _tree(root: Path) -> dict:
+    """Every file under `root`, keyed by its POSIX relative path, valued by its
+    verbatim bytes, so two bundle trees can be compared byte-for-byte."""
+    return {p.relative_to(root).as_posix(): p.read_bytes()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_one_file_round_trips_byte_for_byte(signed_bundle, tmp_path):
+    """Packing a `.revlbundle/` directory into one file and unpacking it back
+    reproduces the whole tree byte-for-byte: same set of files, identical bytes.
+    Nothing is re-derived, so every recorded hash travels verbatim."""
+    packed = tmp_path / ("app" + B.ONEFILE_SUFFIX)
+    B.pack_bundle(str(signed_bundle), str(packed))
+    assert packed.is_file()
+
+    restored = tmp_path / "restored.revlbundle"
+    B.unpack_bundle(str(packed), str(restored))
+
+    before, after = _tree(Path(signed_bundle)), _tree(restored)
+    assert before.keys() == after.keys(), "the one-file bundle lost or added files"
+    for name in before:
+        assert before[name] == after[name], f"{name} differs after a round-trip"
+
+
+def test_one_file_verifies_equivalently(signed_bundle, tmp_path):
+    """A one-file bundle verifies exactly as the directory it was packed from:
+    green, and every tier reports the same status. `verify` accepts the file
+    directly (it expands it into a throwaway tree under the hood)."""
+    packed = tmp_path / ("app" + B.ONEFILE_SUFFIX)
+    B.pack_bundle(str(signed_bundle), str(packed))
+
+    dir_report = B.verify_bundle(str(signed_bundle), env=dict(KEY))
+    file_report = B.verify_bundle(str(packed), env=dict(KEY))
+
+    assert file_report.ok
+    assert {(c.tier, c.status) for c in file_report.checks} == \
+           {(c.tier, c.status) for c in dir_report.checks}
+
+
+def test_pack_is_deterministic(signed_bundle, tmp_path):
+    """The same directory packs to identical bytes every time (no timestamps,
+    sorted keys), so a one-file bundle is itself reproducible."""
+    a = tmp_path / ("a" + B.ONEFILE_SUFFIX)
+    b = tmp_path / ("b" + B.ONEFILE_SUFFIX)
+    B.pack_bundle(str(signed_bundle), str(a))
+    B.pack_bundle(str(signed_bundle), str(b))
+    assert a.read_bytes() == b.read_bytes()
+
+
+def test_tampering_a_one_file_bundle_is_caught_on_verify(signed_bundle, tmp_path):
+    """Editing an emitted artifact inside a packed one-file bundle is caught at
+    exactly that backend's tier, the same way it is in a directory (the bytes are
+    what verify recompiles against)."""
+    packed = tmp_path / ("app" + B.ONEFILE_SUFFIX)
+    B.pack_bundle(str(signed_bundle), str(packed))
+    doc = json.loads(packed.read_text(encoding="utf-8"))
+    doc["files"]["emitted/python/components.py"] += "\n# tampered\n"
+    packed.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n",
+                      encoding="utf-8")
+    report = B.verify_bundle(str(packed), env=dict(KEY))
+    assert not report.ok
+    assert _tier(report, "emitted [python]").status == B.MISMATCH
+
+
+def test_unpack_refuses_a_non_envelope(tmp_path):
+    """A JSON document that is not a one-file envelope is refused, never silently
+    treated as an empty bundle."""
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"kind": "something.else"}), encoding="utf-8")
+    with pytest.raises(RevlError):
+        B.unpack_bundle(str(bad), str(tmp_path / "out"))
+
+
+def test_unpack_jails_a_traversing_entry(tmp_path):
+    """A forged one-file bundle whose embedded path escapes the bundle root (an
+    absolute path or a `..`-bearing one) is refused before it can write outside
+    the extraction directory."""
+    for rel in ("/etc/pwned", "../escaped.txt"):
+        forged = tmp_path / "forged.json"
+        forged.write_text(json.dumps(
+            {"kind": B.ONEFILE_KIND, "version": B.ONEFILE_VERSION,
+             "files": {rel: "x"}}), encoding="utf-8")
+        with pytest.raises(RevlError):
+            B.unpack_bundle(str(forged), str(tmp_path / "out"))
+
+
+def test_is_onefile_discriminates(signed_bundle, tmp_path):
+    """`is_onefile` is True only for a one-file envelope: a directory bundle, a
+    plain JSON file, and a missing path are all False."""
+    packed = tmp_path / ("app" + B.ONEFILE_SUFFIX)
+    B.pack_bundle(str(signed_bundle), str(packed))
+    assert B.is_onefile(str(packed))
+    assert not B.is_onefile(str(signed_bundle))          # the directory
+    assert not B.is_onefile(str(signed_bundle / B.RUNTIME_MANIFEST))  # inner json
+    assert not B.is_onefile(str(tmp_path / "nope"))       # missing
+
+
+def test_cli_one_file_flag_writes_and_verifies(tmp_path, monkeypatch, capsys):
+    """`revl bundle --one-file FILE` writes the packed file beside the directory,
+    and `revl verify FILE` exits 0 just like verifying the directory."""
+    monkeypatch.setenv("REVL_ATTEST_KEY", KEY["REVL_ATTEST_KEY"])
+    src = _write(tmp_path, "app.rvl", BASE)
+    out = tmp_path / "cli.revlbundle"
+    packed = tmp_path / ("cli" + B.ONEFILE_SUFFIX)
+    assert main(["bundle", src, "--out", str(out), "--one-file", str(packed)]) == 0
+    assert packed.is_file()
+    assert main(["verify", str(packed)]) == 0
+
+
 # ------------------------------------------------------------------- CLI exit
 
 def test_cli_exit_codes(tmp_path, monkeypatch, capsys):

@@ -108,7 +108,7 @@ all (a missing directory, a corrupt `runtime-manifest.json`). This mirrors
 ## 3. Options
 
 ```
-revl bundle <sources...> --out DIR [--backend B]... [--topology PLACEMENT] [--json]
+revl bundle <sources...> --out DIR [--backend B]... [--topology PLACEMENT] [--one-file FILE] [--json]
 revl verify <bundle> [--json]
 ```
 
@@ -118,8 +118,12 @@ revl verify <bundle> [--json]
   (`python`, `typescript`, `rust`, `java`, `go`, `wasm`).
 * `--topology PLACEMENT`, a placement/topology map (TOML or JSON) to carry as
   `topology.json`. Omit for a single-process bundle.
+* `--one-file FILE`, also pack the bundle into ONE self-contained file (see §6)
+  beside the `--out` directory, so a consumer can carry a single artifact.
 * `--json`, machine-readable output (the runtime-manifest for `bundle`, the
   tier-by-tier report for `verify`).
+* `revl verify <bundle>` accepts either form: the `.revlbundle` directory or a
+  one-file bundle. Both verify identically.
 
 Signing keys resolve exactly as `revl attest` does, in order: `--key` is not a
 `bundle` flag today (see §4), so the attestation uses `REVL_ATTEST_KEY_FILE`
@@ -192,3 +196,44 @@ backend through the pure compiler frontend and emitters, the same path
 and it never executes host code. It writes nothing: it reads the bundle and
 compares. Booting a bundle is `revl run`'s job, behind the admission gate, and a
 future `revl run <bundle>` will reuse it.
+
+---
+
+## 6. One-file bundle
+
+The `.revlbundle/` directory is the canonical form. A **one-file bundle** is that
+same directory carried inside ONE self-contained JSON document, so a consumer can
+hand around a single artifact instead of a tree (attach it to a release, mail it,
+drop it in an object store):
+
+```
+$ revl bundle app.rvl --out app.revlbundle --one-file app.revlbundle1
+wrote bundle app.revlbundle
+wrote one-file bundle app.revlbundle1
+
+$ revl verify app.revlbundle1
+verified: app.revlbundle1 rebuilds bit-for-bit to what was bundled (14 OK, ...)
+```
+
+The envelope is a plain, self-identifying JSON document (`kind:
+"revl.bundle.onefile"`, `version: "1.0"`) whose `files` member maps each file's
+POSIX relative path to its verbatim text. Every file a bundle writes is UTF-8
+text (`.rvl` source, JSON documents, emitted backend source), so the map is
+lossless. It **invents no new hash scheme and re-derives nothing**: the exact
+bytes travel, so the source, IR, manifest and attestation hashes the directory
+recorded stay bit-for-bit what they were.
+
+* **Round-trip.** `pack` (directory → file) and `unpack` (file → directory) are
+  inverses: unpacking reproduces the tree byte-for-byte, so `revl verify` on a
+  one-file bundle produces the SAME tier-by-tier report as on the directory it
+  packed. `verify` accepts a one-file bundle directly, expanding it into a
+  throwaway temporary tree it checks and discards (it still writes nothing
+  durable).
+* **Deterministic.** The document is emitted with sorted keys and no timestamp,
+  so a given directory packs to identical bytes every time; a one-file bundle is
+  itself reproducible.
+* **Jailed on unpack.** A one-file bundle can arrive from anywhere, so `unpack`
+  refuses a document that is not a one-file envelope and jails every embedded
+  path inside the extraction directory: an absolute or `..`-bearing entry that
+  would escape the bundle root is refused, the same realpath containment the
+  stdlib-ref verify tier and `hostref` enforce.

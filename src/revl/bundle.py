@@ -81,6 +81,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 from ._paths import stdlib_root
@@ -97,6 +98,14 @@ from .truc.reproduce import (
 # idea: a self-identifying tag plus a MAJOR.MINOR line, additive within MAJOR).
 BUNDLE_KIND = "revl.bundle"
 BUNDLE_VERSION = "1.0"
+
+# The one-file bundle envelope: the whole multi-file `.revlbundle/` directory
+# carried inside ONE self-contained, self-identifying JSON document. Same
+# MAJOR.MINOR discipline as the bundle proper (additive within MAJOR). The
+# canonical single-file extension a packed bundle is written under.
+ONEFILE_KIND = "revl.bundle.onefile"
+ONEFILE_VERSION = "1.0"
+ONEFILE_SUFFIX = ".revlbundle1"
 
 RUNTIME_MANIFEST = "runtime-manifest.json"
 LOCK_NAME = "components.lock"
@@ -499,6 +508,111 @@ def _toolchain_version() -> str:
     return tv()
 
 
+# --------------------------------------------------------------- one-file bundle
+#
+# The multi-file `.revlbundle/` directory is the canonical form; a one-file
+# bundle is that SAME directory carried inside one self-contained JSON document,
+# so a consumer can hand around a single artifact instead of a tree. It invents
+# NO new hash scheme and re-derives nothing: every file's exact bytes travel
+# verbatim, so the source, IR, manifest and attestation hashes the directory
+# recorded stay bit-for-bit what they were, and unpacking reproduces the tree
+# byte-for-byte. Every file a bundle writes is UTF-8 text (`.rvl` source, JSON
+# documents, emitted backend source), so a `{relative path: text}` map is a
+# lossless, deterministic, human-inspectable envelope, and stays in the plain
+# deterministic-JSON discipline the rest of the bundle already follows (no
+# timestamps, sorted keys), so a bundle packs to identical bytes every time.
+
+
+def _relposix(root: Path, path: Path) -> str:
+    """The POSIX-slashed path of `path` relative to `root`, the stable key a
+    packed file travels under regardless of the host's path separator."""
+    return path.relative_to(root).as_posix()
+
+
+def _pack_document(bundle_dir: Path) -> dict:
+    """The one-file envelope for a `.revlbundle/` directory: a self-identifying
+    `kind`/`version` header and a `files` map of every file in the tree, keyed by
+    its POSIX relative path, valued by its verbatim UTF-8 text. Deterministic:
+    the map is emitted sorted, so the same directory packs to the same bytes."""
+    files: dict[str, str] = {}
+    for path in sorted(p for p in bundle_dir.rglob("*") if p.is_file()):
+        files[_relposix(bundle_dir, path)] = path.read_text(encoding="utf-8")
+    return {"kind": ONEFILE_KIND, "version": ONEFILE_VERSION, "files": files}
+
+
+def _onefile_text(doc: dict) -> str:
+    """The deterministic on-disk spelling of a one-file bundle envelope."""
+    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
+
+
+def pack_bundle(bundle_dir: str, out_file: str) -> str:
+    """Pack a `.revlbundle/` directory into ONE self-contained file and return
+    its path. The inverse of `unpack_bundle`: the two round-trip a bundle
+    byte-for-byte, and a packed bundle verifies exactly as the directory does
+    (nothing is re-derived, every recorded hash is carried verbatim)."""
+    src = Path(bundle_dir)
+    if not src.is_dir():
+        raise RevlError(bundle_dir, 0, f"not a bundle directory: {bundle_dir}")
+    if not (src / RUNTIME_MANIFEST).is_file():
+        raise RevlError(bundle_dir, 0,
+                        f"not a {BUNDLE_KIND} directory: {RUNTIME_MANIFEST} is "
+                        "missing, nothing to pack")
+    Path(out_file).write_text(_onefile_text(_pack_document(src)),
+                              encoding="utf-8")
+    return out_file
+
+
+def unpack_bundle(one_file: str, out_dir: str) -> str:
+    """Expand a one-file bundle back into a `.revlbundle/` directory and return
+    its path. Refuses a document that is not a one-file envelope, and jails every
+    embedded path inside `out_dir` (a one-file bundle can arrive from anywhere, so
+    an absolute or `..`-bearing key that escaped the tree could overwrite a file
+    outside it, exactly the containment the stdlib-ref verify tier and hostref
+    enforce)."""
+    doc = _read_json(Path(one_file))
+    if doc.get("kind") != ONEFILE_KIND:
+        raise RevlError(one_file, 0,
+                        f"not a {ONEFILE_KIND} document (found kind "
+                        f"{doc.get('kind')!r})")
+    files = doc.get("files")
+    if not isinstance(files, dict):
+        raise RevlError(one_file, 0,
+                        "one-file bundle carries no `files` map, nothing to unpack")
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    out_real = os.path.realpath(str(out))
+    for rel, text in sorted(files.items()):
+        if os.path.isabs(rel) or "\x00" in rel:
+            raise RevlError(one_file, 0,
+                            f"one-file bundle entry {rel!r} is absolute or "
+                            "contains a NUL byte; a bundle path is relative to "
+                            "the bundle root, so this is a forged or tampered file")
+        target = out / rel
+        if not _contained(os.path.realpath(str(target)), out_real):
+            raise RevlError(one_file, 0,
+                            f"one-file bundle entry {rel!r} escapes the bundle "
+                            "root; a forged or tampered file")
+        if not isinstance(text, str):
+            raise RevlError(one_file, 0,
+                            f"one-file bundle entry {rel!r} is not text")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return out_dir
+
+
+def is_onefile(path: str) -> bool:
+    """Whether `path` is a one-file bundle: a readable file (not a directory)
+    whose top-level `kind` is the one-file envelope tag. A directory bundle, a
+    missing path, or any other file is False."""
+    p = Path(path)
+    if not p.is_file():
+        return False
+    try:
+        return json.loads(p.read_text(encoding="utf-8")).get("kind") == ONEFILE_KIND
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        return False
+
+
 # --------------------------------------------------------------- verify
 
 def _stdlib_refs_of(ir: dict) -> list[dict]:
@@ -810,8 +924,27 @@ def _check_topology(bundle: Path, manifest: dict) -> Check:
 
 def verify_bundle(path: str, *, env=None) -> "VerifyReport":
     """Recompile a bundle's source and check every tier against what the bundle
-    recorded. Pure: it reads the bundle and writes nothing. Raises `RevlError`
-    only when the bundle cannot be opened at all (a usage/resolution failure)."""
+    recorded. Accepts either a `.revlbundle/` directory or a one-file bundle (a
+    packed directory): a one-file bundle is expanded into a throwaway temp tree
+    and verified there, so the two forms produce the SAME report (a one-file
+    bundle rebuilds bit-for-bit exactly as the directory it packed). Raises
+    `RevlError` only when the bundle cannot be opened at all (a usage/resolution
+    failure)."""
+    if is_onefile(path):
+        tmp = tempfile.mkdtemp(prefix="revl-onefile-verify-")
+        try:
+            unpack_bundle(path, tmp)
+            report = _verify_bundle_dir(tmp, env=env)
+            report.name = Path(path).name  # report on the one-file, not the temp
+            return report
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    return _verify_bundle_dir(path, env=env)
+
+
+def _verify_bundle_dir(path: str, *, env=None) -> "VerifyReport":
+    """Verify a `.revlbundle/` directory in place. Pure: it reads the bundle and
+    writes nothing."""
     if env is None:
         env = os.environ
     bundle = Path(path)
@@ -937,17 +1070,24 @@ def run_bundle(args) -> int:
         print("error: revl bundle needs --out DIR", file=sys.stderr)
         return 2
     backends = tuple(args.backend) if args.backend else DEFAULT_BACKENDS
+    one_file = getattr(args, "one_file", None)
     try:
         out = build_bundle(args.files, args.out, backends=backends,
                            topology=args.topology)
+        packed = pack_bundle(out, one_file) if one_file else None
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     if args.json:
         manifest = _read_json(Path(out) / RUNTIME_MANIFEST)
-        print(json.dumps({"bundle": out, "manifest": manifest}, indent=2))
+        doc = {"bundle": out, "manifest": manifest}
+        if packed is not None:
+            doc["oneFile"] = packed
+        print(json.dumps(doc, indent=2))
     else:
         print(f"wrote bundle {out}")
+        if packed is not None:
+            print(f"wrote one-file bundle {packed}")
     return 0
 
 
