@@ -473,3 +473,39 @@ def test_f10_is_report_only_and_refuses_nothing():
            "  let h = effect open_sock() undo close_sock(h)\n"
            "  provide s { fn go() = use_sock(h) }\n"
            "}\n")
+
+
+# ---------------------------------------------------------------------------
+# Slice 3a (issue #96) — `shared` / `transfer` ownership modes are RESERVED
+# ---------------------------------------------------------------------------
+#
+# The roadmap deferred SHARED + TRANSFER to a later tier "[contextual keywords
+# reserved]", but the markers were never actually reserved: `effect shared …` /
+# `effect transfer …` fell through to a generic "expected a statement" parse
+# error. Slice 3a reserves both markers at the acquire-binding position with a
+# clear refusal. The modes themselves are NOT implemented here.
+
+
+@pytest.mark.parametrize("mode", ["shared", "transfer"])
+def test_slice3a_ownership_mode_marker_is_reserved(mode):
+    msg = _refuse(
+        _BASE
+        + f"component C {{ let s = effect {mode} open_sock() undo close_sock(s) }}\n"
+    )
+    assert f"`{mode}` ownership mode is reserved for a later tier" in msg
+    assert "not implemented in v1" in msg
+    # the specific later-tier homes are named, not a generic parse error
+    assert "item 294 leases" in msg
+    assert "realm transfer" in msg
+    assert "expected a statement" not in msg
+
+
+@pytest.mark.parametrize("mode", ["shared", "transfer"])
+def test_slice3a_marker_is_contextual_binding_name_still_admits(mode):
+    """`shared` / `transfer` are CONTEXTUAL keywords: only the marker position
+    (`effect <mode> <ident…>`) is reserved. A plain acquire with no marker still
+    admits, so the reservation adds no new grammar."""
+    _admit(
+        _BASE
+        + "component C { let s = effect open_sock() undo close_sock(s) }\n"
+    )
