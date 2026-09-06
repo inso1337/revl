@@ -273,6 +273,7 @@ import RevL
 #print axioms RevL.G4.g4_shape_not_vacuous
 #print axioms RevL.G5.registrations_ignores_its_argument
 #print axioms RevL.G6.g6_not_vacuous
+#print axioms RevL.G6.g6_row_not_vacuous
 #print axioms RevL.G8.g8_marker_level_not_vacuous
 #print axioms RevL.CrossTier.conformance_hypotheses_are_inhabited
 #print axioms RevL.CapCeilings.capceilings_hypotheses_are_inhabited

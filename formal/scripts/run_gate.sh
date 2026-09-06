@@ -201,6 +201,7 @@ python3 scripts/axioms_gate.py \
   RevL.G4.g4_shape_not_vacuous \
   RevL.G5.registrations_ignores_its_argument \
   RevL.G6.g6_not_vacuous \
+  RevL.G6.g6_row_not_vacuous \
   RevL.G8.g8_marker_level_not_vacuous \
   RevL.CrossTier.conformance_hypotheses_are_inhabited \
   RevL.CapCeilings.capceilings_hypotheses_are_inhabited \
@@ -219,6 +220,8 @@ lake env lean harness/Oracle.lean > .oracle-axioms.out 2>&1 \
   || { cat .oracle-axioms.out; exit 1; }
 cat .oracle-axioms.out
 python3 scripts/axioms_gate.py \
+  RevLOracle.heads_exprOfHeads \
+  RevLOracle.confinedB_iff \
   RevLOracle.linkOKB_iff \
   RevLOracle.pathPrefixB_iff \
   RevLOracle.pleqB_iff \
