@@ -83,7 +83,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files, compile_source  # noqa: E402
-from revl.errors import RevlError  # noqa: E402
+from revl.errors import RevlError, RevlErrors  # noqa: E402
 
 
 # ---------------------------------------------------------------- harness
@@ -127,6 +127,14 @@ def admit_tag(ns):
     """The coarse verdict: "" | "G1" | "G2" | "G3" | "G4" | "A1" | "PRELUDE"
     | "BAD"."""
     return ns["admit_tag"]
+
+
+@pytest.fixture(scope="module")
+def admit_all(ns):
+    """Item 419c: the WHOLE collected sink, newline-joined "<line>|<tag>|<msg>"
+    in pipeline order — the test-only twin of the reference's `RevlErrors`
+    carrier. `admit_src` returns only its minimum by `(line, seq)`."""
+    return ns["admit_all"]
 
 
 def test_selfhosted_lower_in_file_tests_pass(ns):
@@ -229,6 +237,20 @@ def _ref(src: str) -> tuple[str, str]:
         return (_classify(e), e.message)
 
 
+def _ref_all(src: str) -> list[tuple[int, str]]:
+    """The reference's full ORDERED refusal list as (line, tag) pairs (item
+    419c). The `RevlErrors` carrier already dedups on `(code, filename, line,
+    message)` and sorts by `(file rank, line)` with a stable tie-break; a lone
+    refusal arrives as a plain `RevlError`. `[]` when the reference admits."""
+    try:
+        compile_source(src, "diff.rvl")
+        return []
+    except RevlErrors as e:
+        return [(x.line, _classify(x)) for x in e.errors]
+    except RevlError as e:
+        return [(e.line, _classify(e))]
+
+
 def _fixture(name: str) -> str:
     return (ROOT / "examples" / "rejections" / f"{name}.rvl").read_text()
 
@@ -267,11 +289,9 @@ def _agree(admit, src: str) -> None:
 # Two providers of one key, isolated into realms `r1` and `r2` — the backend
 # realms every multi-realm routing case below binds against (item 162). Per-realm
 # G2 keeps them non-conflicting, so the routing verdict is the only one in play.
-# That is load-bearing, not tidiness: a program with TWO live refusals hits the
-# 419c ordering divergence (the reference picks the earlier LINE, the gate the
-# earlier PHASE), so the corpus keeps every case single-refusal. See
-# `test_which_refusal_wins_diverges_when_a_program_has_several` at the end of
-# this file, which is where that divergence is pinned.
+# That keeps every `_agree` case SINGLE-refusal, so the message check is exact
+# regardless of ordering. Multi-refusal ordering itself (item 419c) is exercised
+# separately by `test_multi_refusal_programs_agree` at the end of this file.
 _ROUTE_PROVIDERS = """service Kv { fn get(k: Str) -> Str }
 service Api { fn go(k: Str) -> Str }
 component StoreA provides kv: Kv {
@@ -1901,45 +1921,108 @@ component C provides s: S {{
 
 
 # ---------------------------------------------------------------------------
-# A KNOWN, DELIBERATE divergence, pinned rather than left as folklore
+# item 419c: refusal ordering by line, cross-checked against the reference's
+# collect-all sink (item 386). `admit_src` now collects every recoverable
+# refusal, anchors each at the line the reference's diagnostic carries, and
+# reports the minimum by (line, seq) — the reference's `diagnostics[0]`. This is
+# where `test_which_refusal_wins_diverges_when_a_program_has_several` used to
+# pin the divergence; it is gone because the two now AGREE.
 # ---------------------------------------------------------------------------
 
-_MULTI_REFUSAL = """service D { fn q(s: Str) -> Int }
+# Each program carries two or three TRUE refusals of DISTINCT families on
+# distinct lines, so the winner is decided by LINE and the full list exercises
+# the collecting sink. Messages are kept distinct so the reference's dedup (on
+# `(code, filename, line, message)`) never collapses an entry — which would
+# desync the `admit_all` count on the one-line variant, where every line is 1.
+_MULTI_REFUSAL_PROGRAMS = [
+    # an earlier-LINE link (G2, the second provider's line 4) beats a later-line
+    # component body (G4, line 5). Multiline: G2 wins. One-line: every line is 1,
+    # so the tie-break is pipeline order — the component body is collected before
+    # the link, so G4 wins on BOTH sides.
+    ("link vs later body", """service D { fn q(s: Str) -> Int }
 service Bus { emission fn publish(topic: Str) }
 component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
 component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
 component Z requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }
-"""
+"""),
+    # two components each refused (G4 on DIFFERENT keys, lines 3 and 4); the
+    # earlier line wins and the full list carries both. Distinct keys keep the
+    # messages distinct, so the one-line variant is two entries, not one.
+    ("two components each refused", """service Bus { emission fn publish(topic: Str) }
+service Log { emission fn write(m: Str) }
+component P requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }
+component Q requires log: Log { effect log.write("a") undo log.write("b") }
+"""),
+    # a module-fn A1 twin (line 2) beside a component body (G4, line 4). The
+    # reference RAISES the module-fn twin before its collect-all sink exists, so
+    # its diagnostic list is JUST that one A1 — the gate mirrors the FAIL-FAST
+    # (it returns the module-fn refusal alone). The winner is A1 on both
+    # variants; the full list is a singleton on both sides.
+    ("module fn plus a component", """extern emission async fn tick() -> Int = @py { return 1 }
+fn holder() -> Int { let f = tick   return 0 }
+service Bus { emission fn publish(topic: Str) }
+component Z requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }
+"""),
+]
 
 
-def test_which_refusal_wins_diverges_when_a_program_has_several(admit):
-    """Roadmap 419c, pinned as a documented limitation, NOT as agreement.
+def _parse_admit_all(blob: str) -> list[tuple[int, str]]:
+    r"""Parse `admit_all`'s row-joined "<line>|<tag>|<msg>" into (line, tag).
 
-    `admit_src` returns the FIRST refusal it reaches, in its own fixed phase
-    order (module fns, then per component, then spawn bounds, then the G2/G3
-    link). The reference collects diagnostics and orders them by LINE (item
-    386's sink). So on a program carrying BOTH an earlier-line link refusal and
-    a later-line component refusal the two disagree: genuinely different
-    refusals, both true of the program, chosen by different rules.
+    The gate joins rows with the two characters ``\n`` — a revl PLAIN string
+    preserves ``\n`` verbatim rather than as a newline (selfhost/lexer.rvl: the
+    only escapes are ``\"`` and ``\\``), so the emitted separator is a literal
+    backslash-n, not U+000A. No refusal message contains that sequence, so the
+    split is unambiguous."""
+    out: list[tuple[int, str]] = []
+    for row in blob.split("\\n"):
+        if not row:
+            continue
+        line, tag, _ = row.split("|", 2)
+        out.append((int(line), tag))
+    return out
 
-    Closing it means a line number on every gate refusal plus a collecting sink
-    in `selfhost/lower.rvl`, which is item 186's own deferred work; `admit_src`
-    is also what `tools/build_gate_crate.py` digests, so its phase order is not
-    a local edit. Until then the corpus above deliberately never builds a
-    multi-refusal program (see `_ROUTE_PROVIDERS`, which isolates its two
-    providers into distinct realms so the routing verdict is the only one in
-    play), and this test is the only place the divergence is written down.
 
-    When this test reds because the two now agree, delete it and tick 419c."""
-    ref_tag, _ = _ref(_MULTI_REFUSAL)
-    got = admit(_MULTI_REFUSAL)
-    got_tag = got.split("|", 1)[0]
-    # both refuse, and both refusals are true of this program
-    assert ref_tag == "G2" and got_tag == "G4", (ref_tag, got_tag)
-    # the reference picks the earlier LINE (the duplicate provision, line 4);
-    # the gate picks the earlier PHASE (the component loop precedes the link).
-    assert _ref(_MULTI_REFUSAL)[1].startswith("provision conflict")
-    assert "must be marked `emit`" in got
+@pytest.mark.parametrize("oneline", [False, True], ids=["multiline", "oneline"])
+@pytest.mark.parametrize("name,src", _MULTI_REFUSAL_PROGRAMS,
+                         ids=[n for n, _ in _MULTI_REFUSAL_PROGRAMS])
+def test_multi_refusal_programs_agree(admit, admit_all, name, src, oneline):
+    """Item 419c. On a multi-refusal program the gate's `admit_src` reports the
+    reference's `diagnostics[0]` — the minimum by (line, seq). The one-line
+    variant collapses every line to 1, so the tie-break is pipeline order, which
+    the gate's `seq` (its append order) must reproduce.
+
+    Two assertions per program:
+
+    * WINNER — `admit_src` equals the reference's first diagnostic, tag AND
+      message (`_ref`).
+    * FULL LIST — `admit_all` equals the reference's `RevlErrors` carrier
+      (`_ref_all`), compared as sorted (line, tag) lists. This is restricted to
+      the recovery granularity the gate mirrors: the component loop, the
+      post-passes, and the link COLLECT (so their programs carry the full list),
+      while the module-fn twin is FAIL-FAST on BOTH sides (the reference raises
+      before its sink; the gate returns the one refusal), a singleton list —
+      which is exactly why the corpus keeps every OTHER family in the collected
+      regime. Statement-level (Stage-2) recovery inside a body is out of scope.
+    """
+    if oneline:
+        src = _oneline(src)
+
+    ref = _ref_all(src)
+    assert ref, "the reference must refuse every corpus program"
+    assert all(not t.startswith("OUT:") for _, t in ref), ref  # in-slice only
+
+    # WINNER: tag AND message equal the reference's diagnostics[0].
+    ref_tag, ref_msg = _ref(src)
+    got = admit(src)
+    got_tag = got.split("|", 1)[0] if "|" in got else got
+    got_msg = got.split("|", 1)[1] if "|" in got else ""
+    assert got_tag == ref_tag, (name, oneline, got, ref)
+    assert got_msg == ref_msg, (name, oneline, got_msg, ref_msg)
+
+    # FULL LIST: sorted (line, tag) equality against the carrier.
+    got_all = _parse_admit_all(admit_all(src))
+    assert sorted(got_all) == sorted(ref), (name, oneline, got_all, ref)
 
 
 # ============================================================ nesting bound
