@@ -110,12 +110,76 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # per statement, and the name fence (`setup_async_verdict`) prunes the awaited
 # steps it must not see. The two entries that remain are each in a layer this
 # gate deliberately does not run:
+#
+# THE TYPE LAYER (docs/design/457). The bulk of this list is the type-layer
+# gap named executably at slice T0: 46 fixtures over `examples/rejections/`
+# that the reference refuses in its type checker and `selfhost/lower.rvl`'s
+# `admit_src` admits, because the gate runs no type layer yet. They used to sit
+# in `no-objection-out-of-slice` (the classifier tagged every one "OUT:"); T0
+# taught `tests/test_selfhost_lower.py::_classify` the type vocabulary, so they
+# now surface here where they can be worked down. `TYPE_LAYER_GAP` in that same
+# file pins the divergence per fixture; the two lists move together. Each later
+# slice (T1..T4) refuses a family for real, at which point its fixtures leave
+# BOTH lists and the census baseline is re-recorded.
 KNOWN_BYPASSES = {
+    # -- fn-body binding rules (G1/G6) --
+    "examples/rejections/g1_template_undeclared.rvl",
+    "examples/rejections/v2_undeclared_fn_var.rvl",
+    "examples/rejections/v2_let_reassignment.rvl",
+    "examples/rejections/v2_compound_assign_on_let.rvl",
+    "examples/rejections/v2_duplicate_let_block_scope.rvl",
+    "examples/rejections/shadowed_module_fn_call.rvl",
+    "examples/rejections/g6_closure_mutates_capture.rvl",
+    # -- expression typing (T1/T2) --
+    "examples/rejections/t2_null_in_expression.rvl",
+    "examples/rejections/t11_field_through_opt.rvl",
+    "examples/rejections/t12_str_index.rvl",
+    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
+    "examples/rejections/t21_int32_narrow_implicit.rvl",
+    "examples/rejections/t22_int32_width_mix.rvl",
+    "examples/rejections/t23_int32_remainder.rvl",
+    "examples/rejections/t28_bitwise_non_int32.rvl",
+    "examples/rejections/t26_anon_record_update_wrong_type.rvl",
+    "examples/rejections/t27_anon_record_update_undeclared_field.rvl",
+    "examples/rejections/t36_float_literal_range.rvl",
+    # -- calls and signatures --
+    "examples/rejections/t10_call_arity.rvl",
+    "examples/rejections/t15_generic_call_site.rvl",
+    "examples/rejections/v2_map_set_value_mismatch.rvl",
+    "examples/rejections/v2_map_value_unknown_method.rvl",
+    "examples/rejections/arith_zero_divisor.rvl",
+    "examples/rejections/t24_opaque_receiver_builtin.rvl",
+    "examples/rejections/host_method_not_on_surface.rvl",
+    "examples/rejections/g4_extern_undo_wrong_arg_type.rvl",
+    # -- arrows and function values --
+    "examples/rejections/t17_arrow_body_unchecked.rvl",
+    "examples/rejections/t32_arrow_value_result_flows.rvl",
+    "examples/rejections/t33_arrow_value_arity.rvl",
+    "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
     # typecheck.py's `an arrow may not declare its own async colour` — carried
-    # with `code="A1"`, so the oracle classifier reads it in-slice, but it is
-    # decided in the reference TYPE layer, which this gate does not run at all.
-    # Closing it means porting a type-checker rule, not a statement-model fix.
+    # with `code="A1"`, so the classifier already read it in-slice before T0,
+    # but it is decided in the reference TYPE layer this gate does not run.
+    # Flips with the arrows/function-values slice (T2c), with its siblings above.
     "examples/rejections/t34_arrow_self_declared_async.rvl",
+    # -- return paths and match --
+    "examples/rejections/t8_missing_return.rvl",
+    "examples/rejections/t9_return_path_incomplete.rvl",
+    "examples/rejections/t13_unknown_match_case.rvl",
+    "examples/rejections/v2_match_nonexhaustive.rvl",
+    # -- declarations --
+    "examples/rejections/t18_type_alias_cycle.rvl",
+    "examples/rejections/t6_bare_generic.rvl",
+    "examples/rejections/t5_destructure_nonrecord.rvl",
+    # -- provide-method and component bodies --
+    "examples/rejections/t1_service_arg_type.rvl",
+    "examples/rejections/t4_field_arg_type.rvl",
+    "examples/rejections/t7_provide_param_annotation_mismatch.rvl",
+    "examples/rejections/t16_provide_method_missing_return.rvl",
+    "examples/rejections/t31_index_non_int_provide_method.rvl",
+    "examples/rejections/t3_config_default_type.rvl",
+    "examples/rejections/a6_method_not_in_service.rvl",
+    "examples/rejections/g6_method_local_shadows_component.rvl",
+    # -- NOT the type layer, and pre-dating this design --
     # `_check_spawn_attenuation`'s PARAMETERIZED capability-widening refusal
     # (item 294): `fs.write(path="/etc")` is not within the held
     # `fs.write(path="/tmp")` cone. The gate's capability model is token-level

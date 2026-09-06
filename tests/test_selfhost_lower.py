@@ -144,8 +144,11 @@ def test_selfhosted_lower_in_file_tests_pass(ns):
 def _classify(e: RevlError) -> str:
     """The reference refusal rendered in the gate's guarantee vocabulary. A
     RevlError.code is authoritative for A1/G4 (the checks that set one); G2 in
-    `_link` sets no code, so its message marker is used. Anything else is
-    OUT-OF-SLICE (the corpus must never hit it on a rejected case)."""
+    `_link` sets no code, so its message marker is used. The TYPE-LAYER tail
+    (docs/design/457 §4.3, item 429) names the type checker's refusals
+    (T1/T2/G1/G6/A6/HOST-METHOD and the code-less `TYPE` remainder) so the
+    census can see the measured false-admit gap; see the block at the end of
+    this function. Anything still unrecognised is OUT-OF-SLICE."""
     if e.code in ("G4", "A1"):
         return e.code
     m = e.message
@@ -216,6 +219,48 @@ def _classify(e: RevlError) -> str:
         return "G4"
     if "(A1)" in m:
         return "A1"
+    # ---- the self-host TYPE LAYER (docs/design/457, slice T0; item 429) -----
+    # The reference's type layer refuses a program the gate has no phase for, so
+    # `admit_src` waves it through. Every such refusal used to fall here to
+    # "OUT:", which parks it in the census bucket `no-objection-out-of-slice`
+    # that the baseline tolerates. Naming it instead moves the 46 measured
+    # false-admits (section 1 of the design) into `false-admit/<tag>`, where
+    # `tests/test_gate_reference_census.py`'s KNOWN_BYPASSES caps them by name
+    # and the `TYPE_LAYER_GAP` pin below records the divergence per family. No
+    # gate behaviour changes: the gate still admits these, they are just no
+    # longer invisible. Each later type-layer slice deletes lines from both
+    # lists as the gate starts refusing its family for real.
+    #
+    # The vocabulary is design §4.3: `e.code` for the checks that set T1/T2,
+    # `HOST-METHOD` straight through (it is already a reference code), and the
+    # message-shape families for the code-less remainder. It is append-only and
+    # deliberately narrow: it must not name a refusal outside the type layer
+    # (the extern-slot G4/G5, `a2`/`a9`, `use`, the parser-form fixtures and the
+    # `unknown service` provide-clause refusals stay "OUT:" until their own
+    # slice lands and can refuse them natively).
+    if e.code in ("T1", "T2", "HOST-METHOD"):
+        return e.code
+    if "is not declared in this function" in m:
+        return "G1"
+    if ("cannot reassign" in m
+            or "is already declared in this function" in m
+            or "is bound here and called in this body" in m
+            or "is already bound in" in m
+            or "(G6)" in m):
+        return "G6"
+    if "is not a method of service" in m:
+        return "A6"
+    if ("no builtin method" in m
+            or "non-exhaustive match" in m
+            or "type argument(s), got" in m):
+        return "T1"
+    if ("is not a case of" in m
+            or "record update names" in m
+            or "record destructuring requires a record" in m
+            or "type alias cycle" in m
+            or "`mod` by a literal zero" in m
+            or "Float literal is infinite" in m):
+        return "TYPE"
     return "OUT:" + m
 
 
@@ -2074,3 +2119,147 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
             if verdict == _TOO_DEEP:
                 refused += 1
     assert refused > 0, "the fuzz never reached the bound"
+
+
+# =============================================================== type layer
+#
+# The self-host TYPE-LAYER parity gap, named executably (docs/design/457,
+# slice T0). This is the same device `test_selfhost_ownership_gap_308.py` uses
+# for O1/B1: a KNOWN, DESIGNED divergence recorded here so no later oracle
+# discovers it by going red on a surprise.
+#
+# The reference types a function body, its declarations and its provide-method
+# bodies and refuses when they do not check. `selfhost/lower.rvl`'s `admit_src`
+# has no phase for any of that yet (`lir_*` threads a typed environment through
+# the IR but never refuses), so it ADMITS every one of these programs. The two
+# therefore DIVERGE: the reference refuses with a type-layer tag, the gate
+# returns "". Design section 1 measured that gap at 46 fixtures over
+# `examples/rejections/`, grouped below by the reference check that refuses
+# them (the family each self-host slice T1..T4 will move from "pinned gap" to
+# "agrees").
+#
+# This test asserts the divergence is still there. When a later slice ports a
+# family, its fixtures start refusing on the gate side and the matching rows
+# here go red. That is the signal to: (1) delete those rows, (2) remove the same
+# fixtures from KNOWN_BYPASSES in tests/test_gate_reference_census.py and
+# re-record the census baseline, and (3) fold the fixtures into the slice's own
+# agreement corpus. Until then this file plus KNOWN_BYPASSES are the whole
+# record that the 46-fixture gap is intended, not a latent gate bypass.
+#
+# The tag beside each fixture is what `_classify` (above) derives from the
+# reference refusal, i.e. the bucket the census now files the false-admit under.
+TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
+    # fn-body binding rules (G1/G6): undeclared names, let/var reassignment and
+    # redeclaration, callable shadowing, a by-value capture written through.
+    "fn-body binding (G1/G6)": [
+        ("g1_template_undeclared", "G1"),
+        ("v2_undeclared_fn_var", "G1"),
+        ("v2_let_reassignment", "G6"),
+        ("v2_compound_assign_on_let", "G6"),
+        ("v2_duplicate_let_block_scope", "G6"),
+        ("shadowed_module_fn_call", "G6"),
+        ("g6_closure_mutates_capture", "G6"),
+    ],
+    # expression typing (T1/T2): the operator/field/index/record algebra and the
+    # literal-range and `null` refusals.
+    "expression typing (T1/T2)": [
+        ("t2_null_in_expression", "T2"),
+        ("t11_field_through_opt", "T1"),
+        ("t12_str_index", "T1"),
+        ("t14_optional_chain_on_nonoptional", "T1"),
+        ("t21_int32_narrow_implicit", "T1"),
+        ("t22_int32_width_mix", "T1"),
+        ("t23_int32_remainder", "T1"),
+        ("t28_bitwise_non_int32", "T1"),
+        ("t26_anon_record_update_wrong_type", "T1"),
+        ("t27_anon_record_update_undeclared_field", "TYPE"),
+        ("t36_float_literal_range", "TYPE"),
+    ],
+    # calls and signatures: arity, generic call sites, builtin/method receivers,
+    # the literal zero divisor, extern-undo argument typing.
+    "calls and signatures": [
+        ("t10_call_arity", "T1"),
+        ("t15_generic_call_site", "T1"),
+        ("v2_map_set_value_mismatch", "T1"),
+        ("v2_map_value_unknown_method", "T1"),
+        ("arith_zero_divisor", "TYPE"),
+        ("t24_opaque_receiver_builtin", "HOST-METHOD"),
+        ("host_method_not_on_surface", "HOST-METHOD"),
+        ("g4_extern_undo_wrong_arg_type", "T1"),
+    ],
+    # arrows and function values: arrow-body checking, function-value flow and
+    # arity, arrow annotations, the self-declared async colour (already a
+    # false-admit/A1 before T0; it belongs to this family and flips at T2c).
+    "arrows and function values": [
+        ("t17_arrow_body_unchecked", "T1"),
+        ("t32_arrow_value_result_flows", "T1"),
+        ("t33_arrow_value_arity", "T1"),
+        ("t35_arrow_annotation_not_quantified", "T1"),
+        ("t34_arrow_self_declared_async", "A1"),
+    ],
+    # return paths and match: returns on every path, unknown/missing match cases.
+    "return paths and match": [
+        ("t8_missing_return", "T1"),
+        ("t9_return_path_incomplete", "T1"),
+        ("t13_unknown_match_case", "TYPE"),
+        ("v2_match_nonexhaustive", "T1"),
+    ],
+    # declarations: alias cycles, bare generics, non-record destructuring.
+    "declarations": [
+        ("t18_type_alias_cycle", "TYPE"),
+        ("t6_bare_generic", "T1"),
+        ("t5_destructure_nonrecord", "TYPE"),
+    ],
+    # provide-method and component bodies: method params take the service
+    # signature, the body checks against its return, required-service call
+    # argument typing, config defaults, a method-local shadowing a component name.
+    "provide-method and component bodies": [
+        ("t1_service_arg_type", "T1"),
+        ("t4_field_arg_type", "T1"),
+        ("t7_provide_param_annotation_mismatch", "T1"),
+        ("t16_provide_method_missing_return", "T1"),
+        ("t31_index_non_int_provide_method", "T1"),
+        ("t3_config_default_type", "T1"),
+        ("a6_method_not_in_service", "A6"),
+        ("g6_method_local_shadows_component", "G6"),
+    ],
+}
+
+_TYPE_LAYER_CASES = [
+    (family, name, tag)
+    for family, rows in TYPE_LAYER_GAP.items()
+    for name, tag in rows
+]
+
+
+def test_the_type_layer_gap_is_exactly_46_fixtures():
+    """Section 1's measured gap, held as a count so a fixture cannot quietly
+    leave or join the pinned set without this number moving in the diff."""
+    assert len(_TYPE_LAYER_CASES) == 46, len(_TYPE_LAYER_CASES)
+    names = [name for _, name, _ in _TYPE_LAYER_CASES]
+    assert len(set(names)) == 46, "a fixture is listed twice"
+
+
+@pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
+                         ids=[f"{n}" for _, n, _ in _TYPE_LAYER_CASES])
+def test_type_layer_gap_is_a_named_selfhost_divergence(admit, family, name, tag):
+    """Reference refuses this program in its type layer; the gate does not run
+    that layer yet, so it admits. Pinned per fixture so the divergence is owned,
+    not discovered by a red oracle.
+
+    When a row here reds because the gate began refusing its fixture, the type
+    layer for that family has landed: delete the row, drop the same fixture from
+    KNOWN_BYPASSES in tests/test_gate_reference_census.py, re-record the census
+    baseline, and move the fixture into the slice's agreement corpus."""
+    src = _fixture(name)
+    ref_tag, ref_msg = _ref(src)
+    assert ref_tag == tag and ref_msg != "", (
+        f"reference no longer refuses {name} with tag {tag!r}: "
+        f"got tag {ref_tag!r}, message {ref_msg!r}. If the reference message "
+        f"shape changed, update _classify and this row together.")
+    got = admit(src)
+    assert got == "", (
+        f"the gate now refuses {name} ({got!r}): the {family!r} type-layer "
+        f"slice appears to have landed. Flip this fixture — delete its row "
+        f"here, delete it from KNOWN_BYPASSES, re-record the census baseline, "
+        f"and fold it into the slice's agreement corpus.")
