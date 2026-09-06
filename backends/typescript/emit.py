@@ -3882,6 +3882,113 @@ def _ts_extern_config_bind(ext: dict) -> str:
             f"{json.dumps(defaults)});")
 
 
+# issue #278: a verbatim `@ts` extern body has no sanctioned door to an
+# install-tree host module, and the architect decision is Option 1 — no door by
+# design. The ts runtime contract (#295) ships the emitted module to PLAIN NODE
+# (ESM), where CommonJS `require` is not defined and there is no resolution root
+# for a relative (`../x.ts`) or bare (`foo`) specifier. `createRequire` is the
+# synthesized-loader form of the same reach. The ONE specifier a bare
+# `require("node:...")` could still name is a node builtin, and THAT case is
+# #295's runtime gate's to report (it fails loudly under plain node with
+# "require is not defined") — so it is deliberately left untouched here and NOT
+# diagnosed. Every other reach is named at EMIT time, which turns the gap into a
+# COMPILE diagnostic (distinguishable from a genuine runtime module-resolution
+# error) and points at the two sanctioned alternatives: a `= @ts ref` extern
+# (#396 option B, a jailed/pinned reach) or `process.getBuiltinModule` (#382).
+#
+# The scan is textual on the author's verbatim body, but only after `//` and
+# `/* */` COMMENTS are scrubbed (`_strip_ts_comments`): a body that names
+# `createRequire` or `require(...)` in a comment to say it is NOT using it (the
+# ts-host-body conformance case does exactly this) is not a reach. `require` is
+# matched only as a bare call (a negative lookbehind keeps `createRequire(`,
+# `foo.require(` and the emitter's own `_revl_require` from matching the
+# `require` arm); the `createRequire` arm catches the synthesized loader
+# whatever it is later called. `require("node:module")`'s own `createRequire`
+# symbol import is emitter text, never a user body, so it is never scanned.
+_TS_REQUIRE_CALL_RE = re.compile(
+    r"(?<![A-Za-z0-9_$.])require\s*\(\s*(['\"`])(.*?)\1", re.DOTALL)
+# `createRequire` is normally reached as a member (`...module").createRequire(`),
+# so a leading `.` is NOT excluded here — only an identifier run, which would
+# make it part of a longer name rather than the loader symbol.
+_TS_CREATE_REQUIRE_RE = re.compile(r"(?<![A-Za-z0-9_$])createRequire\b")
+
+
+def _strip_ts_comments(body: str) -> str:
+    """Blank `//` line and `/* */` block comments out of a verbatim @ts body.
+
+    String and template literals are preserved intact (so a `require("<spec>")`
+    specifier is still extractable, and a `//` inside a URL string is not read
+    as a comment); comment bytes become spaces so the token scan cannot mistake
+    a mention-in-a-comment for a real install-tree reach."""
+    out: list[str] = []
+    i, n = 0, len(body)
+    quote: str | None = None  # active string delimiter: ' " or `
+    while i < n:
+        c = body[i]
+        if quote is not None:
+            out.append(c)
+            if c == "\\" and i + 1 < n:      # keep escaped char with its slash
+                out.append(body[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in "'\"`":
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and body[i + 1] == "/":
+            while i < n and body[i] != "\n":  # to end of line
+                out.append(" ")
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and body[i + 1] == "*":
+            out.append("  ")
+            i += 2
+            while i < n and not (body[i] == "*" and i + 1 < n
+                                 and body[i + 1] == "/"):
+                out.append("\n" if body[i] == "\n" else " ")
+                i += 1
+            if i < n:                          # consume the closing `*/`
+                out.append("  ")
+                i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _reject_install_tree_reach(name: str, body: str) -> None:
+    """Refuse a verbatim `@ts` body that reaches an install-tree host module.
+
+    Fires on `require("<spec>")` where `<spec>` is not a `node:` builtin, and on
+    any `createRequire`. A `node:`-prefixed `require` is left entirely to #295's
+    runtime gate (issue #278, Option 1 — no install-tree door by design).
+    Comments are scrubbed first, so a token named only in a comment is not a
+    reach."""
+    body = _strip_ts_comments(body)
+    def _door(spec: str) -> EmitError:
+        return EmitError(
+            f"a verbatim @ts body (extern `{name}`) cannot load an install-tree "
+            f"host module `{spec}`; declare a `= @ts ref` extern (#396 option B) "
+            f"for a jailed, pinned reach, or use "
+            f'process.getBuiltinModule("node:…") for a node builtin (#382) '
+            f"(issue #278: no install-tree door by design)"
+        )
+    for match in _TS_REQUIRE_CALL_RE.finditer(body):
+        spec = match.group(2)
+        if spec.startswith("node:"):
+            # #295's runtime-gate case: a bare `require("node:...")` emits, then
+            # fails loudly under plain node. Not this diagnostic's to claim.
+            continue
+        raise _door(spec)
+    if _TS_CREATE_REQUIRE_RE.search(body):
+        raise _door("createRequire")
+
+
 def _emit_ts_externs(externs: list) -> list[str]:
     lines: list[str] = []
     # item 378 Stage 5: emit the config seam once, before the externs, when any
@@ -3913,6 +4020,10 @@ def _emit_ts_externs(externs: list) -> list[str]:
                 f"extern `{name}` has no @ts body — not portable to this backend "
                 f"(available: {', '.join(sorted(set(bodies) | set(refs))) or 'none'})"
             )
+        # issue #278: name the rule when this verbatim body reaches for an
+        # install-tree host module (a non-`node:` require / createRequire). The
+        # `@ts ref` path above is the sanctioned door and never reaches here.
+        _reject_install_tree_reach(name, bodies["ts"])
         # async extern (roadmap item 80, docs/design/async-extern.md §5): emit
         # an `async function` returning `Promise<T>`; the verbatim @ts body may
         # use `await`. Every admitted call site awaits it (see `_expr`). The
