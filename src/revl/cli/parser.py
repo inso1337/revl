@@ -927,18 +927,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = sub.add_parser(
         "serve",
-        help="serve a composition's OWN provided operations as MCP tools "
-             "(the fourth quadrant: hints derived by the compiler)")
+        help="serve a composition's OWN provided operations, over MCP stdio "
+             "(--mcp) or HTTP (--http) — the same compiler-derived projection, "
+             "two transports (the fourth quadrant: hints derived by the compiler)")
     serve.add_argument("files", nargs="+")
-    serve.add_argument("--mcp", action="store_true",
-                       help="serve over the MCP stdio protocol (required)")
+    serve_transport = serve.add_mutually_exclusive_group()
+    serve_transport.add_argument(
+        "--mcp", action="store_true",
+        help="serve over the MCP stdio protocol")
+    serve_transport.add_argument(
+        "--http", action="store_true",
+        help="serve over HTTP: each provided operation is `POST "
+             "/<composition>/<key>/<op>` over the canonical value encoding "
+             "(docs/interop-bridge.md), the server face `revl export client` "
+             "pairs with (item 424 gap c, D-424c.6)")
+    serve.add_argument("--host", default="127.0.0.1", metavar="HOST",
+                       help="--http bind address (default: 127.0.0.1 — loopback; "
+                            "the face makes no safety claim about the callee, so "
+                            "it is not exposed off-host by default)")
+    serve.add_argument("--port", type=int, default=8080, metavar="PORT",
+                       help="--http bind port (default: 8080)")
     serve.add_argument("--config", default=None,
                        help="TOML/JSON file of `component-name = { ... }` config "
                             "tables — supplied to each component at boot")
     serve.add_argument("--env", default=None,
                        help="TOML/JSON file of flat `name = value` environment values, injected into the composition's `boot` component — its `config {}` block is the environment contract, and an undeclared key, a missing required field or a value outside a declared `under`/`in` bound refuses the boot (item 350)")
     serve.add_argument("--composition", default="revl",
-                       help="tool-name prefix (tools are `<prefix>.<key>.<op>`)")
+                       help="tool/route-name prefix (MCP tools are "
+                            "`<prefix>.<key>.<op>`; HTTP routes are "
+                            "`/<prefix>/<key>/<op>`)")
 
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")

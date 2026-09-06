@@ -1104,7 +1104,11 @@ FRONTIER (item 338) and is bounded LOCALLY: it makes no claim about what the
 callee runs (D-424c.8; there is no verified-remote badge - a mutual guarantee
 between two revl peers is `revl contract export`/`check`). A method the
 projection cannot express - a resource handle (an `extern acquire` return), a
-`Map` with a non-`Str` key - is refused at generation, naming the method.
+`Map` with a non-`Str` key - is refused at generation, naming the method. The
+generated file also ships an `httpTransport(base)` factory that drops straight
+onto a `revl serve --http` face (below): `base` is the service's route prefix
+`http://host:port/<composition>/<key>`, and each call POSTs its positional
+arguments as a JSON array.
 
 - `FILES` - `.rvl` source files (required).
 - `--lang LANG` - target language for the generated client (default: `ts`; `ts`
@@ -1118,12 +1122,28 @@ projection cannot express - a resource handle (an `extern acquire` return), a
 
 ### `revl serve`
 
-Serve a composition's OWN provided operations as MCP tools (the fourth
-quadrant: hints derived by the compiler). Distinct from `revl mcp serve`, which
-serves the compiler itself.
+Serve a composition's OWN provided operations (the fourth quadrant: hints
+derived by the compiler), over one of two transports. Distinct from `revl mcp
+serve`, which serves the compiler itself. The transport decides nothing: the
+operation set, the checked emission hints and the wire shape are all the
+compiler's.
 
 - `FILES` (required).
-- `--mcp` - serve over the MCP stdio protocol (required).
+- One transport (mutually exclusive; required):
+  - `--mcp` - serve over the MCP stdio protocol.
+  - `--http` - serve over HTTP. Each provided operation is
+    `POST /<composition>/<key>/<op>`, with the request and response bodies in
+    the canonical value encoding ([interop-bridge.md](interop-bridge.md)) - the
+    server face `revl export client` pairs with (item 424 gap (c), D-424c.6). A
+    request body is the operation's positional arguments as a JSON array (or an
+    object `{"args": [...]}`, or empty for a no-argument call); a success replies
+    `{"ok": true, "value": <encoded result>}`, the exact shape the placement
+    bridge returns. `GET /` returns the manifest: the served operations, their
+    compiler-derived `readOnly`/`emission` hints, and the gate FRONTIER the face
+    was projected under. The face is LOCAL contract only - it makes no safety
+    claim about any callee it in turn reaches - and binds loopback by default.
+- `--host HOST` - `--http` bind address (default: `127.0.0.1`).
+- `--port PORT` - `--http` bind port (default: `8080`).
 - `--config FILE` - TOML/JSON file of `component-name = { ... }` config tables,
   supplied to each component at boot.
 - `--env FILE` - TOML/JSON file of flat `name = value` environment values,
@@ -1133,8 +1153,9 @@ serves the compiler itself.
   value outside a declared `under "<prefix>"` / `in [...]` bound each refuse the
   boot before any runtime is imported. See
   [environment-binding.md](environment-binding.md).
-- `--composition PREFIX` - tool-name prefix (tools are `<prefix>.<key>.<op>`;
-  default: `revl`).
+- `--composition PREFIX` - tool/route-name prefix (MCP tools are
+  `<prefix>.<key>.<op>`; HTTP routes are `/<prefix>/<key>/<op>`; default:
+  `revl`).
 
 ---
 
