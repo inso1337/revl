@@ -107,6 +107,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -2543,6 +2544,88 @@ def admit_deploy_map(placement: Mapping, *,
         targets=(admitted if ok else {}),
         refusals=tuple(refusals),
         boundaries={p: t.boundary for p, t in admitted.items()} if ok else {})
+
+
+# ---------------------------------------------------------------------------
+# §5a-cli. `revl deploy MAP --dry-run` — the plan-time admission surface
+# ---------------------------------------------------------------------------
+
+
+def _load_deploy_map(path: str) -> dict:
+    """Read a deploy map (a placement map, docs/network-placement.md format,
+    with the one new `[processes.<p>.deploy]` table) from TOML or JSON.
+
+    Mirrors `placement._load_placement` deliberately: a deploy map IS a
+    placement map, byte-identical when nothing is remote, and reading it must
+    not diverge from how the conductor reads a placement.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    if path.endswith(".json"):
+        return json.loads(text)
+    import tomllib  # noqa: PLC0415 — stdlib, py3.11+
+
+    return tomllib.loads(text)
+
+
+def deploy_command(args) -> int:
+    """`revl deploy MAP --dry-run` — plan-time admission of a deploy map.
+
+    The deploy analogue of `revl plan` (design §1.1): it runs the whole
+    fallible, EFFECT-FREE half — parse the map, admit every `[deploy]` target
+    against the boundary rules (:func:`admit_deploy_map`) — and prints the
+    verdict each target would return WITHOUT opening any boundary. A machine
+    boundary is refused outright, an unknown `via` is refused rather than read
+    as local, and a container target whose seam set this plan cannot prove
+    seam-free (it has no IR wiring here) fail-closes to `seam-set-unknown` —
+    every rule refuses rather than downgrades, because the map is unauthenticated
+    operator input (design R4).
+
+    This is the CLI wrapper for the landed library surface; the COMMIT/launch
+    orchestration (remote staging, the `deploy-admit` runner, the signed commit
+    receipt the conductor compares) is a following slice, so a non-`--dry-run`
+    invocation prints the admission plan and then refuses rather than pretending
+    to have deployed.
+    """
+    try:
+        placement = _load_deploy_map(args.map)
+    except (OSError, ValueError) as error:
+        # ValueError covers tomllib.TOMLDecodeError and json.JSONDecodeError.
+        print(f"error: cannot read deploy map {args.map!r}: {error}",
+              file=sys.stderr)
+        return 1
+
+    verdict = admit_deploy_map(placement)
+
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "ok": verdict.ok,
+            "targets": {p: {"via": t.via, "boundary": t.boundary}
+                        for p, t in verdict.targets.items()},
+            "refusals": [dict(r) for r in verdict.refusals],
+            "boundaries": verdict.boundaries,
+        }, indent=2))
+    else:
+        n = len(verdict.targets) if verdict.ok else 0
+        head = (f"deploy map {args.map}: admitted, {n} boundary-crossing "
+                f"target(s)" if verdict.ok
+                else f"deploy map {args.map}: REFUSED")
+        print(head)
+        for line in verdict.render():
+            print(line)
+
+    if not verdict.ok:
+        return 1
+
+    if not getattr(args, "dry_run", False):
+        print(
+            "the deploy map is admitted, but this build wraps only the "
+            "plan-time (`--dry-run`) phase: the COMMIT/launch orchestration "
+            "is a following slice. Re-run with --dry-run to make the admission "
+            "plan the result, or drive the coordinated PREPARE/COMMIT protocol "
+            "through the `revl.deploy` library surface.",
+            file=sys.stderr)
+        return 1
+    return 0
 
 
 # ---------------------------------------------------------------------------
