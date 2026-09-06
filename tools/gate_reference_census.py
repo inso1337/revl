@@ -26,6 +26,17 @@ THE BUCKETS
 -----------
 Ordered by how much they matter.
 
+  ``false-admission``
+      THE ISSUED-ADMISSION DIRECTION, the most dangerous class the gate guards
+      against: the gate ISSUES an admission (`"admitted": true` on the wire) for
+      a program the reference refuses for ANY reason. Empty today by construction
+      — no gate arm admits anything (`Verdict` has no `Admitted`) — so it is a
+      SCAFFOLD held ahead of the self-host type layer (docs/design/457, the
+      frontier tracked by issue #346): the day a gate begins to issue admissions,
+      a wrong one reds this census on the same PR. Zero tolerance: no named-list
+      allowance, never baselined. Distinct from `false-admit`, which is a failure
+      to REFUSE (a no-objection), not a wrongly issued admission.
+
   ``false-admit/<tag>``
       THE BYPASS DIRECTION. The reference refuses under a guarantee this gate
       claims (`_classify` names it G1..G4 / A1 / PRELUDE / SPAWN / HANDOFF /
@@ -386,7 +397,15 @@ class CrateEngine:
         for line in lines:
             payload = json.loads(line)
             kind = payload["verdict"]
-            if kind == "refused":
+            # `"admitted": true` is the wire's own signal of an ISSUED admission
+            # and is read FIRST: it is `false` on every arm today (the crate has
+            # no `Admitted`), so this never fires now, but it is what lets the
+            # `false-admission` bucket catch the arm the day it opens, whatever
+            # the arm's `verdict` string turns out to be named.
+            if payload.get("admitted") is True:
+                yield ("admitted", (payload.get("code") or "",
+                                    payload.get("message") or ""))
+            elif kind == "refused":
                 yield ("refused", (payload["code"], payload["message"]))
             elif kind == "no_objection":
                 yield ("no_objection", "")
@@ -457,8 +476,26 @@ def load_fuzz(count: int, seed: int, corpus):
 # never baselined; the rest are recorded exactly so a change has to justify
 # every entry it adds or removes.
 HARD = "false-admit"
-TRACKED = ("false-admit", "tag-mismatch", "msg-mismatch", "false-reject",
-           "gate-fault")
+
+# The ISSUED-ADMISSION bypass, distinct from `false-admit`. Today no gate arm
+# admits anything (`Verdict` has no `Admitted`; `to_json` reports
+# `"admitted": false` on every arm), so this bucket is EMPTY by construction and
+# stays a scaffold. It exists ahead of the self-host type layer (docs/design/
+# 457-selfhost-type-layer.md, the frontier tracked by issue #346) so the moment
+# a gate begins to ISSUE an admission — the direction the whole crate exists to
+# guard — an admission the reference refuses for ANY reason reds this census on
+# the same PR that opens the arm, rather than being discovered later. It is the
+# most dangerous class the gate guards against: a host reading a rust admission
+# as a green and running code the reference never admitted. Unlike `false-admit`
+# it has NO named-list allowance and is NEVER baselined: zero tolerance.
+ADMISSION = "false-admission"
+
+# Buckets `--record` must never write, so their allowance can never grow to one.
+# `--check` fails on any member regardless of the baseline.
+NEVER_BASELINED = (ADMISSION,)
+
+TRACKED = ("false-admission", "false-admit", "tag-mismatch", "msg-mismatch",
+           "false-reject", "gate-fault")
 
 
 def bucket(ref, gate) -> str:
@@ -473,6 +510,13 @@ def bucket(ref, gate) -> str:
         return "recursion"
     if kind == "fault":
         return "gate-fault"
+    if kind == "admitted":
+        # The gate ISSUED an admission. Sound only when the reference admits the
+        # same bytes; a reference refusal for ANY reason — in-slice, out-of-slice,
+        # type layer, anything — is a false admission, no allowance. This is
+        # strictly stronger than the `no_objection` case below, which forgives an
+        # out-of-slice refusal because a no-objection is explicitly NOT a green.
+        return "agree-admit" if ref_tag == "" else ADMISSION
     if kind == "no_objection":
         if ref_tag == "":
             return "agree-admit"
@@ -507,12 +551,13 @@ def run(cases, engine, reference):
         name = bucket(ref, gate)
         buckets.setdefault(name, []).append(case_id)
         if name.split("/", 1)[0] in TRACKED:
+            carries_pair = gate[0] in ("refused", "admitted")
             details[case_id] = {
                 "bucket": name,
                 "reference": {"tag": ref[0], "message": ref[1]},
                 "gate": {"kind": gate[0],
-                         "code": gate[1][0] if gate[0] == "refused" else "",
-                         "message": (gate[1][1] if gate[0] == "refused"
+                         "code": gate[1][0] if carries_pair else "",
+                         "message": (gate[1][1] if carries_pair
                                      else gate[1] if isinstance(gate[1], str)
                                      else "")},
             }
@@ -544,12 +589,21 @@ def compare(buckets: dict[str, list[str]], baseline: dict) -> list[str]:
     problems = []
     want = baseline.get("buckets", {})
     for name, ids in sorted(buckets.items()):
-        if name.split("/", 1)[0] not in TRACKED:
+        head = name.split("/", 1)[0]
+        if head not in TRACKED:
             continue
-        new = sorted(set(ids) - set(want.get(name, [])))
+        # A never-baselined bucket (`false-admission`) fails on EVERY member,
+        # independent of the baseline: `--record` cannot write one, so a baseline
+        # that lists one is either stale or hand-edited and buys no tolerance.
+        seen = set() if head in NEVER_BASELINED else set(want.get(name, []))
+        new = sorted(set(ids) - seen)
         for case_id in new:
-            label = ("NEW BYPASS" if name.startswith(HARD)
-                     else "new divergence")
+            if head in NEVER_BASELINED:
+                label = "FALSE ADMISSION (issued admission the reference refuses)"
+            elif name.startswith(HARD):
+                label = "NEW BYPASS"
+            else:
+                label = "new divergence"
             problems.append(f"{label} {name}: {case_id}")
     for name, ids in sorted(want.items()):
         gone = sorted(set(ids) - set(buckets.get(name, [])))
@@ -561,12 +615,23 @@ def compare(buckets: dict[str, list[str]], baseline: dict) -> list[str]:
 
 
 def bypasses(buckets: dict[str, list[str]]) -> list[str]:
-    """Every case in a `false-admit` bucket, sorted. The open bypass surface."""
+    """Every case in a `false-admit` bucket, sorted. The open bypass surface.
+
+    Keyed on the bucket PREFIX (`false-admit/<tag>`), not `startswith`, so the
+    `false-admission` bucket — which shares `false-admit` as a string prefix —
+    is not swept in here. Its cases are the ISSUED-admission surface, reported
+    separately by `false_admissions`."""
     out: list[str] = []
     for name, ids in buckets.items():
-        if name.startswith(HARD):
+        if name.split("/", 1)[0] == HARD:
             out += ids
     return sorted(out)
+
+
+def false_admissions(buckets: dict[str, list[str]]) -> list[str]:
+    """Every case the gate ADMITTED and the reference refuses, sorted. Zero
+    tolerance: any member is a release blocker, never a baselined allowance."""
+    return sorted(buckets.get(ADMISSION, []))
 
 
 def main(argv: list[str]) -> int:
@@ -616,8 +681,10 @@ def main(argv: list[str]) -> int:
                       "cannot grow quietly while it is worked down."),
              "corpus_dirs": list(CORPUS_DIRS),
              "buckets": {k: sorted(v) for k, v in sorted(buckets.items())
-                         if k.split("/", 1)[0] in TRACKED},
-             "details": details},
+                         if k.split("/", 1)[0] in TRACKED
+                         and k.split("/", 1)[0] not in NEVER_BASELINED},
+             "details": {cid: d for cid, d in details.items()
+                         if d["bucket"].split("/", 1)[0] not in NEVER_BASELINED}},
             indent=1, sort_keys=True) + "\n")
         print(f"\nrecorded {BASELINE.relative_to(ROOT)}")
         return 0
