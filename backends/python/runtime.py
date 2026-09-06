@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import dataclasses
 import hashlib
 import hmac
 import inspect
@@ -3235,6 +3236,104 @@ def _hash_manifest(target: dict) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# item 485: the public bounded witness-inspection snapshot (and the item 483
+# exact-state review token derived from it). docs/design/245-session-commit.md.
+#
+# The harness discovers live filesystem witnesses by reaching through
+# `session._owner`, a frame `_registry`, and `_transactional` — runtime
+# internals with no stability contract. `SessionOwner.witness_snapshot`
+# replaces that reach-through with a supported, read-only surface: an
+# IMMUTABLE (frozen dataclasses + tuples), BOUNDED (a documented cap on the
+# enumerated entries) copy of the outstanding witnessed effects, each carrying
+# a stable identity and a revision digest of its witness preimage — never the
+# preimage itself, unless the caller is a trusted host.
+# ---------------------------------------------------------------------------
+
+#: The maximum number of witnessed entries the snapshot materializes into its
+#: `effects` tuple. A pathological session cannot force an unbounded copy on the
+#: inspecting host; past the cap the tuple is truncated and `truncated` is True.
+#: The review TOKEN is still computed over the FULL outstanding set (below), so
+#: a bounded display never weakens the exact-state binding.
+_WITNESS_SNAPSHOT_BOUND = 4096
+
+
+def _digest_witness(witness: Any) -> str:
+    """A stable, non-reversible revision digest of a witness preimage (item
+    483). Two entries with byte-equal witnesses digest alike; any change to the
+    preimage changes the digest, so a review token bound to it refuses a
+    confirm after the witness moved. Canonical JSON when the witness is
+    JSON-shaped (the common case — a `{path, bak}`-style record), else its
+    `repr`; never the preimage itself crosses the boundary."""
+    try:
+        payload = json.dumps(witness, sort_keys=True, separators=(",", ":"),
+                             default=repr)
+    except (TypeError, ValueError):
+        payload = repr(witness)
+    return "rev:sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclasses.dataclass(frozen=True)
+class WitnessEffect:
+    """One outstanding (or already-settled) witnessed effect in a
+    :class:`WitnessSnapshot` (item 485). Frozen: an inspecting host cannot
+    mutate the live session by writing back to a snapshot entry.
+
+    `status` distinguishes **live** (held on a live registry frame, undecided),
+    **escrowed** (a mid-session-withdrawn frame's entry, awaiting the verdict),
+    and **settled** (already discharged on commit or replayed on abort). `id`
+    is stable across snapshots of the same live entry; `revision` is the digest
+    of the witness preimage. `witness` is None unless the snapshot was taken by
+    a trusted host — sensitive preimage details stay off the untrusted
+    surface."""
+
+    id: str
+    status: str          # "live" | "escrowed" | "settled"
+    kind: str            # "transactional" | "compensation"
+    component: Optional[str]
+    method: Optional[str]
+    seq: Optional[int]
+    revision: str
+    witness: Any = None
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "status": self.status, "kind": self.kind,
+                "component": self.component, "method": self.method,
+                "seq": self.seq, "revision": self.revision,
+                "witness": self.witness}
+
+
+@dataclasses.dataclass(frozen=True)
+class WitnessSnapshot:
+    """An immutable, bounded, read-only view of a session's witnessed effects
+    (item 485). Replaces the harness reaching through `session._owner` /
+    `frame._registry` / `_transactional`.
+
+    Carries a stable `session`/`generation` identity, the ordered `effects`
+    (program order: live registry frames first, then the escrow), and an opaque
+    `token` binding the session, the generation and the ORDERED OUTSTANDING
+    witness identities + revisions. `verdict` is the owner's settled verdict
+    (None while pending). `truncated` is True when there were more than
+    `bound` entries to enumerate — the token still covers the full outstanding
+    set regardless."""
+
+    session: Optional[str]
+    generation: int
+    verdict: Optional[str]
+    token: str
+    effects: tuple
+    bound: int
+    truncated: bool
+    trusted: bool
+
+    def to_dict(self) -> dict:
+        return {"session": self.session, "generation": self.generation,
+                "verdict": self.verdict, "token": self.token,
+                "effects": [e.to_dict() for e in self.effects],
+                "bound": self.bound, "truncated": self.truncated,
+                "trusted": self.trusted}
+
+
 class _Deferred:
     """One class-(b) descriptor on the deferral queue (item 245, Decision 3).
     Holds a serializable named-call descriptor for the WAL/manifest and a zero-arg
@@ -3492,6 +3591,123 @@ class SessionOwner:
             "witnessed": self._witnessed_count(),
             "registry": sorted(f.name for f in self._registry),
         }
+
+    # -- item 485/483: bounded witness inspection + exact-state review ------
+
+    def _entry_kind(self, entry: Any) -> str:
+        return "compensation" if isinstance(entry, _Compensation) else "transactional"
+
+    def _entry_status(self, entry: Any, *, escrowed: bool) -> str:
+        """live | escrowed | settled. Settled = the entry's fate is decided: a
+        transactional discharged (commit) or replayed (abort), or a compensation
+        discharged or already run in Phase 2. Read defensively — a compensation
+        has no `replayed`, a transactional no `ran` (mirrors `_witnessed_count`
+        reading `replayed` with getattr)."""
+        if getattr(entry, "discharged", False) \
+                or getattr(entry, "replayed", False) \
+                or getattr(entry, "ran", False):
+            return "settled"
+        return "escrowed" if escrowed else "live"
+
+    def _entry_identity(self, entry: Any) -> str:
+        """A stable identity for one witnessed entry (item 483): the crossing it
+        names plus its unique registration key — the WAL `seq` when a log is
+        attached, else the process-monotonic `stamp`. Stable across repeated
+        snapshots of the same live entry; distinct for every entry."""
+        component = getattr(entry, "component", None) or "?"
+        method = getattr(entry, "method", None) or "?"
+        seq = getattr(entry, "seq", None)
+        key = f"seq{seq}" if seq is not None else f"stamp{getattr(entry, 'stamp', id(entry))}"
+        return f"{component}.{method}#{key}"
+
+    def _ordered_entries(self) -> list:
+        """Every witnessed entry in a deterministic PROGRAM order: each live
+        registry frame's transactional then compensation entries (registration
+        order), then the escrow. Each item is `(entry, escrowed)`."""
+        ordered: list = []
+        for frame in self._registry:
+            for entry in list(frame._transactional) + list(frame._compensations):
+                ordered.append((entry, False))
+        for entry in self._escrow:
+            ordered.append((entry, True))
+        return ordered
+
+    def _outstanding_identity(self, generation: int) -> list:
+        """The ordered `(id, revision)` pairs of every OUTSTANDING entry (live or
+        escrowed, not yet settled) — the exact-state material the review token
+        and the snapshot token both bind. Excludes settled entries: a discharged
+        or replayed effect is no longer outstanding."""
+        pairs: list = []
+        for entry, escrowed in self._ordered_entries():
+            if self._entry_status(entry, escrowed=escrowed) == "settled":
+                continue
+            pairs.append([self._entry_identity(entry),
+                          _digest_witness(getattr(entry, "witness", None))])
+        return pairs
+
+    def _outstanding_token(self, generation: int,
+                           verdict: Optional[str]) -> str:
+        """The opaque token binding session + generation + ordered outstanding
+        witness identities/revisions (+ an optional intended `verdict`). Any
+        drift — a new witnessed call, a swap, a changed witness preimage, a new
+        generation — recomputes to a different token. Deterministic canonical
+        JSON, like `_hash_manifest`."""
+        payload = {
+            "session": self.session_id,
+            "generation": generation,
+            "verdict": verdict,
+            "outstanding": self._outstanding_identity(generation),
+        }
+        blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def witness_snapshot(self, generation: int, *,
+                         trusted: bool = False) -> "WitnessSnapshot":
+        """A supported, read-only, IMMUTABLE, BOUNDED snapshot of the session's
+        witnessed effects (item 485). This is the surface the harness uses
+        instead of reaching through `_owner` / `_registry` / `_transactional`.
+
+        `trusted` gates the witness PREIMAGE: an untrusted caller sees each
+        effect's stable id, status and revision digest, but never the preimage
+        itself. The `effects` tuple is capped at `_WITNESS_SNAPSHOT_BOUND`
+        (`truncated` flags an overflow); the token binds the FULL outstanding
+        set regardless, so a bounded display never weakens the binding."""
+        effects: list = []
+        truncated = False
+        for entry, escrowed in self._ordered_entries():
+            if len(effects) >= _WITNESS_SNAPSHOT_BOUND:
+                truncated = True
+                break
+            effects.append(WitnessEffect(
+                id=self._entry_identity(entry),
+                status=self._entry_status(entry, escrowed=escrowed),
+                kind=self._entry_kind(entry),
+                component=getattr(entry, "component", None),
+                method=getattr(entry, "method", None),
+                seq=getattr(entry, "seq", None),
+                revision=_digest_witness(getattr(entry, "witness", None)),
+                witness=(getattr(entry, "witness", None) if trusted else None),
+            ))
+        return WitnessSnapshot(
+            session=self.session_id,
+            generation=generation,
+            verdict=self._verdict,
+            token=self._outstanding_token(generation, None),
+            effects=tuple(effects),
+            bound=_WITNESS_SNAPSHOT_BOUND,
+            truncated=truncated,
+            trusted=trusted,
+        )
+
+    def verdict_review_token(self, generation: int, verdict: str) -> str:
+        """The exact-state review token for a `prepare_verdict` (item 483). Binds
+        the intended `verdict` alongside the generation and outstanding witness
+        identities, so a commit review and an abort review of the same state
+        differ, and confirm can recompute for the right verdict. Self-describing:
+        the verdict is carried in plaintext so `confirm_verdict` knows which
+        verdict to recompute and enact."""
+        core = self._outstanding_token(generation, verdict)
+        return f"revl-verdict:{verdict}:{core}"
 
     def manifest(self) -> dict:
         """The commit manifest (Decision 4) — the one schema item 246 freezes
