@@ -1082,12 +1082,34 @@ def test_python_emits_the_cancellation_first_loop():
     assert "StreamFaulted" not in code and "except" not in code
 
 
-@pytest.mark.parametrize("tier", ["go", "rust"])
-def test_the_blocking_tiers_refuse_the_iteration_form_by_name(tier):
-    """go/rust lower the Slice 1/3 protocol but not the iteration form. A
-    refusal that named nothing — or worse, a subscription emitted with its body
-    silently dropped — is the outcome the honest EmitError exists to prevent."""
-    emit = _tier_emit(tier)
+def test_go_emits_the_iteration_form_as_a_blocking_next_loop():
+    """The go tier lowers `every … in` (Slice 4) as a plain for-loop over the
+    cancel-channel `next` the Slice 1/3 protocol already ships — no new runtime.
+    The three properties that carry the guarantee are each a line: a `Faulted`
+    is the error return (it fails the activation, reverting the prefix with the
+    subscription bracket on it — never caught); a `Closed` ENDS the loop before
+    the body (it is a terminal, not an item); the item enters the body only
+    after both, on the same LIFO-teardown-reachable bracket Slice 1 proved."""
+    emit = _tier_emit("go")
+    code = emit.emit(compile_source(_ITER, "s.rvl"))
+    assert "for {" in code
+    assert "_revlStreamItem1, _revlStreamErr1 := sub.Next()" in code
+    # a Faulted terminal is the error return: uncaught, it fails the activation
+    assert "if _revlStreamErr1 != nil {" in code
+    assert "return nil, _revlStreamErr1" in code
+    # a Closed terminal ends the loop and never enters the body
+    assert "if IsStreamClosed(_revlStreamItem1) {" in code
+    assert code.index("break") < code.index("sink.Write(o)")
+    # the item is recovered and the body runs it
+    assert "o := _revlStreamItem1.(string)" in code
+    assert code.index("o := _revlStreamItem1.(string)") < code.index("sink.Write(o)")
+
+
+def test_rust_still_refuses_the_iteration_form_by_name():
+    """rust lowers the Slice 1/3 protocol but not the iteration form. A refusal
+    that named nothing — or worse, a subscription emitted with its body silently
+    dropped — is the outcome the honest EmitError exists to prevent."""
+    emit = _tier_emit("rust")
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_ITER, "s.rvl"))
     msg = str(excinfo.value)
