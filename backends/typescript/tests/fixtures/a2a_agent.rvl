@@ -91,8 +91,8 @@
 // (C2), which is not built; until then this imports as an ordinary
 // provider component like the rest of the family.
 //
-// SCOPE OF THIS SLICE (roadmap item 439, slice 1). Bound: the Agent Card,
-// and a `message/send` whose task reaches a TERMINAL state in that one
+// SCOPE OF THIS SLICE (roadmap item 439). Bound: the Agent Card, and a
+// `message/send` whose task reaches a TERMINAL state in that one
 // crossing — the subset where "does an A2A Task map to one emission, to a
 // stream (item 130), or to a session (item 250)?" does not arise. A
 // non-terminal reply (`working`, `input-required`, `auth-required`) is a
@@ -107,7 +107,7 @@
 // COLOUR: EVERY OPERATION BELOW IS `async`, AND THAT IS PART OF THE
 // SERVICE, NOT AN IMPLEMENTATION DETAIL.
 //
-// A JSON-RPC round trip to another process suspends the calling task,
+// A network round trip to another process suspends the calling task,
 // and this tier has no blocking fetch to hide that behind. So the
 // operation is DECLARED `async` (roadmap item 80,
 // docs/design/async-extern.md), on all three of the service operation,

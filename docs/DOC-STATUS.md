@@ -132,7 +132,7 @@ was corrected by hand and had drifted back within a day.
 | guide-humans.md | stale-fixed | 1 | yes |
 | harness-gate-guide.md | needs-work | 2 |  |
 | holes.md | needs-work | 29 |  |
-| import-a2a.md | current | 11 |  |
+| import-a2a.md | current | 16 |  |
 | import-cordis.md | needs-work | 58 |  |
 | import-openapi.md | needs-work | 45 |  |
 | import-wit.md | needs-work | 29 |  |

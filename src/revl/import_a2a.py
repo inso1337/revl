@@ -7,9 +7,11 @@ Card** and emits revl: a `service` for the agent's skills, one `extern` per
 skill, and a provider component — so a revl composition can consume an external
 agent as an ordinary coeffect.
 
-This is slice 1 of roadmap item 439 (the A2A transport binding). It binds the
-Agent Card and the single-crossing `message/send` call, and nothing else. What
-it deliberately does not do is listed under "Not in this slice" below.
+This is roadmap item 439 (the A2A transport binding). It binds the Agent Card
+and the single-crossing `message/send` call over the two JSON-body transports
+A2A 1.0.0 defines — JSON-RPC 2.0 and HTTP+JSON/REST, selected by the card's
+`preferredTransport` — and nothing else. What it deliberately does not do is
+listed under "Not in this slice" below.
 
 Why this member is the harshest of the family
 ---------------------------------------------
@@ -78,8 +80,8 @@ undoes which: the Agent Card does not say, and this importer will not guess.
 An A2A crossing suspends, so on a coloured tier the operation is `async`
 --------------------------------------------------------------------
 
-A JSON-RPC round trip to another process is not a synchronous call, and the ts
-tier has no blocking fetch to pretend otherwise with. So on a tier whose host
+A round trip to another process is not a synchronous call, and the ts tier has
+no blocking fetch to pretend otherwise with. So on a tier whose host
 body suspends, every declaration this importer writes — the service operation,
 the extern and the provide method — carries `async` (roadmap item 80,
 `docs/design/async-extern.md`). Issue #251: it used to carry none of them and
@@ -137,8 +139,11 @@ Not in this slice, and deliberately
     Recording it and emitting a plain provider anyway would drop a contract the
     agent declared mandatory — the honesty rule the version and transport
     checks already enforce.
-  * **Transports other than JSON-RPC 2.0.** gRPC and HTTP+JSON are refused
-    naming the transport; `additionalInterfaces` are recorded, not projected.
+  * **gRPC.** JSON-RPC 2.0 and HTTP+JSON/REST are both bound (each is a POST of
+    a JSON body to the endpoint, selected by the card's `preferredTransport`).
+    gRPC is a binary transport over HTTP/2 with protobuf framing — not that
+    crossing — so it is refused naming the transport. `additionalInterfaces`
+    advertising a transport other than the one bound are recorded, not projected.
   * **Non-text modalities.** A `FilePart` or a `DataPart` has no transcription
     this slice defines, so a skill whose modes are not all `text/*` is refused
     naming the skill and the mode.
@@ -170,9 +175,28 @@ from .import_openapi import (
 #: that silently follows it is claiming something it has not checked.
 A2A_VERSION = "1.0.0"
 
-#: The one transport this slice binds. A2A 1.0.0 also defines gRPC and
-#: HTTP+JSON; both are refused rather than approximated.
-_TRANSPORT = "JSONRPC"
+#: The transports this binding speaks. A2A 1.0.0 defines three; two of them —
+#: JSON-RPC 2.0 and HTTP+JSON/REST — are ordinary POST-a-JSON-body crossings a
+#: `fetch`/`urllib` host body can carry, so both are bound. gRPC is a binary
+#: transport over HTTP/2 with protobuf framing, which is not that crossing, so
+#: it is refused rather than approximated (see `_transport`).
+_JSONRPC = "JSONRPC"
+_HTTPJSON = "HTTP+JSON"
+_SUPPORTED_TRANSPORTS = (_JSONRPC, _HTTPJSON)
+
+#: A2A 1.0.0 defaults an absent `preferredTransport` to JSON-RPC 2.0.
+_DEFAULT_TRANSPORT = _JSONRPC
+
+#: The HTTP+JSON/REST method path for `message:send`, appended to the card's
+#: `url`. A constant, never card-derived, so interpolating it into a generated
+#: host body carries no injection risk the endpoint check does not already
+#: cover.
+_HTTPJSON_SEND_PATH = "/v1/message:send"
+
+#: How each transport is spelled where a generated file names it: a display
+#: label and the method it crosses on.
+_TRANSPORT_LABEL = {_JSONRPC: "JSON-RPC 2.0", _HTTPJSON: "HTTP+JSON/REST"}
+_TRANSPORT_METHOD = {_JSONRPC: "`message/send`", _HTTPJSON: "`POST /v1/message:send`"}
 
 #: The task states A2A 1.0.0 calls terminal. Anything else coming back from a
 #: single `message/send` is a lifecycle this slice does not express.
@@ -341,27 +365,33 @@ class _Card:
         self.net_cap = f"net.{_cap_token(self.host)}"
 
     def _transport(self) -> None:
-        preferred = self.doc.get("preferredTransport", _TRANSPORT)
-        if preferred != _TRANSPORT:
+        preferred = self.doc.get("preferredTransport", _DEFAULT_TRANSPORT)
+        if preferred not in _SUPPORTED_TRANSPORTS:
             self._refuse(
                 f"this Agent Card prefers the "
-                f"{_comment_safe(json.dumps(preferred))} transport, and slice 1 "
-                f"of the A2A binding speaks JSON-RPC 2.0 only",
+                f"{_comment_safe(json.dumps(preferred))} transport, and this "
+                f"binding speaks JSON-RPC 2.0 and HTTP+JSON/REST, not that one",
                 pointer=_pointer("preferredTransport"),
-                hint="A2A 1.0.0 defines JSONRPC, GRPC and HTTP+JSON. The other "
-                     "two are a transport each, not an approximation of this "
-                     "one, so they are refused rather than guessed at")
+                hint="A2A 1.0.0 defines JSONRPC, GRPC and HTTP+JSON. JSON-RPC "
+                     "and HTTP+JSON are each a POST of a JSON body to the "
+                     "endpoint, so both are bound. gRPC is a binary transport "
+                     "over HTTP/2 with protobuf framing — not that crossing, "
+                     "and not an approximation of it — so it is refused rather "
+                     "than guessed at")
+        self.transport = preferred
         extra = self.doc.get("additionalInterfaces")
         if isinstance(extra, list) and extra:
             transports = sorted({
                 str(entry.get("transport")) for entry in extra
                 if isinstance(entry, dict) and entry.get("transport")
+                and str(entry.get("transport")) != preferred
             })
             if transports:
                 self.unprojected.append(
                     "`additionalInterfaces` advertising "
                     f"{_comment_safe(', '.join(transports))} — recorded, not "
-                    "projected; this file speaks JSON-RPC 2.0 to `url` only")
+                    f"projected; this file speaks {_TRANSPORT_LABEL[preferred]} "
+                    "to `url` only")
 
     def _capabilities(self) -> None:
         caps = self.doc.get("capabilities")
@@ -676,7 +706,173 @@ def _py_body(endpoint: str, skill_id: str, *, follow_redirects: bool) -> str:
     """
 
 
-_BODIES = {"ts": _ts_body, "py": _py_body}
+def _httpjson_endpoint(endpoint: str) -> str:
+    """The REST `message:send` URL: the card's endpoint with the method path
+    appended. The endpoint has already passed `_URL_RE`, and the path is a
+    constant, so the result is still inside the character class the generated
+    comment and host body are held to. A trailing slash on the endpoint is
+    dropped so the result is `.../a2a/v1/message:send`, never `.../a2a//v1/...`.
+    """
+    return endpoint.rstrip("/") + _HTTPJSON_SEND_PATH
+
+
+def _ts_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool) -> str:
+    """The HTTP+JSON/REST `message:send` crossing, TypeScript.
+
+    Same discipline as `_ts_body` — one crossing, redirect-refusing, time-bound,
+    terminal-state-only, text in / text out — over the REST binding instead of
+    JSON-RPC. Two wire differences, and only two: the POST goes to
+    `<endpoint>/v1/message:send` with a bare `{ message }` body (no JSON-RPC
+    envelope), and the reply IS the `Task`/`Message` object, so an A2A error
+    arrives as a NON-2xx status (already a fault on the `!res.ok` branch) rather
+    than as an `error` member to unwrap.
+    """
+    rest = _httpjson_endpoint(endpoint)
+    url = json.dumps(rest)
+    sid = json.dumps(skill_id)
+    terminal = json.dumps(list(_TERMINAL_STATES))
+    policy = ts_policy("a2a", follow=follow_redirects, url_expr=url,
+                       send="a2aSend")
+    return f"""
+      // A2A {A2A_VERSION}, HTTP+JSON/REST `POST /v1/message:send`. ONE crossing.
+      const a2aPayload = JSON.stringify({{
+        message: {{
+          role: "user",
+          messageId: crypto.randomUUID(),
+          parts: [{{ kind: "text", text: message }}],
+          metadata: {{ "revl.skill": {sid} }},
+        }},
+      }});
+      const a2aSend = (u: string) => fetch(u, {{
+        method: "POST",
+        // Nothing is followed by the runtime; see the policy below.
+        redirect: "manual",
+        // A crossing that never returns is not a crossing.
+        signal: AbortSignal.timeout({CROSSING_TIMEOUT} * 1000),
+        headers: {{ "content-type": "application/json" }},
+        body: a2aPayload,
+      }});
+{policy}      if (!res.ok) {{
+        // A2A REST maps an error onto a NON-2xx status. A transport failure and
+        // a peer error are both a FAULT here, never a quietly-empty result.
+        throw new Error(`a2a: transport failure (HTTP ${{res.status}})`);
+      }}
+      // The REST reply is the `Task`/`Message` object directly — no JSON-RPC
+      // envelope to unwrap.
+      const result = await res.json();
+      if (!result) {{
+        throw new Error("a2a: response carried no result");
+      }}
+      // A direct Message reply is already terminal; a Task is terminal only in
+      // the states A2A {A2A_VERSION} says are.
+      const kind = result.kind;
+      const terminal = {terminal};
+      if (kind === "task") {{
+        const state = result.status ? result.status.state : undefined;
+        if (!terminal.includes(state)) {{
+          // Item 439's open question: a task still in flight is a LIFECYCLE
+          // this slice does not express. Refuse; never poll, never resume.
+          throw new Error(
+            `a2a: task returned non-terminal state '${{state}}' — this binding \
+crosses once and does not poll`);
+        }}
+        if (state !== "completed") {{
+          throw new Error(`a2a: task ended '${{state}}'`);
+        }}
+      }} else if (kind !== "message") {{
+        throw new Error(`a2a: unexpected result kind '${{kind}}'`);
+      }}
+      // The reply is the peer's JSON and nothing about it is typed (issue #251):
+      // every field stays optional and the `kind`/`typeof` guards do the work.
+      type A2aPart = {{ kind?: unknown; text?: unknown }};
+      type A2aArtifact = {{ parts?: A2aPart[] }};
+      const parts: A2aPart[] = kind === "task"
+        ? ((result.artifacts as A2aArtifact[] | undefined) || [])
+            .flatMap((a: A2aArtifact) => a.parts || [])
+        : ((result.parts as A2aPart[] | undefined) || []);
+      const text = parts
+        .filter((p: A2aPart) => p && p.kind === "text" && typeof p.text === "string")
+        .map((p: A2aPart) => p.text as string)
+        .join("");
+      if (text.length === 0 && parts.length > 0) {{
+        throw new Error("a2a: reply carried only non-text parts");
+      }}
+      return text;
+    """
+
+
+def _py_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool) -> str:
+    """The same REST crossing, Python. Same interpolation discipline."""
+    rest = _httpjson_endpoint(endpoint)
+    url = json.dumps(rest)
+    sid = json.dumps(skill_id)
+    terminal = json.dumps(list(_TERMINAL_STATES))
+    policy = py_policy("a2a", follow=follow_redirects)
+    return f"""
+    import json as _json, urllib.request as _req, urllib.parse as _urlp
+    import uuid as _uuid
+    # A2A {A2A_VERSION}, HTTP+JSON/REST `POST /v1/message:send`. ONE crossing.
+    _payload = _json.dumps({{
+        "message": {{
+            "role": "user",
+            "messageId": str(_uuid.uuid4()),
+            "parts": [{{"kind": "text", "text": message}}],
+            "metadata": {{"revl.skill": {sid}}},
+        }},
+    }}).encode()
+    _r = _req.Request({url}, data=_payload,
+                      headers={{"content-type": "application/json"}})
+{policy}    try:
+        # A crossing that never returns is not a crossing. A2A REST maps an
+        # error onto a non-2xx status, which `urlopen` raises as an HTTPError —
+        # caught here and made a FAULT, never a quietly-empty result.
+        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) as _resp:
+            _result = _json.loads(_resp.read())
+    except _RedirectRefused:
+        # The refusal names the rule. It is NOT a transport failure and must
+        # not be flattened into one.
+        raise
+    except Exception as _exc:
+        raise RuntimeError("a2a: transport failure") from _exc
+    # The REST reply is the `Task`/`Message` object directly — no JSON-RPC
+    # envelope to unwrap.
+    if not _result:
+        raise RuntimeError("a2a: response carried no result")
+    _kind = _result.get("kind")
+    if _kind == "task":
+        _state = (_result.get("status") or {{}}).get("state")
+        if _state not in {terminal}:
+            # Item 439's open question: a task still in flight is a LIFECYCLE
+            # this slice does not express. Refuse; never poll, never resume.
+            raise RuntimeError(
+                "a2a: task returned non-terminal state %r - this binding "
+                "crosses once and does not poll" % (_state,))
+        if _state != "completed":
+            raise RuntimeError("a2a: task ended %r" % (_state,))
+        _parts = [p for a in (_result.get("artifacts") or [])
+                  for p in (a.get("parts") or [])]
+    elif _kind == "message":
+        _parts = _result.get("parts") or []
+    else:
+        raise RuntimeError("a2a: unexpected result kind %r" % (_kind,))
+    _text = "".join(p.get("text", "") for p in _parts
+                    if p.get("kind") == "text" and isinstance(p.get("text"), str))
+    if not _text and _parts:
+        raise RuntimeError("a2a: reply carried only non-text parts")
+    return _text
+    """
+
+
+#: (backend, transport) -> the host-body builder for that crossing.
+_BODIES = {
+    ("ts", _JSONRPC): _ts_body,
+    ("py", _JSONRPC): _py_body,
+    ("ts", _HTTPJSON): _ts_body_rest,
+    ("py", _HTTPJSON): _py_body_rest,
+}
+
+#: The backends this importer emits, independent of transport.
+_BACKENDS = ("ts", "py")
 
 #: The backends whose crossing SUSPENDS, and whose generated operation is
 #: therefore declared `async` (roadmap item 80, docs/design/async-extern.md).
@@ -777,8 +973,9 @@ class _Generator:
         lines.append(f"  emission {self.async_kw}fn {op}(message: Str) -> Untrusted[Str]")
 
         extern = f"a2a_{self.key}_{op}"
-        body = _BODIES[self.backend](self.card.endpoint, skill_id,
-                                     follow_redirects=self.follow_redirects)
+        body = _BODIES[(self.backend, self.card.transport)](
+            self.card.endpoint, skill_id,
+            follow_redirects=self.follow_redirects)
         extern_decl = (
             f"extern emission[{self.card.net_cap}] {self.async_kw}fn "
             f"{extern}(message: Str) -> Untrusted[Str]\n"
@@ -814,7 +1011,9 @@ class _Generator:
         lines = [
             "// Generated by `revl import a2a` — do not edit by hand.",
             f"// Source Agent Card: {_comment_safe(self.filename)}",
-            f"// Protocol: A2A {A2A_VERSION} over JSON-RPC 2.0 (`message/send`).",
+            f"// Protocol: A2A {A2A_VERSION} over "
+            f"{_TRANSPORT_LABEL[self.card.transport]} "
+            f"({_TRANSPORT_METHOD[self.card.transport]}).",
         ]
         if doc.get("name"):
             lines.append(f"// Agent: {_comment_safe(doc.get('name'))}"
@@ -917,8 +1116,9 @@ class _Generator:
             "// (C2), which is not built; until then this imports as an ordinary",
             "// provider component like the rest of the family.",
             "//",
-            "// SCOPE OF THIS SLICE (roadmap item 439, slice 1). Bound: the Agent Card,",
-            "// and a `message/send` whose task reaches a TERMINAL state in that one",
+            "// SCOPE OF THIS SLICE (roadmap item 439). Bound: the Agent Card, and a",
+            f"// {_TRANSPORT_METHOD[self.card.transport]} whose task reaches a TERMINAL "
+            "state in that one",
             "// crossing — the subset where \"does an A2A Task map to one emission, to a",
             "// stream (item 130), or to a session (item 250)?\" does not arise. A",
             "// non-terminal reply (`working`, `input-required`, `auth-required`) is a",
@@ -936,7 +1136,7 @@ class _Generator:
                 "// COLOUR: EVERY OPERATION BELOW IS `async`, AND THAT IS PART OF THE",
                 "// SERVICE, NOT AN IMPLEMENTATION DETAIL.",
                 "//",
-                "// A JSON-RPC round trip to another process suspends the calling task,",
+                "// A network round trip to another process suspends the calling task,",
                 "// and this tier has no blocking fetch to hide that behind. So the",
                 "// operation is DECLARED `async` (roadmap item 80,",
                 "// docs/design/async-extern.md), on all three of the service operation,",
@@ -977,10 +1177,10 @@ def import_a2a(document: object, *, filename: str = "<agent-card>",
     best-effort line number on a refusal; the JSON pointer in the message is
     the authoritative location either way.
     """
-    if backend not in _BODIES:
+    if backend not in _BACKENDS:
         raise RevlError(filename, 0,
                         f"unsupported backend `{backend}`",
-                        hint=f"pick one of: {', '.join(sorted(_BODIES))}")
+                        hint=f"pick one of: {', '.join(sorted(_BACKENDS))}")
     card = _Card(document, filename, allow_plaintext=allow_plaintext,
                  source=source)
     return _Generator(card, filename, backend, service,
