@@ -1,6 +1,6 @@
 # Design: the self-host type layer
 
-Design-doc id 444 (next free number under `docs/design/`; the roadmap item of
+Design-doc id 457 (next free number under `docs/design/`; the roadmap item of
 the same number is unrelated). Roadmap items served: 417 (issue #108, the type
 layer as a distinct sub-goal), 391 (issue #106, self-host parity), 332 (issue
 #98, the crate's Stage 4 `compile_to`), 146 (issue #84, full self-host), and
