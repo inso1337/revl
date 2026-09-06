@@ -260,6 +260,7 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 #: The supported host binding contract, also exported by `revl.fs_workspace`.
 PINNED_ROOT_API_VERSION = 1
 COMMITTED_SIDECAR_API_VERSION = 1
+COMMITTED_SIDECAR_CLEANUP_API_VERSION = 1
 
 
 class _PinnedRoot(NamedTuple):
@@ -653,6 +654,158 @@ def finalize_committed_sidecar(path: str, expected_sha256: str, *,
             os.close(fd)
     finally:
         os.close(dirfd)
+
+
+# ---------------------------------------------------------------------------
+# runtime-owned committed-sidecar cleanup (item 486)
+# ---------------------------------------------------------------------------
+# `finalize_committed_sidecar` proves none of the lifecycle facts it needs: the
+# host reconstructs the sidecar's ownership, asserts the actual commit landed,
+# and calls the finalizer with the pieces spread across its own bookkeeping.
+# This handle folds ownership AND commit-acknowledgment into one opaque token
+# the runtime issues, so a host holds a thing it cannot forge instead of a
+# recipe it must reassemble. The exclusivity premise is unchanged: the handle
+# owns cleanup only under the exclusive sidecar-metadata access revl already
+# requires, and makes no claim that a portable `unlink` is atomic against an
+# external writer violating it.
+
+
+class CleanupOutcome(NamedTuple):
+    """What one committed-sidecar cleanup attempt achieved.
+
+    `completed` is True only when the runtime removed the owned preimage (this
+    run, or an earlier run of the same handle). Otherwise the sidecar is
+    UNRESOLVED and `(code, message, path)` carry the finalizer's own refusal
+    verbatim, so a host can drain cooperative actors and retry the same handle
+    rather than reconstruct the failure from a raised exception."""
+
+    completed: bool
+    code: str | None = None
+    message: str | None = None
+    path: str | None = None
+
+    @property
+    def state(self) -> str:
+        return "completed" if self.completed else "unresolved"
+
+
+class _CommitReceiptGrant:
+    """Module-private capability. The singleton never leaves this module, so a
+    host cannot construct a `CommittedSidecarReceipt` directly: it must obtain
+    one from the runtime commit path, which is the only place the actual-commit
+    acknowledgment the finalizer refuses to assume actually exists."""
+
+    __slots__ = ()
+
+
+_COMMIT_RECEIPT_GRANT = _CommitReceiptGrant()
+
+
+class CommittedSidecarReceipt:
+    """Opaque, runtime-issued proof that a session commit was durably
+    acknowledged for one captured preimage sidecar.
+
+    Minted only by `issue_committed_sidecar_receipt`, which the trusted commit
+    path calls once it holds the durable acknowledgment `finalize_committed_
+    sidecar` leaves to the host. A `CommittedSidecarCleanup` refuses to act
+    without one, so ownership and commit-ack stop being scattered host state and
+    ride inside a single unforgeable token. Single use: binding it to a cleanup
+    handle consumes it, so one receipt authorizes cleanup of exactly the one
+    sidecar it named."""
+
+    __slots__ = ("_dev", "_ino", "_path", "_sha256", "_spent")
+
+    def __init__(self, grant, *, path, expected_sha256, expected_dev,
+                 expected_ino) -> None:
+        if grant is not _COMMIT_RECEIPT_GRANT:
+            raise ConfinementError(
+                "ERECEIPT", "a committed-sidecar receipt may only be issued by "
+                "the runtime commit path", _sanitized(path))
+        # Validate the finalizer's argument shape up front, so a receipt can
+        # never encode a target the finalizer would only reject later.
+        if (not isinstance(expected_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+                or any(type(n) is not int or n < 0
+                       for n in (expected_dev, expected_ino))):
+            raise FsOpError(
+                "EINVAL", "a committed-sidecar receipt requires a lowercase "
+                "SHA-256 digest and captured nonnegative device/inode integers",
+                _sanitized(path))
+        self._path = path
+        self._sha256 = expected_sha256
+        self._dev = expected_dev
+        self._ino = expected_ino
+        self._spent = False
+
+    def _consume(self) -> tuple:
+        if self._spent:
+            raise ConfinementError(
+                "ERECEIPT", "this committed-sidecar receipt was already bound to "
+                "a cleanup handle", _sanitized(self._path))
+        self._spent = True
+        return (self._path, self._sha256, self._dev, self._ino)
+
+
+def issue_committed_sidecar_receipt(path: str, expected_sha256: str, *,
+                                    expected_dev: int,
+                                    expected_ino: int) -> CommittedSidecarReceipt:
+    """Mint a runtime receipt for one committed preimage sidecar.
+
+    Trusted commit path only: call AFTER the actual session commit is durably
+    acknowledged, passing the captured witness ownership (sidecar path, content
+    digest, device, inode). This is where the acknowledgment the finalizer
+    declines to assume is asserted. The runtime still cannot prove the host's
+    storage flushed, so this widens nothing the finalizer docstring promised;
+    it only gives that assertion one owner and one opaque carrier."""
+    return CommittedSidecarReceipt(
+        _COMMIT_RECEIPT_GRANT, path=path, expected_sha256=expected_sha256,
+        expected_dev=expected_dev, expected_ino=expected_ino)
+
+
+class CommittedSidecarCleanup:
+    """Opaque, runtime-owned cleanup for one committed preimage sidecar.
+
+    Constructed from a `CommittedSidecarReceipt`, so it cannot act without proof
+    of a successful commit; the host no longer reconstructs the sidecar's
+    ownership to call `finalize_committed_sidecar` itself. `run()` performs the
+    finalize under the exclusive sidecar-metadata access revl already requires —
+    it does NOT make `unlink` atomic against an external writer violating that
+    exclusivity — and REPORTS completed vs. unresolved instead of raising the
+    finalizer's refusal, so a lost race or a detectable mismatch is a retryable
+    outcome rather than an exception the host must classify."""
+
+    __slots__ = ("_dev", "_done", "_ino", "_path", "_sha256")
+
+    def __init__(self, receipt: CommittedSidecarReceipt) -> None:
+        if not isinstance(receipt, CommittedSidecarReceipt):
+            raise ConfinementError(
+                "ERECEIPT", "committed sidecar cleanup requires a runtime commit "
+                "receipt", _sanitized(getattr(receipt, "_path", "")))
+        self._path, self._sha256, self._dev, self._ino = receipt._consume()
+        self._done = False
+
+    @property
+    def completed(self) -> bool:
+        """Whether this handle has already removed its owned preimage."""
+        return self._done
+
+    def run(self) -> CleanupOutcome:
+        """Attempt the finalize once and report the outcome.
+
+        Idempotent after success: a completed handle re-reports completed
+        without touching the filesystem again. On an unresolved outcome the
+        handle stays live, so the host may drain actors and call `run()` again.
+        """
+        if self._done:
+            return CleanupOutcome(True)
+        try:
+            finalize_committed_sidecar(
+                self._path, self._sha256,
+                expected_dev=self._dev, expected_ino=self._ino)
+        except FsOpError as exc:
+            return CleanupOutcome(False, exc.code, exc.message, exc.path)
+        self._done = True
+        return CleanupOutcome(True)
 
 
 # ---------------------------------------------------------------------------

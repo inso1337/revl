@@ -233,6 +233,53 @@ syscall barriers for root replacement, and actual recorded write/commit/reopen/
 abort/reopen cycles. Sidecar-swap probes cover detectable stale evidence, not
 adversarial safety across the final check/unlink window.
 
+### Runtime-owned cleanup handle (API 1)
+
+`finalize_committed_sidecar` proves none of its lifecycle premises: the host
+reconstructs the sidecar's ownership, asserts elsewhere that the commit landed,
+and passes the pieces in as loose arguments. The Python-only facade also exports
+`COMMITTED_SIDECAR_CLEANUP_API_VERSION = 1` and a handle that folds ownership and
+commit-acknowledgment into one opaque token instead:
+
+```python
+issue_committed_sidecar_receipt(
+    path: str, expected_sha256: str, *, expected_dev: int, expected_ino: int
+) -> CommittedSidecarReceipt
+CommittedSidecarCleanup(receipt: CommittedSidecarReceipt)
+CommittedSidecarCleanup.run() -> CleanupOutcome  # .completed / .state / .code / .message / .path
+```
+
+`issue_committed_sidecar_receipt` is the **only** way to obtain a
+`CommittedSidecarReceipt`: its private grant never leaves the runtime, so a host
+cannot forge one. The trusted commit path calls it *after* it holds the durable
+acknowledgment of the actual `Session.commit_confirm` that the finalizer declines
+to assume — that is where the acknowledgment is asserted, giving it one owner and
+one carrier rather than scattered host state. Minting validates the same
+argument shape the finalizer requires (64-lowercase-hex digest, nonnegative
+device/inode), so a receipt can never name a target the finalizer would only
+reject later. The runtime still cannot prove the host's storage flushed; this
+widens nothing the finalizer promised.
+
+A `CommittedSidecarCleanup` refuses to construct from anything that is not a
+runtime receipt (`ERECEIPT`), and a receipt is single-use: binding it to a handle
+consumes it, so one receipt authorizes cleanup of exactly the one sidecar it
+named. `run()` performs the same `finalize_committed_sidecar` under the same
+exclusivity contract — it makes **no** stronger atomicity claim against writers
+violating that exclusivity — but *reports* the result rather than raising:
+`CleanupOutcome(completed=True)` when the owned preimage was removed, or
+`completed=False` with the finalizer's own `(code, message, path)` when the
+sidecar is **unresolved** (missing evidence, a detectable mismatch, a lost root,
+or an unbound process). An explicit missing/mismatch failure stays unresolved; it
+is never silently reported as "already clean". Success is idempotent — a
+completed handle re-reports completed without a second filesystem touch — and an
+unresolved handle stays live, so the host can drain cooperative actors and call
+`run()` again.
+
+`tests/test_fs_committed_sidecar_cleanup.py` covers completed removal and its
+idempotence, an unresolved-then-retried-to-completion cycle, unresolved
+missing-evidence reporting, the receipt gate (no receipt, forged grant, malformed
+ownership, single-use), and unbound reporting, all against real files.
+
 ## Observation: the read half, and the door it opens
 
 The four ops above mutate. A consumer also needs to *look*: read a workspace
