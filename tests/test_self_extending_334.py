@@ -493,3 +493,162 @@ def test_edge2_post_swap_call_fault_reverts_residue_free(gate_factory, artifact)
     assert not gate.loaded
     gate.load(_BASE)
     assert gate.call("tool", "describe", [])["result"] == "v1"
+
+
+# =========================================================================== #
+# Live-state migration across a proposed swap (roadmap item 334, the deferred
+# follow-on). Slice 1 exercised only stateless swaps; a self-extension loop
+# records under a policy (`Gate(record=True)`), and the generational swap must
+# carry a running composition's LIVE state — spawned template instances (item
+# 10) and a provider that declared a `handoff` (item 53) — onto the successor,
+# or reject-and-revert when the successor cannot hold it. These are pure-revl
+# candidates (no externs, no host code), so they admit under the profile with
+# an empty `granted` set and no `providers`.
+# =========================================================================== #
+
+# A stateful spawnable template `Worker` (its migratable state is a `Map`) plus
+# a `Supervisor` that spawns one and exposes an admin surface reaching into the
+# instance's private store through the spawn handle. `version` is the one thing
+# the swap changes, so a live `ver()` proves the SUCCESSOR's code is running
+# while the surviving data proves the instance's STATE migrated.
+def _instances_source(version: int, *, resources: int = 1) -> str:
+    extra = "".join(
+        f"  let m{i} = effect Map.new() undo m{i}.drop()\n"
+        for i in range(1, resources))
+    return (
+        "service Store {\n"
+        "  fn get(k: Str) -> Opt[Str]\n"
+        "  fn put(k: Str, v: Str)\n"
+        "  fn version() -> Int\n"
+        "}\n"
+        "service Admin {\n"
+        "  fn seed(k: Str, v: Str)\n"
+        "  fn read(k: Str) -> Opt[Str]\n"
+        "  fn ver() -> Int\n"
+        "}\n"
+        "component Worker provides store: Store {\n"
+        "  let m = effect Map.new() undo m.drop()\n"
+        f"{extra}"
+        "  provide store {\n"
+        "    fn get(k) = m.get(k)\n"
+        "    fn put(k, v) { effect m.insert(k, v) undo m.remove(k) }\n"
+        f"    fn version() = {version}\n"
+        "  }\n"
+        "}\n"
+        "component Supervisor provides admin: Admin {\n"
+        "  let w = effect spawn Worker undo w.dispose()\n"
+        "  provide admin {\n"
+        "    fn seed(k, v) = w.store.put(k, v)\n"
+        "    fn read(k) = w.store.get(k)\n"
+        "    fn ver() = w.store.version()\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+# A root provider that declared a `handoff`: its `Map` state is captured and
+# re-seated onto the successor (item 53), the composition-level counterpart of
+# instance migration.
+def _handoff_source(version: int) -> str:
+    return (
+        "service Store {\n"
+        "  fn get(k: Str) -> Opt[Str]\n"
+        "  fn put(k: Str, v: Str)\n"
+        "  fn version() -> Int\n"
+        "}\n"
+        "component Cache provides cache: Store {\n"
+        "  handoff cache: Map[Str, Str]\n"
+        "  let m = effect Map.new() undo m.drop()\n"
+        "  provide cache {\n"
+        "    fn get(k) = m.get(k)\n"
+        "    fn put(k, v) { effect m.insert(k, v) undo m.remove(k) }\n"
+        f"    fn version() = {version}\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+@needs_cordis
+def test_generational_migration_preserves_live_instance_state_across_propose(
+        gate_factory):
+    """A proposed swap of a template with a LIVE instance carries the instance's
+    state onto the successor generationally: the successor's code is running
+    (`ver` bumps) AND the migrated data survives. Under `record=True` (a
+    self-extension loop always records), the capture reads the instance frame
+    through the recording context wrapper — the interaction the migration
+    follow-on had to fix, or the state is silently dropped."""
+    gate = gate_factory(record=True)
+    gate.load(_instances_source(1))
+    assert gate.call("admin", "ver", [])["result"] == 1
+    gate.call("admin", "seed", ["alice", "42"])
+    assert gate.call("admin", "read", ["alice"])["result"] == "42"
+
+    result = gate.propose(_instances_source(2), granted=[])
+    assert result.admitted and result.swapped, result.message
+
+    # the successor's CODE is live ...
+    assert gate.call("admin", "ver", [])["result"] == 2
+    # ... and the live instance's STATE migrated onto it (not restarted cold).
+    assert gate.call("admin", "read", ["alice"])["result"] == "42", (
+        "the live instance's state was dropped across the proposed swap — the "
+        "generational migration did not carry it (record-mode capture)")
+    # the reconciliation is surfaced as a first-class field, honest about what
+    # moved: one instance carrying one resource.
+    assert result.migration is not None
+    assert result.migration["templates"]["Worker"] == {
+        "instances": 1, "migrated": True, "resources": 1}
+
+
+@needs_cordis
+def test_incompatible_instance_migration_reverts_to_gen_N(gate_factory):
+    """A proposed successor that cannot HOLD the live instance's state (it
+    acquires a second resource, so the state-compat gate rejects the migration)
+    reverts to gen N rather than dropping the state: `SWAP_REVERTED`, and gen N
+    keeps serving with its instance state intact. Dropping it would be residue."""
+    gate = gate_factory(record=True)
+    gate.load(_instances_source(1))
+    gate.call("admin", "seed", ["bob", "7"])
+
+    # the successor's Worker holds TWO Maps — a 2-resource vector the 1-resource
+    # predecessor state cannot migrate onto.
+    result = gate.propose(_instances_source(2, resources=2), granted=[])
+    assert result.admitted and not result.swapped
+    assert result.reverted and result.code == "SWAP_REVERTED", result.message
+    assert result.migration is None
+
+    # gen N is intact and still serving, its instance state preserved.
+    assert gate.call("admin", "ver", [])["result"] == 1
+    assert gate.call("admin", "read", ["bob"])["result"] == "7"
+
+
+@needs_cordis
+def test_provider_handoff_state_migrates_across_propose(gate_factory):
+    """The provider-state half (item 53): a proposed swap of a provider that
+    declared a `handoff` carries its live `Map` onto the successor — the
+    composition-level counterpart of instance migration, and the same record-
+    mode capture path."""
+    gate = gate_factory(record=True)
+    gate.load(_handoff_source(1))
+    gate.call("cache", "put", ["k", "v1"])
+    assert gate.call("cache", "version", [])["result"] == 1
+
+    result = gate.propose(_handoff_source(2), granted=[])
+    assert result.admitted and result.swapped, result.message
+
+    assert gate.call("cache", "version", [])["result"] == 2  # successor code
+    assert gate.call("cache", "get", ["k"])["result"] == "v1"  # state carried
+    assert result.migration is not None
+    assert result.migration["handoff"]["cache"]["migrated"] is True
+    assert result.migration["handoff"]["cache"]["resources"] == 1
+
+
+@needs_cordis
+def test_stateless_swap_reports_no_migration(gate_factory, artifact):
+    """A swap with nothing live to reconcile (no spawned instance, no hand-off)
+    reports `migration = None` — the byte-identical stateless case Slice 1
+    already served, now distinguished from a state-carrying swap."""
+    gate = gate_factory(record=True)
+    gate.load(_BASE)
+    result = gate.propose(_AGENT_V2, granted=["Ops"], providers=_PROVIDERS)
+    assert result.admitted and result.swapped, result.message
+    assert result.migration is None

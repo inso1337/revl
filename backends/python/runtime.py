@@ -2241,6 +2241,23 @@ class Frame:
             _FRAME_BY_CTX[ctx] = self  # so a SpawnHandle can find this frame
         except TypeError:  # pragma: no cover — non-weakrefable ctx
             pass
+        # item 334 (instance migration under recording): the emitted body is
+        # handed a `_RecordingContext` wrapper when the WAL is on, so the frame
+        # is keyed above under the WRAPPER — but a `SpawnHandle` holds the RAW
+        # fiber context (`runtime.spawn`: `SpawnHandle(fiber, ...)`) and looks the
+        # frame up by it (`_frame`/`_frame_for_ctx`). Without also keying under
+        # the underlying raw context, `capture_state` finds no frame under a
+        # recording gate and silently reports an empty resource vector, so a
+        # generational hot-swap through `Gate.propose` (which records under a
+        # policy) drops the live instance's state instead of migrating it. Key
+        # the frame under the underlying context too; a bare (un-recorded)
+        # activation has no `_revl_ctx` and is untouched.
+        underlying = getattr(ctx, "_revl_ctx", None)
+        if underlying is not None and underlying is not ctx:
+            try:
+                _FRAME_BY_CTX[underlying] = self
+            except TypeError:  # pragma: no cover — non-weakrefable ctx
+                pass
         # An emitted `apply` resolves its config immediately before building
         # the Frame, so this is where the resolution finally learns which
         # component it belongs to (ConfigSchema itself is name-less in
