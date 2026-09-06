@@ -2122,10 +2122,12 @@ class Session:
          "why": "no RNG seed or clock reading is recorded, so a branch is a "
                 "divergent continuation, not a bit-reproducible replay"},
         {"axis": "modelDecisions",
-         "why": "the LLM-aware WAL (item 250's deferred replay-modes slice, "
-                "overlapping item 121) is not written, so the model and tool "
-                "calls above the fork point are not on the branch's record and "
-                "no counterfactual replay mode can be honest yet"},
+         "why": "each session's own WAL records its model decisions (model, "
+                "usage, latency, attempts; item 250 Slice 3a) but the branch "
+                "does not copy the parent's decisions below the fork point onto "
+                "its record, and no prompt/response digest, tool call, "
+                "temperature or seed is recorded, so no counterfactual replay "
+                "mode can be honest yet"},
     )
 
     def _branch_provenance(self, at: int) -> dict:

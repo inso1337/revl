@@ -141,6 +141,20 @@ the write-ahead discipline). Three record shapes:
 //    reported; recover SKIPS every seq named here (a committed transaction is
 //    never rolled back)
 {"record": "discharge", "discharged": [5]}
+
+// 6. model-decision — one model completion made durable at its crossing
+//    (item 250 Slice 3a), keyed on the completion's own effect record; the
+//    trace hop's payload (item 121), each field tagged with its provenance.
+//    No prompt/response text, no digest, no seq. Present only for a crossing
+//    that carried a completion; recover ignores it (a fact, not an effect),
+//    `revl compare` lists it per side.
+{"record": "model-decision", "component": "AgentLoop", "stepIndex": 4,
+ "outcome": "validated",
+ "llm": {"model": "openai:gpt-4o", "modelProvenance": "host-reported",
+         "tokensIn": 1204, "tokensOut": 88, "usageProvenance": "host-reported",
+         "latencySeconds": 1.84, "latencyProvenance": "revl-measured-bracket",
+         "attempts": 1, "attemptCeiling": 3, "attemptsProvenance": "revl-controlled",
+         "verifiedBy": []}}
 ```
 
 Two optional fields on the descriptors carry the **re-dispatch register** — the

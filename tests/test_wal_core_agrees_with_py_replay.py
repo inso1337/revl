@@ -61,6 +61,25 @@ def test_the_fork_scope_gate_is_identical():
             == replay.scope_host_confined(scope), scope
 
 
+def test_the_model_decision_record_kind_is_identical(tmp_path):
+    """Item 250 Slice 3a: the py writer names the durable model-decision record
+    and the core indexes it. A drift on the name would leave every decision on
+    the WAL invisible to `revl compare` while the writer kept writing it."""
+    assert wal_core.RECORD_MODEL_DECISION == replay.RECORD_MODEL_DECISION
+
+    path = str(tmp_path / "decision.wal")
+    wal = replay.WriteAheadLog(path, ir={}, generation=2).open()
+    llm = {"model": "m", "tokensIn": 1, "tokensOut": 2, "latencySeconds": 0.5,
+           "attempts": 1, "attemptCeiling": 3}
+    written = wal.record_model_decision(component="Agent", step_index=4,
+                                        llm=llm, outcome="validated")
+    wal.close()
+    assert written["record"] == wal_core.RECORD_MODEL_DECISION
+    core = wal_core.read_wal(path)
+    assert core == replay.WriteAheadLog.read(path)
+    assert wal_core.model_decisions(core["records"]) == {("Agent", 4): written}
+
+
 def test_the_reader_matches_py_replay_read_on_a_real_wal(tmp_path):
     """Write a WAL through the py in-process writer, then read it back both ways
     and require the same {header, records, complete, torn}. Exercises the header
