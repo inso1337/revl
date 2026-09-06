@@ -111,7 +111,7 @@ was corrected by hand and had drifted back within a day.
 | delivery-semantics.md | needs-work | 7 |  |
 | deploy.md | needs-work | 3 |  |
 | derived-versioning.md | current | 9 |  |
-| design-v2-instances.md | needs-work | 76 |  |
+| design-v2-instances.md | needs-work | 85 |  |
 | design-v2-realms.md | needs-work | 17 |  |
 | distribution-model.md | stale-fixed | 7 |  |
 | environment-binding.md | needs-work | 0 |  |

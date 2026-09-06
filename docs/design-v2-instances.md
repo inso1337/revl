@@ -594,11 +594,52 @@ the instance named `worker-a` in process P"), which is why it earns its place
 now: it lets the spawn shape carry a per-instance identity instead of leaving
 "same process" as the only expressible possibility.
 
-**Landed:** parser (`SpawnExpr.name`, `as "<name>"` in `spawn_expr`) + lower
-(`_lower_spawn` stamps `name`, uniqueness via `spawn_reg["names"]`) in
-`src/revl/`, with static tests (`tests/test_instances_frontend.py`, the
-named-instances section). **Remaining (the horizon, unscheduled):** teach the
-placement plan to assign a *named instance* to a process, honour it at runtime
-on the reference tier and fan out, and (with item 23) migrate a named instance
-across tiers. A dynamic address (`as <expr>`, e.g. per-tenant) is a later
-extension of this same node field.
+**Landed (slice 1 — the address):** parser (`SpawnExpr.name`, `as "<name>"` in
+`spawn_expr`) + lower (`_lower_spawn` stamps `name`, uniqueness via
+`spawn_reg["names"]`) in `src/revl/`, with static tests
+(`tests/test_instances_frontend.py`, the named-instances section).
+
+**Landed (slice 2 — the address is enumerable at the composition layer):** the
+address from slice 1 lived only on the deeply-nested `spawn` acquire node, so
+nothing above a single component body could enumerate the named instances of a
+composition — and *the placement plan cannot assign what it cannot enumerate*.
+This slice surfaces them: `_lower_spawn` records each named instance in
+`spawn_reg["named_instances"]`, and `_link` sorts them into
+
+```text
+manifest["named_instances"] = [
+  { "spawner": <component>, "name": <address>,
+    "component": <template component>, "line": <src line> }, ...
+]
+```
+
+sorted by `(spawner, name)`. `(spawner, name)` is the stable address — a name is
+unique within its spawner and may recur across spawners, so the pair
+disambiguates. The key is **additive and named-only**: a composition with no
+`as "<name>"` spawn carries no `named_instances` key and is byte-identical to
+before. It makes **no location claim** — like slice 1 it only records identity,
+so no tier's lowering has to honour it; it is the composition-level index a
+placement slice reads to key on an instance rather than only on a template
+component. Static tests: `tests/test_instances_frontend.py`, the
+"named instances surfaced in the manifest" section.
+
+**Remaining (the horizon, unscheduled — gated on the architect scheduling
+it):** the next moves each need a cross-tier fan-out or a placement-file format
+decision, so they are recorded, not taken here:
+
+- **Placement-file spelling.** A `[processes.<p>]` block assigns *components*
+  today (`components = [...]`). Assigning a *named instance* wants an address
+  form — the natural spelling is `instances = ["Spawner/name", ...]`, validated
+  as a pure read against `manifest["named_instances"]` (an unknown address is
+  one diagnostic before anything spawns, next to the 119/363 gates and
+  `capability_realm_diagnostic`). The spelling is a surface-area decision the
+  architect owns, so it is proposed, not landed.
+- **Runtime honour + fan-out.** Actually landing a named instance in process P
+  (rather than the spawning process) is the cross-tier port — reference tier
+  first, then the other five — under the standing constraint that no tier's
+  spawn lowering may bake "same process" into its shape. The
+  `manifest["named_instances"]` index is the substrate that port consumes.
+- **Migration** (with item 23): migrate a named instance across tiers, keyed on
+  the same address.
+- **Dynamic address** (`as <expr>`, e.g. per-tenant) is a later extension of the
+  same node field.
