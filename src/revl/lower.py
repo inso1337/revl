@@ -398,6 +398,32 @@ def _is_host_valued(expr, scope) -> bool:
 IR_VERSION_V2 = 2  # emitted only when a compiled component uses realms/interception
 IR_VERSION_V3 = 3  # emitted when a program uses full-language features (fn/type)
 
+# The complete top-level surface of a compiled IR document (roadmap item 479).
+# Every member `check_and_lower` (below) and `compile_source`/`compile_files`
+# (compiler.py) can stamp onto the returned document, in one place beside the
+# code that produces it. This is the frontend's authoritative answer to "what
+# top-level fields does a staged IR document know?" — a field outside this set
+# is one this schema revision has never emitted, so the IR-boundary decode
+# REFUSES it BY NAME rather than silently ignoring it (which is exactly how a
+# gate-crate/frontend skew would go undetected). Keep it in lockstep with the
+# `result`/`document` assembly: a new optional member must be added here in the
+# same change that starts emitting it, or the frontend refuses its own output.
+IR_TOPLEVEL_FIELDS = frozenset({
+    "ir_version",     # the schema revision this document was emitted at
+    "services",       # the service interface table
+    "components",     # the newly compiled components
+    "manifest",       # the composition manifest (whole resulting composition)
+    "types",          # user-declared types (present only when declared)
+    "functions",      # module-level fns (present only when declared)
+    "externs",        # host requirements (present only when declared)
+    "secrets",        # manifest-visible secret bindings (name + capability)
+    "tests",          # lowered `test` bodies
+    "prop_tests",     # lowered `prop test` bodies
+    "fault_tests",    # lowered fault-injection tests
+    "holes",          # the obligation ledger (present only for a draft)
+    "stdlib_shadow",  # item 422: a shadowed stdlib module, when one was used
+})
+
 
 def _ir_params(named_types, secret_params=()) -> list:
     """The IR `params` list for a declaration, carrying the `Secret[T]` marking.

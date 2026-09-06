@@ -485,6 +485,87 @@ def test_gate_load_refuses_the_hole_draft():
         gate.close()
 
 
+# --------------------------------------------------------------------------- #
+# item 479: unknown-field refusal at the IR boundary (refuse by name, do not
+# ignore). A staged IR document re-entering the frontend as the runtime-
+# admission `manifest` carries a top-level field this schema revision never
+# emits — a forged document, or a gate-crate/frontend skew. The frontend must
+# REFUSE it and NAME the field, never silently ignore it. These are pure
+# (layer-1) negatives: no live composition, always run.
+# --------------------------------------------------------------------------- #
+
+# A second composition (a different service) admitted INTO the running one, so
+# the candidate itself is clean and the only thing under test is the manifest.
+_CANDIDATE = (
+    "service T { fn g(x: Int) -> Int }\n"
+    "component D provides t: T {\n"
+    "  provide t { fn g(x) = x }\n"
+    "}\n"
+)
+
+
+def _running_ir() -> dict:
+    """A well-formed IR document for `_ACCEPTED`, the staged IR under test."""
+    return compile_source(_ACCEPTED)
+
+
+def test_clean_staged_ir_still_admits():
+    """A control: an unmodified compiled IR document round-trips as the manifest
+    with no false positive — the refusal fires only on an unknown field."""
+    verdict = admit_into(_CANDIDATE, _running_ir())
+    assert verdict.admitted, verdict.message
+
+
+def test_unknown_top_level_field_refuses_by_name_via_admit_into():
+    """The core negative: inject a bogus top-level field into the staged IR and
+    the runtime-admission entrypoint refuses, NAMING the field."""
+    forged = _running_ir()
+    forged["schemaRevision"] = 999  # a member this frontend never emits
+    verdict = admit_into(_CANDIDATE, forged)
+    assert not verdict.admitted
+    assert "`schemaRevision`" in verdict.message
+    assert "unknown top-level field" in verdict.message
+
+
+def test_unknown_top_level_field_refuses_by_name_via_compile_source():
+    """The same refusal at the raw compiler boundary (`compile_source(...,
+    manifest=...)`), naming the field, so the negative does not depend on the
+    gate facade."""
+    forged = _running_ir()
+    forged["mysteryMeat"] = {"anything": True}
+    with pytest.raises(RevlError) as exc:
+        compile_source(_CANDIDATE, manifest=forged)
+    message = str(exc.value)
+    assert "`mysteryMeat`" in message
+    assert "refuses" in message
+
+
+def test_unknown_field_refusal_names_every_unknown_field():
+    """Two injected fields are BOTH named, sorted, so an operator sees the whole
+    unaccounted-for surface, not just the first one."""
+    forged = _running_ir()
+    forged["zebra"] = 1
+    forged["alpha"] = 2
+    with pytest.raises(RevlError) as exc:
+        compile_source(_CANDIDATE, manifest=forged)
+    message = str(exc.value)
+    assert "`alpha`" in message and "`zebra`" in message
+    # sorted: alpha is named before zebra
+    assert message.index("`alpha`") < message.index("`zebra`")
+
+
+def test_refusal_does_not_leak_into_the_ignored_path():
+    """The refusal fires BEFORE any manifest member is read, so an unknown field
+    can never ride along an otherwise-successful admission (the silent-ignore
+    defect this closes). The candidate here would admit against a clean manifest
+    (see the control above), so a non-refusal would be exactly the false-admit."""
+    forged = _running_ir()
+    forged["driftedGateField"] = "smuggled"
+    verdict = admit_into(_CANDIDATE, forged)
+    assert not verdict.admitted
+    assert "driftedGateField" in verdict.message
+
+
 # The public-surface compat gate (an EXACT pin of `revl.gate.__all__`, plus
 # `gate_version()` compat semantics) is item 338's public compat gate, in
 # tests/test_gate_compat.py. It supersedes the subset check that used to live
