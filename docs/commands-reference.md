@@ -1048,7 +1048,7 @@ G7 teardown. See [import-a2a.md](import-a2a.md) §2.
 
 ### `revl export`
 
-The reverse of `revl import`. One subcommand today.
+The reverse of `revl import`. Two subcommands.
 
 `revl export wit FILES` - generate the standard WIT interface for a revl
 service or composition ([wit-bridge.md](wit-bridge.md)).
@@ -1059,6 +1059,29 @@ service or composition ([wit-bridge.md](wit-bridge.md)).
   - `--composition` - export every service the composition provides.
 - `--package NS:NAME` - WIT package id for the generated file (default:
   `revl:exported`).
+- `-o`, `--output PATH` - output path (default: stdout).
+- `--json-diagnostics` - structured diagnostic on rejection.
+
+`revl export client FILES` - generate a typed remote CLIENT for a NON-revl
+consumer, over the canonical value encoding the bridges already speak
+([interop-bridge.md](interop-bridge.md); item 424 gap (c), slice C1). Pure IR
+codegen: no runtime, no emission, no language change. The client's types ARE the
+wire encoding (a record is a plain object, `Opt[T]` is `T | null`, a user ADT or
+`Result` is the adjacently-tagged `{$kind, $value}` object), so a value
+round-trips to the placement bridge by construction. It carries the gate
+FRONTIER (item 338) and is bounded LOCALLY: it makes no claim about what the
+callee runs (D-424c.8; there is no verified-remote badge - a mutual guarantee
+between two revl peers is `revl contract export`/`check`). A method the
+projection cannot express - a resource handle (an `extern acquire` return), a
+`Map` with a non-`Str` key - is refused at generation, naming the method.
+
+- `FILES` - `.rvl` source files (required).
+- `--lang LANG` - target language for the generated client (default: `ts`; `ts`
+  is the slice-C1 target).
+- Exactly one of (required, mutually exclusive):
+  - `--service NAME` - export a client for a single service by name.
+  - `--composition` - export a client for every service the composition
+    provides.
 - `-o`, `--output PATH` - output path (default: stdout).
 - `--json-diagnostics` - structured diagnostic on rejection.
 
