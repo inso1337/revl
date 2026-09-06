@@ -87,6 +87,48 @@ def _row(reg, name="greeter"):
     return json.loads((reg / "index.json").read_text())["components"][name]
 
 
+# -------------------------------------------------------- path-traversal names
+
+@pytest.mark.parametrize("bad_name", [
+    "../evil",
+    "../../etc/cron.d/x",
+    "a/b",
+    "sub/component",
+    "..",
+    ".",
+    r"win\evil",
+    "",
+])
+def test_publish_refuses_a_path_traversal_name(reg, tmp_path, bad_name):
+    """R-C10 (issue #538): a component name becomes a single path segment under
+    `components/`. A name carrying a path separator or a `..` segment would let
+    `publish_release` write `component.rvl` OUTSIDE the registry and then
+    traceback on the missing parent. Every such name must be REFUSED with a
+    clear diagnostic, and nothing may be written anywhere."""
+    before = sorted(p.name for p in (reg / "components").iterdir())
+
+    with pytest.raises(RevlError) as caught:
+        registry.publish_release(reg, bad_name, V1, version="1.0.0")
+    msg = str(caught.value)
+    assert "refusing to publish" in msg
+    # the diagnostic names the actual problem, not a downstream traceback
+    assert ("path separator" in msg or "path-traversal" in msg
+            or "one path segment" in msg)
+
+    # nothing escaped the registry, and no stray entry was created inside it
+    assert not (tmp_path / "evil").exists()
+    assert not (tmp_path / "component.rvl").exists()
+    assert sorted(p.name for p in (reg / "components").iterdir()) == before
+
+
+def test_release_facts_flags_a_traversal_name_as_a_refusal(reg):
+    """The same rule read through the facts the publish gate consults, so
+    `truc ship` phrases the refusal identically to the write path."""
+    facts = registry.release_facts(reg, "../evil", V1, "1.0.0")
+    assert facts["refusals"]
+    assert any("path" in r for r in facts["refusals"])
+
+
 # ------------------------------------------------------------ the first release
 
 def test_a_first_release_is_recorded_frozen_and_indexed(reg):

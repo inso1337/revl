@@ -158,6 +158,66 @@ def test_torn_trailing_line_after_complete_marker(tmp_path):
     assert loaded["torn"] is True
 
 
+def test_crash_torn_trailing_multibyte_is_tolerated(tmp_path):
+    """R-C7 (issue #538): a `kill -9` can tear the final record in the MIDDLE of
+    a multibyte character, leaving a trailing line that is not valid UTF-8. It
+    must be classified `torn` exactly as a torn trailing JSON line is, never
+    tracebacking with a UnicodeDecodeError the recovery exists to absorb — and
+    the good records before it must survive."""
+    path = tmp_path / "torn_utf8.wal"
+    wal = replay.WriteAheadLog(str(path), ir={}, generation=1).open()
+    wal.record_discharge_descriptor(
+        "transactional", receiver="db", method="delete", args=["a"],
+        origin={"key": "db", "method": "insert", "args": ["a"]})
+    wal.close()
+    # Append a record whose UTF-8 encoding is truncated mid-character: the lead
+    # byte of a 3-byte sequence (0xE2, as in "…") with its continuation bytes
+    # never written before the crash.
+    with open(path, "ab") as handle:
+        handle.write(b'{"record": "discharge-descriptor", "note": "\xe2')
+
+    loaded = wal_core.read_wal(str(path))
+    assert loaded["torn"] is True
+    assert len(loaded["records"]) == 1
+    # the two reader copies still agree exactly on the torn-multibyte case
+    assert loaded == replay.WriteAheadLog.read(str(path))
+
+
+def test_mid_file_non_utf8_line_fails_closed(tmp_path):
+    """A non-UTF-8 line with committed records AFTER it is mid-file corruption,
+    the same as a non-JSON one: it must fail closed, never be silently skipped."""
+    path = tmp_path / "midfile_utf8.wal"
+    _write_valid_wal(str(path))
+    good = path.read_bytes().splitlines()
+    spliced = b"\n".join([good[0], b'{"record": "x", "v": "\xe2', *good[1:]]) + b"\n"
+    path.write_bytes(spliced)
+
+    with pytest.raises(wal_core.WALIntegrityError):
+        wal_core.read_wal(str(path))
+
+
+def test_recover_prints_a_diagnostic_not_a_traceback_on_corruption(tmp_path, capsys):
+    """R-C7 (issue #538): `revl recover` is the tool an operator reaches for
+    AFTER a crash, so a corrupt WAL (mid-file corruption raising
+    WALIntegrityError) must print an `error:` diagnostic and exit non-zero,
+    never dump a stack trace."""
+    from revl.cli import change as change_cli  # noqa: PLC0415
+
+    path = tmp_path / "corrupt_cli.wal"
+    _write_valid_wal(str(path))
+    good = path.read_text(encoding="utf-8").splitlines()
+    path.write_text("\n".join([good[0], "not json at all", *good[1:]]) + "\n",
+                    encoding="utf-8")
+
+    args = SimpleNamespace(wal=str(path), json=False, restore=None, policy=None,
+                           approval_policy=None)
+    rc = change_cli._run_recover(args)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error:") or "\nerror:" in err
+    assert "Traceback" not in err
+
+
 # --- sound-property regression guard ----------------------------------------
 
 def test_normal_cycle_still_recovers(tmp_path):
