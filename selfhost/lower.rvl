@@ -6741,8 +6741,603 @@ fn assign_env(env: List[Bind], name: Str, valExpr: Expr) -> List[Bind] {
   return inf == "" ? env : tenv_put(env, name, inf)
 }
 
+// ============================================================ ownership
+//
+// Unique ownership of an accumulation local — item 445, the frontend fact six
+// tiers share, ported from the reference `src/revl/ownership.py`. `out = out.push(v)`
+// is a PERSISTENT write (it copies the whole receiver and rebinds the copy), so
+// the ordinary `var out = []; for (..) { out = out.push(..) }` loop is emitted
+// O(n^2) on every mutable-container tier. The fix is the same statement on every
+// tier — write in place — and it needs the same PROOF, an aliasing question about
+// the source: the object this binding names is reachable through no other name, so
+// no reader can hold the pre-image. That proof rides the IR as a marker each tier
+// reads; producing it here is what closes the self-host's leg of the six.
+//
+//   `assign` step, `unique`: `true` (owns its object outright — an in-place write is
+//        faithful) | `"copy"` (owns it only if the backend copied at the birth `let`).
+//   `let` step, `unique_birth`: `"List"` / `"Map"` — this `let` binds ANOTHER name
+//        (`var out = m`) that a `unique: "copy"` write needs a private copy of.
+//
+// THE ANALYSIS IS FLOW-SENSITIVE (item 445): a forward dataflow with a fixpoint on
+// every loop back edge, asking the ownership question PER WRITE. The reference
+// walks the assembled IR tree; the self-host streams tokens straight to IR JSON in
+// one pass and never builds that tree, so this is a SECOND scan over the same body
+// tokens (`own_scan`) building a small statement view (`OStep`), the dataflow run
+// over it (`own_stmts` / `own_loop`), and the decided markers keyed by the assign's
+// / let's start-token index so `lir_one_stmt` can stamp them where it emits.
+//
+// LATTICE, per name: FRESH (owns outright, level 0) < COPY (owns given the birth
+// copy, level 1) < absent (does not own). A birth (`let out = []`/`Map.empty()`/a
+// record literal) kills an escape; `let out = m` is COPY. Every occurrence of the
+// name in a RETAINING slot (a call/element/capture/for-iterable/alias) drops it.
+// A self-rebind write always kills the escape, so the per-write question is
+// well-founded and a `return` needs no rule (nothing runs after it).
+//
+// CONSERVATIVE FALLBACK, explicitly: every uncertainty resolves to "not owned"
+// (the copying form the tiers had). A parameter is never owned; an unmodelled
+// statement kills every name it mentions; a builtin whose receiver is not in the
+// non-retaining whitelist retains it; a call retains every argument. The
+// whole-program retention summary (item 445 (b), which would refine the "a call
+// retains its argument" default) is NOT ported here — the flow-sensitive half
+// alone is what `transforms.rvl` and the write-shape corpus need — and the
+// token-level record-update write (`p = { p | .. }`) is likewise left to a
+// follow-on; both only ever WITHHOLD a marker, never add a wrong one.
+
+// A name's ownership level in a dataflow state. Absence from the state map is
+// "not owned". FRESH=0, COPY=1 mirror `ownership.py`'s `_FRESH`/`_COPY`.
+// A dataflow STATE: `live: false` is the reference's `None` (an unreachable point
+// after a return/break/continue); `m` maps an owned name to its level.
+type WSt = { live: Bool, m: Map[Str, Int] }
+// The walk accumulator threaded through the pass: `marks` keys an assign's start
+// token (as a string) to 0 (a write-shape but not owned — no marker), 1 (FRESH ->
+// `unique: true`) or 2 (COPY -> `unique: "copy"`); `breaks`/`conts` collect the
+// states flowing to a loop's break/continue edges.
+type WAcc = { marks: Map[Str, Int], breaks: List[WSt], conts: List[WSt] }
+type WalkR = { st: WSt, a: WAcc }
+// The statement view the dataflow runs over. `tok` is the start-token index of an
+// `assign`/`let` (so the marker can be stamped where `lir_one_stmt` emits it);
+// `value` is the assign/let value, `if`/`while` cond, or `for` iterable; `birth`
+// is a `let`'s value kind ("list"/"maplit"/"record"/"var"/"").
+type OStep = { kind: Str, tok: Int, name: Str, birth: Str, value: Expr,
+               forBind: Str, then_: List[OStep], els: List[OStep], body: List[OStep] }
+type OStepR = { step: OStep, i: Int }
+
+fn own_alive(m: Map[Str, Int]) -> WSt { return { live: true, m: m } }
+fn own_dead() -> WSt { return { live: false, m: Map.empty() } }
+fn wacc_fresh(marks: Map[Str, Int]) -> WAcc { return { marks: marks, breaks: [], conts: [] } }
+
+// OStep constructors (a record needs every field, so the empty sub-bodies are set
+// explicitly and NullLit stands in where there is no value expression).
+fn ostep_let(tok: Int, name: Str, birth: Str, v: Expr) -> OStep {
+  return { kind: "let", tok: tok, name: name, birth: birth, value: v,
+           forBind: "", then_: [], els: [], body: [] }
+}
+fn ostep_assign(tok: Int, name: Str, v: Expr) -> OStep {
+  return { kind: "assign", tok: tok, name: name, birth: "", value: v,
+           forBind: "", then_: [], els: [], body: [] }
+}
+fn ostep_simple(kind: Str, v: Expr) -> OStep {
+  return { kind: kind, tok: 0 - 1, name: "", birth: "", value: v,
+           forBind: "", then_: [], els: [], body: [] }
+}
+fn ostep_if(cond: Expr, thenS: List[OStep], elseS: List[OStep]) -> OStep {
+  return { kind: "if", tok: 0 - 1, name: "", birth: "", value: cond,
+           forBind: "", then_: thenS, els: elseS, body: [] }
+}
+fn ostep_while(cond: Expr, bodyS: List[OStep]) -> OStep {
+  return { kind: "while", tok: 0 - 1, name: "", birth: "", value: cond,
+           forBind: "", then_: [], els: [], body: bodyS }
+}
+fn ostep_for(bind: Str, iter: Expr, bodyS: List[OStep]) -> OStep {
+  return { kind: "for", tok: 0 - 1, name: "", birth: "", value: iter,
+           forBind: bind, then_: [], els: [], body: bodyS }
+}
+
+// A builtin method whose RECEIVER is read and not retained — `ownership.py`'s
+// `_NON_RETAINING_METHODS`, deliberately a whitelist (a Go `slice` header aliases
+// its backing array, so "any builtin returns a new container" is a python-only
+// truth this six-tier fact cannot lean on). The write methods are here too: their
+// persistent form returns a new container and keeps nothing.
+fn own_nonretaining_method(m: Str) -> Bool {
+  return m == "length" || m == "indexOf" || m == "slice" || m == "concat"
+    || m == "join" || m == "size" || m == "keys" || m == "lookup"
+    || m == "has" || m == "get" || m == "contains"
+    || m == "push" || m == "set" || m == "remove"
+}
+
+// `"List"` (a `push`) / `"Map"` (a `set`/`remove`) when `value` is a persistent
+// copy of `name` with one entry changed — the `out = out.push(v)` shape whose
+// result rebinds its own receiver — else "". (`ownership.py`'s `_write_shape`; the
+// record-update shape is the deferred token-level remainder.)
+fn own_write_shape(name: Str, value: Expr) -> Str {
+  return match value {
+    Call(c) => match c.target {
+      Field(f) => (f.name == "push" && c.args.length() == 1 && own_is_var(f.target, name))
+                    ? "List"
+                    : (((f.name == "set" && c.args.length() == 2)
+                        || (f.name == "remove" && c.args.length() == 1))
+                       && own_is_var(f.target, name))
+                        ? "Map" : "",
+      _ => "",
+    },
+    _ => "",
+  }
+}
+
+fn own_is_var(e: Expr, name: Str) -> Bool {
+  return match e { Var(n) => n == name, _ => false, }
+}
+
+// The lowered kind of an assign/`let` value that is a fresh allocation this
+// function made (`ownership.py`'s `_FRESH_KINDS`): a list/record literal or
+// `Map.empty()`. A fresh birth on an `assign` is a birth exactly as on a `let`.
+fn own_value_kind(e: Expr) -> Str {
+  return match e {
+    Lst(l) => "list",
+    Rec(r) => "record",
+    Call(c) => (is_empty_map_callee(c.target) && c.args.length() == 0) ? "maplit" : "",
+    _ => "",
+  }
+}
+fn own_is_fresh_kind(k: Str) -> Bool {
+  return k == "list" || k == "maplit" || k == "record"
+}
+
+// The `let` value's kind read off the JSON `lir_rhs` already produced — exact and
+// environment-independent (the top-level `kind` does not depend on the type env),
+// so it needs no second inference pass.
+fn own_birth_kind(js: Str) -> Str {
+  if (js.startsWith("{\"kind\":\"list\"")) { return "list" }
+  if (js.startsWith("{\"kind\":\"maplit\"")) { return "maplit" }
+  if (js.startsWith("{\"kind\":\"record\"")) { return "record" }
+  if (js.startsWith("{\"kind\":\"var\"")) { return "var" }
+  return ""
+}
+
+// -------------------------------------------------------------- the gen walk
+//
+// Drop from the state every name `e` may leave a second holder of. `retains` is
+// whether the slot `e` sits in keeps its value; the non-retaining slots below are
+// `ownership.py`'s `_NON_RETAINING`.
+fn own_gen(e: Expr, retains: Bool, st: Map[Str, Int]) -> Map[Str, Int] {
+  return match e {
+    Var(n)      => retains ? st.remove(n) : st,
+    Bin(b)      => own_gen_bin(b.op, b.l, b.r, st),
+    Un(u)       => own_gen(u.e, false, st),
+    Emit(u)     => own_gen(u.e, true, st),
+    Call(c)     => own_gen_call(c.target, c.args, st),
+    Field(f)    => own_gen(f.target, false, st),
+    OptField(f) => own_gen(f.target, false, st),
+    OptCall(o)  => own_gen_args(o.args, 0, true, own_gen(o.target, false, st)),
+    Index(x)    => own_gen(x.idx, false, own_gen(x.target, false, st)),
+    If(f)       => own_gen(f.els, true, own_gen(f.then_, true, own_gen(f.cond, true, st))),
+    Rec(r)      => own_gen_inits(r.fields, 0, st),
+    Lst(l)      => own_gen_args(l.items, 0, true, st),
+    Arrow(a)    => own_gen_arrow(a, st),
+    Match(m)    => own_gen_match(m, st),
+    Templ(t)    => own_gen_parts(t.parts, 0, st),
+    _           => st,
+  }
+}
+
+// `a ?? b` YIELDS `a`, so BOTH operands are retained; every other binary reads and
+// discards its operands.
+fn own_gen_bin(op: Str, l: Expr, r: Expr, st: Map[Str, Int]) -> Map[Str, Int] {
+  let keep = op == "??"
+  return own_gen(r, keep, own_gen(l, keep, st))
+}
+
+// A call. A whitelisted builtin reads and does not retain its receiver; any other
+// method call retains its receiver (an unaudited builtin may hand back an alias,
+// so the conservative direction — DROP the name — is taken). Arguments retain
+// (the whole-program retention summary that would refine this is item 445 (b)).
+fn own_gen_call(target: Expr, args: List[Expr], st: Map[Str, Int]) -> Map[Str, Int] {
+  return match target {
+    Field(f) => own_gen_args(args, 0, true,
+                  own_gen(f.target, own_nonretaining_method(f.name) ? false : true, st)),
+    _        => own_gen_args(args, 0, true, own_gen(target, true, st)),
+  }
+}
+
+fn own_gen_args(args: List[Expr], i: Int, retains: Bool, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= args.length()) { return st }
+  return own_gen_args(args, i + 1, retains, own_gen(args[i], retains, st))
+}
+
+fn own_gen_inits(fields: List[InitN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= fields.length()) { return st }
+  return own_gen_inits(fields, i + 1, own_gen(fields[i].value, true, st))
+}
+
+fn own_gen_parts(parts: List[PartN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= parts.length()) { return st }
+  return own_gen_parts(parts, i + 1, own_gen(parts[i].e, false, st))
+}
+
+// A closure outlives the expression that built it, so everything it can see is
+// retained — its parameters (which shadow) and every name its body reads. The
+// conservative reading — drop every free name the body mentions — cannot leave a
+// captured name owned, so no in-place write can be mis-proved through an arrow.
+fn own_gen_arrow(ar: ArrowN, st: Map[Str, Int]) -> Map[Str, Int] {
+  return own_dropvars(ar.body, own_drop_params(ar.params, 0, st))
+}
+fn own_drop_params(ps: List[ParamN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= ps.length()) { return st }
+  return own_drop_params(ps, i + 1, st.remove(ps[i].name))
+}
+
+// A `match` binds each arm's payload name (which shadows) and otherwise retains
+// its scrutinee and every arm body.
+fn own_gen_match(m: MatchN, st: Map[Str, Int]) -> Map[Str, Int] {
+  return own_gen_arms(m.arms, 0, own_gen(m.scrut, true, own_drop_arm_binds(m.arms, 0, st)))
+}
+fn own_drop_arm_binds(arms: List[ArmN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= arms.length()) { return st }
+  let s = arms[i].bind == "" ? st : st.remove(arms[i].bind)
+  return own_drop_arm_binds(arms, i + 1, s)
+}
+fn own_gen_arms(arms: List[ArmN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= arms.length()) { return st }
+  return own_gen_arms(arms, i + 1, own_gen(arms[i].body, true, st))
+}
+
+// Remove every name mentioned anywhere in `e` (the closure-capture reading).
+fn own_dropvars(e: Expr, st: Map[Str, Int]) -> Map[Str, Int] {
+  return match e {
+    Var(n)      => st.remove(n),
+    Bin(b)      => own_dropvars(b.r, own_dropvars(b.l, st)),
+    Un(u)       => own_dropvars(u.e, st),
+    Emit(u)     => own_dropvars(u.e, st),
+    Call(c)     => own_dropvars_args(c.args, 0, own_dropvars(c.target, st)),
+    Field(f)    => own_dropvars(f.target, st),
+    OptField(f) => own_dropvars(f.target, st),
+    OptCall(o)  => own_dropvars_args(o.args, 0, own_dropvars(o.target, st)),
+    Index(x)    => own_dropvars(x.idx, own_dropvars(x.target, st)),
+    If(f)       => own_dropvars(f.els, own_dropvars(f.then_, own_dropvars(f.cond, st))),
+    Rec(r)      => own_dropvars_inits(r.fields, 0, st),
+    Lst(l)      => own_dropvars_args(l.items, 0, st),
+    Arrow(a)    => own_dropvars(a.body, own_drop_params(a.params, 0, st)),
+    Match(m)    => own_dropvars_match(m, st),
+    Templ(t)    => own_dropvars_parts(t.parts, 0, st),
+    _           => st,
+  }
+}
+fn own_dropvars_args(args: List[Expr], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= args.length()) { return st }
+  return own_dropvars_args(args, i + 1, own_dropvars(args[i], st))
+}
+fn own_dropvars_inits(fields: List[InitN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= fields.length()) { return st }
+  return own_dropvars_inits(fields, i + 1, own_dropvars(fields[i].value, st))
+}
+fn own_dropvars_parts(parts: List[PartN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= parts.length()) { return st }
+  return own_dropvars_parts(parts, i + 1, own_dropvars(parts[i].e, st))
+}
+fn own_dropvars_match(m: MatchN, st: Map[Str, Int]) -> Map[Str, Int] {
+  return own_gen_arms_drop(m.arms, 0, own_dropvars(m.scrut, own_drop_arm_binds(m.arms, 0, st)))
+}
+fn own_gen_arms_drop(arms: List[ArmN], i: Int, st: Map[Str, Int]) -> Map[Str, Int] {
+  if (i >= arms.length()) { return st }
+  return own_gen_arms_drop(arms, i + 1, own_dropvars(arms[i].body, st))
+}
+
+// The write-shape assign gens its ARGUMENTS (evaluated before the write) and never
+// its receiver `var` — the receiver IS the write, not a second reader.
+fn own_gen_writeargs(value: Expr, st: Map[Str, Int]) -> Map[Str, Int] {
+  return match value {
+    Call(c) => own_gen_args(c.args, 0, true, st),
+    _       => st,
+  }
+}
+
+// ---------------------------------------------------------------- the dataflow
+
+fn own_map_size(m: Map[Str, Int]) -> Int { return m.keys().length() }
+
+fn own_map_eq(a: Map[Str, Int], b: Map[Str, Int]) -> Bool {
+  let ka = a.keys()
+  if (ka.length() != b.keys().length()) { return false }
+  var i = 0
+  while (i < ka.length()) {
+    let av = match a.lookup(ka[i]) { Some(v) => v, None => 0 - 1 }
+    let bv = match b.lookup(ka[i]) { Some(v) => v, None => 0 - 2 }
+    if (av != bv) { return false }
+    i += 1
+  }
+  return true
+}
+
+// The meet of the reachable predecessors: a name survives only where every live
+// predecessor owns it, at the WEAKER (max) of their levels — a name owned FRESH on
+// one path and COPY on another joins to COPY. A dead predecessor contributes
+// nothing; no live predecessor is a dead result.
+fn own_join2(a: WSt, b: WSt) -> WSt {
+  if (!a.live) { return b }
+  if (!b.live) { return a }
+  var out: Map[Str, Int] = Map.empty()
+  let ka = a.m.keys()
+  var i = 0
+  while (i < ka.length()) {
+    let k = ka[i]
+    if (b.m.has(k)) {
+      let av = match a.m.lookup(k) { Some(v) => v, None => 0 }
+      let bv = match b.m.lookup(k) { Some(v) => v, None => 0 }
+      out = out.set(k, av > bv ? av : bv)
+    }
+    i += 1
+  }
+  return { live: true, m: out }
+}
+fn own_join_list(states: List[WSt], i: Int, acc: WSt, seen: Bool) -> WSt {
+  if (i >= states.length()) { return acc }
+  let s = states[i]
+  if (!s.live) { return own_join_list(states, i + 1, acc, seen) }
+  let acc2 = seen ? own_join2(acc, s) : s
+  return own_join_list(states, i + 1, acc2, true)
+}
+
+fn own_stmts(steps: List[OStep], i: Int, st: WSt, a: WAcc) -> WalkR {
+  if (i >= steps.length() || !st.live) { return { st: st, a: a } }
+  let r = own_stmt(steps[i], st, a)
+  return own_stmts(steps, i + 1, r.st, r.a)
+}
+
+fn own_stmt(s: OStep, st: WSt, a: WAcc) -> WalkR {
+  if (s.kind == "let") {
+    let m1 = own_gen(s.value, true, st.m)
+    var m2 = m1
+    if (own_is_fresh_kind(s.birth)) { m2 = m1.set(s.name, 0) }
+    else { m2 = s.birth == "var" ? m1.set(s.name, 1) : m1.remove(s.name) }
+    return { st: own_alive(m2), a: a }
+  }
+  if (s.kind == "assign") {
+    let shape = own_write_shape(s.name, s.value)
+    if (shape == "") {
+      let m1 = own_gen(s.value, true, st.m)
+      let m2 = own_is_fresh_kind(own_value_kind(s.value)) ? m1.set(s.name, 0) : m1.remove(s.name)
+      return { st: own_alive(m2), a: a }
+    }
+    // a self-rebind write: the args gen normally, the receiver is the write. The
+    // binding owns its object afterwards either way (in place on something nothing
+    // else reaches, or the persistent copy's brand-new container).
+    let m1 = own_gen_writeargs(s.value, st.m)
+    let markv = match m1.lookup(s.name) { Some(v) => v + 1, None => 0 }
+    let newlvl = match m1.lookup(s.name) { Some(v) => v, None => 0 }
+    let a2: WAcc = { marks: a.marks.set(s.tok.to_str(), markv), breaks: a.breaks, conts: a.conts }
+    return { st: own_alive(m1.set(s.name, newlvl)), a: a2 }
+  }
+  if (s.kind == "return") { return { st: own_dead(), a: a } }
+  if (s.kind == "break") {
+    return { st: own_dead(), a: { marks: a.marks, breaks: a.breaks.push(st), conts: a.conts } }
+  }
+  if (s.kind == "continue") {
+    return { st: own_dead(), a: { marks: a.marks, breaks: a.breaks, conts: a.conts.push(st) } }
+  }
+  if (s.kind == "if") {
+    let m1 = own_gen(s.value, true, st.m)
+    let rt = own_stmts(s.then_, 0, own_alive(m1), a)
+    let re = own_stmts(s.els, 0, own_alive(m1), rt.a)
+    return { st: own_join2(rt.st, re.st), a: re.a }
+  }
+  if (s.kind == "while") { return own_loop(s.body, st.m, s.value, true, a) }
+  if (s.kind == "for") {
+    let m1 = own_gen(s.value, true, st.m).remove(s.forBind)
+    return own_loop(s.body, m1, NullLit, false, a)
+  }
+  // "other" — an unmodelled statement kills every name it mentions.
+  return { st: own_alive(own_gen(s.value, true, st.m)), a: a }
+}
+
+// Fixpoint over the back edge. The lattice is finite (three levels per name, and
+// the name set only shrinks) and the transfer is monotone, so `2n+3` steps bound
+// it; the LAST pass is the one whose marks stand. `breaks`/`conts` are reset each
+// pass (only the last pass's survive), while `marks` carry forward and are
+// overwritten by key, so an optimistic early answer is replaced by the fixpoint's.
+fn own_loop(body: List[OStep], entry: Map[Str, Int], cond: Expr, hasCond: Bool,
+            a: WAcc) -> WalkR {
+  let outerBreaks = a.breaks
+  let outerConts = a.conts
+  var head = entry
+  var marks = a.marks
+  var topFinal = entry
+  var brFinal: List[WSt] = []
+  var done = false
+  let bound = 2 * own_map_size(entry) + 3
+  var it = 0
+  while (it < bound) {
+    if (!done) {
+      var top = head
+      if (hasCond) { top = own_gen(cond, true, top) }
+      let r = own_stmts(body, 0, own_alive(top), wacc_fresh(marks))
+      marks = r.a.marks
+      topFinal = top
+      brFinal = r.a.breaks
+      let preds = [own_alive(head)].concat([r.st]).concat(r.a.conts)
+      let merged = own_join_list(preds, 0, own_dead(), false)
+      if (own_map_eq(merged.m, head)) { done = true }
+      else { head = merged.m }
+    }
+    it += 1
+  }
+  if (!done) {
+    var top = Map.empty()
+    if (hasCond) { top = own_gen(cond, true, top) }
+    let r = own_stmts(body, 0, own_alive(top), wacc_fresh(marks))
+    marks = r.a.marks
+    topFinal = top
+    brFinal = r.a.breaks
+  }
+  let exits = [own_alive(topFinal)].concat(brFinal)
+  let out = own_join_list(exits, 0, own_dead(), false)
+  let outState = out.live ? out : own_alive(Map.empty())
+  return { st: outState, a: { marks: marks, breaks: outerBreaks, conts: outerConts } }
+}
+
+// -------------------------------------------------------------- the body scan
+//
+// A second scan of the SAME body tokens, mirroring `lir_one_stmt`'s recognition
+// and advancement exactly so an assign's / let's start-token index matches the one
+// `lir_one_stmt` stamps against. Only the modeled statement shapes carry analysis
+// structure; everything else is an "other" step that kills the names it mentions.
+fn own_scan(ts: List[Token], lo: Int, hi: Int) -> List[OStep] {
+  var i = lo
+  var out: List[OStep] = []
+  while (i < hi && !atk(ts, i, "}")) {
+    if (atk(ts, i, ";")) { i += 1 }
+    else {
+      let so = own_one(ts, i, hi)
+      if (so.i <= i) { i = hi }
+      else { out = out.push(so.step)  i = so.i }
+    }
+  }
+  return out
+}
+
+fn own_one(ts: List[Token], i: Int, hi: Int) -> OStepR {
+  let t = tkc(ts, i)
+  if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
+    let name = tkc(ts, i + 1).text
+    var j = i + 2
+    if (atk(ts, j, ":")) { let tr = type_at(ts, j + 1)  j = tr.i }
+    if (!atk(ts, j, "=")) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let r = lir_rhs(ts, j + 1, [])
+    if (!r.ok) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let ve = expr_at(ts, j + 1)
+    return { step: ostep_let(i, name, own_birth_kind(r.js), ve.e), i: r.i }
+  }
+  if (t.kind == "kw" && t.text == "return") {
+    let r = expr_at(ts, i + 1)
+    let ni = (is_bad(r.e) || r.i <= i + 1) ? i + 1 : r.i
+    return { step: ostep_simple("return", NullLit), i: ni }
+  }
+  if (t.kind == "kw" && t.text == "assert") {
+    let r = expr_at(ts, i + 1)
+    if (is_bad(r.e) || r.i <= i + 1) { return { step: ostep_simple("other", NullLit), i: hi } }
+    return { step: ostep_simple("other", r.e), i: r.i }
+  }
+  if (t.kind == "kw" && (t.text == "break" || t.text == "continue")) {
+    return { step: ostep_simple(t.text, NullLit), i: i + 1 }
+  }
+  if (t.kind == "kw" && t.text == "if") {
+    let c = expr_at(ts, i + 1)
+    if (is_bad(c.e) || c.i <= i + 1 || !atk(ts, c.i, "{")) {
+      return { step: ostep_simple("other", NullLit), i: hi }
+    }
+    let tend = close_brace(ts, c.i)
+    if (tend == 0 - 1) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let thenS = own_scan(ts, c.i + 1, tend - 1)
+    var elseS: List[OStep] = []
+    var nexti = tend
+    if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
+      let eend = close_brace(ts, tend + 1)
+      if (eend != 0 - 1) { elseS = own_scan(ts, tend + 2, eend - 1)  nexti = eend }
+    }
+    return { step: ostep_if(c.e, thenS, elseS), i: nexti }
+  }
+  if (t.kind == "kw" && t.text == "while") {
+    let c = expr_at(ts, i + 1)
+    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let bend = close_brace(ts, c.i)
+    if (bend == 0 - 1) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let bodyS = own_scan(ts, c.i + 1, bend - 1)
+    return { step: ostep_while(c.e, bodyS), i: bend }
+  }
+  if (t.kind == "kw" && t.text == "for") {
+    if (!atk(ts, i + 1, "(")) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let bind = tkc(ts, i + 2).text
+    let it = expr_at(ts, i + 4)
+    if (is_bad(it.e) || !atk(ts, it.i, ")") || !atk(ts, it.i + 1, "{")) {
+      return { step: ostep_simple("other", NullLit), i: hi }
+    }
+    let bend = close_brace(ts, it.i + 1)
+    if (bend == 0 - 1) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let bodyS = own_scan(ts, it.i + 2, bend - 1)
+    return { step: ostep_for(bind, it.e, bodyS), i: bend }
+  }
+  if (t.kind == "ident" && atk(ts, i + 1, "=")) {
+    let r = expr_at(ts, i + 2)
+    if (is_bad(r.e) || r.i <= i + 2) { return { step: ostep_simple("other", NullLit), i: hi } }
+    return { step: ostep_assign(i, t.text, r.e), i: r.i }
+  }
+  if (t.kind == "ident" && is_compound_op(ts, tkc(ts, i + 1).kind) && atk(ts, i + 2, "=")) {
+    let r = expr_at(ts, i + 3)
+    if (is_bad(r.e) || r.i <= i + 3) { return { step: ostep_simple("other", NullLit), i: hi } }
+    let binE = Bin({ op: tkc(ts, i + 1).text, l: Var(t.text), r: r.e, paren: false })
+    return { step: ostep_assign(i, t.text, binE), i: r.i }
+  }
+  let r = expr_at(ts, i)
+  if (is_bad(r.e) || r.i <= i) { return { step: ostep_simple("other", NullLit), i: hi } }
+  return { step: ostep_simple("other", r.e), i: r.i }
+}
+
+// ------------------------------------------------------------------- stamps
+//
+// `unique_birth` on a `let`: after the marks are decided, a name written `"copy"`
+// (COPY) needs the birth copy stamped on the `let` that bound it off another name.
+// `push` names a List; `set`/`remove` a Map, so the birth copy needs no receiver
+// type. (No corpus program reaches COPY yet — every accumulator is born fresh — so
+// these stamps are inert today, but the shape is carried for the day one does.)
+fn own_copies(steps: List[OStep], i: Int, marks: Map[Str, Int],
+              acc: Map[Str, Str]) -> Map[Str, Str] {
+  if (i >= steps.length()) { return acc }
+  let s = steps[i]
+  var out = acc
+  if (s.kind == "assign") {
+    let mv = match marks.lookup(s.tok.to_str()) { Some(v) => v, None => 0 }
+    if (mv == 2) {
+      let cur = match out.lookup(s.name) { Some(v) => v, None => "" }
+      if (cur != "List") { out = out.set(s.name, own_write_shape(s.name, s.value)) }
+    }
+  }
+  out = own_copies(s.then_, 0, marks, out)
+  out = own_copies(s.els, 0, marks, out)
+  out = own_copies(s.body, 0, marks, out)
+  return own_copies(steps, i + 1, marks, out)
+}
+fn own_births(steps: List[OStep], i: Int, copies: Map[Str, Str],
+              acc: Map[Str, Str]) -> Map[Str, Str] {
+  if (i >= steps.length()) { return acc }
+  let s = steps[i]
+  var out = acc
+  if (s.kind == "let" && s.birth == "var" && copies.has(s.name)) {
+    let shape = match copies.lookup(s.name) { Some(v) => v, None => "" }
+    out = out.set(s.tok.to_str(), shape)
+  }
+  out = own_births(s.then_, 0, copies, out)
+  out = own_births(s.els, 0, copies, out)
+  out = own_births(s.body, 0, copies, out)
+  return own_births(steps, i + 1, copies, out)
+}
+
+// The decided markers for one function body: `marks` (assign token -> level) and
+// `births` (let token -> birth-copy shape).
+type OwnMarks = { marks: Map[Str, Int], births: Map[Str, Str] }
+
+fn own_marks(ts: List[Token], lo: Int, hi: Int) -> OwnMarks {
+  let steps = own_scan(ts, lo, hi)
+  let r = own_stmts(steps, 0, own_alive(Map.empty()), wacc_fresh(Map.empty()))
+  let marks = r.a.marks
+  let copies = own_copies(steps, 0, marks, Map.empty())
+  return { marks: marks, births: own_births(steps, 0, copies, Map.empty()) }
+}
+
+fn own_marker(marks: Map[Str, Int], tok: Int) -> Str {
+  return match marks.lookup(tok.to_str()) {
+    Some(v) => v == 1 ? ",\"unique\":true" : (v == 2 ? ",\"unique\":\"copy\"" : ""),
+    None => "",
+  }
+}
+fn own_birth_marker(births: Map[Str, Str], tok: Int) -> Str {
+  return match births.lookup(tok.to_str()) {
+    Some(shape) => ",\"unique_birth\":".concat(jstr(shape)),
+    None => "",
+  }
+}
+
 fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
-                muts: List[Str], ret: Str) -> StmtOne {
+                muts: List[Str], ret: Str, marks: Map[Str, Int],
+                births: Map[Str, Str]) -> StmtOne {
   let t = tkc(ts, i)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
     let mutable = t.text == "var"
@@ -6759,7 +7354,8 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
       ? r.js.slice(0, r.js.length() - 1).concat(",\"expected\":").concat(jstr(declared)).concat("}")
       : r.js
     let js = "{\"step\":\"let\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
-      .concat(value).concat(",\"mutable\":").concat(mutable ? "true" : "false").concat("}")
+      .concat(value).concat(",\"mutable\":").concat(mutable ? "true" : "false")
+      .concat(own_birth_marker(births, i)).concat("}")
     return mk_one(js, env2, mutable ? muts.push(name) : muts, r.i)
   }
   if (t.kind == "kw" && t.text == "return") {
@@ -6792,13 +7388,13 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     if (is_bad(c.e) || c.i <= i + 1 || !atk(ts, c.i, "{")) { return mk_one("", env, muts, hi) }
     let tend = close_brace(ts, c.i)
     if (tend == 0 - 1) { return mk_one("", env, muts, hi) }
-    let thenjs = lir_stmts(ts, c.i + 1, tend - 1, env, muts, ret)
+    let thenjs = lir_stmts(ts, c.i + 1, tend - 1, env, muts, ret, marks, births)
     var elsejs = "null"
     var nexti = tend
     if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
       let eend = close_brace(ts, tend + 1)
       if (eend != 0 - 1) {
-        elsejs = "[".concat(lir_stmts(ts, tend + 2, eend - 1, env, muts, ret)).concat("]")
+        elsejs = "[".concat(lir_stmts(ts, tend + 2, eend - 1, env, muts, ret, marks, births)).concat("]")
         nexti = eend
       }
     }
@@ -6811,7 +7407,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     if (is_bad(c.e) || !atk(ts, c.i, "{")) { return mk_one("", env, muts, hi) }
     let bend = close_brace(ts, c.i)
     if (bend == 0 - 1) { return mk_one("", env, muts, hi) }
-    let bodyjs = lir_stmts(ts, c.i + 1, bend - 1, env, muts, ret)
+    let bodyjs = lir_stmts(ts, c.i + 1, bend - 1, env, muts, ret, marks, births)
     let js = "{\"step\":\"while\",\"cond\":".concat(lir_expr(c.e, env))
       .concat(",\"body\":[").concat(bodyjs).concat("]}")
     return mk_one(js, env, muts, bend)
@@ -6831,7 +7427,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
       let el = type_arg1(iterTy)
       if (el != "") { inner = tenv_put(env, bind, el) }
     }
-    let bodyjs = lir_stmts(ts, it.i + 2, bend - 1, inner, muts, ret)
+    let bodyjs = lir_stmts(ts, it.i + 2, bend - 1, inner, muts, ret, marks, births)
     let js = "{\"step\":\"for\",\"bind\":".concat(jstr(predeclared_mangle(bind))).concat(",\"iterable\":")
       .concat(lir_expr(it.e, env)).concat(",\"body\":[").concat(bodyjs).concat("]}")
     return mk_one(js, env, muts, bend)
@@ -6841,7 +7437,7 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
     let r = expr_at(ts, i + 2)
     if (is_bad(r.e) || r.i <= i + 2) { return mk_one("", env, muts, hi) }
     let js = "{\"step\":\"assign\",\"name\":".concat(jstr(predeclared_mangle(name))).concat(",\"value\":")
-      .concat(lir_expr(r.e, env)).concat("}")
+      .concat(lir_expr(r.e, env)).concat(own_marker(marks, i)).concat("}")
     return mk_one(js, assign_env(env, name, r.e), muts, r.i)
   }
   if (t.kind == "ident" && is_compound_op(ts, tkc(ts, i + 1).kind) && atk(ts, i + 2, "=")) {
@@ -6861,7 +7457,8 @@ fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
 }
 
 fn lir_stmts(ts: List[Token], lo: Int, hi: Int, env0: List[Bind],
-             muts0: List[Str], ret: Str) -> Str {
+             muts0: List[Str], ret: Str, marks: Map[Str, Int],
+             births: Map[Str, Str]) -> Str {
   var i = lo
   var env = env0
   var muts = muts0
@@ -6869,7 +7466,7 @@ fn lir_stmts(ts: List[Token], lo: Int, hi: Int, env0: List[Bind],
   while (i < hi && !atk(ts, i, "}")) {
     if (atk(ts, i, ";")) { i += 1 }
     else {
-      let st = lir_one_stmt(ts, i, hi, env, muts, ret)
+      let st = lir_one_stmt(ts, i, hi, env, muts, ret, marks, births)
       if (st.i <= i) { i = hi }
       else {
         if (st.js != "") { out = out == "" ? st.js : out.concat(",").concat(st.js) }
@@ -6916,8 +7513,9 @@ fn lir_function(ts: List[Token], i: Int, cases: List[Bind], public_fn: Bool) -> 
   if (!atk(ts, reti, "{")) { return { js: "", i: skip_line(ts, i) } }
   let bend = close_brace(ts, reti)
   if (bend == 0 - 1) { return { js: "", i: ts.length() } }
+  let om = own_marks(ts, reti + 1, bend - 1)
   let bodyjs = lir_stmts(ts, reti + 1, bend - 1,
-                         params_env(ps.ps, cases), [], retTy)
+                         params_env(ps.ps, cases), [], retTy, om.marks, om.births)
   let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_params_json(ps.ps))
     .concat("],\"returns\":").concat(retJson).concat(",\"public\":")
     .concat(public_fn ? "true" : "false").concat(",\"body\":[")
