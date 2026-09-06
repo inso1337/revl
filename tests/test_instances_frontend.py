@@ -100,6 +100,78 @@ component Root { let top = effect spawn Session with { depth: 3 } undo top.dispo
     assert ir["manifest"]["templates"] == ["Session"]
 
 
+# -- named instances (item 10 placement horizon) ---------------------------
+# `spawn C … as "<name>"` stamps the instance with a stable author-declared
+# address. The address makes no location claim yet (the instance still lands in
+# the spawning process); it is the identity a later placement slice keys on, so
+# the spawn shape need not bake "same process" in as its only possibility.
+
+def test_named_spawn_carries_the_name_on_the_node():
+    ir = _compile("""
+component Sup {
+  let w = effect spawn Worker with { tag: "x" } as "worker-a" undo w.dispose()
+}
+""")
+    acq = next(c for c in ir["components"] if c["name"] == "Sup")["body"][0]["acquire"]
+    assert acq["kind"] == "spawn"
+    assert acq["name"] == "worker-a"
+
+
+def test_unnamed_spawn_has_no_name_key():
+    """Byte-identical: an unnamed spawn node is unchanged (no `name` key)."""
+    ir = _compile("""
+component Sup { let w = effect spawn Worker with { tag: "x" } undo w.dispose() }
+""")
+    acq = next(c for c in ir["components"] if c["name"] == "Sup")["body"][0]["acquire"]
+    assert "name" not in acq
+
+
+def test_distinct_named_instances_in_one_component_are_allowed():
+    ir = _compile("""
+component Sup {
+  let a = effect spawn Worker with { tag: "x" } as "a" undo a.dispose()
+  let b = effect spawn Worker with { tag: "y" } as "b" undo b.dispose()
+}
+""")
+    body = next(c for c in ir["components"] if c["name"] == "Sup")["body"]
+    assert [s["acquire"]["name"] for s in body] == ["a", "b"]
+
+
+def test_same_name_in_different_components_is_allowed():
+    """A name addresses within its spawner, so two supervisors may reuse it."""
+    ir = _compile("""
+component SupA { let w = effect spawn Worker with { tag: "x" } as "primary" undo w.dispose() }
+component SupB { let w = effect spawn Worker with { tag: "y" } as "primary" undo w.dispose() }
+""")
+    got = {c["name"]: c["body"][0]["acquire"].get("name")
+           for c in ir["components"] if c["name"] in ("SupA", "SupB")}
+    assert got == {"SupA": "primary", "SupB": "primary"}
+
+
+def test_duplicate_named_instance_in_one_component_is_rejected():
+    with pytest.raises(RevlError, match="duplicate spawn instance name"):
+        _compile("""
+component Sup {
+  let a = effect spawn Worker with { tag: "x" } as "dup" undo a.dispose()
+  let b = effect spawn Worker with { tag: "y" } as "dup" undo b.dispose()
+}
+""")
+
+
+def test_non_string_instance_name_is_rejected():
+    with pytest.raises(RevlError, match="must be a string literal"):
+        _compile("""
+component Sup { let w = effect spawn Worker with { tag: "x" } as worker undo w.dispose() }
+""")
+
+
+def test_empty_instance_name_is_rejected():
+    with pytest.raises(RevlError, match="cannot be empty"):
+        _compile("""
+component Sup { let w = effect spawn Worker with { tag: "x" } as "" undo w.dispose() }
+""")
+
+
 # -- rejections -------------------------------------------------------------
 
 def test_unbound_spawn_is_rejected():

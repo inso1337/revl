@@ -492,10 +492,18 @@ class SpawnExpr:
     component at runtime (docs/design-v2-instances.md). Only legal as the
     acquisition of an effect binding: `let s = effect spawn C with {..} undo
     s.dispose()`. The instance is an acquisition whose inverse is its own
-    teardown."""
+    teardown.
+
+    An optional trailing `as "<name>"` gives the instance a stable,
+    author-declared address (the *named instance*, item 10's placement horizon,
+    docs/design-v2-instances.md). It is a static string label carried onto the
+    IR, unique among a component's spawn sites; it makes no location claim on
+    its own — the instance still lands in the spawning process — so it is the
+    addressing hook a later placement slice reads, not a placement itself."""
     component: str
     config: dict  # field name -> expression AST (lowered in the spawner's scope)
     line: int
+    name: str | None = None  # `as "<name>"` — the named-instance address, or None
 
 
 @dataclass
@@ -4502,7 +4510,7 @@ class Parser:
         return TimerStmt(mode, interval_ms, body, kw.line)
 
     def spawn_expr(self) -> "SpawnExpr":
-        """`spawn <Component> [with { field: <expr>, ... }]`."""
+        """`spawn <Component> [with { field: <expr>, ... }] [as "<name>"]`."""
         line = self.expect("kw", "spawn").line
         component = self.expect("ident").value
         config: dict = {}
@@ -4519,7 +4527,30 @@ class Parser:
                 if self.at(","):
                     self.next()
             self.expect("}")
-        return SpawnExpr(component, config, line)
+        # optional named instance: `as "<name>"` — a static string address for
+        # the instance (item 10 placement horizon, docs/design-v2-instances.md).
+        # Deliberately a bare string literal, not an expression: an address is
+        # decided in the source, not computed, so it can be checked for
+        # uniqueness at lower time and read by a later placement slice.
+        name: str | None = None
+        if self.at("kw", "as"):
+            self.next()
+            ntok = self.peek()
+            if ntok.kind != "string":
+                raise self.err(
+                    ntok.line,
+                    "a spawn instance name must be a string literal",
+                    hint='write `spawn C … as "worker-a"`; the name is a static '
+                         "address for the instance, not a computed value "
+                         "(docs/design-v2-instances.md)")
+            self.next()
+            name = ntok.value
+            if not name:
+                raise self.err(
+                    ntok.line, "a spawn instance name cannot be empty",
+                    hint="give the instance a non-empty address, or drop `as` "
+                         "for an unnamed instance")
+        return SpawnExpr(component, config, line, name)
 
     def component_if(self) -> IfStmt:
         line = self.expect("kw", "if").line
