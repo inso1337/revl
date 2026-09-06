@@ -2551,6 +2551,83 @@ def test_vec_iterated_twice_cargo_builds(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+# item 437(f): a `for` iterable that is DEAD after the loop MOVES instead of
+# cloning. The multi-use clone above is a whole-body reference count with no
+# liveness, so the accumulate-then-walk shape the self-host emitters use — build
+# a Vec before the loop, walk it once, never touch it after — cloned the whole
+# Vec (every String field included) only to drop it. The clone is removable
+# exactly when every other reference to the name executes strictly before the
+# loop and the loop is not nested in another loop or a closure (a move inside an
+# outer loop strands the second iteration, E0382).
+_FOR_DEAD_LOCAL_RVL = """
+pub fn walk(n: Int) -> Int {
+  var xs: List[Int] = []
+  var i = 0
+  while (i < n) { xs = xs.push(i); i = i + 1 }
+  var s = 0
+  for (v of xs) { s = s + v }
+  return s
+}
+"""
+
+# The iterable is read AGAIN after the loop, so it is still live and the clone
+# must stay: the loop would otherwise move a value `return xs` needs (E0382).
+_FOR_LIVE_LOCAL_RVL = """
+pub fn walk_live(xs: List[Int]) -> List[Int] {
+  var s = 0
+  for (v of xs) { s = s + v }
+  return xs
+}
+"""
+
+# Dead after its own loop, but the loop is nested inside a `while`: a move would
+# fail on the outer loop's second iteration, so the clone stays.
+_FOR_NESTED_RVL = """
+pub fn nested(xs: List[Int], ys: List[Int], m: Int) -> Int {
+  var s = 0
+  var i = 0
+  while (i < m) {
+    if (xs == ys) { s = s + 1 }
+    for (v of xs) { s = s + v }
+    i = i + 1
+  }
+  return s
+}
+"""
+
+
+def test_for_iterable_dead_after_loop_moves_instead_of_cloning():
+    """A reused iterable that is dead after the loop moves; the clone is gone."""
+    src = emit.emit(compile_source(_FOR_DEAD_LOCAL_RVL))
+    assert "for v in xs {" in src
+    assert "for v in xs.clone()" not in src
+
+
+def test_for_iterable_live_after_loop_still_clones():
+    """An iterable read after the loop is still live, so the clone stays."""
+    src = emit.emit(compile_source(_FOR_LIVE_LOCAL_RVL))
+    assert "for v in xs.clone()" in src
+
+
+def test_for_iterable_nested_in_loop_still_clones():
+    """A move inside an outer loop would strand the second iteration, so a
+    dead-after-its-own-loop iterable nested in a `while` keeps the clone."""
+    src = emit.emit(compile_source(_FOR_NESTED_RVL))
+    assert "for v in xs.clone()" in src
+
+
+@needs_cargo
+def test_for_iterable_dead_and_live_and_nested_cargo_build(tmp_path):
+    """All three shapes cargo-build: the move is sound and the two clones are
+    the shapes that would fail to build without them."""
+    for i, rvl in enumerate(
+            (_FOR_DEAD_LOCAL_RVL, _FOR_LIVE_LOCAL_RVL, _FOR_NESTED_RVL)):
+        crate = tmp_path / f"c{i}"
+        crate.mkdir()
+        result = _cargo_check(crate, emit.emit(compile_source(rvl)))
+        assert result.returncode == 0, result.stderr
+
+
 @needs_cargo
 def test_all_selfhost_stages_cargo_build(tmp_path):
     """The item-278 definition-of-done: EACH of the lexer/parser/checker/lower

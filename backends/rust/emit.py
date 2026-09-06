@@ -237,6 +237,67 @@ def _body_multi_use(body: object, counts: dict[str, int]) -> None:
             _body_multi_use(item, counts)
 
 
+def _movable_for_iterables(body: object, multi_use: "set[str]") -> "set[int]":
+    """The `id()` of every `for` node whose bare-name iterable may be MOVED
+    (`for x in v`) instead of CLONED (`for x in v.clone()`) — item 437f.
+
+    `for x of v` consumes `v` via `.into_iter()`. The emitter clones `v` whenever
+    the name is referenced more than once ANYWHERE in the body (`ctx.multi_use`,
+    a whole-body count with no liveness), which over-clones the accumulate-then-
+    walk shape the self-host emitters use: `v` is built up BEFORE the loop and
+    never read after it, so the clone copies a value — every `String` field
+    included — that is immediately dropped. The clone is removable exactly when
+
+      * the iterable is a bare local name `v` (not a field/index/call result),
+      * the `for` is not nested inside another loop or a closure (a move inside
+        an outer loop strands the second iteration, E0382), and
+      * every OTHER reference to `v` in the function executes strictly BEFORE the
+        loop — so `v` is read neither in the loop body nor in the loop's
+        continuation.
+
+    Pre-order position is a conservative proxy for "executes before": the move
+    fires only when the number of `v` references seen strictly before the `for`
+    node, plus the one iterable reference, equals `v`'s whole-body reference
+    count, so ANY reference at or after the loop (its body included) leaves the
+    clone in place. Mutually-exclusive branch siblings can only make the check
+    fail, never wrongly pass, so the result stays sound. A single-use iterable is
+    already a move (`_by_value_tail`), so only names in `multi_use` are candidates.
+    """
+    total: dict[str, int] = {}
+    _body_multi_use(body, total)
+    movable: set[int] = set()
+    seen: dict[str, int] = {}
+
+    def walk(node: object, depth: int) -> None:
+        if isinstance(node, dict):
+            kind = node.get("kind")
+            if kind in ("var", "name", "req"):
+                # Count the reference in pre-order, so `seen` holds exactly the
+                # references program-order-before the node about to be entered.
+                ident = node.get("id") or node.get("name")
+                if ident is not None:
+                    seen[ident] = seen.get(ident, 0) + 1
+            if node.get("step") == "for":
+                it = node.get("iterable")
+                name = (it.get("id") or it.get("name")) if (
+                    isinstance(it, dict)
+                    and it.get("kind") in ("var", "name", "req")) else None
+                if (name is not None and name in multi_use and depth == 0
+                        and seen.get(name, 0) + 1 == total.get(name, 0)):
+                    movable.add(id(node))
+            inner = depth + 1 if (
+                node.get("step") in ("while", "for")
+                or kind == "arrow") else depth
+            for value in node.values():
+                walk(value, inner)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, depth)
+
+    walk(body, 0)
+    return movable
+
+
 def _by_value_field_clone(arg_node: object, rendered: str,
                           ctx: "_V3Ctx") -> str | None:
     """`f"{rendered}.clone()"` when the by-value argument is a non-Copy field
@@ -4745,6 +4806,10 @@ class _V3Ctx:
         # clone (see `_by_value_arg`); reset per fn by `_emit_v3_functions`,
         # empty everywhere the reuse context is not established.
         self.multi_use: set[str] = set()
+        # `id()` of every `for` node whose bare-name iterable is dead after the
+        # loop and so may be MOVED rather than `.clone()`d (item 437f); reset per
+        # fn by `_emit_v3_functions`, empty in every other emit context.
+        self.movable_for_iterables: set[int] = set()
         # Local name -> element surface type for a binding introduced as an empty
         # `vec![]` (E0282 annotation); reset per fn by `_emit_v3_functions`, empty
         # in every other emit context (no empty-vec annotation needed there).
@@ -6188,8 +6253,15 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         # moves on the first loop, so it is cloned when reused (a single-use
         # iterable stays a move). Cloning the Vec keeps the loop binding owned, so
         # the body is unchanged -- unlike a `&v` borrow, which would retype `x`.
-        iterable = _by_value_tail(
-            node["iterable"], _render_expr(node["iterable"], ctx), ctx)
+        # A reused binding that is nonetheless DEAD after the loop (built up
+        # before it, read nowhere after) moves instead of cloning (item 437f):
+        # the clone would copy the whole Vec — every String field included — only
+        # to drop it, and the move is byte-for-byte the hand-written shape.
+        if id(node) in ctx.movable_for_iterables:
+            iterable = _render_expr(node["iterable"], ctx)
+        else:
+            iterable = _by_value_tail(
+                node["iterable"], _render_expr(node["iterable"], ctx), ctx)
         iterable_type = _v3_infer_type(node["iterable"], ctx)
         element_type = _list_element_type(iterable_type)
         if element_type is not None:
@@ -6371,6 +6443,10 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         counts: dict[str, int] = {}
         _body_multi_use(fn.get("body") or [], counts)
         ctx.multi_use = {n for n, c in counts.items() if c > 1}
+        # `for` iterables that are dead after the loop and so move rather than
+        # clone (item 437f). Computed from the same whole-body reference counts.
+        ctx.movable_for_iterables = _movable_for_iterables(
+            fn.get("body") or [], ctx.multi_use)
         # Element types for this fn's empty-`vec![]` locals, so the `let` can be
         # annotated `Vec<T>` (E0282). Computed before the body renders and after
         # `var_types` is seeded with the params it reads.
