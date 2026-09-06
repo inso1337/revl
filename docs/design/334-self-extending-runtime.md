@@ -750,8 +750,52 @@ that admit an untrusted author's source, not at `propose` alone.
 still genuinely blocked); the re-entrant `propose` (enforced-deferred by the
 forbidden-grant rule); the genuinely-new-host-code path (operator gate or item
 411); live-instance/provider-state MIGRATION across a proposed swap
-(`migrate="generational"`); and the per-turn `Session.admit` realm question
-named in (1).
+(`migrate="generational"`, LANDED in slice 3 below); and the per-turn
+`Session.admit` realm question named in (1).
+
+**Slice 3 (LANDED): live-state migration across a proposed swap.** Slice 1
+started from a stateless swap and named migration as a follow-on: "a stateless
+swap is byte-identical to before, so Slice 1 can start there and add migration
+coverage as a follow-on." `Session.swap` already reconciles two live layers the
+static swap never saw, and `propose` inherits its default `migrate="generational"`:
+spawned template instances (item 10) and a provider that declared a `handoff`
+(item 53) have their state captured before teardown and re-seated onto the
+successor, or the state-compat gate rejects a successor that cannot hold it and
+the swap reverts to gen N. Slice 3 makes that real through `propose` rather than
+only through a bare `Session.swap`.
+
+Exercising it uncovered a defect that made the guarantee false through the very
+door 334 uses. A self-extension loop records (a policy is set, so `Gate` defaults
+`record=True`), and under recording the emitted component body runs under a
+`replay._RecordingContext` wrapper so its emissions land on the WAL. The
+activation `Frame` is therefore built with the WRAPPER as its context and keyed
+into the runtime's `_FRAME_BY_CTX` under it. But a `SpawnHandle` holds the RAW
+fiber context (`runtime.spawn`: `SpawnHandle(fiber, ...)`), and both
+`SpawnHandle.capture_state` and the provider-state `_frame_resources` look the
+frame up by that raw context. The lookup missed, `capture_state` returned an
+empty resource vector, and the generational swap reported `migrated: True` with
+`resources: 0` while silently dropping the live state. The fix is one place:
+`Frame.__init__` now also keys `_FRAME_BY_CTX` under the wrapper's underlying
+context (`getattr(ctx, "_revl_ctx", None)`), so capture through the raw fiber
+context resolves the same frame. A bare, un-recorded activation has no
+`_revl_ctx` and is byte-identical.
+
+The surface addition is `ProposeResult.migration`: on an accepted swap it names
+what the reconciliation carried across (per template, the instance and resource
+counts; per hand-off provider, the same), and it is `None` for a stateless swap
+(the byte-identical case Slice 1 already served). A candidate whose successor
+cannot hold gen N's live state never reaches this shape: the state-compat gate
+rejects it and the swap reverts to gen N (`SWAP_REVERTED`), because silently
+dropping the state would be residue. Four tests: a compatible generational
+migration preserves a live instance's state across `propose` (successor code
+running, data survived); an incompatible successor (a changed resource vector)
+reverts to gen N with the instance state intact; a provider hand-off carries its
+`Map` across; and a stateless swap reports `migration = None`.
+
+**Still deferred after slice 3:** the rust host (below, still genuinely
+blocked); the re-entrant `propose` (enforced-deferred by the forbidden-grant
+rule); the genuinely-new-host-code path (operator gate or item 411); and the
+per-turn `Session.admit` realm question named in slice 2's (1).
 
 **The rust host remains BLOCKED, re-verified 2026-09-02.** `crates/revl-gate`
 landed since the slice-1 triage, but it is layer 1 ONLY and admit-only: `admit`
