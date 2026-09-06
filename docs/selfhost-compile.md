@@ -145,14 +145,26 @@ site (`backends/rust/emit.py::_coerce_any_arg`): a concrete `Str`/`Int`/`Int32`/
 Stage 4 is not yet fully reachable. With `stdlib/value.rvl`'s `@rs` accessors present
 (the wave that carries them), `emit_rust.rvl` EMITS to rust with zero externs missing
 an `@rs` body, but the emitted crate does not yet `cargo build`: the residual blockers
-are all in OTHER self-host functions, not the escapers or the coercion. They are
-(1) `List[Any]`/`Vec<Value>` ergonomics (`.length()` on a `Vec<Value>` fails the
-`RevlListOps` `T: PartialEq` bound, since `cordis::Value` is not `PartialEq`; a
-`Vec<Value>` passed to an `Any` parameter is the list case the scalar coercion
-deliberately excludes) and (2) coercion misses where the v3 emitter cannot yet infer
-that an argument is a scalar (for example `let joined = fmt.join("")`, whose method-
-call return type `_v3_infer_type` does not track). These are separate rust-backend
-emit gaps, tracked for a later slice.
+are all in OTHER self-host functions, not the escapers or the coercion.
+
+Blocker (1), the `List[Any]`/`Vec<Value>` `.length()` ergonomics gap, is now
+CLOSED. `revl_length`/`revl_slice`/`revl_concat`/`revl_push` need only `T: Clone`;
+only `revl_index_of` compares elements and so needs `T: PartialEq`. The prelude
+(`backends/rust/emit.py::_stdlib_helper_traits`, mirrored byte-for-byte in
+`selfhost/emit_rust.rvl`) now splits them: the size/copy ops stay on
+`impl<T: Clone> RevlListOps<T>` and `revl_index_of` moves to a separate
+`impl<T: Clone + PartialEq> RevlListSearchOps<T>`. A `Vec<Value>` (`cordis::Value`
+is `Clone` but NOT `PartialEq`) therefore reaches `.revl_length()` and the other
+size/copy ops — which the fused `T: Clone + PartialEq` bound rejected outright —
+while `.revl_index_of()` on a `PartialEq` element type resolves exactly as before
+(both traits are emitted together in every module's prelude). An isolation crate
+over a `Vec<Value>` (`Clone`, non-`PartialEq`) compiles `length`/`slice`/`concat`/
+`push`, and `revl_index_of` on a `Vec<i64>` is unchanged.
+
+Blocker (2) remains: coercion misses where the v3 emitter cannot yet infer that an
+argument is a scalar (for example `let joined = fmt.join("")`, whose method-call
+return type `_v3_infer_type` does not track). That is a separate rust-backend emit
+gap, tracked for a later slice.
 
 ## Files
 

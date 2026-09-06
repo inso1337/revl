@@ -10030,11 +10030,13 @@ impl RevlStrListOps for [String] {
 trait RevlListOps<T> {
     fn revl_length(&self) -> i64;
     fn revl_slice(&self, a: i64, b: i64) -> Vec<T>;
-    fn revl_index_of(&self, needle: &T) -> i64;
     fn revl_concat(&self, other: &Vec<T>) -> Vec<T>;
     fn revl_push(&self, item: T) -> Vec<T>;
 }
-impl<T: Clone + PartialEq> RevlListOps<T> for Vec<T> {
+trait RevlListSearchOps<T> {
+    fn revl_index_of(&self, needle: &T) -> i64;
+}
+impl<T: Clone> RevlListOps<T> for Vec<T> {
     fn revl_length(&self) -> i64 { self.len() as i64 }
     fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {
         // JS slice semantics: out-of-range bounds clamp, never panic.
@@ -10043,9 +10045,6 @@ impl<T: Clone + PartialEq> RevlListOps<T> for Vec<T> {
         let b2 = (b.max(0) as usize).min(len).max(a2);
         self[a2..b2].to_vec()
     }
-    fn revl_index_of(&self, needle: &T) -> i64 {
-        self.iter().position(|x| x == needle).map(|i| i as i64).unwrap_or(-1)
-    }
     fn revl_concat(&self, other: &Vec<T>) -> Vec<T> {
         let mut _v = self.clone(); _v.extend(other.iter().cloned()); _v
     }
@@ -10053,7 +10052,12 @@ impl<T: Clone + PartialEq> RevlListOps<T> for Vec<T> {
         let mut _v = self.clone(); _v.push(item); _v
     }
 }
-impl<T: Clone + PartialEq> RevlListOps<T> for [T] {
+impl<T: Clone + PartialEq> RevlListSearchOps<T> for Vec<T> {
+    fn revl_index_of(&self, needle: &T) -> i64 {
+        self.iter().position(|x| x == needle).map(|i| i as i64).unwrap_or(-1)
+    }
+}
+impl<T: Clone> RevlListOps<T> for [T] {
     fn revl_length(&self) -> i64 { self.len() as i64 }
     fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {
         let len = self.len();
@@ -10061,7 +10065,9 @@ impl<T: Clone + PartialEq> RevlListOps<T> for [T] {
         let b2 = (b.max(0) as usize).min(len).max(a2);
         self[a2..b2].to_vec()
     }
-    fn revl_index_of(&self, needle: &T) -> i64 { self.iter().position(|x| x == needle).map_or(-1, |i| i as i64) }
     fn revl_concat(&self, other: &Vec<T>) -> Vec<T> { let mut out = self.to_vec(); out.extend(other.iter().cloned()); out }
     fn revl_push(&self, item: T) -> Vec<T> { let mut out = self.to_vec(); out.push(item); out }
+}
+impl<T: Clone + PartialEq> RevlListSearchOps<T> for [T] {
+    fn revl_index_of(&self, needle: &T) -> i64 { self.iter().position(|x| x == needle).map_or(-1, |i| i as i64) }
 }
