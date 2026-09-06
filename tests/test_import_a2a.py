@@ -21,8 +21,9 @@ result is `Untrusted[Str]`, and the checker — not this importer — is what
 refuses a card result reaching an authority-granting sink.
 
 The fourth is the slice boundary itself, pinned so it cannot erode: version
-honesty (`1.0.0` exactly), JSON-RPC only, text modalities only, and a
-non-terminal Task refused at the boundary instead of polled.
+honesty (`1.0.0` exactly), the two JSON-body transports A2A 1.0.0 defines
+(JSON-RPC 2.0 and HTTP+JSON/REST) bound and gRPC refused, text modalities only,
+and a non-terminal Task refused at the boundary instead of polled.
 """
 
 import json
@@ -196,11 +197,75 @@ def test_another_protocol_version_is_refused(claimed):
     assert "1.0.0" in message
 
 
-def test_a_non_jsonrpc_transport_is_refused():
+def test_grpc_is_refused_naming_the_transport():
+    """gRPC is a binary transport over HTTP/2 with protobuf framing, not the
+    POST-a-JSON-body crossing this generator emits, so it is refused rather than
+    approximated. JSON-RPC and HTTP+JSON are the two that ARE bound."""
     message = _refusal(_card(preferredTransport="GRPC"))
     assert "GRPC" in message
-    assert "JSON-RPC 2.0 only" in message
+    assert "gRPC" in message
     assert "#/preferredTransport" in message
+
+
+@pytest.mark.parametrize("backend", ["ts", "py"])
+def test_httpjson_transport_binds_a_rest_crossing(backend):
+    """The HTTP+JSON/REST transport is bound as a second single crossing: the
+    same revl surface (service, extern, provider; text in / text out;
+    `Untrusted[Str]`), differing only in the wire — a POST to
+    `<endpoint>/v1/message:send` with a bare `{ message }` body, no JSON-RPC
+    envelope."""
+    doc = _card(preferredTransport="HTTP+JSON")
+    source = import_a2a(doc, filename="card.json", backend=backend)
+    # same revl surface as the JSON-RPC binding
+    ir = compile_source(source, "billing.rvl")
+    methods = ir["services"]["BillingAgent"]["methods"]
+    assert sorted(methods) == ["invoice_lookup", "issue_refund"]
+    assert methods["invoice_lookup"]["params"] == [{"name": "message", "type": "Str"}]
+    assert methods["invoice_lookup"]["emission"] is True
+    assert "fn invoice_lookup(message: Str) -> Untrusted[Str]" in source
+    # the REST method path is where the crossing posts
+    assert "/a2a/v1/message:send" in source
+    # the JSON-RPC envelope is gone: no `jsonrpc` wrapper and no `message/send`
+    # (the ts `fetch` still carries `method: "POST"`, which is the HTTP method,
+    # not the JSON-RPC `method` member)
+    assert "jsonrpc" not in source
+    assert "message/send" not in source
+    # the header names the transport it actually speaks
+    assert "over HTTP+JSON/REST (`POST /v1/message:send`)" in source
+    assert "Protocol: A2A 1.0.0 over JSON-RPC" not in source
+
+
+@pytest.mark.parametrize("backend", ["ts", "py"])
+def test_httpjson_keeps_every_boundary_guarantee(backend):
+    """Only the wire changed. The redirect refusal, the time bound, the
+    terminal-state discipline, the no-inverse teardown and the taint are all
+    exactly the JSON-RPC binding's."""
+    doc = _card(preferredTransport="HTTP+JSON")
+    source = import_a2a(doc, filename="card.json", backend=backend)
+    assert "redirect refused" in source
+    assert "non-terminal state" in source and "does not poll" in source
+    assert "-> Untrusted[Str]" in source
+    # every generated extern is `emission` with no inverse of any grade, exactly
+    # as the JSON-RPC binding (checked on the declarations, not the header prose)
+    ir = compile_source(source, "billing.rvl")
+    for extern in ir["externs"]:
+        assert extern["class"] == "emission"
+        assert not extern.get("undo") and not extern.get("compensate")
+    # a REST error is a non-2xx status, and it is a FAULT like any transport
+    # failure, never a quietly-empty result
+    assert "transport failure" in source
+
+
+def test_httpjson_additional_interfaces_note_names_the_bound_transport():
+    """When HTTP+JSON is bound, the JSON-RPC and gRPC interfaces the card also
+    advertises are recorded as NOT PROJECTED, and the note says the file speaks
+    HTTP+JSON/REST to `url` only."""
+    doc = _card(preferredTransport="HTTP+JSON")
+    source = import_a2a(doc, filename="card.json")
+    assert "this file speaks HTTP+JSON/REST to `url` only" in source
+    # the other advertised transports are named, the bound one is not duplicated
+    assert "GRPC" in source
+    assert "JSONRPC" in source
 
 
 def test_streaming_is_recorded_not_projected():
