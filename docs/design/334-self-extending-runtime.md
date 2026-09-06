@@ -115,10 +115,16 @@ embeddable-gate arc: the "self-mutating" banner made real. A component proposes
 a component, the embedded compiler decides, the runtime reverts on rejection or
 fault, and the process never leaves.
 
-This is design-first. Almost everything it turns on is already landed and this
-note's job is to name the ONE new surface honestly and to draw the trust
-boundary precisely, because that boundary is where the headline claim is easy to
-oversell. The machinery for the loop exists in four landed places:
+This note began design-first, and its slices have since LANDED: Slice 1 (the
+`Gate.propose` verb + the post-activation EDGE-1 health gate that reverts a
+FAILED/PENDING successor to gen N + the FORBIDDEN_GRANT pre-compile refusal,
+merged 9d3a68b, 2026-09-01), Slice 2 (the proposal's authority envelope, see
+"Slice 2" below), and Slice 3 (live-state migration across a proposed swap,
+2026-09-06, see "Slice 3" below). Almost everything it turns on was already
+landed and its job was to name the ONE new surface honestly and to draw the
+trust boundary precisely, because that boundary is where the headline claim is
+easy to oversell. The rust in-process host and re-entrant `propose` stay
+deferred. The machinery for the loop exists in four landed places:
 
 * the embeddable gate (item 332, `src/revl/gate.py`): the two-layer library
   surface, `admit`/`compile_to` and the `Gate` session facade, fail-closed;

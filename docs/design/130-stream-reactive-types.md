@@ -1,10 +1,18 @@
 # Design: `Stream[T]` reactive types (item 130)
 
-Status: design proposed. This document turns the roadmap's v1 spec
-(docs/v2.0-roadmap.md:3518) into an admission-and-lowering design with a
-concrete Slice 1, decides every hard-part the roadmap lists, folds in the
-typed-EVENTS proposal, and closes one CRITICAL that an adversarial pass found
-(§9). No implementation; no `src/` or `backends/` change is made by this doc.
+Status: SLICES 1-5 LANDED (the full v1 surface). This document turns the
+roadmap's v1 spec (docs/v2.0-roadmap.md:3518) into an admission-and-lowering
+design with a concrete Slice 1, decides every hard-part the roadmap lists, folds
+in the typed-EVENTS proposal, and closes one CRITICAL that an adversarial pass
+found (§9). The v1 surface has since landed across slices 1-5 on py: the type
+and `Stream[T, State]`, the subscribe/next/close bracket with the
+cancellation-first `next` and rule 3.6, `map`/`filter`/`take` with the declared
+backpressure policies and the drain clock, the `merge` fan-in with the go/rust
+blocking lowerings, `every … in` async iteration, and typed events; §4.5
+(`replay`) and §6b (events) record inline what each slice shipped. Still open:
+the iteration/handler forms on go/rust/java/typescript, the
+`replay(n)`/`replay(from: <durable>)` declaration, and the reconstructible
+crash-recovery case.
 
 Base: `origin/main` @ `e513772`. Every `file:line` anchor below was read at
 that sha. Every "admitted"/"refused" claim about *today's* checker is a claim
