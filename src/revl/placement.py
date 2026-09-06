@@ -629,7 +629,7 @@ def _component_reach(ir: dict) -> dict[str, set]:
     authoritative G8/G4 boundary walk `revl audit` uses; reused here so the
     sandbox gate partitions the exact reach the audit prints, with no second
     walk to drift (the `_boundary` surface, `__main__._boundary`)."""
-    from .__main__ import _boundary  # noqa: PLC0415; lazy, avoids an import cycle
+    from .boundary import _boundary  # noqa: PLC0415; lazy, avoids an import cycle
     surface = _boundary(ir)
     return {name: {e["name"] for e in (stats.get("externs") or [])}
             for name, stats in surface.items()}

@@ -550,7 +550,7 @@ def _audit_document(ir: dict) -> dict:
     what `revl audit --json` emits, so an entry's manifest.json is reproducible
     from its source by the current compiler (docs/registry.md §1).
     Does not mutate the input IR."""
-    from .__main__ import _boundary            # noqa: PLC0415 — lazy, like plan/mcp
+    from .boundary import _boundary            # noqa: PLC0415 — lazy, like plan/mcp
     from .distribute import distributability   # noqa: PLC0415
     from .interchange import stamp             # noqa: PLC0415
 
@@ -1366,7 +1366,7 @@ def build_evidence(registry_dir: str | os.PathLike, *, key: bytes | None = None,
     `unavailable`) when it is absent, never faked. Returns a per-component map of
     the facets that were assembled.
     """
-    from .__main__ import _boundary  # noqa: PLC0415
+    from .boundary import _boundary  # noqa: PLC0415
 
     comps = _components_dir(registry_dir)
     produced: dict = {}

@@ -51,6 +51,16 @@ SYMBOLS = {"{", "}", "(", ")", "[", "]", ",", ":", "=", "."}
 # generics with `[]` (never `<>`), so there is no `List<T>` ambiguity for `>>`.
 OPERATORS = ("===", "!==", "=>", "?.", "??", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "->")
 
+# The same operators, bucketed by first character in their OPERATORS order. Two
+# operators with different first characters can never both match at one position
+# (a `startswith` demands the first character), so testing only the bucket for
+# `source[i]` is identical to a first-match-wins scan of all of OPERATORS — but
+# a non-operator position (an identifier, digit or space, the common case) costs
+# one dict lookup instead of fourteen `startswith` probes (issue #543 P-7).
+_OPERATORS_BY_FIRST: dict[str, tuple[str, ...]] = {}
+for _op in OPERATORS:
+    _OPERATORS_BY_FIRST[_op[0]] = _OPERATORS_BY_FIRST.get(_op[0], ()) + (_op,)
+
 # Single-character operator tokens (checked after OPERATORS). `&`, `^` and `~`
 # are the Int32 bitwise AND/XOR/NOT (item 366); `&&`/`||` in OPERATORS above are
 # matched first, so a lone `&` still reaches here. `|` (already present) doubles
@@ -348,10 +358,18 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
     """
     if line_offset == 0 and source.startswith("\ufeff"):
         source = source[1:]
-    for position, character in enumerate(source):
-        if 0xD800 <= ord(character) <= 0xDFFF:
-            line = line_offset + source.count("\n", 0, position) + 1
-            raise RevlError(filename, line, "source contains a lone surrogate")
+    # A lone surrogate cannot be UTF-8 encoded, so the common (clean) source
+    # encodes in one C-level pass and skips the per-character Python scan
+    # entirely; only a source that actually contains one falls back to the scan
+    # to locate its exact position and line for the byte-identical diagnostic
+    # (issue #543 P-7).
+    try:
+        source.encode("utf-8")
+    except UnicodeEncodeError:
+        for position, character in enumerate(source):
+            if 0xD800 <= ord(character) <= 0xDFFF:
+                line = line_offset + source.count("\n", 0, position) + 1
+                raise RevlError(filename, line, "source contains a lone surrogate")
     tokens: list[Token] = []
     i, line, n = 0, 1 + line_offset, len(source)
     while i < n:
@@ -364,12 +382,11 @@ def lex(source: str, filename: str, line_offset: int = 0) -> list[Token]:
         elif source.startswith("//", i):
             while i < n and source[i] != "\n":
                 i += 1
-        elif any(source.startswith(op, i) for op in OPERATORS):
-            for op in OPERATORS:
-                if source.startswith(op, i):
-                    tokens.append(Token("arrow" if op == "->" else op, op, line))
-                    i += len(op)
-                    break
+        elif c in _OPERATORS_BY_FIRST and (matched := next(
+                (op for op in _OPERATORS_BY_FIRST[c]
+                 if source.startswith(op, i)), None)) is not None:
+            tokens.append(Token("arrow" if matched == "->" else matched, matched, line))
+            i += len(matched)
         elif source.startswith('"""', i):
             # Triple-quoted verbatim string: raw text (newlines included) up to
             # the next `"""`. Distinct from the single-`"` form only in that it
