@@ -240,9 +240,13 @@ only keywords involved; a spawn's `undo` is required, exactly as for any
 acquisition.
 
 ```text
-spawnexpr := 'spawn' IDENT [ 'with' '{' (IDENT ':' expr (',' IDENT ':' expr)*)? '}' ]
+spawnexpr := 'spawn' IDENT [ 'with' '{' (IDENT ':' expr (',' IDENT ':' expr)*)? '}' ] [ 'as' STRING ]
 leteffect := 'let' IDENT '=' 'effect' spawnexpr 'undo' expr
 ```
+
+The optional trailing `as "<name>"` is the *named instance* (see "Named
+instances", below); it uses the existing `as` keyword, so the lexer's
+`KEYWORDS` set is untouched.
 
 So the surface form is:
 
@@ -310,6 +314,9 @@ The `spawn` acquire node:
   identity per spawn), so two instances of one component never collide on a
   provision — disjoint by construction, no config value known at link time.
 - `line` — source line, for diagnostics.
+- `name` — **present only when the source wrote `as "<name>"`** (the *named
+  instance*, below). Absent otherwise, so an unnamed spawn node is byte-identical
+  to before this slice.
 
 The enclosing step is an unchanged `let-effect`:
 
@@ -548,3 +555,50 @@ is the canonical foundation; the declared form is the missing contract half.
   Concurrently-activating **async** instance bodies could cross-attribute. Every
   tier that lowers this must carry a proper per-fiber ledger — a blocking
   prerequisite, so it is not rediscovered mid-port.
+
+## Named instances — the placement horizon's addressing hook (roadmap item 10)
+
+The roadmap's open horizon for item 10 is *placement-aware spawn*: "spawn C for
+tenant X **in process P**". Its standing constraint is that no tier's spawn
+lowering may bake "same process" into its shape. Placement today assigns
+**components**, not instances — and an instance you cannot *name*, you cannot
+place. This slice adds that missing primitive: the **named instance**.
+
+**Surface.** An optional trailing `as "<name>"` on a spawn:
+
+```revl fragment
+let w = effect spawn Worker with { tag: "a" } as "worker-a" undo w.dispose()
+```
+
+The name is a **static string literal**, not an expression — an address is
+decided in the source, so it can be checked at compile time and read by the
+placement plan. It uses the existing `as` keyword (no lexer change).
+
+**What it means — and, deliberately, what it does not.** The name is a stable
+author-declared **address** for the instance. It is:
+
+- **carried onto the spawn IR node** as `name`, present only when written (an
+  unnamed spawn is byte-identical, so nothing downstream changes for existing
+  programs);
+- **checked unique among a component's spawn sites** — two instances of one
+  component cannot share an address, or the address is ambiguous
+  (`duplicate spawn instance name`); a name may repeat across *different*
+  spawners, because it addresses within its spawner (the supervision tree, 1/2).
+
+It makes **no location claim on its own**. The instance still lands in the
+spawning process, exactly as before — so no tier's lowering has to honour the
+name, and there is no silent wrongness (a name that promised a location while
+running elsewhere would be exactly the class of silent wrongness this project
+refuses). The name is the identity a **later** placement slice keys on ("place
+the instance named `worker-a` in process P"), which is why it earns its place
+now: it lets the spawn shape carry a per-instance identity instead of leaving
+"same process" as the only expressible possibility.
+
+**Landed:** parser (`SpawnExpr.name`, `as "<name>"` in `spawn_expr`) + lower
+(`_lower_spawn` stamps `name`, uniqueness via `spawn_reg["names"]`) in
+`src/revl/`, with static tests (`tests/test_instances_frontend.py`, the
+named-instances section). **Remaining (the horizon, unscheduled):** teach the
+placement plan to assign a *named instance* to a process, honour it at runtime
+on the reference tier and fan out, and (with item 23) migrate a named instance
+across tiers. A dynamic address (`as <expr>`, e.g. per-tenant) is a later
+extension of this same node field.
