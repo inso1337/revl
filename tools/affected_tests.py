@@ -95,6 +95,44 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_tokens_to_green.py",
 )
 
+# Self-host oracle tests, keyed by the selfhost/<stem>.rvl file they check.
+# selfhost/*.rvl is revl SOURCE compiled by the reference compiler INSIDE these
+# oracle tests; nothing under src/revl imports it, so — exactly like bench/ and
+# formal/ — a change to one self-host file can only break its own oracle set,
+# never the frontend pipeline. Before this mapping every self-host edit matched
+# no rule and fell to the fail-safe FULL gate (~8 min), which then aborted on the
+# pre-existing >120s descent test tests/test_selfhost_lower.py under the hook's
+# --timeout, so the commit could not complete at all and the whole class of edits
+# had to be landed with --no-verify (issue #431). Mapping each file to its narrow
+# oracle set (seconds) gives the inner-loop hook a real local signal again.
+#
+# DELIBERATELY EXCLUDES tests/test_selfhost_lower.py from the lower.rvl entry: it
+# is the slow descent-bound test that made the FULL fallback time out. lower.rvl's
+# IR is covered narrowly by tests/test_selfhost_lower_ir.py instead.
+#
+# tests/test_affected_tests.py recomputes the key set from selfhost/*.rvl on disk
+# and checks every mapped test exists, so a new self-host file (or a renamed
+# oracle) cannot silently fall back to the unmapped FULL gate this rule replaced.
+SELFHOST_ORACLE_TESTS = {
+    "checker": ("tests/test_selfhost_checker.py",),
+    "compile": ("tests/test_selfhost_compile.py",),
+    "emit_go": ("tests/test_selfhost_emit_go.py",),
+    "emit_java": ("tests/test_selfhost_emit_java.py",),
+    "emit_py": ("tests/test_selfhost_emit_py.py",),
+    "emit_rust": ("tests/test_selfhost_emit_rust.py",),
+    "emit_ts": ("tests/test_selfhost_emit_ts.py",),
+    "emit_wasm": ("tests/test_selfhost_emit_wasm.py",),
+    "lexer": ("tests/test_selfhost_lexer.py",),
+    "lower": ("tests/test_selfhost_lower_ir.py",),
+    "parser": ("tests/test_selfhost_parser.py",),
+}
+
+# The item-429 line-coverage gate re-runs on ANY self-host source change (it
+# asserts every self-host line stays exercised), so it is added on top of the
+# per-file oracle for every selfhost/*.rvl file — including checker.rvl and
+# parser.rvl, which issue #431 calls out as needing their oracle + this gate.
+SELFHOST_ALWAYS = ("tests/test_selfhost_line_coverage.py",)
+
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
 _SHARED_TEST_FILES = {
     "tests/conftest.py",
@@ -323,6 +361,22 @@ def select(changed, root) -> dict:
             continue
         if f.startswith("stdlib/"):
             return _full(f"non-module stdlib change {f} -> full")
+
+        # --- selfhost/<stem>.rvl (the self-host compiler, revl source) ----- #
+        # Narrow like bench/ and formal/: a self-host file only feeds its own
+        # oracle tests, so select those (+ the item-429 line-coverage gate)
+        # rather than the FULL gate the hook was timing out on (issue #431).
+        if f.startswith("selfhost/") and f.endswith(".rvl"):
+            stem = Path(f).stem
+            oracle = SELFHOST_ORACLE_TESTS.get(stem)
+            if oracle is None:
+                return _full(f"selfhost/{stem}.rvl has no oracle mapping -> full")
+            pytest_nodes.update(oracle)
+            pytest_nodes.update(SELFHOST_ALWAYS)
+            reasons.append(f"selfhost/{stem} (self-host oracle)")
+            continue
+        if f.startswith("selfhost/"):
+            return _full(f"non-source selfhost change {f} -> full")
 
         # --- src/revl/** ---------------------------------------------------- #
         if f.startswith("src/revl/") and f.endswith(".py"):
