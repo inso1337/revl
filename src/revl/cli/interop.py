@@ -358,16 +358,20 @@ def _run_import(args) -> int:
 
 
 def _run_export(args) -> int:
-    """`revl export wit` — the reverse of `revl import wit` (docs/wit-bridge.md).
+    """`revl export {wit,client}` — project a compiled IR into an external face.
 
-    Slice 1 of the Component Model bridge: pure IR codegen of the standard WIT
-    interface a revl service or composition presents (the importer's type
-    mapping, run backwards). No runtime, no emission, no binary — interface
-    text only. Effects ride alongside the shape as `/// @revl:*` doc comments,
-    because WIT's type system carries shape, not lifecycle.
+    `wit` (docs/wit-bridge.md) is the reverse of `revl import wit`: pure IR
+    codegen of the standard WIT interface a revl service or composition presents
+    (the importer's type mapping, run backwards). No runtime, no emission, no
+    binary — interface text only; effects ride alongside the shape as
+    `/// @revl:*` doc comments, because WIT's type system carries shape, not
+    lifecycle.
+
+    `client` (docs/interop-bridge.md, item 424 gap (c) slice C1) is a typed
+    remote client for a NON-revl consumer, over the canonical value encoding the
+    bridges already speak. Also pure codegen: the client is typed and bounded
+    LOCALLY and makes no claim about the callee (D-424c.8).
     """
-    from ..export_wit import export_wit  # noqa: PLC0415
-
     try:
         ir = compile_files(args.files)
     except RevlError as error:
@@ -376,6 +380,27 @@ def _run_export(args) -> int:
         else:
             print(f"error: {error}", file=sys.stderr)
         return 1
+
+    if args.export_command == "client":
+        from ..export_client import export_client  # noqa: PLC0415
+        try:
+            source = export_client(ir, lang=args.lang, service=args.service,
+                                   composition=args.composition)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        if args.output:
+            try:
+                Path(args.output).write_text(source, encoding="utf-8")
+            except OSError as error:
+                print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
+                return 1
+        else:
+            print(source, end="")
+        return 0
+
+    from ..export_wit import export_wit  # noqa: PLC0415
+
     try:
         source = export_wit(ir, service=args.service,
                             composition=args.composition, package=args.package)
