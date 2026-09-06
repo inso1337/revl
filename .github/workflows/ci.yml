@@ -137,6 +137,21 @@ jobs:
       # rather than a note nobody reads.
       - run: python3 tools/check_workflow_permissions.py --self-test
       - run: python3 tools/check_workflow_permissions.py --strict
+      # issue #292: the static half of the merge-queue answer. Three defects
+      # reached main in one day from clean merges; the merge_group trigger at
+      # the top of this file closes that class by construction, and this gate
+      # closes the one case of the three a linter could ever catch -- two
+      # branches defining the same fail-silent `revl_*` runtime seam with
+      # incompatible signatures. Those seams are read through a `getattr`
+      # string literal (backends/python/replay.py, src/revl/run.py), which
+      # F811 and every type checker walk straight past, so a duplicate or a
+      # changed arity rots with no raise. This asserts each registered seam is
+      # defined exactly once with the arity its caller uses, in seconds at lint
+      # time rather than minutes into a merge-queue build. The self-test runs
+      # FIRST and reds the gate against the issue-#292 collision itself, so its
+      # teeth are exercised on every PR. Never add `|| true`.
+      - run: python3 tools/check_runtime_seams.py --self-test
+      - run: python3 tools/check_runtime_seams.py
       # The roadmap's in-progress markers, checked against git: a marker naming
       # a branch that already landed, a branch gone from origin, or a sha not
       # reachable from main is a lie the next reader pays for. Needs no
