@@ -1220,6 +1220,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify":
         from .bundle import run_verify  # noqa: PLC0415 — lazy
         return run_verify(args)
+    if args.command == "deploy":
+        from .deploy import deploy_command  # noqa: PLC0415 — lazy
+        return deploy_command(args)
     if args.command == "composition":
         return _run_composition(args)
     if args.command == "analyze":
