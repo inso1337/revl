@@ -119,7 +119,113 @@ def _pinned_requires(consumer_doc: dict) -> dict:
     return requires
 
 
-def check(consumer_doc: dict, provider_ir: dict) -> dict:
+def _adapter_pin(pinned: dict, provider_services: dict, breaks: list,
+                 consumer_doc: dict, provider_ir: dict,
+                 adapt_opt_ins: dict) -> dict:
+    """Item 296, §6/slice 3: probe whether a SAFE adapter closes each direct
+    break, and record the verdict in the pin.
+
+    A MAJOR drift breaks the direct §5 predicate, but the very same difference
+    may be bridgeable by a synthesized adapter deployed at A's boundary — the
+    identical `compatible-with-adapter` move `registry.resolve` makes, pointed
+    across the deployment seam. This reads the LANDED predicate
+    (`adapt.bridge_plan`) over A's pinned required service (as `R`) and B's
+    current provided service (as `P`); it invents nothing. `adapt_opt_ins` is
+    the author's `D`, keyed by service name then method (default empty), so a
+    bridge that would need a semantic opt-in — an outcome merge, a supplied-value
+    drop — is NOT auto-admitted here: it surfaces as a near-miss refusal for a
+    human to opt into, exactly the proposed-not-silent discipline of §3.
+
+    The verdict is `satisfied-via-adapter` iff every broken service admits a
+    bridge. It never flips `satisfied`: a direct break is still a break, the
+    deploy gate still refuses (the consumer must commit the adapter), and the
+    pin merely records that a safe bridge exists.
+    """
+    from .adapt import bridge_plan, render_adapter  # noqa: PLC0415 — lazy
+    from .admission import _service_from_ir  # noqa: PLC0415 — avoids a cycle
+
+    req_types = consumer_doc.get("types") or {}
+    prov_types = provider_ir.get("types") or {}
+    adapt_opt_ins = adapt_opt_ins or {}
+
+    # broken services, first-seen order preserved (the break list is ordered).
+    broken_services: list[str] = []
+    for c in breaks:
+        if c.service not in broken_services:
+            broken_services.append(c.service)
+
+    bridged: list[dict] = []
+    unbridgeable: list[dict] = []
+    for service in broken_services:
+        if service not in provider_services:
+            # B no longer provides the service at all: there is no candidate to
+            # adapt. An adapter bridges a shape difference, it cannot conjure a
+            # provider that vanished (§2.4, a method/service absent from P).
+            unbridgeable.append({
+                "service": service,
+                "reason": (f"the provider no longer provides `{service}`; an "
+                           "adapter bridges a shape difference, it cannot "
+                           "supply a provider that is gone"),
+            })
+            continue
+        required = _service_from_ir(service, pinned[service])
+        provided = _service_from_ir(service, provider_services[service])
+        res = bridge_plan(required, provided,
+                          adapt_opt_ins.get(service) or {},
+                          req_types=req_types, prov_types=prov_types)
+        if not res.ok:
+            unbridgeable.append({
+                "service": service,
+                "refusals": [
+                    {"method": r.method, "position": r.position,
+                     "transformation": r.transformation, "clause": r.clause,
+                     "reason": r.reason, "hint": r.hint}
+                    for r in res.refusals],
+            })
+            continue
+        entry = {
+            "service": service,
+            "merges": list(res.merges),
+            "methods": [
+                {"method": mp.method,
+                 "steps": [{"position": s.position,
+                            "transformation": s.transformation,
+                            "detail": s.detail,
+                            "merge_shape": s.merge_shape}
+                           for s in mp.steps]}
+                for mp in res.methods],
+        }
+        # The consumer-facing tokens the alias must carry (§2.1 S2): the union
+        # of the required service's per-method capability tokens.
+        carried: list[str] = []
+        for m in required.methods.values():
+            for cap in (m.capabilities or ()):
+                if cap not in carried:
+                    carried.append(cap)
+        try:
+            # A drift check mints no adapter IDENTITY (it has no provider source
+            # sha), so the render carries no derivation marking — an honest
+            # preview of the bridge the consumer would commit, not a committed
+            # artifact (§4: a rendering with no derivation carries no marking).
+            entry["source"] = render_adapter(
+                f"{service}Adapter", required, provided,
+                adapt_opt_ins.get(service) or {},
+                provide_key=service.lower(), require_key="backing",
+                carried_tokens=tuple(carried), prov_types=prov_types)
+        except ValueError:
+            # bridge_plan admits a shape this slice-1 renderer does not yet
+            # spell (§4 TODO): report the plan, omit the preview source.
+            pass
+        bridged.append(entry)
+
+    verdict = ("satisfied-via-adapter"
+               if bridged and not unbridgeable else "broken")
+    return {"verdict": verdict, "bridged": bridged,
+            "unbridgeable": unbridgeable}
+
+
+def check(consumer_doc: dict, provider_ir: dict, *,
+          adapt_opt_ins: dict | None = None) -> dict:
     """Does provider B's current manifest still satisfy consumer A's pinned
     surface? The cross-boundary drift check.
 
@@ -137,15 +243,30 @@ def check(consumer_doc: dict, provider_ir: dict) -> dict:
     no longer provides). A minor change is compatible surface and leaves A's
     shipped call sites valid.
 
+    `adapt_opt_ins` (item 296) is the author's `D`, keyed by service name then
+    method: when B breaks A directly, each break is probed against the LANDED
+    safe-adapter predicate (`adapt.bridge_plan`), and the pin records whether a
+    safe adapter would close it. `satisfied` is unchanged by that probe — a
+    direct break is still a break and the deploy gate still refuses; the pin
+    only records the bridge as a proposal (§3, proposed-not-silent).
+
     Returns a machine-readable verdict:
 
         {
-          "satisfied": bool,          # False iff B breaks A
+          "satisfied": bool,          # False iff B breaks A DIRECTLY
           "consumer": "<label>|None",
           "pinned": ["Service", ...], # services A requires from B
           "breaks":     [ {service, method, kind, reason}, ... ],
           "compatible": [ {service, method, kind, reason}, ... ],
+          # present only when there ARE direct breaks (item 296):
+          "verdict": "satisfied" | "satisfied-via-adapter" | "broken",
+          "bridged":      [ {service, methods, merges, source?}, ... ],
+          "unbridgeable": [ {service, refusals|reason}, ... ],
         }
+
+    `verdict` is `satisfied` when B satisfies A directly, `satisfied-via-adapter`
+    when every direct break is safely bridgeable, and `broken` when at least one
+    break has no safe bridge.
     """
     pinned = _pinned_requires(consumer_doc)
     provider_services = _services_of(provider_ir, what="the provider composition")
@@ -162,13 +283,20 @@ def check(consumer_doc: dict, provider_ir: dict) -> dict:
         return {"service": c.service, "method": c.method,
                 "kind": c.kind, "reason": c.reason}
 
-    return {
+    result = {
         "satisfied": not breaks,
         "consumer": consumer_doc.get("consumer"),
         "pinned": sorted(pinned),
         "breaks": [_row(c) for c in breaks],
         "compatible": [_row(c) for c in compatible],
     }
+    if not breaks:
+        result["verdict"] = "satisfied"
+        return result
+    # Direct breaks exist: record whether a safe adapter closes each (item 296).
+    result.update(_adapter_pin(pinned, provider_services, breaks,
+                               consumer_doc, provider_ir, adapt_opt_ins or {}))
+    return result
 
 
 def render(result: dict, consumer_label: str, provider_label: str) -> str:
@@ -212,4 +340,31 @@ def render(result: dict, consumer_label: str, provider_label: str) -> str:
         for row in compatible:
             lines.append(f"  [ok] {_where(row)}  ({row['kind']})")
             lines.append(f"      {row['reason']}")
+    # item 296: a break may still be closable by a SAFE adapter the consumer
+    # deploys at its boundary. Proposed, never automatic — the direct pin is
+    # still broken, this only tells the author a safe bridge exists.
+    bridged = result.get("bridged") or []
+    unbridgeable = result.get("unbridgeable") or []
+    if result.get("verdict") == "satisfied-via-adapter":
+        lines.append("")
+        lines.append("safe adapter available (PROPOSED, not automatic — the "
+                     "consumer commits it): every break above is bridgeable.")
+        for entry in bridged:
+            merges = entry.get("merges") or []
+            note = f"  (outcome merges: {', '.join(merges)})" if merges else ""
+            lines.append(f"  [adapter] {entry['service']}{note}")
+    elif bridged:
+        lines.append("")
+        lines.append("some breaks are bridgeable by a safe adapter, but not "
+                     "all — the contract stays broken until every one is "
+                     "closed:")
+        for entry in bridged:
+            lines.append(f"  [adapter] {entry['service']} (bridgeable)")
+        for entry in unbridgeable:
+            why = entry.get("reason")
+            if not why:
+                refusals = entry.get("refusals") or []
+                why = ("; ".join(r["clause"] for r in refusals)
+                       or "no safe bridge")
+            lines.append(f"  [no-adapter] {entry['service']}: {why}")
     return "\n".join(lines)
