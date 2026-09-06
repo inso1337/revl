@@ -382,6 +382,104 @@ def test_evidence_free_policy_is_byte_identical():
     assert base == []
 
 
+# ---------------------------------------- --recompute (item 290, §4, slice 3)
+
+# a self-attesting facet nothing in the bundle carries: without --recompute it
+# is `unavailable` and the rule refuses; with --recompute the operator's own
+# local producer runs and grades it, marking the facet `recomputed`.
+RECOMPUTE_POLICY = ("evidence-root: local\n"
+                    "component * requires evidence [inverse-roundtrip pass]\n")
+
+
+def test_recompute_grades_a_fresh_dossier_marking_recomputed_vs_published():
+    audit = _audit(SOLO)
+    policy = parse_policy(RECOMPUTE_POLICY)
+
+    # published-only: no bundle carries an inverse round-trip, so the clause is
+    # unavailable and the component would be REFUSED.
+    published = explain(policy, audit, origins={"CsvReader": "source"})
+    assert published["refused"]
+    assert published["recomputed"] is False
+
+    # --recompute: the operator's own `fault.roundtrip_dossier` runs against the
+    # component in hand, grades `pass`, and the clause is marked `recomputed`.
+    ir = compile_source(SOLO)
+    result = explain(policy, audit, origins={"CsvReader": "source"},
+                     recompute=True, recompute_ir={"CsvReader": ir})
+    assert result["recomputed"] is True
+    assert not result["refused"]
+    clause = result["components"][0]["rules"][0]["clauses"][0]
+    assert clause["facet"] == "inverse-roundtrip"
+    assert clause["pass"] is True
+    assert clause["standing"] == "recomputed"
+    # the human report announces the local recompute and shows the standing.
+    text = render_explain(result)
+    assert "recomputed" in text
+
+
+def test_recompute_gauntlet_facet_is_operator_run_and_marked_recomputed():
+    audit = _audit(SOLO)
+    policy = parse_policy("mcp requires evidence [gauntlet admissible]")
+    ir = compile_source(SOLO)
+    # the caller supplies the cold gauntlet dossier the CLI would run; recompute
+    # overlays it as an operator-run facet, so the mcp draft admits.
+    result = explain(policy, audit, mcp_components={"CsvReader"},
+                     recompute=True, recompute_ir={"CsvReader": ir},
+                     recompute_gauntlet={"verdict": "admissible"})
+    assert not result["refused"]
+    clauses = result["components"][0]["rules"][0]["clauses"]
+    gauntlet = next(c for c in clauses if c["facet"] == "gauntlet")
+    assert gauntlet["pass"] is True
+    assert gauntlet["standing"] == "recomputed"
+
+
+def test_recompute_leaves_the_verdict_agreeing_with_the_gate():
+    # the dry-run's refused flag comes from the SAME `evaluate`, so recompute
+    # cannot make the report disagree with the gate (one comparison site, §7).
+    audit = _audit(SOLO)
+    policy = parse_policy(RECOMPUTE_POLICY)
+    ir = compile_source(SOLO)
+    violations = evaluate(policy, audit, origins={"CsvReader": "source"},
+                          recompute=True, recompute_ir={"CsvReader": ir})
+    result = explain(policy, audit, origins={"CsvReader": "source"},
+                     recompute=True, recompute_ir={"CsvReader": ir})
+    assert bool(violations) == result["refused"]
+
+
+def test_recompute_off_is_byte_identical_to_a_plain_evaluate():
+    # the recompute inputs default off; passing them off changes nothing.
+    audit = _audit(SOLO)
+    policy = parse_policy(RECOMPUTE_POLICY)
+    base = evaluate(policy, audit, origins={"CsvReader": "source"})
+    same = evaluate(policy, audit, origins={"CsvReader": "source"},
+                    recompute=False, recompute_ir=None, recompute_gauntlet=None)
+    assert [v.message for v in base] == [v.message for v in same]
+
+
+def test_cli_recompute_end_to_end(tmp_path):
+    """`revl policy evaluate --recompute` over a bare source: the inverse
+    round-trip producer runs locally and the JSON marks the facet recomputed."""
+    import contextlib
+    import json as _json
+
+    from revl.__main__ import main
+    prog = tmp_path / "prog.rvl"
+    prog.write_text(SOLO)
+    pol = tmp_path / "policy.txt"
+    pol.write_text(RECOMPUTE_POLICY)
+    out = tmp_path / "out.json"
+    with open(out, "w", encoding="utf-8") as handle:
+        with contextlib.redirect_stdout(handle):
+            code = main(["policy", "evaluate", str(pol), str(prog),
+                         "--json", "--recompute"])
+    report = _json.loads(out.read_text())
+    assert code == 0            # recomputed inverse round-trip passes
+    assert report["recomputed"] is True
+    clause = report["components"][0]["rules"][0]["clauses"][0]
+    assert clause["facet"] == "inverse-roundtrip"
+    assert clause["standing"] == "recomputed"
+
+
 def test_a_retired_register_level_is_rejected_with_its_replacement_named():
     """Item 207 removed `shape-proven`. A policy written against the old
     vocabulary must fail loudly and say what to write instead, rather than being

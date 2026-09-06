@@ -272,6 +272,13 @@ def build_parser() -> argparse.ArgumentParser:
                           metavar="COMPONENT",
                           help="treat COMPONENT as MCP/agent-admitted; `*` = "
                                "every component")
+    pol_eval.add_argument("--recompute", action="store_true",
+                          help="run the operator's OWN local producers (fault "
+                               "sweep, inverse round-trip, cold gauntlet) "
+                               "against the component in hand and grade THAT "
+                               "dossier instead of the published bundle; each "
+                               "facet is marked `recomputed` vs `published` "
+                               "(item 290 §4)")
 
     diff_cmd = sub.add_parser(
         "diff",

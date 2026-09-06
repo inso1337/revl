@@ -434,6 +434,13 @@ def _run_policy(args) -> int:
     evidence: dict = {}
     origins: dict = {}
     evidence_ir: dict = {}
+    recompute = bool(getattr(args, "recompute", False))
+    recompute_ir: dict = {}
+    recompute_gauntlet = None
+    # the source set the cold gauntlet producer compiles under --recompute
+    # (§4): the .rvl files in source mode, the entry's source text in registry
+    # mode. Only assembled when --recompute is on.
+    gauntlet_args: dict | None = None
 
     try:
         if getattr(args, "registry", None):
@@ -457,6 +464,9 @@ def _run_policy(args) -> int:
             origins[name] = "registry"
             evidence_ir[name] = reg._normalize_ir_for_attest(
                 compile_source(entry.source, "component.rvl"))
+            if recompute:
+                recompute_ir[name] = ir
+                gauntlet_args = {"source": entry.source}
         else:
             if not args.files:
                 print("error: policy evaluate needs a POLICY and PROGRAM.rvl "
@@ -467,6 +477,10 @@ def _run_policy(args) -> int:
             comps = list(audit.get("boundary") or {})
             for name in comps:
                 origins[name] = "source"
+                if recompute:
+                    recompute_ir[name] = ir
+            if recompute:
+                gauntlet_args = {"files": list(args.files)}
             if getattr(args, "evidence", None):
                 from . import registry as reg  # noqa: PLC0415
                 bundle = reg.load_evidence_bundle(args.evidence)
@@ -483,13 +497,29 @@ def _run_policy(args) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
+    # §4: the cold gauntlet is operator-run at evaluation time (needs no
+    # attestation root). Guarded broadly — the gauntlet grades rather than
+    # raises, but a runtime/toolchain gap must degrade to "no dossier", never
+    # crash the dry-run; every other facet still recomputes.
+    if recompute and gauntlet_args is not None:
+        try:
+            from .mcp import gauntlet as _gauntlet  # noqa: PLC0415
+            from .mcp.session import Session  # noqa: PLC0415
+            recompute_gauntlet = _gauntlet.run(Session(), gauntlet_args,
+                                               over_the_transport=False)
+        except Exception:  # noqa: BLE001 — a producer gap is not a dry-run crash
+            recompute_gauntlet = None
+
     scope = getattr(args, "mcp_scope", []) or []
     mcp_components = (frozenset(audit.get("boundary") or {})
                      if "*" in scope else frozenset(scope))
 
     result = explain(policy, audit, mcp_components, evidence=evidence,
                      origins=origins, trusted_publishers=trusted, key=key,
-                     evidence_ir=evidence_ir, component=args.component)
+                     evidence_ir=evidence_ir, recompute=recompute,
+                     recompute_ir=recompute_ir,
+                     recompute_gauntlet=recompute_gauntlet,
+                     component=args.component)
     if args.json:
         print(json.dumps(result, indent=2))
     else:
