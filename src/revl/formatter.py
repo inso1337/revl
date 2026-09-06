@@ -269,16 +269,72 @@ def _scan_number(source: str, start: int, filename: str) -> int:
 _INDENT = "  "  # two spaces per nesting level
 
 
+# Operators that pair with a trailing `=` to form a compound assignment.
+# The parser recognises exactly these five (parser.py `_looks_like_assign`,
+# item 366): `+= -= *= /= %=`.  The lexer has no compound-assign token, so
+# each reaches the scanner as an `_OP` piece followed by a `=` `_PUNCT` piece
+# -- the join is whitespace-only (the token stream is `+` then `=` either way)
+# and the IR gate proves it.
+_COMPOUND_ASSIGN = frozenset({"+", "-", "*", "/", "%"})
+
+# Operators that are ALWAYS prefix-unary: logical not and Int32 bitwise
+# complement (parser.py `_unary`, item 366).  They never take a space on their
+# operand side: `!x`, `~x`, never `! x` / `~ x`.
+_ALWAYS_PREFIX = frozenset({"!", "~"})
+
+
+def _is_value_end(piece: _Piece | None) -> bool:
+    """Whether *piece* ends a value expression, so a following `-`/`+` is the
+    binary operator (`a - 1`) rather than a prefix sign (`-1`).
+
+    A value ends at an identifier/number, a string/template span, a closing
+    bracket, or one of the value keywords `true`/`false`/`null`.  Everything
+    else before a `-`/`+` -- an operator, an opener, a comma/colon, a
+    statement keyword like `return`, or the start of a line (`None`) -- makes
+    it prefix-unary.
+    """
+    if piece is None:
+        return False
+    if piece.kind in (_WORD, _VERBATIM):
+        return True
+    if piece.kind == _PUNCT and piece.text in _CLOSERS:
+        return True
+    if piece.kind == _KW and piece.text in ("true", "false", "null"):
+        return True
+    return False
+
+
 def _space_between(prev: _Piece, cur: _Piece,
-                   nxt: _Piece | None = None) -> bool:
+                   nxt: _Piece | None = None,
+                   prv: _Piece | None = None) -> bool:
     """Whether a single space is emitted between two same-line pieces.
 
     Only word/word adjacency is significant to the lexer; every other choice
     is cosmetic and the IR gate backs it up.  The rules below reproduce the
-    house style visible in the example corpus.
+    house style visible in the example corpus.  *prv* is the piece two places
+    back (the one before *prev*), which the unary-sign rule needs to tell
+    binary `a - 1` from prefix `-1`.
     """
     p, pk = prev.text, prev.kind
     c, ck = cur.text, cur.kind
+
+    # a compound-assignment operator binds to its `=`: `x += 1`, never
+    # `x + = 1` (issue 545).  `+ - * / %` are the only single-char operators
+    # the grammar joins to a following `=`; the multi-char comparisons
+    # (`== != <= >=`) already reach the scanner as one operator piece.
+    if pk == _OP and c == "=" and p in _COMPOUND_ASSIGN:
+        return False
+    # a prefix-only operator binds tight to its operand: `!x` / `~x`, never
+    # `! x` / `~ x` (issue 545).
+    if pk == _OP and p in _ALWAYS_PREFIX:
+        return False
+    # a `-`/`+` that is prefix-unary binds tight to the value it signs:
+    # `-1`, `-x`, `-(a + b)`, never `- 1` (issue 545).  It is prefix (not the
+    # binary operator) when what precedes it does not end a value; the space
+    # is suppressed only immediately before the operand token.
+    if (pk == _OP and p in ("+", "-") and not _is_value_end(prv)
+            and (ck in (_WORD, _VERBATIM) or c in ("(", "["))):
+        return False
 
     # dot access binds tight on both sides -- but a `.` that leads an origin
     # qualifier (`.::@db`, item 426 S2: the project's own origin is spelled
@@ -351,7 +407,8 @@ def _render_line(pieces: list[_Piece], indent_level: int) -> str:
     for idx, piece in enumerate(pieces):
         if idx > 0 and _space_between(
                 pieces[idx - 1], piece,
-                pieces[idx + 1] if idx + 1 < len(pieces) else None):
+                pieces[idx + 1] if idx + 1 < len(pieces) else None,
+                pieces[idx - 2] if idx >= 2 else None):
             out.append(" ")
         out.append(piece.text)
     return "".join(out).rstrip()
