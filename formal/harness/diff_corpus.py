@@ -1669,6 +1669,66 @@ def recovery_coverage(observed: dict) -> list[str]:
     return findings
 
 
+#: What the REFERENCE computed for each reconstructed statement, for the G6
+#: non-vacuity ratchet: (confined, head count, leaked-root count). Filled by
+#: `reference_from_tsv`; read by `confinement_coverage`. Kept beside the
+#: compared verdict rather than inside it because these are evidence the row
+#: BITES, not a claim either side makes.
+_CONFINEMENTS: dict = {}
+
+
+def confinement_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `C` row (G6, issue 276).
+
+    Same discipline as `attenuation_coverage`, and for the same reason: the
+    whole point of #276 is that a confinement row every admitted component
+    satisfies trivially certifies nothing. Every exported `I` row IS from an
+    admitted component, so if the row only ever said `ok` it would agree
+    vacuously. So this states, and enforces, that the corpus actually
+    EXERCISES both verdicts on the REFERENCE's own computation:
+
+      * some statement is confined with a NON-EMPTY reach surface -- an `ok`
+        that is a real confinement (every crossing declared), not the empty
+        statement's free pass;
+      * some statement LEAKS -- a head whose root is outside the component's
+        declared context, which the row scores `fail`. This is the caught
+        violation #276 requires: without one, `confinedB` would be a constant
+        `true` over the corpus and the differential would prove nothing.
+
+    A leaking statement is a `fail` on BOTH sides (both read head-roots against
+    the same declared context), so the row bites without an admitted violation
+    to point at -- the checker refuses those at parse (the G6 fixtures), so
+    none reaches an `I` row. The bite is instead that the verdict is
+    mutation-sensitive: `RevL.G6.g6_row_not_vacuous` proves the check flips
+    when a leaking head is accepted, so a reference that drifted to accept one
+    would diverge from the Lean row here.
+
+    Returns findings, which the caller treats as gate failures.
+    """
+    confined_witness = leak_witness = None
+    caught = 0
+    for key, (confined, n_heads, n_leaked) in _CONFINEMENTS.items():
+        if confined and n_heads > 0:
+            confined_witness = confined_witness or key
+        if not confined:
+            caught += 1
+            leak_witness = leak_witness or key
+    findings: list[str] = []
+    for label, witness in (
+            ("a statement confined over a non-empty reach surface",
+             confined_witness),
+            ("a statement whose head leaks outside the declared context",
+             leak_witness)):
+        if witness is None:
+            findings.append(f"confinement coverage: NO witness of {label} — "
+                            "the C row would agree vacuously")
+    if not findings:
+        print(f"confinement coverage: {len(_CONFINEMENTS)} statements, "
+              f"{caught} caught violations; confined={confined_witness} "
+              f"leak={leak_witness}")
+    return findings
+
+
 def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
     """Run the Lean oracle over the corpus TSV; None if lake is absent."""
     if shutil.which("lake") is None:
@@ -1690,7 +1750,9 @@ class Verdicts(NamedTuple):
     """One side's verdicts. `files` are V rows (disjoint, closed, link),
     `comps` G rows, `providers` P rows, `spawns` W rows, `refused` X rows,
     `dispositions` D rows (G7 teardown: replayed / discharged / stranded),
-    `recoveries` O rows (A8/R4 crash recovery: outcome / applied / residue)."""
+    `recoveries` O rows (A8/R4 crash recovery: outcome / applied / residue),
+    `confinements` C rows (G6: a reconstructed statement's reach surface is
+    within its component's declared context)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -1698,11 +1760,13 @@ class Verdicts(NamedTuple):
     refused: dict[str, str]
     dispositions: dict[str, tuple[tuple, tuple, tuple]]
     recoveries: dict[str, tuple]
+    confinements: dict[tuple[str, str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
                 + len(self.spawns) + len(self.refused)
-                + len(self.dispositions) + len(self.recoveries))
+                + len(self.dispositions) + len(self.recoveries)
+                + len(self.confinements))
 
 
 def _cols(field: str) -> list[str]:
@@ -1720,6 +1784,7 @@ def parse_verdicts(text: str) -> Verdicts:
     refused: dict[str, str] = {}
     dispositions: dict[str, tuple[tuple, tuple, tuple]] = {}
     recoveries: dict[str, tuple] = {}
+    confinements: dict[tuple[str, str, str], str] = {}
     for line in text.splitlines():
         parts = line.split("\t")
         if parts[0] == "V" and len(parts) == 5:
@@ -1758,10 +1823,13 @@ def parse_verdicts(text: str) -> Verdicts:
                 None if body == "n/a" else tuple(sorted(int(x)
                                                         for x in _cols(parts[4]))),
             )
+        elif parts[0] == "C" and len(parts) == 5:
+            # G6 confinement: (file, comp, statement index) -> ok|fail.
+            confinements[(parts[1], parts[2], parts[3])] = parts[4].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries)
+                    recoveries, confinements)
 
 
 def _slots(provides: list[str], realms: dict[str, str]) -> list[tuple[str, str]]:
@@ -1827,6 +1895,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     krows = [r for r in rows if r and r[0] == "K" and len(r) == 5]
     srows = [r for r in rows if r and r[0] == "S" and len(r) == 4]
     harows = [r for r in rows if r and r[0] == "HA" and len(r) == 5]
+    irows = [r for r in rows if r and r[0] == "I" and len(r) == 7]
 
     ems_by_file: dict[str, set[tuple[str, str]]] = {}
     bounds_by_file: dict[tuple[str, str, str], tuple[str, set[str]]] = {}
@@ -1964,8 +2033,41 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         recoveries[name] = (outcome, tuple(applied),
                             None if residue is None else tuple(residue))
 
+    # C rows: G6 confinement, computed INDEPENDENTLY of admission. A
+    # component's declared context is its require locals (M) together with the
+    # roots its require-held caps bind (K) -- the names a body may legitimately
+    # reach through. A reconstructed statement is confined iff every head-root
+    # it reaches is one of those declared roots. This is the same head-roots
+    # membership the Lean side decides with `confinedB`, computed here from the
+    # SAME TSV rather than from either side's admission judgment: a leaking
+    # head is a `fail` on both sides, so the row bites without needing an
+    # admitted violation (which the checker refuses at parse, see the G6
+    # fixtures) to point at.
+    def _root(h: str) -> str:
+        return h.split(".", 1)[0]
+
+    requires_by_comp: dict[tuple[str, str], list[str]] = {}
+    for r in mrows:
+        requires_by_comp[(r[1], r[2])] = [k for k in r[3].split(",") if k]
+    kbinds_by_comp: dict[tuple[str, str], set[str]] = {}
+    for r in krows:
+        kbinds_by_comp.setdefault((r[1], r[2]), set()).add(r[3])
+
+    _CONFINEMENTS.clear()
+    confinements: dict[tuple[str, str, str], str] = {}
+    for r in irows:
+        rel, compn, index, kind = r[1], r[2], r[3], r[4]
+        heads = [h for h in r[5].split(",") if h]
+        inverse = [h for h in r[6].split(",") if h]
+        reach = heads + inverse if kind == "effect" else heads
+        declared = set(requires_by_comp.get((rel, compn), [])) \
+            | kbinds_by_comp.get((rel, compn), set())
+        leaked = {_root(h) for h in reach} - declared
+        confinements[(rel, compn, index)] = "ok" if not leaked else "fail"
+        _CONFINEMENTS[(rel, compn, index)] = (not leaked, len(reach), len(leaked))
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
-                    recoveries)
+                    recoveries, confinements)
 
 
 # The buckets that are GATE FAILURES, not findings (item 418 step 7). Both
@@ -2122,7 +2224,8 @@ def main() -> int:
             ("spawn", ref.spawns, formal.spawns),
             ("refusal", ref.refused, formal.refused),
             ("teardown", ref.dispositions, formal.dispositions),
-            ("recovery", ref.recoveries, formal.recoveries)):
+            ("recovery", ref.recoveries, formal.recoveries),
+            ("confinement", ref.confinements, formal.confinements)):
         for key, want in refmap.items():
             got = gotmap.get(key)
             if got is None:
@@ -2136,12 +2239,14 @@ def main() -> int:
         f"{len(ref.providers)} methods + {len(ref.spawns)} spawns + "
         f"{len(ref.refused)} parse refusals + "
         f"{len(ref.dispositions)} teardowns + "
-        f"{len(ref.recoveries)} recoveries) — "
+        f"{len(ref.recoveries)} recoveries + "
+        f"{len(ref.confinements)} confinements) — "
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
     mismatches.extend(teardown_coverage(ref.dispositions))
     mismatches.extend(recovery_coverage(ref.recoveries))
     mismatches.extend(attenuation_coverage())
+    mismatches.extend(confinement_coverage())
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
     if len(mismatches) > 10:
