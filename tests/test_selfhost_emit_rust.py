@@ -148,6 +148,13 @@ CORPUS = [
                         #   rather than cloning the element; the owned `return`/
                         #   `let` cases keep the clone. No corpus fixture reached
                         #   the shape, so this closes the same 429 gap.
+    "perf_iter.rvl",    # item 437f — a `for` iterable that is dead after the loop
+                        #   MOVES instead of cloning. The self-host port never
+                        #   cloned a for-iterable, so before the optimisation the
+                        #   reference cloned and diverged here with no fixture to
+                        #   catch it; this closes that 429 gap (the reused-but-live
+                        #   clone lives in test_emit_rust.py — the port cannot
+                        #   mirror it, so it cannot be a byte-agreement fixture).
     # slice 2 — the v3 typed-core:
     "records.rvl",   # record `type` -> `pub struct`, record literal + field clone,
                      #   field access, a record-typed field, List[Point] lowering
