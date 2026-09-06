@@ -24,11 +24,18 @@ PINNED_ROOT_API_VERSION = _runtime.PINNED_ROOT_API_VERSION
 bind_workspace_root = _runtime.bind_workspace_root
 COMMITTED_SIDECAR_API_VERSION = _runtime.COMMITTED_SIDECAR_API_VERSION
 finalize_committed_sidecar = _runtime.finalize_committed_sidecar
+COMMITTED_SIDECAR_CLEANUP_API_VERSION = _runtime.COMMITTED_SIDECAR_CLEANUP_API_VERSION
+issue_committed_sidecar_receipt = _runtime.issue_committed_sidecar_receipt
+CommittedSidecarReceipt = _runtime.CommittedSidecarReceipt
+CommittedSidecarCleanup = _runtime.CommittedSidecarCleanup
+CleanupOutcome = _runtime.CleanupOutcome
 FsOpError = _runtime.FsOpError
 ConfinementError = _runtime.ConfinementError
 
 __all__ = [
     "PINNED_ROOT_API_VERSION", "bind_workspace_root",
     "COMMITTED_SIDECAR_API_VERSION", "finalize_committed_sidecar",
+    "COMMITTED_SIDECAR_CLEANUP_API_VERSION", "issue_committed_sidecar_receipt",
+    "CommittedSidecarReceipt", "CommittedSidecarCleanup", "CleanupOutcome",
     "FsOpError", "ConfinementError",
 ]
