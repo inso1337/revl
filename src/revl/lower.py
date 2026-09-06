@@ -6511,6 +6511,7 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         "edges": [],        # (spawner, target) — the instance graph
         "templates": set(),  # components that are spawn targets (excluded from static composition)
         "sites": [],        # G4 spawn-boundary obligations, checked after lowering
+        "names": {},        # spawner component -> set of named-instance addresses (item 10)
     }
 
     # item 386, Stage 1: collect ALL refusals in one pass instead of aborting
@@ -11281,7 +11282,7 @@ def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:
     realms = sorted(key for key, _svc, _line in target.provides)
     reg["edges"].append((env.component.name, expr.component))
     reg["templates"].add(expr.component)
-    return {
+    node = {
         "kind": "spawn",
         "component": expr.component,
         "config": lowered_cfg,
@@ -11290,6 +11291,28 @@ def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:
         "realms": realms,
         "line": expr.line,
     }
+    # item 10 placement horizon: an optional NAMED INSTANCE. `as "<name>"`
+    # stamps the spawn with a stable author-declared address. It is present on
+    # the node ONLY when written, so an unnamed spawn is byte-identical to
+    # before (no shape change for existing programs). The address makes no
+    # location claim yet — the instance still lands in the spawning process —
+    # so no tier's lowering has to honour it; it is the identity a later
+    # placement slice keys on so the spawn shape need not bake "same process"
+    # in as its only possibility (docs/design-v2-instances.md).
+    if expr.name is not None:
+        seen = reg["names"].setdefault(env.component.name, set())
+        if expr.name in seen:
+            raise RevlError(
+                env.filename, expr.line,
+                f"duplicate spawn instance name `{expr.name}` in "
+                f"{env.component.name}",
+                hint="a named instance is an ADDRESS: two instances of one "
+                     "component cannot share it, or the address is ambiguous. "
+                     "Give each a distinct name (docs/design-v2-instances.md)",
+            )
+        seen.add(expr.name)
+        node["name"] = expr.name
+    return node
 
 
 def _instance_handle_component(node: dict, env: Env) -> str | None:
