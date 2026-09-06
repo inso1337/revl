@@ -1241,6 +1241,34 @@ def resolve_file(path: str, root: str | None = None,
     return fold(decl, path, root, overlay)
 
 
+def _compile_table(table: RowTable, root: str, *,
+                   paths: list[str] | None = None,
+                   rows_ir: list[dict] | None = None, **kwargs) -> dict:
+    """Compile the rows of a resolved table and carry the table into the IR.
+
+    `paths` compiles a SUBSET of the table's row sources (426 S3, incremental
+    admission: the delta rather than the whole composition) while still
+    recording the whole resolved table as the IR's `rows`. It defaults to every
+    row, which is the full compile `compile_composition` and `--full` want.
+
+    item 424 C2: a synthesized provider is compiled from memory. It is ORDINARY
+    revl source and the ordinary compiler compiles it, so `_link` runs G2, G3
+    and G4 over it exactly as it does over a file row.
+    """
+    from .compiler import compile_files  # noqa: PLC0415 (cycle: compiler -> parser -> here)
+
+    sources = dict(kwargs.pop("sources", None) or {})
+    for rel, text in table.sources.items():
+        sources[os.path.join(root, rel)] = text
+    rel_paths = table.paths() if paths is None else paths
+    document = compile_files([os.path.join(root, p) for p in rel_paths],
+                             sources=sources or None, **kwargs)
+    document["rows"] = table.to_ir() if rows_ir is None else rows_ir
+    if isinstance(document.get("manifest"), dict):
+        document["manifest"]["rows"] = document["rows"]
+    return document
+
+
 def compile_composition(path: str, root: str | None = None,
                         overlay: dict | None = None, **kwargs) -> dict:
     """Compile a composition document: resolve the row table, compile the rows
@@ -1250,20 +1278,128 @@ def compile_composition(path: str, root: str | None = None,
     is compiled and READ (its rows are already in the IR) instead of compiled,
     emitted, exec'd, called and parsed back out of a JSON string.
     """
-    from .compiler import compile_files  # noqa: PLC0415 (cycle: compiler -> parser -> here)
-
     root = os.path.abspath(root or os.getcwd())
     table = resolve_file(path, root, overlay)
-    # item 424 C2: a synthesized provider is compiled from memory. It is
-    # ORDINARY revl source and the ordinary compiler compiles it, so `_link`
-    # runs G2, G3 and G4 over it exactly as it does over a file row — which is
-    # why nothing in `synthesize.py` is on the trusted path either.
-    sources = dict(kwargs.pop("sources", None) or {})
-    for rel, text in table.sources.items():
-        sources[os.path.join(root, rel)] = text
-    document = compile_files([os.path.join(root, p) for p in table.paths()],
-                             sources=sources or None, **kwargs)
-    document["rows"] = table.to_ir()
-    if isinstance(document.get("manifest"), dict):
-        document["manifest"]["rows"] = document["rows"]
+    return _compile_table(table, root, **kwargs)
+
+
+def _delta(base: RowTable, folded: RowTable) -> tuple:
+    """The change the fold introduces, keyed by qualified label (426 §5.1).
+
+    The label is identity (§1.1), so a row is the SAME row across base and
+    folded exactly when its qualified label matches. Four buckets:
+
+    - ADDED       a label the base did not carry;
+    - REPLACED    a label whose source or component changed (a new
+                  implementation of the same row);
+    - CONFIGURED  a label whose only change is its config block. Config is IR
+                  metadata typed at resolution (`_check_config`), never compiled
+                  into a body, so a configure-only change recompiles NOTHING and
+                  changes no wiring, which is why §5.3 files its activation
+                  narrowing as the highest-value follow-on;
+    - REMOVED     a base label the fold withdrew.
+    """
+    base_by = {r.qualified: r for r in base.rows}
+    fold_by = {r.qualified: r for r in folded.rows}
+    added, replaced, configured, removed = [], [], [], []
+    for label, row in fold_by.items():
+        prev = base_by.get(label)
+        if prev is None:
+            added.append(row)
+        elif prev.source != row.source or prev.component != row.component:
+            replaced.append((prev, row))
+        elif dict(prev.config) != dict(row.config):
+            configured.append((prev, row))
+    for label, prev in base_by.items():
+        if label not in fold_by:
+            removed.append(prev)
+    return added, replaced, configured, removed
+
+
+def admit_layers(path: str, root: str | None = None,
+                 overlay: dict | None = None, full: bool = False) -> dict:
+    """426 slice S3: admit a composition's layers INCREMENTALLY.
+
+    The base composition (level 0, no layers) is the running manifest; the
+    layers are the patch. Only the DELTA the fold introduces is recompiled,
+    against that manifest, and G2/G3 span the union exactly as `_link` runs them
+    over a full compile — which is why the verdict and the resulting manifest
+    are byte-identical to a full re-admission (exit test 10). `full=True` asks
+    for that full re-compile, the oracle the incremental path is checked against.
+
+    The recompile set is the STRUCTURAL delta — the rows the fold added or
+    replaced — compiled against the base manifest exactly as
+    `tests/test_manifest.py:44` compiles a lone hot-swap provider against a
+    running composition. A `configure`-only change recompiles NOTHING: config is
+    typed at resolution (`_check_config`) and never reaches a body, so no G2/G3
+    verdict can move (§5.3). Every row the delta did not touch is CARRIED from
+    the base manifest rather than recompiled, which is the incremental win.
+
+    Three honest limits, all from the design and all stated rather than hidden:
+
+    - I2 GROUPING (§5.1). The project's own sources may cross-import, so a
+      genuine cross-component dataflow between two first-party rows makes
+      recompiling one in isolation unsound. `_link` still runs G2/G3 over the
+      union and `refuse_admission` still decides, so the resolver being off the
+      trusted path (§3.3) means this can only ever OVER-refuse, never admit
+      something a full compile would reject — which the exit test guards by
+      asserting the manifest equals a full re-admission. Detecting the
+      cross-import edges to widen the recompile set to the whole group is the
+      refinement I2 names, and it is not built here.
+    - ACTIVATION stays whole-generation (§5.2). This admits a patch; it does not
+      hot-swap a live fiber. G7 blocks `replace`/`remove` from riding
+      `_wire_turn`, so only an `add`-only patch activates hot, and that path is
+      the session's, not this one's.
+    - No per-row FACT CACHE (I3). The delta is recompiled fresh each time;
+      caching per-row facts keyed by the compiler's identity is a later
+      optimization, and it is unsound without that key.
+    """
+    root = os.path.abspath(root or os.getcwd())
+    decl = sole_composition(parse_file(path), path)
+    has_layers = bool(decl.stack) or decl.site is not None
+
+    folded = fold(decl, path, root, overlay) if (has_layers or overlay) \
+        else resolve(decl, path, root)
+
+    if full or not has_layers:
+        # No layers to fold, or a full re-admission was asked for: compile the
+        # whole (folded) table. Nothing is carried from a prior manifest.
+        document = _compile_table(folded, root)
+        document["admission"] = {
+            "mode": "full",
+            "recompiled": sorted(r.component for r in folded.rows),
+            "carried": [],
+            "withdrawn": [],
+        }
+        return document
+
+    base = resolve(decl, path, root)
+    base_doc = _compile_table(base, root)
+
+    added, replaced, _configured, _removed = _delta(base, folded)
+    # The recompile set is the structural delta, deduplicated by source. A
+    # configure-only change contributes nothing, so a configure-only patch
+    # recompiles an empty set and simply re-affirms the base manifest.
+    recompile: dict[str, Row] = {}
+    for row in (*added, *(row for _, row in replaced)):
+        recompile.setdefault(row.source, row)
+
+    # `replacing` withdraws every base component whose NAME the folded table no
+    # longer carries — a removed row, or the old name behind a renamed
+    # replacement. A recompiled component keeping its name is dropped-then-added
+    # by `compile_files` implicitly (compiler.py:572), so it is not listed here.
+    base_names = {entry["name"] for entry in base_doc["manifest"]["components"]}
+    fold_names = {row.component for row in folded.rows}
+    withdrawn = sorted(base_names - fold_names)
+
+    recompiled_names = {row.component for row in recompile.values()}
+    document = _compile_table(
+        folded, root, paths=list(recompile), manifest=base_doc,
+        replacing=tuple(withdrawn), rows_ir=folded.to_ir())
+    document["admission"] = {
+        "mode": "incremental",
+        "recompiled": sorted(recompiled_names),
+        "carried": sorted(fold_names - recompiled_names),
+        "withdrawn": withdrawn,
+    }
     return document

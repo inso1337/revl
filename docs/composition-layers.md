@@ -253,11 +253,50 @@ Every input is an ordered list in a file. Nothing here depends on filesystem
 iteration order, directory listing order, wall-clock time, or fetch completion
 order.
 
+## Incremental admission
+
+`revl layer admit FILE` admits the folded composition INCREMENTALLY. The base
+composition (no layers) is the running manifest; the layers are the patch. Only
+the DELTA the fold introduces — the rows it added or replaced — is recompiled,
+against that manifest, and G2/G3 span the union exactly as they do over a full
+compile. Every row the delta did not touch is CARRIED from the base manifest
+rather than recompiled, which is the whole cost saving: the cost of the
+operator's decision is one compile of the patched rows, not of the composition.
+
+```text
+$ revl layer admit base.rvl
+admitted (incremental): PgDatabase -> MemCache
+  recompiled: PgDatabase
+  carried:    MemCache
+  withdrawn:  SqliteDatabase
+```
+
+- A `replace` recompiles the replacement row; the component it replaced is
+  WITHDRAWN (named in `replacing`), and a replacement keeping the same component
+  name is dropped-then-re-added by the compiler implicitly.
+- An `add` recompiles the added row alone.
+- A `configure`-only patch recompiles NOTHING: config is typed at resolution and
+  never reaches a body, so no wiring and no G2/G3 verdict can move.
+- A `remove` withdraws the row's component and recompiles nothing.
+
+`--full` re-admits the whole folded table instead of the delta. It is the oracle
+the incremental path is checked against: the incremental verdict and the
+resulting manifest are byte-identical to a full re-admission (exit test 10).
+
+The resolver is still not on the trusted path. `_link` runs G2/G3 over the
+union and decides admission, so a bug on this path can only ever OVER-refuse. It
+carries three honest limits. Two first-party rows that genuinely cross-import
+are one compile group (invariant I2); widening the recompile set to the group is
+a refinement not built here, and until it is, the equality-to-`--full` check is
+what guards it. ACTIVATION stays whole-generation: this admits a patch, it does
+not hot-swap a live fiber, so only an `add`-only patch activates hot (a property
+of G7). And there is no per-row fact cache: the delta is recompiled fresh each
+time.
+
 ## What is not here yet
 
 | next | what it adds | what it waits on |
 |---|---|---|
-| incremental admission | admitting the resolved delta through `admit_into` with a `replacing` withdrawal set, so the cost is one compile of the patched rows | this slice only |
 | confinement | non-first-party rows compiled under the untrusted-author profile, and the per-root profile split in `compile_files` | roadmap 425 F1's decision |
 | the authority panel | crossing tokens re-keyed by row label, a `config:` token carrying a value digest, a fail-closed headline, a printed blind-spots block | confinement, and roadmap 428 F3 |
 | distribution | a layer is a truc, the `[trucs]` origin namespace becomes real, the pin becomes mandatory | roadmap 428 F3 |

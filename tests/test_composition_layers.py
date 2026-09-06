@@ -28,7 +28,8 @@ Which of 426 §12's exit tests this file covers:
 Item 424 R2's third rule (`granted` is never writable in a stack layer), which
 S1 could not enforce because it needs layers, is covered here.
 
- 10, 11             need S3 (incremental admission)
+ 10                 COVERED by S3 in `tests/test_composition_admit.py`
+ 11                 needs S3 activation (whole-generation only, §5.2)
  13, 14, 15, 16, 17 need S4/S5/S6 (confinement, the panel, distribution)
 """
 
