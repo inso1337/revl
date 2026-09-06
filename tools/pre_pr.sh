@@ -39,8 +39,8 @@ PY
 # signal it gets. Needs PyYAML, which the repo does not otherwise depend on, so
 # it runs through uv the way ruff above does.
 echo "== workflow permissions =="
-uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --self-test || fail=1
-uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --strict || fail=1
+uv run --no-project --with pyyaml==6.0.2 python3 tools/check_workflow_permissions.py --self-test || fail=1
+uv run --no-project --with pyyaml==6.0.2 python3 tools/check_workflow_permissions.py --strict || fail=1
 
 # issue #292: each fail-silent `revl_*` runtime seam is defined exactly once
 # with the arity its getattr caller uses. The merge queue closes the whole
