@@ -302,6 +302,7 @@ below; the exhaustive per-command flag reference is
 | `revl mcp import MANIFEST` | turn an MCP `tools/list` manifest into revl source | [mcp-bridge.md](mcp-bridge.md) |
 | `revl import wit\|openapi\|cordis\|a2a FILE` | import an external interface definition as typed revl source | [import-wit.md](import-wit.md) · [import-openapi.md](import-openapi.md) · [import-cordis.md](import-cordis.md) · [import-a2a.md](import-a2a.md) |
 | `revl export wit FILES --service N\|--composition` | generate the standard WIT interface for a revl service/composition | [wit-bridge.md](wit-bridge.md) |
+| `revl export client FILES --lang ts --service N\|--composition` | generate a typed remote client (TypeScript) over the canonical wire encoding; carries the gate frontier, claims nothing about the callee | [interop-bridge.md](interop-bridge.md) |
 | `revl emit FILES` | render one backend's source directly, no IR round-trip (`--backend`, `--target temporal`) | [backends-roadmap.md](backends-roadmap.md) |
 | `revl bundle FILES --out DIR` | emit every tier plus the runtime manifest into one portable bundle (`--backend`, `--topology`) | [deploy.md](deploy.md) |
 | `revl verify BUNDLE` | check a bundle tier by tier; nonzero on a failing tier, so it is usable as a release gate | [commands-reference.md](commands-reference.md#revl-verify) |
