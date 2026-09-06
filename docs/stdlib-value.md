@@ -151,14 +151,14 @@ above is the specification for that rewrite.
 ## Tier status
 
 `Value` erases to each host's dynamic representation, exactly as
-`stdlib/json.rvl`'s `Any` does. The **py** and **ts** tiers ship; rs/go/java are
-the additive follow-up.
+`stdlib/json.rvl`'s `Any` does. The **py**, **ts**, and **rs** tiers ship;
+go/java are the additive follow-up.
 
 | tier | erases `Value` to | status |
 |---|---|---|
 | py | native object graph (`dict`/`list`/`bool`/`int`/`float`/`str`/`None`) | **executed by tests** (`tests/test_value_stdlib.py`) |
 | ts | JS value (record → object, list → array, `Int` → `bigint`, `Float` → `number`, null/absent → `null`/`undefined`), `typeof` / `Array.isArray` discrimination | **executed by tests** (`tests/test_value_total_field.py`, run under node) — the total field read is identical to py (item 368) |
-| rs | `cordis::Value` / `serde_json::Value` (as `json.rvl` already boxes) | **deferred** — add `@rs` bodies |
+| rs | a `serde_json::Value` boxed in `cordis::Value` (as `json.rvl` already boxes); `.downcast::<serde_json::Value>()` reads it, each child is re-boxed with `Value::new` | **shipped** (item 391 / #106) — every accessor carries an `@rs` body, verified byte-for-byte against the `@py` outputs in an isolation crate. `value_keys` / `value_children` over a record read the host map in insertion order, so a `Value`-walking crate must build serde_json with `preserve_order` — the identical requirement `json.rvl`'s `json_stringify` canonical key order already imposes |
 | go | `any` (type-switch discrimination) | **deferred** — add `@go` bodies |
 | java | a provider's JSON tree (Jackson/Gson) | **deferred** — needs a provider on the classpath |
 | wasm | — | **no representation**: the substrate value model (Int/Bool/Str/List) holds no Float/Map/record, same limit as `json.rvl` |

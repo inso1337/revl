@@ -163,11 +163,14 @@ def test_module_imports_and_externs_reach_the_ir(consumer_ir):
     assert names["value_list"]["returns"] == "List[Value]"
     assert names["value_opt"]["returns"] == "Opt[Value]"
     assert names["value_keys"]["returns"] == "List[Str]"
-    # py and ts are both shipped now (item 368 made the module two-tier so the
-    # total field read is identical on both wire tiers); rs/go/java/wasm stay the
-    # documented follow-up (docs/stdlib-value.md).
+    # py, ts, and rs are all shipped now: item 368 made the module two-tier (py +
+    # ts, the wire tiers), and item 391 / #106 added the rs tier — every accessor
+    # walks a `serde_json::Value` boxed in `cordis::Value` (as stdlib/json.rvl
+    # boxes) so a self-hosted emitter reads a json_parse'd backend-IR document in
+    # pure revl when COMPILED TO RUST (native `compile_to`, #98 Stage 4). go/java/
+    # wasm stay the documented follow-up (docs/stdlib-value.md).
     for e in consumer_ir["externs"]:
-        assert set(e["bodies"]) == {"py", "ts"}, e["name"]
+        assert set(e["bodies"]) == {"py", "ts", "rs"}, e["name"]
     assert consumer_ir["ir_version"] == 3
 
 
