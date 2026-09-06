@@ -165,7 +165,7 @@ was corrected by hand and had drifted back within a day.
 | revl-diff.md | current | 19 |  |
 | revl-metrics.md | current | 16 |  |
 | revl-profile.md | current | 15 |  |
-| router.md | stale-fixed | 5 |  |
+| router.md | stale-fixed | 10 |  |
 | scaffold.md | needs-work | 2 |  |
 | schedule-testing.md | needs-work | 0 |  |
 | seam-deadlines.md | needs-work | 15 |  |

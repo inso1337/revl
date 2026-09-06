@@ -154,3 +154,46 @@ out of scope for this item and are recorded here so they are not re-derived:
 Nothing here needed a new primitive: spawn, named/local realms, the reactive
 coeffect, and per-realm committed-view resolution were all already in the
 runtime, item 161 packages them.
+
+---
+
+## 5. Interposition today, and the `routes` trap (item 424 gap (b), slice B1)
+
+Item 424 gap (b) asks whether a third party can *observe* calls across a
+provision edge without forking the provider — DSH's `tools/pre-execute` hook,
+in revl's terms. The full answer (a `seam` composition row) is slice B2 and
+needs the row table of item 426; this slice records what revl admits **today**,
+measured on the runtime, so B2 does not inherit a trap.
+
+**The sanctioned pattern is a distinct-key wrapper.** The inner provider is
+keyed `inner_db`, and a `Seam` component takes the key `db` the consumer
+requires and forwards to `inner_db`, recording each call on the way through.
+Every consumer of `db` is covered with no source change of its own (G2 gives one
+provider per key), and G4 keeps the interposition honest: a seam cannot observe
+*with effect* unless the wrapped service declares the bound, so `Db.execute` is
+declared `emission[wire, audit, inner_db]` and the operator, not the middleware,
+mints that authority. `examples/interpose_observe.rvl` is the worked pattern,
+executed as a `lifecycle test` (the observation is asserted, then the
+composition reverts with no residue).
+
+**Its cost is a re-key in the provider's own source.** The wrapper only sits in
+front because the provider was renamed from `db` to `inner_db` **in the source
+the third party does not own**. Inserting the wrapper is therefore a fork by
+another name — exactly 424(b)'s "a third party has no place to stand". Removing
+that cost is what slice B2's `seam` row is for.
+
+**The tempting same-key shape compiles, admits — and never runs.** Interposing
+*without* re-keying is expressible through the item-162 multi-realm bind used as
+a one-element route: the inner provider writes `isolate db in realm("inner")`
+and the seam writes `isolate db in realms("inner")`, requiring `db` in the inner
+realm and providing `db` in the parent realm. Consumers are untouched, G2 holds
+per `(key, realm)`, and it passes G4. But a component carrying a `routes` entry
+is realized by the driver as a `_Router` proxy and **never plugged as a fiber**
+(the `if comp.get("routes"): self._install_router(...)` guard in `_load`, for
+the PENDING reason of §2's "Why the driver, not the emitted body"). So the
+seam's provide body — which *is* the whole interception — is silently discarded:
+`db.execute` reaches the inner provider directly and the seam's `audit.record`
+never fires. `tests/test_interposition_b1.py` pins this as an executed fact
+(`audit.seen() == 0` across the routed edge), so the day a seam implementation
+runs its body, the test flips and forces the change to be acknowledged rather
+than riding the `routes` path by accident.

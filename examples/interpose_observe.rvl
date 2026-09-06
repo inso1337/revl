@@ -1,0 +1,74 @@
+// The SANCTIONED interposition pattern today (item 424 gap (b), slice B1;
+// docs/design/424-dsh-language-gaps.md §2.2, §2.6).
+//
+// A DSH plugin registers on `tools/pre-execute` and thereby observes every
+// tool call. revl has no hook table for a third party to grab, and by its
+// lights that registration is an undeclared authority grab. What revl DOES
+// admit today is a distinct-key wrapper: the inner provider is keyed
+// `inner_db`, and a `Seam` component takes the key `db` the consumer requires
+// and forwards to `inner_db`, observing each call on the way through.
+//
+// The cost is in the first line of `Inner`: the provider had to be re-keyed
+// from `db` to `inner_db` IN ITS OWN SOURCE for the seam to sit in front of
+// it. Inserting the wrapper is a source edit to a component the third party
+// does not own — a fork by another name. That cost is exactly what 424(b)'s
+// slice B2 (`seam` as a composition row) removes; this example pins the
+// today-behaviour that motivates it, executed rather than recalled.
+//
+// G4 makes the crux explicit: a seam cannot observe WITH EFFECT unless the
+// wrapped SERVICE declares the bound, so `Db.execute` is declared
+// `emission[wire, audit, inner_db]` — the operator, not the middleware, mints
+// that authority here.
+
+service Db {
+  emission[wire, audit, inner_db] fn execute(q: Str) -> Str
+}
+
+service Audit {
+  emission[log_line] fn record(line: Str)
+  fn seen() -> Int
+}
+
+extern emission fn wire(q: Str) -> Str = @py { return "row" }
+extern emission fn log_line(s: Str)    = @py { pass }
+
+component Inner provides inner_db: Db {
+  provide inner_db { fn execute(q) = emit wire(q) }
+}
+
+component AuditSink provides audit: Audit {
+  let log = effect Map.new() undo log.drop()
+
+  provide audit {
+    fn record(line) {
+      effect log.insert(line, "seen")
+      undo   log.remove(line)
+      emit log_line(line)
+    }
+    fn seen() = log.size()
+  }
+}
+
+component Seam requires inner_db: Db, audit: Audit provides db: Db {
+  provide db {
+    fn execute(q) {
+      let r = emit inner_db.execute(q)
+      emit audit.record(q)
+      return r
+    }
+  }
+}
+
+lifecycle test "a distinct-key wrapper observes the call" {
+  load Inner
+  load AuditSink
+  load Seam
+  let r = call db.execute("select 1")
+  assert r == "row"
+  let n = call audit.seen()
+  assert n == 1
+  unload Seam
+  unload AuditSink
+  unload Inner
+  assert no_residue
+}
