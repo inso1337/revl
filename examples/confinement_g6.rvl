@@ -1,0 +1,23 @@
+// G6 confinement (issue 276, the differential `C` row). DESIGN.md pillar 3:
+// everything a component reaches, it reaches through a declared capability.
+//
+// `ConfinedWriter` reaches ONLY through its two declared require keys, so
+// every reconstructed statement head is inside the declared context and the
+// oracle's confinement row scores `confined=ok`. The effect crosses TWO
+// declared keys in a single statement (`store.put` in the acquire, `clock.now`
+// nested as its argument), which exercises the non-lossy head reconstruction
+// the row rests on: the pre-276 exporter kept only the first head and would
+// have dropped `clock.now` from the reach surface entirely.
+
+service Store {
+  fn put(k: Int, v: Int)
+  fn drop(k: Int)
+}
+
+service Clock {
+  fn now() -> Int
+}
+
+component ConfinedWriter requires store: Store, clock: Clock {
+  effect store.put(1, clock.now()) undo store.drop(1)
+}

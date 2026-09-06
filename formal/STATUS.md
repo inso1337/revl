@@ -50,7 +50,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G3** acyclic dependencies | full | 9 | **yes** (V rows, 1 agree-G3) | the layering certificate is *derived* from `LinkOK`, so nothing is assumed. No known gap |
 | **G4** inverse-or-emit | full over the lattice; the shape-level statement is weak and marked | 2 + 7 | **yes** (182 G rows, 25 P rows, 6 agree-G4) | `G4.inverse_or_emit` is shape-level and superseded. For the lattice form: the reach fold's **fuel bound** is real and named (`fold_must_run_to_stability`), `FnDecl.calls` stands in for `_calls_in` (an empirical obligation on the lowering), first-class dispatch is `*`, and `inverseOK` reads `undo` only where the reference walks `compensate` too. **Unbuilt work**, not modelling limits |
 | **G5** teardown registers nothing | full over the lattice; the shape-level statement is **contentless** and registered as a finding | 2 + 14 | no | `G5.teardown_registers_nothing` is true by definition (`registrations` is constant zero) and says so in the registry. `G5Classified` carries the real count, including two operational runs. **Gap: no oracle row** — the lattice model is checked against the paper, not the checker |
-| **G6** purity outside effect forms | partial | 2 | no | content is the shape of `TypedIn`/`ReachIn`; the derived form (reach computed from program text) exists only inside `CapCeilings.derived_confinement_within_ceiling`. **Unbuilt work** |
+| **G6** purity outside effect forms | full at head granularity; the shape-level statement is the content of `TypedIn`/`ReachIn` | 3 | **yes** (596 C rows) | the row reconstructs each lowered statement from its exported heads (`Oracle.exprOfHeads`, proved non-lossy by `heads_exprOfHeads`) and decides `∀ k ∈ stmtHeads s, k ∈ C` with `confinedB` (`confinedB_iff`), against a declared context of the component's require locals (M) plus its require-held binding roots (K). The reference computes the same head-roots membership independently from the TSV, and the two agree on all 596 statements. A leak is a `fail` on both sides, so the row bites without an admitted violation to point at (the checker refuses those at parse); `confinement_coverage` fails the gate unless the corpus carries both a confined statement over a non-empty reach and a caught violation (281 today), and `g6_row_not_vacuous` proves the verdict flips when a leaking head is accepted. Still not under the row: the derived form (reach computed from program text) lives only in `CapCeilings.derived_confinement_within_ceiling`, and host builtins and let-bound locals count as reach, so a component using them is a faithful `fail` rather than a claim it is unsafe |
 | **G7** derived LIFO teardown | full for *which* entries run, in *what order*, under *which verdict* — including the E-Stop | 32 + 7 | **yes** (267 D rows) | the row RUNS `backends/python/runtime.py` over an enumerated scenario corpus and diffs the reference's observed disposition against the model's predicted one, with a coverage ratchet (`teardown_coverage`) that fails the gate if the corpus stops distinguishing LIFO from FIFO, Phase 2 from Phase 1, or the three dispositions from one another. Still deliberately not modelled, and so not under the row: Phase-1 continue-and-record and its residue severities, the Phase-2 budget, escrow under a pending session verdict (item 245), cascading abort. This model says which entries run, **not what happens when one of them fails**. The cordis LIFO unwind of the activation-body stack is supplied by the harness, not observed — only `drain`'s own `reversed` loop (item 369) is revl's own ordering code. **Modelling limit, scoped on purpose** |
 | **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 8 | no | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. **Gap: no oracle row**; the harness's `methodBoundOK` is a private restatement, not the model |
 | **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
@@ -256,6 +256,7 @@ Three summary readings of that map:
 | `RevL.G4.g4_shape_not_vacuous` | G4, non-vacuity (step 8) | **proved** | none | both conclusion branches inhabited, and the `raw` branch shown to close because `Typed` lacks a constructor |
 | `RevL.G5.registrations_ignores_its_argument` | G5, the FINDING (step 8) | **proved** | none | the review's constant-function probe, proved, plus an undo body that calls an emission and still scores zero |
 | `RevL.G6.g6_not_vacuous` | G6, non-vacuity (step 8) | **proved** | `propext, Classical.choice, Quot.sound` | an admitted statement with a non-empty reach surface, and a refused one |
+| `RevL.G6.g6_row_not_vacuous` | G6, oracle C row non-vacuity (issue 276) | **proved** | `propext, Classical.choice, Quot.sound` | the confinement check refuses `leakStmt`'s undeclared head and accepts it once the context is extended, so the differential C row's verdict is mutation-sensitive |
 | `RevL.G8.g8_marker_level_not_vacuous` | G8, non-vacuity (step 8) | **proved** | `propext, Quot.sound` | a typed body with a non-empty surface, beside the `effect` whose surface is empty by definition |
 | `RevL.CrossTier.cross_tier_agreement` | item 133 — cross-tier agreement | **proved** | `propext` | any two `Conformant` profiles lower a `WellAnnotated` IR to the same `Value` |
 | `RevL.CrossTier.six_tier_agreement` | item 133 — the six backends | **proved** | `propext` | the corollary over the six-element `Tier` |
@@ -772,6 +773,22 @@ Verdicts:
   neither order is a claim the other makes; the ordered LIFO claim is
   G7's and the D row checks it ordered. `reported` is compared only under
   `outcome = rolledBack`, the model's own scope.
+- **C rows (per lowered statement, G6, issue 276)**: `Oracle.confinedB` over
+  `RevL.Typing.stmtHeads` of the statement reconstructed from its exported
+  heads (`exprOfHeads`, non-lossy by `heads_exprOfHeads`), against the
+  component's declared context (its require locals from M plus its
+  require-held binding roots from K). `confinedB_iff` proves the printed Bool
+  is exactly `∀ k ∈ stmtHeads s, k ∈ C`, the surface `RevL.G6.confinement`
+  quantifies over. The reference computes the same head-roots membership
+  independently from the TSV. Every exported statement is from an admitted
+  component, so a leak never appears as an admitted violation (the checker
+  refuses those at parse, hence the G6 fixtures carry no I rows); the row is
+  kept honest instead by `confinement_coverage`, which fails the gate unless
+  the corpus carries both a confined statement over a non-empty reach and a
+  caught violation, and by `g6_row_not_vacuous`, which proves the verdict
+  flips when a leaking head is accepted. Host builtins and let-bound locals
+  count as reach, so a component that uses them is a faithful `fail`, not a
+  claim it is unsafe.
 
 ### The G7 row, and what it is evidence of
 
