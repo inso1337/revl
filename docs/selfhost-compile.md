@@ -123,6 +123,37 @@ What remains is not the self-hosting question. It is native-tier runtime
 roadmap items 283/284) and per-tier **run** coverage. The self-compile of the
 covered surface is settled on py and rust.
 
+## Compiling `emit_rust.rvl` itself to rust (native `compile_to` Stage 4, #106/#98)
+
+Running the rust emitter when it is COMPILED TO RUST (not just producing rust from
+the py-hosted emitter) needs every host-formatting extern in `selfhost/emit_rust.rvl`
+to carry an `@rs` body. All six now do: `newline`/`mangle`/`snake`/`camel` landed
+first, and `string_lit`/`num_str` are now ported too. The `Any`-typed pair recovers
+the erased value the way the whole rust tier does, a boxed `serde_json::Value`
+reached through `v.downcast::<serde_json::Value>()` (the `stdlib/value.rvl` /
+`stdlib/json.rvl` model). `num_str`'s float path is a shortest-round-trip formatter
+that reproduces Python's `repr(float)` (fixed vs scientific by the same decimal-point
+rule, trailing `.0` on whole-valued fixed forms); it and `string_lit`'s non-ASCII
+branch carry the same cross-tier caveat `json.rvl` already documents for floats.
+
+The one required emitter change is the concrete-to-`Any` boxing coercion at the call
+site (`backends/rust/emit.py::_coerce_any_arg`): a concrete `Str`/`Int`/`Int32`/
+`Float`/`Bool` argument flowing into an `Any`/`Value` parameter is wrapped as
+`Value::new(serde_json::Value::from(..))`, which the many `string_lit(<Str>)` /
+`num_str(<Int>)` call sites in this file need to typecheck against `fn f(v: Value)`.
+
+Stage 4 is not yet fully reachable. With `stdlib/value.rvl`'s `@rs` accessors present
+(the wave that carries them), `emit_rust.rvl` EMITS to rust with zero externs missing
+an `@rs` body, but the emitted crate does not yet `cargo build`: the residual blockers
+are all in OTHER self-host functions, not the escapers or the coercion. They are
+(1) `List[Any]`/`Vec<Value>` ergonomics (`.length()` on a `Vec<Value>` fails the
+`RevlListOps` `T: PartialEq` bound, since `cordis::Value` is not `PartialEq`; a
+`Vec<Value>` passed to an `Any` parameter is the list case the scalar coercion
+deliberately excludes) and (2) coercion misses where the v3 emitter cannot yet infer
+that an argument is a scalar (for example `let joined = fmt.join("")`, whose method-
+call return type `_v3_infer_type` does not track). These are separate rust-backend
+emit gaps, tracked for a later slice.
+
 ## Files
 
 - `selfhost/compile.rvl`: the fully-native driver (`compile_to`, `admit`, the

@@ -383,6 +383,60 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     return rendered
 
 
+# The concrete surface types that erase to a distinct Rust value (`String`,
+# `i64`, `i32`, `f64`, `bool`) and so must be BOXED when they flow into an
+# `Any`/`Value` parameter slot (`fn f(v: Value)`). A `Bytes`, list, record, ADT,
+# `Opt`, or already-erased `Any`/`Value` argument is out of this bounded fix:
+# the first three have no single canonical serde_json scalar image, and the last
+# is already a `Value`.
+_ANY_BOXABLE = frozenset(("Str", "Int", "Int32", "Float", "Bool"))
+
+
+def _coerce_any_arg(arg_node: object, rendered: str, param_type: object,
+                    ctx: "_V3Ctx") -> str:
+    """Box a concrete scalar argument that flows into an `Any`/`Value` parameter.
+
+    `Any` (and the `Value` alias) erase to `cordis::Value`, the type-erased box
+    the whole rust tier speaks (`stdlib/value.rvl`, `stdlib/json.rvl`): a boxed
+    `serde_json::Value` recovered with `v.downcast::<serde_json::Value>()`. A
+    concrete `String`/`i64`/`i32`/`f64`/`bool` argument does NOT implement
+    `Into<Value>`, so `f(String::from("x"))` against `fn f(v: Value)` fails to
+    compile. Wrap it into the SAME representation the callee will recover:
+    `Value::new(serde_json::Value::from(<arg>))`. `serde_json::Value` has a
+    `From` for each of these scalars (a non-finite `f64` maps to `Null`, which no
+    finite source literal produces), so one uniform wrap covers every case.
+
+    Bounded and precise: it fires ONLY when the callee's declared parameter erases
+    to the opaque `Value` AND the argument's surface type is a known concrete
+    scalar. An argument already typed `Any`/`Value` (e.g. a `value_field(..)`
+    result threaded straight through) infers as `Value` and is left untouched, so
+    the common pass-through never double-boxes.
+    """
+    if not isinstance(param_type, str):
+        return rendered
+    # A function-typed parameter (`(Str) -> Str`, or one nested in a container)
+    # never erases to `Value`, and `_rust_type` REFUSES it in the escaping value
+    # position `_coerce_any_arg` would query — so it must never be asked. The
+    # concrete-scalar `arg_ty` gate below is also the cheaper check, so run it
+    # first: a fn-value argument infers as a non-scalar and is filtered before
+    # `_rust_type` is ever reached.
+    if _is_fn_type(param_type):
+        return rendered
+    arg_ty = _v3_infer_type(arg_node, ctx)
+    if arg_ty not in _ANY_BOXABLE:
+        return rendered
+    try:
+        erased = _rust_type(param_type, ctx.types)
+    except EmitError:
+        # A container type carrying a nested function type (`List[(Int) -> Int]`)
+        # is refused here too; it is not the opaque `Value`, so leave the
+        # argument untouched rather than let the probe abort the emit.
+        return rendered
+    if erased != "Value":
+        return rendered
+    return f"Value::new(serde_json::Value::from({rendered}))"
+
+
 def _borrow_str_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     """Render an argument bound for a borrowed `&str` callee parameter (item 282).
 
@@ -4784,6 +4838,21 @@ class _V3Ctx:
         }
         for ext in externs or []:
             self.fn_returns.setdefault(ext.get("name"), ext.get("returns"))
+        # Free function / extern name -> its declared parameter surface types, so
+        # a call site can tell which argument slots erase to the opaque
+        # `cordis::Value` (an `Any`/`Value` parameter). A concrete scalar flowing
+        # into such a slot must be BOXED there (`_coerce_any_arg`): the callee's
+        # body recovers it through the serde_json value model the whole rust tier
+        # shares (stdlib/value.rvl, stdlib/json.rvl), so passing a bare `String`/
+        # `i64`/`f64`/`bool` would not even typecheck against `fn f(v: Value)`.
+        self.fn_param_types: dict[str, list] = {
+            fn.get("name"): [p.get("type") for p in (fn.get("params") or [])]
+            for fn in functions or []
+        }
+        for ext in externs or []:
+            self.fn_param_types.setdefault(
+                ext.get("name"),
+                [p.get("type") for p in (ext.get("params") or [])])
         # target component name -> whether it declares a typed config struct.
         # A `spawn` acquisition uses this to build the plug-time config value:
         # `<Comp>Config { .. }` when the template has config fields, else `()`.
@@ -5273,10 +5342,16 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             # a clone (item 282), so its whole string is never copied at the call.
             borrow = ctx.fn_borrow.get(callee_name, frozenset())
             list_borrow = ctx.fn_list_borrow.get(callee_name, frozenset())
+            # Declared parameter surface types, so a concrete scalar reaching an
+            # `Any`/`Value` slot is boxed (`_coerce_any_arg`). A borrowed `&str`
+            # slot (item 282) is never an `Any` slot, so the two never overlap.
+            param_types = ctx.fn_param_types.get(callee_name, [])
             bv_args = [
                 _borrow_str_arg(a, r, ctx) if idx in borrow
                 else _borrow_list_arg(a, r, ctx) if idx in list_borrow
-                else _by_value_arg(a, r, ctx)
+                else _coerce_any_arg(
+                    a, _by_value_arg(a, r, ctx),
+                    param_types[idx] if idx < len(param_types) else None, ctx)
                 for idx, (a, r) in enumerate(zip(node.get("args") or [], arg_exprs))
             ]
             # item 277: a viewed callee takes its `&[char]` companions last.
