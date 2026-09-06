@@ -64,27 +64,29 @@ func TestV3Interp(t *testing.T) {
 }
 
 func TestV3Opt(t *testing.T) {
+	// Opt is a two-value struct (item 434 (d)): Some is {Value, Ok:true}, None
+	// is the zero value (Ok:false); discriminate on `.Ok`, never a type switch.
 	// optfield reads through a value and short-circuits on None.
-	some := optName(RevlSome[Row]{Value: Row{Id: 1, Name: "ada"}})
-	if s, ok := some.(RevlSome[string]); !ok || s.Value != "ada" {
+	some := optName(RevlOpt[Row]{Value: Row{Id: 1, Name: "ada"}, Ok: true})
+	if !some.Ok || some.Value != "ada" {
 		t.Fatalf("optName(Some) = %#v", some)
 	}
-	if _, ok := optName(RevlNone[Row]{}).(RevlNone[string]); !ok {
+	if optName(RevlOpt[Row]{}).Ok {
 		t.Fatalf("optName(None) should be None")
 	}
 	// optcall
-	code := optCode(RevlSome[string]{Value: "A"})
-	if c, ok := code.(RevlSome[int64]); !ok || c.Value != 65 {
+	code := optCode(RevlOpt[string]{Value: "A", Ok: true})
+	if !code.Ok || code.Value != 65 {
 		t.Fatalf("optCode(Some) = %#v", code)
 	}
-	if _, ok := optCode(RevlNone[string]{}).(RevlNone[int64]); !ok {
+	if optCode(RevlOpt[string]{}).Ok {
 		t.Fatalf("optCode(None) should be None")
 	}
 	// Some/None match
-	if got := unwrapOr(RevlSome[int64]{Value: 7}, 99); got != 7 {
+	if got := unwrapOr(RevlOpt[int64]{Value: 7, Ok: true}, 99); got != 7 {
 		t.Fatalf("unwrapOr(Some) = %d, want 7", got)
 	}
-	if got := unwrapOr(RevlNone[int64]{}, 99); got != 99 {
+	if got := unwrapOr(RevlOpt[int64]{}, 99); got != 99 {
 		t.Fatalf("unwrapOr(None) = %d, want 99", got)
 	}
 }

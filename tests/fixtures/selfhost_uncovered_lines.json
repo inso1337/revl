@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 4057,
+      "statements": 4110,
       "uncovered": {
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
@@ -230,7 +230,7 @@
           "_emit_v3_go_types": 2
         },
         "Remaining scalar-wildcard payload binding is compatibility IR: source wildcard arms do not introduce that bind. Other residuals lower explicitly deferred Opt/Result cases or reject an unknown case. Scalar wildcard-only and fresh user-constructor scrutinees are now repaired and covered.": {
-          "_go_v3_match": 12
+          "_go_v3_match": 10
         },
         "Remaining statements emit destructive stdlib self-rebinds, optimized code-point scans, or reject an unknown step. Their prerequisite builtin families are deferred; ordinary assignments, loops and accumulator builders are not excluded.": {
           "_go_v3_stmt": 12
@@ -245,6 +245,9 @@
           "_spawn_expr": 9,
           "_spawn_targets": 5,
           "_uses_spawn": 1
+        },
+        "The non-boxing Opt[T] match discriminator (item 434(d), #114): `_go_v3_match_opt` renders the `.Ok` if/else for a v3 Opt match; the go v3 module byte-agreement corpus has no Opt-match program, so the oracle never enters it. Reachable in principle, not exercised by the corpus.": {
+          "_go_v3_match_opt": 54
         },
         "emit calls this Secret-marking scan only after the pure-module early return, to select component record/WAL redaction. The corpus already exercises a pure extern Secret return, but service secret parameters, config secrets and secret_witness descriptors remain a separate roadmap 421F6 runtime/redaction gap; pure wrapping is not evidence of runtime parity.": {
           "_declares_secret": 16
@@ -265,7 +268,7 @@
           "_needs_sync": 1
         }
       },
-      "uncovered_statements": 2885
+      "uncovered_statements": 2937
     },
     "java": {
       "statements": 2551,
@@ -765,7 +768,7 @@
       "uncovered_statements": 627
     },
     "rust": {
-      "statements": 3189,
+      "statements": 3240,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and stream refusal. Those require the live plugin/frame runtime that the self-host component slice explicitly marks DEFER.": {
           "_emit_step": 95,
@@ -1663,7 +1666,7 @@
       "uncovered_statements": 94
     },
     "rust": {
-      "statements": 1872,
+      "statements": 1966,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "component_uses_await": 1,
@@ -1750,7 +1753,7 @@
           "v3_infer_type": 3
         }
       },
-      "uncovered_statements": 139
+      "uncovered_statements": 142
     },
     "ts": {
       "statements": 2086,

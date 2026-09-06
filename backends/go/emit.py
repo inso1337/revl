@@ -3617,7 +3617,9 @@ func (m *Map[V]) Keys() []string {
 #   * user ADTs/enums    -> a sealed-interface + case-struct tagging, and
 #                           `match` -> a Go type switch (mirrors the JAVA tier's
 #                           sealed variants; Go has no native sum type)
-#   * built-in Opt/Result-> generic sealed interfaces RevlOpt[T]/RevlResult[T,E]
+#   * built-in Opt      -> a two-value struct RevlOpt[T]{Value; Ok} (item 434
+#                          (d): no heap box for an escaping Opt); match on `.Ok`
+#   * built-in Result   -> a generic sealed interface RevlResult[T,E]
 #   * stdlib builtins    -> typed helpers, generics for the List overloads
 #   * `test` blocks      -> func TestXxx(t *testing.T) asserting computed values
 #
@@ -4087,14 +4089,16 @@ def _v3_has_any(surface) -> bool:
 
 
 def _go_v3_is_interface(surface, types) -> bool:
-    """Whether a revl surface type lowers to a Go *interface* on this tier.
+    """Whether a revl surface type needs discriminated `match` handling here.
 
-    The sealed sum types do: Opt[T] -> RevlOpt (interface), Result[T,E] ->
-    RevlResult (interface), and a declared user variant -> its `is<Name>()`
-    interface. Records, lists, maps and scalars lower to concrete Go types.
-    A type-switch (`x.(type)`) is only legal on an interface, and a value that
-    flows into a match must be stored in its interface type for the switch to
-    both compile and discriminate — item 280.
+    True for the sum types whose `match` is more than a wildcard: Result[T,E]
+    -> RevlResult (a sealed interface, type-switched) and a declared user
+    variant -> its `is<Name>()` interface. Opt[T] is included even though it is
+    now a two-value STRUCT rather than an interface (item 434 (d)): its match
+    discriminates on `.Ok` (`_go_v3_match_opt`), so it must NOT be routed to the
+    concrete-scrutinee wildcard shortcut, and its `let` binding holds the
+    declared `RevlOpt[T]` type rather than an inferred case shape (item 280).
+    Records, lists, maps and scalars lower to plain concrete Go values.
     """
     if not isinstance(surface, str):
         return False
@@ -4138,8 +4142,8 @@ def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected,
 
     `arg_nodes` are the unrendered argument expressions, used to recover the
     concrete element type of a built-in `Some`/`Ok`/`Err` when no expected
-    Opt/Result type pins it — so `Some(7)` is `RevlSome[int64]`, not the
-    `RevlSome[any]` that later defeats a type-switch (item 280)."""
+    Opt/Result type pins it — so `Some(7)` is `RevlOpt[int64]{..}`, not the
+    `RevlOpt[any]` that later defeats a structural equality (item 280/302)."""
     adt = ctx.case_adt.get(case)
     if adt is not None:
         # user variant (monomorphic): `<Variant><Case>{...}`
@@ -4168,8 +4172,9 @@ def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected,
         if case == "None":
             if arg_renders:
                 raise EmitError("`None` takes no arguments")
-            return f"RevlNone[{got}]{{}}"
-        return f"RevlSome[{got}]{{Value: {arg_renders[0]}}}"
+            # item 434 (d): the zero value of the two-value struct (Ok false).
+            return f"RevlOpt[{got}]{{}}"
+        return f"RevlOpt[{got}]{{Value: {arg_renders[0]}, Ok: true}}"
     if case in ("Ok", "Err"):
         if exp.startswith("Result[") and exp.endswith("]"):
             ok, err = _v3_split_generic(exp[7:-1])
@@ -4253,9 +4258,9 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
                 # value-level sibling of 280). revlEq is reflect.DeepEqual,
                 # which is FALSE across two different generic instantiations:
                 # a bare `Err("")` / `None` / `[]` erases to
-                # RevlErr[any, string] / RevlNone[any] / []any, and DeepEqual
+                # RevlErr[any, string] / RevlOpt[any] / []any, and DeepEqual
                 # against the other side's concrete RevlErr[int64, string] /
-                # RevlNone[string] / []string reports unequal even though the
+                # RevlOpt[string] / []string reports unequal even though the
                 # values match on py. Pin BOTH sides to whichever operand type
                 # is fully concrete (no `any`), so equal values emit as the
                 # identical Go type. A construction/empty-list renderer only
@@ -4741,6 +4746,83 @@ def _go_v3_optchain(node, ctx: _V3GoCtx, *, field=None, method=None, args=None):
             f"{{ return {body} }})")
 
 
+def _go_v3_match_opt(node, ctx: _V3GoCtx, expected, scrut_node, opt_inner,
+                     exp_t) -> str:
+    """A `match` over an Opt scrutinee on the two-value struct (item 434 (d)).
+
+    Opt is `struct { Value T; Ok bool }`, so the match discriminates on `.Ok`
+    in an if/else instead of a type switch — the go mirror of the component
+    tier's `(T, bool)` tuple match. A `Some` arm binds `_m.Value`; a `None`
+    arm has no payload; a wildcard `_` binds the whole Opt and covers whichever
+    arm is absent."""
+    arms = node.get("arms") or []
+    some_arm = next((a for a in arms if a.get("pattern") == "Some"), None)
+    none_arm = next((a for a in arms if a.get("pattern") == "None"), None)
+    wild = next((a for a in arms if a.get("pattern") == "_"), None)
+    st = f"Opt[{opt_inner}]"
+    scrutinee = _go_v3_expr(scrut_node, ctx)
+    lines = [f"func() {exp_t} {{"]
+    lines.append(f"\t_m := {scrutinee}")
+
+    # A wildcard is the ONLY arm: no discrimination, evaluate its body once.
+    if some_arm is None and none_arm is None and wild is not None:
+        wbind = wild.get("bind")
+        if wbind and wbind != "_":
+            ctx.var_types[wbind] = st
+            gobind = _v3_ident(wbind, "match bind")
+            lines.append(f"\t{gobind} := _m")
+            lines.append(f"\t_ = {gobind}")
+        else:
+            lines.append("\t_ = _m")
+        lines.append(f"\treturn {_go_v3_expr(wild.get('body'), ctx, expected)}")
+        lines.append("}()")
+        return "\n".join(lines)
+
+    # The present (Some) side.
+    lines.append("\tif _m.Ok {")
+    if some_arm is not None:
+        bind = some_arm.get("bind")
+        if bind and bind != "_":
+            ctx.var_types[bind] = opt_inner
+            gobind = _v3_ident(bind, "match bind")
+            lines.append(f"\t\t{gobind} := _m.Value")
+            lines.append(f"\t\t_ = {gobind}")
+        else:
+            lines.append("\t\t_ = _m.Value")
+        lines.append(f"\t\treturn {_go_v3_expr(some_arm.get('body'), ctx, expected)}")
+    elif wild is not None:
+        wbind = wild.get("bind")
+        if wbind and wbind != "_":
+            ctx.var_types[wbind] = st
+            gobind = _v3_ident(wbind, "match bind")
+            lines.append(f"\t\t{gobind} := _m")
+            lines.append(f"\t\t_ = {gobind}")
+        else:
+            lines.append("\t\t_ = _m")
+        lines.append(f"\t\treturn {_go_v3_expr(wild.get('body'), ctx, expected)}")
+    else:
+        lines.append('\t\tpanic("unreachable: non-exhaustive match")')
+    lines.append("\t}")
+
+    # The absent (None) side.
+    if none_arm is not None:
+        lines.append(f"\treturn {_go_v3_expr(none_arm.get('body'), ctx, expected)}")
+    elif wild is not None:
+        wbind = wild.get("bind")
+        if wbind and wbind != "_":
+            ctx.var_types[wbind] = st
+            gobind = _v3_ident(wbind, "match bind")
+            lines.append(f"\t{gobind} := _m")
+            lines.append(f"\t_ = {gobind}")
+        else:
+            lines.append("\t_ = _m")
+        lines.append(f"\treturn {_go_v3_expr(wild.get('body'), ctx, expected)}")
+    else:
+        lines.append('\tpanic("unreachable: non-exhaustive match")')
+    lines.append("}()")
+    return "\n".join(lines)
+
+
 def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     scrut_node = node.get("scrutinee")
     scrutinee = _go_v3_expr(scrut_node, ctx)
@@ -4784,6 +4866,12 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     if is_result:
         res_ok, res_err = _v3_split_generic(st[7:-1])
 
+    if is_opt:
+        # item 434 (d): Opt is a two-value struct, not a sealed interface, so
+        # the match discriminates on `.Ok` in an if/else rather than a type
+        # switch (the (T, bool) shape the component tier's tuple match uses).
+        return _go_v3_match_opt(node, ctx, expected, scrut_node, opt_inner, exp_t)
+
     lines = [f"func() {exp_t} {{"]
     # item 313: a scrutinee that is not a bare identifier — an Opt/Result
     # CONSTRUCTOR LITERAL such as `match Ok(1) { .. }` — renders to a composite
@@ -4814,12 +4902,9 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
             lines.append(f"\t\treturn {body}")
             continue
         # determine the case struct type and the bound payload's surface type
-        if is_opt:
-            got = _go_v3_type(opt_inner, ctx.types)
-            case_type = (f"RevlSome[{got}]" if pattern == "Some"
-                         else f"RevlNone[{got}]")
-            payload_surface = opt_inner if pattern == "Some" else None
-        elif is_result:
+        # (Opt returned early via `_go_v3_match_opt`; here it is a Result or a
+        # user variant, both of which stay sealed-interface type switches).
+        if is_result:
             got_ok = _go_v3_type(res_ok, ctx.types)
             got_err = _go_v3_type(res_err, ctx.types)
             case_type = (f"RevlOk[{got_ok}, {got_err}]" if pattern == "Ok"
@@ -5252,10 +5337,13 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         if go_t in ("int64", "float64"):
             out.append(f"{pad}var {name} {go_t} = {value}")
         elif inferred and _go_v3_is_interface(inferred, ctx.types):
-            # An Opt/Result/variant binding must hold its *interface* type, not
-            # the concrete case struct `:=` would infer (e.g. `RevlSome[int64]`)
+            # A Result/variant binding must hold its *interface* type, not the
+            # concrete case struct `:=` would infer (e.g. `RevlOk[int64, any]`)
             # — otherwise a later `match` type-switch on it is a Go compile
             # error ("not an interface") and never discriminates (item 280).
+            # Opt is a struct now (item 434 (d)) so `:=` would already infer the
+            # right `RevlOpt[T]`, but pinning the declared type is still correct
+            # and keeps a bare `None` binding well-typed.
             out.append(f"{pad}var {name} {go_t} = {value}")
         else:
             out.append(f"{pad}{name} := {value}")
@@ -6805,26 +6893,27 @@ func StreamReset() {
 # helper here is an ordinary package-level declaration — Go never errors on an
 # unused func/type, only on unused imports (which is why the group flags gate
 # the `import` block, not the helpers).
-_V3_OPT_PREAMBLE = '''// ---- built-in Opt as a generic sealed interface -----------------------
-type RevlOpt[T any] interface{ isRevlOpt() }
-type RevlSome[T any] struct{ Value T }
-
-func (RevlSome[T]) isRevlOpt() {}
-
-type RevlNone[T any] struct{}
-
-func (RevlNone[T]) isRevlOpt() {}
+_V3_OPT_PREAMBLE = '''// ---- built-in Opt as a two-value struct (item 434 (d)) ----------------
+// A present-flag + value struct, not a sealed interface: a Some carrying a
+// non-pointer payload no longer heap-boxes to satisfy an interface, so an Opt
+// that escapes a function or lands in a collection costs no allocation. `Ok`
+// discriminates; `None` is the zero value (Ok == false), matching the (T, bool)
+// return shape the component (v1/v2) tier already uses.
+type RevlOpt[T any] struct {
+\tValue T
+\tOk    bool
+}
 
 func revlOptMap[A any, B any](o RevlOpt[A], f func(A) B) RevlOpt[B] {
-\tif s, ok := o.(RevlSome[A]); ok {
-\t\treturn RevlSome[B]{Value: f(s.Value)}
+\tif o.Ok {
+\t\treturn RevlOpt[B]{Value: f(o.Value), Ok: true}
 \t}
-\treturn RevlNone[B]{}
+\treturn RevlOpt[B]{}
 }
 
 func revlOptOr[T any](o RevlOpt[T], d T) T {
-\tif s, ok := o.(RevlSome[T]); ok {
-\t\treturn s.Value
+\tif o.Ok {
+\t\treturn o.Value
 \t}
 \treturn d
 }
@@ -6838,7 +6927,7 @@ func revlOptOr[T any](o RevlOpt[T], d T) T {
 _V3_PARSE_INT_HELPER = '''// ---- Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int) ----------------
 func revlParseInt(s string) RevlOpt[int64] {
 \tif s == "" {
-\t\treturn RevlNone[int64]{}
+\t\treturn RevlOpt[int64]{}
 \t}
 \tneg := false
 \ti := 0
@@ -6846,7 +6935,7 @@ func revlParseInt(s string) RevlOpt[int64] {
 \t\tneg = true
 \t\ti = 1
 \t\tif len(s) == 1 {
-\t\t\treturn RevlNone[int64]{}
+\t\t\treturn RevlOpt[int64]{}
 \t\t}
 \t}
 \tconst lim = uint64(9223372036854775808) // Int.MAX + 1
@@ -6854,23 +6943,23 @@ func revlParseInt(s string) RevlOpt[int64] {
 \tfor ; i < len(s); i++ {
 \t\tc := s[i]
 \t\tif c < '0' || c > '9' {
-\t\t\treturn RevlNone[int64]{}
+\t\t\treturn RevlOpt[int64]{}
 \t\t}
 \t\tn = n*10 + uint64(c-'0')
 \t\tif n > lim {
-\t\t\treturn RevlNone[int64]{}
+\t\t\treturn RevlOpt[int64]{}
 \t\t}
 \t}
 \tif neg {
 \t\tif n == lim {
-\t\t\treturn RevlSome[int64]{Value: -9223372036854775807 - 1}
+\t\t\treturn RevlOpt[int64]{Value: -9223372036854775807 - 1, Ok: true}
 \t\t}
-\t\treturn RevlSome[int64]{Value: -int64(n)}
+\t\treturn RevlOpt[int64]{Value: -int64(n), Ok: true}
 \t}
 \tif n == lim {
-\t\treturn RevlNone[int64]{}
+\t\treturn RevlOpt[int64]{}
 \t}
-\treturn RevlSome[int64]{Value: int64(n)}
+\treturn RevlOpt[int64]{Value: int64(n), Ok: true}
 }
 '''
 
@@ -6897,9 +6986,9 @@ func revlMapSet[K comparable, V any](m map[K]V, k K, v V) map[K]V {
 
 func revlMapGet[K comparable, V any](m map[K]V, k K) RevlOpt[V] {
 	if v, ok := m[k]; ok {
-		return RevlSome[V]{Value: v}
+		return RevlOpt[V]{Value: v, Ok: true}
 	}
-	return RevlNone[V]{}
+	return RevlOpt[V]{}
 }
 
 func revlMapHas[K comparable, V any](m map[K]V, k K) bool {
