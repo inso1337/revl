@@ -600,6 +600,57 @@ Widening native navigation past declarations, or moving diagnostics at all, want
 the self-host front end to carry scopes, parameters, `type` declarations, `pub`
 and `verified` — which is item 391, the same gate slice 3 waits on.
 
+## What the one-file bundling slice landed (as implemented)
+
+Recorded after the fact. Slice 1 delivered A2's honest fallback (the reference as
+a child process against an installed `revl`); the "one distributable file" half
+this note calls slice 0 is where this slice picks up. The PyOxidizer spike
+(issue #102, 2026-09-05) came back a measured no-go — a 67,651,176-byte arm64
+Mach-O with no external Python linkage, but pinned to unsupported Python 3.10 and
+an in-memory importer that omits `__file__`, which Revl's filesystem-backed
+runtime assets require. The path that spike left standing is the current
+PyO3 + current `python-build-standalone` extracted-private-runtime one, and what
+landed here is the RUNTIME-MANAGEMENT contract that path is built on, held apart
+from the interpreter-EMBEDDING mechanics it will layer over.
+
+**What landed** (`crates/revl-lsp/src/runtime.rs`, `engine.rs`): a resolver that,
+when a distributable carries a pinned runtime (an archive via
+`REVL_LSP_RUNTIME_ARCHIVE`, an extracted tree via `REVL_LSP_RUNTIME`, or a
+`runtime/<pin>/` beside the executable), extracts it ATOMICALLY into a VERSIONED
+private cache (`<cache>/revl-lsp/runtime/<pin>/`, one `rename` so no reader sees a
+half-populated `<pin>/`, and two racers settle on whichever rename won) and runs
+the worker under that private interpreter in ISOLATED mode (`-I`), so `revl` is
+imported only from the runtime's own site. `REVL_LSP_PYTHON` still wins over it
+(the oracle's pin); a runtime configured-but-broken fails closed as a visible
+engine diagnostic, never a silent degrade to a `python3` on PATH. The engine's
+`embedding` (`private-runtime` / `system-python`) rides `revl/gateVersion`, so a
+client can tell a self-contained artifact from one leaning on an installed `revl`
+alongside it — the distribution twin of the A3 skew surface.
+
+**What it did NOT buy.** Not Python removal, and not the shipped single file yet.
+Two pieces stay out, on purpose, and both are the interpreter-embedding half this
+slice deliberately does not conflate with runtime management: shipping the pinned
+`python-build-standalone` archive with the crate (a distribution/build step, 338,
+so the resolver is a no-op until a distributable actually carries one — the
+current-PATH behavior stands and nothing in a `cargo` build changes), and the
+in-process PyO3 link (`libpython`, `PyConfig.isolated`,
+`Py_InitializeFromConfig`) that replaces the child process with a linked
+interpreter. Both read the same pin, cache, and isolation this slice fixes.
+
+**The exit check** (`crates/revl-lsp/tests/private_runtime.rs`):
+`a_bundled_runtime_answers_from_a_versioned_private_cache_in_isolated_mode`
+drives the binary with ONLY a bundled runtime archive to reach `revl` (no
+`REVL_LSP_PYTHON`), over a frontier-crossing slice of the corpus, and asserts the
+interpreter landed in the versioned cache, the binary reports the
+`private-runtime` embedding, its `publishDiagnostics` equal the reference
+server's byte for byte, and a second launch reuses the cache rather than
+re-extracting (a sentinel dropped beside the runtime survives). The runtime it
+wraps is a real self-contained interpreter with `revl` in its own site, so the
+extraction, caching and isolation paths are the production ones; only the shipped
+`python-build-standalone` bytes are the deferred piece, which is why the test
+sources its interpreter from `REVL_LSP_TEST_RUNTIME_PYTHON` (or `REVL_LSP_PYTHON`)
+and skips with a stated reason when neither is set — never a hollow green.
+
 ## The honest hard part (consolidated)
 
 Four costs, taken in the open. First, the native-checker half of this item is item
