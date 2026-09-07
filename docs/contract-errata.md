@@ -315,6 +315,56 @@ This goes in the compiler spec, not the runtimes.
   they need none, run in the `frontend` job, and there is now one per
   lowering per tier, four of them for this defect specifically.
 
+- **`Float -> Str` rendering diverged on every tier** (`${aFloat}` in a
+  template), the interpolation-path sibling of the equality divergence above.
+  A `Float` has no canonical `Str` spelling, so each tier rendered its host
+  default and a template that logs or hashes a `Float` was a silent
+  cross-tier difference. Measured before the fix:
+
+  | expression | py | ts | go | rust | java | wasm |
+  |---|---|---|---|---|---|---|
+  | `${1.0e21}` | `1e+21` | `1e+21` | `1e+21` | `1000000000000000000000` | `1.0E21` | refused |
+  | `${0.0/0.0}` (NaN) | `nan` | `NaN` | `NaN` | `NaN` | `NaN` | refused |
+  | `${0.0}` (whole) | `0.0` | `0` | `0` | `0` | `0.0` | refused |
+  | `${(0.0-1.0)*0.0}` (-0.0) | `-0.0` | `0` | `0` | `-0` | `-0.0` | refused |
+
+  Decision (docs/strings.md §"The float-rendering sub-decision"): one canonical
+  `Float -> Str`, the **ECMAScript `Number::toString` shortest-round-trip
+  form** — the same JS-prior tiebreak that settled `==` (above) and `Int / Int`
+  (below). A whole-number float renders `0`/`3` with no trailing `.0`, the
+  exponent form is `1e+21`, non-finites are `NaN`/`Infinity`/`-Infinity`, and
+  **negative zero renders `0`**: the sign is dropped in text even though the
+  value stays IEEE-distinct, which is why this entry and the `wt(-0.0).equals(
+  wt(0.0))` row above (both `true`) are about different surfaces of the same
+  value — one pins how `-0.0` *compares*, this one pins how it *reads*.
+
+  Each tier now spells that one renderer in host syntax: python `_revl_ftoa`,
+  go `revlFtoa`, rust `revl_ftoa`, java `revlFtoa`, emitted with the module and
+  only where a `Float` is actually interpolated (byte-identical modules
+  otherwise). typescript needs none: its `${x}` template *is* ECMAScript
+  `Number::toString`, so reimplementing it would only invite drift. wasm
+  renders the subset it can do byte-exactly through a hand-written
+  `$f64_to_str` — NaN, `+/-Infinity`, and every integer-valued finite with
+  `|x| < 2^63` (whole-number and `-0.0` both to `0`) — and **traps** on the
+  exponent form (`|x| >= 2^63`) and non-integers rather than emit a
+  non-canonical string, the one narrowed piece of remaining WAT work
+  (docs/strings.md §"Remaining wasm WAT work"). There is no second `Float -> Str`
+  surface to converge: `to_str` is typed on `Int` only
+  (`typecheck.py`, `"to_str": ("Int", [], "Str")`), so `Float.to_str()` does
+  not exist and cannot render `3.0` behind the interpolation path's back.
+
+  Pinned the way the equality defect taught: the executed probes
+  (`tests/test_cross_tier_execution.py::test_float_interpolation_is_canonical`,
+  its `_slow` rust/java variant, and the wasm subset/fenced pair) run the
+  render on each real toolchain, and — because those probes run in no
+  toolchain-free job, exactly the `REVL_CROSS_TIER_SLOW`/`vitest` blind spot
+  recorded above — a matching set of STATIC guards
+  (`test_float_interpolation_routes_through_canonical_renderer`, plus the
+  native-template guard for ts) asserts in the `frontend` job that each
+  emitter routes the render through the shared canonical renderer and never
+  back to its host default. One per lowering per tier, the same line of
+  defence, for the sibling divergence.
+
 ## Arithmetic divergences (open, pinned, one root cause)
 
 Found by executing the same source on every tier
