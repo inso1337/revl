@@ -136,10 +136,12 @@ def test_accepted_uname_maps_known_arches_and_rejects_the_rest():
     assert _sb.accepted_uname("linux//v7") is None      # empty arch segment
 
 
-def test_only_the_container_rung_has_a_driver():
+def test_the_driverless_microvm_rung_resolves_to_none():
+    # container (OS boundary) and wasm-cell (in-process cell substrate) both have
+    # drivers; microvm needs a hypervisor and is the one driverless rung, so it
+    # is NOT quietly treated as the rung below it.
     assert _sb.resolve_driver("container") is not None
-    # the other two rungs are NOT quietly treated as the rung below them
-    assert _sb.resolve_driver("wasm-cell") is None
+    assert _sb.resolve_driver("wasm-cell") is not None
     assert _sb.resolve_driver("microvm") is None
 
 
@@ -505,7 +507,7 @@ def test_audit_names_the_enforcement_each_rung_would_get(tmp_path):
 
     lines, err = _placement.sandbox_audit_view(
         ir, {"default_tier": "py",
-             "sandbox": {"Lonely": {"isolation": "wasm-cell"}}})
+             "sandbox": {"Lonely": {"isolation": "microvm", "image": _IMAGE_TAG}}})
     assert err is None
     assert any("enforcement: NONE" in ln and "REFUSES" in ln for ln in lines)
 
