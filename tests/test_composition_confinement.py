@@ -30,17 +30,24 @@ Which of 426 §12's exit tests this file covers:
                                   jail is S6 (distribution) and is noted there.
 
 Exit test 14 (CRITICAL B, the config token) and 16 (the fail-closed panel) are
-the authority panel, S5, and wait on S4 (this) plus 428 F3; 17-18 are
-distribution, S6. None is buildable here.
+the authority panel, S5, and are BUILT below (they wait on this S4 split plus
+the 428 F3 mandatory pin, both now landed). The S5 half of exit test 13 (the
+`--trust-host-code` shape change and the panel's `clean` forfeiture) is built
+below too. 17-18 are distribution, S6, in tests_truc_*.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from revl import AdmissionProfile
+from revl import authority_panel
+from revl.composition import admit_composition, resolve, resolve_file, sole_composition
 from revl.compiler import compile_files
 from revl.errors import RevlError
+from revl.parser import parse_file
 
 # A first-party row: it legitimately declares and reaches its own host body.
 # The base composition and the operator's site layer are first-party (§4.1), so
@@ -271,3 +278,267 @@ def test_first_party_root_reach_is_not_allowlisted():
         sources={b: _BASE_TWO_SERVICES, lay: _LAYER_REACHES_FS},
         profiles={b: None, lay: None})
     assert "LayComp" in {c["name"] for c in doc["components"]}
+
+
+# =========================================================================== #
+# S5 — the authority panel (§8). A composition on disk, folded with layers,
+# read through the panel API. `_panel_project` writes the four kinds of source
+# an S5 test needs: services, a first-party base-row component, an optional
+# host-body layer component, and the base composition + named layers.
+# =========================================================================== #
+
+_SERVICES = """
+service Db      { fn query(q: Str) -> Str }
+service Metrics { fn tick() -> Int }
+"""
+
+_PGDB = """
+use "services.rvl" { }
+component PgDb provides db: Db {
+  config { url: Str, pool: Int = 8 }
+  provide db { fn query(q) = q }
+}
+"""
+
+# A non-first-party layer component that DECLARES a host body: 425 F1's shape.
+_HOST_LOGGER = """
+use "services.rvl" { }
+extern pure fn log_host(t: Str) -> Str = @py { import os; return os.environ.get("HOME", "") }
+component Logger provides metrics: Metrics {
+  provide metrics { fn tick() = 1 }
+}
+"""
+
+# A clean non-first-party layer component: no host body, only composition.
+_CLEAN_LOGGER = """
+use "services.rvl" { }
+component Logger provides metrics: Metrics {
+  provide metrics { fn tick() = 1 }
+}
+"""
+
+_BASE_TMPL = """
+composition Demo {
+  use "services.rvl"
+  row @db from "pgdb.rvl" provides db
+    config { url: "postgres://primary:5432/app", pool: 8 }
+%(clauses)s%(stack)s%(site)s}
+"""
+
+
+def _panel_project(tmp_path: Path, *, db_clauses="    open { url, pool }\n",
+                   stack=(), site=None, components=None, **layers):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "services.rvl").write_text(_SERVICES)
+    (tmp_path / "pgdb.rvl").write_text(_PGDB)
+    for name, text in (components or {}).items():
+        (tmp_path / f"{name}.rvl").write_text(text)
+    (tmp_path / "layers").mkdir(exist_ok=True)
+    for name, text in layers.items():
+        (tmp_path / "layers" / f"{name}.rvl").write_text(text)
+    clauses = "".join(f'  stack "layers/{n}.rvl"\n' for n in stack)
+    site_clause = f'  site "layers/{site}.rvl"\n' if site else ""
+    doc = tmp_path / "base.rvl"
+    doc.write_text(_BASE_TMPL % {"clauses": db_clauses, "stack": clauses,
+                                 "site": site_clause})
+    return doc
+
+
+def _tables(doc: Path, tmp_path: Path):
+    """(base, candidate) resolved row tables — base with no layers, candidate
+    folded."""
+    decl = sole_composition(parse_file(str(doc)), str(doc))
+    base = resolve(decl, str(doc), str(tmp_path))
+    candidate = resolve_file(str(doc), str(tmp_path))
+    return base, candidate
+
+
+# --------------------------------------------------------------------------- #
+# Exit test 14 — CRITICAL B: the config token, its digest, and the bounded
+# refusal.
+# --------------------------------------------------------------------------- #
+
+def test_config_only_layer_is_not_invisible_and_the_token_carries_a_digest(tmp_path):
+    """426 exit test 14. A layer whose only operation is `configure @db { url }`
+    on an UNBOUNDED field produces a `config:@db:url:<digest>` widening token and
+    the panel does not print `clean`. Changing the value again produces a
+    DIFFERENT token, so a prior `--accept` does not cover it."""
+    doc = _panel_project(
+        tmp_path, site="tune", tune="""
+layer Tune for Demo {
+  configure @db with { url: "postgres://replica:5432/app" }
+}
+""")
+    base, cand = _tables(doc, tmp_path)
+    res = authority_panel.panel(base, cand)
+    toks = [t["token"] for t in res["tokens"]]
+    assert any(t.startswith("config:@db:url:") for t in toks), toks
+    assert not res["clean"]
+    digest_one = [t for t in toks if t.startswith("config:@db:url:")][0]
+
+    # a DIFFERENT value -> a DIFFERENT token (the digest pins the ack, §8.4).
+    doc2 = _panel_project(
+        tmp_path / "two", site="tune", tune="""
+layer Tune for Demo {
+  configure @db with { url: "postgres://elsewhere:5432/app" }
+}
+""")
+    _b2, c2 = _tables(doc2, tmp_path / "two")
+    digest_two = [t["token"] for t in authority_panel.panel(_b2, c2)["tokens"]
+                  if t["token"].startswith("config:@db:url:")][0]
+    assert digest_one != digest_two
+
+
+def test_a_pure_numeric_config_change_gets_no_token(tmp_path):
+    """426 §8.7: `pool: 8 -> 16` feeds pure computation, so it is NOT
+    authority-bearing and produces no `config:` token — the panel stays clean on
+    a numeric-only change."""
+    doc = _panel_project(
+        tmp_path, site="tune", tune="""
+layer Tune for Demo {
+  configure @db with { pool: 16 }
+}
+""")
+    base, cand = _tables(doc, tmp_path)
+    res = authority_panel.panel(base, cand)
+    assert res["tokens"] == []
+    assert res["clean"]
+
+
+def test_a_bounded_field_configured_outside_its_reach_is_refused(tmp_path):
+    """426 exit test 14, first half. A `configure` moving a field with a
+    declared composition `reach` bound to a value whose host is outside the
+    bound is a REFUSAL at resolution (§8.3), naming the field — never a silent
+    redirect, and it never reaches the panel."""
+    doc = _panel_project(
+        tmp_path,
+        db_clauses='    open { url }\n    reach { url: host("primary:5432") }\n',
+        site="evil", evil="""
+layer Evil for Demo {
+  configure @db with { url: "postgres://attacker.example:5432/app" }
+}
+""")
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    msg = str(exc.value)
+    assert "outside the reach" in msg and "attacker.example" in msg
+
+
+def test_a_bounded_field_configured_in_bound_admits_and_still_tokens(tmp_path):
+    """426 §8.4: a bounded field changed but kept IN bound admits, and still
+    renders as a `config:` widening in the panel (a bounded change is a change),
+    so the panel does not silently green a redirect that merely stayed legal."""
+    doc = _panel_project(
+        tmp_path,
+        db_clauses='    open { url }\n    reach { url: host("primary:5432") }\n',
+        site="ok", ok="""
+layer Ok for Demo {
+  configure @db with { url: "postgres://primary:5432/other" }
+}
+""")
+    base, cand = _tables(doc, tmp_path)
+    res = authority_panel.panel(base, cand)
+    toks = [t for t in res["tokens"] if t["field"] == "url"]
+    assert toks and toks[0]["bounded"] is True
+    assert not res["clean"]
+
+
+# --------------------------------------------------------------------------- #
+# Exit test 16 — the panel is fail-closed.
+# --------------------------------------------------------------------------- #
+
+def test_an_unclassifiable_config_field_prevents_clean(tmp_path):
+    """426 exit test 16, first half. An unclassifiable (string, no declared
+    reach) config field is treated as AUTHORITY-BEARING: it produces a `config:`
+    token, is listed under BLIND SPOTS, and prevents `clean` (§8.5 conjunct 5,
+    incompleteness costs noise not silence)."""
+    doc = _panel_project(
+        tmp_path, site="tune", tune="""
+layer Tune for Demo {
+  configure @db with { url: "postgres://replica:5432/app" }
+}
+""")
+    base, cand = _tables(doc, tmp_path)
+    res = authority_panel.panel(base, cand)
+    assert "@db.url" in res["unclassifiable"]
+    assert not res["clean"]
+    assert "BLIND SPOTS" in authority_panel.render(res)
+
+
+def test_a_trust_host_code_row_prevents_clean_with_an_unchanged_token_set(tmp_path):
+    """426 exit test 16, second half. A row admitted under `--trust-host-code`
+    forfeits `clean` however quiet the tokens are (§8.5 conjunct 3): trust basis
+    is CLAIMED and the token set is UNCHANGED (the layer adds a clean row and
+    changes no config), yet the panel is not clean."""
+    doc = _panel_project(
+        tmp_path, stack=("obs",), components={},
+        obs="""
+layer Obs for Demo {
+  add row @metrics from "../metrics.rvl" provides metrics
+}
+""")
+    (tmp_path / "metrics.rvl").write_text(_CLEAN_LOGGER)
+    base, cand = _tables(doc, tmp_path)
+    nfp = [r.qualified for r in cand.rows
+           if authority_panel._trust_of(cand)[r.label] == "non-first-party"]
+    assert nfp, "the added row is non-first-party"
+
+    # with no trust flag the added clean row leaves the panel clean (no tokens).
+    plain = authority_panel.panel(base, cand)
+    assert plain["tokens"] == [] and plain["trust_basis"].startswith("MEASURED")
+    assert plain["clean"]
+
+    # trusting it flips the basis to CLAIMED and forfeits clean, tokens unchanged.
+    trusted = authority_panel.panel(base, cand, trust_host_code=set(nfp))
+    assert trusted["trust_basis"] == "CLAIMED"
+    assert trusted["tokens"] == []
+    assert not trusted["clean"]
+    assert nfp[0] in trusted["claimed"]
+
+
+# --------------------------------------------------------------------------- #
+# Exit test 13 (S5 half) — CRITICAL A: --trust-host-code shape + clean forfeit.
+# --------------------------------------------------------------------------- #
+
+def test_layer_host_body_refused_by_default_through_admit_composition(tmp_path):
+    """426 exit test 13, the S5 half. A stack layer shipping a host body is
+    refused BY DEFAULT when the composition is admitted with confinement on —
+    the untrusted-author profile the row's trust class selects refuses the
+    declared extern."""
+    doc = _panel_project(
+        tmp_path, stack=("otel",), otel="""
+layer Otel for Demo {
+  add row @logger from "../logger.rvl" provides metrics
+}
+""")
+    (tmp_path / "logger.rvl").write_text(_HOST_LOGGER)
+    with pytest.raises(RevlError) as exc:
+        admit_composition(str(doc), str(tmp_path), confine=True)
+    assert getattr(exc.value, "code", None) == "G8"
+
+
+def test_trust_host_code_admits_the_body_and_the_panel_forfeits_clean(tmp_path):
+    """426 exit test 13, the S5 half. `--trust-host-code` admits the same layer
+    as reviewed first-party code, and the panel changes SHAPE: trust basis
+    CLAIMED, the row named under UNCHECKED HOST CODE, and `clean` forfeited."""
+    doc = _panel_project(
+        tmp_path, stack=("otel",), otel="""
+layer Otel for Demo {
+  add row @logger from "../logger.rvl" provides metrics
+}
+""")
+    (tmp_path / "logger.rvl").write_text(_HOST_LOGGER)
+    base, cand = _tables(doc, tmp_path)
+    nfp = [r.qualified for r in cand.rows
+           if authority_panel._trust_of(cand)[r.label] == "non-first-party"]
+
+    # admitting with the row trusted no longer refuses.
+    admit_composition(str(doc), str(tmp_path), confine=True,
+                      trust_host_code=set(nfp))
+
+    res = authority_panel.panel(base, cand, trust_host_code=set(nfp))
+    assert res["trust_basis"] == "CLAIMED"
+    assert nfp[0] in res["claimed"]
+    assert not res["clean"]
+    text = authority_panel.render(res)
+    assert "UNCHECKED HOST CODE" in text and nfp[0] in text

@@ -680,6 +680,23 @@ class RowDecl:
     # first-party row); a written clause defaults to EMPTY, never to "whatever
     # the row requires".
     granted: list[tuple[str, int]] | None = None
+    # item 426 S5, §8.6: `open { field, ... }` — the config fields a STACK layer
+    # may `configure` on a row it does not own. `None` == the clause was not
+    # written (nothing is open; a base that declares no `open` is extensible
+    # only by `replace`). Writable only in the base composition.
+    open: list[tuple[str, int]] | None = None
+    # item 426 S5, §8.3/§8.4: `reach { field: host("h:port") }` — the
+    # composition-level authority bound on a host-bearing config field. The
+    # operator assembling the composition owns this bound, not the third party
+    # who wrote the extern (§8.3). A `configure` moving the field to a value
+    # outside the bound is a REFUSAL at resolution (§8.3); a change that stays
+    # in bound still renders as a `config:` widening in the panel (§8.4).
+    # DEVIATION from §8.3's sketch, recorded in docs/composition-rows.md: the
+    # clause is keyed by CONFIG FIELD, not by extern name. Resolution is
+    # header-only and cannot trace a value from a field to the extern it feeds
+    # without lowering the body; the operator-facing bound is naturally written
+    # on the field the operator configures. `None` == no bound declared.
+    reach: list[tuple[str, str, int]] | None = None
 
 
 @dataclass
@@ -3067,6 +3084,8 @@ class Parser:
         component: str | None = None
         config: list[tuple[str, object, int]] = []
         granted: list[tuple[str, int]] | None = None
+        open_fields: list[tuple[str, int]] | None = None
+        reach: list[tuple[str, str, int]] | None = None
         while True:
             if self.at("kw", "component"):
                 cline = self.next().line
@@ -3090,9 +3109,42 @@ class Parser:
                     if self.at(","):
                         self.next()
                 self.expect("}")
+            elif self.at("ident", "open"):
+                oline = self.next().line
+                if open_fields is not None:
+                    raise self.err(oline, f"duplicate `open` clause on row `@{label}`")
+                open_fields = []
+                self.expect("{")
+                while not self.at("}"):
+                    fline = self.peek().line
+                    open_fields.append((self._name(what="an open config field"), fline))
+                    if self.at(","):
+                        self.next()
+                self.expect("}")
+            elif self.at("ident", "reach"):
+                rline = self.next().line
+                if reach is not None:
+                    raise self.err(rline, f"duplicate `reach` clause on row `@{label}`")
+                reach = []
+                self.expect("{")
+                while not self.at("}"):
+                    fline = self.peek().line
+                    field_name = self._name(what="a reach config field")
+                    self.expect(":")
+                    # `host("h:port")` — the composition-level authority bound.
+                    self.expect("ident", "host",
+                                what="`host(\"...\")` — the reach bound (426 §8.3)")
+                    self.expect("(")
+                    bound = self.expect("string", what="a host bound string").value
+                    self.expect(")")
+                    reach.append((field_name, bound, fline))
+                    if self.at(","):
+                        self.next()
+                self.expect("}")
             else:
                 break
-        return RowDecl(label, path, claims, line, component, config, granted)
+        return RowDecl(label, path, claims, line, component, config, granted,
+                       open=open_fields, reach=reach)
 
     # -- item 426 S2: layers, addresses and the four operations -------------
 
