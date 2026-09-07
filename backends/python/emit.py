@@ -438,129 +438,91 @@ class _Lines:
         return "\n".join(self._lines)
 
 
-def _uses_bounded_int(node) -> bool:
-    """Does this IR do Int `+`, `-` or `*`, or negate an Int? The bound check
-    is emitted only where it is needed, so modules that never do Int
-    arithmetic are unchanged."""
-    if isinstance(node, dict):
-        if (node.get("kind") == "bin" and node.get("op") in ("+", "-", "*")
-                and node.get("operands") == "Int"):
-            return True
-        # unary minus on an Int goes through the bound too: it is `0 - x`
-        if (node.get("kind") == "un" and node.get("op") == "-"
-                and node.get("operands") == "Int"):
-            return True
-        # integer division overflows at Int.MIN/-1 (quotient 2^63); the
-        # faulting forms are bound the same way (mod cannot overflow)
-        if (node.get("kind") == "builtin"
-                and node.get("method") in ("div_trunc", "div_floor", "div_euclid")):
-            return True
-        return any(_uses_bounded_int(v) for v in node.values())
-    if isinstance(node, (list, tuple)):
-        return any(_uses_bounded_int(v) for v in node)
-    return False
+class _UsesScan:
+    """The single-pass answer to every preamble `_uses_*` gate (issue #540).
+
+    The preamble used to ask a dozen-plus separate `_uses_*` questions, each
+    of which recursed the WHOLE IR to answer one yes/no (~60% of emit).
+    `_scan_uses` walks the IR ONCE and records every predicate those gates
+    test, so each gate becomes a field read or a set membership. The booleans
+    are computed identically — same predicates, only the short-circuit is gone
+    (a full walk visits every node) — so the emitted preamble is byte-for-byte
+    unchanged."""
+
+    __slots__ = (
+        "bounded_int", "bounded_int32", "i32_shl", "true_division",
+        "trunc_rem", "float_interp", "opt_to_int", "builtins",
+    )
+
+    def __init__(self) -> None:
+        self.bounded_int = False
+        self.bounded_int32 = False
+        self.i32_shl = False
+        self.true_division = False
+        self.trunc_rem = False
+        self.float_interp = False
+        self.opt_to_int = False
+        self.builtins: set = set()
 
 
-def _uses_bounded_int32(node) -> bool:
-    """Does this IR do Int32 `+`/`-`/`*`, negate an Int32, or narrow with
-    `to_int32`? The i32 bound helper is emitted only where it is used."""
-    if isinstance(node, dict):
-        if (node.get("kind") == "bin" and node.get("op") in ("+", "-", "*")
-                and node.get("operands") == "Int32"):
-            return True
-        if (node.get("kind") == "un" and node.get("op") == "-"
-                and node.get("operands") == "Int32"):
-            return True
-        if node.get("kind") == "builtin" and node.get("method") == "to_int32":
-            return True
-        return any(_uses_bounded_int32(v) for v in node.values())
-    if isinstance(node, (list, tuple)):
-        return any(_uses_bounded_int32(v) for v in node)
-    return False
+def _scan_uses(root) -> _UsesScan:
+    """Collect, in ONE traversal, every fact the preamble `_uses_*` gates need.
 
-
-def _uses_i32_shl(node) -> bool:
-    """Does this IR do an Int32 `<<`? Left shift is the one bitwise op whose
-    result can leave the 32-bit range (a bit op, not a trap), so python
-    re-wraps it through `_revl_i32_wrap`; `&`/`|`/`^`/`>>`/`~` all stay in
-    range for in-range operands and need no helper (docs/arithmetic.md)."""
-    if isinstance(node, dict):
-        if node.get("kind") == "bin" and node.get("op") == "<<":
-            return True
-        return any(_uses_i32_shl(v) for v in node.values())
-    if isinstance(node, (list, tuple)):
-        return any(_uses_i32_shl(v) for v in node)
-    return False
-
-
-def _uses_true_division(node) -> bool:
-    """Does anything in this IR divide with `/`? The IEEE helper is emitted
-    only where it is used, so modules that never divide stay unchanged."""
-    if isinstance(node, dict):
-        if node.get("kind") == "bin" and node.get("op") == "/":
-            return True
-        return any(_uses_true_division(v) for v in node.values())
-    if isinstance(node, (list, tuple)):
-        return any(_uses_true_division(v) for v in node)
-    return False
-
-
-def _uses_builtin(node, *methods: str) -> bool:
-    """Does this IR call any of these stdlib builtins? The preamble helper each
-    one lowers to (item 436 F6) is emitted only where it is used, exactly as
-    `_revl_div` and `_revl_ftoa` already are."""
-    if isinstance(node, dict):
-        # `?.m(..)` is an `optcall` node, NOT a `builtin` one, but it goes
-        # through the very same `_render_builtin` table, so it needs the very
-        # same helper emitted.
-        if node.get("kind") in ("builtin", "optcall") \
-                and node.get("method") in methods:
-            return True
-        return any(_uses_builtin(v, *methods) for v in node.values())
-    if isinstance(node, (list, tuple)):
-        return any(_uses_builtin(v, *methods) for v in node)
-    return False
-
-
-def _uses_opt_to_int(node) -> bool:
-    """Is a `to_int` reached through `?.`, whose node carries no receiver type?
-    Only then is the payload-dispatching wrapper emitted."""
-    if isinstance(node, dict):
-        if node.get("kind") == "optcall" and node.get("method") == "to_int":
-            return True
-        return any(_uses_opt_to_int(v) for v in node.values())
-    if isinstance(node, (list, tuple)):
-        return any(_uses_opt_to_int(v) for v in node)
-    return False
-
-
-def _uses_trunc_rem(node) -> bool:
-    """Does this IR take a truncated remainder (`%` on Int or Float)? Python's
-    own `%` floors, so this is the one operator the tier has to build."""
-    if isinstance(node, dict):
-        if (node.get("kind") == "bin" and node.get("op") == "%"
-                and node.get("operands") in ("Int", "Float")):
-            return True
-        return any(_uses_trunc_rem(v) for v in node.values())
-    if isinstance(node, (list, tuple)):
-        return any(_uses_trunc_rem(v) for v in node)
-    return False
-
-
-def _uses_float_interp(node) -> bool:
-    """Does any `${…}` template interpolate a provably-`Float` expression?
-    The canonical `Float -> Str` helper is emitted only then, so modules
-    without float interpolation stay byte-identical (docs/strings.md)."""
-    if isinstance(node, dict):
-        if node.get("kind") == "interp":
-            for part in node.get("parts") or []:
-                if isinstance(part, (list, tuple)) and len(part) == 2 \
-                        and part[0] == "expr" and _is_float_expr(part[1]):
-                    return True
-        return any(_uses_float_interp(v) for v in node.values())
-    if isinstance(node, (list, tuple)):
-        return any(_uses_float_interp(v) for v in node)
-    return False
+    Each per-node test mirrors exactly one former gate: bounded Int / Int32
+    arithmetic, an Int32 `<<`, `/` true division, `%` truncated remainder, a
+    float `${…}` interpolation, `?.to_int()`, and the stdlib builtins (the
+    `builtins` set holds every `builtin`/`optcall` method name, so
+    `m in scan.builtins` is the old `_uses_builtin(ir, m)`)."""
+    scan = _UsesScan()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            kind = node.get("kind")
+            if kind == "bin":
+                op = node.get("op")
+                operands = node.get("operands")
+                if op in ("+", "-", "*"):
+                    if operands == "Int":
+                        scan.bounded_int = True
+                    elif operands == "Int32":
+                        scan.bounded_int32 = True
+                elif op == "<<":
+                    scan.i32_shl = True
+                elif op == "/":
+                    scan.true_division = True
+                elif op == "%" and operands in ("Int", "Float"):
+                    scan.trunc_rem = True
+            elif kind == "un":
+                if node.get("op") == "-":
+                    operands = node.get("operands")
+                    if operands == "Int":
+                        scan.bounded_int = True
+                    elif operands == "Int32":
+                        scan.bounded_int32 = True
+            elif kind == "builtin":
+                method = node.get("method")
+                if method in ("div_trunc", "div_floor", "div_euclid"):
+                    scan.bounded_int = True
+                elif method == "to_int32":
+                    scan.bounded_int32 = True
+                scan.builtins.add(method)
+            elif kind == "optcall":
+                method = node.get("method")
+                if method == "to_int":
+                    scan.opt_to_int = True
+                scan.builtins.add(method)
+            elif kind == "interp":
+                if not scan.float_interp:
+                    for part in node.get("parts") or []:
+                        if (isinstance(part, (list, tuple)) and len(part) == 2
+                                and part[0] == "expr" and _is_float_expr(part[1])):
+                            scan.float_interp = True
+                            break
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+    return scan
 
 
 # Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md). `repr`
@@ -4819,7 +4781,10 @@ def emit(ir: dict) -> str:
         ) + "}"
         out.add(0, f"_REVL_IDEMPOTENT = {rendered_idem}")
         out.add(0)
-    if _uses_bounded_int(ir):
+    # issue #540: one traversal answers every `_uses_*` gate below, in place of
+    # the dozen-plus full-IR walks that dominated emit. Byte-identical output.
+    _scan = _scan_uses(ir)
+    if _scan.bounded_int:
         out.add(0, "_REVL_I64_MIN = -(2 ** 63)")
         out.add(0, "_REVL_I64_MAX = 2 ** 63 - 1")
         out.add(0)
@@ -4831,7 +4796,7 @@ def emit(ir: dict) -> str:
         out.add(0, "        raise OverflowError('revl: Int overflow')")
         out.add(0, "    return v")
         out.add(0)
-    if _uses_bounded_int32(ir):
+    if _scan.bounded_int32:
         out.add(0, "_REVL_I32_MIN = -(2 ** 31)")
         out.add(0, "_REVL_I32_MAX = 2 ** 31 - 1")
         out.add(0)
@@ -4842,14 +4807,14 @@ def emit(ir: dict) -> str:
         out.add(0, "        raise OverflowError('revl: Int32 overflow')")
         out.add(0, "    return v")
         out.add(0)
-    if _uses_i32_shl(ir):
+    if _scan.i32_shl:
         out.add(0, "def _revl_i32_wrap(v):")
         out.add(0, '    """Wrap an Int32 `<<` result into 32-bit two\'s '
                    'complement (docs/arithmetic.md)."""')
         out.add(0, "    v &= 0xFFFFFFFF")
         out.add(0, "    return v - 0x100000000 if v & 0x80000000 else v")
         out.add(0)
-    if _uses_true_division(ir):
+    if _scan.true_division:
         # `/` is IEEE true division (docs/arithmetic.md): a zero divisor gives
         # +/-inf, and 0/0 gives NaN. Python is the only tier that raises
         # instead, so it is the only one that needs this.
@@ -4869,7 +4834,7 @@ def emit(ir: dict) -> str:
     # `def`, gated on use, rather than a lambda built and applied at every
     # evaluation (item 436 F6). Same shape as `_revl_div` above — one frame, no
     # function-object allocation — and each is emitted only where it is used.
-    if _uses_trunc_rem(ir):
+    if _scan.trunc_rem:
         out.add(0, "def _revl_rem(a, b):")
         out.add(0, '    """The TRUNCATED remainder: it takes the sign of the '
                    'DIVIDEND, as in"""')
@@ -4877,20 +4842,20 @@ def emit(ir: dict) -> str:
                    'divisor\'s sign."""')
         out.add(0, "    return abs(a) % abs(b) if a >= 0 else -(abs(a) % abs(b))")
         out.add(0)
-    if _uses_builtin(ir, "div_trunc"):
+    if "div_trunc" in _scan.builtins:
         out.add(0, "def _revl_div_trunc(a, b):")
         out.add(0, '    """Division that TRUNCATES toward zero '
                    '(docs/arithmetic.md)."""')
         out.add(0, "    return (abs(a) // abs(b) if (a < 0) == (b < 0)")
         out.add(0, "            else -(abs(a) // abs(b)))")
         out.add(0)
-    if _uses_builtin(ir, "div_euclid"):
+    if "div_euclid" in _scan.builtins:
         out.add(0, "def _revl_div_euclid(a, b):")
         out.add(0, '    """Euclidean division: the remainder is never negative '
                    '(docs/arithmetic.md)."""')
         out.add(0, "    return a // b if b > 0 else -(a // -b)")
         out.add(0)
-    if _uses_builtin(ir, "indexOf"):
+    if "indexOf" in _scan.builtins:
         out.add(0, "def _revl_index_of(v, n):")
         out.add(0, '    """First index of `n`, -1 when absent — a Str receiver '
                    'or a List one."""')
@@ -4898,13 +4863,13 @@ def emit(ir: dict) -> str:
         out.add(0, "        return v.find(n)")
         out.add(0, "    return v.index(n) if n in v else -1")
         out.add(0)
-    if _uses_builtin(ir, "split"):
+    if "split" in _scan.builtins:
         out.add(0, "def _revl_split(v, s):")
         out.add(0, '    """JS-shape split: an empty separator yields 1-char '
                    'strings (py raises)."""')
         out.add(0, "    return list(v) if s == \"\" else v.split(s)")
         out.add(0)
-    if _uses_builtin(ir, "to_int"):
+    if "to_int" in _scan.builtins:
         # FR-9, docs/stdlib-2.0.md §Str.to_int: total on the ASCII digits with
         # an optional leading `-`, `None` otherwise — including out of the i64
         # range, which is None like every other non-digit (the tier's ints are
@@ -4919,7 +4884,7 @@ def emit(ir: dict) -> str:
         out.add(0, "    n = int(s)")
         out.add(0, "    return n if -(2**63) <= n <= 2**63 - 1 else None")
         out.add(0)
-        if _uses_opt_to_int(ir):
+        if _scan.opt_to_int:
             # reached through `?.`, whose node carries no receiver type:
             # dispatch on the payload, the same split `indexOf` makes.
             out.add(0, "def _revl_opt_to_int(v):")
@@ -4928,7 +4893,7 @@ def emit(ir: dict) -> str:
             out.add(0, "    return _revl_str_to_int(v) if isinstance(v, str) else v")
             out.add(0)
     for checked in _CHECKED_DIVS:
-        if not _uses_builtin(ir, checked):
+        if checked not in _scan.builtins:
             continue
         # The total forms (docs/arithmetic.md): the same quotient as the
         # faulting operation, but a zero divisor yields Err(reason) instead of
@@ -4955,7 +4920,7 @@ def emit(ir: dict) -> str:
             out.add(0, "        return Ok(q)")
             out.add(0, "    return Err('revl: Int overflow')")
         out.add(0)
-    if _uses_float_interp(ir):
+    if _scan.float_interp:
         # Canonical Float -> Str (docs/strings.md): the ECMAScript
         # Number::toString shortest-round-trip form, so `${aFloat}` agrees with
         # every other tier. python's own `str(float)` gives `nan`/`0.0`/`-0.0`,
