@@ -7,7 +7,7 @@
 use "assembler.rvl" { Assembler }
 use "shipper.rvl" { Shipper }
 
-type Cmd = Add | Rm | Assemble | AssembleCheck | Ship | Unknown
+type Cmd = Add | Rm | Assemble | AssembleCheck | Ship | Apply | StackCheck | Unknown
 
 fn nth(argv: List[Str], i: Int) -> Str {
   if (i < argv.length()) {
@@ -45,6 +45,18 @@ fn parse_cmd(argv: List[Str]) -> Cmd {
   if (s == "ship") {
     return Ship
   }
+  // 426 S6 — `truc apply [--trust-host-code]` and the two-word `truc stack
+  // check`. The --trust-host-code flag is read at dispatch (an enum carries no
+  // payload); a bare `truc stack` with no `check` is unknown.
+  if (s == "apply") {
+    return Apply
+  }
+  if (s == "stack") {
+    if (nth(argv, 1) == "check") {
+      return StackCheck
+    }
+    return Unknown
+  }
   return Unknown
 }
 
@@ -60,6 +72,8 @@ component CliDispatch requires asm: Assembler, ship: Shipper provides cli: Cli {
       Assemble      => emit asm.assemble(),
       AssembleCheck => emit asm.assemble_check(),
       Ship          => emit ship.run(".", nth(argv, 1)),
+      Apply         => emit asm.apply(has_flag(argv, "--trust-host-code")),
+      StackCheck    => emit asm.stack_check(),
       Unknown       => emit asm.unknown(nth(argv, 0)),
     }
   }
