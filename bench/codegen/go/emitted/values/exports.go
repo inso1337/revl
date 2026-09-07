@@ -41,13 +41,12 @@ func CharAt(s string, i int64) int64 { return char_at(s, i) }
 // Maybe is the emitted `maybe`: an `Opt[Int]` crossing a function boundary.
 func Maybe(m map[string]int64, k string) RevlOpt[int64] { return maybe(m, k) }
 
-// OptIsSome answers the emitted Opt without the caller depending on the
-// sealed-interface spelling.
+// OptIsSome answers the emitted Opt without the caller depending on its
+// internal spelling. Since item 434 (d) the emitted Opt is a two-value
+// `struct { Value T; Ok bool }` rather than a sealed interface, so the
+// presence flag is read directly off the struct.
 func OptIsSome(o RevlOpt[int64]) (int64, bool) {
-	if s, ok := o.(RevlSome[int64]); ok {
-		return s.Value, true
-	}
-	return 0, false
+	return o.Value, o.Ok
 }
 
 // Boxed is the emitted `boxed`: a List[Opt[Int]], every element boxed.
