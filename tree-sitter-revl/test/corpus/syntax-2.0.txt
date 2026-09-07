@@ -1,0 +1,375 @@
+================================================================
+timers: every / after with duration and emit body
+================================================================
+
+component Heartbeat requires log: Log {
+  every 30s {
+    emit log.write("tick")
+  }
+  after 5m {
+    emit log.write("warmup done")
+  }
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (component_declaration
+    (identifier)
+    (requires_clause
+      (binding
+        (identifier)
+        (identifier)))
+    (component_body
+      (timer_statement
+        (duration
+          (integer)
+          (time_unit))
+        (timer_body
+          (emit_statement
+            (call_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (arguments
+                (string))))))
+      (timer_statement
+        (duration
+          (integer)
+          (time_unit))
+        (timer_body
+          (emit_statement
+            (call_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (arguments
+                (string)))))))))
+
+================================================================
+handoff prelude declaration
+================================================================
+
+component Cache provides cache: Store {
+  handoff cache: Map[Str, Str]
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (component_declaration
+    (identifier)
+    (provides_clause
+      (binding
+        (identifier)
+        (identifier)))
+    (component_body
+      (handoff_statement
+        (identifier)
+        (generic_type
+          (identifier)
+          (type_identifier
+            (identifier))
+          (type_identifier
+            (identifier)))))))
+
+================================================================
+parameterised capabilities on a service method
+================================================================
+
+service NetTight { emission[net(requests=100)] fn call(u: Str) -> Int }
+
+----------------------------------------------------------------
+
+(source_file
+  (service_declaration
+    (identifier)
+    (service_body
+      (method_signature
+        (method_modifier
+          (capability_list
+            (capability
+              (capability_name
+                (identifier))
+              (capability_parameters
+                (capability_parameter
+                  (identifier)
+                  (integer))))))
+        (identifier)
+        (typed_parameters
+          (typed_parameter
+            (identifier)
+            (type_identifier
+              (identifier))))
+        (type_identifier
+          (identifier))))))
+
+================================================================
+extern with emission capability and async colour
+================================================================
+
+extern emission[fs] fn read_file(p: Str) -> Str = @py { return "" }
+
+----------------------------------------------------------------
+
+(source_file
+  (extern_declaration
+    (extern_modifier
+      (capability_list
+        (capability
+          (capability_name
+            (identifier)))))
+    (identifier)
+    (typed_parameters
+      (typed_parameter
+        (identifier)
+        (type_identifier
+          (identifier))))
+    (type_identifier
+      (identifier))
+    (host_block
+      (identifier)
+      (host_body))))
+
+================================================================
+boot component with config bounds
+================================================================
+
+boot component AppBoot provides env: Env {
+  config {
+    data_dir: Str under "./.app-data",
+    model: Str in ["mock", "real"] = "mock",
+    port: Int = 8099,
+  }
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (component_declaration
+    (identifier)
+    (provides_clause
+      (binding
+        (identifier)
+        (identifier)))
+    (component_body
+      (config_block
+        (config_field
+          (identifier)
+          (type_identifier
+            (identifier))
+          (config_bound
+            (string)))
+        (config_field
+          (identifier)
+          (type_identifier
+            (identifier))
+          (config_bound
+            (list_literal
+              (string)
+              (string)))
+          (string))
+        (config_field
+          (identifier)
+          (type_identifier
+            (identifier))
+          (integer))))))
+
+================================================================
+functional record update
+================================================================
+
+fn main() -> Int {
+  let a = { h: "x" }
+  let b = { a | h = 5 }
+  return 0
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    (identifier)
+    (typed_parameters)
+    (type_identifier
+      (identifier))
+    (block
+      (let_statement
+        (identifier)
+        (record_literal
+          (record_entry
+            (identifier)
+            (string))))
+      (let_statement
+        (identifier)
+        (record_update
+          (identifier)
+          (record_update_entry
+            (identifier)
+            (integer))))
+      (return_statement
+        (integer)))))
+
+================================================================
+bitwise and shift operators
+================================================================
+
+fn flags(a: Int32, b: Int32) -> Int32 {
+  return (a | b) ^ (a & ~b) << 2 >> 1
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    (identifier)
+    (typed_parameters
+      (typed_parameter
+        (identifier)
+        (type_identifier
+          (identifier)))
+      (typed_parameter
+        (identifier)
+        (type_identifier
+          (identifier))))
+    (type_identifier
+      (identifier))
+    (block
+      (return_statement
+        (binary_expression
+          (parenthesized_expression
+            (binary_expression
+              (identifier)
+              (identifier)))
+          (binary_expression
+            (binary_expression
+              (parenthesized_expression
+                (binary_expression
+                  (identifier)
+                  (unary_expression
+                    (identifier))))
+              (integer))
+            (integer)))))))
+
+================================================================
+prop test with generated inputs
+================================================================
+
+prop test "less-than is antisymmetric" (a: Int, b: Int) {
+  assert !(a < b && b < a)
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (prop_test_declaration
+    (string)
+    (typed_parameters
+      (typed_parameter
+        (identifier)
+        (type_identifier
+          (identifier)))
+      (typed_parameter
+        (identifier)
+        (type_identifier
+          (identifier))))
+    (block
+      (assert_statement
+        (unary_expression
+          (parenthesized_expression
+            (binary_expression
+              (binary_expression
+                (identifier)
+                (identifier))
+              (binary_expression
+                (identifier)
+                (identifier)))))))))
+
+================================================================
+arrow function with parameter and return-type annotations
+================================================================
+
+fn demo() -> Str {
+  let f = (x: Q): Q => x
+  return f
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    (identifier)
+    (typed_parameters)
+    (type_identifier
+      (identifier))
+    (block
+      (let_statement
+        (identifier)
+        (arrow_function
+          (parameters
+            (parameter
+              (identifier)
+              (type_identifier
+                (identifier))))
+          (type_identifier
+            (identifier))
+          (identifier)))
+      (return_statement
+        (identifier)))))
+
+================================================================
+advance drives the deterministic clock
+================================================================
+
+lifecycle test "clock advances" {
+  load TickCounter
+  advance 35s
+  assert no_residue
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (test_declaration
+    (string)
+    (test_body
+      (load_statement
+        (identifier))
+      (advance_statement
+        (duration
+          (integer)
+          (time_unit)))
+      (assert_statement
+        (identifier)))))
+
+================================================================
+string literals: single, double, triple-quoted, escapes
+================================================================
+
+fn strings() -> Str {
+  let a = "with \" escape"
+  let b = 'single'
+  let c = """triple "quoted" body"""
+  return a
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (function_declaration
+    (identifier)
+    (typed_parameters)
+    (type_identifier
+      (identifier))
+    (block
+      (let_statement
+        (identifier)
+        (string))
+      (let_statement
+        (identifier)
+        (string))
+      (let_statement
+        (identifier)
+        (string))
+      (return_statement
+        (identifier)))))

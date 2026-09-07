@@ -1,5 +1,21 @@
 [
   {
+    "type": "advance_statement",
+    "named": true,
+    "fields": {
+      "interval": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "duration",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "arguments",
     "named": true,
     "fields": {},
@@ -76,6 +92,10 @@
           "named": true
         },
         {
+          "type": "record_update",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -111,6 +131,10 @@
             "named": true
           },
           {
+            "type": "block",
+            "named": true
+          },
+          {
             "type": "boolean",
             "named": true
           },
@@ -120,6 +144,10 @@
           },
           {
             "type": "config",
+            "named": true
+          },
+          {
+            "type": "emit_expression",
             "named": true
           },
           {
@@ -171,6 +199,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -198,6 +230,32 @@
           },
           {
             "type": "parameters",
+            "named": true
+          }
+        ]
+      },
+      "return_type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "generic_type",
+            "named": true
+          },
+          {
+            "type": "optional_type",
+            "named": true
+          },
+          {
+            "type": "parenthesized_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
             "named": true
           }
         ]
@@ -278,6 +336,10 @@
         },
         {
           "type": "record_literal",
+          "named": true
+        },
+        {
+          "type": "record_update",
           "named": true
         },
         {
@@ -416,6 +478,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -509,6 +575,10 @@
         },
         {
           "type": "record_literal",
+          "named": true
+        },
+        {
+          "type": "record_update",
           "named": true
         },
         {
@@ -607,6 +677,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -641,6 +715,10 @@
             "named": false
           },
           {
+            "type": "&",
+            "named": false
+          },
+          {
             "type": "&&",
             "named": false
           },
@@ -665,6 +743,10 @@
             "named": false
           },
           {
+            "type": "<<",
+            "named": false
+          },
+          {
             "type": "<=",
             "named": false
           },
@@ -685,7 +767,19 @@
             "named": false
           },
           {
+            "type": ">>",
+            "named": false
+          },
+          {
             "type": "??",
+            "named": false
+          },
+          {
+            "type": "^",
+            "named": false
+          },
+          {
+            "type": "|",
             "named": false
           },
           {
@@ -764,6 +858,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -857,6 +955,10 @@
           "named": true
         },
         {
+          "type": "handoff_statement",
+          "named": true
+        },
+        {
           "type": "if_statement",
           "named": true
         },
@@ -878,6 +980,10 @@
         },
         {
           "type": "return_statement",
+          "named": true
+        },
+        {
+          "type": "timer_statement",
           "named": true
         },
         {
@@ -1005,6 +1111,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -1061,6 +1171,32 @@
     }
   },
   {
+    "type": "capability",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "capability_name",
+            "named": true
+          }
+        ]
+      },
+      "parameters": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "capability_parameters",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "capability_list",
     "named": true,
     "fields": {},
@@ -1069,7 +1205,83 @@
       "required": true,
       "types": [
         {
+          "type": "capability",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "capability_name",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
           "type": "identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "capability_parameter",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "negative_number",
+            "named": true
+          },
+          {
+            "type": "null",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "capability_parameters",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "capability_parameter",
           "named": true
         }
       ]
@@ -1124,6 +1336,10 @@
           "named": true
         },
         {
+          "type": "handoff_statement",
+          "named": true
+        },
+        {
           "type": "if_statement",
           "named": true
         },
@@ -1145,6 +1361,10 @@
         },
         {
           "type": "return_statement",
+          "named": true
+        },
+        {
+          "type": "timer_statement",
           "named": true
         },
         {
@@ -1286,6 +1506,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -1336,9 +1560,45 @@
     }
   },
   {
+    "type": "config_bound",
+    "named": true,
+    "fields": {
+      "prefix": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      },
+      "values": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "list_literal",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "config_field",
     "named": true,
     "fields": {
+      "bound": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "config_bound",
+            "named": true
+          }
+        ]
+      },
       "default": {
         "multiple": false,
         "required": false,
@@ -1408,6 +1668,32 @@
     }
   },
   {
+    "type": "duration",
+    "named": true,
+    "fields": {
+      "count": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "integer",
+            "named": true
+          }
+        ]
+      },
+      "unit": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "time_unit",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "effect_block",
     "named": true,
     "fields": {},
@@ -1452,6 +1738,10 @@
           "named": true
         },
         {
+          "type": "handoff_statement",
+          "named": true
+        },
+        {
           "type": "if_statement",
           "named": true
         },
@@ -1473,6 +1763,10 @@
         },
         {
           "type": "return_statement",
+          "named": true
+        },
+        {
+          "type": "timer_statement",
           "named": true
         },
         {
@@ -1556,6 +1850,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -1651,6 +1949,10 @@
         },
         {
           "type": "record_literal",
+          "named": true
+        },
+        {
+          "type": "record_update",
           "named": true
         },
         {
@@ -1768,6 +2070,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -1864,6 +2170,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -1952,6 +2262,10 @@
         },
         {
           "type": "record_literal",
+          "named": true
+        },
+        {
+          "type": "record_update",
           "named": true
         },
         {
@@ -2050,6 +2364,10 @@
           "named": true
         },
         {
+          "type": "record_update",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -2072,24 +2390,6 @@
     "type": "extern_declaration",
     "named": true,
     "fields": {
-      "classification": {
-        "multiple": false,
-        "required": false,
-        "types": [
-          {
-            "type": "acquire",
-            "named": false
-          },
-          {
-            "type": "emission",
-            "named": false
-          },
-          {
-            "type": "pure",
-            "named": false
-          }
-        ]
-      },
       "compensate": {
         "multiple": false,
         "required": false,
@@ -2160,6 +2460,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -2299,6 +2603,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -2322,11 +2630,30 @@
       "required": true,
       "types": [
         {
+          "type": "extern_modifier",
+          "named": true
+        },
+        {
           "type": "host_block",
           "named": true
         },
         {
           "type": "type_parameters",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "extern_modifier",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "capability_list",
           "named": true
         }
       ]
@@ -2406,6 +2733,10 @@
         },
         {
           "type": "record_literal",
+          "named": true
+        },
+        {
+          "type": "record_update",
           "named": true
         },
         {
@@ -2619,6 +2950,10 @@
             "named": true
           },
           {
+            "type": "handoff_statement",
+            "named": true
+          },
+          {
             "type": "if_statement",
             "named": true
           },
@@ -2640,6 +2975,10 @@
           },
           {
             "type": "return_statement",
+            "named": true
+          },
+          {
+            "type": "timer_statement",
             "named": true
           },
           {
@@ -2718,6 +3057,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -2913,6 +3256,48 @@
     }
   },
   {
+    "type": "handoff_statement",
+    "named": true,
+    "fields": {
+      "key": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "function_type",
+            "named": true
+          },
+          {
+            "type": "generic_type",
+            "named": true
+          },
+          {
+            "type": "optional_type",
+            "named": true
+          },
+          {
+            "type": "parenthesized_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "hole",
     "named": true,
     "fields": {
@@ -3029,6 +3414,10 @@
             "named": true
           },
           {
+            "type": "handoff_statement",
+            "named": true
+          },
+          {
             "type": "if_statement",
             "named": true
           },
@@ -3050,6 +3439,10 @@
           },
           {
             "type": "return_statement",
+            "named": true
+          },
+          {
+            "type": "timer_statement",
             "named": true
           },
           {
@@ -3131,6 +3524,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -3193,6 +3590,10 @@
             "named": true
           },
           {
+            "type": "handoff_statement",
+            "named": true
+          },
+          {
             "type": "if_statement",
             "named": true
           },
@@ -3214,6 +3615,10 @@
           },
           {
             "type": "return_statement",
+            "named": true
+          },
+          {
+            "type": "timer_statement",
             "named": true
           },
           {
@@ -3316,6 +3721,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -3403,6 +3812,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -3554,6 +3967,10 @@
             "named": true
           },
           {
+            "type": "emit_expression",
+            "named": true
+          },
+          {
             "type": "float",
             "named": true
           },
@@ -3599,6 +4016,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -3695,6 +4116,10 @@
         },
         {
           "type": "record_literal",
+          "named": true
+        },
+        {
+          "type": "record_update",
           "named": true
         },
         {
@@ -3844,6 +4269,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -3937,6 +4366,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -4069,6 +4502,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -4274,6 +4711,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -4464,6 +4905,10 @@
           "named": true
         },
         {
+          "type": "record_update",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -4511,6 +4956,42 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "prop_test_declaration",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      },
+      "parameters": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "typed_parameters",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -4595,6 +5076,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -4781,6 +5266,10 @@
           "named": true
         },
         {
+          "type": "record_update",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -4883,6 +5372,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -4993,6 +5486,226 @@
     }
   },
   {
+    "type": "record_update",
+    "named": true,
+    "fields": {
+      "base": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "arrow_function",
+            "named": true
+          },
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "config",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "hole",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "list_literal",
+            "named": true
+          },
+          {
+            "type": "match_expression",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "null",
+            "named": true
+          },
+          {
+            "type": "optional_member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "template_string",
+            "named": true
+          },
+          {
+            "type": "ternary_expression",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "record_update_entry",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "record_update_entry",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "arrow_function",
+            "named": true
+          },
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "config",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "hole",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "list_literal",
+            "named": true
+          },
+          {
+            "type": "match_expression",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "null",
+            "named": true
+          },
+          {
+            "type": "optional_member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "template_string",
+            "named": true
+          },
+          {
+            "type": "ternary_expression",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "requires_clause",
     "named": true,
     "fields": {},
@@ -5084,6 +5797,10 @@
           "named": true
         },
         {
+          "type": "record_update",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         },
@@ -5169,6 +5886,10 @@
           "named": true
         },
         {
+          "type": "prop_test_declaration",
+          "named": true
+        },
+        {
           "type": "service_declaration",
           "named": true
         },
@@ -5214,32 +5935,6 @@
     }
   },
   {
-    "type": "swap_statement",
-    "named": true,
-    "fields": {
-      "from": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      },
-      "to": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      }
-    }
-  },
-  {
     "type": "ternary_expression",
     "named": true,
     "fields": {
@@ -5265,6 +5960,10 @@
           },
           {
             "type": "config",
+            "named": true
+          },
+          {
+            "type": "emit_expression",
             "named": true
           },
           {
@@ -5313,6 +6012,10 @@
           },
           {
             "type": "record_literal",
+            "named": true
+          },
+          {
+            "type": "record_update",
             "named": true
           },
           {
@@ -5406,6 +6109,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -5445,6 +6152,10 @@
           },
           {
             "type": "config",
+            "named": true
+          },
+          {
+            "type": "emit_expression",
             "named": true
           },
           {
@@ -5496,6 +6207,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -5523,6 +6238,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "advance_statement",
+          "named": true
+        },
         {
           "type": "assert_statement",
           "named": true
@@ -5564,6 +6283,10 @@
           "named": true
         },
         {
+          "type": "handoff_statement",
+          "named": true
+        },
+        {
           "type": "if_statement",
           "named": true
         },
@@ -5592,7 +6315,7 @@
           "named": true
         },
         {
-          "type": "swap_statement",
+          "type": "timer_statement",
           "named": true
         },
         {
@@ -5627,6 +6350,61 @@
           {
             "type": "string",
             "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "timer_body",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "emit_statement",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "timer_statement",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "timer_body",
+            "named": true
+          }
+        ]
+      },
+      "interval": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "duration",
+            "named": true
+          }
+        ]
+      },
+      "mode": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "after",
+            "named": false
+          },
+          {
+            "type": "every",
+            "named": false
           }
         ]
       }
@@ -5871,6 +6649,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -5898,6 +6680,10 @@
           },
           {
             "type": "-",
+            "named": false
+          },
+          {
+            "type": "~",
             "named": false
           }
         ]
@@ -6062,6 +6848,10 @@
             "named": true
           },
           {
+            "type": "handoff_statement",
+            "named": true
+          },
+          {
             "type": "if_statement",
             "named": true
           },
@@ -6083,6 +6873,10 @@
           },
           {
             "type": "return_statement",
+            "named": true
+          },
+          {
+            "type": "timer_statement",
             "named": true
           },
           {
@@ -6164,6 +6958,10 @@
             "named": true
           },
           {
+            "type": "record_update",
+            "named": true
+          },
+          {
             "type": "string",
             "named": true
           },
@@ -6201,6 +6999,10 @@
   },
   {
     "type": "%=",
+    "named": false
+  },
+  {
+    "type": "&",
     "named": false
   },
   {
@@ -6272,6 +7074,10 @@
     "named": false
   },
   {
+    "type": "<<",
+    "named": false
+  },
+  {
     "type": "<=",
     "named": false
   },
@@ -6300,6 +7106,10 @@
     "named": false
   },
   {
+    "type": ">>",
+    "named": false
+  },
+  {
     "type": "?",
     "named": false
   },
@@ -6324,7 +7134,19 @@
     "named": false
   },
   {
+    "type": "^",
+    "named": false
+  },
+  {
     "type": "acquire",
+    "named": false
+  },
+  {
+    "type": "advance",
+    "named": false
+  },
+  {
+    "type": "after",
     "named": false
   },
   {
@@ -6345,6 +7167,10 @@
   },
   {
     "type": "await",
+    "named": false
+  },
+  {
+    "type": "boot",
     "named": false
   },
   {
@@ -6393,6 +7219,10 @@
     "named": false
   },
   {
+    "type": "every",
+    "named": false
+  },
+  {
     "type": "extern",
     "named": false
   },
@@ -6422,6 +7252,10 @@
   },
   {
     "type": "for",
+    "named": false
+  },
+  {
+    "type": "handoff",
     "named": false
   },
   {
@@ -6493,6 +7327,10 @@
     "named": false
   },
   {
+    "type": "prop",
+    "named": false
+  },
+  {
     "type": "provide",
     "named": false
   },
@@ -6545,16 +7383,16 @@
     "named": true
   },
   {
-    "type": "swap",
-    "named": false
-  },
-  {
     "type": "template_string",
     "named": true
   },
   {
     "type": "test",
     "named": false
+  },
+  {
+    "type": "time_unit",
+    "named": true
   },
   {
     "type": "true",
@@ -6566,6 +7404,10 @@
   },
   {
     "type": "unaffected",
+    "named": false
+  },
+  {
+    "type": "under",
     "named": false
   },
   {
@@ -6610,6 +7452,10 @@
   },
   {
     "type": "}",
+    "named": false
+  },
+  {
+    "type": "~",
     "named": false
   }
 ]
