@@ -383,6 +383,38 @@ reclassified a granted provider reports `stale` and writes `abandoned`. The
 non-vacuity check: with the journal-served seam disabled the fenced-completed
 case dispatches twice and the test fails on it.
 
+*Status.* The classification, content CAS and forward finalize landed first
+(the stage records + `recover_forward_admissions` over them). The §4
+journal-served seam then landed on top: `WriteAheadLog.begin_decision`/
+`end_decision` open the admission window over the plug (`session._wire_turn`), so
+each crossing the activation body journals carries the `decisionId` and a fenced
+one a per-decision `ordinal`; `record_fenced_crossing_begin`/`_complete` write
+the fenced-crossing journal; `recovery._served_fenced_crossings` reads it by
+`(decisionId, ordinal)`; and `Session.serve_fenced_crossing` (driven under
+`begin_journal_served`) serves a completed fenced crossing from the journal with
+zero dispatch, while a `begin` with no `complete` reclassifies the decision
+`ambiguous`. Re-materializing the turn's fibers through a LIVE runtime re-plug in
+journal-served mode remains the runtime half; the durable serving verdict and the
+forward finalize it gates are in place.
+
+Slice 4 then landed the E-Stop coupling on the py tier: the plug-seam refusal
+(`EstopHalted` at the runtime `plug` seam) closes the decision
+`admit-abandoned {estop}` in `session._wire_turn` rather than `plug-failed`; an
+`estop-ambiguous` record tagged with a `decisionId` is read as that decision's
+in-flight fenced row in `recovery.recover_forward_admissions` and never
+cross-attributes to a neighbour; and `Session.estop_report` lists the
+un-finalized decisions (`_unfinalized_decisions`) so the halt report and `revl
+recover` name the same decisions.
+
+Alongside Slice 4, a forward-recovery soundness fix (the #476 review finding): a
+forward finalize now REQUIRES a restored `session` to run the content CAS
+against. A `revl recover --wal FILE --forward` with no `--restore` reaches
+`recover_forward_admissions` with `session=None` and can no longer finalize an
+advanced decision — it classifies it `unverified`, appends no `admit-finalized`,
+and never reports a CAS that never ran. An `admit-applied` is historical applied
+state, not checked-current state; only a restored surface authorizes the forward
+finalize.
+
 **Slice 4: E-Stop coupling on py.** The plug-seam refusal writes
 `abandoned {reason: "estop"}`; an `estop-ambiguous` record under a decision is
 read as the §4 in-flight row; the conductor's halt report lists un-finalized

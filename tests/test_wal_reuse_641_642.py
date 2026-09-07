@@ -41,6 +41,19 @@ from revl.__main__ import main  # noqa: E402
 from revl.recovery import recover, recover_forward_admissions  # noqa: E402
 
 
+class _RestoredSessionStub:
+    """A minimal stand-in for the restored Session forward recovery needs to run
+    the content CAS against (design 460 §3): it returns a surface so the CAS on an
+    `admit-decided` with no recorded `expected` digests passes vacuously and the
+    decision classifies ADVANCED. Issue #476's review made a restored session
+    MANDATORY before a forward finalize — the no-session path no longer finalizes
+    — so these WAL-seal tests supply one to reach the terminal-append path they
+    exercise, without dragging in the compiler."""
+
+    def _forward_surface_for_turn(self, _turn):
+        return {"baseManifestHash": None, "classMapDigest": None}
+
+
 # --------------------------------------------------------------------------- #
 # #641 — seal the torn tail before appending a terminal admission record
 # --------------------------------------------------------------------------- #
@@ -73,9 +86,12 @@ def test_forward_admission_finalize_survives_a_torn_tail(tmp_path):
 
     wal = wal_core.read_wal(path)
     assert wal["torn"] is True  # the reader saw the torn trailing write
-    # no session: `admit-applied` present with no CAS makes this ADVANCED, so
-    # forward recovery appends `admit-finalized`.
-    reports = recover_forward_admissions(wal, forward=True, wal_path=path)
+    # a restored session makes the CAS pass (the decided record carries no
+    # `expected` digests, so nothing drifts) — the decision is ADVANCED and
+    # forward recovery appends `admit-finalized` (issue #476 review: the finalize
+    # requires a restored session, so a stub supplies one).
+    reports = recover_forward_admissions(wal, session=_RestoredSessionStub(),
+                                         forward=True, wal_path=path)
     assert len(reports) == 1
     assert reports[0]["classification"] == "advanced"
     assert reports[0]["finalized"] is True
@@ -105,6 +121,7 @@ def test_second_forward_pass_over_a_torn_tail_stays_readable_and_idempotent(tmp_
     _write_advanced_prefix_then_torn(path)
 
     first = recover_forward_admissions(wal_core.read_wal(path),
+                                       session=_RestoredSessionStub(),
                                        forward=True, wal_path=path)
     assert first[0]["finalized"] is True
 

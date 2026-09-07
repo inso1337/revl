@@ -492,6 +492,21 @@ class Session:
         # Process-local: a fresh process has an empty set and re-materializes the
         # turn through forward recovery (§5), never from this map.
         self._applied_decisions: dict[str, tuple] = {}
+        # design 460 §4: the journal-served plug seam. When forward recovery
+        # re-applies an ADVANCED decision (§5), it re-plugs the turn in
+        # journal-served mode: at each fenced crossing the runtime asks
+        # `serve_fenced_crossing`, and a crossing already recorded complete under
+        # this decision is SERVED from the journal (returned, dispatched zero
+        # times) instead of re-run — the whole point of §4, "no double-run of a
+        # fenced extern" (§8). `_journal_served` maps a decision's fenced ordinals
+        # to their recorded outcomes; the counters track the seam's position and
+        # how many crossings actually dispatched (zero when everything was served,
+        # the non-vacuity witness the §7 Slice-3 exit test asserts). Empty and
+        # inert outside a re-apply, so a normal plug is untouched.
+        self._journal_served: dict = {}
+        self._journal_served_decision: str | None = None
+        self._journal_served_ordinal = 0
+        self._fenced_dispatch_count = 0
         # item 250 (session branching): once a session is FORKED, it is FROZEN —
         # retired at the fork step k, non-callable, so the shared rewound
         # workspace has exactly one live owner, the branch (Decision 4). `_frozen`
@@ -2702,9 +2717,39 @@ class Session:
             return {"halted": False, "residue": [], "clean": True}
         residue = driver.runtime.estop_residue()
         return {"halted": True, **halt, "residue": residue,
+                # design 460 §6.3: the halt report lists the two-phase admissions
+                # it stranded mid-commit by `decisionId`, so an operator halt names
+                # the same decisions `revl recover` will classify — one ambiguity
+                # vocabulary across the halt report and the forward-recovery scan.
+                "unfinalizedDecisions": self._unfinalized_decisions(),
                 # an E-Stop is NEVER clean. R4 is a property of the abort path;
                 # the halt violates it by design and says so.
                 "clean": False}
+
+    def _unfinalized_decisions(self) -> list:
+        """The `decisionId`s this session's WAL carries an `admit-decided` for with
+        no terminal `admit-finalized`/`admit-abandoned` behind them (design 460
+        §6.3): the two-phase admissions a halt strands mid-commit — a decision
+        after `decided`, its plug settled or in flight, that never reached a
+        terminal stage. `estop_report` lists them so the halt report and `revl
+        recover` name the SAME decisions. In `admit-decided` order; a decision
+        settled by a later `finalized`/`abandoned` (a plug that raised under the
+        halt writes `abandoned {estop}`) is excluded. Empty, never an error, when no
+        WAL is readable — the halt report degrades rather than crashing."""
+        records = self._wal_ledger_records()
+        settled = {r.get("decisionId") for r in records
+                   if r.get("record") in ("admit-finalized", "admit-abandoned")}
+        seen: set = set()
+        out: list = []
+        for r in records:
+            if r.get("record") != "admit-decided":
+                continue
+            did = r.get("decisionId")
+            if did in settled or did in seen:
+                continue
+            seen.add(did)
+            out.append(did)
+        return out
 
     @property
     def halted(self) -> bool:
@@ -3449,16 +3494,34 @@ class Session:
         # (issue #644). Nothing is adopted, so the running composition is untouched
         # exactly as the pre-plug gates' refusal leaves it.
         runtime_mod.set_session_owner(self._owner)
+        # design 460 §4: open the decision window over the plug so every crossing
+        # the turn's activation body journals is tagged with this `decisionId`
+        # and, for a fenced crossing, an `ordinal` — the coordinates a fresh
+        # process serves a completed fenced crossing by, so it never re-dispatches
+        # one on forward recovery. Closed in the `finally` whether the plug
+        # settles or raises; a WAL-less session opens no window (nothing to tag).
+        if wal is not None and decision_id is not None:
+            wal.begin_decision(decision_id)
         try:
             self._run(_plug())
         except BaseException as admit_err:
             retained = self._dispose_turn_fibers(turn_names)
             if wal is not None and decision_id is not None and not retained:
                 # cleanup resolved: every plugged fiber was torn down, so the
-                # terminal `admit-abandoned {plug-failed}` is honest — a halt
-                # during admission is a settled decision, never an owed one.
+                # terminal `admit-abandoned` is honest — a halt during admission
+                # is a settled decision, never an owed one.
+                #
+                # design 460 §6.1: the E-Stop's plug-seam refusal (`_estop_check`
+                # at the runtime `plug` seam) raises `EstopHalted`. It closes the
+                # decision with `admit-abandoned {estop}` rather than `plug-failed`,
+                # so a halt DURING admission carries the E-Stop's own reason — the
+                # shared ambiguity vocabulary of §6 — and never an owed one on the
+                # next `revl recover`. Every other plug failure stays `plug-failed`.
+                estop_halt = getattr(runtime_mod, "EstopHalted", ())
+                reason = ("estop" if isinstance(admit_err, estop_halt)
+                          else "plug-failed")
                 wal.record_admit_abandoned(decision_id=decision_id,
-                                           reason="plug-failed")
+                                           reason=reason)
             elif retained:
                 # design 460 §2 / issue #644: cleanup is UNRESOLVED — one or more
                 # of the turn's plugged fibers could not be torn down and stay in
@@ -3482,6 +3545,8 @@ class Session:
                     driver._log("admit", "cleanup-unresolved", note)
             raise
         finally:
+            if wal is not None and decision_id is not None:
+                wal.end_decision()
             runtime_mod.clear_session_owner()
 
         # adopt the turn into the live composition: `turn_doc["manifest"]`
@@ -5773,6 +5838,63 @@ class Session:
         return {"baseManifestHash": self._base_manifest_hash(),
                 "classMapDigest": self._class_map_digest(
                     class_map=self._build_class_map(merged))}
+
+    # -- design 460 §4: the journal-served plug seam ------------------------ #
+
+    def begin_journal_served(self, decision_id: str, served: dict) -> None:
+        """Enter journal-served mode for a forward re-apply of `decision_id`
+        (design 460 §4). `served` maps this decision's fenced-crossing ordinals to
+        the outcomes the journal recorded on completion; while the mode is open,
+        `serve_fenced_crossing` returns a recorded outcome for a completed fenced
+        crossing rather than letting it dispatch. Forward recovery
+        (`recover_forward_admissions`) opens this around the re-plug of an
+        ADVANCED decision whose fenced crossings all completed, so a fresh process
+        re-materializes the turn's provisions without re-running a fenced extern.
+        Resets the seam position and the dispatch witness."""
+        self._journal_served = dict(served)
+        self._journal_served_decision = decision_id
+        self._journal_served_ordinal = 0
+        self._fenced_dispatch_count = 0
+
+    def end_journal_served(self) -> None:
+        """Leave journal-served mode (design 460 §4). Idempotent, so a re-apply's
+        `finally` can call it unconditionally. Leaves `_fenced_dispatch_count`
+        intact for the caller to read the seam's verdict (zero == everything was
+        served, nothing re-dispatched)."""
+        self._journal_served = {}
+        self._journal_served_decision = None
+        self._journal_served_ordinal = 0
+
+    def serve_fenced_crossing(self, receiver: str, method: str) -> tuple:
+        """The §4 fenced-crossing seam, consulted at each fenced boundary crossing
+        while a turn is re-plugged in journal-served mode. Returns
+        `(served, outcome)`:
+
+          * `served` True — this crossing is recorded COMPLETE in the journal for
+            the decision being re-applied; `outcome` is the recorded return. The
+            caller MUST NOT dispatch: the fenced extern already ran once, and the
+            journal is the only evidence a fresh process has of it (§4 fenced row,
+            "serve the recorded outcome, do not dispatch"). Dispatches zero times.
+          * `served` False — no completed record for this crossing's ordinal, so
+            it is running for the FIRST time on this base and the caller dispatches
+            it normally. Counted in `_fenced_dispatch_count`, the non-vacuity
+            witness: with the seam disabled a completed fenced crossing would fall
+            here and re-dispatch, which the §7 exit test fails on.
+
+        Outside journal-served mode every crossing is a first run (`served`
+        False), so a live plug is unaffected. Ordinals are consumed in body order,
+        matching the order `record_fenced_crossing_begin` assigned them at
+        record time, so the re-plug and the recording line up crossing for
+        crossing."""
+        if self._journal_served_decision is None:
+            self._fenced_dispatch_count += 1
+            return (False, None)
+        ordinal = self._journal_served_ordinal
+        self._journal_served_ordinal += 1
+        if ordinal in self._journal_served:
+            return (True, self._journal_served[ordinal])
+        self._fenced_dispatch_count += 1
+        return (False, None)
 
     def _surface_digests(self) -> dict:
         """The across-restart content form of the surface CAS key, recomputed from
