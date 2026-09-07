@@ -2296,16 +2296,20 @@ class WriteAheadLog:
         records: list = []
         complete = False
         torn = False
-        with open(path, encoding="utf-8") as handle:
-            lines = [line.strip() for line in handle]
-        last_content = max((i for i, line in enumerate(lines) if line),
+        # Read as BYTES and decode per line so a trailing record torn mid
+        # multibyte-character (a genuine `kill -9`) classifies as `torn` rather
+        # than raising a UnicodeDecodeError the recovery exists to absorb — kept
+        # behaviourally identical to `revl.wal.read_wal`.
+        with open(path, "rb") as handle:
+            byte_lines = [bl.strip() for bl in handle]
+        last_content = max((i for i, bl in enumerate(byte_lines) if bl),
                            default=-1)
-        for index, line in enumerate(lines):
-            if not line:
+        for index, byte_line in enumerate(byte_lines):
+            if not byte_line:
                 continue
             try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
+                entry = json.loads(byte_line.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 if index == last_content:
                     torn = True   # a partial FINAL record: the crash itself
                     continue

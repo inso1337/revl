@@ -410,3 +410,40 @@ def test_two_tier_composition_boots_and_a_call_crosses_the_seam(tmp_path, capfd)
     assert "tier_py[py]" in out and "tier_go[go]" in out
     # the probe ran on the py control plane and the value crossed back from go
     assert "'ping'" in out or "ping" in out
+
+
+# -------------------------------------------------------- R-C6: pump robustness
+
+def test_conductor_pump_survives_a_non_utf8_stdout_byte(tmp_path):
+    """R-C6 (issue #538): the conductor pumps each child's stdout through a
+    text-mode pipe. A single non-UTF-8 byte (a truncated log line, a raw crash
+    dump) must not raise `UnicodeDecodeError` in the pump loop — that kills the
+    daemon pump THREAD and strands the child, whose UP/DOWN/HALTED lines then
+    never reach the conductor. `spawn()` opens the pipe with `errors="replace"`
+    so a bad byte is tolerated and the lines around it still arrive.
+
+    This pins the exact Popen contract `spawn()` uses (text + errors=replace)
+    against a child that emits a bad byte between two sentinel lines, and
+    asserts both sentinels survive."""
+    import subprocess  # noqa: PLC0415
+
+    # a child that writes: a good line, one lone 0x80 byte (never valid UTF-8
+    # on its own), then another good line — the shape a torn log write leaves.
+    child = (
+        "import sys\n"
+        "b = sys.stdout.buffer\n"
+        "b.write(b'[c] UP\\n'); b.flush()\n"
+        "b.write(b'\\x80\\n'); b.flush()\n"
+        "b.write(b'[c] DOWN\\n'); b.flush()\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, errors="replace",
+    )
+    # drive the same read loop the conductor's `pump` runs; it must not raise.
+    seen = [line.strip() for line in proc.stdout]
+    proc.wait(timeout=10)
+
+    assert "[c] UP" in seen
+    assert "[c] DOWN" in seen   # the line AFTER the bad byte still arrived

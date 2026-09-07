@@ -3646,7 +3646,7 @@ def run_placement(files, placement_path: str, once: bool = False,
                 pname, cmd, proc_env, sandbox_achieved[pname])
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=proc_env, text=True,
+            env=proc_env, text=True, errors="replace",
         )
         children[pname] = (proc, stop_mode)
         thread = threading.Thread(target=pump, args=(pname, proc), daemon=True)
