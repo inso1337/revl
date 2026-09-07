@@ -1,0 +1,62 @@
+// item 437d, the field-off-an-index subset the byte-agreement oracle CAN hold.
+//
+// The census found that EVERY remaining "index read cloned" site in the
+// self-host stages is `xs[i].field == "lit"`: a field read off a `List` element
+// that cloned the WHOLE element (every sibling field) just to move one field
+// out and compare it. The `field` render now clones only the field read, and a
+// read-only caller strips even that. Without a fixture reaching the shape, the
+// reference emitter could be optimised and `selfhost/emit_rust.rvl` left behind
+// with the oracle staying green (the item-429 trap), so this pins both tiers.
+//
+// Everything stays inside the covered subset: user records, field access,
+// index, `==`/`!=`, `${..}` interpolation, and the read-only string-arg
+// builtins. No stdlib `len` property, which the self-host port does not emit.
+type Tok = { kind: Str, text: Str }
+
+// A field off an index read in an `==`/`!=` operand borrows the element place —
+// `(xs[i]).kind == "kw"`, no whole-element clone — and the `Str` literal on the
+// other side borrows too (item 437b), so the compare allocates nothing. Both
+// operand orders and both operators.
+fn count_kw(xs: List[Tok]) -> Int {
+  var n = 0
+  var i = 0
+  let len = xs.length()
+  while (i < len) {
+    if (xs[i].kind == "kw") { n = n + 1 }
+    if ("ident" == xs[i].kind) { n = n + 2 }
+    if (xs[i].text != "eof") { n = n + 3 }
+    i = i + 1
+  }
+  return n
+}
+
+// A field off an index read as a builtin RECEIVER — every `Revl*Ops` method
+// takes `&self`, so `(xs[i]).text.startsWith("k")` borrows the field place.
+fn any_prefixed(xs: List[Tok]) -> Int {
+  var n = 0
+  var i = 0
+  let len = xs.length()
+  while (i < len) {
+    if (xs[i].text.startsWith("k")) { n = n + 1 }
+    if (xs[i].kind.endsWith("d")) { n = n + 1 }
+    i = i + 1
+  }
+  return n
+}
+
+// A field off an index read in an interpolation operand — `format!` borrows its
+// arguments, so `${xs[i].kind}` and a bare `${xs[i]}`-style read need no clone.
+fn describe(xs: List[Tok], names: List[Str], i: Int) -> Str {
+  return `${xs[i].kind}:${xs[i].text}=${names[i]}`
+}
+
+// OWNED positions keep an owning clone, but of the FIELD, not the whole element:
+// `(xs[i]).kind.clone()` for a `return`/`let`, and a Copy field the same way.
+fn first_kind(xs: List[Tok]) -> Str {
+  return xs[0].kind
+}
+
+fn stored_text(xs: List[Tok]) -> Int {
+  let t = xs[0].text
+  return t.length()
+}
