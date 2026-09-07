@@ -2717,9 +2717,39 @@ class Session:
             return {"halted": False, "residue": [], "clean": True}
         residue = driver.runtime.estop_residue()
         return {"halted": True, **halt, "residue": residue,
+                # design 460 §6.3: the halt report lists the two-phase admissions
+                # it stranded mid-commit by `decisionId`, so an operator halt names
+                # the same decisions `revl recover` will classify — one ambiguity
+                # vocabulary across the halt report and the forward-recovery scan.
+                "unfinalizedDecisions": self._unfinalized_decisions(),
                 # an E-Stop is NEVER clean. R4 is a property of the abort path;
                 # the halt violates it by design and says so.
                 "clean": False}
+
+    def _unfinalized_decisions(self) -> list:
+        """The `decisionId`s this session's WAL carries an `admit-decided` for with
+        no terminal `admit-finalized`/`admit-abandoned` behind them (design 460
+        §6.3): the two-phase admissions a halt strands mid-commit — a decision
+        after `decided`, its plug settled or in flight, that never reached a
+        terminal stage. `estop_report` lists them so the halt report and `revl
+        recover` name the SAME decisions. In `admit-decided` order; a decision
+        settled by a later `finalized`/`abandoned` (a plug that raised under the
+        halt writes `abandoned {estop}`) is excluded. Empty, never an error, when no
+        WAL is readable — the halt report degrades rather than crashing."""
+        records = self._wal_ledger_records()
+        settled = {r.get("decisionId") for r in records
+                   if r.get("record") in ("admit-finalized", "admit-abandoned")}
+        seen: set = set()
+        out: list = []
+        for r in records:
+            if r.get("record") != "admit-decided":
+                continue
+            did = r.get("decisionId")
+            if did in settled or did in seen:
+                continue
+            seen.add(did)
+            out.append(did)
+        return out
 
     @property
     def halted(self) -> bool:
@@ -3478,10 +3508,20 @@ class Session:
             retained = self._dispose_turn_fibers(turn_names)
             if wal is not None and decision_id is not None and not retained:
                 # cleanup resolved: every plugged fiber was torn down, so the
-                # terminal `admit-abandoned {plug-failed}` is honest — a halt
-                # during admission is a settled decision, never an owed one.
+                # terminal `admit-abandoned` is honest — a halt during admission
+                # is a settled decision, never an owed one.
+                #
+                # design 460 §6.1: the E-Stop's plug-seam refusal (`_estop_check`
+                # at the runtime `plug` seam) raises `EstopHalted`. It closes the
+                # decision with `admit-abandoned {estop}` rather than `plug-failed`,
+                # so a halt DURING admission carries the E-Stop's own reason — the
+                # shared ambiguity vocabulary of §6 — and never an owed one on the
+                # next `revl recover`. Every other plug failure stays `plug-failed`.
+                estop_halt = getattr(runtime_mod, "EstopHalted", ())
+                reason = ("estop" if isinstance(admit_err, estop_halt)
+                          else "plug-failed")
                 wal.record_admit_abandoned(decision_id=decision_id,
-                                           reason="plug-failed")
+                                           reason=reason)
             elif retained:
                 # design 460 §2 / issue #644: cleanup is UNRESOLVED — one or more
                 # of the turn's plugged fibers could not be torn down and stay in

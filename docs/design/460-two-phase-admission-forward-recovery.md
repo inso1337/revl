@@ -397,6 +397,24 @@ zero dispatch, while a `begin` with no `complete` reclassifies the decision
 journal-served mode remains the runtime half; the durable serving verdict and the
 forward finalize it gates are in place.
 
+Slice 4 then landed the E-Stop coupling on the py tier: the plug-seam refusal
+(`EstopHalted` at the runtime `plug` seam) closes the decision
+`admit-abandoned {estop}` in `session._wire_turn` rather than `plug-failed`; an
+`estop-ambiguous` record tagged with a `decisionId` is read as that decision's
+in-flight fenced row in `recovery.recover_forward_admissions` and never
+cross-attributes to a neighbour; and `Session.estop_report` lists the
+un-finalized decisions (`_unfinalized_decisions`) so the halt report and `revl
+recover` name the same decisions.
+
+Alongside Slice 4, a forward-recovery soundness fix (the #476 review finding): a
+forward finalize now REQUIRES a restored `session` to run the content CAS
+against. A `revl recover --wal FILE --forward` with no `--restore` reaches
+`recover_forward_admissions` with `session=None` and can no longer finalize an
+advanced decision — it classifies it `unverified`, appends no `admit-finalized`,
+and never reports a CAS that never ran. An `admit-applied` is historical applied
+state, not checked-current state; only a restored surface authorizes the forward
+finalize.
+
 **Slice 4: E-Stop coupling on py.** The plug-seam refusal writes
 `abandoned {reason: "estop"}`; an `estop-ambiguous` record under a decision is
 read as the §4 in-flight row; the conductor's halt report lists un-finalized

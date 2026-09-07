@@ -1173,3 +1173,232 @@ def test_advanced_with_no_fenced_records_finalizes_forward_unchanged(tmp_path):
     assert reports[0]["finalized"] is True
     assert [r for r in read_wal(path)["records"]
             if r.get("record") == "admit-finalized"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #476 review: forward recovery must NEVER finalize an advanced decision
+# without a restored Session to run the content CAS against. The public `revl
+# recover --wal FILE --forward` path builds a Session only under `--restore`, so
+# a `--forward` without `--restore` reaches `recover_forward_admissions` with
+# `session=None`. Finalizing there would append `admit-finalized` and report a
+# content CAS (design 460 §3) that never ran — carrying a decision onto a surface
+# it may never have seen. The decision is classified `unverified`: reported,
+# nothing appended, and no claim the CAS passed. Pure over the WAL records.
+# --------------------------------------------------------------------------- #
+
+def _applied_wal(tmp_path, name):
+    """An on-disk WAL header so a later `read_wal` parses; the caller's records
+    live only in the in-memory `wal` dict handed to `recover_forward_admissions`,
+    so the file starts with just the header and gains only what the scan appends
+    (the same shape the Slice-3 tests above use)."""
+    import json as _json
+    path = str(tmp_path / name)
+    with open(path, "w", encoding="utf-8") as h:
+        h.write(_json.dumps({"record": "header", "walVersion": 1}) + "\n")
+    return path
+
+
+def test_advanced_without_a_session_is_unverified_and_finalizes_nothing(tmp_path):
+    """The review finding, at the classifier: an advanced decision with NO restored
+    Session cannot run the content CAS, so forward recovery refuses to finalize it,
+    classifies it `unverified`, appends nothing, and never claims the CAS passed."""
+    from revl.recovery import recover_forward_admissions
+    from revl.wal import read_wal
+    s = _forward_session()
+    decided = _decided_record(s)   # its `expected` surface would MATCH under CAS
+    wal = {"records": [decided,
+                       {"record": "admit-applied", "seq": 7, "decisionId": "D1",
+                        "observed": {"generation": 1, "surfaceEpoch": 2}}]}
+    path = _applied_wal(tmp_path, "nosession.wal")
+    # session=None, forward=True: the bug was that this finalized forward anyway.
+    reports = recover_forward_admissions(wal, session=None, forward=True,
+                                         wal_path=path)
+    assert len(reports) == 1
+    assert reports[0]["classification"] == "unverified"
+    assert reports[0]["finalized"] is False
+    assert reports[0]["casChecked"] is False
+    # NOTHING terminal was appended — no false `admit-finalized`, no `abandoned`.
+    got = read_wal(path)["records"]
+    assert not [r for r in got if r.get("record") == "admit-finalized"]
+    assert not [r for r in got if r.get("record") == "admit-abandoned"]
+
+
+def test_no_session_forward_recover_end_to_end_never_finalizes(tmp_path):
+    """The same finding end-to-end through `recover()`, the shape the CLI drives on
+    `revl recover --wal FILE --forward` with no `--restore` (session=None): the
+    advanced decision surfaces as `unverified` and the WAL gains no `finalized`."""
+    import sys as _sys
+    _sys.path.insert(0, str(_BACKEND))
+    from replay import WriteAheadLog
+    from revl.recovery import recover
+    from revl.wal import read_wal
+    s = _forward_session()
+    path = str(tmp_path / "cli.wal")
+    w = WriteAheadLog(path).open()
+    w.record_admit_decided(
+        decision_id="D1", turn=_TURN_BUNDLE,
+        expected=_decided_record(s)["expected"], spends=["r1"],
+        components=["TurnComp"], keys=["turn"])
+    w.record_admit_applied(decision_id="D1", generation=1, surface_epoch=2)
+    w.commit_activation(components=["Agent"])
+    w.close()
+    report = recover(path, session=None, forward_admissions=True)
+    assert report["admissions"][0]["classification"] == "unverified"
+    assert report["admissions"][0]["finalized"] is False
+    assert not [r for r in read_wal(path)["records"]
+                if r.get("record") == "admit-finalized"]
+
+
+# --------------------------------------------------------------------------- #
+# The crash matrix (design 460 §7, Slice 3 exit): a cut between EACH pair of
+# stages, asserting the forward-recovery verdict is deterministic. Pure over the
+# WAL records + the content CAS.
+#   * cut after `decided`  (decided -> applied window)  -> `owed`, re-asks
+#   * cut after `applied`  (applied -> finalized window) -> `advanced`, finalizes
+#   * cut after `finalized`                              -> no-op (settled)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("cut,expected_class,expect_finalized", [
+    ("after-decided", "owed", False),
+    ("after-applied", "advanced", True),
+    ("after-finalized", None, None),
+])
+def test_crash_between_each_pair_of_stages_recovers_forward(
+        tmp_path, cut, expected_class, expect_finalized):
+    from revl.recovery import recover_forward_admissions
+    from revl.wal import read_wal
+    s = _forward_session()
+    decided = _decided_record(s)
+    records = [decided]
+    if cut in ("after-applied", "after-finalized"):
+        records.append({"record": "admit-applied", "seq": 7, "decisionId": "D1",
+                        "observed": {"generation": 1, "surfaceEpoch": 2}})
+    if cut == "after-finalized":
+        records.append({"record": "admit-finalized", "seq": 9,
+                        "decisionId": "D1"})
+    wal = {"records": records}
+    path = _applied_wal(tmp_path, f"{cut}.wal")
+    reports = recover_forward_admissions(wal, session=s, forward=True,
+                                         wal_path=path)
+    if expected_class is None:   # a finalized decision: the scan is a no-op.
+        assert reports == []
+        return
+    assert reports[0]["classification"] == expected_class
+    assert reports[0]["finalized"] is expect_finalized
+    fin = [r for r in read_wal(path)["records"]
+           if r.get("record") == "admit-finalized"]
+    # the applied->finalized cut is finalized FORWARD; the decided->applied cut
+    # (owed) re-asks the gate and finalizes nothing.
+    assert bool(fin) is bool(expect_finalized)
+    if expected_class == "owed":
+        # owed names the re-admittable turn + the already-spent approvals; it is
+        # reported, never silently re-run (the spends stay consumed, fail-closed).
+        assert reports[0]["turn"] == _TURN_BUNDLE
+        assert reports[0]["spends"] == ["r1"]
+
+
+# --------------------------------------------------------------------------- #
+# Slice 4: E-Stop coupling on the py tier (design 460 §6).
+#   * a plug-seam refusal closes the decision `admit-abandoned {estop}`, so the
+#     next `revl recover` sees a SETTLED decision, never an owed one;
+#   * an `estop-ambiguous` record tagged with a decisionId is that decision's
+#     in-flight fenced row and never cross-attributes to a neighbour;
+#   * the halt report names the un-finalized decisions by `decisionId`, so
+#     `revl estop --report` and `revl recover` name the SAME decisions.
+# --------------------------------------------------------------------------- #
+
+def test_abandoned_estop_decision_is_settled_not_owed():
+    """§6.1 recovery side: a decision closed `admit-abandoned {estop}` (a latch at
+    the plug seam) is terminal — forward recovery treats it as settled and reports
+    NO owed decision, exactly as a `plug-failed` abandonment."""
+    from revl.recovery import recover_forward_admissions
+    s = _forward_session()
+    decided = _decided_record(s)
+    wal = {"records": [decided,
+                       {"record": "admit-abandoned", "seq": 7, "decisionId": "D1",
+                        "reason": "estop"}]}
+    assert recover_forward_admissions(wal, session=s) == []
+
+
+def test_estop_ambiguous_tagged_with_a_decision_does_not_cross_attribute(tmp_path):
+    """§6.2: an `estop-ambiguous` record carrying a `decisionId` is the in-flight
+    fenced row for THAT decision only. A record tagged with another decision does
+    not make this advanced decision ambiguous; a record tagged with THIS decision
+    does."""
+    from revl.recovery import recover_forward_admissions
+    s = _forward_session()
+    decided = _decided_record(s)
+    applied = {"record": "admit-applied", "seq": 7, "decisionId": "D1",
+               "observed": {"generation": 1, "surfaceEpoch": 2}}
+    # an ambiguous record tagged with a DIFFERENT decision: D1 is unaffected and
+    # finalizes forward.
+    other = {"record": "estop-ambiguous", "seq": 8, "decisionId": "D-OTHER"}
+    path = _applied_wal(tmp_path, "tagged-other.wal")
+    reports = recover_forward_admissions({"records": [decided, applied, other]},
+                                         session=s, forward=True, wal_path=path)
+    assert reports[0]["classification"] == "advanced"
+    assert reports[0]["finalized"] is True
+
+    # the same record tagged with D1: now D1 is the in-flight/ambiguous decision.
+    mine = {"record": "estop-ambiguous", "seq": 8, "decisionId": "D1"}
+    reports = recover_forward_admissions({"records": [decided, applied, mine]},
+                                         session=s, forward=False)
+    assert reports[0]["classification"] == "ambiguous"
+    assert reports[0]["finalized"] is False
+
+
+def test_unfinalized_decisions_reads_the_wal_and_matches_what_recover_reports():
+    """§6.3: the halt report lists the two-phase admissions it stranded mid-commit
+    by `decisionId` (`Session._unfinalized_decisions`) — a `decided` with no
+    terminal stage behind it. A settled decision (finalized OR abandoned) is
+    excluded, so the halt report and the forward-recovery scan name the SAME
+    decisions."""
+    from revl.mcp.session import Session
+    from revl.recovery import recover_forward_admissions
+    ledger = [
+        {"record": "admit-decided", "seq": 1, "decisionId": "D-open"},
+        {"record": "admit-applied", "seq": 2, "decisionId": "D-open"},
+        {"record": "admit-decided", "seq": 3, "decisionId": "D-done"},
+        {"record": "admit-finalized", "seq": 4, "decisionId": "D-done"},
+        {"record": "admit-decided", "seq": 5, "decisionId": "D-halt"},
+        {"record": "admit-abandoned", "seq": 6, "decisionId": "D-halt",
+         "reason": "estop"},
+    ]
+    s = Session()
+    s._wal_ledger_records = lambda: ledger   # shadow the reader (no live WAL)
+    # only the open decision is un-finalized; the finalized and the abandoned are
+    # settled and excluded.
+    assert s._unfinalized_decisions() == ["D-open"]
+    # and `recover` classifies exactly that same decision (the un-settled one).
+    reports = recover_forward_admissions({"records": ledger}, session=None)
+    named = {r["decisionId"] for r in reports}
+    assert named == set(s._unfinalized_decisions()) == {"D-open"}
+
+
+@needs_cordis
+def test_plug_seam_estop_abandons_the_decision_and_leaves_no_owed(tmp_path):
+    """§6.1 end-to-end on the py tier: a latch armed BEFORE the plug makes the
+    runtime plug seam refuse (`EstopHalted`). `_wire_turn` closes the decision
+    `admit-abandoned {estop}` (not `plug-failed`) and disposes nothing it adopted,
+    so the running composition is untouched and the next `revl recover` sees a
+    settled decision, never an owed one."""
+    import json as _json
+    import runtime as rt   # backends/python/runtime.py
+    from revl.recovery import recover_forward_admissions
+    from revl.wal import read_wal
+    session = _gated_session(tmp_path)
+    latch = tmp_path / "session.wal.estop"
+    rt.arm_estop_latch(str(latch))
+    latch.write_text(_json.dumps({"halted": True, "reason": "operator halt",
+                                  "operator": "alice"}), encoding="utf-8")
+    try:
+        with pytest.raises(rt.EstopHalted):
+            session.admit(_TURN_FORWARD, granted=["Ops"])
+    finally:
+        rt.clear_estop()
+        rt.arm_estop_latch(None)
+    records = read_wal(session._wal_path)["records"]
+    abandoned = [r for r in records if r.get("record") == "admit-abandoned"]
+    assert len(abandoned) == 1 and abandoned[0]["reason"] == "estop"
+    # the decision is SETTLED: forward recovery reports no owed decision.
+    assert recover_forward_admissions({"records": records}) == []

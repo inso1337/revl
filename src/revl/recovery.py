@@ -694,9 +694,15 @@ def recover_forward_admissions(wal: dict, *, session=None,
         did not advance; the recorded turn is re-admittable through the gate, which
         re-asks any ticket (the spends are already consumed, fail-closed). Reported;
         never silently re-run.
-      * `advanced` — `admit-applied` is present. The runtime advanced past the
-        decision. CAS the recorded `expected` surface against the base+turn
-        recomputed from the restored generation; on match, finalize forward.
+      * `advanced` — `admit-applied` is present AND a restored `session` let the
+        content CAS run and pass. The runtime advanced past the decision and the
+        surface still matches; finalize forward.
+      * `unverified` — `admit-applied` is present but there is NO restored
+        `session` to recompute the current surface from, so the content CAS could
+        not run. Forward recovery refuses to finalize (it will not claim a CAS it
+        never performed, issue #476 review); `admit-applied` is historical applied
+        state, not checked-current state. Reported; finalizes nothing. A
+        `--restore` snapshot moves it to `advanced` or `stale`.
       * `stale` — advanced, but the content CAS failed: the base's manifest or the
         merged class-map digest moved. Write `admit-abandoned {stale}`, report the
         digest that moved, finalize nothing. A decision never finalizes onto a
@@ -746,9 +752,16 @@ def recover_forward_admissions(wal: dict, *, session=None,
         # an estop-ambiguous record after this decision's seq is the §4 in-flight
         # fenced row: report and refuse to finalize.
         decided_seq = d.get("seq", 0)
+        # design 460 §6.2: an `estop-ambiguous` record tagged with THIS decisionId
+        # is the in-flight fenced row for exactly this decision (the halt now tags
+        # the residue it stranded, §6.3); an untagged one (a legacy/pre-tag record)
+        # falls back to the seq window after this decision. Tagged records never
+        # cross-attribute to a neighbouring decision.
         ambiguous = [r for r in records
                      if r.get("record") == "estop-ambiguous"
-                     and r.get("seq", -1) > decided_seq]
+                     and (r.get("decisionId") == did
+                          or (r.get("decisionId") is None
+                              and r.get("seq", -1) > decided_seq))]
         applied = _for("admit-applied", did)
 
         if ambiguous:
@@ -774,25 +787,48 @@ def recover_forward_admissions(wal: dict, *, session=None,
                 "finalized": False})
             continue
 
-        # advanced: the content CAS on the recorded `expected` surface.
+        # advanced: the content CAS on the recorded `expected` surface. The CAS
+        # REQUIRES a restored Session to recompute the live surface from
+        # (`_forward_surface_for_turn`, design 460 §3): the class map is never
+        # trusted from the record, it is rebuilt from the restored base plus the
+        # recorded turn and compared. Without a Session — a `revl recover
+        # --forward` with no `--restore` — there is NO current-surface evidence,
+        # so an advanced decision cannot be finalized: finalizing here would append
+        # `admit-finalized` and report a content CAS that never ran, carrying a
+        # decision onto a surface it may never have seen (issue #476 review). An
+        # `admit-applied` is HISTORICAL applied state, not CHECKED-current state;
+        # forward recovery refuses, reports the decision unresolved, appends
+        # nothing, and never claims the CAS passed.
         expected = d.get("expected") or {}
+        if session is None:
+            reports.append({
+                "decisionId": did, "classification": "unverified",
+                "decision": ("the runtime advanced past the decision, but forward "
+                             "recovery has no restored Session to recompute and "
+                             "compare the CURRENT surface against (no `--restore`), "
+                             "so the content CAS design 460 §3 requires never ran. "
+                             "The decision is NOT finalized — its `admit-applied` is "
+                             "historical applied state, not checked-current state. "
+                             "Re-run with `--restore SNAPSHOT` to authorize the "
+                             "forward finalize under the surface CAS."),
+                "casChecked": False, "finalized": False})
+            continue
         classification = "advanced"
         cas_detail = None
-        if session is not None:
-            try:
-                live = session._forward_surface_for_turn(d.get("turn") or {})
-            except Exception as error:  # noqa: BLE001 — a refusing checker, §2.1
+        try:
+            live = session._forward_surface_for_turn(d.get("turn") or {})
+        except Exception as error:  # noqa: BLE001 — a refusing checker, §2.1
+            classification = "stale"
+            cas_detail = str(error)
+        else:
+            drifted = [k for k in ("baseManifestHash", "classMapDigest")
+                       if expected.get(k) is not None
+                       and live.get(k) != expected.get(k)]
+            if drifted:
                 classification = "stale"
-                cas_detail = str(error)
-            else:
-                drifted = [k for k in ("baseManifestHash", "classMapDigest")
-                           if expected.get(k) is not None
-                           and live.get(k) != expected.get(k)]
-                if drifted:
-                    classification = "stale"
-                    cas_detail = ", ".join(
-                        f"{k}: {expected.get(k)} -> {live.get(k)}"
-                        for k in drifted)
+                cas_detail = ", ".join(
+                    f"{k}: {expected.get(k)} -> {live.get(k)}"
+                    for k in drifted)
 
         if classification == "stale":
             if forward and wal_path is not None:
@@ -807,6 +843,7 @@ def recover_forward_admissions(wal: dict, *, session=None,
                              "landed effects are left to the normal roll-back/"
                              "roll-forward verdict."),
                 "drift": cas_detail,
+                "casChecked": True,
                 "finalized": False,
                 "abandoned": bool(forward and wal_path is not None)})
             continue
@@ -875,6 +912,7 @@ def recover_forward_admissions(wal: dict, *, session=None,
                          "Its fenced crossings are served from the journal, not "
                          "re-dispatched (§4)."),
             "served": sorted(served), "dispatched": dispatched,
+            "casChecked": True,
             "finalized": bool(forward and wal_path is not None)})
     return reports
 
@@ -1905,8 +1943,9 @@ def render(report: dict) -> str:
     for entry in report.get("admissions") or []:
         did = (entry.get("decisionId") or "")[:19]
         tag = {"owed": "OWED", "advanced": "advanced", "stale": "STALE",
-               "ambiguous": "AMBIGUOUS"}.get(entry.get("classification"),
-                                             entry.get("classification"))
+               "ambiguous": "AMBIGUOUS",
+               "unverified": "UNVERIFIED"}.get(entry.get("classification"),
+                                               entry.get("classification"))
         fin = " finalized" if entry.get("finalized") else ""
         fin = " abandoned" if entry.get("abandoned") else fin
         # design 460 §4: name the journal-served fenced crossings on an advanced
