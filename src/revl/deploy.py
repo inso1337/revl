@@ -1303,6 +1303,288 @@ def compare_commit_receipt(admission_receipt: Mapping,
 
 
 # ---------------------------------------------------------------------------
+# §1.3 steps 3–5 / S2 slice 1. the remote deploy-admit runner protocol
+# ---------------------------------------------------------------------------
+#
+# Slice 1 (single-host) put :func:`admit` and :func:`admit_bundle_chain` on the
+# PREPARE path, but the conductor called `admit` IN ITS OWN PROCESS, over bytes
+# on its own disk (`via = local`). The design's cross-machine PREPARE (§1.3
+# steps 3–5) is different in one way that does not need a second machine to
+# build: the conductor does not run the check itself — it STAGES the sliced
+# bundle on the far host, starts `revl deploy-admit` there in ADMIT-ONLY mode,
+# and receives back a SIGNED admission verdict that the HOST minted against the
+# HOST's own local trust store (S2.4). The trust inversion is the whole point:
+# a cross-domain host verifies with keys the conductor does not hold and can
+# only be ASKED, never told, to admit.
+#
+# This slice builds that request/response protocol and its message shapes, plus
+# an IN-PROCESS transport stub (:class:`InProcessTransport`) that stands in for
+# the SSH/subprocess orchestration channel of §1.2. The stub carries every
+# message through its CANONICAL WIRE FORM (`to_wire` -> json -> `from_wire`), so
+# it exercises the exact serialization a real transport would and a field that
+# does not survive the round trip fails a test here, not in production. The live
+# cross-machine leg (staging over scp/rsync, spawning the runner over ssh, the
+# pinned host key of §1.3) rides on top of this protocol unchanged and is a
+# following slice; it would be verified end-to-end on the two self-hosted
+# runners (azure-amd-1 + oracle-arm64).
+#
+# The protocol is deliberately thin — dict in, dict out — because a real runner
+# reads one JSON line off the orchestration channel and writes one back. The
+# typed :class:`AdmitRequest` / :class:`AdmitResponse` are the constructors and
+# fail-closed validators the two ends use to build and read those lines; the
+# authority for a verdict stays :func:`admit`, reused unchanged.
+
+#: A refusal whose failing "link" is the transport itself, not a chain link: a
+#: request that did not parse, or a reply that did not answer THIS request. It
+#: is distinct from every :data:`LINK_SIGNER`-class chain link because the
+#: attestation was never reached — the fault is in the exchange, not the bundle.
+LINK_TRANSPORT = "transport"
+
+#: The two message kinds of the orchestration-channel handshake. Domain-distinct
+#: strings so a request can never be read as a response (or as a receipt, whose
+#: kind is :data:`RECEIPT_KIND`); `from_wire` refuses any other value.
+ADMIT_REQUEST_KIND = "revl.deploy.admit-request"
+ADMIT_RESPONSE_KIND = "revl.deploy.admit-response"
+
+#: Protocol version of the request/response envelope, bumped when a field's
+#: meaning changes. Both ends pin it and refuse a mismatch rather than guessing.
+ADMIT_PROTOCOL_VERSION = "1.0"
+
+
+@dataclass(frozen=True)
+class AdmitRequest:
+    """The conductor's PREPARE request to a remote deploy-admit runner (§1.3
+    steps 3–5).
+
+    It names the STAGED bundle path *on the runner's own filesystem* (the
+    conductor put it there in step 2), the `backend` the host will load, the
+    evidence the deploy requires, and a `challenge` nonce the runner echoes so
+    the conductor can bind the reply to THIS request — an orchestration-channel
+    liveness check distinct from the data-plane :class:`TransportReplayGuard`
+    (§1.4). It carries NO key: the runner verifies against its OWN local trust
+    store (S2.4), so a request can ask for admission but never supply the trust
+    that would grant it.
+
+    `require_gauntlet` / `require_conformance` are what the conductor asks the
+    host to enforce; the host may only be STRICTER, never looser, than the ask
+    (see :func:`serve_admit_request`).
+    """
+
+    bundle: str
+    backend: str
+    challenge: str
+    require_gauntlet: bool = False
+    require_conformance: bool = False
+
+    def to_wire(self) -> dict:
+        return {"kind": ADMIT_REQUEST_KIND,
+                "version": ADMIT_PROTOCOL_VERSION,
+                "bundle": self.bundle,
+                "backend": self.backend,
+                "challenge": self.challenge,
+                "require_gauntlet": bool(self.require_gauntlet),
+                "require_conformance": bool(self.require_conformance)}
+
+    @classmethod
+    def from_wire(cls, wire: Mapping) -> "AdmitRequest":
+        """Parse a request off the wire, fail-closed. A wrong kind/version or a
+        missing/ill-typed field raises :class:`ValueError` rather than being
+        read with a default — a runner that guessed at a malformed request
+        would be admitting on terms the conductor never stated."""
+        if not isinstance(wire, Mapping):
+            raise ValueError("admit request is not a mapping")
+        if wire.get("kind") != ADMIT_REQUEST_KIND:
+            raise ValueError(
+                f"not a {ADMIT_REQUEST_KIND} record: kind is "
+                f"{wire.get('kind')!r}")
+        if wire.get("version") != ADMIT_PROTOCOL_VERSION:
+            raise ValueError(
+                f"admit request version is {wire.get('version')!r}, expected "
+                f"{ADMIT_PROTOCOL_VERSION!r}")
+        bundle = wire.get("bundle")
+        backend = wire.get("backend")
+        challenge = wire.get("challenge")
+        for name, value in (("bundle", bundle), ("backend", backend),
+                            ("challenge", challenge)):
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"admit request {name!r} must be a non-empty string, got "
+                    f"{value!r}")
+        return cls(bundle=bundle, backend=backend, challenge=challenge,
+                   require_gauntlet=bool(wire.get("require_gauntlet", False)),
+                   require_conformance=bool(
+                       wire.get("require_conformance", False)))
+
+
+@dataclass(frozen=True)
+class AdmitResponse:
+    """The runner's reply: the signed admission `receipt` (an ACCEPT or REFUSE
+    from :func:`admit`) plus the `challenge` echoed back from the request so the
+    conductor can confirm the reply answers THIS request and not a replayed
+    earlier one."""
+
+    receipt: dict
+    challenge: str
+
+    def to_wire(self) -> dict:
+        return {"kind": ADMIT_RESPONSE_KIND,
+                "version": ADMIT_PROTOCOL_VERSION,
+                "challenge": self.challenge,
+                "receipt": dict(self.receipt)}
+
+    @classmethod
+    def from_wire(cls, wire: Mapping) -> "AdmitResponse":
+        """Parse a response off the wire, fail-closed — same discipline as
+        :meth:`AdmitRequest.from_wire`: a reply the conductor cannot recognise
+        is not a verdict it may act on."""
+        if not isinstance(wire, Mapping):
+            raise ValueError("admit response is not a mapping")
+        if wire.get("kind") != ADMIT_RESPONSE_KIND:
+            raise ValueError(
+                f"not a {ADMIT_RESPONSE_KIND} record: kind is "
+                f"{wire.get('kind')!r}")
+        if wire.get("version") != ADMIT_PROTOCOL_VERSION:
+            raise ValueError(
+                f"admit response version is {wire.get('version')!r}, expected "
+                f"{ADMIT_PROTOCOL_VERSION!r}")
+        receipt = wire.get("receipt")
+        challenge = wire.get("challenge")
+        if not isinstance(receipt, Mapping):
+            raise ValueError("admit response carries no receipt mapping")
+        if not isinstance(challenge, str) or not challenge:
+            raise ValueError("admit response carries no challenge")
+        return cls(receipt=dict(receipt), challenge=challenge)
+
+
+def serve_admit_request(request_wire: Mapping, *,
+                        key_paths: Sequence[Path | str] = (),
+                        host_key: Optional[bytes] = None,
+                        require_gauntlet: bool = False,
+                        require_conformance: bool = False,
+                        runtime_versions: Optional[Mapping[str, str]] = None,
+                        now=None) -> dict:
+    """Runner side of §1.3 steps 4–5: read one request off the orchestration
+    channel, verify the staged bundle's chain LOCALLY against THIS host's own
+    trust store, and answer with a signed admission verdict. Loads nothing; this
+    is PREPARE. Returns a response WIRE dict (what `revl deploy-admit` writes
+    back); the transport moves it, the conductor reads it with
+    :meth:`AdmitResponse.from_wire`.
+
+    Two host-authority properties the design (S2.4) requires are enforced here,
+    not left to the request:
+
+      * the trust store is built from the HOST's own `key_paths` and
+        `host_key`; the request supplies no key, so a request can ask for
+        admission but never carry the trust that grants it;
+      * the host may be STRICTER than the ask but never looser — the effective
+        `require_gauntlet` / `require_conformance` is the host's floor OR the
+        request's ask, so a conductor cannot turn a host's evidence requirement
+        OFF by omitting it from the request.
+
+    A malformed request fails CLOSED to a :data:`LINK_TRANSPORT` REFUSE (the
+    same shape :func:`admit` uses for a bad chain), because a runner that could
+    not parse what it was asked to admit must refuse, never admit on a guess.
+    """
+    try:
+        request = AdmitRequest.from_wire(request_wire)
+    except ValueError as error:
+        challenge = ""
+        if isinstance(request_wire, Mapping):
+            got = request_wire.get("challenge")
+            challenge = got if isinstance(got, str) else ""
+        receipt = _refusal(LINK_TRANSPORT,
+                           f"the deploy-admit request could not be parsed, so "
+                           f"nothing was admitted: {error}")
+        return AdmitResponse(receipt=receipt, challenge=challenge).to_wire()
+
+    keys: dict[str, bytes] = {}
+    for path in key_paths:
+        raw = Path(path).read_bytes()
+        keys[attest.key_id(raw)] = raw
+    trust = TrustStore(
+        keys=keys, backend=request.backend,
+        # The host is the floor: it may add a requirement the conductor did not
+        # ask for, but the conductor cannot subtract one the host stands on.
+        require_gauntlet=bool(require_gauntlet) or request.require_gauntlet,
+        require_conformance=(bool(require_conformance)
+                             or request.require_conformance))
+    receipt = admit(request.bundle, trust=trust, host_key=host_key,
+                    runtime_versions=runtime_versions, now=now)
+    return AdmitResponse(receipt=receipt, challenge=request.challenge).to_wire()
+
+
+class InProcessTransport:
+    """The orchestration channel of §1.2, stubbed to run the runner IN THIS
+    PROCESS — no second machine, no ssh, no subprocess. It stands in for the
+    real SSH/scp transport so the whole PREPARE handshake is buildable and
+    testable on one host; the live cross-machine transport is a following slice
+    that implements the same `send` contract.
+
+    `send` carries the request through its canonical wire form and carries the
+    reply back the same way (`to_wire` -> json text -> `from_wire`), so the stub
+    exercises the identical serialization a real transport puts on the channel —
+    a field that does not survive json round-trips fails here, in a unit test,
+    rather than on the wire between two machines. It holds the runner-side trust
+    configuration (the host's keys and evidence floor), exactly the state a real
+    far host owns and the conductor never sees.
+    """
+
+    def __init__(self, *, key_paths: Sequence[Path | str] = (),
+                 host_key: Optional[bytes] = None,
+                 require_gauntlet: bool = False,
+                 require_conformance: bool = False,
+                 runtime_versions: Optional[Mapping[str, str]] = None) -> None:
+        self._key_paths = list(key_paths)
+        self._host_key = host_key
+        self._require_gauntlet = require_gauntlet
+        self._require_conformance = require_conformance
+        self._runtime_versions = (dict(runtime_versions)
+                                  if runtime_versions is not None else None)
+
+    def send(self, request_wire: Mapping, *, now=None) -> dict:
+        """Deliver one request to the runner and return its response wire dict.
+        The json round trips are what make this a faithful stub and not just a
+        function call: they are the bytes a real channel would carry."""
+        on_far_side = json.loads(json.dumps(request_wire))
+        response_wire = serve_admit_request(
+            on_far_side, key_paths=self._key_paths, host_key=self._host_key,
+            require_gauntlet=self._require_gauntlet,
+            require_conformance=self._require_conformance,
+            runtime_versions=self._runtime_versions, now=now)
+        return json.loads(json.dumps(response_wire))
+
+
+def request_admission(transport, request: AdmitRequest, *, now=None) -> dict:
+    """Conductor side of §1.3 steps 3–5: send `request` over `transport`,
+    receive the runner's signed admission verdict, and CHECK that the runner
+    answered THIS request — the `challenge` nonce must round-trip. Returns the
+    admission receipt (ACCEPT or REFUSE); the caller verifies its signature
+    against the host's known key with :func:`verify_receipt`, exactly as it
+    would for a local :func:`admit`.
+
+    A reply that does not echo the challenge, or that cannot be parsed as an
+    :class:`AdmitResponse`, fails CLOSED to a :data:`LINK_TRANSPORT` REFUSE: a
+    verdict the conductor cannot tie to the request it sent is not a verdict it
+    may act on, so the deploy refuses with nothing staged to roll back.
+    """
+    try:
+        response = AdmitResponse.from_wire(transport.send(request.to_wire(),
+                                                          now=now))
+    except ValueError as error:
+        return _refusal(LINK_TRANSPORT,
+                       f"the runner's reply could not be read as an admission "
+                       f"response, so no verdict was received: {error}")
+    if not hmac.compare_digest(response.challenge, request.challenge):
+        return _refusal(
+            LINK_TRANSPORT,
+            "the runner's reply did not echo this request's challenge nonce "
+            f"(sent {request.challenge[:12]}…, got "
+            f"{response.challenge[:12]}…): a reply that is not bound to this "
+            "request is refused rather than mistaken for an answer to it")
+    return response.receipt
+
+
+# ---------------------------------------------------------------------------
 # §1.4. distributed effect correlation, authenticated against the peer
 # ---------------------------------------------------------------------------
 
