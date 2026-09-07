@@ -79,6 +79,65 @@ def score_one(path: Path, compile_source, RevlError, classify) -> dict:
                 "message": f"{type(exc).__name__}: {exc}", "line": None}
 
 
+class SelfScoreError(AssertionError):
+    """A number was about to be produced with a grader that is not model-free.
+
+    See docs/eval-protocol.md section 3 (noSelfScore). This is a hard stop, not
+    a warning: an eval number that fails these checks does not exist under the
+    protocol.
+    """
+
+
+def assert_model_free(cells, compile_source, RevlError, classify) -> None:
+    """Enforce the mechanical core of the noSelfScore rule before scoring.
+
+    docs/eval-protocol.md section 3 states three things a machine can check.
+    This guard checks exactly those three and no more:
+
+      1. model-free grading input: every cell is a committed file on disk under
+         bench/results/, not text handed back from a live model call;
+      2. the grader is the compiler: the scoring callable resolves to the revl
+         compiler entrypoint, never a generation driver or a model client;
+      3. determinism: scoring one cell twice yields the same result.
+
+    It cannot and does not check the ladder's review step (section 5); that is a
+    process rule kept honest by the review record, not by this program.
+    """
+    # (2) the grader is the compiler, not a generator or a model client.
+    mod = getattr(compile_source, "__module__", "") or ""
+    name = getattr(compile_source, "__name__", "") or ""
+    if not (mod == "revl" or mod.startswith("revl.")):
+        raise SelfScoreError(
+            f"grader must be the revl compiler; got a callable from {mod!r}")
+    if name != "compile_source":
+        raise SelfScoreError(
+            f"grader must be revl.compile_source; got {name!r}")
+    for banned in ("run_cline", "run_local", "run_mock", "complete", "generate"):
+        if hasattr(compile_source, banned):
+            raise SelfScoreError(
+                f"grader exposes a generation entrypoint {banned!r}; "
+                "the generator must never be the grader")
+
+    # (1) model-free grading input: every cell is a committed file under RESULTS.
+    for _spec, _variant, path in cells:
+        p = Path(path).resolve()
+        if not p.is_file():
+            raise SelfScoreError(f"grading input is not a file on disk: {p}")
+        if RESULTS.resolve() not in p.parents:
+            raise SelfScoreError(
+                f"grading input is outside the committed corpus {RESULTS}: {p}")
+
+    # (3) determinism: score the first cell twice, results must match.
+    if cells:
+        _spec, _variant, path = cells[0]
+        first = score_one(path, compile_source, RevlError, classify)
+        again = score_one(path, compile_source, RevlError, classify)
+        if first != again:
+            raise SelfScoreError(
+                "grader is non-deterministic on a fixed input; a compiler is a "
+                f"pure function of (bytes, commit): {first} != {again}")
+
+
 def collect(run: str, attempt: int) -> list[tuple[str, str, Path]]:
     run_dir = RESULTS / run
     if not run_dir.is_dir():
@@ -151,8 +210,12 @@ def main() -> int:
     runs = MODEL_RUNS if args.run == "all" else [args.run]
     out, all_rows = [], []
     for run in runs:
+        cells = collect(run, args.attempt)
+        # noSelfScore: prove the grading is model-free before it produces a
+        # number (docs/eval-protocol.md section 3).
+        assert_model_free(cells, compile_source, RevlError, classify)
         rows = []
-        for spec, variant, path in collect(run, args.attempt):
+        for spec, variant, path in cells:
             result = score_one(path, compile_source, RevlError, classify)
             rows.append({"run": run, "spec": spec, "variant": variant,
                          "path": str(path.relative_to(ROOT)), **result})
