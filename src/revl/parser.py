@@ -245,6 +245,13 @@ class LetEffect:
     # `acquire` field holds a `SubscribeExpr`; the bracket lowers exactly like an
     # effect (a `let-effect` step carrying `subscribe: true`).
     subscribe: bool = False
+    # item 308 (issue #96): the ownership mode this acquisition declares. `owned`
+    # is the implicit default of a plain `let x = effect <acquire>` binding (v1,
+    # 5601d70); `shared` is the contextual marker `effect shared <acquire>` — N
+    # holders, teardown at the last release (S1). `transfer` stays reserved and is
+    # refused at parse. Threaded onto the lowered step as `"mode"` only when it is
+    # not `owned`, so a non-shared program's IR is byte-identical to before.
+    mode: str = "owned"
 
 
 @dataclass
@@ -728,6 +735,44 @@ class RemoteRowDecl:
 
 
 @dataclass
+class SeamRowDecl:
+    """A `seam` row: a row whose provider is a SYNTHESIZED FORWARDER that
+    interposes an observer on an existing provision edge (item 424 gap (b),
+    D-424b.1/.3, slice B2).
+
+    `seam @label on key("<key>") observe|decide with @observer [through cap, ...]`
+
+    The seam addresses an EDGE — a `(key, realm)` (D-424b.1) — spelled the same
+    way a patch addresses a row (426 §2.3). It never registers itself: the
+    COMPOSITION places it (D-424b.2), so there is no hook table to grab. `with
+    @observer` names the row that provides the observer service; the forwarder
+    calls its `saw` (`observe`) or `allow` (`decide`) method (D-424b.4) and never
+    hands it the inner handle (D-424b.8).
+
+    `seam`, `on`, `observe`, `decide` and `through` are CONTEXTUAL keywords read
+    only in this one position inside a `composition` block, exactly as `remote`,
+    `at`, `host` and `on_failure` are — so the lexer's KEYWORDS set is untouched,
+    the self-host lexer needs no sync, and a program using any of those words as
+    an ordinary name still parses. `with`, `in` and `realm` are the keywords the
+    language already has, reused verbatim.
+    """
+    label: str
+    key: str                        # the edge's provision key
+    kind: str                       # "observe" | "decide"; "rewrite" is refused
+    observer: str                   # the `with @observer` row label
+    line: int
+    realm: str | None = None        # `key("k", realm: "r")`; None == shared realm
+    # D-424b.5: the reach the COMPOSITION grants the forwarder. Empty == the
+    # clause was not written. §2.4's FALLBACK is enforced — the set must be a
+    # SUBSET of the wrapped service's own `emission[...]` bound, checked at
+    # resolution (`composition._check_seam_through`). The WIDENING (checking the
+    # forwarder against this set rather than the service, minting a bound the
+    # service did not declare) is the rule change reserved for the architect and
+    # needs 426 S5's `seam:` token; it is not made here.
+    through: list[str] = field(default_factory=list)
+
+
+@dataclass
 class CompositionDecl:
     name: str
     rows: list[RowDecl]
@@ -738,6 +783,11 @@ class CompositionDecl:
     # file. Kept in their own list because they carry no `from` path and
     # resolution reads no header for them.
     remotes: list["RemoteRowDecl"] = field(default_factory=list)
+    # item 424 B2: seam rows — a synthesized forwarder interposing an observer
+    # on a provision edge. Like `remote`, carries no `from` path; unlike it, its
+    # forwarder is derived from an edge another row provides, so it resolves
+    # AFTER the file rows (composition.py `_resolve_seams`).
+    seams: list["SeamRowDecl"] = field(default_factory=list)
     # item 426 S2 (§3.1): the ordered layer stack. `stack` entries are LEVEL 1
     # peers — conflicts between them refuse — and `site` is the single LEVEL 2
     # layer, the one level at which "I decide" is expressible. Both are ordered
@@ -2957,6 +3007,7 @@ class Parser:
         self.expect("{")
         rows: list[RowDecl] = []
         remotes: list[RemoteRowDecl] = []
+        seams: list[SeamRowDecl] = []
         uses: list[tuple[str, int]] = []
         stack: list[tuple[str, int]] = []
         site: tuple[str, int] | None = None
@@ -2997,20 +3048,28 @@ class Parser:
                 self._composition_label(name, remote.label, remote.line, seen)
                 remotes.append(remote)
                 continue
+            if self.at("ident", "seam"):
+                # item 424 B2: a row whose provider is a SYNTHESIZED FORWARDER
+                # interposing an observer on a provision edge (D-424b.1/.3).
+                seam = self.seam_row_decl(name)
+                self._composition_label(name, seam.label, seam.line, seen)
+                seams.append(seam)
+                continue
             if not self.at("ident", "row"):
                 tok = self.peek()
                 raise self.err(
                     tok.line,
-                    "expected `row`, `remote`, `use`, `stack`, `site`, or "
-                    f"`}}` in composition {name}, found {tok.value!r}",
+                    "expected `row`, `remote`, `seam`, `use`, `stack`, `site`, "
+                    f"or `}}` in composition {name}, found {tok.value!r}",
                     hint="a composition document declares rows: "
-                         '`row @label from "path.rvl" provides key`, or '
-                         '`remote @label provides key: Service at host("h:port")`')
+                         '`row @label from "path.rvl" provides key`, '
+                         '`remote @label provides key: Service at host("h:port")`, '
+                         'or `seam @label on key("k") observe with @observer`')
             rows.append(self.row_decl(name))
             self._composition_label(name, rows[-1].label, rows[-1].line, seen)
         self.expect("}")
         return CompositionDecl(name, rows, line, uses, stack=stack,
-                               site=site, remotes=remotes)
+                               site=site, remotes=remotes, seams=seams)
 
     def _composition_label(self, composition: str, label: str, line: int,
                            seen: dict[str, int]) -> None:
@@ -3463,6 +3522,109 @@ class Parser:
                              redirect=redirect, redirect_line=redirect_line,
                              host_line=host_line)
 
+    def seam_row_decl(self, composition: str) -> SeamRowDecl:
+        """`seam @label on key("<key>"[, realm: "r"]) observe|decide
+        with @observer [through cap, cap, ...]`
+
+        Item 424 D-424b.1/.3, slice B2. `seam`, `on`, `observe`, `decide` and
+        `through` are CONTEXTUAL keywords read only here, so the lexer stays
+        context-free and the self-host lexer needs no sync — the same discipline
+        the `remote` row and 426 S2's `configure @db with { ... }` chose. `with`,
+        `in` and `realm` are the keywords the language already has.
+
+        The seam addresses an EDGE, spelled `key("db")` exactly as a patch
+        addresses a row (426 §2.3), and `rewrite` is refused with the F2
+        argument (D-424b.4) — it has no spelling anywhere in the grammar.
+        """
+        line = self.next().line                        # `seam`
+        label = self._row_label()
+        if not self.at("ident", "on"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `on key(\"...\")` after seam row label `@{label}`, "
+                f"found {tok.value!r}",
+                hint='a seam names the edge it wraps: `seam @%s on key("db") '
+                     'observe with @observer` (424 D-424b.1)' % label)
+        self.next()
+        if not self.at("ident", "key"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `key(\"...\")` after `on` on seam row `@{label}`, "
+                f"found {tok.value!r}",
+                hint="a seam addresses an EDGE as a `(key, realm)` pair, spelled "
+                     '`key("db")` or `key("kv", realm: "tenant_a")` — the same '
+                     "address a patch writes (426 §2.3, 424 D-424b.1)")
+        self.next()
+        self.expect("(")
+        key = self.expect("string", what="a provision key string").value
+        realm: str | None = None
+        if self.at(","):
+            self.next()
+            self.expect("kw", "realm", what="`realm:` inside `key(...)`")
+            self.expect(":")
+            realm = self.expect("string", what="a realm name string").value
+        self.expect(")")
+        if not key:
+            raise self.err(line, f"seam row `@{label}` names an empty edge key")
+
+        tok = self.peek()
+        kind = tok.value if tok.kind == "ident" else None
+        if kind == "rewrite":
+            raise self.err(
+                tok.line,
+                f"seam row `@{label}` names kind `rewrite`, which has no spelling",
+                hint="a seam is `observe` or `decide`. `rewrite` is refused: "
+                     "argument substitution between the point a call is DESCRIBED "
+                     "and the point it EXECUTES is roadmap 427 F2's "
+                     "approve-one-run-another shape, a HIGH finding still unfixed, "
+                     "so a construct whose purpose is that substitution would "
+                     "reintroduce it as a feature (424 D-424b.4)")
+        if kind not in ("observe", "decide"):
+            raise self.err(
+                tok.line,
+                f"expected `observe` or `decide` after `on key(\"{key}\")` on "
+                f"seam row `@{label}`, found {tok.value!r}",
+                hint="`observe` sees the call and has no effect; `decide` turns a "
+                     "`Deny` into the method's `Err` and is admitted only on a "
+                     "`Result` method (424 D-424b.4)")
+        self.next()
+
+        if not self.at("kw", "with"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `with @observer` after `{kind}` on seam row "
+                f"`@{label}`, found {tok.value!r}",
+                hint="a seam names the observer row that provides the observer "
+                     "service: `seam @%s on key(\"%s\") %s with @observer`"
+                     % (label, key, kind))
+        self.next()
+        observer = self._row_label()
+
+        through: list[str] = []
+        if self.at("ident", "through"):
+            self.next()
+            while True:
+                parts = [self.expect("ident", what="a capability name").value]
+                while self.at("."):
+                    self.next()
+                    parts.append(self.expect("ident").value)
+                through.append(".".join(parts))
+                if self.at(","):
+                    self.next()
+                    continue
+                break
+            if not through:
+                raise self.err(
+                    line,
+                    f"`through` on seam row `@{label}` names no capability",
+                    hint="drop the `through` clause, or name the reach the "
+                         "composition grants the forwarder (424 D-424b.5)")
+        return SeamRowDecl(label, key, kind, observer, line, realm=realm,
+                           through=through)
+
     def row_config_block(self, label: str) -> list[tuple[str, object, int]]:
         """`config { field: <literal>, ... }` on a row.
 
@@ -3644,9 +3806,10 @@ class Parser:
                              "revl does not model (see the frontier in "
                              "src/revl/typecheck.py); drop the annotation",
                     )
-                acquire, undo, line, setup, is_async = self.effect_form(tok.line)
+                acquire, undo, line, setup, is_async, mode = \
+                    self.effect_form(tok.line)
                 return LetEffect(bind, acquire, undo, line, setup, verified_effect,
-                                 is_async)
+                                 is_async, mode=mode)
             # item 130: `let sub = subscribe <stream> undo sub.close()` — a
             # subscription bracket. It is deliberately the `effect … undo …`
             # shape (a subscription IS an acquisition), so the bracket
@@ -3722,11 +3885,29 @@ class Parser:
                                f"expected `effect` after `verified`, found {tok2.value!r}",
                                hint="inside a body, `verified` marks an effect for inverse "
                                     "round-trip testing: `verified effect … undo …`")
-            acquire, undo, line, setup, is_async = self.effect_form(tok.line)
+            acquire, undo, line, setup, is_async, mode = \
+                self.effect_form(tok.line)
+            if mode == "shared":
+                raise self.err(
+                    line,
+                    "`effect shared …` must be bound: a shared handle is a "
+                    "COUNTED holder, so the acquiring frame must name it",
+                    hint="write `let h = effect shared <cap>.open() undo "
+                         "h.close()`; the binding is holder #1 of the shared "
+                         "grant (item 308, S1)")
             return EffectStmt(acquire, undo, line, setup, verified=True,
                               is_async=is_async)
         if tok.kind == "kw" and tok.value == "effect":
-            acquire, undo, line, setup, is_async = self.effect_form(tok.line)
+            acquire, undo, line, setup, is_async, mode = \
+                self.effect_form(tok.line)
+            if mode == "shared":
+                raise self.err(
+                    line,
+                    "`effect shared …` must be bound: a shared handle is a "
+                    "COUNTED holder, so the acquiring frame must name it",
+                    hint="write `let h = effect shared <cap>.open() undo "
+                         "h.close()`; the binding is holder #1 of the shared "
+                         "grant (item 308, S1)")
             return EffectStmt(acquire, undo, line, setup, is_async=is_async)
         if tok.kind == "kw" and tok.value == "subscribe":
             # item 130: a subscription must be bound — its inverse `close` names
@@ -4033,6 +4214,11 @@ class Parser:
 
     def effect_form(self, line: int):
         self.expect("kw", "effect")
+        # item 308 (issue #96): the ownership mode a plain acquisition may carry
+        # is threaded out as the final tuple element; `owned` for spawn/lease and
+        # the unmarked default, `shared` for the admitted `effect shared …`
+        # marker below. Only the plain-acquire path can be `shared`.
+        mode = "owned"
         # item 131: `effect await <expr> undo <expr>` — an ASYNC acquisition.
         # The `await` is a divert boundary (paper §4.3.2): the fiber suspends
         # during the call and the LANDED result is bound, not the in-flight
@@ -4069,7 +4255,7 @@ class Parser:
                 )
             self.next()
             undo = self.pure_expr()
-            return acquire, undo, line, [], is_async
+            return acquire, undo, line, [], is_async, mode
         # capability leases: `effect lease fs.write(path="/tmp") ttl 10m undo
         # l.revoke()` (item 294 Slice 2). A lease is a ticket-gated acquisition of
         # a standing grant over the capability's cone; its inverse is its own
@@ -4099,32 +4285,45 @@ class Parser:
                          f"{acquire.capability} … undo l.revoke()` (G4, item 294)")
             self.next()
             undo = self.pure_expr()
-            return acquire, undo, line, [], is_async
+            return acquire, undo, line, [], is_async, mode
         # ownership modes `shared` / `transfer` (item 308, issue #96): the acquire
-        # binding may one day carry an explicit ownership mode marker between
-        # `effect` and the acquisition — `effect shared <cap>.open() undo …` /
-        # `effect transfer <cap>.open() undo …`. `owned` (implicit at acquire) and
-        # `borrowed` (the positional default) shipped inferred in v1 (5601d70, no
-        # grammar); `shared` and `transfer` are RESERVED for a later tier but not
-        # implemented. Both are CONTEXTUAL keywords, exactly like `lease` above:
-        # the marker form is `effect shared <ident…>` / `effect transfer <ident…>`
-        # (the acquire head is an ident), so `effect shared()`, `effect shared.m()`
-        # and any binding named `shared`/`transfer` stay ordinary acquisitions.
-        # Reserving the marker turns the otherwise-generic parse error into a clear
-        # "reserved for a later tier" refusal.
+        # binding may carry an explicit ownership mode marker between `effect` and
+        # the acquisition — `effect shared <cap>.open() undo …` / `effect transfer
+        # <cap>.open() undo …`. `owned` (implicit at acquire) and `borrowed` (the
+        # positional default) shipped inferred in v1 (5601d70, no grammar).
+        #
+        # `shared` (issue #96, S1) is now ADMITTED: it marks an N-holder handle
+        # whose declared inverse is bound to the count's zero crossing and runs
+        # exactly once at the last release. The marker is threaded onto the lowered
+        # step (`mode: "shared"`) so the checker (O1/B1 owner carve-out for the
+        # acquiring frame) and the runtime crash path (SharedGrantBook,
+        # liveness_confirm.py) see it. `transfer` stays RESERVED — it moves the
+        # bracket across a realm/process seam and additionally needs the WAL to
+        # move processes, so it is not a v1 afterthought (design §"Reconciling
+        # with the seam").
+        #
+        # Both are CONTEXTUAL keywords, exactly like `lease` above: the marker
+        # form is `effect shared <ident…>` (the acquire head is an ident), so
+        # `effect shared()`, `effect shared.m()`, and any binding named
+        # `shared`/`transfer` stay ordinary acquisitions — the self-hosted lexer's
+        # keyword-set parity oracle is untouched.
         if self.peek().value in ("shared", "transfer") \
                 and self.at("ident") and self.peek_ahead(1).kind == "ident":
-            mode = self.peek().value
-            raise self.err(
-                self.peek().line,
-                f"`{mode}` ownership mode is reserved for a later tier (shared: "
-                "item 294 leases; transfer: realm transfer) and is not implemented "
-                "in v1",
-                hint="v1 infers ownership over the teardown accumulator — `owned` is "
-                     "implicit at the acquire and `borrowed` is the positional "
-                     "default; write `let h = effect <cap>.open() undo …` with no "
-                     "mode marker (item 308)",
-            )
+            marker = self.peek().value
+            if marker == "transfer":
+                raise self.err(
+                    self.peek().line,
+                    "`transfer` ownership mode is reserved for a later tier "
+                    "(realm/process transfer moves the bracket itself, and across "
+                    "a process seam it needs the WAL to move processes) and is not "
+                    "implemented in v1",
+                    hint="v1 has no transfer: an owned handle stays where it was "
+                         "acquired, and a realm or process boundary refuses it. "
+                         "For an N-holder handle torn down at the last release, "
+                         "use `effect shared <cap>.open() undo …` (item 308, S1)",
+                )
+            self.next()                       # consume `shared`
+            mode = "shared"
         setup: list = []
         if self.at("{"):
             self.next()
@@ -4186,12 +4385,12 @@ class Parser:
             if isinstance(acquire, ExprVar) or (
                     isinstance(acquire, ExprCall)
                     and isinstance(acquire.callee, ExprVar)):
-                return acquire, None, line, setup, is_async
+                return acquire, None, line, setup, is_async, mode
             message, hint = missing_undo_refusal(_describe_expr(acquire))
             raise self.err(line, message, hint=hint)
         self.next()
         undo = self.pure_expr()
-        return acquire, undo, line, setup, is_async
+        return acquire, undo, line, setup, is_async, mode
 
     def _stream_chain(self):
         """`.map(<arrow>)` / `.filter(<arrow>)` / `.take(<int>)` after the stream
