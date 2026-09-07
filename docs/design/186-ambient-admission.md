@@ -86,20 +86,52 @@ what a later wave BREAKS — a hot-swap replaces `M`'s provision rather than
 conflicting with it, and there is no single-source text whose G2 scan models
 replacement — which is why replacement is a wave and disjointness is a slice.
 
+## Slice 2 — multi-realm routing validation against ambient realms
+
+Item 162's `isolate <key> in realms("a","b")` route distributes a *required* key
+across N named realms; the link-time half checks every routed realm has a
+provider (`route_realm_scan` / `collect_routes`). For the single-source path
+that provider must be in the same text. Against a running manifest, a route may
+legitimately target a realm provided ONLY by the manifest — the store already
+running that a newly admitted router binds to.
+
+Slice 1 seeded only `collect_g2`. Slice 2 makes `admit_ambient` recompute the
+WHOLE G2/ROUTE/G3 link seeded with the manifest (`link_refusals(pg, seed)`),
+because a route refusal is *composition-dependent*, not internal: forwarding the
+self-verdict wholesale (slice 1's `if admit_src(src) != "" return it`) wrongly
+refused a route the manifest satisfies. So `admit_ambient` now splits
+`admit_src` into its internal refusals (`collect_nonlink` — per-component,
+module-fn, spawn, boot, shared verbatim with the single-source path) plus the
+manifest-seeded link, ordered together by `(line, seq)`.
+
+The oracle is the same M ++ X equivalence, since a `realms(...)` route reads the
+per-`(key, realm)` provider table `find_provider` computes and the manifest wire
+fully populates it:
+
+```
+admit_ambient(Router, manifest_of(StoreA, StoreB)) == admit_src(StoreA ++ StoreB ++ Router)
+```
+
+A realm provided by neither the text nor the manifest still refuses ROUTE,
+byte-identical to the composed single source. `tests/test_selfhost_lower.py`
+pins both directions (admit and the surviving-dangling-leg refusal) plus the
+diagnostic-ordering case where an earlier-line ambient G2 outranks a later
+internal refusal — the merge slice 2 enables.
+
 ## What remains for full closure of #86 / item 186
 
 - **`handoff` STATE replacement / service replacement / hot-swap.** The
   replacement semantics that break the single-source equivalence above. Needs a
   reference-side ambient oracle (construct a running manifest on both sides), the
-  wave the roadmap describes.
-- **Multi-realm routing VALIDATION against ambient realms.** Item 162's
-  component-level refusals and link-time per-realm provider check landed for the
-  single-source path; the ambient path (a route whose target realm is provided
-  only by the running manifest) is not yet modelled.
-- **G3 acyclicity across the manifest boundary.** Slice 1 seeds only the G2
-  provision table; the manifest's provider→consumer edges are not yet folded into
-  the acyclicity scan, so a cycle that closes THROUGH the running manifest is not
-  yet caught.
+  wave the roadmap describes. This is the seam `collect_nonlink` deliberately
+  keeps closed: an internally refused component is still forwarded, never
+  laundered by the manifest.
+- **G3 acyclicity across the manifest boundary.** Slices 1-2 seed the G2/ROUTE
+  provider table, which the wire (rows of PROVISIONS) fully carries. The
+  manifest's provider→consumer edges — which require the manifest to also carry
+  each running component's REQUIREMENTS — are not folded into the acyclicity
+  scan, so a cycle that closes THROUGH the running manifest is not yet caught.
+  Extending the wire is part of the replacement wave.
 - **Residual coloring approximation (b).** Callee collection descends into a
   nested COERCED arrow instead of stopping (`stop_async_arrows`); reached by no
   fixture, rule-2 masks it. Unchanged by this slice; tracked in item 186.
