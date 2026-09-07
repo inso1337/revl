@@ -155,8 +155,11 @@ def test_slice_results_keep_their_static_kind():
     assert "function revlSlice<T>(x: T[], a: bigint, b: bigint): T[]" in out
     assert "revlSlice(x: string, a: bigint, b: bigint): string | T[]" not in out, \
         "the union signature must not be the only one — it makes chained calls fail tsc"
-    # the chains themselves keep their static kind in the emitted calls
-    assert "revlSlice(rest, 0n, 10n)).split" in out
+    # the chains themselves keep their static kind in the emitted calls. A
+    # `Str.split` lowers to the `revlSplit` helper (cross-tier divergence fix,
+    # #646), so the sliced string flows in as its first argument; `List.join`
+    # stays a method call on the sliced array.
+    assert 'revlSplit((revlSlice(rest, 0n, 10n)), " ")' in out
     assert "revlSlice(xs, 0n, 2n)).join" in out
     assert "const ys = revlSlice(xs, 1n, 3n)" in out
     # Bytes service params render as Uint8Array, not unknown, so the slice
