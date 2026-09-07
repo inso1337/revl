@@ -516,6 +516,20 @@ def test_clean_staged_ir_still_admits():
     assert verdict.admitted, verdict.message
 
 
+def test_composition_rows_field_is_a_known_boundary_field():
+    """A compiled composition stamps a top-level `rows` field (item 426 S1) and
+    copies it onto the manifest, so at the S3 admit round-trip the manifest
+    re-enters the frontend carrying `rows`. `rows` is therefore a field this
+    schema revision DOES emit and must be in `IR_TOPLEVEL_FIELDS`, or the
+    frontend refuses its own output. This pins the exemption: a manifest whose
+    ONLY extra member is `rows` admits, the way the composition fold's own
+    document does, rather than tripping the unknown-field guard."""
+    manifest = _running_ir()
+    manifest["rows"] = [{"label": "@t", "origin": ".", "from": "t.rvl"}]
+    verdict = admit_into(_CANDIDATE, manifest)
+    assert verdict.admitted, verdict.message
+
+
 def test_unknown_top_level_field_refuses_by_name_via_admit_into():
     """The core negative: inject a bogus top-level field into the staged IR and
     the runtime-admission entrypoint refuses, NAMING the field."""
