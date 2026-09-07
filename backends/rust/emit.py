@@ -3696,7 +3696,6 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     )
     name = component["name"]
     cname = _ident(name, "component")
-    snake = _snake(name)
     isolate = component.get("isolate") or {}
     intercept = component.get("intercept") or {}
     has_effectful = _component_has_effectful_methods(component)
@@ -3725,6 +3724,16 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     map_values = _component_map_values(env)
 
     for key, service in env.provides.items():
+        # item 449 (G2): a routed provided key is realized by its router struct
+        # (emitted below from `env.routes`), never by a hand-written provide
+        # body — a body on the routed key is now refused at compile. So the
+        # sanctioned router shape carries no `provide <key>` step, and emitting
+        # a standalone provider struct here would produce an empty `impl <Svc>`
+        # (no methods) that does not compile. Skip it; the router struct is the
+        # provider. Mirrors the go tier, which only emits from body provide
+        # steps and so never synthesized this struct.
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
@@ -4044,7 +4053,6 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     )
     name = component["name"]
     cname = _ident(name, "component")
-    snake = _snake(name)
     out: list[str] = []
 
     config_ty = _emit_config_struct(component, out)
@@ -4054,6 +4062,12 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     map_values = _component_map_values(env)
 
     for key, service in env.provides.items():
+        # item 449 (G2): a routed provided key is realized by its router struct
+        # (emitted below from `env.routes`), never a hand-written provide body,
+        # which is now refused at compile. Emitting a standalone provider struct
+        # here would yield an empty `impl <Svc>` that does not compile; skip it.
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
