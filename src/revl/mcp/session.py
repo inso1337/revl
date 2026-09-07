@@ -509,6 +509,12 @@ class Session:
         # resolved after it settles so a later `aclose` reads the same result
         # (idempotent), and cleared by `load` when a fresh composition boots.
         self._teardown_future: asyncio.Future | None = None
+        # item 628: the settled result of the retained attempt above, cached so
+        # `teardown_disposition` can report the unresolved ownership WITHOUT
+        # re-awaiting the future, and `rearm_teardown`/`strand_teardown` can read
+        # what is still owed. None until an attempt settles; cleared with the
+        # future by `load`, a re-arm, or a strand.
+        self._teardown_settlement: dict | None = None
 
     # -- plumbing ----------------------------------------------------------
 
@@ -547,6 +553,7 @@ class Session:
         # is stale; drop it so a later `aclose` tears down THIS composition
         # rather than replaying the old settlement.
         self._teardown_future = None
+        self._teardown_settlement = None
         # booting is admission: a draft with open obligations is checkable but
         # not runnable, and the refusal belongs here rather than in the Python
         # emitter's lap (docs/holes.md)
@@ -1952,55 +1959,211 @@ class Session:
         neither stops nor freezes an unrelated one.
         """
         # Join a retained attempt (in-flight, or already-settled → idempotent).
-        # No `await` between this read and the assignment below, so on a single
-        # loop two callers cannot both miss it and both start a teardown.
+        # No `await` between this read and the assignment in `_arm_teardown`, so
+        # on a single loop two callers cannot both miss it and both start a
+        # teardown.
         existing = self._teardown_future
         if existing is not None:
             return await asyncio.shield(existing)
-
-        # Pre-effect guards: refuse BEFORE any terminal effect begins, stating
-        # the missing ownership contract, so the host keeps its resources.
+        # Pre-effect guards: refuse BEFORE any terminal effect begins.
         self._refuse_if_halted("aclose")           # item 443: dead, use recover
-        driver = self._require()                   # nothing loaded / frozen
-        running = asyncio.get_running_loop()
-        if self._loop is running:
-            # The session's runtime work is bound to the very loop this
-            # coroutine runs on. Offloading its `run_until_complete` to a thread
-            # would double-drive one loop; disposing inline would need a nested
-            # loop. Neither is a supported ownership shape — refuse before any
-            # inverse or terminal effect, exactly as scenario 6 requires, rather
-            # than discovering it after teardown has started.
-            raise SessionError(
-                "`aclose` cannot tear down a session whose runtime loop is the "
-                "caller's own running loop: the owned-resource settlement "
-                "contract needs the session to own a loop distinct from the "
-                "host's. Load the session on its own loop (the default), or use "
-                "the synchronous `unload` from outside the running loop.")
+        self._require()                            # nothing loaded / frozen
 
-        fut = asyncio.ensure_future(self._teardown_offloaded(driver, running))
-        self._teardown_future = fut
-        return await asyncio.shield(fut)
-
-    async def _teardown_offloaded(self, driver, host_loop) -> dict:
-        """The retained close attempt (item 524): settle the verdict, drive the
-        owned disposal on the session's own loop from a worker thread, then
-        report. Runs exactly once per attempt; joined, never duplicated."""
+        # Implicit terminal commit (or in-process abort) — the async twin of
+        # `unload`, unchanged by items 625/628. The prepare below sets the
+        # verdict from the in-process abort bit; the finalize discharges (commit)
+        # or replays the escrow (abort) exactly as `unload` does.
         owner = self._owner
         aborting = owner is not None and any(
             getattr(f, "_aborting", False) for f in owner._registry)
-        if owner is not None:
-            owner._verdict = "abort" if aborting else "commit"
-            if aborting:
-                owner._queue = []   # a close that reverts drops the queue
+
+        def _prepare() -> None:
+            if owner is not None:
+                owner._verdict = "abort" if aborting else "commit"
+                if aborting:
+                    owner._queue = []   # a close that reverts drops the queue
+
+        def _finalize() -> dict:
+            if owner is not None and not aborting:
+                owner.finalize_commit()             # consolidated commit proof
+            elif owner is not None:
+                for entry in owner._escrow:          # aborting: replay the escrow
+                    entry.frame.abort()
+                owner.finalize_abort()
+            return {"unloaded": True}
+
+        return await self._arm_teardown(
+            "aclose", verdict=("abort" if aborting else "commit"),
+            aborting=aborting, prepare=_prepare, finalize=_finalize,
+            shared_loop_hint=(
+                "Load the session on its own loop (the default), or use the "
+                "synchronous `unload` from outside the running loop."))
+
+    async def aabort(self) -> dict:
+        """Awaitable AUDITED abort (item 625) — the async twin of `abort`,
+        callable from the OWNING running event loop. Marks every live frame
+        aborting and drops the deferral queue BEFORE any teardown (the pre-effect
+        prepare, on the host loop), offloads the inverse replay to the session's
+        own loop on a worker thread, then writes the `aborted` completion record
+        and closes the WAL. The implicit-commit default of `aclose` is untouched:
+        this is the explicit, WAL-marked verdict path. It reuses the one retained
+        attempt, so a cancelled/duplicate caller joins rather than re-aborting."""
+        existing = self._teardown_future
+        if existing is not None:
+            return await asyncio.shield(existing)
+        self._refuse_if_halted("aabort")
+        self._require()
+        owner = self._owner
+        if owner is None:
+            raise SessionError("no session owner is registered — nothing to abort")
+        dropped = {"n": 0}
+
+        def _prepare() -> None:
+            dropped["n"] = len(owner._queue)
+            owner.begin_abort()   # mark frames aborting + drop queue (zero cost)
+
+        def _finalize() -> dict:
+            result = owner.finalize_abort()   # `aborted` record (+ escrow Phase 2)
+            self._close_wal()
+            return {"aborted": True, "replayed": result["replayed"],
+                    "droppedDeferred": dropped["n"]}
+
+        return await self._arm_teardown(
+            "aabort", verdict="abort", aborting=True,
+            prepare=_prepare, finalize=_finalize)
+
+    async def acommit_confirm(self, manifest_hash: str) -> dict:
+        """Awaitable AUDITED commit-confirm (item 625) — the async twin of
+        `commit_confirm`. Recomputes the manifest hash and REFUSES a stale/changed
+        review token BEFORE any terminal effect (the host may re-enumerate with
+        `commit()`); on a match it writes `commit-approved` and flushes the queue
+        FIFO on the host loop, offloads the frame discharge to the session's own
+        loop, then writes the ONE discharge record and `activation-complete`. The
+        durable order — `commit-approved`, `flushed`*, `discharge`,
+        `activation-complete` — is byte-identical to the synchronous path."""
+        existing = self._teardown_future
+        if existing is not None:
+            return await asyncio.shield(existing)
+        self._refuse_if_halted("acommit_confirm")
+        driver = self._require()
+        owner = self._owner
+        if owner is None:
+            raise SessionError("no session owner is registered — nothing to commit")
+        # Refuse the shared-loop shape BEFORE `approve` writes any WAL record, so
+        # an unsupported ownership shape costs zero terminal effect.
+        self._require_distinct_loop("acommit_confirm")
+        # Pre-effect guard: `approve` recomputes the hash and RAISES before it
+        # writes `commit-approved`, so a stale token refuses with zero terminal
+        # effect and no retained attempt — the host stays loaded and may
+        # re-enumerate. This runs on the host loop (pure bookkeeping + WAL).
+        try:
+            flush = owner.approve(manifest_hash)   # commit-approved + flush FIFO
+        except driver.runtime.SessionCommitError as exc:
+            return {"committed": False, "refused": True, "reason": str(exc),
+                    "manifest": owner.manifest()}
+        prompts = dict(owner.prompts)
+
+        def _finalize() -> dict:
+            discharged = owner.finalize_commit()   # one discharge record
+            self._commit_wal(driver)               # activation-complete + close
+            return {"committed": True, "flushed": flush["fired"],
+                    "flushResidue": flush["flushResidue"],
+                    "discharged": discharged, "prompts": prompts}
+
+        return await self._arm_teardown(
+            "acommit_confirm", verdict="commit", aborting=False,
+            prepare=None, finalize=_finalize)
+
+    async def aconfirm_verdict(self, token: str) -> dict:
+        """Awaitable exact-state review-confirm (item 625) — the async twin of
+        `confirm_verdict`. Recomputes the abort review token against the CURRENT
+        state and REFUSES a drifted/stale token BEFORE any terminal effect (the
+        host must look again). On an exact match it enacts the audited abort via
+        `aabort`, so the offload seam and one-retained-attempt semantics hold."""
+        self._require()
+        self._refuse_if_halted("aconfirm_verdict")
+        owner = self._owner
+        if owner is None:
+            raise SessionError("no session owner is registered — nothing to abort")
+        prefix = "revl-verdict:"
+        rest = token[len(prefix):] if token.startswith(prefix) else ""
+        verdict, _, _core = rest.partition(":")
+        if verdict != "abort":
+            raise SessionError(
+                f"unrecognized verdict token {token!r} — obtain one from "
+                "`prepare_verdict('abort')` (item 483/625)")
+        current = owner.verdict_review_token(self._generation, verdict)
+        if token != current:
+            snapshot = owner.witness_snapshot(self._generation)
+            return {"confirmed": False, "refused": True,
+                    "reason": "stale verdict token — the session generation or "
+                              "an outstanding witness identity/revision changed "
+                              "since the review, so the confirm is refused "
+                              "(item 483/625)",
+                    "review": {"token": current,
+                               "snapshot": snapshot.to_dict()}}
+        return await self.aabort()
+
+    async def _arm_teardown(self, verb: str, *, verdict: str, aborting: bool,
+                            prepare, finalize,
+                            shared_loop_hint: str | None = None) -> dict:
+        """The shared awaitable-teardown seam behind `aclose`/`aabort`/
+        `acommit_confirm` (items 524/625/628).
+
+        Refuses the shared-loop shape BEFORE any terminal effect, runs the
+        verb's pre-effect `prepare` on the host loop, then retains ONE offloaded
+        attempt (shielded, joined by duplicate/re-entrant callers) that drives the
+        owned disposal on the session's own loop from a worker thread and settles
+        with `finalize`. The caller has already joined an existing attempt and
+        run its own pre-approve guard where applicable."""
+        running = self._require_distinct_loop(verb, shared_loop_hint)
+        if prepare is not None:
+            prepare()
+        fut = asyncio.ensure_future(
+            self._teardown_offloaded(self._require(), running, verdict=verdict,
+                                     aborting=aborting, finalize=finalize))
+        self._teardown_future = fut
+        return await asyncio.shield(fut)
+
+    def _require_distinct_loop(self, verb: str,
+                               hint: str | None = None):
+        """Refuse the shared-loop ownership shape BEFORE any terminal effect
+        (items 524/625 scenario 6), returning the caller's running loop.
+
+        The session's runtime work is bound to its own loop; if that IS the
+        caller's running loop, offloading its `run_until_complete` to a thread
+        would double-drive one loop and disposing inline would need a nested one.
+        Neither is a supported ownership shape — refuse so the host keeps its
+        resources rather than discovering it after teardown has started."""
+        running = asyncio.get_running_loop()
+        if self._loop is running:
+            raise SessionError(
+                f"`{verb}` cannot tear down a session whose runtime loop is the "
+                "caller's own running loop: the owned-resource settlement "
+                "contract needs the session to own a loop distinct from the "
+                f"host's. {hint or ''}".rstrip())
+        return running
+
+    async def _teardown_offloaded(self, driver, host_loop, *, verdict: str,
+                                  aborting: bool, finalize) -> dict:
+        """The retained teardown attempt (items 524/628): drive the owned
+        disposal on the session's own loop from a worker thread WITH a settlement
+        ledger, then settle with the verb's `finalize`. Runs exactly once per
+        attempt; joined, never duplicated."""
+        owner = self._owner
 
         # Distinguish invocation / return / failure / cancellation of the owned
         # disposers. The worker thread NEVER re-raises: a caught cleanup fault
         # must not read back as a verified success, so it is recorded and the
-        # settlement below withholds `settled`/`releaseOwnership`.
+        # settlement below withholds `settled`/`releaseOwnership`. The ledger
+        # (item 628) captures each ORIGINAL disposer's outcome so a failure names
+        # the exact resource rather than losing it to the pre-`await` pop.
         disposal = {"invoked": True, "returned": False,
                     "failed": None, "cancelled": False}
+        ledger: list = []
 
         def _drive() -> None:
+            driver._settlement_ledger = ledger
             try:
                 self._loop.run_until_complete(driver._dispose_all(self.ir))
                 disposal["returned"] = True
@@ -2008,26 +2171,44 @@ class Session:
                 disposal["cancelled"] = True
             except BaseException as exc:  # noqa: BLE001 — honest failure surface
                 disposal["failed"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                driver._settlement_ledger = None
 
         await host_loop.run_in_executor(None, _drive)
-        return self._settlement(driver, owner, aborting, disposal)
+        result = self._settlement(driver, owner, aborting, disposal, ledger,
+                                  verdict=verdict, finalize=finalize)
+        self._teardown_settlement = result
+        return result
 
-    def _settlement(self, driver, owner, aborting: bool,
-                    disposal: dict) -> dict:
-        """Build the item-524 settlement from a finished disposal attempt. Runs
-        on the host loop (pure Python); only reached once the offloaded disposal
-        has returned control."""
-        verdict = "abort" if aborting else "commit"
+    def _settlement(self, driver, owner, aborting: bool, disposal: dict,
+                    ledger: list, *, verdict: str, finalize) -> dict:
+        """Build the item-524/625/628 settlement from a finished disposal
+        attempt. Runs on the host loop (pure Python); only reached once the
+        offloaded disposal has returned control.
+
+        The settlement ties authoritative release to the ORIGINAL provisions/
+        disposers (the ledger), not to post-disposal structural counters, and
+        RETAINS the composition (no `_reset`) whenever anything is unresolved so
+        the host can inspect what remains owned before deciding."""
+        resources = [dict(r) for r in ledger]
+        # what the ledger says is still owned: reached-but-failed, reached-but-
+        # unreturned (a cancelled disposer), or never-reached (unattempted).
+        owned = sorted(r["component"] for r in resources
+                       if r["outcome"] in ("owned", "attempted", "failed"))
+
         if not disposal["returned"]:
             # Native cleanup did not complete: expose the unresolved/failure
             # state, DO NOT finalize the verdict, DO NOT reset — the host keeps
             # its pools/root reservations. A retained-but-failed attempt stays
             # readable; the composition is still loaded for the host to inspect,
-            # strand, or reconcile deliberately.
+            # strand, or re-arm deliberately. When the aggregate disposal was
+            # replaced wholesale (no ledger recorded), fall back to the live
+            # `fibers` for a best-effort inventory.
             return {
                 "closed": False,
                 "requestedVerdict": verdict,
                 "disposal": dict(disposal),
+                "resources": resources,
                 "nativeCleanupComplete": False,
                 "settled": False,
                 "releaseOwnership": False,
@@ -2035,38 +2216,130 @@ class Session:
                     "reason": ("disposal cancelled" if disposal["cancelled"]
                                else "disposal failed"),
                     "error": disposal["failed"],
+                    "ownedResources": owned or sorted(driver.fibers),
                     "liveComponents": sorted(driver.fibers),
                 },
             }
 
-        # Native cleanup returned: finalize the verdict exactly as `unload` does.
-        if owner is not None and not aborting:
-            owner.finalize_commit()             # consolidated commit proof
-        elif owner is not None:
-            for entry in owner._escrow:          # aborting: replay the escrow
-                entry.frame.abort()
-            owner.finalize_abort()
+        # Native cleanup returned: finalize the verdict (the verb's terminal
+        # record), then run the R4 residue checks and the per-resource ledger.
+        extra = finalize() or {}
         residue = self._surface_compensation_residue(owner)
         report = self._teardown_report(driver)
-        settled = bool(report["noResidue"])
-        self._reset()
+        failed = [r["component"] for r in resources if r["outcome"] == "failed"]
+        unattempted = [r["component"] for r in resources
+                       if r["outcome"] in ("owned", "attempted")]
+        r4_clean = bool(report["noResidue"])
+        # `settled` is PHYSICAL settlement: the aggregate returned, every original
+        # disposer that was reached returned, and R4 passes. A logged fault on a
+        # single original resource withholds it even though the aggregate returned.
+        settled = r4_clean and not failed and not unattempted
+        # Release ownership ONLY on a provably clean settlement: any owed
+        # compensation residue, failed R4 check, or unreturned original resource
+        # keeps the flag false, so the host retains rather than releases on
+        # ambiguity. `closed`/`settled` alone never imply safe release (item 628).
+        release = settled and not residue
         unresolved_checks = {k: v for k, v in report["checks"].items() if not v}
-        return {
+        result = {
             "closed": True,
             "requestedVerdict": verdict,
             "disposal": dict(disposal),
+            "resources": resources,
             "nativeCleanupComplete": True,
             "settled": settled,
-            # Release ownership only on a provably clean settlement; any owed
-            # compensation residue or failed R4 check keeps the flag false so
-            # the host retains rather than releases on ambiguity.
-            "releaseOwnership": settled and not residue,
-            "unresolved": {"compensationResidue": residue,
-                           "checks": unresolved_checks},
-            "unloaded": True,
+            "releaseOwnership": release,
+            "unresolved": {
+                "compensationResidue": residue,
+                "checks": unresolved_checks,
+                "ownedResources": sorted(set(failed) | set(unattempted)),
+            },
             "compensationResidue": residue,
             **report,
+            **extra,
         }
+        if release:
+            # Provably clean: drop the composition so `loaded` is False and the
+            # driver/owner are released, exactly as the synchronous verbs do.
+            self._reset()
+        # else: RETAIN — the composition stays loaded and the retained attempt
+        # stays cached so `teardown_disposition` can read the unresolved ownership
+        # and the host can `rearm_teardown` (re-attempt) or `strand_teardown`.
+        return result
+
+    # -- item 628: inspect + explicit failure-disposition of a retained attempt
+
+    def teardown_disposition(self) -> dict:
+        """Read the retained awaitable-teardown attempt's disposition WITHOUT any
+        effect (item 628), so an async consumer can determine whether original
+        roots/pools remain owned rather than reconstructing ownership from post-
+        disposal structural counters.
+
+        ``attempt`` is ``none`` (never armed), ``in-flight`` (still running),
+        ``released`` (settled clean, ownership dropped), or ``unresolved``
+        (settled with something still owed); ``settlement`` is the cached result
+        (with its per-resource ``resources`` ledger and ``unresolved`` ownership)
+        once the attempt has finished."""
+        fut = self._teardown_future
+        if fut is None:
+            return {"attempt": "none", "settlement": None}
+        if not fut.done():
+            return {"attempt": "in-flight", "settlement": None}
+        settlement = self._teardown_settlement
+        released = bool((settlement or {}).get("releaseOwnership"))
+        return {"attempt": "released" if released else "unresolved",
+                "settlement": settlement}
+
+    def rearm_teardown(self) -> dict:
+        """Explicit re-arm of a FINISHED-but-unresolved teardown attempt so a
+        fresh `aclose`/`aabort`/`acommit_confirm` may RE-ATTEMPT the owned
+        disposal (item 628). This is the deliberate, host-driven re-attempt the
+        design defers to an explicit re-arm: there is NO automatic retry and NO
+        detached-task adoption. Refuses an in-flight attempt, a cleanly released
+        one (nothing owed), or the absence of any attempt."""
+        fut = self._teardown_future
+        if fut is None:
+            raise SessionError(
+                "no retained teardown attempt to re-arm (item 628)")
+        if not fut.done():
+            raise SessionError(
+                "the retained teardown attempt is still in flight — await it "
+                "before re-arming (item 628)")
+        settlement = self._teardown_settlement or {}
+        if settlement.get("releaseOwnership"):
+            raise SessionError(
+                "the retained teardown released ownership cleanly — there is "
+                "nothing to re-arm (item 628)")
+        prior = self._teardown_settlement
+        self._teardown_future = None
+        self._teardown_settlement = None
+        return {"rearmed": True, "priorSettlement": prior}
+
+    def strand_teardown(self) -> dict:
+        """Explicit TERMINAL failure-disposition of a retained-but-unresolved
+        teardown attempt (item 628): ACCEPT the unresolved ownership as STRANDED
+        — owed, not released, held until the process exits or `revl recover`
+        runs — drop the composition, and clear the attempt. No detached-task
+        adoption, no retry; the host has decided to stop trying. Refuses an
+        in-flight attempt or a cleanly released one."""
+        fut = self._teardown_future
+        if fut is None:
+            raise SessionError(
+                "no retained teardown attempt to strand (item 628)")
+        if not fut.done():
+            raise SessionError(
+                "the retained teardown attempt is still in flight — await it "
+                "before stranding (item 628)")
+        settlement = self._teardown_settlement or {}
+        if settlement.get("releaseOwnership"):
+            raise SessionError(
+                "the retained teardown released ownership cleanly — there is "
+                "nothing to strand (item 628)")
+        unresolved = settlement.get("unresolved")
+        if self._driver is not None:
+            self._reset()   # drop the Python composition; native roots stay owed
+        self._teardown_future = None
+        self._teardown_settlement = None
+        return {"stranded": True, "unresolved": unresolved}
 
     # -- the session commit protocol (roadmap item 245) --------------------
 
