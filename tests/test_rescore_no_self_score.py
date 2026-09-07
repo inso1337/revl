@@ -21,6 +21,40 @@ import rescore  # noqa: E402
 CORPUS = "typed-deepseek-v4-pro"
 
 
+@pytest.fixture(autouse=True)
+def _restore_revl_module_graph():
+    """Put the `revl.*` module graph back exactly as this test found it.
+
+    `rescore.load_compiler` deliberately EVICTS every `revl`/`revl.*` entry
+    from `sys.modules` and re-imports a fresh set, so the grader it hands back
+    is a pristine compiler with no state a prior run could have poisoned (issue
+    #478). That is correct for a one-shot script, but in a shared test process
+    it leaks: after eviction `sys.modules["revl.parser"]` (and every sibling)
+    is a BRAND-NEW module object with brand-new class objects, while every
+    already-imported test module still holds names bound to the ORIGINAL ones.
+    A later test whose import-time `compile_files` is the old module then parses
+    with the old `parser.HostRef` yet reaches a `lower.py` that resolves
+    `revl.parser` freshly from `sys.modules` and sees the NEW `HostRef`; the
+    `isinstance(body, HostRef)` guard silently turns False and lowering blows up
+    with `'HostRef' object has no attribute 'text'`.
+
+    Snapshot the `revl.*` entries before the test and restore that exact
+    mapping after, dropping any fresh modules `load_compiler` installed, so the
+    process-wide graph the next test sees is byte-identical to before.
+    """
+    saved = {name: mod for name, mod in sys.modules.items()
+             if name == "revl" or name.startswith("revl.")}
+    saved_path = list(sys.path)
+    try:
+        yield
+    finally:
+        for name in [n for n in sys.modules
+                     if n == "revl" or n.startswith("revl.")]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+        sys.path[:] = saved_path
+
+
 def _compiler():
     return rescore.load_compiler(ROOT)
 

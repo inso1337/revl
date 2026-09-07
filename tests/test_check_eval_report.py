@@ -15,7 +15,6 @@ strictly more evidence than the rung below, and independence (noSelfScore) is
 required at every promotion.
 """
 
-import copy
 import json
 import sys
 from pathlib import Path

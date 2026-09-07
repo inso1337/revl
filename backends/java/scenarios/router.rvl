@@ -18,6 +18,12 @@ component W3 provides worker: Worker {
   provide worker { fn call(request) = "w3:" + request }
 }
 component Router requires worker: Worker provides worker: Worker {
+  // item 449 (G2): a `realms(...)` route realizes this component as a routing
+  // proxy; the routed key is provided downstream through that proxy, so the
+  // `provides worker: Worker` header clause alone is what the route needs. A
+  // hand-written `provide worker { … }` body for the routed key is now refused
+  // (it would be silently discarded at load) — dropped per #492's sanctioned
+  // router shape. The EMITTED routing body still fans each call across the
+  // worker realms; it derives from the `realms(...)` route, not from a body.
   isolate worker in realms("w1", "w2", "w3") strategy(round_robin)
-  provide worker { fn call(request) = worker.call(request) }
 }
