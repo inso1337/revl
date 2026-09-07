@@ -34,7 +34,7 @@ type ListN    = { items: List[Expr] }
 pub type ParamN = { name: Str, ty: Str }
 
 
-type ArrowN   = { params: List[ParamN], body: Expr }
+type ArrowN   = { params: List[ParamN], body: Expr, ret: Str }
 pub type ArmN = { pat: Str, bind: Str, body: Expr }
 type MatchN   = { scrut: Expr, arms: List[ArmN] }
 pub type PartN = { kind: Str, text: Str, e: Expr }
@@ -658,7 +658,19 @@ fn arrow_ahead(ts: List[Token], i: Int) -> Bool {
     if (k == "(" || k == "[") { depth += 1 }
     if (k == ")" || k == "]") {
       depth -= 1
-      if (depth == 0) { return tk(ts, j + 1).kind == "=>" }
+      if (depth == 0) {
+        // `)` closes the parameter list. A bare `=>` heads an unannotated arrow;
+        // a `:` heads a written return annotation (`(x: T): R => …`, parser.py's
+        // optional `_maybe_return_type` after the arrow params), after which the
+        // `=>` must follow. Anything else is a parenthesised group, not an arrow.
+        if (tk(ts, j + 1).kind == "=>") { return true }
+        if (tk(ts, j + 1).kind == ":") {
+          let rt = p_type(ts, j + 2, 0)
+          if (!rt.ok) { return false }
+          return tk(ts, rt.i).kind == "=>"
+        }
+        return false
+      }
     }
     j += 1
   }
@@ -851,7 +863,7 @@ fn p_primary(ts: List[Token], i: Int, d: Int) -> PR {
       let b = p_expr_d(ts, i + 2, d + 1)
       if (is_bad(b.e)) { return b }
       let one = [{ name: t.text, ty: "" }]
-      return { i: b.i, e: Arrow({ params: one, body: b.e }) }
+      return { i: b.i, e: Arrow({ params: one, body: b.e, ret: "" }) }
     }
     return { i: i + 1, e: Var(t.text) }
   }
@@ -889,10 +901,23 @@ fn p_primary(ts: List[Token], i: Int, d: Int) -> PR {
     if (arrow_ahead(ts, i)) {
       let ps = p_params(ts, i + 1, d + 1)
       if (!ps.ok) { return bad("bad arrow params") }
-      if (!at(ts, ps.i, "=>")) { return bad("expected =>") }
-      let ab = p_expr_d(ts, ps.i + 1, d + 1)
+      // An optional written return annotation `(x: T): R => …` (parser.py's
+      // `_maybe_return_type`). Recorded on the node so lowering can read the
+      // colour it declares — rule C1 refuses an arrow that names its own async
+      // colour (`Async[…]`), because colour is positional, not self-declared.
+      var ai = ps.i
+      var ret = ""
+      if (at(ts, ai, ":")) {
+        let rt = p_type(ts, ai + 1, d + 1)
+        if (!rt.ok) { return bad("bad arrow return type") }
+        ret = rt.ty
+        ai = rt.i
+      }
+      if (!at(ts, ai, "=>")) { return bad("expected =>") }
+      let ab = p_expr_d(ts, ai + 1, d + 1)
       if (is_bad(ab.e)) { return ab }
-      return { i: ab.i, e: Arrow({ params: ps.xs, body: ab.e }) }
+      let rr = ret
+      return { i: ab.i, e: Arrow({ params: ps.xs, body: ab.e, ret: rr }) }
     }
     let inner = p_expr_d(ts, i + 1, d + 1)
     if (is_bad(inner.e)) { return inner }
