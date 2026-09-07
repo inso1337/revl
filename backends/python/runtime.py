@@ -337,7 +337,8 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
             validated = validate_response(value, schema, where, constructors)
         except ResponseValidationError:  # noqa: PERF203 — retry is the point
             if attempt >= budget:
-                _revl_record_model_call(started, attempt + 1, budget + 1, value)
+                _revl_record_model_call(started, attempt + 1, budget + 1, value,
+                                        validated=False)
                 raise
             attempt += 1
             continue
@@ -374,7 +375,8 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
             validated = validate_response(result, schema, where, constructors)
         except ResponseValidationError:  # noqa: PERF203 — retry is the point
             if attempt >= budget:
-                _revl_record_model_call(started, attempt + 1, budget + 1, result)
+                _revl_record_model_call(started, attempt + 1, budget + 1, result,
+                                        validated=False)
                 raise
             attempt += 1
             continue
@@ -431,6 +433,7 @@ def revl_reset_run_trace_state() -> None:
     _revl_digest_nonce = None
     _revl_model_calls.set(())
     _revl_recorded_crossing.set(None)
+    _revl_model_decision_sink.set(None)
     _revl_validated_completions.set(None)
     _revl_last_emission_index.set(None)
     _revl_pending_produced_by.set(None)
@@ -468,6 +471,17 @@ _revl_model_calls: "contextvars.ContextVar[tuple]" = \
 # completion's OWN crossing and nothing else's.
 _revl_recorded_crossing: "contextvars.ContextVar[Optional[tuple]]" = \
     contextvars.ContextVar("_revl_recorded_crossing", default=None)
+
+# item 250 Slice 3a: the durable sink for the crossing recorded most recently in
+# this fiber, or None. The recorder publishes it beside the crossing key when a
+# WAL is attached (`replay.Timeline.record_emission`), so the seam below can
+# append a `model-decision` record for the completion it just measured WITHOUT
+# the runtime holding a WAL handle. Consumed on write, exactly like the keyed
+# observation: a later crossing that carried no completion never inherits it.
+# None whenever recording is off or no WAL is attached, in which case the
+# decision lives only on the trace (item 121) as before.
+_revl_model_decision_sink: "contextvars.ContextVar[Optional[Callable]]" = \
+    contextvars.ContextVar("_revl_model_decision_sink", default=None)
 
 # ---------------------------------------------------------------------------
 # Slice 2: the value-flow token that gates `producedSeq` (§2.2, the NEW
@@ -512,7 +526,8 @@ _revl_pending_produced_by: "contextvars.ContextVar[Optional[int]]" = \
     contextvars.ContextVar("_revl_pending_produced_by", default=None)
 
 
-def revl_note_emission_index(component: "Optional[str]", index: "Optional[int]") -> None:
+def revl_note_emission_index(component: "Optional[str]", index: "Optional[int]",
+                             sink: "Optional[Callable]" = None) -> None:
     """Item 242: publish the crossing being recorded RIGHT NOW in this fiber.
 
     Called by `replay.Timeline.record_emission` as it mints the `emit` step, so
@@ -524,9 +539,17 @@ def revl_note_emission_index(component: "Optional[str]", index: "Optional[int]")
     Item 121 Slice 2 rides the same publication: the value-flow token holds the
     completion crossing's STEP INDEX, so the bare index is published alongside
     the `(component, index)` crossing key for `revl_note_validated_completion`
-    to name the crossing the recorder just made."""
+    to name the crossing the recorder just made.
+
+    Item 250 Slice 3a rides it too: `sink`, when the recorder has a WAL
+    attached, is the callable that appends THIS crossing's `model-decision`
+    record (`sink(llm, outcome)`). It is published beside the key rather than
+    looked up later because the seam that writes it runs after `make_call`
+    returns, in the same fiber, with no WAL handle of its own. Absent (the
+    default) means no durable sink: the decision stays trace-only."""
     _revl_recorded_crossing.set((component, index))
     _revl_last_emission_index.set(index)
+    _revl_model_decision_sink.set(sink)
 
 
 def revl_recorded_crossing() -> "Optional[tuple]":
@@ -535,11 +558,16 @@ def revl_recorded_crossing() -> "Optional[tuple]":
 
 
 def _revl_record_model_call(started: float, attempts: int, attempt_ceiling: int,
-                            raw_return) -> None:
+                            raw_return, validated: bool = True) -> None:
     """Stash this fiber's model-completion observation, KEYED BY THE CROSSING it
     was measured at, for the driver to read when it records that crossing's
     `emit` event. `latencySeconds` is the revl-measured BRACKET (§2.2): honest
     about what revl timed, silent about what the host `@py` body did inside it.
+
+    Item 250 Slice 3a: the same observation is then written DURABLY through the
+    fiber's model-decision sink when the recorder published one
+    (`_revl_write_model_decision`); `validated` names the outcome on that
+    record, and defaults to True for the seam's own unit tests.
 
     The key is `revl_recorded_crossing()` — the crossing `make_call` just
     recorded, which under a validation retry is the LAST attempt, the one whose
@@ -552,6 +580,61 @@ def _revl_record_model_call(started: float, attempts: int, attempt_ceiling: int,
     obs = (latency, attempts, attempt_ceiling, raw_return)
     entries = tuple(e for e in _revl_model_calls.get() if e[0] != crossing)
     _revl_model_calls.set((*entries, (crossing, obs)))
+    _revl_write_model_decision(obs, validated)
+
+
+def revl_host_usage(raw) -> tuple:
+    """The HOST-REPORTED model/tokens/cost, best-effort read off a model
+    completion's return value (item 121 §2.1). Byte-identical in behaviour to
+    `revl.run._host_usage`, the driver's copy the trace uses; item 250 Slice 3a
+    needs the same read at the crossing, on this side of the boundary, so the
+    WAL record and the trace hop agree on what the host said. Pinned together by
+    the Slice 3a tests.
+
+    Recognized ONLY when the return is a mapping carrying the conventional keys
+    (top-level, or a nested ``usage`` object for the token counts); anything
+    else honest-degrades to ``None`` for every field. Returns
+    ``(model, tokens_in, tokens_out, cost)``."""
+    if not isinstance(raw, dict):
+        return None, None, None, None
+    usage = raw.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    tokens_in = raw.get("tokensIn", usage.get("tokensIn"))
+    tokens_out = raw.get("tokensOut", usage.get("tokensOut"))
+    cost = raw.get("cost")
+    cost = cost if isinstance(cost, dict) else None
+    return raw.get("model"), tokens_in, tokens_out, cost
+
+
+def _revl_write_model_decision(obs: tuple, validated: bool) -> None:
+    """Item 250 Slice 3a: make the completion the seam just measured DURABLE.
+
+    Consumes this fiber's model-decision sink (published by the recorder beside
+    the crossing key, see `revl_note_emission_index`) and hands it the SAME
+    `llm` payload the trace hop carries (`revl_model_hop`), assembled from the
+    revl-owned bracket and attempt count plus the host-reported usage. With no
+    sink (recording off, no WAL attached, a hand-built timeline) this is a
+    no-op and the decision lives only on the trace, exactly as before.
+
+    Two trace fields are deliberately ABSENT here, stated rather than faked:
+    `promptDigest` needs the compile-side taint certificate only the driver
+    holds (item 444), and a digest written without that gate would be the
+    CRITICAL item 121 §4 closes; `producedSeq` is a trace seq that does not
+    exist on the WAL. Neither the prompt nor the response text is ever written.
+    `outcome` says whether the response VALIDATED or the retry budget was
+    EXHAUSTED (item 257): the crossing happened and cost tokens either way, so
+    the record is written either way."""
+    sink = _revl_model_decision_sink.get()
+    if sink is None:
+        return
+    _revl_model_decision_sink.set(None)
+    latency, attempts, ceiling, raw = obs
+    model, tokens_in, tokens_out, cost = revl_host_usage(raw)
+    llm = revl_model_hop(
+        model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost=cost,
+        latency_seconds=latency, attempts=attempts, attempt_ceiling=ceiling,
+        verified_by=[])
+    sink(llm, "validated" if validated else "exhausted")
 
 
 _REVL_ANY_CROSSING = object()

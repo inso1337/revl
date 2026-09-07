@@ -76,7 +76,8 @@ except ModuleNotFoundError:  # pragma: no cover — path-loaded copy of this mod
     _confidential_spec.loader.exec_module(confidential)
     sys.modules.setdefault("confidential", confidential)
 
-def _note_emission_index(component: str, index: int) -> None:
+def _note_emission_index(component: str, index: int,
+                         sink: Optional[Callable] = None) -> None:
     """Item 242: tell the runtime which crossing is being recorded right now.
 
     The item-121 model-hop observation is measured at the `validate_retry` seam,
@@ -84,6 +85,11 @@ def _note_emission_index(component: str, index: int) -> None:
     inside `make_call`, and the seam can bind its numbers to this exact step
     instead of leaving the driver to infer a crossing at read time from a
     fiber-wide register (which the newest-first `step_back` walk mis-attributed).
+
+    Item 250 Slice 3a publishes `sink` beside the marker: the callable that
+    appends this crossing's durable `model-decision` record, present only when
+    the timeline has a WAL attached. Passed only when set, so a stub runtime
+    with the pre-3a two-argument signature still works.
 
     Resolved through `sys.modules` with a lazy import fallback, and a NO-OP when
     the runtime is not importable: this module's promise is that a timeline is
@@ -97,8 +103,12 @@ def _note_emission_index(component: str, index: int) -> None:
         except Exception:  # noqa: BLE001 — recording must not depend on this
             return
     note = getattr(mod, "revl_note_emission_index", None)
-    if note is not None:
+    if note is None:
+        return
+    if sink is None:
         note(component, index)
+    else:
+        note(component, index, sink)
 
 
 __all__ = [
@@ -107,6 +117,8 @@ __all__ = [
     # crash recovery (roadmap item 47): the accumulator as a write-ahead log
     "WAL_VERSION", "WAL_GUARANTEE", "WriteAheadLog", "inverse_descriptor",
     "boundary_of",
+    # item 250 Slice 3a: the durable model-decision record
+    "RECORD_MODEL_DECISION",
 ]
 
 
@@ -134,6 +146,15 @@ KINDS = (KIND_EFFECT, KIND_PROVISION, KIND_EMISSION, KIND_COMPENSATION,
 #: headline correctness point that keeps the fork rewind from itself PUT-ing a
 #: preimage to a remote endpoint mid-fork (the CRITICAL the review found).
 HOST_CONFINED_CAPS = frozenset({"fs"})
+
+#: item 250 Slice 3a: the WAL record kind that makes one model decision durable
+#: (docs/design/250-session-branching.md, Slice 3a). Written by
+#: :meth:`WriteAheadLog.record_model_decision` right after the completion
+#: crossing's own `effect` record, keyed on `{component, stepIndex}`. Mirrored
+#: into ``revl.wal.RECORD_MODEL_DECISION`` and pinned by
+#: ``test_wal_core_agrees_with_py_replay`` so the writer and the offline reader
+#: cannot drift on the name.
+RECORD_MODEL_DECISION = "model-decision"
 
 
 # ---------------------------------------------------------------------------
@@ -502,10 +523,31 @@ class Timeline:
         # returns next binds its observation to THIS step — the fix for the
         # driver's newest-first walk attributing a model hop to a later crossing.
         # The same publication carries this crossing's STEP INDEX, the identity
-        # the item-121 Slice 2 value-flow token holds.
-        _note_emission_index(self.component, step.index)
+        # the item-121 Slice 2 value-flow token holds, and (item 250 Slice 3a)
+        # the durable sink for this crossing's `model-decision` record, so the
+        # seam can append it without holding the WAL itself.
+        _note_emission_index(self.component, step.index,
+                             self._model_decision_sink(step))
         self._wal_append(step)
         return step
+
+    def _model_decision_sink(self, step: "Step") -> Optional[Callable]:
+        """Item 250 Slice 3a: the callable that appends `step`'s `model-decision`
+        record to the attached WAL, or None when there is no WAL to append to.
+
+        The sink checks `is_open` at WRITE time rather than at build time: the
+        seam fires after `make_call` returns, and a WAL closed in between is
+        treated as absent (the decision stays trace-only) instead of raising
+        `ReplayError` out of a completion that already succeeded."""
+        wal, component, index = self._wal, self.component, step.index
+        if wal is None:
+            return None
+
+        def sink(llm: dict, outcome: str) -> None:
+            if wal.is_open:
+                wal.record_model_decision(component=component, step_index=index,
+                                          llm=llm, outcome=outcome)
+        return sink
 
     def record_yield(self, value: Any, effect_label: Optional[str]) -> tuple:
         """Classify one yield out of a recorded effect generator.
@@ -2257,6 +2299,42 @@ class WriteAheadLog:
                   "notPreserved": list(not_preserved or []),
                   "crossed": list(crossed or []),
                   "wouldCross": list(would_cross or [])}
+        self._write(record)
+        return record
+
+    def record_model_decision(self, *, component: str, step_index: int,
+                              llm: dict, outcome: str) -> dict:
+        """Append ``model-decision``, the durable record of ONE model completion
+        (item 250 Slice 3a, docs/design/250-session-branching.md).
+
+        Item 121 put the model-hop vocabulary on the TRACE, read off the
+        `validate_retry` seam at step-back time; it never reached the WAL, so a
+        branch's model decisions died with the process and `revl compare` could
+        list `decisionCause` only as not comparable. This record is the same
+        `llm` payload the trace hop carries (`runtime.revl_model_hop`: the
+        revl-measured latency bracket, the revl-controlled attempt count against
+        the static ceiling, the host-reported model/tokens/cost, each tagged with
+        its provenance), written at the crossing, keyed on the completion's own
+        `effect` record by ``{component, stepIndex}``.
+
+        Written ONLY for a crossing that carried a completion: every other
+        record on the WAL is byte-identical and no WAL golden moves (the
+        absent-by-default discipline of Slice 2's `scope` / `compensated` /
+        `undoIdempotent`). Under a validation retry it names the LAST attempt's
+        crossing (the one whose return was measured), with `attempts` counting
+        every crossing that retry made; ``outcome`` is ``validated`` or
+        ``exhausted`` (item 257), because the crossing cost tokens either way.
+
+        Deliberately NOT here, stated so nobody infers them from silence: the
+        prompt and response TEXT (never written anywhere), `promptDigest` (its
+        taint gate lives in the driver, item 444, and a digest without the gate
+        is the item 121 §4 CRITICAL), `producedSeq` (a trace seq), and the
+        request-side parameters revl cannot see through the host body
+        (temperature, seed, tool calls). Consumes no seq: it names a fact about
+        an existing step, it is not an effect."""
+        record = {"record": RECORD_MODEL_DECISION, "component": component,
+                  "stepIndex": step_index, "outcome": outcome,
+                  "llm": dict(llm)}
         self._write(record)
         return record
 
