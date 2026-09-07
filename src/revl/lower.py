@@ -9270,17 +9270,70 @@ def _b1_body_scan(node, env: "Env", filename: str, line: int) -> None:
                     _b1_flag_if_borrow(a, env, taint, owned, filename, line, "state")
 
 
+def _is_service_crossing(call: dict, env: "Env") -> bool:
+    """Whether a lowered call node is a SERVICE-METHOD crossing — a required-key
+    call (`s.m(..)`, a `req` target) or a spawn-handle provision call
+    (`w.key.m(..)`, an `instance-get` receiver). A plain fn/host call is not a
+    crossing; neither is a method called ON a delegated reference itself, whose
+    receiver is a borrowed local, not a `req`/provision (that is the delegate's
+    admitted own use, C2)."""
+    if not isinstance(call, dict) or call.get("kind") != "call":
+        return False
+    target = call.get("target")
+    if isinstance(target, dict) and target.get("kind") == "req" and call.get("method"):
+        return True
+    return _instance_get_call(call, env) is not None
+
+
+def _d4_delegate_no_recrossing(node, env: "Env", filename: str, line: int) -> None:
+    """D4 (roadmap item 442 §6.2, issue #121): a received `Delegate[S]` value is
+    a DEPTH-1 borrow. It may be used (its own `S` methods called) and passed
+    DOWN a plain call, but it may NOT be handed as an argument across a SECOND
+    service-method crossing. An unbounded delegation chain is a capability cone
+    no header can enumerate, which breaks G8's enumerable-ceiling guarantee; v1
+    bounds depth at one by refusing a delegated reference in the argument list
+    of any service crossing (the existing crossing / non-crossing line, so no
+    depth counter and no new concept — design §6.2 D4, C6)."""
+    taint, _ = _resource_ctx(env.types)
+    if DELEGATE_HEAD not in taint:
+        return
+    for call in _walk_call_nodes(node):
+        if not _is_service_crossing(call, env):
+            continue
+        for arg in call.get("args") or []:
+            if _node_resource(arg, env, {DELEGATE_HEAD}) != DELEGATE_HEAD:
+                continue
+            named = _node_local_name(arg)
+            who = f"`{named}` " if named else ""
+            raise RevlError(
+                filename, line,
+                f"a delegated reference {who}(`{DELEGATE_HEAD}[S]`) cannot be "
+                "passed as an argument to a further service-method call — a "
+                "delegation is bounded to depth one (item 442, issue #121)",
+                hint="v1 admits a delegated reference for the duration of the "
+                     "ONE call that received it: use it directly (call its own "
+                     "`S` methods) or pass it down a plain `fn`, but it may not "
+                     "cross a second service boundary. An unbounded delegation "
+                     "chain is a capability cone no header can enumerate (G8); "
+                     "if the far component needs the authority, delegate to it "
+                     "directly from the holder (design §6.2 D4)",
+                code="G8", category="delegation",
+            )
+
+
 def _ownership_check_expr(node, env: "Env", filename: str, line: int,
                           *, seam: bool = False) -> None:
     """Run the body-position ownership checks over one lowered expression: O1
     (no hand-call of a declared inverse, no own-undo exemption in a body
-    position) and B1 clauses 1/4 (no borrow stored into activation state or an
-    escaping carrier). `seam` marks a provide-METHOD position so O1's hint
-    names a fix reachable there (item 274)."""
+    position), B1 clauses 1/4 (no borrow stored into activation state or an
+    escaping carrier), and D4 (no delegated reference re-crossed a second
+    service boundary; item 442 §6.2). `seam` marks a provide-METHOD position so
+    O1's hint names a fix reachable there (item 274)."""
     if node is None:
         return
     _o1_check(node, env, filename, line, position="body", seam=seam)
     _b1_body_scan(node, env, filename, line)
+    _d4_delegate_no_recrossing(node, env, filename, line)
 
 
 def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:

@@ -158,6 +158,79 @@ def test_delegate_borrow_stored_into_state_refused():
 
 
 # ---------------------------------------------------------------------------
+# D4 (§6.2): depth is bounded at one — a received delegated reference may not be
+# handed as an argument across a SECOND service-method crossing (exit test 6).
+# An unbounded chain is a capability cone no header can enumerate (breaks G8).
+# ---------------------------------------------------------------------------
+
+def test_delegate_recrossing_service_call_refused():
+    # `Sink.run` receives `d`, then hands it to `s2.take` — a second crossing.
+    msg = _refuse(
+        _FS
+        + "service Sink2 { fn take(d: Delegate[Fs]) -> Int }\n"
+        "service Sink { emission fn run(d: Delegate[Fs]) }\n"
+        "component P provides sink: Sink requires s2: Sink2 {\n"
+        "  provide sink { fn run(d) { let n = s2.take(d) } }\n"
+        "}\n")
+    assert "bounded to depth one" in msg
+    assert "further service-method call" in msg
+
+
+def test_delegate_recrossing_emit_call_refused():
+    # The same second crossing in an `emit` position is refused identically.
+    msg = _refuse(
+        _FS
+        + "service Sink2 { emission fn take(d: Delegate[Fs]) }\n"
+        "service Sink { emission fn run(d: Delegate[Fs]) }\n"
+        "component P provides sink: Sink requires s2: Sink2 {\n"
+        "  provide sink { fn run(d) { emit s2.take(d) } }\n"
+        "}\n")
+    assert "bounded to depth one" in msg
+
+
+def test_non_delegate_arg_to_crossing_admits():
+    # D4 is delegate-specific, not a blanket refusal of arguments to a crossing:
+    # a plain value handed to a second service call is untouched.
+    _admit(
+        _FS
+        + "service Sink2 { fn take(p: Str) -> Int }\n"
+        "service Sink { fn run(d: Delegate[Fs]) -> Int }\n"
+        "component P provides sink: Sink requires s2: Sink2 {\n"
+        "  provide sink { fn run(d) { let n = s2.take(\"x\")  return n } }\n"
+        "}\n")
+
+
+# ---------------------------------------------------------------------------
+# D2 / B1 clause 5 (§3.3): a delegated reference may not appear in an inverse
+# position. This is the compile-time refusal of use-after-revoke: an `undo`
+# rides this activation's LIFO stack to teardown (G7) and would replay through
+# a delegation that may already be revoked.
+# ---------------------------------------------------------------------------
+
+def test_delegate_in_undo_refused():
+    msg = _refuse(
+        _FS
+        + "service Sink { emission fn run(d: Delegate[Fs]) }\n"
+        "component P provides sink: Sink {\n"
+        "  provide sink { fn run(d) { effect Map.new() undo d.write(\"x\") } }\n"
+        "}\n")
+    # B1 clause 5, made load-bearing for delegation by D2 (design §3.3).
+    assert "borrowed resource `Delegate`" in msg
+    assert "`undo`" in msg
+
+
+def test_delegate_captured_by_closure_refused():
+    msg = _refuse(
+        _FS
+        + "service Sink { fn run(d: Delegate[Fs]) -> Int }\n"
+        "component P provides sink: Sink {\n"
+        "  provide sink { fn run(d) { let f = () => d  return 1 } }\n"
+        "}\n")
+    assert "borrowed resource `Delegate`" in msg
+    assert "captured by a closure" in msg
+
+
+# ---------------------------------------------------------------------------
 # verdict invariance: a composition that names no `Delegate` is untouched
 # ---------------------------------------------------------------------------
 
