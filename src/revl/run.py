@@ -1021,6 +1021,18 @@ class _Driver:
         # ownership from the post-disposal `fibers`/structural counters. None (the
         # default) records nothing, so every non-teardown caller is byte-identical.
         self._settlement_ledger: list | None = None
+        # item 628 (residual): ORIGINAL fibers whose disposer FAILED (or was
+        # cancelled) in a retained teardown attempt. `_dispose_all` pops a fiber
+        # from `fibers` BEFORE awaiting its `dispose`, so a raise leaves the
+        # failed original object outside `fibers` — inventoried by the ledger but
+        # otherwise lost. Retain it here so an explicit host-driven re-arm
+        # (`Session.rearm_teardown` + a fresh `aclose`) re-attempts the SAME
+        # original disposer rather than reading the resource as `absent` from a
+        # fresh `fibers` scan and releasing ownership on an unresolved resource.
+        # Empty for every clean composition; a non-teardown caller never touches
+        # it (the pop-before-await path only records into a ledger that a
+        # teardown attempt installs).
+        self._retained_disposers: dict[str, object] = {}
         # runtime routing (docs/distribution-model.md): a component carrying the
         # `routes` IR (item 162's multi-realm bind) is realized here, not as a
         # plugged fiber — the driver resolves its N per-realm handles and
@@ -1669,13 +1681,30 @@ class _Driver:
                 await self._flush()
                 continue
             fiber = self.fibers.pop(name, None)
+            reattempt = False
+            if fiber is None:
+                # item 628 (residual): a prior retained attempt may hold this
+                # original object because its disposer FAILED (it was popped from
+                # `fibers` before the raise). An explicit re-arm re-attempts the
+                # SAME original disposer — take it back here so the resource is
+                # re-targeted, not read as `absent` from a fresh `fibers` scan.
+                fiber = self._retained_disposers.pop(name, None)
+                reattempt = fiber is not None
             if fiber is None:
                 # never live (or already disposed): nothing owned here.
                 if rec is not None:
-                    rec["outcome"] = "absent"
+                    # item 628 (residual): a carried-forward owed resource whose
+                    # original object cannot be re-driven stays OWED — release is
+                    # never inferred from a resource's absence in `fibers`.
+                    prior = rec.get("priorOutcome")
+                    rec["outcome"] = (prior
+                                      if prior in ("owned", "attempted", "failed")
+                                      else "absent")
                 continue
             if rec is not None:
                 rec["outcome"] = "attempted"
+                if reattempt:
+                    rec["reattempt"] = True
             self._log("swap", name, "dispose -> inverses replay (LIFO)")
             frame = self.runtime._frame_for_ctx(getattr(fiber, "ctx", None))
             try:
@@ -1688,6 +1717,12 @@ class _Driver:
                 if rec is not None:
                     rec["outcome"] = "failed"
                     rec["error"] = f"{type(exc).__name__}: {exc}"
+                # item 628 (residual): retain the ORIGINAL object so it is not
+                # lost to the pop above. An explicit re-arm re-attempts THIS same
+                # disposer (see the `_retained_disposers` fall-back on lookup);
+                # ownership stays inspectable and is never inferred released from
+                # the resource's absence in `fibers`.
+                self._retained_disposers[name] = fiber
                 raise
             if rec is not None:
                 rec["outcome"] = "returned"

@@ -600,3 +600,67 @@ def test_a_retained_failure_does_not_touch_an_independent_session():
     assert b.call("cache", "size")["result"] == 0     # B untouched
     b.unload()
     a.strand_teardown()
+
+
+# ------------- item 628 residual: original-disposer failure + explicit re-arm
+
+@needs_runtime
+def test_rearm_after_original_disposer_failure_keeps_the_original_and_evidence():
+    """The residual item-628 contract gap: an ORIGINAL disposer failure followed
+    by an explicit re-arm must not lose the original object or its prior
+    settlement evidence.
+
+    A single original disposer (`App`) is faulted at the fiber, so it is popped
+    before its `dispose` is awaited (`run.py`), leaving the failed fiber outside
+    `driver.fibers`. The host inspects the retained attempt, re-arms it, and
+    closes again WITHOUT clearing the fault. The re-attempt must target the SAME
+    original disposer (not read the resource as `absent` from a fresh `fibers`
+    scan and release ownership), so with the fault still live `App` stays owed
+    and ownership is NOT released. The prior `failed` evidence must remain
+    inspectable across the re-arm and the second attempt."""
+    session = _loaded_two()
+    app_fiber = session._driver.fibers["App"]
+    real_app_dispose = app_fiber.dispose                     # keep to restore later
+    app_fiber.dispose = _raise_native_fault                  # fault the original
+
+    first = asyncio.run(session.aclose())
+    assert first["closed"] is False
+    outcomes = {r["component"]: r["outcome"] for r in first["resources"]}
+    assert outcomes == {"App": "failed", "MemCache": "owned"}
+    assert session.loaded is True
+    # the failed ORIGINAL object is retained (popped from `fibers`, not lost).
+    assert "App" in session._driver._retained_disposers
+
+    # re-arm must retain the prior unresolved evidence, not erase it.
+    rearmed = session.rearm_teardown()
+    assert rearmed["rearmed"] is True
+    assert rearmed["priorSettlement"]["unresolved"]["ownedResources"] == [
+        "App", "MemCache"]
+    disposition = session.teardown_disposition()
+    assert disposition["attempt"] != "none"                  # evidence retained
+    assert (disposition["settlement"]["unresolved"]["ownedResources"]
+            == ["App", "MemCache"])
+
+    # second close, fault NOT cleared: the retained ORIGINAL disposer is
+    # re-targeted and fails again — the resource stays owed, ownership is NOT
+    # released, and the composition is retained (no false clean release).
+    second = asyncio.run(session.aclose())
+    assert second["closed"] is False
+    assert second["releaseOwnership"] is False
+    assert session.loaded is True
+    outcomes2 = {r["component"]: r["outcome"] for r in second["resources"]}
+    assert outcomes2.get("App") == "failed"                  # NOT `absent`
+    assert "App" in second["unresolved"]["ownedResources"]
+    # the prior failure evidence is still inspectable on the re-attempted rec.
+    app_rec = next(r for r in second["resources"] if r["component"] == "App")
+    assert "native disposer fault" in (app_rec.get("error") or "")
+
+    # once the fault clears, the same explicit re-arm path re-attempts the SAME
+    # original disposer and releases cleanly.
+    session.rearm_teardown()
+    # restore the real disposer on the SAME retained original object.
+    session._driver._retained_disposers["App"].dispose = real_app_dispose
+    third = asyncio.run(session.aclose())
+    assert third["closed"] is True
+    assert third["releaseOwnership"] is True
+    assert session.loaded is False
