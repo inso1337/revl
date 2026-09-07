@@ -102,10 +102,10 @@ was corrected by hand and had drifted back within a day.
 | commands-reference.md | current | 8 |  |
 | component-leases.md | needs-work | 26 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
-| composition-layers.md | needs-work | 15 |  |
-| composition-rows.md | needs-work | 17 |  |
+| composition-layers.md | needs-work | 20 |  |
+| composition-rows.md | needs-work | 19 |  |
 | conformance.md | needs-work | 0 |  |
-| contract-errata.md | needs-work | 6 | yes |
+| contract-errata.md | needs-work | 19 | yes |
 | crash-recovery.md | needs-work | 52 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
@@ -188,7 +188,7 @@ was corrected by hand and had drifted back within a day.
 | threat-model.md | needs-work | 27 |  |
 | time-coeffect.md | needs-work | 35 | yes |
 | token-economy.md | needs-work | 19 |  |
-| truc.md | needs-work | 47 |  |
+| truc.md | needs-work | 56 |  |
 | ts-runtime-contract.md | needs-work | 2 |  |
 | verified-canary.md | needs-work | 22 |  |
 | verified-effect.md | needs-work | 18 |  |
@@ -197,5 +197,5 @@ was corrected by hand and had drifted back within a day.
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |
-| witnessed-fs.md | needs-work | 9 |  |
+| witnessed-fs.md | needs-work | 14 |  |
 <!-- docgen:doc-status end -->
