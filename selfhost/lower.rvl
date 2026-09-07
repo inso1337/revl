@@ -6322,7 +6322,13 @@ fn builtin_ret(method: Str, recvTy: Str) -> Str {
   if (method == "join") { return "Str" }
   if (method == "repeat") { return "Str" }
   if (method == "startsWith" || method == "endsWith" || method == "has") { return "Bool" }
-  if (method == "div_trunc" || method == "div_floor" || method == "div_euclid") { return "Int" }
+  // `mod` is the named integer remainder that rides the same Int-family dispatch
+  // as its `div_*` siblings (issue #549). Without it here `a.mod(b)` inferred as
+  // unknown, so an outer arithmetic node reading it lost its `operands: "Int"`
+  // tag and, with it, the i64 overflow guard the reference wraps every chained
+  // `+`/`-`/`*` in (the frontend-x64 self-host oracle divergence).
+  if (method == "div_trunc" || method == "div_floor" || method == "div_euclid"
+      || method == "mod") { return "Int" }
   if (method == "to_int") {
     if (recvTy == "Int32") { return "Int" }
     if (parse_head(recvTy) == "Str") { return "Opt[Int]" }

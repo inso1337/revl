@@ -5704,7 +5704,7 @@ fn builtin_ret(method: &str, recvTy: String) -> String {
     if (((method == "startsWith") || (method == "endsWith")) || (method == "has")) {
         return String::from("Bool");
     }
-    if (((method == "div_trunc") || (method == "div_floor")) || (method == "div_euclid")) {
+    if ((((method == "div_trunc") || (method == "div_floor")) || (method == "div_euclid")) || (method == "mod")) {
         return String::from("Int");
     }
     if (method == "to_int") {
