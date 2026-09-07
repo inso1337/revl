@@ -33,15 +33,20 @@ func revlOptOr[T any](o RevlOpt[T], d T) T {
 	return d
 }
 
-// ---- built-in Result as a generic sealed interface --------------------
-type RevlResult[T any, E any] interface{ isRevlResult() }
-type RevlOk[T any, E any] struct{ Value T }
-
-func (RevlOk[T, E]) isRevlResult() {}
-
-type RevlErr[T any, E any] struct{ Value E }
-
-func (RevlErr[T, E]) isRevlResult() {}
+// ---- built-in Result as a two-value struct (item 434 (d)) -------------
+// An Ok/Err-flag + two payload struct, not a sealed interface: an Ok or Err
+// carrying a non-pointer payload no longer heap-boxes to satisfy an interface,
+// so a Result that escapes a function or lands in a collection costs no
+// allocation (the same argument, and the same shape, as the Opt conversion
+// above). `Ok` discriminates; `OkV` holds the Ok payload and `ErrV` the Err
+// payload, each the zero value on the other arm. reflect.DeepEqual stays a
+// correct value equality: two Ok values compare their `OkV` (matching `ErrV`
+// zero), an Ok and an Err differ on `Ok`.
+type RevlResult[T any, E any] struct {
+	OkV  T
+	ErrV E
+	Ok   bool
+}
 
 // ---- stdlib builtins (docs/stdlib-2.0.md); positions are code-point based
 func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }
@@ -319,27 +324,23 @@ func adder() func(int64) int64 {
 }
 
 func okOf(n int64) RevlResult[int64, string] {
-	return RevlOk[int64, string]{Value: n}
+	return RevlResult[int64, string]{OkV: n, Ok: true}
 }
 
 func errOf(m string) RevlResult[int64, string] {
-	return RevlErr[int64, string]{Value: m}
+	return RevlResult[int64, string]{ErrV: m}
 }
 
 func resultFold(r RevlResult[int64, string]) int64 {
 	return func() int64 {
-		switch _m := r.(type) {
-		case RevlOk[int64, string]:
-			v := _m.Value
+		_m := r
+		if _m.Ok {
+			v := _m.OkV
 			_ = v
 			return v
-		case RevlErr[int64, string]:
-			e := _m.Value
-			_ = e
-			return (-revlStrLen(e))
-		default:
-			_ = _m
-			panic("unreachable: non-exhaustive match")
 		}
+		e := _m.ErrV
+		_ = e
+		return (-revlStrLen(e))
 	}()
 }
