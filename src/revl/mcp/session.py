@@ -3325,10 +3325,12 @@ class Session:
         `admit-decided` after the pre-plug gates cleared and the spends were
         committed and BEFORE the plug, `admit-applied` after the plug settled and
         the turn was adopted, `admit-finalized` after the per-generation indexes
-        were installed. A plug that raises writes `admit-abandoned {plug-failed}`
-        and disposes the turn's already-plugged fibers, so the crash window between
-        "gate decided" and "composition live" is a settled decision on disk rather
-        than an ambiguous one a restart has to guess at. `bundle` is the
+        were installed. A plug that raises disposes the turn's already-plugged
+        fibers and, once that cleanup resolves, writes `admit-abandoned
+        {plug-failed}`, so the crash window between "gate decided" and
+        "composition live" is a settled decision on disk rather than an ambiguous
+        one a restart has to guess at; if a fiber cannot be disposed the decision
+        is left owed rather than falsely settled (issue #644). `bundle` is the
         re-admittable turn source the `admit-decided` record carries (§2.1); a
         `_wire_turn` reached without one (a legacy internal call) writes no records
         and keeps today's in-process-only atomicity.
@@ -3438,18 +3440,46 @@ class Session:
         #
         # design 460 §2: the plug is the window between STAGE 1 and STAGE 2. A
         # failure here — a plug that raises, or the E-Stop's plug-seam refusal —
-        # disposes the turn's already-plugged fibers and closes the decision with
-        # `admit-abandoned {plug-failed}`, so a halt during admission is a settled
-        # decision and never an owed one. Nothing is adopted, so the running
-        # composition is untouched exactly as the pre-plug gates' refusal leaves it.
+        # disposes the turn's already-plugged fibers through the supported
+        # `fiber.dispose()` path and, ONLY once that cleanup fully resolves,
+        # closes the decision with `admit-abandoned {plug-failed}`, so a halt
+        # during admission is a settled decision and never an owed one. If a fiber
+        # cannot be disposed the decision is left owed (no terminal record) with
+        # the leak made explicit, so recovery does not skip a still-live fiber
+        # (issue #644). Nothing is adopted, so the running composition is untouched
+        # exactly as the pre-plug gates' refusal leaves it.
         runtime_mod.set_session_owner(self._owner)
         try:
             self._run(_plug())
-        except BaseException:
-            self._dispose_turn_fibers(turn_names)
-            if wal is not None and decision_id is not None:
+        except BaseException as admit_err:
+            retained = self._dispose_turn_fibers(turn_names)
+            if wal is not None and decision_id is not None and not retained:
+                # cleanup resolved: every plugged fiber was torn down, so the
+                # terminal `admit-abandoned {plug-failed}` is honest — a halt
+                # during admission is a settled decision, never an owed one.
                 wal.record_admit_abandoned(decision_id=decision_id,
                                            reason="plug-failed")
+            elif retained:
+                # design 460 §2 / issue #644: cleanup is UNRESOLVED — one or more
+                # of the turn's plugged fibers could not be torn down and stay in
+                # `driver.fibers`, still holding live provisions/effects. Writing
+                # `admit-abandoned` here would settle the decision terminally, and
+                # forward recovery SKIPS a terminal decision (recovery.py §5), so
+                # those live fibers would never be reached again. Leave the
+                # decision OWED (its `admit-decided` stands, no terminal record) so
+                # recovery still reports it, keep the fibers inspectable, and make
+                # the cleanup failure explicit on the preserved admission error
+                # rather than masking it behind a false settlement.
+                note = ("revl: admission failed AND cleanup is unresolved — "
+                        f"{len(retained)} turn fiber(s) retained undisposed in "
+                        f"driver.fibers ({', '.join(sorted(retained))}); "
+                        "admit-abandoned was NOT recorded, so the decision stays "
+                        "owed and forward recovery does not skip the still-live "
+                        "fibers (issue #644)")
+                try:
+                    admit_err.add_note(note)
+                except AttributeError:  # pragma: no cover — revl targets py3.11+
+                    driver._log("admit", "cleanup-unresolved", note)
             raise
         finally:
             runtime_mod.clear_session_owner()
@@ -3526,7 +3556,7 @@ class Session:
             self._applied_decisions[content_key] = result
         return result
 
-    def _dispose_turn_fibers(self, turn_names: set) -> None:
+    def _dispose_turn_fibers(self, turn_names: set) -> set:
         """Dispose the fibers a failed turn plug left in `driver.fibers` (design
         460 §2, the `plug-failed` path), through the SUPPORTED runtime disposal
         path — `await fiber.dispose()` then a flush, exactly as
@@ -3537,10 +3567,12 @@ class Session:
         turn is never adopted into the IR, so ordinary IR-ordered disposal can
         never reach them (issue #644).
 
-        `_wire_turn` calls this BEFORE `record_admit_abandoned`, so the terminal
-        settlement is written only once the fibers it abandons are actually torn
-        down — the WAL never claims a decision is abandoned while its fibers are
-        still leaking.
+        Returns the set of names whose disposal did NOT resolve — the fibers left
+        (deliberately) in `driver.fibers` because their own `dispose()` raised.
+        `_wire_turn` reads this to keep the WAL honest: it records the terminal
+        `admit-abandoned` only when this set comes back empty, so a decision is
+        never settled while its fibers are still leaking. An empty return means
+        every turn fiber was torn down and the terminal settlement is safe.
 
         Consumers before providers: `driver.fibers` is insertion-ordered and the
         turn's fibers were stored in plug (load) order, so tearing them down in
@@ -3550,10 +3582,11 @@ class Session:
         Best-effort and never raising — the caller is already unwinding a plug
         failure and must re-raise the original error, not a teardown one. A fiber
         whose own `dispose()` raises is LEFT in `driver.fibers` so its ownership
-        stays inspectable rather than being silently dropped undisposed."""
+        stays inspectable rather than being silently dropped undisposed, and its
+        name is returned so the caller can withhold terminal settlement."""
         driver = self._driver
         if driver is None:
-            return
+            return set()
 
         async def _teardown(fiber) -> None:
             await fiber.dispose()
@@ -3562,6 +3595,7 @@ class Session:
         # reverse plug (load) order over the driver's own insertion order, kept
         # to the names this turn owns: consumers come down before the providers
         # they reached, the direction `_dispose_all` tears a live composition in.
+        retained: set = set()
         ordered = [n for n in reversed(list(driver.fibers)) if n in turn_names]
         for name in ordered:
             fiber = driver.fibers.get(name)
@@ -3572,8 +3606,15 @@ class Session:
             except BaseException:  # noqa: BLE001 — unwinding a plug failure
                 # a fiber that could not be torn down stays in `driver.fibers`,
                 # inspectable, rather than being dropped as if it were disposed.
+                # Report it so `_wire_turn` withholds the terminal settlement
+                # while this ownership is still live (issue #644).
+                driver._log("admit", "dispose-failed",
+                            f"{name}: retained undisposed in driver.fibers "
+                            "for inspection (cleanup unresolved)")
+                retained.add(name)
                 continue
             driver.fibers.pop(name, None)
+        return retained
 
     def _turn_content_key(self, bundle: dict) -> str:
         """The in-process applied-set key for a turn (design 460 §4): a digest of
