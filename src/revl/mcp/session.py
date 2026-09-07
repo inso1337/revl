@@ -18,6 +18,7 @@ call — between tool calls the composition is simply idle.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import sys
 from fnmatch import fnmatchcase
@@ -33,6 +34,24 @@ from .approval import _args_digest as _cache_args_digest
 
 class SessionError(RuntimeError):
     """The session cannot do what was asked (no runtime, nothing loaded…)."""
+
+
+@dataclasses.dataclass(frozen=True)
+class VerdictReview:
+    """The review half of the item 483 exact-state verdict protocol, returned by
+    `Session.prepare_verdict`. Frozen: presenting a review never mutates the
+    session.
+
+    `token` binds the session generation and the exact outstanding witness
+    identities/revisions (via `SessionOwner.verdict_review_token`); retain it and
+    pass it to `confirm_verdict`. `summary` is the human-facing digest of what
+    the verdict will act on; `snapshot` is the full `WitnessSnapshot` the token
+    was derived from (item 485)."""
+
+    verdict: str
+    token: str
+    summary: dict
+    snapshot: object
 
 
 def _cap_covers(wide: str, narrow: str) -> bool:
@@ -1876,6 +1895,93 @@ class Session:
         return {"aborted": True, "replayed": result["replayed"],
                 "droppedDeferred": dropped, "prompts": prompts,
                 "compensationResidue": residue, **report}
+
+    # -- item 485/483: witness inspection + exact-state verdict review -----
+
+    def witness_snapshot(self, trusted: bool = False):
+        """A supported, read-only, IMMUTABLE, BOUNDED snapshot of the live
+        witnessed filesystem effects (item 485). This replaces the harness
+        reaching through `session._owner`, a frame `_registry` and
+        `_transactional` — runtime internals with no stability contract.
+
+        Returns a `runtime.WitnessSnapshot`: a stable session/generation
+        identity, the ordered effects distinguishing live / escrowed / settled,
+        each with a stable id and a revision digest, and an opaque snapshot
+        token. `trusted` gates the sensitive witness PREIMAGE — an untrusted
+        caller sees identities and digests, never the preimage."""
+        self._require()
+        if self._owner is None:
+            raise SessionError(
+                "no session owner is registered — nothing to inspect")
+        return self._owner.witness_snapshot(self._generation, trusted=trusted)
+
+    def prepare_verdict(self, verdict: str) -> VerdictReview:
+        """Step 1 of the exact-state verdict protocol (item 483) — the abort
+        analogue of `commit`. Enumerates a review whose `token` binds the session
+        GENERATION and the EXACT outstanding witness identities/revisions (not a
+        count and frame names), so `confirm_verdict` refuses if the state drifts.
+        Nothing is torn down here.
+
+        This slice supports `verdict="abort"`; `commit` keeps its own hash-bound
+        two-step (`commit` -> `commit_confirm`)."""
+        self._require()
+        self._refuse_if_halted("prepare_verdict")
+        if verdict != "abort":
+            raise SessionError(
+                f"prepare_verdict supports 'abort' in this slice, not "
+                f"{verdict!r} — use `commit` -> `commit_confirm` for commit "
+                "(item 483)")
+        owner = self._owner
+        if owner is None:
+            raise SessionError("no session owner is registered — nothing to abort")
+        snapshot = owner.witness_snapshot(self._generation)
+        token = owner.verdict_review_token(self._generation, verdict)
+        outstanding = [e for e in snapshot.effects if e.status != "settled"]
+        summary = {
+            "verdict": verdict,
+            "session": snapshot.session,
+            "generation": snapshot.generation,
+            "outstanding": len(outstanding),
+            "live": sum(1 for e in outstanding if e.status == "live"),
+            "escrowed": sum(1 for e in outstanding if e.status == "escrowed"),
+            "droppedDeferred": len(owner._queue),
+            "effects": [e.to_dict() for e in snapshot.effects],
+        }
+        return VerdictReview(verdict=verdict, token=token, summary=summary,
+                             snapshot=snapshot)
+
+    def confirm_verdict(self, token: str) -> dict:
+        """Step 2 of the exact-state verdict protocol (item 483). Recomputes the
+        review token against the CURRENT state; if the generation or any
+        outstanding witness identity/revision drifted since `prepare_verdict`,
+        the confirm is REFUSED with a fresh review — never silently adopting the
+        changed state. On an exact match it enacts the verdict (abort)."""
+        driver = self._require()
+        self._refuse_if_halted("confirm_verdict")
+        owner = self._owner
+        if owner is None:
+            raise SessionError("no session owner is registered — nothing to abort")
+        prefix = "revl-verdict:"
+        rest = token[len(prefix):] if token.startswith(prefix) else ""
+        verdict, _, _core = rest.partition(":")
+        if verdict != "abort":
+            raise SessionError(
+                f"unrecognized verdict token {token!r} — obtain one from "
+                "`prepare_verdict('abort')` (item 483)")
+        current = owner.verdict_review_token(self._generation, verdict)
+        if token != current:
+            # drift: another witnessed call, a swap, or a changed witness
+            # preimage since the review. Refuse, hand back a fresh review — the
+            # caller must look again, never confirm a state it did not see.
+            snapshot = owner.witness_snapshot(self._generation)
+            return {"confirmed": False, "refused": True,
+                    "reason": "stale verdict token — the session generation or "
+                              "an outstanding witness identity/revision changed "
+                              "since the review, so the confirm is refused "
+                              "(item 483)",
+                    "review": {"token": current,
+                               "snapshot": snapshot.to_dict()}}
+        return self.abort()
 
     def estop(self, reason: str = "operator halt",
               operator: str | None = None) -> dict:
