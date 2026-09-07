@@ -62,7 +62,12 @@ What is NOT in this slice
   gate builds the `relay-mtls` descriptor, checks the item-56 role rule and the
   item-54 deadline rule per seam, and names each unmet precondition — the T3
   reachability precondition among them — instead of the old blanket
-  "seam-free only" refusal.
+  "seam-free only" refusal. As of T2 (`seam_dir_mounts`) the conductor mints a
+  per-boot mTLS leaf + key for every cross-boundary sandbox-seam participant and
+  the driver mounts each process's OWN spec and identity read-only, in place of
+  the whole placement directory that would have handed a hostile sandbox every
+  sibling's key — landed ahead of T3, which is what makes a seam-carrying
+  sandbox launchable at all.
 * The conductor-served approval-across-boundary channel.
 * The `wasm-cell` and `microvm` rungs (`resolve_driver` returns None, and the
   caller refuses).
@@ -341,6 +346,34 @@ def _runtime_mounts() -> tuple[list[tuple[str, str]], str | None]:
             (str(cordis_root), "ro")], None
 
 
+def seam_dir_mounts(ctx: dict) -> list[tuple[str, str]]:
+    """The per-process view of the placement directory a sandboxed process is
+    given (item 411 T2), replacing the whole-directory read-write mount Stage 2a
+    used.
+
+    A confined process reads its OWN spec and — on a cross-boundary sandbox seam
+    — its own conductor-minted leaf certificate, its own key, and the CA
+    certificate, all read-only. It never sees the CA key, nor a sibling's spec
+    or key: the whole-directory mount handed a hostile sandbox every process's
+    private identity, which is the exact leak this narrowing closes before T3
+    makes a sandboxed seam launchable at all.
+
+    When `ctx` carries no `spec_path` (a bare-ctx unit probe that refuses before
+    launch), the pre-T2 whole-directory mount is returned unchanged, so a caller
+    that has not adopted the narrowed view is byte-identical.
+    """
+    spec_path = ctx.get("spec_path")
+    if not spec_path:
+        return [(ctx["seam_dir"], "rw")]
+    mounts: list[tuple[str, str]] = [(spec_path, "ro")]
+    tls = ctx.get("seam_tls")
+    if tls:
+        # leaf, key and CA cert only — never the CA key (which never leaves the
+        # conductor's own mint directory, itself unmounted).
+        mounts += [(tls["cert"], "ro"), (tls["key"], "ro"), (tls["ca"], "ro")]
+    return mounts
+
+
 def source_mounts(files, cwd: str) -> list[tuple[str, str]]:
     """The composition's own `.rvl` sources, read-only.
 
@@ -518,7 +551,9 @@ class ContainerDriver:
         # confirms first, and its RUNTIME line says whether the image can be the
         # runner on its own.
         cwd = ctx.get("cwd") or os.getcwd()
-        declared = [(ctx["seam_dir"], "rw")] + envelope_mounts(env)
+        # item 411 T2: the process's OWN spec and seam identity, not the whole
+        # placement directory — a hostile sandbox must not read its siblings' keys.
+        declared = seam_dir_mounts(ctx) + envelope_mounts(env)
         probe, probe_err = self._probe(docker, pname, env, str(image), declared)
         if probe_err:
             return None, probe_err

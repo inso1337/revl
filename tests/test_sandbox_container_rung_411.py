@@ -318,6 +318,40 @@ def test_a_non_py_backend_in_a_container_refuses():
     assert "py` backend only" in err
 
 
+# -- the per-process placement-directory view (item 411 T2) ------------------
+
+
+def test_seam_dir_mounts_narrow_to_the_process_own_spec():
+    # the whole-directory rw mount is gone: a seam-free sandbox reads only its
+    # own spec, read-only.
+    mounts = _sb.seam_dir_mounts(
+        {"seam_dir": "/place", "spec_path": "/place/p.spec.json"})
+    assert mounts == [("/place/p.spec.json", "ro")]
+
+
+def test_seam_dir_mounts_add_own_identity_never_the_ca_key():
+    # a cross-boundary seam participant also gets its own leaf, its own key, and
+    # the CA CERTIFICATE — never the CA key, never a sibling's file.
+    tls = {"cert": "/place/certs/p/seam.crt", "key": "/place/certs/p/seam.key",
+           "ca": "/place/certs/p/seam_ca.crt", "identity": "p"}
+    mounts = _sb.seam_dir_mounts(
+        {"seam_dir": "/place", "spec_path": "/place/p.spec.json", "seam_tls": tls})
+    assert mounts == [
+        ("/place/p.spec.json", "ro"),
+        ("/place/certs/p/seam.crt", "ro"),
+        ("/place/certs/p/seam.key", "ro"),
+        ("/place/certs/p/seam_ca.crt", "ro")]
+    # every mount is read-only, and the CA key never appears
+    assert all(mode == "ro" for _, mode in mounts)
+    assert not any("seam_ca.key" in path for path, _ in mounts)
+
+
+def test_seam_dir_mounts_fall_back_to_the_whole_directory_without_a_spec_path():
+    # a bare-ctx unit probe (the refuses-before-launch tests) is byte-identical
+    # to the pre-T2 whole-directory mount.
+    assert _sb.seam_dir_mounts({"seam_dir": "/t"}) == [("/t", "rw")]
+
+
 # -- the heart of it: a canary report that does not CONFIRM the envelope ----
 
 def _report(**over) -> dict:

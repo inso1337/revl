@@ -713,6 +713,63 @@ def sandbox_seam_roles(pname: str, processes: dict, requires: dict,
     return edges
 
 
+def sandbox_seam_participants(sandboxes: dict, processes: dict, requires: dict,
+                              provides: dict, owner: dict, backends: dict,
+                              remote_specs: dict, default_deadline) -> set[str]:
+    """Every process on a cross-boundary sandbox seam (item 411 T2): each
+    sandboxed process that shares a seam with a sibling, and the host-side peer
+    on the other end of that seam. BOTH ends need a conductor-minted seam
+    identity, because the seam rides item-56 TCP+mTLS across the boundary once
+    T3 lands and mTLS authenticates each peer to the other — a sandboxed
+    provider and the host-side consumer that dials it, or a host-side provider
+    and the sandboxed consumer it serves.
+
+    The `remote '<key>'` pseudo-peer of a sandboxed consumer that dials another
+    composition is NOT here: that provider runs its own placement and serves
+    its own certificate material (item 151). A seam-free sandbox contributes
+    nothing, so a placement with no cross-boundary sandbox seam yields an empty
+    set and mints nothing."""
+    participants: set[str] = set()
+    for pname in sandboxes:
+        for edge in sandbox_seam_roles(pname, processes, requires, provides,
+                                       owner, backends, remote_specs, default_deadline):
+            participants.add(edge["provider"])
+            participants.add(edge["consumer"])
+    # the `remote '<key>'` provider pseudo-name never denotes a local process.
+    return {p for p in participants if p in processes}
+
+
+def mint_sandbox_seam_certs(cert_root: Path, participants, identity_of) -> dict:
+    """Per-boot mTLS material for every sandbox-seam participant (item 411 T2),
+    laid out so each process's OWN view holds only its leaf certificate, its
+    private key, and the CA certificate — never the CA key, never a sibling's
+    key. One throwaway CA is shared (the peers must verify one another against
+    it); the leaves are minted under `cert_root`, then each process's three
+    files are copied into `cert_root/<pname>/`, which is the only directory the
+    sandbox driver mounts for that process.
+
+    These are the conductor's per-boot seam identities, minted with the same
+    trust as the per-boot correlation secret, NOT the operator-opted-in
+    `generate_test_certs` loopback material (docs/network-placement.md). Returns
+    ``{pname: {"cert","key","ca","identity","dir"}}``; raises ``RuntimeError``
+    when the ``openssl`` CLI is absent, which the caller turns into a refusal."""
+    wanted = {identity_of(p) for p in participants}
+    minted = generate_seam_certs(cert_root, wanted)
+    out: dict[str, dict] = {}
+    for pname in sorted(participants):
+        ident = identity_of(pname)
+        material = minted[ident]
+        pdir = cert_root / pname
+        pdir.mkdir(parents=True, exist_ok=True)
+        leaf, key, ca = pdir / "seam.crt", pdir / "seam.key", pdir / "seam_ca.crt"
+        shutil.copyfile(material["cert"], leaf)
+        shutil.copyfile(material["key"], key)
+        shutil.copyfile(material["ca"], ca)
+        out[pname] = {"cert": str(leaf), "key": str(key), "ca": str(ca),
+                      "identity": ident, "dir": str(pdir)}
+    return out
+
+
 def process_tag(pname: str, processes: dict, backends: dict, sandboxes: dict) -> str:
     """The boot-summary tag for one process. A non-sandboxed process is
     byte-identical to the pre-411 tag (`p[backend]=[comps]`); a sandboxed one
@@ -3387,6 +3444,45 @@ def run_placement(files, placement_path: str, once: bool = False,
             # see is not an emergency stop.
             spec["estopLatch"] = estop_latch
 
+    # --- sandbox seam identities (item 411 T2): the conductor mints a per-boot
+    # mTLS leaf + key for every process on a CROSS-BOUNDARY sandbox seam, so a
+    # seam that must cross the isolation boundary (once T3 carries it) is
+    # authenticated by a certificate this conductor issued, not by the per-boot
+    # correlation secret a UDS uses. Minted BEFORE the driver loop, because the
+    # driver mounts each process's own leaf into its narrowed placement-directory
+    # view. Identity defaults to the process name; under an `operator_profile`
+    # item 55's attribution rule holds, so each participant must declare a [tls]
+    # identity that is a declared operator, refused otherwise. A placement with
+    # no cross-boundary sandbox seam mints nothing (byte-identical to before).
+    seam_participants = sandbox_seam_participants(
+        sandboxes, processes, requires, provides, owner, backends,
+        remote_specs, default_deadline)
+    sandbox_seam_certs: dict[str, dict] = {}
+    if seam_participants:
+        if profile_path:
+            for p in sorted(seam_participants):
+                if p not in identities:
+                    return abort(
+                        f"process {p!r} is on a cross-boundary sandbox seam but "
+                        f"declares no identity, and the placement names an "
+                        f"operator_profile — add [processes.{p}.tls] identity = "
+                        f'"..." (a sandbox seam is attributable to a declared '
+                        f"operator, item 55)")
+                if allowed_identities is not None and identities[p] not in allowed_identities:
+                    return abort(
+                        f"process {p!r} identity {identities[p]!r} is not a declared "
+                        f"operator in {profile_path!r}, but it is on a cross-boundary "
+                        f"sandbox seam whose identity is issued by the operator model "
+                        f"(item 55)")
+
+        def _seam_identity(p: str) -> str:
+            return identities.get(p, p)
+        try:
+            sandbox_seam_certs = mint_sandbox_seam_certs(
+                tmp / "sandbox_certs", seam_participants, _seam_identity)
+        except RuntimeError as exc:
+            return abort(str(exc))
+
     # --- sandbox runtime driver (item 411, Slice 2): ESTABLISH each declared
     # isolation boundary before anything spawns, or refuse the placement.
     #
@@ -3413,9 +3509,19 @@ def run_placement(files, placement_path: str, once: bool = False,
                 f"unconfined process — the placement refuses. Use the `container` "
                 f"rung, or take the process out of the sandbox.")
         spec = specs[pname]
+        # item 411 T2: the driver mounts this process's OWN spec file, not the
+        # whole placement directory, so the file has to exist before the boot
+        # canary probes the mount. `spawn` rewrites the same path at launch.
+        spec_path = tmp / f"{pname}.spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
         ctx = {
             "backend": backends[pname],
             "seam_dir": str(tmp),
+            # item 411 T2: the narrowed placement-directory view — this process's
+            # own spec and its own seam identity (leaf/key/CA cert), never the
+            # whole directory that holds every sibling's key.
+            "spec_path": str(spec_path),
+            "seam_tls": sandbox_seam_certs.get(pname),
             "seam_keys": sorted(set(spec.get("proxies") or {})
                                 | set((spec.get("serve") or {}).get("keys") or [])),
             # item 411 T1: the seam ROLES (provider/consumer, peer, peer backend,
