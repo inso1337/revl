@@ -42,6 +42,7 @@ from revl.placement import (  # noqa: E402
     render_seam_transport_summary,
     sandbox_approval_rows,
     sandbox_capability_gate,
+    sandbox_crossing_check,
     sandbox_relay_table,
 )
 from revl import sandbox_runtime as _sb  # noqa: E402
@@ -291,6 +292,185 @@ def test_gate_no_sandbox_is_a_noop(tmp_path):
     ir = _ir(tmp_path)
     processes = {"p": {"backend": "py", "components": ["Provider", "Untrusted"]}}
     assert sandbox_capability_gate(ir, processes, {}, {}, {}, {}, {}) is None
+
+
+# ==========================================================================
+# 2b. the structural crossing-type walk (item 411 T4, pure)
+# ==========================================================================
+#
+# A seam that crosses a SANDBOXED process's isolation boundary may carry only
+# value-copyable types. `sandbox_crossing_check` walks each crossing type
+# structurally (every record field and variant arm, transitively) and refuses an
+# embedded resource handle -- naming the field path -- or an unresolvable type.
+# It is the sandboxed-seam rule that pre-empts the tier-agnostic 363 check, so a
+# handle two records deep is refused as clearly as one at the surface.
+
+# every crossing shape a sandboxed seam might carry, declared once. No component
+# provides the resource services (item 308 B1 refuses returning a handle across
+# a signature in pure revl), so a resource seam is a host/remote-provided or
+# bridged surface -- exactly the declaration surface these plan-layer checks
+# read, wired below the same way `_gate_setup` wires requires/provides by hand.
+_CROSSING_APP = """
+extern pure fn close_sock(h: Int) = @py { return None }
+extern acquire fn open_sock(p: Int) -> Sock undo close_sock(0) = @py { return 0 }
+type Conn = { sock: Sock, name: Str }
+type Deep = { inner: Conn }
+type Env = A(Str) | B(Conn)
+service ResRet { async fn dial(x: Str) -> Conn }
+service ResTop { async fn raw(x: Str) -> Sock }
+service ResDeep { async fn deep(d: Deep) -> Str }
+service ResVar { async fn ev(e: Env) -> Str }
+service ResList { async fn many(x: Str) -> List[Conn] }
+service CleanSvc { async fn compute(x: Str) -> Str }
+component P provides clean: CleanSvc {
+  provide clean { async fn compute(x) = x }
+}
+component U requires clean: CleanSvc provides job: CleanSvc {
+  provide job { async fn compute(x) = x }
+}
+"""
+
+
+def _crossing_setup(tmp: Path, iface: str, *, sandboxed_consumer: bool = True,
+                    sandbox_present: bool = True):
+    """A two-process placement whose sandboxed process shares the `svc` seam
+    (interface `iface`) with an unsandboxed peer. `sandboxed_consumer` toggles
+    which end is the sandbox; `sandbox_present=False` drops the sandbox entirely
+    (the additive no-op case)."""
+    ir = compile_files([_write(tmp, "app.rvl", _CROSSING_APP)])
+    norm, err = _normalize_sandbox_table({"isolation": "container", "image": "i"})
+    assert err is None, err
+    if not sandbox_present:
+        processes = {"a": {"backend": "py", "components": ["P"]},
+                     "b": {"backend": "py", "components": ["U"]}}
+        sandboxes: dict = {}
+    elif sandboxed_consumer:
+        processes = {"host": {"backend": "py", "components": ["P"]},
+                     "sandbox_U": {"backend": "py", "components": ["U"],
+                                   "sandbox": {}}}
+        sandboxes = {"sandbox_U": norm}
+    else:
+        processes = {"sandbox_P": {"backend": "py", "components": ["P"],
+                                   "sandbox": {}},
+                     "host": {"backend": "py", "components": ["U"]}}
+        sandboxes = {"sandbox_P": norm}
+    a, b = list(processes)
+    # `a` provides `svc: iface`, `b` requires it -> the seam crosses a <-> b.
+    provides = {a: {"svc": iface}, b: {}}
+    requires = {a: {}, b: {"svc": iface}}
+    owner = {"svc": a}
+    backends = {a: "py", b: "py"}
+    return ir, sandboxes, processes, requires, provides, owner, backends
+
+
+def test_crossing_resource_in_a_record_names_the_field_path(tmp_path):
+    args = _crossing_setup(tmp_path, "ResRet")
+    err = sandbox_crossing_check(*args)
+    assert err is not None
+    assert "resource handle" in err
+    assert "ResRet.dial return is 'Conn'" in err
+    # the load-bearing exit: the walk descends the record and names the leaf path
+    assert "handle type 'Sock' (at Conn.sock)" in err
+    assert "sandbox_U" in err
+
+
+def test_crossing_top_level_resource_is_refused_identically(tmp_path):
+    # "identically to the top-level resource": a bare handle return refuses with
+    # no field-path suffix, the record case's leaf spelled at depth zero.
+    args = _crossing_setup(tmp_path, "ResTop")
+    err = sandbox_crossing_check(*args)
+    assert err is not None
+    assert "ResTop.raw return is 'Sock'" in err
+    assert "embeds the handle type 'Sock'." in err  # no "(at ...)" suffix
+    assert "(at " not in err
+
+
+def test_crossing_walk_is_transitive_through_two_records(tmp_path):
+    # Deep -> Conn -> Sock: the refusal names the full nested path, proving the
+    # walk is transitive rather than one level deep.
+    args = _crossing_setup(tmp_path, "ResDeep")
+    err = sandbox_crossing_check(*args)
+    assert err is not None
+    assert "at Deep.inner.sock" in err
+
+
+def test_crossing_walk_descends_a_variant_arm(tmp_path):
+    args = _crossing_setup(tmp_path, "ResVar")
+    err = sandbox_crossing_check(*args)
+    assert err is not None
+    assert "at Env.B.sock" in err
+
+
+def test_crossing_walk_unwraps_a_builtin_carrier(tmp_path):
+    # List[Conn]: a structural carrier is unwrapped to its element, which then
+    # carries the handle.
+    args = _crossing_setup(tmp_path, "ResList")
+    err = sandbox_crossing_check(*args)
+    assert err is not None
+    assert "at Conn.sock" in err
+
+
+def test_crossing_a_value_typed_seam_is_admitted(tmp_path):
+    # CleanSvc.compute(Str) -> Str crosses cleanly by value copy.
+    args = _crossing_setup(tmp_path, "CleanSvc")
+    assert sandbox_crossing_check(*args) is None
+
+
+def test_crossing_refuses_when_the_sandbox_is_the_provider(tmp_path):
+    # the boundary is symmetric: a sandboxed PROVIDER serving a resource out is
+    # refused the same as a sandboxed consumer taking one in.
+    args = _crossing_setup(tmp_path, "ResRet", sandboxed_consumer=False)
+    err = sandbox_crossing_check(*args)
+    assert err is not None and "at Conn.sock" in err and "sandbox_P" in err
+
+
+def test_crossing_an_unresolvable_type_fails_closed(tmp_path):
+    # a nominal crossing type the plan cannot resolve to a primitive, builtin
+    # carrier, declared record/variant, or handle is refused rather than assumed
+    # copyable. Aliases are inlined before this layer, so `Ghost` is a real gap.
+    ir = {"services": {"X": {"methods": {"m": {
+              "params": [{"name": "a", "type": "Ghost"}],
+              "returns": "Str", "async": True}}}},
+          "types": {}, "externs": []}
+    norm, _ = _normalize_sandbox_table({"isolation": "container", "image": "i"})
+    sandboxes = {"sandbox_U": norm}
+    processes = {"host": {"backend": "py"}, "sandbox_U": {"sandbox": {}}}
+    provides = {"host": {"svc": "X"}, "sandbox_U": {}}
+    requires = {"host": {}, "sandbox_U": {"svc": "X"}}
+    owner = {"svc": "host"}
+    err = sandbox_crossing_check(ir, sandboxes, processes, requires, provides,
+                                 owner, {"host": "py", "sandbox_U": "py"})
+    assert err is not None
+    assert "unresolvable type" in err and "Ghost" in err
+
+
+def test_crossing_check_is_a_noop_without_a_sandbox(tmp_path):
+    # additive: with no sandboxed process the walk never runs, and the 363 check
+    # (unchanged) owns every seam. A resource seam here yields None from T4.
+    args = _crossing_setup(tmp_path, "ResRet", sandbox_present=False)
+    assert sandbox_crossing_check(*args) is None
+
+
+def test_crossing_check_leaves_a_non_sandboxed_seam_alone(tmp_path):
+    # a sandbox exists, but the resource seam is between two UNSANDBOXED peers;
+    # T4 only walks seams that touch a sandboxed process, so this one is left to
+    # the 363 verdict (T4 returns None for it).
+    ir = compile_files([_write(tmp_path, "app.rvl", _CROSSING_APP)])
+    norm, _ = _normalize_sandbox_table({"isolation": "container", "image": "i"})
+    # three processes: a sandboxed one with a clean seam, plus two unsandboxed
+    # peers sharing the resource seam `svc`.
+    processes = {
+        "sandbox_U": {"backend": "py", "components": ["U"], "sandbox": {}},
+        "host_a": {"backend": "py", "components": ["P"]},
+        "host_b": {"backend": "py", "components": []},
+    }
+    sandboxes = {"sandbox_U": norm}
+    provides = {"sandbox_U": {}, "host_a": {"svc": "ResRet"}, "host_b": {}}
+    requires = {"sandbox_U": {}, "host_a": {}, "host_b": {"svc": "ResRet"}}
+    owner = {"svc": "host_a"}
+    backends = {"sandbox_U": "py", "host_a": "py", "host_b": "py"}
+    assert sandbox_crossing_check(ir, sandboxes, processes, requires, provides,
+                                  owner, backends) is None
 
 
 # ==========================================================================
