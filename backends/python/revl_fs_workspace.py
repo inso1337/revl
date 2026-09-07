@@ -1391,6 +1391,147 @@ def expect_existing(handle: WriteHandle, expected: dict) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# issue #623: bind the original receipt + preimage facts to the witness that
+# rides the effect entry / WAL, so the witnessed teardown machinery and the
+# verdict/snapshot APIs consume the ORIGINAL held-target identity rather than a
+# fact reconstructed by reopening the name afterwards.
+#
+# The direct `revl.fs.write` shim (#606) already captures the receipt for its
+# own return value; what it does NOT do is emit those facts ONTO the witness the
+# transactional entry carries, so nothing downstream can tell which inode
+# actually participated. `witnessed_write_record` produces the WAL-serializable
+# witness that carries them, versioned so an unsupported reader refuses a record
+# it cannot interpret (issue #523 requirement 7 carried onto the receipt).
+# ---------------------------------------------------------------------------
+
+#: Version of the bound-receipt witness SHAPE, independent of the package and of
+#: `WRITE_RECEIPT_API_VERSION` (the public return shape). A consumer that reads a
+#: witness whose `version` it does not recognise must refuse it — a durable
+#: witness outlives the process that wrote it (`revl recover`), so a newer record
+#: replayed by an older install is refused rather than silently misread.
+WITNESS_RECEIPT_VERSION = 1
+
+#: The four call outcomes a witnessed-write inventory distinguishes (issue #623:
+#: "distinguish prior success, failed, unknown and unattempted calls"). A durable
+#: mutation that landed is ``success``; a call that ran and was refused/failed
+#: without mutating is ``failed``; a call whose landing could not be determined
+#: (an error after the mutation, before confirmation) is ``unknown``; a call in a
+#: batch that a prior failure prevented from ever running is ``unattempted``.
+OUTCOME_SUCCESS = "success"
+OUTCOME_FAILED = "failed"
+OUTCOME_UNKNOWN = "unknown"
+OUTCOME_UNATTEMPTED = "unattempted"
+CALL_OUTCOMES: tuple[str, ...] = (
+    OUTCOME_SUCCESS, OUTCOME_FAILED, OUTCOME_UNKNOWN, OUTCOME_UNATTEMPTED)
+
+#: Bound on how many writes one guarded witnessed batch may retain and enumerate
+#: (issue #523 requirement 6: bounded retained handles/writes/history). A batch
+#: past this cap is refused BEFORE the first mutation, so a pathological caller
+#: cannot force the host to retain an unbounded inventory of witnesses/preimages.
+MAX_WITNESS_BATCH_WRITES = 1024
+
+
+def witnessed_write_record(handle: WriteHandle, contents: str, receipt: dict,
+                           *, outcome: str = OUTCOME_SUCCESS) -> dict:
+    """The WAL-serializable witness for a GUARDED witnessed write, binding the
+    original held-target facts + preimage to the effect entry (issue #623).
+
+    A superset of the legacy `WriteWitness` (`path`/`preimage`/`created`, which
+    `restore` still reads unchanged) with the original receipt attached, so the
+    transactional entry the accumulator holds — and therefore the WAL discharge
+    descriptor, the `witness_snapshot` and the verdict review token, all of which
+    read `entry.witness` — bind the ORIGINAL inode identity captured before the
+    truncate, not a name reopened afterward. `outcome` records how the call
+    ended (`success` for a landed mutation); a non-success record carries no
+    inverse.
+
+    `receipt` MUST be the `original_receipt` captured from THIS handle BEFORE
+    `write_through` truncated it — the caller captures it in the same guarded
+    call, so a stale or reconstructed receipt cannot be substituted (issue #623:
+    "copied/stale owner-fact refusal"). Passing it in rather than re-reading the
+    fd here is deliberate: after the truncate the held fd holds the NEW bytes, so
+    re-deriving the digest here would bind the post-write content, not the
+    original preimage identity the receipt is supposed to name."""
+    if outcome not in CALL_OUTCOMES:
+        raise FsOpError(
+            "EINVAL",
+            f"outcome must be one of {', '.join(CALL_OUTCOMES)}, not "
+            f"{outcome!r}",
+            handle.real,
+        )
+    return {
+        # legacy WriteWitness fields, byte-identical so `restore` is unchanged
+        "path": handle.real,
+        "preimage": handle.preimage,
+        "created": handle.created,
+        # issue #623: the original held-target receipt, bound to the entry
+        "receipt": dict(receipt),
+        "new_digest": "sha256:" + hashlib.sha256(
+            contents.encode("utf-8")).hexdigest(),
+        "outcome": outcome,
+        "version": WITNESS_RECEIPT_VERSION,
+    }
+
+
+def refuse_unknown_receipt_version(witness) -> None:
+    """Refuse a bound-receipt witness whose `version` this install does not
+    understand (issue #623: durable version refusal).
+
+    A witness with no `version` is a LEGACY `WriteWitness` and is accepted (the
+    opt-out path): only a record that explicitly declares a receipt version is
+    version-checked, so wiring the guarded surface in does not reject the plain
+    witnessed `write` bodies. A declared version this install cannot read is
+    `EVERSION` — never silently reinterpreted."""
+    if not isinstance(witness, dict) or "version" not in witness:
+        return
+    v = witness["version"]
+    if v != WITNESS_RECEIPT_VERSION:
+        raise FsOpError(
+            "EVERSION",
+            f"witness receipt version {v!r} is not readable by this install "
+            f"(supports {WITNESS_RECEIPT_VERSION}); refusing rather than "
+            "reinterpreting a durable record written by another version",
+            (witness.get("path") if isinstance(witness, dict) else "") or "",
+        )
+
+
+def read_bound_receipt(witness):
+    """The original held-target receipt bound onto a witness by
+    `witnessed_write_record`, or `None` for a legacy witness that carries none.
+
+    This is the supported reader a verdict/inspection consumer uses to reach the
+    ORIGINAL facts, so it never rebuilds a parallel inventory from the path.
+    Version-checked first, so a record from an unreadable version is refused
+    rather than mis-parsed."""
+    refuse_unknown_receipt_version(witness)
+    if isinstance(witness, dict):
+        return witness.get("receipt")
+    return None
+
+
+def witness_outcome(witness) -> str:
+    """The recorded call outcome of a witness (issue #623). A legacy witness with
+    no outcome reads as `success` — it only ever exists on the `Ok` branch, so a
+    landed legacy mutation is a success by construction."""
+    if isinstance(witness, dict):
+        return witness.get("outcome", OUTCOME_SUCCESS)
+    return OUTCOME_SUCCESS
+
+
+def check_witness_batch_bound(count: int) -> None:
+    """Refuse a guarded witnessed batch larger than `MAX_WITNESS_BATCH_WRITES`
+    (issue #523 requirement 6), BEFORE any mutation runs, so an oversized batch
+    never retains a single preimage/handle."""
+    if count > MAX_WITNESS_BATCH_WRITES:
+        raise FsOpError(
+            "EBOUNDS",
+            f"a guarded witnessed batch is bounded to {MAX_WITNESS_BATCH_WRITES} "
+            f"writes; {count} were requested — split the batch",
+            "",
+        )
+
+
 def discard_write(handle: WriteHandle) -> None:
     """Abandon a write that failed after the open: remove the preimage sidecar
     it snapshotted, and, if the open CREATED the target and the name still
