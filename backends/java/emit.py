@@ -5364,6 +5364,15 @@ def _emit_component_modern(
     out: list[str] = []
 
     for key, service in env.provides.items():
+        # item 449 (G2): a routed provided key is realized by its router class
+        # (emitted below from `env.routes`), never a hand-written provide body —
+        # a body on the routed key is refused at compile now. The sanctioned
+        # router shape carries no `provide <key>` step, so emitting a provider
+        # class here would produce an empty `implements <Service>` with no
+        # method override that javac rejects. Skip it; the router class is the
+        # provider. Mirrors the go tier, which emits only from body provide steps.
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"public static final class {struct} implements {service} {{")
@@ -5570,6 +5579,12 @@ def _emit_component(
     out: list[str] = []
 
     for key, service in env.provides.items():
+        # item 449 (G2): a routed provided key is realized by its router class,
+        # never an empty provide body (refused at compile). Routed components
+        # always take the modern path (they carry `isolate`), so this guard is a
+        # no-op here, but it keeps the two emitters consistent.
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"public static final class {struct} implements {service} {{")
