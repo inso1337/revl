@@ -505,6 +505,7 @@ def _run_recover(args) -> int:
         sys.path.insert(0, str(backend_dir))
 
     from ..recovery import recover, render, RecoveryError  # noqa: PLC0415
+    from ..wal import WALIntegrityError  # noqa: PLC0415
 
     # item 440 §(b): the re-issue seam's operator knob rides the SAME `--policy`
     # file the roll-forward path already re-establishes, and is read whether or
@@ -551,7 +552,11 @@ def _run_recover(args) -> int:
     try:
         report = recover(args.wal, session=session, snapshot=snapshot,
                          reissue=reissue)
-    except RecoveryError as error:
+    except (RecoveryError, WALIntegrityError, OSError) as error:
+        # A corrupt or unreadable WAL is a diagnostic, not a traceback: recover
+        # is the tool an operator reaches for AFTER a crash, so a mid-file
+        # corruption (WALIntegrityError) or an unreadable log (OSError) must
+        # print `error:` and exit non-zero, never dump a stack.
         print(f"error: {error}", file=sys.stderr)
         return 1
 

@@ -986,6 +986,28 @@ def _recorded_publisher(entry_dir: Path, previous: str) -> str:
     return str((provenance or {}).get("publisher") or "")
 
 
+def _unsafe_name_reason(name: str) -> str:
+    """Why `name` cannot be a component directory, or "" when it is safe.
+
+    A component name becomes a single path segment under `components/`
+    (`_components_dir(...) / name`). A name carrying a path separator or a `..`
+    segment escapes that directory: `publish_release` would write
+    `component.rvl` OUTSIDE the registry and then traceback on the missing
+    parent. The registry is a single flat namespace (docs/registry.md §1), so a
+    name is one segment — reject anything that is not, with a diagnostic, before
+    any path is derived from it."""
+    if not name or not name.strip():
+        return ("component name is empty; a publish needs a name that is one "
+                "path segment under the registry")
+    if "/" in name or "\\" in name or "\x00" in name:
+        return (f"component name {name!r} contains a path separator; a name is "
+                "a single segment in the registry's flat namespace, never a path")
+    if name in (".", ".."):
+        return (f"component name {name!r} is a path-traversal segment; a name "
+                "must not escape the registry directory")
+    return ""
+
+
 def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
                   declared_version: str | None = None, *,
                   scheme: str = SCHEME_SEMVER,
@@ -1024,6 +1046,11 @@ def release_facts(registry_dir: str | os.PathLike, name: str, source: str,
         "changes": [],
         "refusals": refusals,
     }
+
+    unsafe = _unsafe_name_reason(name)
+    if unsafe:
+        refusals.append(unsafe)
+        return facts
 
     if scheme not in SCHEMES:
         refusals.append(
