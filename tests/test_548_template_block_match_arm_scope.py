@@ -22,14 +22,13 @@ already has.
 import sys
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "backends" / "python"))
 
 from _backend_import import backend_emitter  # noqa: E402
-from revl import RevlError, compile_source  # noqa: E402
+from revl import compile_source  # noqa: E402
 
 emit = backend_emitter("python")
 
