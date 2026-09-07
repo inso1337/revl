@@ -84,6 +84,60 @@ def test_format_is_stable_second_run():
 
 
 # --------------------------------------------------------------------------
+# Operator spacing: compound assignment, prefix-unary, and unary sign
+# (issue 545: the formatter split `x += 1` -> `x + = 1`, `!x` -> `! x`,
+#  and unary `-1` -> `- 1`).  The lexer has no compound-assign / unary token,
+# so the token stream is identical either way and the IR gate cannot see the
+# mangling -- these tests pin the SPACING directly.
+# --------------------------------------------------------------------------
+
+# (messy source, expected substring in the canonical output).
+_SPACING_CASES = [
+    # compound assignment binds the operator to its `=`
+    ("fn f() { var x = 0  x + = 1 }", "x += 1"),
+    ("fn f() { var x = 0  x -= 1 }", "x -= 1"),
+    ("fn f() { var x = 2  x * = 2 }", "x *= 2"),
+    ("fn f() { var x = 2  x / = 2 }", "x /= 2"),
+    ("fn f() { var x = 2  x % = 2 }", "x %= 2"),
+    # prefix-only operators bind tight to their operand
+    ("fn f(a) = ! a", "= !a"),
+    ("fn f() = ~ 1", "= ~1"),
+    # unary sign binds tight to the value it signs, in every position
+    ("fn f() = - 1", "= -1"),
+    ("fn f(b) = - b", "= -b"),
+    ("fn f(a) = f(- 1)", "f(-1)"),
+    ("fn f() = [- 1]", "[-1]"),
+    ("fn f(a) = a + - 1", "a + -1"),
+    # ...but the BINARY operator keeps its spaces
+    ("fn f(a) = a - 1", "a - 1"),
+    ("fn f(a) = a + 1", "a + 1"),
+    ("fn g(xs, i) = xs[i - 1]", "xs[i - 1]"),
+    ("fn h() = g() - 1", "g() - 1"),
+]
+
+
+def test_operator_spacing_is_canonical():
+    for messy, want in _SPACING_CASES:
+        out = format_source(messy, "spacing.rvl")
+        assert want in out, f"{want!r} not in {out!r} (from {messy!r})"
+
+
+def test_operator_spacing_is_idempotent():
+    for messy, _want in _SPACING_CASES:
+        once = format_source(messy, "spacing.rvl")
+        assert format_source(once, "spacing.rvl") == once, f"not idempotent: {messy!r}"
+
+
+def test_operator_spacing_preserves_ir():
+    # Each rewrite must also clear the self-proving gate: the token stream is
+    # identical, so the IR must be byte-identical (never REFUSED).
+    for messy, _want in _SPACING_CASES:
+        out = format_source(messy, "spacing.rvl")
+        result = ir_equivalent(messy, out, "spacing.rvl")
+        assert result.admitted, f"gate refused {messy!r}: {result.reason}"
+
+
+# --------------------------------------------------------------------------
 # The self-proving gate refuses a meaning-changing rewrite
 # --------------------------------------------------------------------------
 
