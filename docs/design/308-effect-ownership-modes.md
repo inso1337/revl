@@ -6,8 +6,14 @@ witnessed returns are nominal opaque handles), O1 (no hand-call of a declared
 inverse), B1 (the seven-clause borrow-does-not-escape). F10 retention audit
 SHIPPED and F9 method-scope early-release DECIDED/closed (the early-release form
 is already refused, count zero); the inline § markers below are authoritative
-per decision. SHARED + TRANSFER stay reserved contextual keywords, deferred to
-item 294 leases. PRODUCT-VISION, 243-261 arc.
+per decision. SHARED + TRANSFER stay reserved contextual keywords (markers
+landed, slice 3a / PR #503); the SHARED SLICE 3b SPEC IS NOW COMPLETE (S1
+below, "S1 completed": the crash-path debt is paid by retiring the owned
+out-of-frame ttl executor once cross-process shared is a premise, binding
+teardown to the 294 counted-grant ledger, and re-using `revl recover` for the
+whole-process crash with a new `reclaim` residue record). Implementation of
+3b is the next slice and stays deferred, sequenced with item 294. TRANSFER
+remains reserved and unspecced. PRODUCT-VISION, 243-261 arc.
 Companion docs: [243-witnessed-externs.md](243-witnessed-externs.md),
 [teardown-contract.md](teardown-contract.md),
 [247-compensate.md](247-compensate.md),
@@ -660,6 +666,103 @@ The earlier draft's blanket "no new teardown phase" claim held only for
 the orderly path; the shared slice's spec owes the crash path this
 executor, its residue kind, and its WAL entry.
 
+### S1 completed (shared slice 3b): the debt paid, the executor retired
+
+The three paragraphs above fix the DIRECTION. This subsection is the spec the
+shared slice was told it owed, and it pays that debt by RESOLVING a tension the
+earlier draft left implicit rather than by fleshing out the out-of-frame ttl
+executor it named. The resolution follows from a fact stated two sections down
+but not yet folded back into S1: **`shared` across a process seam is refused**
+(see "Reconciling with the seam", `shared` row). Once that refusal is a
+premise, every holder of a shared handle is co-located in ONE process with the
+handle, and the crash shapes collapse to two, both already-shipped surfaces.
+
+**Teardown vocabulary (the 294-lease binding, orderly path).** A `shared`
+acquire mints a COUNTED grant in the 294 grant ledger, keyed off the acquiring
+binding exactly as a task lease is (`{capability, component, session,
+grantedAt, expiresAt, ...}` plus a `holders` count seeded at 1 for the
+acquiring frame). The declared inverse is NOT a per-frame bracket; it is bound
+to the count's zero crossing. Holders are counted at B1's crossing enumeration,
+the same module and the same closed-world list: every position B1 clauses 1-7
+name as a crossing into another activation's scope is a lease CONSUME
+(count += 1, a durable ledger write); the receiving scope's teardown is a
+RELEASE (count -= 1, a durable ledger write). This is the construction S1's
+first paragraph named ("each crossing is a lease consume in 294 vocabulary");
+the spec fix is only that the count is a ledger field, written
+consume-before-fire (243 rule 4, the same fsync'd-append discipline
+`replay-fence` uses), so it is reconstructible on recovery and never a bare
+in-memory refcount. On the orderly path the frame that drives the count to zero
+registers the declared inverse on its OWN LIFO stack as an ordinary `bracket`
+entry, at release time, so G5/G7 are unchanged and a failed shared inverse is a
+`bracket-fault` like any other. No new teardown phase, no new residue kind on
+the orderly path. That half was already true in the draft; it is restated here
+only so the crash half can say precisely what it does NOT reuse.
+
+**Why the out-of-frame ttl executor is RETIRED, not specified.** The draft
+owed "the executor, its residue kind, its WAL entry" for a liveness-gated
+wall-clock reclaim. That executor existed to answer one danger: a ttl lapse
+firing the inverse while a slow-but-alive holder still holds (the
+manufactured-use-after-close S1 warns of). That danger requires a holder in a
+DIFFERENT process from the reclaimer, so that the reclaimer can be alive to fire
+while the holder is alive to be harmed. Cross-process `shared` is refused, so
+that configuration is unreachable: a reclaimer and every holder share one
+process's fate. Firing an inverse on wall-clock while that process is alive
+would therefore always be firing on a live in-process holder (a hang, not a
+crash), which is exactly the fail-dangerous close, so the shared slice fires NO
+inverse on wall-clock at all. The 294 grant's ttl keeps only its shipped,
+fail-safe role: lapsing the GRANT (an authority drop, the holder re-requests),
+never firing the handle's inverse. A hung in-process holder pins the handle
+until it releases or the process dies; that is S1's own "correct bias for
+teardown", now with no wall-clock exception to it.
+
+**Crash reclaim (the two shapes that remain).**
+
+1. **Whole-process crash (SIGKILL / panic).** The handle, every holder, and the
+   reclaimer die together; the OS reclaims a raw fd, and an external resource
+   (a remote session, a lock) is left to `revl recover`. Recovery reads the
+   durable ledger: a shared grant with `holders > 0` and an unrun zero-crossing
+   inverse is RESIDUE whose forward referent still persists, so recover re-fires
+   the declared inverse EXACTLY ONCE, gated by a new `shared-reclaim-fence` WAL
+   record appended and fsync'd BEFORE the single attempt (the identical
+   consume-before-fire discipline as `replay-fence`/`reissue-fence`: the fence
+   proves an attempt was about to start, never that it ran, so a crash between
+   the fence and the fire leaves "fenced-before-attempt, outcome unknown" and no
+   double-close). The executor is thus `revl recover`, a SHIPPED out-of-frame
+   surface, not a new expiry-sweep step in the ledger. This is the same shape
+   the 294 task lease already has for crash ("ttl-backstopped on crash: a
+   SIGKILL that skips teardown leaves the grant to lapse", 294 §"grant ledger");
+   the only addition is that a shared grant's recovery re-FIRES an inverse where
+   a task grant merely lets the authority lapse.
+2. **E-Stop mid-count (item 443 `halted`).** Every registered release entry and
+   the zero-crossing bracket are STRANDED, not run and not dropped, kept for
+   `revl recover`, exactly as F9's spawn entry is. A holder halted before its
+   release leaves the count OVER-reported (the handle stays pinned), which is
+   the R4-safe direction (residue is never under-reported) and the same bias F9
+   relies on. Nothing fires early.
+
+**The residue kind (owed, and here it is).** When `revl recover` fires a shared
+inverse from the ledger rather than a live frame, the outcome is reported as a
+NEW residue record `reclaim` (fields: the capability/handle identity, the
+`holders` count observed at reclaim, the reclaim basis `whole-process` or
+`estop-stranded`, and `ok`/`err`). It is deliberately DISTINCT from
+`bracket-fault`: a `bracket-fault` is an in-frame inverse that FAILED, whereas a
+`reclaim` is an inverse that ran (or failed) OUTSIDE any activation during
+recovery. A failed `reclaim` inverse carries its error in the same record
+(there is no separate `reclaim-fault`; `ok: false` on the `reclaim` record is
+the contract-grade fault, the merged-schema economy the teardown contract keeps
+for `restore-residue`). `revl audit` surfaces `reclaim` rows so a lease-lapse
+close is legible as a reclaim, which is the honesty the draft asked for.
+
+**What this leaves genuinely open (named, not waved).** The count is exact only
+to B1's crossing enumeration: a crossing B1 cannot see is a holder S1 never
+counts, so the S1 count and the B1 refusal share one frontier and one honest
+limitation (the retaining-extern surface F10 audits). Borrow-across-await (open
+question 2) is the one in-process shape where a holder is alive but quiescent
+for an unbounded window; because the slice fires no wall-clock inverse, an
+awaiting holder simply pins the handle, which is correct, at the cost that a
+truly-wedged holder pins it forever (the same liveness limit the whole language
+accepts for a hung activation, not a new one shared introduces).
+
 ## Reconciling with the seam (and the realm boundary)
 
 The seam rule today (`resource_crossing_refusal`, tier-agnostic, every
@@ -712,7 +815,7 @@ from its undo contract. Per mode:
 | borrow cannot outlive owner | by construction for static topology (R3/G7); broken by stored copies under swap; closures can smuggle | refused (B1), including the swap shape |
 | no resource in teardown-phase positions | writable; compensations are use-after-close by phase order | refused (B1 clause 5) |
 | no borrow seated in another activation | writable via spawn config and handoff | refused (B1 clauses 6, 7) |
-| shared teardown exactly once | no shared notion at all | direction fixed (S1, liveness-gated backstop, crash executor owed), deferred to the 294 lease |
+| shared teardown exactly once | no shared notion at all | spec COMPLETE (S1 completed): 294 counted-grant ledger, orderly last-release as an ordinary bracket, whole-process crash via `revl recover` + `reclaim` residue, no wall-clock inverse; impl deferred, sequenced with 294 |
 | owned cannot cross a seam | refused (363/F1) | unchanged, mode-named diagnostic |
 
 Relation to the arc: G5 is untouched in v1 (checker-only, no new
@@ -762,7 +865,9 @@ The minimal cut that pays for itself immediately:
    surface, no new grammar, no discharge.
 
 Deferred, each with its landing place named: `shared` (a 294 lease
-binding; spec S1 above, crash-path executor owed), explicit `transfer`
+binding; spec S1 above is now COMPLETE per "S1 completed", crash path resolved
+by `revl recover` + the `reclaim` residue record, implementation the next
+slice), explicit `transfer`
 and realm-crossing moves (new source marker, WAL migration; also the only
 honest future for handoff of resource-carrying state, per clause 7), an
 explicit-release surface for an ACTIVATION-scope handle (F9 resolved the
@@ -870,13 +975,42 @@ per-backend goldens byte-identical (checker-only until the shared slice).
   - swap shape covered: the consumer-stores-provider-handle program that
     motivated the rule is refused at check time (no runtime swap test
     needed; the point is it never compiles).
-- **Slice 3 (deferred, sequenced with 294): shared.** Exit tests:
+- **Slice 3b: shared (spec completed above at "S1 completed"; sequenced
+  with 294).** Exit tests, each grounded in the completed spec:
+  - `shared` admitted only at an acquire binding: the reserved-refusal from
+    slice 3a flips to admission for `let p = effect shared Pool.open(url)
+    undo p.close()`; a `shared` marker anywhere but the acquire-binding
+    position stays refused (positive + guard);
   - last release runs the inverse exactly once: N holders, release order
     permuted (including the acquiring frame releasing first), trace shows
-    one close, in the last releaser's frame, LIFO-positioned;
-  - a holder crashing without release: the ttl backstop fires the inverse
-    once, and the residue/audit surface reports the lease lapse honestly;
-  - shared across a process seam refused.
+    one close, in the last-releaser's frame, LIFO-positioned as an ordinary
+    `bracket` entry (the orderly path; runs on py). The 295 schedule-testing
+    interleavings are the permutation source;
+  - the holder count is a durable ledger field, not an in-memory refcount:
+    a consume and a release each appear as a fsync'd ledger write, and a
+    count reconstructed from the ledger after a simulated mid-count restart
+    equals the live holder set (pins the consume-before-fire discipline);
+  - whole-process crash: `revl recover` re-fires the declared inverse
+    EXACTLY ONCE from a shared grant with `holders > 0`, gated by the
+    `shared-reclaim-fence` (a re-run of recover after the fence but before
+    the fire does NOT double-close), and the outcome is a `reclaim` residue
+    record (basis `whole-process`), surfaced by `revl audit` as a reclaim
+    and NOT as a `bracket-fault`;
+  - E-Stop mid-count: the release entries and the zero-crossing bracket are
+    STRANDED (kept, not run), the count is over-reported not under-reported
+    (R4-safe), and the stranded set is what `revl recover` reads back;
+  - NO wall-clock inverse: a shared grant whose ttl lapses while its process
+    is alive does NOT fire the handle's inverse (only the 294 GRANT lapses,
+    fail-safe); a test asserts the handle stays open while a holder is still
+    counted, so a future change that wired ttl to the inverse reds here;
+  - shared across a process seam refused: `resource_crossing_refusal`
+    already refuses a shared (resource-typed) handle crossing; re-pin with
+    the mode-named message ("shared resource ... refused across the process
+    seam; cross-process shared is a distributed count, not a refcount").
+  - self-host: no O1/B1/S1 rejection fixture enters the self-host corpus
+    until the ownership-dialect slice ports the flow walk (the slice-2
+    deferral in "Self-host note" extends to S1 unchanged; S1 is checker/
+    recover surface, no new grammar).
 - **Seam re-pin (any slice): owned crosses seam refused.** Already green
   today via `resource_crossing_refusal`; re-pin with the mode-named
   diagnostic text so the message upgrade cannot regress silently.
