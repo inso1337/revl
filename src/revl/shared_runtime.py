@@ -68,6 +68,12 @@ class JournaledSharedGrantBook:
         #: orderly path) already settled, so a faulted close is never later
         #: overwritten with a false completion (issues #709/#710).
         self._settled: set[str] = set()
+        #: handles whose ``shared-reclaim-fence`` is already durable. One fence
+        #: per handle is all recovery needs (it keys on presence, not count), so
+        #: this keeps `_journal_fence` idempotent: the orderly path fences
+        #: explicitly before it fires and the bound inverse also fences on the
+        #: way to the effect, and the two must not stack a second fence record.
+        self._fenced: set[str] = set()
 
     # -- durable ledger ----------------------------------------------------
 
@@ -100,12 +106,34 @@ class JournaledSharedGrantBook:
         later recover over the same durable ledger re-fires NOTHING and the
         failed/unknown evidence survives the restart (consume-before-fire, the
         discipline the WAL seal in #642/#695 and `recover`'s own reclaim fence
-        use)."""
+        use).
+
+        Idempotent per handle: a handle's fence is written at most once for the
+        life of this book, so the orderly path's explicit pre-fire fence and the
+        bound inverse's own on-the-way-to-the-effect fence collapse to one
+        record rather than stacking a redundant second one."""
+        if handle in self._fenced:
+            return
         self._append({"record": "shared-reclaim-fence", "handle": handle})
+        self._fenced.add(handle)
 
     def _inverse_callable(self, handle: str) -> Callable[[], None]:
         op = self._inverse_op[handle]
-        return lambda: self._world.apply_inverse(op)
+
+        def _fire() -> None:
+            # Write-ahead the reclaim intent at the NARROWEST point: a durable
+            # ``shared-reclaim-fence`` (an inverse is owed / about to run) is
+            # forced to disk BEFORE the external effect, for whoever fires — the
+            # orderly last releaser, or the primitive's out-of-frame crash
+            # reclaim. So a crash between the effect and any completion write
+            # always leaves a fence a later recover reads as outcome-unknown
+            # residue: it never re-fires the inverse a second time (#709) and
+            # never misreads the crossing as a clean balance (#710). Idempotent,
+            # so an explicit pre-fire fence upstream makes this a no-op.
+            self._journal_fence(handle)
+            self._world.apply_inverse(op)
+
+        return _fire
 
     # -- the counted grant lifecycle --------------------------------------
 
@@ -152,20 +180,24 @@ class JournaledSharedGrantBook:
             # the reclaim re-fires once, or shows the count the survivors hold.
             self._journal_grant(handle)
             return False
-        # the zero crossing, orderly path. Consume-before-fire (the discipline
-        # the WAL seal in #642/#695 and `recover`'s own reclaim fence use): the
-        # count-zero ledger write and a fence recording the ATTEMPT are durable
-        # BEFORE the inverse fires; the ``shared-complete`` marker is written
-        # ONLY after the inverse returns. So a crash — or a raising inverse —
-        # between the fence and completion leaves a durable 'fenced-before-
-        # attempt' that recover reads as outcome-unknown residue, never a false
-        # 'done' concealing an inverse that did not confirm (issue #710). The
-        # orderly inverse's exactly-once stays the bracket channel's: the fence
-        # only fails a later recover CLOSED, it never re-fires.
-        self._journal_grant(handle)  # holders == [] now
-        self._journal_fence(handle)  # intent: the attempt is about to start
+        # the zero crossing, orderly path. Write-ahead the intent FIRST: the
+        # durable ``shared-reclaim-fence`` (an inverse is owed) precedes BOTH the
+        # count-zero ledger write AND the fire, so no durable state ever shows a
+        # zeroed count — or an attempted inverse — without a fence proving one
+        # was owed. Ordering the fence before the count-zero write is what closes
+        # #710: a crash between the two used to leave a durable holders == []
+        # with no fence, which recover misread as a balanced accumulator and
+        # dropped the owed inverse; now that gap is fence-then-zero, so recover
+        # always finds the fence and reports the crossing (never a false clean).
+        # The ``shared-complete`` marker still lands ONLY after the inverse
+        # returns, so a raising/crashing inverse between fence and completion
+        # stays 'fenced-before-attempt, outcome unknown' — never a concealed
+        # 'done', never a blind re-fire. The orderly inverse's exactly-once stays
+        # the bracket channel's; the fence only fails a later recover CLOSED.
+        self._journal_fence(handle)  # intent, BEFORE the destructive count-zero write
         self._settled.add(handle)    # terminal durable state is owned here now
-        inverse()                    # only past the durable fence
+        self._journal_grant(handle)  # holders == [] now, but the fence already stands
+        inverse()                    # only past the durable fence (self-fence is a no-op)
         self._append({"record": "shared-complete", "handle": handle})
         return True
 
