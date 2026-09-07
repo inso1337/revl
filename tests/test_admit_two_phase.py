@@ -313,3 +313,279 @@ def test_undo_refuses_a_generation_loaded_without_recorded_sources(tmp_path):
     with pytest.raises(SessionError) as caught:
         session.undo()
     assert "without recorded sources" in str(caught.value)
+
+
+# --------------------------------------------------------------------------- #
+# Slice 1: the durable stage records (design 460 §2). Written through the WAL's
+# single seq space, so they order against the crossings the activation body
+# journals. These exercise the record methods directly — no live runtime.
+# --------------------------------------------------------------------------- #
+
+_TURN_BUNDLE = {"sources": {"<turn>.rvl": _TURN_FORWARD},
+                "granted": ["Ops"], "modules": {}}
+
+
+def _wal(tmp_path):
+    import sys as _sys
+    _sys.path.insert(0, str(_BACKEND))
+    from replay import WriteAheadLog
+    return WriteAheadLog(str(tmp_path / "s.wal")).open()
+
+
+def test_stage_records_share_the_seq_space_and_order_decided_then_finalized(tmp_path):
+    """§2: the three stages are ordered events on the session's single seq
+    space, so `decided < every crossing the body journals < applied <
+    finalized`. Here decided, one effect, applied, finalized are written in that
+    order and the seqs come out strictly increasing."""
+    wal = _wal(tmp_path)
+    d = wal.record_admit_decided(
+        decision_id="D1", turn=_TURN_BUNDLE,
+        expected={"generation": 1, "surfaceEpoch": 2,
+                  "baseManifestHash": "sha256:aa", "classMapDigest": "sha256:bb"},
+        spends=["r1"], components=["TurnComp"], keys=["turn"])
+    # a crossing the activation body journals, between decided and applied.
+    mid = wal.record_boundary(
+        "TurnComp", "shout", resource="file:/tmp/x",
+        inverse_op={"receiver": "fs", "method": "rm", "args": ["/tmp/x"]})
+    a = wal.record_admit_applied(decision_id="D1", generation=1, surface_epoch=2)
+    f = wal.record_admit_finalized(decision_id="D1", generation=1, surface_epoch=2)
+    wal.close()
+    assert d["seq"] < mid["seq"] < a["seq"] < f["seq"]
+    assert d["record"] == "admit-decided" and d["spends"] == ["r1"]
+    assert d["turn"] == _TURN_BUNDLE
+    assert a["observed"] == {"generation": 1, "surfaceEpoch": 2}
+
+
+def test_abandoned_is_a_terminal_record_with_a_reason(tmp_path):
+    wal = _wal(tmp_path)
+    wal.record_admit_decided(
+        decision_id="D2", turn=_TURN_BUNDLE, expected={}, spends=[],
+        components=["TurnComp"], keys=["turn"])
+    ab = wal.record_admit_abandoned(decision_id="D2", reason="plug-failed")
+    wal.close()
+    assert ab["record"] == "admit-abandoned"
+    assert ab["decisionId"] == "D2" and ab["reason"] == "plug-failed"
+
+
+def test_a_session_that_never_admits_writes_no_admit_records(tmp_path):
+    """§7 non-vacuity: the record methods are the ONLY source of `admit-*`
+    records, so a WAL that never calls them carries none — the byte-identical
+    guarantee for a composition that never admits."""
+    from revl.wal import read_wal
+    wal = _wal(tmp_path)
+    wal.record_boundary("C", "x", resource="file:/tmp/y",
+                        inverse_op={"receiver": "fs", "method": "rm",
+                                    "args": ["/tmp/y"]})
+    wal.commit_activation(components=["C"])
+    wal.close()
+    got = read_wal(str(tmp_path / "s.wal"))
+    assert not [r for r in got["records"]
+                if str(r.get("record", "")).startswith("admit-")]
+
+
+# --------------------------------------------------------------------------- #
+# decisionId (design 460 §2.1): bound to source + granted + base + seq.
+# --------------------------------------------------------------------------- #
+
+def test_decision_id_is_stable_and_moves_with_each_input():
+    from revl.mcp.session import _decision_id_of
+    base = _decision_id_of({"t.rvl": _TURN_FORWARD}, ["Ops"], "sha256:aa", 5)
+    assert base == _decision_id_of({"t.rvl": _TURN_FORWARD}, ["Ops"],
+                                   "sha256:aa", 5), "not stable over two derivations"
+    # each input moves it.
+    assert base != _decision_id_of({"t.rvl": _TURN_FORWARD + "\n"}, ["Ops"],
+                                   "sha256:aa", 5)
+    assert base != _decision_id_of({"t.rvl": _TURN_FORWARD}, ["Ops", "Other"],
+                                   "sha256:aa", 5)
+    assert base != _decision_id_of({"t.rvl": _TURN_FORWARD}, ["Ops"],
+                                   "sha256:cc", 5)
+    assert base != _decision_id_of({"t.rvl": _TURN_FORWARD}, ["Ops"],
+                                   "sha256:aa", 6)
+
+
+# --------------------------------------------------------------------------- #
+# Slice 3: recover_forward_admissions classification (design 460 §5). Pure over
+# the WAL records + the content CAS, so it runs without a live runtime.
+# --------------------------------------------------------------------------- #
+
+def _forward_session(src=_SRC_C):
+    """A restored-base session with the surface set by hand (no runtime), so the
+    content CAS `_forward_surface_for_turn` performs is exercised without cordis:
+    it recompiles the recorded turn against this base and digests the merged map,
+    which is pure over the compiler."""
+    from revl.mcp.session import Session
+    from revl.mcp.approval import ClassMap
+    s = Session()
+    s.approval_policy = "auto"
+    s.ir = _compile(src)
+    s._class_map = ClassMap(s.ir)
+    s._generation = 1
+    s._surface_epoch = 1
+    return s
+
+
+def _decided_record(session, decision_id="D1", seq=5):
+    """An `admit-decided` record whose `expected` surface is exactly what
+    `_forward_surface_for_turn` recomputes for `session` — so the content CAS
+    MATCHES when recovery runs against this same base."""
+    live = session._forward_surface_for_turn(_TURN_BUNDLE)
+    return {"record": "admit-decided", "seq": seq, "decisionId": decision_id,
+            "turn": _TURN_BUNDLE,
+            "expected": {"generation": 1, "surfaceEpoch": 2, **live},
+            "spends": ["r1"], "components": ["TurnComp"], "keys": ["turn"]}
+
+
+def test_owed_when_the_runtime_did_not_advance_past_the_decision():
+    from revl.recovery import recover_forward_admissions
+    s = _forward_session()
+    wal = {"records": [_decided_record(s)]}
+    reports = recover_forward_admissions(wal, session=s)
+    assert len(reports) == 1
+    assert reports[0]["classification"] == "owed"
+    # the report names the re-admittable turn and the spends — never a silent re-run.
+    assert reports[0]["turn"] == _TURN_BUNDLE
+    assert reports[0]["spends"] == ["r1"]
+    assert reports[0]["finalized"] is False
+
+
+def test_advanced_and_surface_matches_finalizes_forward(tmp_path):
+    from revl.recovery import recover_forward_admissions
+    from revl.wal import read_wal
+    s = _forward_session()
+    decided = _decided_record(s)
+    wal = {"records": [decided,
+                       {"record": "admit-applied", "seq": 7, "decisionId": "D1",
+                        "observed": {"generation": 1, "surfaceEpoch": 2}}]}
+    # forward=False: classify only, change nothing.
+    dry = recover_forward_admissions(wal, session=s)
+    assert dry[0]["classification"] == "advanced" and dry[0]["finalized"] is False
+
+    # forward=True with a WAL path: append `admit-finalized`.
+    path = str(tmp_path / "fwd.wal")
+    # a minimal valid WAL so a later read parses (header + the same records).
+    import json as _json
+    with open(path, "w", encoding="utf-8") as h:
+        h.write(_json.dumps({"record": "header", "walVersion": 1}) + "\n")
+        for r in wal["records"]:
+            h.write(_json.dumps(r, sort_keys=True) + "\n")
+    reports = recover_forward_admissions(wal, session=s, forward=True,
+                                         wal_path=path)
+    assert reports[0]["classification"] == "advanced"
+    assert reports[0]["finalized"] is True
+    got = read_wal(path)["records"]
+    fin = [r for r in got if r.get("record") == "admit-finalized"]
+    assert len(fin) == 1 and fin[0]["decisionId"] == "D1"
+
+
+def test_advanced_but_surface_drifted_is_stale_and_abandons(tmp_path):
+    """§5: the runtime advanced, but the content CAS fails — the class-map digest
+    the decision was checked against moved. The decision is abandoned, finalizes
+    nothing, and the report names the drift."""
+    from revl.recovery import recover_forward_admissions
+    from revl.wal import read_wal
+    s = _forward_session()
+    decided = _decided_record(s)
+    # a decision whose recorded digest does not match the restored surface.
+    decided["expected"]["classMapDigest"] = "sha256:staleaaaa"
+    wal = {"records": [decided,
+                       {"record": "admit-applied", "seq": 7, "decisionId": "D1",
+                        "observed": {}}]}
+    path = str(tmp_path / "stale.wal")
+    import json as _json
+    with open(path, "w", encoding="utf-8") as h:
+        h.write(_json.dumps({"record": "header", "walVersion": 1}) + "\n")
+    reports = recover_forward_admissions(wal, session=s, forward=True,
+                                         wal_path=path)
+    assert reports[0]["classification"] == "stale"
+    assert reports[0]["finalized"] is False and reports[0]["abandoned"] is True
+    assert "classMapDigest" in (reports[0]["drift"] or "")
+    got = read_wal(path)["records"]
+    assert [r for r in got if r.get("record") == "admit-abandoned"
+            and r.get("reason") == "stale"]
+
+
+def test_advanced_but_turn_no_longer_compiles_is_stale():
+    """§2.1: forward recovery re-runs the checker over the recorded turn. A turn
+    the current checker now refuses (here: granted an empty set, so the forward
+    to `Ops` is out of the allowlist) is classified stale, never resumed on stale
+    authority."""
+    from revl.recovery import recover_forward_admissions
+    s = _forward_session()
+    decided = _decided_record(s)
+    # rewrite the bundle to one that will not compile against the base: no grant.
+    decided["turn"] = {"sources": {"<turn>.rvl": _TURN_FORWARD},
+                       "granted": [], "modules": {}}
+    wal = {"records": [decided,
+                       {"record": "admit-applied", "seq": 7, "decisionId": "D1",
+                        "observed": {}}]}
+    reports = recover_forward_admissions(wal, session=s)
+    assert reports[0]["classification"] == "stale"
+
+
+def test_finalized_decision_is_a_no_op_for_the_scan():
+    from revl.recovery import recover_forward_admissions
+    s = _forward_session()
+    decided = _decided_record(s)
+    wal = {"records": [decided,
+                       {"record": "admit-applied", "seq": 7, "decisionId": "D1"},
+                       {"record": "admit-finalized", "seq": 9, "decisionId": "D1"}]}
+    assert recover_forward_admissions(wal, session=s) == []
+
+
+def test_abandoned_decision_is_settled_and_skipped():
+    from revl.recovery import recover_forward_admissions
+    s = _forward_session()
+    decided = _decided_record(s)
+    wal = {"records": [decided,
+                       {"record": "admit-abandoned", "seq": 7, "decisionId": "D1",
+                        "reason": "plug-failed"}]}
+    assert recover_forward_admissions(wal, session=s) == []
+
+
+def test_estop_ambiguous_after_decided_refuses_to_finalize():
+    """§4/§6: an in-flight fenced crossing at the cut leaves the E-Stop's
+    `estop-ambiguous` record; forward recovery reads it as the in-flight row,
+    reports `ambiguous` and finalizes nothing — one ambiguity vocabulary with the
+    E-Stop."""
+    from revl.recovery import recover_forward_admissions
+    s = _forward_session()
+    decided = _decided_record(s)
+    wal = {"records": [decided,
+                       {"record": "admit-applied", "seq": 7, "decisionId": "D1"},
+                       {"record": "estop-ambiguous", "seq": 8}]}
+    reports = recover_forward_admissions(wal, session=s, forward=True)
+    assert reports[0]["classification"] == "ambiguous"
+    assert reports[0]["finalized"] is False
+
+
+def test_recover_reports_admissions_and_scan_is_noop_without_admits(tmp_path):
+    """End to end through `recover()`: an activation-complete WAL rolls forward,
+    and the forward-admission scan rides both branches. A WAL with no
+    `admit-decided` gets no `admissions` key (byte-identical to today)."""
+    import sys as _sys
+    _sys.path.insert(0, str(_BACKEND))
+    from replay import WriteAheadLog
+    from revl.recovery import recover
+    # no admits: report carries no `admissions` key.
+    plain = str(tmp_path / "plain.wal")
+    w = WriteAheadLog(plain).open()
+    w.record_boundary("C", "x", resource="file:/tmp/z",
+                      inverse_op={"receiver": "fs", "method": "rm",
+                                  "args": ["/tmp/z"]})
+    w.commit_activation(components=["C"])
+    w.close()
+    report = recover(plain)
+    assert "admissions" not in report
+
+    # with an un-finalized decision: recover surfaces the classification.
+    s = _forward_session()
+    withadmit = str(tmp_path / "admit.wal")
+    w = WriteAheadLog(withadmit).open()
+    w.record_admit_decided(
+        decision_id="D1", turn=_TURN_BUNDLE,
+        expected=_decided_record(s)["expected"], spends=["r1"],
+        components=["TurnComp"], keys=["turn"])
+    w.commit_activation(components=["Agent"])
+    w.close()
+    report = recover(withadmit, session=s, forward_admissions=False)
+    assert report["admissions"][0]["classification"] == "owed"
