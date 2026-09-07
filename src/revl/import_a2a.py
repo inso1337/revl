@@ -793,7 +793,7 @@ def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
             'inline bytes - this binding does not fetch it")\n'
             '    _value = _b64.b64decode(_inline[0]["bytes"]) if _inline'
             ' else b""\n'
-            '    if not _value and _parts:\n'
+            '    if not _inline and _parts:\n'
             '        raise RuntimeError("a2a: reply carried no inline-bytes file '
             'part")\n'
             '    return _value\n')

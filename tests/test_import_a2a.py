@@ -656,6 +656,36 @@ def test_a_file_modality_round_trips_base64_bytes_on_py():
     assert part["file"]["mimeType"] == "application/pdf"
 
 
+def test_a_file_modality_accepts_an_empty_filewithbytes_reply():
+    """A2A 1.0.0 `FileWithBytes` with `bytes: ""` is a valid zero-byte file:
+    empty base64 is a legitimate encoding of `b""`. The importer must return
+    that zero-byte payload, not reject it as an absent part — presence of a
+    valid inline file part is tracked independently of the decoded bytes'
+    length. Regression guard for the truthiness conflation in #708."""
+    doc = _card()
+    doc["skills"][0]["inputModes"] = ["application/pdf"]
+    doc["skills"][0]["outputModes"] = ["application/pdf"]
+    source = import_a2a(doc, filename="card.json", backend="py")
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "message", "parts": [{"kind": "file", "file": {"bytes": ""}}]}}
+    out, _ = _run_py_body(reply, backend_source=source, arg=b"\x00PDF\xff")
+    assert out == b""
+
+
+def test_a_file_reply_of_only_uri_parts_is_still_a_fault():
+    """The empty-bytes acceptance must not weaken the uri refusal: a file part
+    that carries a `uri` and no inline `bytes` is still not fetched."""
+    doc = _card()
+    doc["skills"][0]["inputModes"] = ["application/pdf"]
+    doc["skills"][0]["outputModes"] = ["application/pdf"]
+    source = import_a2a(doc, filename="card.json", backend="py")
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "message", "parts": [{"kind": "file", "file": {"uri": "x"}}]}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_py_body(reply, backend_source=source, arg=b"\x00PDF\xff")
+    assert "uri" in str(excinfo.value)
+
+
 def test_a_file_send_carries_the_declared_input_media_type():
     """The mimeType comes from the INPUT side's declared media type, is derived
     from the card (not the output side), and rides the REST wire the same way as
