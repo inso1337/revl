@@ -57,6 +57,38 @@ meeting the ideal fails the kit** — so a report can only change when someone
 re-baselines a pin deliberately. A runtime *not* pinned for a case that behaves
 like some other runtime's known bug fails too — that is a finding, not a pass.
 
+## Hostile-wire seam-envelope section (issue #475)
+
+The cases above score a runtime's *semantics*. A second conformance section
+scores the runtime's *wire*: how the sealed seam envelope
+(`revl.deploy.Correlation` + `CorrelationGuard`) behaves when the transport
+underneath it is adversarial. The shapes are protocol-agnostic on purpose, so
+each is a property of the envelope rather than of a transport:
+
+- **truncated** sealed envelope, refuses and leaves no ledger residue;
+- **reordered** pair of correlated calls, correlates off the envelope not
+  arrival order, with no order-accept path that admits a replay;
+- **duplicated** frame, never silently deduped by the frame layer, a keyed
+  replay is an explicit `duplicate-envelope` verdict;
+- **partition** mid-envelope, the partial is a non-crossing, never dispatched,
+  no residue;
+- **reconnect-storm** soak, a consumer that bounces the connection over and
+  over, the seam stays intact and dispatches exactly the whole crossings.
+
+These live at two altitudes in `tests/test_hostile_wire_tck.py`: a
+protocol-agnostic property suite over `CorrelationGuard.admit`, and a
+system-level suite driving a real `bridge.serve` UDS provider byte by byte with
+a raw socket. They run pure-python (no runtime adapter, no toolchain) and are
+gated in the `conformance` CI job. One capability the sealed envelope does not
+have — a per-crossing sequence number for in-order-delivery *enforcement* — is
+called out as a `strict` `xfail` rather than faked; it flips to a real ordering
+test if a `sequence` field ever lands on `Correlation` (rides with the F8
+network seam, #421 / #107 T3).
+
+```sh
+pytest tests/test_hostile_wire_tck.py -q
+```
+
 ## Running it
 
 The worked example drives the real cordis-py runtime, so run it under the python
