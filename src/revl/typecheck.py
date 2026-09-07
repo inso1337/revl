@@ -223,7 +223,8 @@ _GENERIC_ARITY = {"Opt": 1, "List": 1, "Map": 2, "Result": 2}
 
 
 def check_type_wellformed(filename: str, line: int, type_name: str | None,
-                          *, allow_async_param: bool = False) -> None:
+                          *, allow_async_param: bool = False,
+                          allow_delegate_param: bool = False) -> None:
     """Reject a malformed declared type annotation (a builtin generic head
     used with the wrong number of arguments, e.g. bare `Opt` or `List`).
     Recurses into type arguments. User/nominal heads are not arity-checked.
@@ -232,17 +233,56 @@ def check_type_wellformed(filename: str, line: int, type_name: str | None,
     a value type: it is legal only as the return of a function type, and — in
     v1 — only when that function type is a module `fn` parameter
     (`allow_async_param=True`). Every other declaration site leaves the flag
-    False, so an async function type there is refused with a "not yet" hint."""
+    False, so an async function type there is refused with a "not yet" hint.
+
+    `Delegate[S]` (roadmap item 442, issue #121) is position-restricted the
+    same way: v1 admits it only as a service-method parameter type
+    (`allow_delegate_param=True`), so a delegated reference is received for one
+    call and cannot be written as a value binding, a return, a field, a config,
+    or a module `fn` parameter (docs/design/442-typed-delegation.md §4.1)."""
     _check_type_wf(filename, line, type_name, type_name,
-                   allow_async=allow_async_param, in_fn_return=False)
+                   allow_async=allow_async_param, in_fn_return=False,
+                   allow_delegate=allow_delegate_param)
 
 
 def _check_type_wf(filename: str, line: int, type_name: str | None,
                    root: str | None, *, allow_async: bool,
-                   in_fn_return: bool) -> None:
+                   in_fn_return: bool, allow_delegate: bool = False) -> None:
     if not type_name:
         return
     head, args = parse_type(type_name)
+    if head == "Delegate":
+        # item 442 (issue #121): `Delegate[S]` is a typed, borrow-confined view
+        # of an authority the caller holds, handed to a callee for the duration
+        # of one call. Like `Async[T]` it is POSITION-RESTRICTED — v1 admits it
+        # only as a service-method parameter — so a delegated reference cannot
+        # be stored, returned, or persisted (design §4.1, §10 S1).
+        if not allow_delegate:
+            raise RevlError(
+                filename, line,
+                f"`Delegate[S]` is not a value type (`{type_name}`) — it may "
+                "only appear as a service-method parameter type",
+                hint="a delegated reference is received for the duration of one "
+                     "call and cannot be stored, returned, or held in a field "
+                     "(item 442, docs/design/442-typed-delegation.md §4.1)",
+                code="G1", category="delegation",
+            )
+        if len(args) != 1:
+            raise RevlError(
+                filename, line,
+                f"`Delegate` takes 1 type argument, got {len(args)} "
+                f"(`{type_name}`)",
+                hint="write e.g. `Delegate[FileSystem]`, naming the service "
+                     "type the delegated reference exposes",
+                code="G1", category="delegation",
+            )
+        # `S` names the delegated surface; it may not itself be a delegation, an
+        # async type, or a malformed generic. `allow_delegate` drops to False so
+        # a nested `Delegate[Delegate[..]]` is refused here (depth is a separate
+        # concern, and v1 never nests the handle inside another type).
+        _check_type_wf(filename, line, args[0], root,
+                       allow_async=False, in_fn_return=False)
+        return
     if head == "Approval":
         # item 246, Decision 3, invariant 5 (non-persistence): `Approval[C]` is
         # produced ONLY by `await approval[C]` and is non-denotable as a written

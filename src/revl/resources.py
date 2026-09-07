@@ -36,6 +36,18 @@ PRIMITIVE_TYPE_NAMES = frozenset({
 # opaque handle: copying it copies whatever it wraps, not a live handle.
 _STRUCTURAL_HEADS = frozenset({"Opt", "List", "Map", "Result"})
 
+# item 442 (issue #121): the head of a typed delegated reference `Delegate[S]`
+# — a bounded, revocable view of an authority the caller holds, handed to a
+# callee for one call (docs/design/442-typed-delegation.md). It is NOT an
+# acquire-return handle, so it is deliberately absent from the acquire-derived
+# taint base (`resource_base`); the frontend borrow walk adds it to its own
+# taint set (`lower._resource_ctx`) so a delegated reference is confined by
+# item 308's B1 exactly as a borrowed handle is (design §3.3 D2, §4.3 C3/C4).
+# Kept here as the single spelling both the type-wellformedness rule and the
+# frontend confinement read, so the two cannot drift.
+DELEGATE_HEAD = "Delegate"
+
+
 # An acquire that yields NO handle value: a lock-style acquire
 # (`lockOp() -> Unit undo unlockOp()`) whose teardown takes no handle argument.
 # It carries no resource identity, so R0 permits it and the taint base excludes
