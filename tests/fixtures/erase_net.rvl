@@ -1,0 +1,46 @@
+// Fixture for tests/test_erase_report_network_254.py — item 254 (compensate-
+// grade witnessed network) network-boundary measurement on the erase report.
+//
+// Realm `edge` makes THREE boundary crossings against a `net.*` capability,
+// the shape `import openapi` emits for a compensate-grade endpoint (item 254
+// Slice 1): an emission EXTERN that OWNS its reversal through an extern-declared
+// `compensate` slot (no site-spelled `compensate`, per commit 4413fc8), plus a
+// bare net emission that nothing offsets. It also makes one NON-network service
+// emission so the network-boundary fraction is a real subset of all crossings,
+// not the whole thing.
+//
+//   http_put   — net.edge_api, compensated (restore rides on the extern)
+//   http_bare  — net.edge_api, bare (no compensate)
+//   store.keep — a plain service emission, NOT a network crossing
+
+extern emission[net.edge_api] fn http_put(body: Str) -> Int
+  compensate http_restore()
+  = @py { return 1 }
+
+extern emission[net.edge_api] fn http_restore() -> Int
+  = @py { return 0 }
+
+extern emission[net.edge_api] fn http_bare(body: Str) -> Int
+  = @py { return 2 }
+
+service Store {
+  emission fn keep(line: Str)
+}
+
+component EdgeStore provides store: Store {
+  isolate store in realm("edge")
+  let cells = effect Map.new() undo cells.drop()
+  provide store {
+    fn keep(line) {
+      effect cells.insert("last", line)
+      undo   cells.remove("last")
+    }
+  }
+}
+
+component EdgeApp requires store: Store {
+  isolate store in realm("edge")
+  emit http_put("payload")
+  emit http_bare("leak")
+  emit store.keep("kept")
+}

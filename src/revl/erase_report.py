@@ -134,6 +134,54 @@ def _provisions(index: Composition, members: list[str], realm: str) -> list[dict
     return sorted(out, key=lambda p: (p["key"], p["provider"]))
 
 
+def _is_network_cap(cap: object) -> bool:
+    """A capability token names the network boundary iff it is `net.*` — the
+    scope `import openapi` gives a compensate-grade endpoint (item 254 §4,
+    `import_openapi._net_cap`). The `*` first-class widening is deliberately NOT
+    network: an unnameable boundary is not proven to be an API crossing."""
+    return isinstance(cap, str) and cap.startswith("net.")
+
+
+def _is_network(crossing: dict) -> bool:
+    return any(_is_network_cap(c) for c in (crossing.get("capabilities") or []))
+
+
+def _network_boundary(all_cross: list[dict], witnessed: list[dict]) -> dict:
+    """Item 254 / item 248 measurement, extended to the wire. Roll the crossings
+    whose capability scope is a `net.*` cap into the one number item 254 promises:
+    the fraction of the realm's API traffic that became witnessed (revertible) or
+    compensable (an offset attached), the honest remainder left bare.
+
+    A witnessed[net.*] inverse is host-restorable and counts as the strongest end
+    (revertible); a compensate-bearing net emission counts as compensable; a bare
+    net emission is the residue. Compensation is not inversion (§6.1): a
+    compensable crossing still left the system — this counts *what was done about
+    it*, not whether observation was undone."""
+    net_irreversible = [c for c in all_cross if _is_network(c)]
+    net_witnessed = [c for c in witnessed if _is_network(c)]
+    compensated = [c for c in net_irreversible if c["compensated"]]
+    bare = [c for c in net_irreversible if not c["compensated"]]
+    total = len(net_irreversible) + len(net_witnessed)
+    compensable = len(compensated) + len(net_witnessed)
+    fraction = round(compensable / total, 4) if total else None
+    return {
+        "total": total,
+        "witnessedCount": len(net_witnessed),
+        "compensatedCount": len(compensated),
+        "compensableCount": compensable,
+        "bareCount": len(bare),
+        "compensableFraction": fraction,
+        "compensableTokens": sorted(
+            c["token"] for c in compensated + net_witnessed if c.get("token")),
+        "bareTokens": sorted(c["token"] for c in bare if c.get("token")),
+        "note": "the fraction of this realm's network (API) boundary crossings "
+                "that became witnessed (revertible) or compensable (an offset "
+                "attached); the remainder is bare emission. Compensation is not "
+                "inversion (§6.1) — a compensable crossing still left the system, "
+                "it is not un-issued.",
+    }
+
+
 def _crossings(index: Composition, members: list[str],
                residue: list | None = None) -> dict:
     """Aggregate the G8 boundary surface of the realm's members: every
@@ -197,6 +245,11 @@ def _crossings(index: Composition, members: list[str],
                     # 245, Decision 2); deferral is an extern-declaration property,
                     # not spellable on a service method.
                     "actionClass": "c",
+                    # item 254: the capability the crossing is scoped to, so the
+                    # network-boundary fold (§4) can tell an API crossing from an
+                    # in-process one. A service-op emission is scoped to its
+                    # service, never a `net.*` cap.
+                    "capabilities": [fact["service"]] if fact.get("service") else [],
                     "token": f"emit:{name}:{fact['key']}.{fact['method']}",
                 })
             for fact in facts["externs"]:
@@ -212,16 +265,29 @@ def _crossings(index: Composition, members: list[str],
                         mark = (name, fact["name"])
                         if mark not in seen_witnessed:
                             seen_witnessed.add(mark)
+                            wentry = index.externs.get(fact["name"]) or {}
                             witnessed.append({
                                 "component": name, "scope": scope["kind"],
                                 "name": fact["name"], "class": "witnessed",
                                 "actionClass": "a", "revertible": True,
+                                # item 254: caps so a witnessed[net.*] inverse is
+                                # counted as the compensable-or-better end of the
+                                # network boundary.
+                                "capabilities": sorted(
+                                    wentry.get("capabilities") or []),
                                 "token": f"witnessed:{name}:{fact['name']}"})
                     continue
                 mark = (name, fact["name"])
                 if mark in seen_host:
                     continue
                 seen_host.add(mark)
+                # item 254: an emission EXTERN may OWN its reversal through an
+                # extern-declared `compensate` slot (the shape `import openapi`
+                # emits for a compensate-grade endpoint, wired to fire at teardown
+                # by commit 4413fc8). Read that clause off the extern IR entry —
+                # the per-scope fact does not carry it — so a compensate-bearing
+                # network emission is tagged `compensated`, not misreported bare.
+                ext_entry = index.externs.get(fact["name"]) or {}
                 externs.append({
                     "component": name, "scope": scope["kind"],
                     "name": fact["name"], "class": fact.get("class"),
@@ -230,9 +296,12 @@ def _crossings(index: Composition, members: list[str],
                     # any other reached emission extern is class (c).
                     "actionClass": "b" if fact.get("deferred") else "c",
                     "backends": fact.get("backends") or [],
-                    # a host extern crossing carries no compile-time compensate
-                    # clause; it is bare by construction at this granularity.
-                    "compensated": False,
+                    # item 254: the extern's declared capability scope, so a
+                    # `net.*` emission extern is recognised at the network boundary.
+                    "capabilities": sorted(ext_entry.get("capabilities") or []),
+                    # compensated iff the extern DECLARES a `compensate` slot (an
+                    # offset attached, item 247). Absent = bare, as before.
+                    "compensated": ext_entry.get("compensate") is not None,
                     "token": f"host:{name}:{fact['name']}",
                 })
     emissions.sort(key=lambda e: (e["component"], e["label"]))
@@ -254,6 +323,7 @@ def _crossings(index: Composition, members: list[str],
     unresolved = partition["unresolved"]
     unresolved_tokens = sorted(
         c["token"] for c in unresolved if c.get("token"))
+    network = _network_boundary(all_cross, witnessed)
     return {
         "emissions": emissions,
         "externs": externs,
@@ -281,6 +351,14 @@ def _crossings(index: Composition, members: list[str],
         "unresolved": unresolved,
         "unresolvedCount": len(unresolved),
         "unresolvedTokens": unresolved_tokens,
+        # item 254 (item 248's measurement, extended to the network boundary):
+        # of the crossings scoped to a `net.*` capability — the realm's API
+        # traffic — the fraction that became WITNESSED (revertible) or
+        # COMPENSABLE (an offset attached), with the bare-emission remainder
+        # named. Empty (`total` 0, `compensableFraction` None) for a realm that
+        # touches no network boundary, so a network-free report is byte-identical
+        # but for this additive member.
+        "networkBoundary": network,
         "note": "a crossing is bare when nothing was done about it, "
                 "compensated when an offset landed, unresolved when an offset "
                 "was owed but did not land. Compensation is not inversion "
@@ -433,6 +511,11 @@ def build_report(ir: dict, realm: str, *, prove_residue: bool = True,
             "bareCrossings": crossings["bareCount"],
             "compensatedCrossings": crossings["compensatedCount"],
             "unresolvedCrossings": crossings["unresolvedCount"],
+            # item 254: the network-boundary headline (item 248, extended). 0 /
+            # None for a realm that touches no `net.*` cap.
+            "networkCrossings": crossings["networkBoundary"]["total"],
+            "networkCompensableFraction":
+                crossings["networkBoundary"]["compensableFraction"],
             "stateGoneProven": residue.get("proven"),
             "otherRealmsUntouched": others["untouched"],
         },
@@ -502,7 +585,10 @@ def render(report: dict) -> str:
         tag = "[compensated]" if c["compensated"] else "[BARE]"
         out.append(f"      {tag:<14} {c['component']}  emit {c['label']}")
     for c in cross["externs"]:
-        out.append(f"      {'[BARE]':<14} {c['component']}  host {c['name']}()")
+        # item 254: an emission extern that owns a `compensate` slot is
+        # compensated, not bare (the network compensate-grade case).
+        tag = "[compensated]" if c["compensated"] else "[BARE]"
+        out.append(f"      {tag:<14} {c['component']}  host {c['name']}()")
     # item 414: a `*` widening, an emitting callable escaping in value
     # position, reaching a boundary that cannot be named.
     for c in cross.get("widenings") or []:
@@ -517,6 +603,16 @@ def render(report: dict) -> str:
         comp = c.get("component") or rec.get("component") or "?"
         out.append(f"      {'[UNRESOLVED]':<14} {comp}  offset {label}"
                    + (f"  — {err}" if err else ""))
+    # item 254: the network-boundary headline, printed only when the realm
+    # actually touches a `net.*` cap so a network-free report is unchanged.
+    net = cross.get("networkBoundary") or {}
+    if net.get("total"):
+        pct = f"{net['compensableFraction'] * 100:.1f}%"
+        out.append(
+            f"      network boundary: {net['compensableCount']} of "
+            f"{net['total']} API crossing(s) witnessed/compensable ({pct}) — "
+            f"{net['witnessedCount']} witnessed, {net['compensatedCount']} "
+            f"compensated, {net['bareCount']} bare")
     out.append(f"      note: {cross['note']}")
 
     # 3. others untouched

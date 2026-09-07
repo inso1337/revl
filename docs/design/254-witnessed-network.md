@@ -748,4 +748,43 @@ resource came back, rather than overwrite whatever took its place.
 - **A genuine proof-surface network witness** - a new language construct, its
   own item.
 - **Verified-idempotent upgrade** (attack 3's real closure, item 37).
-- **item 248 measurement extension** to the network boundary.
+- **item 248 measurement extension** to the network boundary - the revl-side
+  surface LANDED (see §9); the harness-side per-session roll-up rides item 248.
+
+## 9. The item-248 measurement, extended to the network boundary (landed)
+
+Item 254's roadmap payoff is that "item 248's measurement extends to the network
+boundary - the fraction of an agent's API traffic that became witnessed or
+compensable, per session, with proof." Item 248 measures that fraction
+harness-side; for it to reach the wire, revl must first *expose* the
+classification of each network crossing on a surface the harness can read. That
+surface is `revl erase-report`, which already enumerates every boundary crossing
+as compensated vs bare. Two gaps stood between it and the item-254 headline:
+
+1. **The compensate-grade network emission was misreported bare.** The Slice 1
+   shape is an emission EXTERN that owns its reversal through an extern-declared
+   `compensate` slot (fired at teardown by the py runtime, commit 4413fc8).
+   `erase_report._crossings` read the `compensate` clause only off per-call
+   *service-emission* facts and hard-coded every host extern `compensated:
+   False`, so the whole point of item 254 - a `net.*` PUT that carries an offset
+   - counted as a bare, un-offset emission. Fixed by reading the `compensate`
+   clause and the capability scope off the extern IR entry (`Composition.externs`),
+   so a compensate-bearing net emission is tagged `compensated`.
+
+2. **There was no network-boundary fraction.** All crossings folded into one
+   bare/compensated total with no way to read the API-traffic subset. Added a
+   `networkBoundary` member to the boundary-crossings section: of the crossings
+   scoped to a `net.*` cap (the `import openapi` scope, `_net_cap`), the
+   `compensableFraction` that became witnessed (revertible) or compensable (an
+   offset attached), the bare-emission remainder named by token, echoed into the
+   report summary (`networkCrossings`, `networkCompensableFraction`) and the
+   human render. Empty (`total` 0, fraction `None`) for a realm that touches no
+   network boundary, so a network-free report is byte-identical but for the
+   additive member. The §6.1 honesty rides on the note: compensation is not
+   inversion, so this counts *what was done about* a crossing, never that the
+   observation was undone.
+
+`src/revl/erase_report.py`, `tests/test_erase_report_network_254.py`,
+`tests/fixtures/erase_net.rvl`. No gate-digest input touched (no crate regen).
+The harness-side per-session roll-up that turns this static per-composition
+surface into the "per session, with proof" number remains item 248's to land.
