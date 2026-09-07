@@ -109,7 +109,7 @@ was corrected by hand and had drifted back within a day.
 | crash-recovery.md | needs-work | 44 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
-| deploy.md | needs-work | 5 |  |
+| deploy.md | needs-work | 12 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 85 |  |
 | design-v2-realms.md | needs-work | 17 |  |
@@ -145,7 +145,7 @@ was corrected by hand and had drifted back within a day.
 | mcp-reference.md | current | 3 |  |
 | namespacing.md | needs-work | 8 |  |
 | network-path.md | needs-work | 24 |  |
-| network-placement.md | needs-work | 1 |  |
+| network-placement.md | needs-work | 4 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
 | operator-capabilities.md | needs-work | 34 |  |
 | parallel-activation.md | needs-work | 17 |  |
@@ -170,7 +170,7 @@ was corrected by hand and had drifted back within a day.
 | scaffold.md | needs-work | 2 |  |
 | schedule-testing.md | needs-work | 0 |  |
 | seam-deadlines.md | needs-work | 15 |  |
-| selfhost-compile.md | stale-fixed | 0 |  |
+| selfhost-compile.md | stale-fixed | 2 |  |
 | selfhost-findings.md | live-owned (not audited) | 247 |  |
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |
