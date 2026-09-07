@@ -64,8 +64,9 @@ def test_the_wasm_cell_rung_now_resolves_to_a_driver():
     driver = _sb.resolve_driver("wasm-cell")
     assert isinstance(driver, _sb.WasmCellDriver)
     assert driver.rung == "wasm-cell"
-    # microvm is still the one driverless rung and must not be downgraded.
-    assert _sb.resolve_driver("microvm") is None
+    # microvm now resolves to its own driver too (it refuses without /dev/kvm),
+    # so no rung is downgraded to another.
+    assert isinstance(_sb.resolve_driver("microvm"), _sb.MicroVMDriver)
 
 
 def test_evaluate_cell_confirms_a_well_formed_report():

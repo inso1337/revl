@@ -1757,9 +1757,26 @@ class _ComponentEmitter:
             body_lines = []
             mlocals: list[str] = []
             mwhere = f"{where}.{key}.{mname}"
-            for mstep in method.get("body") or []:
+            # issue #548: control flow in a provide-method body. `break`/
+            # `continue` need named wasm labels (there is no native break), so a
+            # per-method loop-label stack mirrors the fn renderer's
+            # `_loop_label_stack`. `for` over a List needs the memory-walk cursor
+            # apparatus the fn `_emit_for` owns (keyed off a per-loop `_lid`
+            # this method path never assigns), so it is refused here with the
+            # `while`+index workaround; `if`/`while` are the tractable forms.
+            mloop_labels: list[tuple[str, str, str]] = []
+
+            def emit_mstep(mstep: dict, out_lines: list[str],
+                           top_level: bool = False) -> None:
                 mkind = mstep.get("step")
                 if mkind == "return":
+                    # A trailing top-level return leaves its value on the stack
+                    # and the function returns by falling off the end — the
+                    # original, byte-stable rendering. A return NESTED in
+                    # control flow (issue #548) must branch out explicitly, and
+                    # a value it produced would otherwise be left on the stack of
+                    # an operand-less `(if)`/`(loop)`, so it emits `(return)`.
+                    ret = "" if top_level else " (return)"
                     if mstep.get("expr") is None:
                         # a void service operation: `{"step": "return",
                         # "expr": null}` is the natural body, and wasm has the
@@ -1769,8 +1786,8 @@ class _ComponentEmitter:
                                 f"{mwhere}: bare `return` in a method the service "
                                 f"declares as returning {spec.get('returns')!r}"
                             )
-                        body_lines.append("(return)")
-                        continue
+                        out_lines.append("(return)")
+                        return
                     value = self._lower(mstep["expr"], mscope, mtypes, mwhere)
                     if has_result and _is_unit_type(value.ty):
                         raise EmitError(f"{mwhere}: void expression returned from a typed method")
@@ -1785,12 +1802,12 @@ class _ComponentEmitter:
                             f"{spec.get('returns')!r}; compound values stay inside the "
                             f"module (return them from a `fn`, or use a hosted backend)"
                         )
-                    body_lines.append(
-                        value.wat if has_result
-                        else f"(drop {value.wat})" if not _is_unit_type(value.ty)
-                        else value.wat)
+                    out_lines.append(
+                        f"{value.wat}{ret}" if has_result
+                        else f"(drop {value.wat}){ret}" if not _is_unit_type(value.ty)
+                        else f"{value.wat}{ret}")
                 elif mkind == "emit":
-                    body_lines.append(self._statement(mstep["expr"], mscope, mwhere, mtypes))
+                    out_lines.append(self._statement(mstep["expr"], mscope, mwhere, mtypes))
                     if mstep.get("compensate") is not None:
                         raise EmitError(
                             f"{mwhere}: method-time compensation is not lowerable — "
@@ -1814,7 +1831,79 @@ class _ComponentEmitter:
                         self.v3._declare_local(name, value.ty, mwhere)
                     elif name not in mlocals:
                         raise EmitError(f"{mwhere}: `{name}` is not declared")
-                    body_lines.append(f"(local.set ${name} {value.wat})")
+                    out_lines.append(f"(local.set ${name} {value.wat})")
+                elif mkind == "if":
+                    # issue #548: control flow over the method's value
+                    # computation. The arms are pure method steps, so they
+                    # recurse through `emit_mstep` — the same `(if (then) (else))`
+                    # skeleton the fn renderer's `_emit_stmts` emits.
+                    cond = self._lower(mstep["cond"], mscope, mtypes, mwhere)
+                    then_lines: list[str] = []
+                    for s in mstep.get("then") or []:
+                        emit_mstep(s, then_lines)
+                    else_lines: list[str] = []
+                    for s in mstep.get("else") or []:
+                        emit_mstep(s, else_lines)
+                    out_lines.append(cond.wat)
+                    out_lines.append("(if")
+                    out_lines.append("  (then")
+                    out_lines.extend("    " + line for line in then_lines)
+                    out_lines.append("  )")
+                    if mstep.get("else"):
+                        out_lines.append("  (else")
+                        out_lines.extend("    " + line for line in else_lines)
+                        out_lines.append("  )")
+                    out_lines.append(")")
+                elif mkind == "while":
+                    cond = self._lower(mstep["cond"], mscope, mtypes, mwhere)
+                    body = mstep.get("body") or []
+                    if self.v3._loop_control_targets(
+                            body, frozenset({"break", "continue"})):
+                        self.v3._brk_labels += 1
+                        n2 = self.v3._brk_labels
+                        brk, top = f"$revl_mbrk_{n2}", f"$revl_mtop_{n2}"
+                        mloop_labels.append(("while", brk, top))
+                        body_lines2: list[str] = []
+                        for s in body:
+                            emit_mstep(s, body_lines2)
+                        mloop_labels.pop()
+                        out_lines.append(f"(block {brk}")
+                        out_lines.append(f"  (loop {top}")
+                        out_lines.append("    " + cond.wat)
+                        out_lines.append("    (i32.eqz)")
+                        out_lines.append(f"    (br_if {brk})")
+                        out_lines.extend("    " + line for line in body_lines2)
+                        out_lines.append(f"    (br {top})")
+                        out_lines.append("  )")
+                        out_lines.append(")")
+                    else:
+                        body_lines2 = []
+                        for s in body:
+                            emit_mstep(s, body_lines2)
+                        out_lines.append("(block")
+                        out_lines.append("  (loop")
+                        out_lines.append("    " + cond.wat)
+                        out_lines.append("    (i32.eqz)")
+                        out_lines.append("    (br_if 1)")
+                        out_lines.extend("    " + line for line in body_lines2)
+                        out_lines.append("    (br 0)")
+                        out_lines.append("  )")
+                        out_lines.append(")")
+                elif mkind == "break":
+                    if not mloop_labels:
+                        raise EmitError(f"{mwhere}: `break` outside a loop")
+                    out_lines.append(f"(br {mloop_labels[-1][1]})")
+                elif mkind == "continue":
+                    if not mloop_labels:
+                        raise EmitError(f"{mwhere}: `continue` outside a loop")
+                    out_lines.append(f"(br {mloop_labels[-1][2]})")
+                elif mkind == "for":
+                    raise EmitError(
+                        f"{mwhere}: a `for (x of xs)` loop in a provide-method "
+                        f"body is not yet lowerable on the wasm tier — count with "
+                        f"a `var` and a `while`, indexing `xs[i]` (issue #548). "
+                        f"The other tiers support method-body `for`; this one is "
+                        f"the tracked remainder.")
                 elif mkind == "effect" and self._witnessed_extern(mstep.get("acquire")) is not None:
                     # item 324: a WITNESSED effect in a provide-method body is
                     # the per-tool-call H1 gate — valid, and registers its
@@ -1824,7 +1913,7 @@ class _ComponentEmitter:
                     # all stay refused below: this tier admits only the witnessed
                     # position item 318 opened, nothing more.
                     ext = self._witnessed_extern(mstep["acquire"])
-                    body_lines.append(
+                    out_lines.append(
                         self._method_witnessed_step(mstep, ext, mscope, mtypes, mwhere))
                 elif mkind in ("effect", "let-effect"):
                     raise EmitError(
@@ -1834,6 +1923,9 @@ class _ComponentEmitter:
                     )
                 else:
                     raise EmitError(f"{mwhere}: unknown step {mkind!r}")
+
+            for mstep in method.get("body") or []:
+                emit_mstep(mstep, body_lines, top_level=True)
 
             header = f'(func (export "{_wat_string(self._provide_prefix(key) + "." + mname)}") {" ".join(decl)}'.rstrip()
             # wasm requires local declarations before the body — and each one

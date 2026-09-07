@@ -21,13 +21,15 @@ property of the envelope and again end to end over a real socket:
     frame, or drop a connection mid-envelope — things `bridge._Client` will not
     do for you.
 
-Why the UDS seam and not a network one: item 421 F8's network seam is still in
-design (#107 T3), so the sealed envelope the conductor actually wires today is
-the local UDS one (`_process_runner.py` installs `CorrelationGuard` there). This
-section lands the adversarial corpus against THAT seam so the network seam is
-build-to-test against it later, exactly as the issue asks. It is one slice of
-the larger suite: the network-transport reconnect-storm and the coverage pin
-named in the issue's "Done" ride with the F8 seam when it exists.
+Two transports, one envelope: the local UDS seam the conductor wires by default
+(`_process_runner.py` installs `CorrelationGuard` there), AND — now that item
+411 T3's seam transport has landed (#621) — the SAME sealed envelope end to end
+over a real TCP + mutual-TLS network seam reached THROUGH the T3 relay
+(`revl.seam_relay.Relay`, the conductor's blind byte forwarder). Section D drives
+the network-transport reconnect-storm the issue's "Done" named, against that T3
+seam, so no hostile-wire shape is pinned only on the local transport. With it the
+suite covers every shape the issue enumerates on both transports, and the
+coverage pin (Section E) is configured to demand exactly that.
 
 One capability the sealed envelope does NOT have is called out honestly as an
 `xfail` rather than faked: it carries no per-crossing sequence number, so the
@@ -43,6 +45,7 @@ import json
 import random
 import shutil
 import socket
+import ssl
 import sys
 import tempfile
 import threading
@@ -461,7 +464,193 @@ def test_a_reconnect_storm_mid_flight_refuses_cleanly_and_leaves_no_residue(seam
 
 
 # ---------------------------------------------------------------------------
-# Section C — the section is self-describing: every hostile shape is covered
+# Section D — the reconnect-storm end to end over the T3 NETWORK seam
+#
+# Item 411 T3 (#621) landed the seam transport: a conductor-owned relay
+# (`revl.seam_relay.Relay`) that blindly forwards the bytes of a TCP + mutual-TLS
+# seam between two processes. This section pins the ONE hostile-wire shape the
+# issue deferred to that seam — a consumer that bounces the connection mid-flight
+# over and over — end to end over the real network transport: a raw mTLS client
+# drives the wire byte by byte AT THE RELAY, the relay forwards ciphertext it
+# cannot read to a `bridge.serve` TCP provider running the same
+# `CorrelationGuard`, and the seam must survive the storm, dispatch EXACTLY the
+# whole crossings, and still admit a fresh crossing afterwards — the same
+# property Section B pins over UDS, now proven not to depend on the transport.
+# ---------------------------------------------------------------------------
+
+# The mTLS-proven identity a consumer presents on the network seam is its cert
+# commonName; `CorrelationGuard` cross-checks it against the envelope's
+# `peer_identity`, so both the secret and the sealed envelopes here are for
+# "consumer" (the client cert the storm dials with).
+NET_IDENTITY = "consumer"
+NET_SECRET = b"secret-for-consumer-" + b"0" * 12  # 32 bytes, like the UDS ones
+
+
+def _net_guard():
+    return deploy.CorrelationGuard({NET_IDENTITY: NET_SECRET})
+
+
+def _net_sealed(*, key="idem-1", effect="Cache.get"):
+    return deploy.seal(_envelope(NET_IDENTITY, effect=effect, key=key), NET_SECRET)
+
+
+def _free_inet_port() -> int:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+class _RelayThread:
+    """A `seam_relay.Relay` (the T3 forwarder) on its own event-loop thread,
+    forwarding one listener to the provider's TCP port, torn down cleanly."""
+
+    def __init__(self, listen_port, target_port):
+        from revl import seam_relay
+        self._loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def run():
+            asyncio.set_event_loop(self._loop)
+            relay = seam_relay.Relay([seam_relay.RelayRow(
+                id="storm", listen_host="127.0.0.1", listen_port=listen_port,
+                target_host="127.0.0.1", target_port=target_port)])
+            self._loop.run_until_complete(relay.start())
+            ready.set()
+            self._loop.run_forever()
+            self._loop.run_until_complete(relay.close())
+            self._loop.close()
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+        assert ready.wait(10)
+
+    def stop(self):
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
+
+
+@pytest.fixture(scope="module")
+def certs(tmp_path_factory):
+    """A throwaway loopback CA and a leaf per identity (openssl-minted), exactly
+    the material a network placement uses; skipped where openssl is absent."""
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl CLI needed to mint the loopback test certs")
+    from revl import placement
+    out = tmp_path_factory.mktemp("hostile_wire_certs")
+    return placement.generate_seam_certs(out, ["provider", "consumer"])
+
+
+def _client_ctx(certs) -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(certs[NET_IDENTITY]["cert"], certs[NET_IDENTITY]["key"])
+    ctx.load_verify_locations(certs[NET_IDENTITY]["ca"])
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.check_hostname = True
+    return ctx
+
+
+@pytest.fixture
+def net_relay(certs):
+    """A TCP + mTLS `bridge.serve` provider (guarded) behind the T3 relay.
+
+    Yields `(relay_port, service, certs)`: the port a consumer dials, which the
+    relay forwards to the provider's own port. A crossing therefore travels the
+    real network transport — TLS terminates in the provider, the relay only ever
+    moves ciphertext it cannot read."""
+    bridge = _bridge()
+    service = _Counter()
+    provider_port = _free_inet_port()
+    tls = bridge.TlsConfig(certs["provider"]["cert"], certs["provider"]["key"],
+                           certs["provider"]["ca"], identity="provider",
+                           server_hostname="127.0.0.1")
+    endpoint = bridge.Endpoint(host="127.0.0.1", port=provider_port, tls=tls)
+    seam = _Seam(bridge, endpoint, service, _net_guard())
+    relay_port = _free_inet_port()
+    relay = _RelayThread(relay_port, provider_port)
+    try:
+        yield relay_port, service, certs
+    finally:
+        relay.stop()
+        seam.stop()
+
+
+def _net_call(relay_port, ctx, sealed, **kw):
+    """One full request on a fresh mTLS connection through the relay."""
+    raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    raw.settimeout(5.0)
+    raw.connect(("127.0.0.1", relay_port))
+    tls = ctx.wrap_socket(raw, server_hostname="127.0.0.1")
+    try:
+        io = tls.makefile("rwb")
+        io.write(_request_bytes(sealed, **kw))
+        io.flush()
+        line = io.readline()
+        return json.loads(line) if line else None
+    finally:
+        tls.close()
+
+
+def test_a_network_transport_reconnect_storm_over_the_t3_relay_refuses_cleanly(
+        net_relay):
+    """The Section B reconnect-storm, now over the real T3 network seam. A
+    consumer BOUNCES its mTLS connection through the relay again and again: some
+    connections open and drop, some send half an envelope and drop, some send a
+    whole keyed crossing and hang up abruptly. After the storm the relay and the
+    provider behind it must be intact, have dispatched EXACTLY the whole
+    crossings (no partial slipped through, no crossing double-counted), and still
+    admit a brand-new crossing — proving the envelope's rule holds on the network
+    transport, not just over UDS."""
+    relay_port, service, certs = net_relay
+    ctx = _client_ctx(certs)
+    rng = _rng("net-reconnect-storm")
+    expected = 0
+    for i in range(90):
+        kind = rng.choice(("silent", "partial", "whole"))
+        raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw.settimeout(5.0)
+        raw.connect(("127.0.0.1", relay_port))
+        try:
+            tls = ctx.wrap_socket(raw, server_hostname="127.0.0.1")
+        except OSError:
+            raw.close()
+            continue
+        try:
+            if kind == "silent":
+                pass  # handshake, then drop with no crossing
+            elif kind == "partial":
+                payload = _request_bytes(_net_sealed(key=f"p{i}"))
+                tls.sendall(payload[:max(1, len(payload) // 2)])  # no newline
+            else:  # whole crossing, then hang up (sometimes before reading)
+                tls.sendall(_request_bytes(_net_sealed(key=f"w{i}")))
+                expected += 1
+                if rng.random() < 0.5:
+                    tls.makefile("rb").readline()
+        finally:
+            tls.close()
+        time.sleep(0.001)
+
+    # the seam and its relay are still up: a brand-new crossing round-trips
+    assert _net_call(relay_port, ctx, _net_sealed(key="net-post-storm"))["ok"] is True
+
+    # every whole crossing ran once, the post-storm probe adds one, and no
+    # partial or silent bounce ever reached the service. Bounded settle: the
+    # whole crossings were fire-and-forget on separate connections, so allow the
+    # provider a moment to drain them before pinning the exact count.
+    deadline = time.time() + 5.0
+    while len(service.calls) < expected + 1 and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.05)  # and no straggler partial sneaks in after
+    dispatched = list(service.calls)
+    assert len(dispatched) == expected + 1, (
+        f"dispatched {len(dispatched)} != {expected} whole crossings + 1 probe")
+    assert all(c == "a" for c in dispatched)
+
+
+# ---------------------------------------------------------------------------
+# Section E — the section is self-describing: every hostile shape is covered
 # ---------------------------------------------------------------------------
 
 HOSTILE_WIRE_SHAPES = (
@@ -471,10 +660,21 @@ HOSTILE_WIRE_SHAPES = (
 
 def test_every_hostile_wire_shape_has_a_test_in_this_section():
     """Coverage pin for the section: each shape the issue enumerates is backed
-    by at least one test here, so a shape cannot silently fall out of the suite.
-    The reconnect-storm at the network-transport level and the coverage-config
-    pin named in issue #475 ride with the F8 network seam (still in design) and
-    are out of scope for this UDS slice."""
+    by at least one test here, so a shape cannot silently fall out of the
+    suite."""
     names = [n for n in globals() if n.startswith("test_")]
     for shape in HOSTILE_WIRE_SHAPES:
         assert any(shape in n for n in names), f"no test covers shape {shape!r}"
+
+
+def test_the_reconnect_storm_is_pinned_on_both_transports():
+    """The coverage-config pin issue #475 deferred to the F8 network seam: the
+    reconnect-storm must be exercised on BOTH transports — the local UDS seam
+    (Section B) and the T3 network seam through the relay (Section D) — so the
+    shape can never silently regress to a single-transport test. This pin fails
+    the moment either altitude is dropped."""
+    names = [n for n in globals() if n.startswith("test_")]
+    uds = [n for n in names if "reconnect_storm" in n and "network_transport" not in n]
+    net = [n for n in names if "network_transport_reconnect_storm" in n]
+    assert uds, "no UDS-level reconnect-storm test"
+    assert net, "no network-transport reconnect-storm test (the T3 seam, #621)"
