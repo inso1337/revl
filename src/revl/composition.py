@@ -477,6 +477,88 @@ def _check_reach_bounds(label: str, config: dict, reach: dict[str, str] | None,
                      "(426 §8.3)")
 
 
+def _merge_replacement_reach(base_reach: dict[str, str] | None,
+                             repl_reach: dict[str, str] | None,
+                             layer: LayerDecl, line: int,
+                             target: str) -> dict[str, str] | None:
+    """The `reach` bound a stack-layer `replace` presents, clamped to the base.
+
+    426 §8.3/§8.6: the composition-level `reach` bound belongs to the BASE
+    composition. A `replace` inherits it and may NARROW it — bound a field the
+    base left unbounded — but never WIDEN it. A base bound on a field is
+    authoritative: a replacement that re-declares that field to a DIFFERENT
+    authority, or drops it while declaring its own `reach` on other fields,
+    would raise its own reach past what the base restricted. That replacement
+    is REFUSED and the base keeps the bound — a replacement narrows or is
+    refused, it never widens (the same admission discipline the rest of the
+    fold keeps). This also subsumes the plain carry-forward: a replacement that
+    declares no `reach` of its own inherits the base's unchanged.
+    """
+    base_reach = base_reach or {}
+    repl_reach = repl_reach or {}
+    merged = dict(repl_reach)
+    for field, base_bound in base_reach.items():
+        repl_bound = repl_reach.get(field)
+        if repl_bound is not None:
+            base_host = _host_of(base_bound) or base_bound
+            repl_host = _host_of(repl_bound) or repl_bound
+            if repl_host != base_host:
+                raise _layer_error(
+                    layer, line,
+                    f"layer `{layer.name}` replaces row `{target}` with a "
+                    f"component whose `reach` on `{field}` widens the bound the "
+                    f"base composition declared",
+                    hint=f"inherited: host(\"{base_host}\")\n"
+                         f"requested: host(\"{repl_host}\")\n"
+                         "a `replace` inherits the base's reach and may narrow "
+                         "it, never widen or redirect it; drop the wider bound "
+                         "or refuse the layer (426 §8.3/§8.6)")
+        # The base bound is authoritative and carried forward as-is.
+        merged[field] = base_bound
+    return merged or None
+
+
+def _merge_replacement_open(base_open: set[str] | None,
+                            repl_open: set[str] | None,
+                            layer: LayerDecl, line: int,
+                            target: str) -> set[str] | None:
+    """The `open` set a stack-layer `replace` presents, clamped to the base.
+
+    426 §8.6/§8.3: the composition-level `open` set belongs to the BASE
+    composition. `open` is the allowlist of config fields a non-owning stack
+    layer may `configure`, so it GRANTS authority — the mirror image of a
+    `reach` bound, which restricts it. A `replace` inherits the base's open set
+    and may NARROW it — open fewer fields, keep more closed — but never WIDEN
+    it: a replacement that re-declares `open` to include a field the base kept
+    closed would grant configure authority the base withheld, and a later stack
+    layer could then patch that field. That replacement is REFUSED. This also
+    subsumes the plain carry-forward: a replacement that declares no `open` of
+    its own inherits the base's unchanged.
+    """
+    if repl_open is None:
+        # No `open` of its own: inherit the base's set unchanged.
+        return base_open
+    base_open = base_open or set()
+    widened = repl_open - base_open
+    if widened:
+        opened = ", ".join(f"`{f}`" for f in sorted(widened))
+        inherited = ", ".join(f"`{f}`" for f in sorted(base_open)) or "<none>"
+        requested = ", ".join(f"`{f}`" for f in sorted(repl_open)) or "<none>"
+        raise _layer_error(
+            layer, line,
+            f"layer `{layer.name}` replaces row `{target}` with a component "
+            f"whose `open` set opens {opened}, which the base composition kept "
+            f"closed",
+            hint=f"inherited: open {{ {inherited} }}\n"
+                 f"requested: open {{ {requested} }}\n"
+                 "a `replace` inherits the base's open set and may narrow it "
+                 "(open fewer, keep closed), never widen it; a later stack layer "
+                 "could configure a field the base withheld. Drop the wider "
+                 "`open` or refuse the layer (426 §8.6/§8.3)")
+    # A subset (or the same set) narrows or preserves the base grant: kept.
+    return repl_open
+
+
 def _vendor_truc_of(abspath: str, root: str) -> str | None:
     """The truc a source path is VENDORED under (`trucs/<truc>/...`), or `None`
     if the path is the project's own (426 §7). Distribution facts key off where
@@ -1481,13 +1563,16 @@ def _apply_op(target, layer, layer_origin, op, rel, slots, decl, doc,
         row.provenance = [*slot.row.provenance, (level, layer.name, "replace")]
         # 426 §8.3/§8.6: the composition-level `reach` bound and the `open` set
         # belong to the base composition; a stack-layer `replace` cannot drop
-        # them (that would be raising its own authority). They are carried
-        # forward whenever the replacement does not declare its own, and the
-        # carried bound is re-checked against the replacement's config.
-        if row.reach is None:
-            row.reach = slot.row.reach
-        if row.open is None:
-            row.open = slot.row.open
+        # or widen them (that would be raising its own authority). Both are
+        # inherited and clamped — a replacement may narrow (a tighter reach
+        # bound, a smaller open set) but a widening one is REFUSED: a wider
+        # reach lets a config value escape, a wider open set lets a later stack
+        # layer configure a field the base kept closed. The reach bound is then
+        # re-checked against the replacement's config below.
+        row.reach = _merge_replacement_reach(
+            slot.row.reach, row.reach, layer, op.row.line, target)
+        row.open = _merge_replacement_open(
+            slot.row.open, row.open, layer, op.row.line, target)
         _check_reach_bounds(row.label, row.config, row.reach,
                             layer.source or doc, op.row.line,
                             f"by layer `{layer.name}`")
