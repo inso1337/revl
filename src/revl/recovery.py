@@ -1060,21 +1060,34 @@ def recover_shared_grants(wal: dict, *, wal_path: Optional[str],
     reclaims: list = []
     for handle, grant in sorted(latest.items()):
         holders = list(grant.get("holders") or [])
-        if handle in completed or not holders:
-            # orderly last release already ran the inverse (or the count is
-            # zero): nothing owed, exactly as a balanced accumulator.
+        if handle in completed:
+            # a CONFIRMED completion — an orderly last release, or a clean live
+            # reclaim — already ran the inverse and it returned; nothing owed, no
+            # double-close.
             continue
         if handle in already_fenced:
-            # a prior recover run fenced this before its single attempt; the
-            # outcome is unknown and a second attempt cannot be proven safe.
+            # an inverse attempt was durably fenced but no confirmed completion
+            # followed it: an orderly zero crossing about to fire, a live reclaim
+            # whose inverse raised, or a prior recover run that fenced before its
+            # single attempt. The outcome is unknown and a second attempt cannot
+            # be proven safe, so it is honest residue and NOT re-fired — even when
+            # the last ledger write shows an empty count (a fenced orderly
+            # crossing journals holders == [] before the fire). This check comes
+            # BEFORE the zero-count skip precisely so that crossing is not read as
+            # a clean balance (issues #709/#710).
             reclaims.append(_reclaim_record(
                 handle, len(holders), basis, ok=False,
                 error={"type": "fenced-before-attempt",
-                       "message": "an earlier recovery run fenced this shared "
-                                  "reclaim before its single attempt; a second "
+                       "message": "this shared reclaim was fenced before a "
+                                  "confirmed completion; its inverse may have "
+                                  "raised or crashed mid-attempt, so a second "
                                   "attempt cannot be proven safe (no "
                                   "double-close)"},
                 fenced_unknown=True))
+            continue
+        if not holders:
+            # the count reached zero with no attempt ever fenced: a balanced
+            # accumulator, nothing owed.
             continue
         inverse = grant.get("inverse") or {}
         if wal_path is not None:

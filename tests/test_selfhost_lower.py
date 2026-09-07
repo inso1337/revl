@@ -352,6 +352,17 @@ component StoreB provides kv: Kv {
 # Programs the reference admits — the gate must admit them too. Kept
 # reference-clean (no out-of-slice defect), so "" is the only agreement.
 ACCEPTED_PROGRAMS = [
+    # The accepting twin of the single-case-alias G1 rejections: a MULTI-case
+    # variant registers each case name as a constructor, builtin-spelled names
+    # included (`type T = Foo | Str` makes `Str(...)` a real case), so both
+    # implementations admit the call. Pinned so the `type_ctors` alias/variant
+    # split cannot regress into refusing a genuine constructor.
+    ("bare call of a builtin-named case in a multi-case variant", """type T = Foo | Str
+service S { fn go() -> Int }
+component C provides s: S {
+  provide s { fn go() { let x = Str("a")   return 0 } }
+}
+"""),
     # item 350: a `boot` component — the environment contract. `boot` is a
     # contextual keyword the admission gate carries no verdict for (the contract
     # is an admission-time CONFIG concern, checked by `run.py`'s `--env`
@@ -886,6 +897,33 @@ component Logger provides log: Log {
     # per-realm G2: same key, SAME realm — a conflict, and the realm is named
     # (fixture).
     ("g2 same-realm conflict", _fixture("v2_same_realm_conflict"), "G2"),
+    # G1 bare CALL head: a single-case type declaration aliasing a builtin type
+    # (`type Alias = Int`) binds a type, not a constructor — the reference's
+    # `_case_table` never registers `Int` as a case (typecheck.py
+    # `_is_type_expression`), so `Int("1")` draws the same "not a declared
+    # requirement" G1 refusal a bare `nope()` does. The gate's `type_ctors` used
+    # to collect every Upper-cased name a `type` declaration mentioned, admitting
+    # this whole family; it now follows the same alias/variant split.
+    ("g1 bare call of a builtin type aliased single-case",
+     """type Alias = Int
+service S { fn go() -> Int }
+component C provides s: S {
+  provide s { fn go() { let x = Int("1")   return 0 } }
+}
+""", "G1"),
+    # G1 bare CALL head: a single-case type application (`type Rows = List[Row]`)
+    # is an alias RHS too, so its head `List` is not a constructor.
+    ("g1 bare call of a type-application alias head",
+     """type Rows = List[Row]
+service S { fn go() -> Int }
+component C provides s: S {
+  provide s { fn go() { let x = List(1)   return 0 } }
+}
+""", "G1"),
+    # The accepting twin: in a MULTI-case variant the same builtin name IS a
+    # registered case, so `Str("a")` resolves and both admit. (Held in the
+    # ACCEPTED corpus below so a future over-eager fix cannot silently start
+    # refusing it.)
     # ---- slice 3 ---------------------------------------------------------
     # G1 bare-value: an undeclared bare `Var` used as a value in a provide
     # method body (not a call/access head) — the reference's `_plain_body`

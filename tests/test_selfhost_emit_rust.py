@@ -149,6 +149,13 @@ CORPUS = [
                         #   rather than cloning the element; the owned `return`/
                         #   `let` cases keep the clone. No corpus fixture reached
                         #   the shape, so this closes the same 429 gap.
+    "perf_field_index.rvl",  # item 437d — a FIELD read off a List index read
+                        #   (`xs[i].kind == "lit"`, the shape the census found is
+                        #   every remaining site) clones only the field, not the
+                        #   whole element, and a read-only operand (`==`/`!=`, a
+                        #   builtin receiver, an interpolation operand) strips even
+                        #   that. Both tiers pinned so the port cannot fall behind
+                        #   (item 429).
     "perf_iter.rvl",    # item 437f — a `for` iterable that is dead after the loop
                         #   MOVES instead of cloning. The self-host port never
                         #   cloned a for-iterable, so before the optimisation the

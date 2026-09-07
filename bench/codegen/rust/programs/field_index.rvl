@@ -1,0 +1,28 @@
+// A FIELD read off a `List` element by index, in a read-only position — the
+// shape the item-437 census found is EVERY remaining "index read cloned" site
+// in the self-host stages (`toks[i].kind == "kw"`). The records are built once
+// from a `List[Str]` (so the harness can hand both sides the same std-typed
+// argument) and then read in a hot loop, so the per-read cost dominates the
+// one-time build. Reading `recs[i].tag` in a read-only `==` cloned the WHOLE
+// element out of the persistent list every time; borrowing the element place
+// and reading the field needs no allocation at all.
+type Rec = { tag: Str }
+
+pub fn field_index(raw: List[Str]) -> Int {
+  var recs: List[Rec] = []
+  for (s of raw) {
+    recs = recs.push({ tag: s })
+  }
+  var hits = 0
+  var pass = 0
+  let n = recs.length()
+  while (pass < 20) {
+    var i = 0
+    while (i < n) {
+      if (recs[i].tag == "key") { hits = hits + 1 }
+      i = i + 1
+    }
+    pass = pass + 1
+  }
+  return hits
+}
