@@ -76,7 +76,10 @@ class _StubSession:
         self.calls: list[tuple] = []
         self._result_value = result_value
 
-    def call(self, key, method, args):
+    def call(self, key, method, args, *, raw=False):
+        # the HTTP face always calls with `raw=True` (it applies the canonical
+        # `_encode_value` itself); the stub already hands back a live value, so
+        # the flag changes nothing here beyond matching the real signature.
         self.calls.append((key, method, args))
         return {"result": self._result_value, "trace": []}
 
@@ -173,7 +176,7 @@ def test_session_error_is_400_with_diagnostics():
     from revl.mcp.session import SessionError
 
     class _Bad(_StubSession):
-        def call(self, key, method, args):
+        def call(self, key, method, args, *, raw=False):
             raise SessionError("key 'cache' is not one the admitted turn provides")
 
     face = HttpComposedServer(_Bad(CACHE), composition="app")
@@ -190,7 +193,7 @@ def test_class_c_crossing_is_403_with_the_ticket_not_an_opaque_fault():
     from revl.mcp.approval import ApprovalRequired
 
     class _Raising(_StubSession):
-        def call(self, key, method, args):
+        def call(self, key, method, args, *, raw=False):
             raise ApprovalRequired({"key": key, "method": method,
                                     "hash": "sha256:deadbeef",
                                     "capabilities": ["send"]})
@@ -343,7 +346,7 @@ service Inventory {
 }
 component Store provides inv: Inventory {
   provide inv {
-    fn lookup(sku) = Found(Item { sku: sku, qty: 7 })
+    fn lookup(sku) = Found({ sku: sku, qty: 7 })
     fn maybe(sku) = None
     fn tally() = Ok(3)
   }
