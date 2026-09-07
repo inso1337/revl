@@ -3681,6 +3681,39 @@ _GO_RESERVED = {
     "fallthrough", "for", "func", "go", "goto", "if", "import", "interface",
     "map", "package", "range", "return", "select", "struct", "switch", "type",
     "var", "nil", "true", "false", "iota",
+    # Go's PREDECLARED identifiers (builtins and primitive type names) are not
+    # keywords, but they live in the universe block, so a package-level
+    # `func`/`type` decl OR a local/param of the same name shadows them for the
+    # rest of that scope. The names below are the ones the emitter references by
+    # BARE name in the code it emits into the user's package — the builtins
+    # `len`/`make`/`append`/`copy`/`delete`/`panic`, the primitive types
+    # `int`/`int32`/`int64`/`string`/`bool`/`byte`/`rune`/`float64`/`uint32`,
+    # `error`, and the generic constraints `any`/`comparable`. A user `fn len`,
+    # `type error`, or `fn reassigned(parts, len: Int)` used to shadow one and
+    # break `go build` (a runtime helper's `len(s)` binding the user's
+    # `func len(int64) int64`). This is the #553 cluster-C method-hijack class,
+    # loud here where py's identical collision was a SILENT wrong value; the
+    # portability floor needs both tiers to accept the program the checker does.
+    # The emitter controls its own reference sites (literal text, never through
+    # `_v3_ident`), so escaping the colliding USER name through the injective
+    # ladder below closes it — the user's `len` emits as `len_`, the emitter's
+    # `len(...)` stays the builtin.
+    #
+    # Only the ACTUALLY-emitted subset is reserved, not the whole predeclared
+    # list: a predeclared identifier the emitter never spells (`clear`, `close`,
+    # `cap`, `new`, `min`/`max`, …) cannot be shadowed because nothing references
+    # it, and over-reserving would rename a user `clear`/`cap` that the
+    # self-hosted `selfhost/emit_go.rvl` (keyword-escape only) leaves alone —
+    # breaking the byte-agreement oracle
+    # (`tests/test_selfhost_emit_go.py::test_selfhosted_emitter_is_byte_identical`,
+    # which `emit_go_corpus/accumulators.rvl`'s `clear` parameter exercises)
+    # without a matching change to that digest-input file. Go service methods
+    # are emitted capitalized (`r.Close()`), so they never reach `_v3_ident`'s
+    # predeclared check and need no exclusion. None of these end in `_`, so the
+    # ladder stays injective and a mangled name never re-enters the set.
+    "any", "append", "bool", "byte", "comparable", "copy", "delete", "error",
+    "float64", "int", "int32", "int64", "len", "make", "panic", "rune",
+    "string", "uint32",
 }
 
 _V3_PRIM = {

@@ -92,6 +92,72 @@ CONTEXT_MEMBERS = {
     "get", "set", "provide", "accessor", "mixin", "baseUrl",
 }
 
+# A service key becomes a PROPERTY on cordis's Context (`ctx.<key>`, both where
+# a provider installs it and where a consumer reads it, `_expr`'s
+# `ctx.{requirement}` at the require site). That property lookup walks the JS
+# prototype chain and hits cordis's own accessor Proxy, so a key that collides
+# with an inherited member never reaches the injected service — the #553
+# cluster-C consumer-side hijack, silent on this tier where py/go resolve the
+# same key from a string-keyed store:
+#   * `then` makes the host object THENABLE — awaiting a fiber/context that
+#     carries it re-invokes `.then`, and cordis returns `undefined` for it on
+#     purpose to stay un-thenable, so `ctx.then` is never the service;
+#   * `constructor` / `prototype` / `toString` / `valueOf` / `hasOwnProperty` /
+#     `__proto__` / … are `Object.prototype` (and `Function.prototype`) members
+#     every object already answers, so `ctx.<key>` returns the inherited value,
+#     not the service (and cannot be a clean own-property either);
+#   * a `_`-prefixed key is cordis's reserved internal namespace (its Proxy
+#     does not surface it as a service).
+# None can be safely renamed the way a `_mangle` handles a JS *keyword*: a key
+# is the wire string a provider and a consumer match on (see `_ident`'s "a
+# property key is therefore NEVER `_mangle`d"), and appending `_` would not even
+# lift a `_`-prefixed name out of the reserved namespace. So, like the existing
+# `CONTEXT_MEMBERS` rejection, an unsafe key is refused at emit with a clean
+# message telling the author to rename it — a loud portability error in place of
+# a silent wrong resolution. `_is_reserved_service_key` / `_reject_service_key`
+# fold all three cases together and are applied to BOTH provide and require
+# keys (the require side was previously unguarded).
+_JS_MEMBER_KEYS = frozenset({
+    "then", "catch", "finally",
+    "constructor", "prototype", "__proto__",
+    "toString", "toLocaleString", "valueOf",
+    "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable",
+    "__defineGetter__", "__defineSetter__",
+    "__lookupGetter__", "__lookupSetter__",
+    "length", "name", "apply", "call", "bind", "caller", "arguments",
+})
+
+
+def _is_reserved_service_key(key: object) -> bool:
+    """Whether `key`, used as a `ctx.<key>` service property, would collide with
+    a cordis Context member, an inherited JS prototype member, or cordis's
+    reserved `_`-prefixed internal namespace (see `_JS_MEMBER_KEYS`)."""
+    return (isinstance(key, str)
+            and (key in CONTEXT_MEMBERS
+                 or key in _JS_MEMBER_KEYS
+                 or key.startswith("_")))
+
+
+def _reject_service_key(key: object, role: str, component: object) -> None:
+    """Refuse a provide/require key that cannot be a safe `ctx.<key>` property."""
+    if not _is_reserved_service_key(key):
+        return
+    if isinstance(key, str) and key.startswith("_"):
+        why = ("cordis reserves the `_`-prefixed namespace for its own "
+               "internals, so it is never surfaced as a service")
+    elif isinstance(key, str) and key in CONTEXT_MEMBERS:
+        why = f"`ctx.{key}` is already a cordis Context member"
+    elif key == "then":
+        why = ("`then` makes the host object thenable, so cordis returns "
+               "undefined for it rather than the injected service")
+    else:
+        why = (f"`ctx.{key}` is an inherited JavaScript object member, so it "
+               f"shadows the injected service")
+    raise EmitError(
+        f"{role} key {key!r} in component {component!r} is not host-safe on "
+        f"the ts tier: {why}. Rename the key."
+    )
+
 
 def _split_ts_types(inner: str) -> list[str]:
     """Split a type argument list on commas outside `[...]` / `(...)`."""
@@ -2117,10 +2183,12 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
 
     for local, service in requires.items():
         _ident(local, "requirement")
+        _reject_service_key(local, "requirement", name)
         if service not in services:
             raise EmitError(f"requirement {local!r} names unknown service {service!r}")
     for key, service in provides.items():
         _ident(key, "provision key")
+        _reject_service_key(key, "provision", name)
         if service not in services:
             raise EmitError(f"provision {key!r} names unknown service {service!r}")
     for key in isolate:
