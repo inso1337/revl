@@ -237,3 +237,11 @@ recorded stay bit-for-bit what they were.
   path inside the extraction directory: an absolute or `..`-bearing entry that
   would escape the bundle root is refused, the same realpath containment the
   stdlib-ref verify tier and `hostref` enforce.
+* **Multi-module.** A program split across modules (`main.rvl` importing a
+  helper through `use "lib.rvl"`) bundles the same way: pass every module as a
+  source, they travel as distinct files under `source/`, and `main`'s `use`
+  resolves from the bundle's own `source/` at verify. Each backend inlines all
+  the modules into one emitted artifact, so the one-file bundle carries a single
+  self-contained runnable file per backend. The admission gauntlet grades the
+  real multi-module composition (over the source files, not a text
+  concatenation of them, which would leave the `use` unresolved).

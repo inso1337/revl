@@ -264,13 +264,21 @@ def _load_topology(path: str) -> dict:
         raise RevlError(path, 0, f"topology is not valid JSON: {error}") from error
 
 
-def _gauntlet_dossier(source: str) -> dict | None:
-    """The item-31 gauntlet dossier for the source, the graded evidence that the
-    composition is admissible (boots and unloads clean). Boots the candidate in a
+def _gauntlet_dossier(paths: list[str]) -> dict | None:
+    """The item-31 gauntlet dossier for the composition, the graded evidence that
+    it is admissible (boots and unloads clean). Boots the candidate in a
     throwaway `Session` on a worker thread (the gauntlet drives its own asyncio
     loop, which a bare call from an already-running loop would refuse). Returns
     None when the gauntlet machinery is unavailable, honest degradation, the
-    bundle is still produced without gauntlet evidence."""
+    bundle is still produced without gauntlet evidence.
+
+    Grades over the source FILES, the same root set the compile ran, NOT a text
+    concatenation of them: a multi-module program's `use "other.rvl"` resolves
+    only when the modules stay distinct files on disk, so a concatenated blob
+    graded a real multi-module composition as `rejected` (the import could not
+    be found) and turned every multi-module bundle red at the gauntlet tier.
+    Passing `files` lets the gauntlet resolve imports exactly as the bundle's own
+    compile did, and for a single source it grades that one file unchanged."""
     import concurrent.futures  # noqa: PLC0415
 
     try:
@@ -289,7 +297,7 @@ def _gauntlet_dossier(source: str) -> dict | None:
         # own files: the human running the command IS the author, so this
         # compile carries no MCP authoring trust (the same rule
         # `server.compile_under_authoring` applies to jailed `files`).
-        return gauntlet.run(Session(), {"source": source},
+        return gauntlet.run(Session(), {"files": list(paths)},
                             over_the_transport=False)
 
     try:
@@ -458,7 +466,7 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
     # deploy chain and rides along under an honest signature (roadmap 428 F8).
     # With it, `verify` here and `deploy.admit` on the receiving side can both
     # require that the evidence is evidence about the artifact in hand.
-    dossier = _gauntlet_dossier(combined_source)
+    dossier = _gauntlet_dossier(sources)
     gauntlet_verdict = None
     if dossier is not None:
         gauntlet_verdict = str(dossier.get("verdict") or "")
