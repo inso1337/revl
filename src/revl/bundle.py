@@ -308,7 +308,7 @@ def _gauntlet_dossier(paths: list[str]) -> dict | None:
 
 
 def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
-                 topology: str | None = None, env=None) -> str:
+                 topology: str | None = None, force: bool = False, env=None) -> str:
     """Assemble a `.revlbundle` directory from `sources` and return its path.
 
     Compiles the sources once through the normal pipeline, refuses a draft (open
@@ -392,6 +392,21 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
 
     out_dir = Path(out)
     if out_dir.exists():
+        # Guard against silently deleting an existing non-empty directory (a
+        # `--out` pointed at unrelated files is data loss). An empty directory,
+        # or an explicit `--force`, is fine to clear and rewrite.
+        if not out_dir.is_dir():
+            raise RevlError(
+                "<bundle>", 0,
+                f"--out path already exists and is not a directory: {out_dir}",
+                hint="point --out at a bundle directory (e.g. app.revlbundle) "
+                     "or a fresh path.")
+        if any(out_dir.iterdir()) and not force:
+            raise RevlError(
+                "<bundle>", 0,
+                f"--out directory is not empty: {out_dir}",
+                hint="bundling would delete its current contents; pass --force "
+                     "to overwrite it, or choose an empty/fresh --out path.")
         shutil.rmtree(out_dir)
     (out_dir / "source").mkdir(parents=True)
     (out_dir / "ir").mkdir()
@@ -1081,7 +1096,8 @@ def run_bundle(args) -> int:
     one_file = getattr(args, "one_file", None)
     try:
         out = build_bundle(args.files, args.out, backends=backends,
-                           topology=args.topology)
+                           topology=args.topology,
+                           force=getattr(args, "force", False))
         packed = pack_bundle(out, one_file) if one_file else None
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)

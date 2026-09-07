@@ -318,6 +318,51 @@ def test_bundling_a_draft_is_refused(tmp_path):
     assert "hole" in str(exc.value)
 
 
+# ----------------------------------------------------------- --out overwrite (#537)
+
+def test_nonempty_out_dir_is_refused_without_force(tmp_path):
+    """A non-empty --out directory is NOT silently rmtree'd (data loss, #537):
+    bundling refuses it with a diagnostic that names the directory, and the
+    pre-existing file is left untouched."""
+    src = _write(tmp_path, "app.rvl", BASE)
+    out = tmp_path / "existing.revlbundle"
+    out.mkdir()
+    victim = out / "unrelated.txt"
+    victim.write_text("precious", encoding="utf-8")
+    with pytest.raises(RevlError) as exc:
+        B.build_bundle([src], str(out), env=dict(KEY))
+    assert "not empty" in str(exc.value)
+    assert str(out) in str(exc.value)
+    # the refusal must not have deleted anything
+    assert victim.exists()
+    assert victim.read_text(encoding="utf-8") == "precious"
+
+
+def test_force_overwrites_a_nonempty_out_dir(tmp_path):
+    """`--force` overrides the guard: the non-empty directory is cleared and a
+    fresh, verifiable bundle is written in its place."""
+    src = _write(tmp_path, "app.rvl", BASE)
+    out = tmp_path / "existing.revlbundle"
+    out.mkdir()
+    (out / "unrelated.txt").write_text("gone", encoding="utf-8")
+    B.build_bundle([src], str(out), force=True, env=dict(KEY))
+    # old contents cleared, real bundle in place
+    assert not (out / "unrelated.txt").exists()
+    assert (out / "source").is_dir()
+    assert B.verify_bundle(str(out), env=dict(KEY)).ok
+
+
+def test_empty_out_dir_is_written_without_force(tmp_path):
+    """An empty --out directory (and a fresh path) still bundles with no
+    --force, the guard only fires on a non-empty directory."""
+    src = _write(tmp_path, "app.rvl", BASE)
+    out = tmp_path / "empty.revlbundle"
+    out.mkdir()  # exists but empty
+    B.build_bundle([src], str(out), env=dict(KEY))
+    assert (out / "source").is_dir()
+    assert B.verify_bundle(str(out), env=dict(KEY)).ok
+
+
 # ------------------------------------------------------------- backend / topology
 
 def test_backend_selection_narrows_the_emitted_set(tmp_path):
