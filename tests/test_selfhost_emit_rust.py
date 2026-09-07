@@ -139,10 +139,11 @@ CORPUS = [
     "strings.rvl",   # string `+` via format!, `${..}` interpolation, literals
     "lists.rvl",     # list literal, index, the sync arrow bound to a `let`
     "maps.rvl",      # the empty map literal and the Map/List generic type lowering
-    "perf_shapes.rvl",  # item 437 — the `== "lit"` literal borrow and the `+`
-                        #   self-append rewrite. 437 found NO fixture reached
-                        #   either shape, so the oracle stayed green over an
-                        #   unported optimisation; this closes that (item 429)
+    "perf_shapes.rvl",  # item 437 — the `== "lit"` literal borrow, the `+`
+                        #   self-append rewrite, and 437(d) the `==`/`!=`-operand
+                        #   index borrow. 437 found NO fixture reached these
+                        #   shapes, so the oracle stayed green over an unported
+                        #   optimisation; this closes that (item 429)
     "perf_index.rvl",   # item 437d — a List index read in a read-only position
                         #   (an `==`/`!=` operand, a builtin receiver) borrows
                         #   rather than cloning the element; the owned `return`/
