@@ -179,7 +179,7 @@ class _ModuleLoader:
 
     def __init__(self, sources: dict[str, str] | None = None,
                  profile: AdmissionProfile | None = None,
-                 profiles: dict[str, AdmissionProfile] | None = None) -> None:
+                 profiles: dict[str, AdmissionProfile | None] | None = None) -> None:
         self._cache: dict[str, _LoadedModule] = {}
         self._stack: list[str] = []
         # Keys are normalised to abspath ONCE here. Every lookup below is by
@@ -206,7 +206,7 @@ class _ModuleLoader:
         # abspath, looked up through `_profile_for`, which falls back to the
         # single `_profile` for every root not named — so a caller passing a bare
         # `profile=` (or nothing) is byte-identical to before this split.
-        self._profiles: dict[str, AdmissionProfile] = {
+        self._profiles: dict[str, AdmissionProfile | None] = {
             os.path.abspath(k): v for k, v in (profiles or {}).items()}
         self._root_paths: set[str] = set()
         # item 410: abspath -> the search-path ENTRY that resolved it, recorded
@@ -680,7 +680,7 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                   replacing: tuple[str, ...] = (),
                   sources: dict[str, str] | None = None,
                   profile: AdmissionProfile | None = None,
-                  profiles: dict[str, AdmissionProfile] | None = None) -> dict:
+                  profiles: dict[str, AdmissionProfile | None] | None = None) -> dict:
     """Compile a composition: all services and components across the files
     are checked and linked together (the composition manifest, DESIGN §4).
 
@@ -725,10 +725,16 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             per_root_profiles[ap] = profiles.get(p, profiles.get(ap))
         else:
             per_root_profiles[ap] = profile
-    loader = _ModuleLoader(
-        sources, profile,
-        profiles={ap: prof for ap, prof in per_root_profiles.items()
-                  if prof is not None})
+    # #640: hand the loader the FULL per-root map, INCLUDING explicit `None`
+    # overrides. Filtering `None` out here dropped an explicit trusted-`None`
+    # override back onto `_profile_for`'s fallback (the restrictive `profile`
+    # default), so a trusted root's legitimate extern was refused at LOAD time,
+    # before per-root enforcement could honour the override. An explicit `None`
+    # must survive as a distinct (inert-profile) entry, not become an absent key.
+    # Roots not named in `profiles` still resolve to `profile` via `_profile_for`
+    # whether their entry is present (value == `profile`) or absent, so this is
+    # byte-identical for the default and single-profile paths.
+    loader = _ModuleLoader(sources, profile, profiles=per_root_profiles)
     # item 396: mark every root abspath before loading, so the root-scoped
     # no-extern check and body-file resolution skip apply even to a root that is
     # reached as another root's `use` dependency.
@@ -962,8 +968,16 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     if profiles is None:
         _enforce_document(document, profile)
     else:
+        # #643: carry each component's owning ROOT (its declaring root abspath),
+        # not just that root's profile. Enforcement groups by ROOT so that two
+        # DISTINCT roots sharing one `AdmissionProfile` object stay isolated —
+        # one root's provision must not make another root's cross-root reach
+        # count as internal ("own") wiring. `seen_components[name]` is the path
+        # of the root module that declared the component (components are never
+        # imported), so its abspath is the canonical source-root owner.
         _enforce_document_per_root(document, {
-            name: per_root_profiles.get(os.path.abspath(path), profile)
+            name: (os.path.abspath(path),
+                   per_root_profiles.get(os.path.abspath(path), profile))
             for name, path in seen_components.items()})
     # roadmap 422 F7: which file each `use "stdlib/..."` actually got. ADDITIVE
     # and present only when one of them did not come from this compiler's own
