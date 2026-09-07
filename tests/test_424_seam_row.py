@@ -23,9 +23,15 @@ than left in the prose, because they bound what a forwarder can be:
     inner key (`isolate` binds one realm per key, so the same-key shape is
     `run.py:747`'s hole); and
   * the forwarder reaches the inner and observer keys, so G4 refuses it unless
-    the wrapped SERVICE declares a bound wide enough (D-424b.5 is the rule
-    change that would move that check onto the seam's `through` set; it is filed
-    for B3 and NOT made here). `test_a_narrow_bound_*` pins the current refusal.
+    the wrapped SERVICE declares a bound wide enough. `test_a_narrow_bound_*`
+    pins that refusal.
+
+§2.4's FALLBACK for D-424b.5 is ENFORCED here: a seam's declared `through` reach
+must be a SUBSET of the wrapped service's own `emission[...]` bound, so `through`
+names an enforced reach rather than a decorative one (`test_a_seam_through_*`).
+The WIDENING — checking the forwarder against `through` INSTEAD of the service,
+minting a bound the service did not declare — is the rule change reserved for
+the architect and needs 426 S5's `seam:` token; it is not made here.
 """
 
 from __future__ import annotations
@@ -358,15 +364,17 @@ composition Shop {
 def test_a_narrow_service_bound_refuses_the_forwarder(tmp_path):
     """The load-bearing measured fact (§2.2, §2.4). The forwarder reaches
     `db__seamed` and `obs`, so G4 refuses it against a service that declares
-    `emission[wire]` only. Moving that check onto the seam's `through` set is the
-    D-424b.5 rule change, filed for B3 and NOT made here; this pins the boundary
-    so the day it lands, something says so."""
+    `emission[wire]` only. This is the FALLBACK floor: G4 checks the forwarder
+    against the service declaration exactly as it checks any provider, and the
+    WIDENING that would move the check onto `through` is the architect's, not
+    made here. No `through` clause is written, so this pins the forwarder-vs-
+    service refusal alone (the `through`-subset refusal is its own test)."""
     write(tmp_path, services=DB_NARROW, inner=INNER_DB, obs=OBS, base="""
 composition Shop {
   use "services.rvl"
   row @inner from "inner.rvl" provides db__seamed
   row @obs from "obs.rvl" provides obs
-  seam @audit on key("db") observe with @obs through audit
+  seam @audit on key("db") observe with @obs
 }
 """)
     # Resolution and synthesis SUCCEED — the seam is admissible as a row.
@@ -378,6 +386,52 @@ composition Shop {
     message = str(excinfo.value)
     assert "`Db.execute` is declared `emission[wire]`" in message
     assert "db__seamed" in message
+
+
+# ------------------------- §2.4 fallback: `through` is bounded by the service
+
+def test_a_seam_through_reach_outside_the_service_bound_is_refused(tmp_path):
+    """§2.4's fallback for D-424b.5: a seam may declare `through` only over a
+    reach the wrapped service already grants. `Db.execute` declares
+    `emission[wire, db__seamed, obs]`, so a seam declaring `through payments` is
+    refused at RESOLUTION, naming the capability and the service — before G4 ever
+    runs. This is what makes 424(b)'s "reach is DECLARED and admitted" real: an
+    operator cannot claim a seam reaches a capability the service never gave."""
+    write(tmp_path, services=DB, inner=INNER_DB, obs=OBS, base="""
+composition Shop {
+  use "services.rvl"
+  row @inner from "inner.rvl" provides db__seamed
+  row @obs from "obs.rvl" provides obs
+  seam @audit on key("db") observe with @obs through obs, payments
+}
+""")
+    with pytest.raises(RevlError) as excinfo:
+        resolve(tmp_path)
+    message = str(excinfo.value)
+    assert "seam row `@audit` declares `through payments`" in message
+    assert "wrapped service `Db` does not grant" in message
+
+
+def test_a_bare_emission_service_leaves_through_unbounded(tmp_path):
+    """A method declared bare `emission` (no `[caps]`) grants "any capability",
+    so the fallback ceiling is UNBOUNDED and `through` cannot exceed it: a seam
+    over such a service admits whatever `through` it names. The forwarder still
+    passes G4 (a bare-`emission` method may emit anywhere)."""
+    write(tmp_path, services="""
+service Db { emission fn execute(q: Str) -> Str }
+service Obs { emission[log] fn saw(op: Str) }
+extern emission fn wire(q: Str) -> Str = @py { return "row" }
+extern emission fn log(s: Str) = @py { pass }
+""", inner=INNER_DB, obs=OBS, base="""
+composition Shop {
+  use "services.rvl"
+  row @inner from "inner.rvl" provides db__seamed
+  row @obs from "obs.rvl" provides obs
+  seam @audit on key("db") observe with @obs through anything, at, all
+}
+""")
+    row = next(r for r in resolve(tmp_path).rows if r.label == "audit")
+    assert row.seam["through"] == ["anything", "at", "all"]
 
 
 # ------------------------------------------- two seams on one edge collide (G2)
@@ -402,22 +456,25 @@ composition Shop {
     assert "`.::@b`" in message
 
 
-def test_through_is_carried_into_the_row_ir(tmp_path):
-    """B3's `through` bound has its SURFACE here: it parses and is carried into
-    the row and the IR. The G4-against-`through` CHECK (D-424b.5) is B3's and is
-    not wired, which the forwarder header states in the artifact itself."""
+def test_through_within_the_service_bound_is_carried_into_the_row_ir(tmp_path):
+    """`through` parses, is bounded by the service (§2.4's fallback, so every
+    named capability is in `Db`'s `emission[wire, db__seamed, obs]`), and is
+    carried into the row and the IR. The forwarder header states the enforced
+    fallback and that the WIDENING remains the architect's."""
     write(tmp_path, services=DB, inner=INNER_DB, obs=OBS, base="""
 composition Shop {
   use "services.rvl"
   row @inner from "inner.rvl" provides db__seamed
   row @obs from "obs.rvl" provides obs
-  seam @audit on key("db") observe with @obs through audit, net.log
+  seam @audit on key("db") observe with @obs through db__seamed, obs
 }
 """)
     table = resolve(tmp_path)
     row = next(r for r in table.rows if r.label == "audit")
-    assert row.seam["through"] == ["audit", "net.log"]
-    assert "filed for B3" in table.sources[row.source]
+    assert row.seam["through"] == ["db__seamed", "obs"]
+    src = table.sources[row.source]
+    assert "ENFORCED (§2.4's fallback)" in src
+    assert "reserved for the architect" in src
 
 
 # ------------------------------------------- the kind, called directly (§4)

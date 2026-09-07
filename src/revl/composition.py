@@ -630,6 +630,68 @@ def _observer_provision(rows: list["Row"], root: str,
     return None, None
 
 
+def _seam_reach_ceiling(service) -> frozenset | None:
+    """The capabilities the wrapped SERVICE already declares across its methods —
+    the emission bound a seam's `through` reach must stay within under §2.4's
+    fallback.
+
+    `None` means UNBOUNDED: some method is a bare `emission` ("any capability",
+    `capabilities is None`), so nothing in `through` can exceed it and the subset
+    check is vacuous. A plain `fn` method contributes nothing (its forwarder
+    emits nothing there to bound, and G4 refuses a seam over a pure method
+    anyway), and a method declaring `emission[caps]` contributes those caps.
+    """
+    ceiling: set[str] = set()
+    for method in service.methods.values():
+        if not method.emission:
+            continue
+        if method.capabilities is None:
+            return None  # bare `emission` == any capability, no ceiling
+        ceiling.update(method.capabilities)
+    return frozenset(ceiling)
+
+
+def _check_seam_through(service, seam, doc: str) -> None:
+    """§2.4's FALLBACK for D-424b.5 — the no-rule-change half, and the half that
+    IS buildable today. A seam's declared `through` reach must be a SUBSET of the
+    wrapped service's own declared emission bound.
+
+    G4 still checks the synthesized forwarder against the service declaration
+    exactly as it checks any provider (no rule change, so a seam still compiles
+    only where the service's bound already covers the crossing, §2.4). This adds
+    only that the operator's declared `through` may not claim a reach the service
+    never granted, so `through` names an ENFORCED reach rather than a decorative
+    one — 424(b)'s exit is an interception surface whose reach is DECLARED and
+    admitted, and this is the admission.
+
+    The WIDENING variant — checking the forwarder against `through` INSTEAD of
+    the service, letting the composition MINT a bound the service did not declare
+    — is the rule change §2.4 reserves for the architect, weakens transitive
+    purity of a plain `fn` across the seamed edge, and needs 426 S5's `seam:`
+    token to keep the panel from printing `clean` across the insertion. It is
+    not made here.
+    """
+    if not seam.through:
+        return
+    ceiling = _seam_reach_ceiling(service)
+    if ceiling is None:
+        return  # a bare `emission` method grants any capability
+    for cap in seam.through:
+        if cap not in ceiling:
+            declared = ", ".join(f"`{c}`" for c in sorted(ceiling)) or "<none>"
+            raise RevlError(
+                doc, seam.line,
+                f"seam row `@{seam.label}` declares `through {cap}`, a reach the "
+                f"wrapped service `{service.name}` does not grant (it declares "
+                f"{declared})",
+                hint="§2.4's fallback bounds a seam's `through` reach by the "
+                     "wrapped service's own `emission[...]` declaration: "
+                     "`through` may name only a capability the service already "
+                     "declares. Reaching a capability the service did NOT declare "
+                     "is the D-424b.5 WIDENING, reserved for the architect and "
+                     "dependent on 426 S5's `seam:` token (424 D-424b.5, §2.4)")
+
+
 def _resolve_seams(decl: CompositionDecl, doc: str, origin: str, root: str,
                    uses: list[str], rows: list["Row"]) -> dict:
     """item 424 B2: append the rows whose provider is a SYNTHESIZED FORWARDER,
@@ -710,6 +772,10 @@ def _resolve_seam(seam, catalog: dict, rows: list["Row"], decl: CompositionDecl,
             "not declared in this composition",
             hint="add a `use` for the file declaring the wrapped service")
     wrapped_decl = catalog[wrapped_service][0]
+    # §2.4's fallback for D-424b.5: the declared `through` reach must stay within
+    # the wrapped service's own emission bound. Enforced here at resolution,
+    # before synthesis, so the refusal names the seam row and the capability.
+    _check_seam_through(wrapped_decl, seam, doc)
 
     component, text = synthesize_provider(wrapped_decl, "seam", {
         "label": seam.label, "key": seam.key, "realm": seam.realm,

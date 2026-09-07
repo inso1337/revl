@@ -803,13 +803,18 @@ def _remote_header(service, label, key, host, capability, on_failure,
 # 2. **The forwarder reaches the inner and observer keys, so G4 bounds it.**
 #    A forwarder whose `provide` body emits through `<inner>` and `<obs>` is
 #    refused by G4 unless the WRAPPED SERVICE declares those in its
-#    `emission[...]` — which is the wrong owner (D-424b.5, §2.4). This slice
-#    does NOT make the D-424b.5 rule change (check the forwarder against the
-#    seam's declared `through` set instead of the service's declaration); it
-#    carries `through` into the row and the IR and leaves the check to B3. So a
-#    seam compiles today only where the service already declares a bound wide
-#    enough to cover the crossing — §2.4's stated fallback — and refuses
-#    otherwise with G4's own message. `test_424_seam_row.py` pins both halves.
+#    `emission[...]`. So a seam compiles only where the service already declares
+#    a bound wide enough to cover the crossing, and refuses otherwise with G4's
+#    own message — §2.4's FALLBACK, the no-rule-change floor. On top of that G4
+#    check, the fallback's other half is now ENFORCED at resolution
+#    (`composition._check_seam_through`): the seam's declared `through` reach
+#    must be a SUBSET of the service's own `emission[...]` bound, so `through` is
+#    an enforced reach rather than decorative. What is NOT made here is the
+#    D-424b.5 WIDENING — checking the forwarder against `through` INSTEAD of the
+#    service, letting the composition mint a bound the service did not declare —
+#    which weakens plain-`fn` transitive purity across the edge and needs 426
+#    S5's `seam:` token to stay auditable; it remains the architect's to take.
+#    `test_424_seam_row.py` pins each half.
 
 
 def check_seam_kind(kind: str, *, doc: str, line: int, label: str) -> None:
@@ -911,12 +916,16 @@ def _seam_header(service, params: dict) -> str:
             "//",
             f"// THROUGH: {', '.join('`' + _comment_safe(c) + '`' for c in through)}."
             "  The composition declares the reach the",
-            "//   forwarder may cross (D-424b.5). NOTE: this slice CARRIES the",
-            "//   bound into the row and the IR; checking the forwarder against it",
-            "//   instead of against the wrapped service's `emission[...]` is the",
-            "//   D-424b.5 rule change, filed for B3. Until it lands, G4 checks the",
-            "//   forwarder against the service declaration, so a seam compiles",
-            "//   only where that bound already covers the crossing (§2.4).",
+            "//   forwarder may cross (D-424b.5). ENFORCED (§2.4's fallback): this",
+            "//   `through` set is a SUBSET of the wrapped service's own",
+            "//   `emission[...]` bound — a `through` reach the service does not",
+            "//   grant is refused at resolution naming the capability. G4 still",
+            "//   checks the forwarder against the service declaration, so a seam",
+            "//   compiles only where that bound already covers the crossing. The",
+            "//   WIDENING — checking the forwarder against `through` INSTEAD of",
+            "//   the service, minting a bound the service did not declare — is",
+            "//   the rule change reserved for the architect and needs 426 S5's",
+            "//   `seam:` token; it is not made here.",
         ]
     return "\n".join(lines)
 

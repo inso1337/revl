@@ -755,10 +755,13 @@ class SeamRowDecl:
     observer: str                   # the `with @observer` row label
     line: int
     realm: str | None = None        # `key("k", realm: "r")`; None == shared realm
-    # D-424b.5 / slice B3: the reach the COMPOSITION grants the forwarder. Empty
-    # == the clause was not written. This slice CARRIES the set into the row and
-    # the IR; checking the forwarder against it rather than against the wrapped
-    # service's `emission[...]` is the D-424b.5 rule change, filed for B3.
+    # D-424b.5: the reach the COMPOSITION grants the forwarder. Empty == the
+    # clause was not written. §2.4's FALLBACK is enforced — the set must be a
+    # SUBSET of the wrapped service's own `emission[...]` bound, checked at
+    # resolution (`composition._check_seam_through`). The WIDENING (checking the
+    # forwarder against this set rather than the service, minting a bound the
+    # service did not declare) is the rule change reserved for the architect and
+    # needs 426 S5's `seam:` token; it is not made here.
     through: list[str] = field(default_factory=list)
 
 
