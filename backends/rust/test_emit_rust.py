@@ -110,24 +110,24 @@ def test_record_mode_off_is_byte_identical_and_on_adds_the_wal_sink():
 _JSONWIRE_RVL = Path(__file__).parent / "scenarios" / "jsonwire.rvl"
 _ROUTER_RVL = Path(__file__).parent / "scenarios" / "router.rvl"
 
-# item 167: a `#[test]` appended to the emitted router crate that boots the
-# three worker realms + Router, then drives the routed `worker` provider through
-# a probe plugin (the runtime has no root-level require). It proves the EMITTED
-# Router body distributes round-robin and fails over when a worker withdraws.
+# item 167 / item 449 / #596: a `#[test]` appended to the emitted router crate
+# that boots the three worker realms + Router, then drives the routed `worker`
+# through the emitted `realms(...)` proxy CONSTRUCTED DIRECTLY. The Router's
+# hand-written `provide worker { … }` body was dropped — a routes-carrying
+# component that also provides the routed key is refused at compile now, because
+# the body would be silently discarded at load — so the routed key is no longer
+# registered as a root single-realm service (a root-level require of it would
+# hang Pending forever). The sanctioned realization is the emitted
+# `RevlRouterRouterWorker` proxy, which lives in this same crate; the harness
+# constructs it exactly as the Router's own Apply body does
+# (`RevlRouterRouterWorker::_revl_new(ctx.clone())`) and exercises the real
+# routed call through it. It proves the EMITTED routing body distributes
+# round-robin and fails over when a worker withdraws. Mirrors the go tier's
+# router_test.go.fixture after #596.
 _ROUTER_TEST_MODULE = """
 #[cfg(test)]
 mod _revl_router_scenario {
     use super::*;
-    use std::sync::{Arc, Mutex};
-
-    fn probe(sink: Arc<Mutex<Vec<String>>>, n: usize) -> cordis::PluginHandle {
-        cordis::plugin_sync::<(), _>("Probe", cordis::Inject::new(["worker"]), move |ctx, _cfg| {
-            let svc = ctx.require::<Box<dyn Worker>>("worker")?;
-            let mut out = sink.lock().unwrap();
-            for i in 0..n { out.push(svc.call(format!("{}", i))); }
-            Ok(cordis::PluginOutput::none())
-        })
-    }
 
     fn load(root: &cordis::Context, name: &str) -> cordis::Fiber {
         let f = _revl_load(root, name, &serde_json::Value::Null).unwrap();
@@ -143,24 +143,26 @@ mod _revl_router_scenario {
         let _w3 = load(&root, "w3");
         let _router = load(&root, "router");
 
-        // the emitted Router body fans out round-robin across w1,w2,w3
-        let sink = Arc::new(Mutex::new(Vec::new()));
-        let p = root.plugin(probe(sink.clone(), 6), ());
-        p.wait().unwrap();
-        assert_eq!(*sink.lock().unwrap(),
+        // the sanctioned realization of the route: the emitted proxy, built the
+        // same way the Router's own Apply body builds it.
+        let router = RevlRouterRouterWorker::_revl_new(root.clone());
+
+        // the emitted routing body fans out round-robin across w1,w2,w3
+        let got: Vec<String> = (0..6).map(|i| router.call(format!("{}", i))).collect();
+        assert_eq!(got.iter().map(String::as_str).collect::<Vec<_>>(),
             vec!["w1:0","w2:1","w3:2","w1:3","w2:4","w3:5"]);
-        p.dispose().ok();
+
+        // G2 / item 449: the bare routed key is realized ONLY through the proxy;
+        // it is not registered as a root single-realm service, so resolving it
+        // on the bare root must come back empty.
+        assert!(root.get::<Box<dyn Worker>>("worker").unwrap().is_none());
 
         // withdraw w2 -> its realm resolves to a non-ACTIVE handle and drops
         // out; the next calls go to the survivors (reactive failover)
         w2.dispose().ok();
-        let sink2 = Arc::new(Mutex::new(Vec::new()));
-        let p2 = root.plugin(probe(sink2.clone(), 6), ());
-        p2.wait().unwrap();
-        let got = sink2.lock().unwrap().clone();
-        assert!(got.iter().all(|r| r.starts_with("w1:") || r.starts_with("w3:")), "{:?}", got);
-        assert!(!got.iter().any(|r| r.starts_with("w2:")), "{:?}", got);
-        p2.dispose().ok();
+        let got2: Vec<String> = (0..6).map(|_| router.call("x".to_string())).collect();
+        assert!(got2.iter().all(|r| r.starts_with("w1:") || r.starts_with("w3:")), "{:?}", got2);
+        assert!(!got2.iter().any(|r| r.starts_with("w2:")), "{:?}", got2);
     }
 }
 """
