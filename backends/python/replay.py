@@ -2278,6 +2278,32 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_cache_hit(self, entry: dict) -> dict:
+        """Append the ``cache-hit`` record when a cached read re-delivers a stored
+        result (item 310 slice 4, issue #97; design laundering point 5). Names the
+        entry it re-delivers — the SEAM path passes ``{key, method, grantIds}``,
+        the INTERIOR path ``{digest, token, extern, requestIds, component}`` — so
+        the audit joins a hit to the ``cache-fill`` that produced it. Consumes no
+        seq: like ``approval-emission`` it names a fact about a fire that did not
+        happen again (a hit crosses nothing). Fixes the pre-slice no-op where the
+        seam hit was counted in ``state()`` and recorded nowhere durable."""
+        record = {"record": "cache-hit", **entry}
+        self._write(record)
+        return record
+
+    def record_cache_fill(self, entry: dict) -> dict:
+        """Append the ``cache-fill`` record AFTER an interior-crossing miss fires
+        and stores its result (item 310 slice 4). Names the authority the miss
+        consumed (``requestIds``) alongside ``{digest, token, extern, component}``,
+        so the audit joins the fill to the ``approval-consumed`` spend behind it
+        (ordering invariant 2: consume before fill) and to any later ``cache-hit``
+        that re-delivers it (invariant 3: fill before hit). Consumes no seq — it
+        names a fact about the fire that just happened, like
+        ``approval-emission``."""
+        record = {"record": "cache-fill", **entry}
+        self._write(record)
+        return record
+
     def record_approval_emission(self, request_id: str, capability: str,
                                  component: str) -> dict:
         """Append the ``approval-emission`` record AFTER a typed-approval crossing

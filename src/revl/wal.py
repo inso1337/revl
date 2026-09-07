@@ -210,8 +210,58 @@ def read_wal(path: str) -> dict:
                 records.append(entry)
             else:
                 records.append(entry)
+    _check_cache_ordering(records, path)
     return {"header": header, "records": records,
             "complete": complete, "torn": torn}
+
+
+def _check_cache_ordering(records: list, path: str) -> None:
+    """The item-310 slice-4 (issue #97) interior-crossing WAL ordering gate, run
+    ahead of the roll-forward/roll-back decision (item 413), fail-closed via
+    :class:`WALIntegrityError`:
+
+    * **invariant 2, consume before fill.** A ``cache-fill`` naming a
+      ``requestId`` r must be preceded in the log by an ``approval-consumed`` r
+      (the deferred spend at the crossing, or the seam's own spend when the
+      authority was not deferrable). A fill with no spend behind it is impossible
+      by construction (no scope, no store), so observing one means a tampered or
+      corrupt log — an authorized-looking cache entry with no consent record.
+    * **invariant 3, fill before hit.** An interior ``cache-hit`` for digest d
+      must follow a ``cache-fill`` for d. A hit for an entry the log never saw
+      filled re-delivers a result no crossing ever produced.
+
+    A seam ``cache-hit`` (finding 1) carries ``key``/``method``, not
+    ``digest``/``requestIds``, so it is not subject to invariant 3 (the seam has
+    no ``cache-fill`` twin). The pass reads no authority into being — it only
+    refuses a log whose cache facts contradict the consent record."""
+    consumed: set = set()
+    filled: set = set()
+    for entry in records:
+        kind = entry.get("record")
+        if kind == "approval-consumed":
+            rid = entry.get("requestId")
+            if rid is not None:
+                consumed.add(rid)
+        elif kind == "cache-fill":
+            for rid in entry.get("requestIds") or []:
+                if rid not in consumed:
+                    raise WALIntegrityError(
+                        f"WAL {path} violates cache invariant 2 (consume before "
+                        f"fill): a cache-fill names requestId {rid!r} with no "
+                        f"preceding approval-consumed for it. A cached entry with "
+                        f"no consent record behind it is impossible by "
+                        f"construction; refusing to read it as authorized.")
+            digest = entry.get("digest")
+            if digest is not None:
+                filled.add(digest)
+        elif kind == "cache-hit":
+            digest = entry.get("digest")
+            if digest is not None and digest not in filled:
+                raise WALIntegrityError(
+                    f"WAL {path} violates cache invariant 3 (fill before hit): a "
+                    f"cache-hit for digest {digest!r} has no preceding cache-fill "
+                    f"for it. A hit re-delivers a fill the log never recorded; "
+                    f"refusing to read a result no crossing produced.")
 
 
 def _last_newline_offset(handle, size: int) -> int:

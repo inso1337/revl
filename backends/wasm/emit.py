@@ -5698,6 +5698,7 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         from revl.errors import RevlError
         from revl.session_commit import (
             refuse_approval_on_ownerless_tier,
+            refuse_cache_extern_on_ownerless_tier,
             refuse_deferred_on_ownerless_tier,
         )
     except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
@@ -5709,11 +5710,13 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         from revl.errors import RevlError
         from revl.session_commit import (
             refuse_approval_on_ownerless_tier,
+            refuse_cache_extern_on_ownerless_tier,
             refuse_deferred_on_ownerless_tier,
         )
     try:
         refuse_deferred_on_ownerless_tier(ir, "wasm")
         refuse_approval_on_ownerless_tier(ir, "wasm")
+        refuse_cache_extern_on_ownerless_tier(ir, "wasm")
     except RevlError as exc:
         raise EmitError(exc.message) from None
 

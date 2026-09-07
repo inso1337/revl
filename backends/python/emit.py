@@ -1000,6 +1000,16 @@ class _ComponentEmitter:
             ext["name"]: ext for ext in (externs or [])
             if ext.get("class") == "emission" and ext.get("deferred")
         }
+        # item 310 slice 4 (issue #97): cache-declaring externs by name (the
+        # interior crossing). A fire of one is wrapped in
+        # `_revl_frame.cache_crossing(token, name, args, lambda: <fire>)` so the
+        # owner-carried gate can settle the hit/miss transaction at the crossing.
+        # Absent/empty for every program that declares no cache-declaring extern,
+        # so their emission stays byte-identical.
+        self.cache_externs = {
+            ext["name"]: ext for ext in (externs or [])
+            if ext.get("cache") is not None
+        }
         # item 254 (docs/design/254-witnessed-network.md): emission externs that
         # DECLARE a `compensate` slot, by name. An `emit` of one registers the
         # extern's OWN declared compensation onto the activation frame's LIFO at
@@ -1406,6 +1416,22 @@ class _ComponentEmitter:
             if self._in_async and not self._in_arrow \
                     and name in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
                 return f"(await {name}({args}))"
+            # item 310 slice 4 (issue #97): a cache-declaring extern call is the
+            # interior crossing — wrap it in `_revl_frame.cache_crossing` so the
+            # owner gate settles the hit/miss transaction. The outer lambda binds
+            # the args once (`_revl_a`) for both the digest and the fire. Skipped
+            # inside a G6-pure arrow (no `_revl_frame`), for an async cached extern
+            # (a sync wrapper cannot await — refused at lower), and off the emit
+            # step's approval-edge path (`_emit_fire` builds cache-outside there).
+            raw_name = expr.get("name")
+            spec = self.cache_externs.get(raw_name)
+            if spec is not None and not spec.get("async") and not self._in_arrow:
+                caps = spec.get("capabilities") or []
+                token = caps[0] if caps else raw_name
+                argtuple = f"({args},)" if args else "()"
+                return (f"(lambda _revl_a: _revl_frame.cache_crossing("
+                        f"{token!r}, {raw_name!r}, _revl_a, "
+                        f"lambda: {name}(*_revl_a)))({argtuple})")
             return f"{name}({args})"
         if kind == "match":
             # the ADT eliminator, now legal in component/method bodies; the
@@ -1984,9 +2010,38 @@ class _ComponentEmitter:
         step carries a `with a` approval edge (item 246), the fire is wrapped in
         `_revl_frame.approval_crossing(a, "C", lambda: <fire>)`: the frame checks
         and consumes the token durably before the body runs (Decision 3). No edge
-        emits byte-identically to before."""
-        fire = self._expr(step.get("expr"), where)
+        emits byte-identically to before.
+
+        item 310 slice 4 (issue #97): a cache-declaring extern call is wrapped in
+        `_revl_frame.cache_crossing(...)` by `_expr` itself (so an expression-
+        bodied `fn get(...) = emit read_db(...)` — lowered to a `return` of a
+        plain call — is wrapped too, not just the statement `emit` form). The one
+        case `_expr` cannot see is the `with a` approval EDGE, which lives on the
+        emit STEP: there the cache wrapper must be OUTSIDE the approval crossing
+        (a hit crosses nothing and so consumes no typed approval), so it is built
+        here."""
+        expr = step.get("expr")
         approval = step.get("approval")
+        name = (expr.get("name")
+                if isinstance(expr, dict) and expr.get("kind") == "fn" else None)
+        cached = name is not None and name in self.cache_externs \
+            and not self.cache_externs[name].get("async") and not self._in_arrow
+        if approval is not None and cached:
+            # cache OUTSIDE approval: build the nesting directly, bypassing the
+            # `_expr` cache wrap (which would put approval outside).
+            ext = self.cache_externs[name]
+            caps = ext.get("capabilities") or []
+            token = caps[0] if caps else name
+            callee = _ident(name, f"{where}: function")
+            argexprs = [self._expr(arg, where) for arg in expr.get("args") or []]
+            argtuple = "(" + "".join(f"{a}, " for a in argexprs) + ")"
+            handle = self._expr(approval.get("expr"), where)
+            cap = approval.get("capability")
+            inner = (f"lambda: _revl_frame.approval_crossing({handle}, {cap!r}, "
+                     f"lambda: {callee}(*_revl_a))")
+            return (f"(lambda _revl_a: _revl_frame.cache_crossing({token!r}, "
+                    f"{name!r}, _revl_a, {inner}))({argtuple})")
+        fire = self._expr(expr, where)   # `_expr` wraps a cached extern call
         if approval is None:
             return fire
         handle = self._expr(approval.get("expr"), where)
