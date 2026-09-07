@@ -151,6 +151,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="the project root row provenance and origins are recorded "
              "against (default: the working directory)")
     composition.add_argument(
+        "--panel", action="store_true",
+        help="item 426 S5 (§8): print the AUTHORITY PANEL comparing the base "
+             "composition to the folded candidate — the TRUST BASIS line, the "
+             "re-keyed crossing tokens with `config:` value digests, the "
+             "fail-closed headline, and the always-printed BLIND SPOTS block. "
+             "The panel is the approval surface for applying layers")
+    composition.add_argument(
+        "--trust-host-code", action="store_true", dest="trust_host_code",
+        help="item 426 §8.8: admit every non-first-party (stack-layer) row as "
+             "reviewed first-party code, lifting the untrusted-author profile. "
+             "This changes the panel's SHAPE (TRUST BASIS becomes CLAIMED) and "
+             "forfeits the word `clean` — the panel cannot say what a trusted "
+             "host body does")
+    composition.add_argument(
         "--set", action="append", default=[], metavar="@ROW.FIELD=VALUE",
         dest="overrides",
         help="item 426 S2, the INVOCATION OVERLAY (the last level): override "

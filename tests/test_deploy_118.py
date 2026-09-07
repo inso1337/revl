@@ -1701,3 +1701,96 @@ def test_participant_world_write_is_atomic(tmp_path, monkeypatch):
     assert json.loads(world.read_text(encoding="utf-8")) == {"db:row1": True}
     # and the failed write left no sibling temp file behind
     assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+# --- issue #627: durability failures are EXPLICIT, never swallowed ----------
+
+
+def test_participant_world_write_confirms_durable_publication(tmp_path):
+    """Issue #627: a normal write does not merely swap the file atomically, it
+    fsyncs the temp file AND fsyncs the containing directory so the rename is
+    durably published. On POSIX a successful write reports confirmed-durable
+    (``True``); a caller can tell that apart from published-but-unknown."""
+    from revl import _deploy_participant as dp  # noqa: PLC0415
+
+    world = tmp_path / "db.world.json"
+    part = dp._Participant({"identity": "db", "world": str(world),
+                            "wal": str(tmp_path / "db.wal"), "effects": []})
+
+    result = part._write_world({"db:row1": True})
+    assert result is True  # confirmed durable on POSIX, not a bare None
+    assert json.loads(world.read_text(encoding="utf-8")) == {"db:row1": True}
+
+
+def test_participant_world_write_surfaces_temp_fsync_failure(tmp_path, monkeypatch):
+    """Issue #627: the prior code CAUGHT the temp-file ``fsync`` failure and
+    continued, returning as if the bytes were durable. Inject a file-sync
+    failure and assert it can no longer produce a false durable-success: it
+    raises, the previous generation survives whole, and no temp residue is left
+    (the atomic-replacement fix is preserved)."""
+    from revl import _deploy_participant as dp  # noqa: PLC0415
+
+    world = tmp_path / "db.world.json"
+    part = dp._Participant({"identity": "db", "world": str(world),
+                            "wal": str(tmp_path / "db.wal"), "effects": []})
+    assert part._write_world({"db:row1": True}) is True
+
+    def _fsync_boom(fd):
+        raise OSError("simulated file sync failure")
+
+    monkeypatch.setattr(dp.os, "fsync", _fsync_boom)
+    with pytest.raises(dp.WorldDurabilityError):
+        part._write_world({"db:row2": True})
+
+    # no false success: the previous generation is intact, no torn/empty file
+    assert json.loads(world.read_text(encoding="utf-8")) == {"db:row1": True}
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_participant_world_write_surfaces_directory_fsync_failure(tmp_path, monkeypatch):
+    """Issue #627: after the atomic ``os.replace`` the containing directory is
+    fsynced so the new entry survives a crash. Inject a DIRECTORY-sync failure
+    (the second fsync — the temp-file fsync succeeds first, verifying
+    replacement precedes directory sync) and assert it surfaces rather than
+    reporting durable success. The content is published (the swap already
+    happened) but durability is not falsely confirmed."""
+    from revl import _deploy_participant as dp  # noqa: PLC0415
+
+    world = tmp_path / "db.world.json"
+    part = dp._Participant({"identity": "db", "world": str(world),
+                            "wal": str(tmp_path / "db.wal"), "effects": []})
+    assert part._write_world({"db:row1": True}) is True
+
+    real_fsync = dp.os.fsync
+    calls = {"n": 0}
+
+    def _fsync_second_boom(fd):
+        calls["n"] += 1
+        if calls["n"] == 1:   # the temp file fsync succeeds (ordering: swap then dir)
+            return real_fsync(fd)
+        raise OSError("simulated directory sync failure")
+
+    monkeypatch.setattr(dp.os, "fsync", _fsync_second_boom)
+    with pytest.raises(dp.WorldDurabilityError):
+        part._write_world({"db:row2": True})
+
+    # the swap DID happen (replacement precedes the directory fsync), so the new
+    # content is published — but a durability failure was surfaced, not swallowed
+    assert calls["n"] == 2
+    assert json.loads(world.read_text(encoding="utf-8")) == {"db:row2": True}
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_participant_world_write_reports_unknown_durability_off_posix(tmp_path, monkeypatch):
+    """Issue #627: where the platform has no directory-fsync semantics we must
+    not IMPLY durability. Simulate a non-POSIX platform and assert the directory
+    publish reports published-but-durability-unknown (``False``), which a caller
+    can distinguish from confirmed-durable (``True``), instead of pretending the
+    rename is durable."""
+    from revl import _deploy_participant as dp  # noqa: PLC0415
+
+    # Build the target Path BEFORE faking the platform: os.name drives pathlib's
+    # concrete class, so we exercise only _fsync_parent_dir's early return.
+    target = tmp_path / "db.world.json"
+    monkeypatch.setattr(dp.os, "name", "nt")
+    assert dp._fsync_parent_dir(target) is False  # not a false durable claim

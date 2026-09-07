@@ -574,6 +574,70 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     return model
 
 
+def fold_ambient_composition(model: TaintModel, ambient_services,
+                             taint_strict: bool = False) -> None:
+    """Fold the AMBIENT composition's service operations into an already-built
+    `TaintModel`, so a crossing's derived sink/source class is PRESERVED across
+    the manifest/composition boundary.
+
+    A per-turn source (item 330's `admit`, and `revl_load`/`revl_swap` with a
+    running manifest) is compiled against `manifest=<running IR>`: the running
+    composition's services are ambient — in scope without redeclaration — while
+    their PROVIDER BODIES live in the running components and are NOT in the turn's
+    program. `extract_and_normalize` reads only the turn's own declarations, so a
+    crossing the turn reaches purely through an ambient service operation
+    (`emit sh.exec(emit fs.read(p))`) contributed no sink and no source: the
+    model came back empty, `TaintModel.active` was false, and the flow walk was
+    skipped entirely. That is a G9 laundering across the boundary — an untrusted
+    `fs`/`web`/`net`/… value piped into a `shell`/`exec`/`terminal` sink, admitted
+    even under `taint_strict`.
+
+    The ambient IR retains each operation's `emission` flag and its
+    `capabilities`, which is exactly what the Slice-D derived-class rule reads, so
+    the boundary reconstructs the SAME sink/source classes the operation would
+    carry in-composition. A turn that only forwards to a granted provider is thus
+    judged against the provider's real capability surface rather than a stripped
+    one. Keyed by operation name, exactly as the in-program service loop above and
+    as the flow walk's call-site lookup (`_callee_name` returns the method name).
+
+    Only the DERIVED (capability-scoped) classes are folded, and only under
+    `taint_strict` — the explicit `Trusted[T]`/`Untrusted[T]` qualifiers are
+    already stripped from the IR by the time a composition is a manifest, so they
+    cannot be recovered here, and the profile that admits an untrusted author
+    (`AdmissionProfile.untrusted_author`) always sets `taint_strict`. With
+    `taint_strict` off this is a no-op, so a trusted `load`/`swap` against a
+    running manifest is byte-identical.
+
+    `setdefault` throughout: a name the turn's own declarations already classified
+    keeps that classification (the turn's extraction ran first), so re-declaring a
+    service in the turn never loosens what the ambient surface contributes.
+    """
+    if not taint_strict:
+        return
+    for svc in (ambient_services or {}).values():
+        for method in getattr(svc, "methods", {}).values():
+            if not getattr(method, "emission", False):
+                continue
+            caps = getattr(method, "capabilities", None)
+            # a shell / exec / terminal / policy-scoped operation is a derived
+            # SINK on every parameter (injected authority must not receive an
+            # untrusted value) — the ambient sibling of the extern rule.
+            if _sink_of(caps) is not None:
+                for i, (_pname, ptype) in enumerate(method.params):
+                    model.sinks.setdefault(method.name, {}).setdefault(i, ptype)
+                model.sink_kind.setdefault(
+                    method.name, _sink_kind_for(method.name, caps))
+            # a web / net / fs / model / input-scoped emission mints its coarse
+            # origin on its RETURN — the source the turn cannot otherwise see,
+            # because the provider body that reaches the real source extern is not
+            # in the turn's program.
+            if caps and method.returns is not None:
+                origin = _origin_of(caps)
+                if origin in _SOURCE_CLASS_SCOPES \
+                        and method.name not in model.sources:
+                    model.sources[method.name] = origin
+
+
 def _warn_on_literal_secret_default(comp, cfield) -> None:
     """Warn when a `Secret[T]` config field's default is a literal (issue #192).
 

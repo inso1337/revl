@@ -7,14 +7,18 @@ Mapping (DESIGN.md §7, docs/design-v2-realms.md, docs/syntax-2.0.md):
 
 - service     -> `public interface <Name> { <ret> <m>(<params>); }`
 - component   -> `public final class <Name>Plugin implements Plugin { apply(ctx) }`
-- requires    -> `ctx.get(<Svc>.class)` (manifest load order guarantees the
-                 provider is already active)
-- provides    -> `ctx.provide(ServiceKey.of(<Svc>.class), new <Impl>(...))`
+- requires    -> `ctx.get(<Svc>.class, "<key>")` (manifest load order
+                 guarantees the provider is already active). The provision key
+                 is part of the lookup: when two providers share one service
+                 type, the required key selects the right one (the same routing
+                 the go/rust/py tiers do — a require binds the provision named
+                 by its key, not merely the first provider of the class).
+- provides    -> `ctx.provide(ServiceKey.of(<Svc>.class, "<key>"), new <Impl>(...))`
 - effect/undo -> `Context.EffectScope` (`ctx.effect()`) + `fx.track(...)`;
                  pure v1 components keep the byte-identical
                  `Disposables.composite(...)` teardown path
 - isolate     -> `ctx = ctx.isolate(<Svc>.class, <realm>)`
-- intercept   -> `ctx.intercept(ServiceKey.of(<Svc>.class), <metadata>)`
+- intercept   -> `ctx.intercept(ServiceKey.of(<Svc>.class, "<key>"), <metadata>)`
 - types       -> static final record classes / sealed variant interfaces
 - functions   -> `public static` methods on `Components`
 - match       -> Java 21 pattern `switch` expressions (no `default` when the
@@ -1099,8 +1103,14 @@ def _v3_builtin(method: object, target: str, args: list[str],
         return f"revlMapRemove({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): the receiver
     # lowers to a long, and String.valueOf(long) is exact decimal —
-    # including Long.MIN_VALUE, no |MIN| detour needed.
+    # including Long.MIN_VALUE, no |MIN| detour needed. A Float receiver
+    # (review item 12) renders through revlFtoa, the canonical ECMAScript
+    # Number::toString a `${aFloat}` interpolation uses, so `x.to_str()` and
+    # `${x}` agree byte-for-byte (String.valueOf(double) would print Java's
+    # `3.0`/`1.0E30`, which diverges from every other tier).
     if method == "to_str":
+        if recv == "Float":
+            return f"revlFtoa({target})"
         return f"String.valueOf({target})"
     raise EmitError(f"unknown builtin method {method!r}")
 
@@ -1441,8 +1451,9 @@ def _is_float_expr(node: object) -> bool:
 
 
 def _uses_float_interp(ir: dict) -> bool:
-    """True when any `${…}` interpolates a provably-`Float` expression, so the
-    canonical Float renderer is emitted only where it is used."""
+    """True when the canonical Float renderer (revlFtoa) is needed: any `${…}`
+    interpolates a provably-`Float` expression, or a `Float.to_str()` builtin
+    renders one (review item 12) — either way it is emitted only where used."""
     found = False
 
     def walk(node) -> None:
@@ -1456,6 +1467,10 @@ def _uses_float_interp(ir: dict) -> bool:
                             and part[0] == "expr" and _is_float_expr(part[1])):
                         found = True
                         return
+            if (node.get("kind") == "builtin" and node.get("method") == "to_str"
+                    and node.get("recv") == "Float"):
+                found = True
+                return
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -4782,17 +4797,50 @@ def _method_body_lines(
     _pin_value_map_locals(method.get("body"), method.get("params"), v3_ctx)
     rename = {b: f"this.{b}" for b in _binds(env.component)}
     rename.update({local: f"this.{local}" for local in env.reqs})
-    for stmt in method.get("body") or []:
+
+    def render(steps: list, lines: list[str], pad: str) -> None:
+      for stmt in steps or []:
         step = stmt.get("step")
+        if step in ("if", "while", "for", "break", "continue"):
+            # issue #548: control flow over the method's value computation. The
+            # arms are pure and their inner steps are ordinary method steps, so
+            # they recurse through `render` — the same shape as the fn-grammar
+            # `_v3_stmt` if/while/for (javac ignores the indentation, added only
+            # for readability).
+            if step == "break":
+                lines.append(f"{pad}break;")
+            elif step == "continue":
+                lines.append(f"{pad}continue;")
+            elif step == "if":
+                lines.append(f"{pad}if ({_expr(stmt['cond'], v3_ctx, rename, env)}) {{")
+                render(stmt.get("then") or [], lines, pad + "    ")
+                if stmt.get("else"):
+                    lines.append(f"{pad}}} else {{")
+                    render(stmt["else"], lines, pad + "    ")
+                lines.append(f"{pad}}}")
+            elif step == "while":
+                lines.append(f"{pad}while ({_expr(stmt['cond'], v3_ctx, rename, env)}) {{")
+                render(stmt.get("body") or [], lines, pad + "    ")
+                lines.append(f"{pad}}}")
+            else:  # for
+                bind = _ident(stmt["bind"], "loop binding")
+                # `var` lets javac infer the element type from the Iterable —
+                # correct for every `List[T]` and free of a surface->Java type map.
+                lines.append(
+                    f"{pad}for (var {bind} : "
+                    f"{_expr(stmt['iterable'], v3_ctx, rename, env)}) {{")
+                render(stmt.get("body") or [], lines, pad + "    ")
+                lines.append(f"{pad}}}")
+            continue
         if step == "return":
             if stmt.get("expr") is None:
-                lines.append("return;")
+                lines.append(f"{pad}return;")
             elif returns_void:
                 # `void` methods run the expression for its effect.
-                lines.append(f"{_expr(stmt['expr'], v3_ctx, rename, env)};")
-                lines.append("return;")
+                lines.append(f"{pad}{_expr(stmt['expr'], v3_ctx, rename, env)};")
+                lines.append(f"{pad}return;")
             else:
-                lines.append(f"return {_expr(stmt['expr'], v3_ctx, rename, env)};")
+                lines.append(f"{pad}return {_expr(stmt['expr'], v3_ctx, rename, env)};")
         elif step == "effect":
             wit = _witnessed_extern_for(stmt.get("acquire"), v3_ctx.witnessed)
             if wit is not None:
@@ -4853,7 +4901,7 @@ def _method_body_lines(
             # a plain value binding inside a method body
             name = _ident(stmt.get("name"), "binding")
             raw = stmt.get("value")
-            if step == "let" and _bind_local_arrow(v3_ctx, name, raw, lines, "", rename, env):
+            if step == "let" and _bind_local_arrow(v3_ctx, name, raw, lines, pad, rename, env):
                 continue
             v3_ctx.arrows.pop(name, None)
             value = _expr(raw, v3_ctx, rename, env)
@@ -4864,13 +4912,16 @@ def _method_body_lines(
                 decl = _empty_map_decl_type(stmt, v3_ctx.map_locals)
             else:
                 decl = _adt_binding_type(raw, v3_ctx) or "var"
-            lines.append(f"{decl} {name} = {value};" if step == "let"
-                         else f"{name} = {value};")
+            lines.append(f"{pad}{decl} {name} = {value};" if step == "let"
+                         else f"{pad}{name} = {value};")
         elif step == "provide":
             raise EmitError("provide steps are not allowed inside method bodies")
         else:
             raise EmitError(f"unknown step in method body: {step!r}")
+
+    render(method.get("body") or [], lines, "")
     return lines
+
 
 def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad: str) -> None:
     kind = step.get("step")
@@ -5164,8 +5215,8 @@ def _emit_component_stmts(
                    for f in _provider_config_fields(component)]
             )
             out.append(
-                f"{pad}fx.track(ctx.provide(ServiceKey.of({service}.class), "
-                f"new {struct}({ctor_args})));"
+                f"{pad}fx.track(ctx.provide(ServiceKey.of({service}.class, "
+                f"{_string(key)}), new {struct}({ctor_args})));"
             )
         elif kind == "if":
             out.append(f"{pad}if ({_expr(step['cond'], v3_ctx, None, env)}) {{")
@@ -5364,6 +5415,15 @@ def _emit_component_modern(
     out: list[str] = []
 
     for key, service in env.provides.items():
+        # item 449 (G2): a routed provided key is realized by its router class
+        # (emitted below from `env.routes`), never a hand-written provide body —
+        # a body on the routed key is refused at compile now. The sanctioned
+        # router shape carries no `provide <key>` step, so emitting a provider
+        # class here would produce an empty `implements <Service>` with no
+        # method override that javac rejects. Skip it; the router class is the
+        # provider. Mirrors the go tier, which emits only from body provide steps.
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"public static final class {struct} implements {service} {{")
@@ -5461,7 +5521,8 @@ def _emit_component_modern(
     for key, metadata in intercept.items():
         service = env.reqs[key]
         out.append(
-            f"        ctx.intercept(ServiceKey.of({service}.class), {_metadata_lit(metadata)});"
+            f"        ctx.intercept(ServiceKey.of({service}.class, {_string(key)}), "
+            f"{_metadata_lit(metadata)});"
         )
     out.append("        Context.EffectScope fx = ctx.effect();")
     if needs_frame:
@@ -5476,7 +5537,7 @@ def _emit_component_modern(
             out.append(f"        {service} {local} = "
                        f"new RevlRouter{cname}{_camel(local)}(ctx);")
             continue
-        out.append(f"        {service} {local} = ctx.get({service}.class);")
+        out.append(f"        {service} {local} = ctx.get({service}.class, {_string(local)});")
     # A8 self-revert: cordis4j's ctx.effect() scope is NOT owned by the
     # fiber until apply returns it, so a failing activation must dispose
     # the accumulated effects itself before the failure routes to the
@@ -5570,6 +5631,12 @@ def _emit_component(
     out: list[str] = []
 
     for key, service in env.provides.items():
+        # item 449 (G2): a routed provided key is realized by its router class,
+        # never an empty provide body (refused at compile). Routed components
+        # always take the modern path (they carry `isolate`), so this guard is a
+        # no-op here, but it keeps the two emitters consistent.
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"public static final class {struct} implements {service} {{")
@@ -5622,7 +5689,7 @@ def _emit_component(
     out.append("    @Override")
     out.append("    public Disposable apply(Context ctx) {")
     for local, service in env.reqs.items():
-        out.append(f"        {service} {local} = ctx.get({service}.class);")
+        out.append(f"        {service} {local} = ctx.get({service}.class, {_string(local)});")
     # A8 self-revert: undos accumulate as the steps land; if a later step
     # throws mid-activation, the accumulated inverses run (reverse order)
     # before the failure routes to the runtime — cordis4j only owns what
@@ -5655,8 +5722,8 @@ def _emit_component(
             # modern path tracks it via fx.track(ctx.provide(...)); dropping
             # it would leave the provision registered after unload.
             out.append(
-                f"            undos.add(ctx.provide(ServiceKey.of({service}.class), "
-                f"new {struct}({ctor_args})));"
+                f"            undos.add(ctx.provide(ServiceKey.of({service}.class, "
+                f"{_string(key)}), new {struct}({ctor_args})));"
             )
             disposers.append(key)
         else:

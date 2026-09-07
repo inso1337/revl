@@ -558,12 +558,29 @@ patch the rows this document defines.
 | the authority panel | crossing tokens re-keyed by row label, a `config:` token carrying a value digest, a fail-closed headline, and a printed blind-spots block | confinement, and roadmap 428 F3 |
 | distribution | a layer is a truc, the `[trucs]` origin namespace becomes real, the pin becomes mandatory | roadmap 428 F3 |
 
-Two surface clauses the design defines are still not grammar, and writing one is
-a parse error rather than a silently ignored clause: `open`
-(which fields a third-party layer may configure) and `reach` (the
-composition-level authority bound). `place` and `variant` are the same. Each
-arrives with the slice that gives it meaning, because a clause that parses and
-does nothing is worse than one that refuses.
+`open` (which fields a third-party layer may `configure`, §8.6) and `reach` (the
+composition-level authority bound, §8.3) are now grammar, landed with the
+authority panel (S5). Both name CONFIG FIELDS and are checked against the
+component's declared config at resolution — a clause naming a field the
+component does not declare is a refusal there, not a silent no-op.
+
+    row @db from "trucs/pg/component.rvl" provides db
+      config { url: "postgres://primary:5432/app", pool: 8 }
+      open   { url, pool }
+      reach  { url: host("primary:5432") }
+
+A `configure` that moves a `reach`-bounded field to a value whose host is
+outside the bound is a refusal at resolution ("widen the bound in your site
+layer, or refuse the layer"). One recorded deviation from §8.3's sketch: the
+`reach` clause is keyed by CONFIG FIELD, not by extern name. Resolution is
+header-only and cannot trace a value from a field to the extern it feeds
+without lowering the body; the operator-facing bound is naturally written on the
+field the operator configures. This is the same kind of surface deviation S2
+already recorded (`configure … with { … }`, `layer NAME for …`).
+
+`place` and `variant` are still not grammar, and writing one is a parse error
+rather than a silently ignored clause — a clause that parses and does nothing is
+worse than one that refuses. Each arrives with the slice that gives it meaning.
 
 Activation is unchanged and stays whole-generation for anything but a pure
 addition. That is a property of G7, not of effort: a withdrawn component's fiber

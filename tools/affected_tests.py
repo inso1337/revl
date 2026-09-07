@@ -86,6 +86,10 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_inprocess_gate_rust.py",
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
+    "tests/test_rescore_no_self_score.py",
+    # Drives the codegen-perf harness (bench/codegen/python/run.py) to gate the
+    # roadmap-436 / issue-71 python-emitter findings, so a bench change re-runs it.
+    "tests/test_71_codegen_perf_findings.py",
     # These self-host emit oracles read real bench corpus programs
     # (bench/results/... and bench/codegen/...) as additional emit witnesses,
     # so a bench change must re-run them.

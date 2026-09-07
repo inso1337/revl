@@ -313,11 +313,58 @@ def _deferred_register_kwargs(ext: dict, args: list) -> str:
     return ", " + ", ".join(parts)
 
 
+# The Python builtins this backend emits BARE into generated code — as the
+# lowering of a language construct, never from a user node. `.length()` lowers
+# to `len(...)`, `${x}` interpolation and `.to_str()` to `str(...)`, `.sort()`
+# to `sorted(...)`, `%` to `abs(...)`, a `Float` cast to `float(...)`, an
+# `assert`'s operand dump to `repr(...)`, the `Int` bound to `int(...)`, and the
+# list/dict/bool/min/max value forms to their namesakes; the always-or-gated
+# preamble helpers and emitted classes reach for `isinstance`/`type`/`hash`/
+# `getattr`/`globals`/`callable`/`object`/`bytes`/`tuple`/`set`/`reversed`/
+# `range`/`ord`/`hasattr` and the exception roots the same bare way.
+#
+# Each of these is an unqualified module-global reference in the emitted module,
+# so a user identifier of the same name that reaches module scope (a top-level
+# `fn`, an emitted type/variant class, an extern) SHADOWS the builtin the
+# emitter is relying on — the emitter's own `len(...)` then resolves to the user
+# fn, silently, with nothing failing until a downstream value is wrong. The
+# emitter's own call sites are literal text and cannot be threaded, so the fix
+# is at the user-identifier end: `_mangle` renames any user identifier that
+# would collide, at its declaration and every use alike (it is the one rename
+# site both flow through), exactly as it already does for Python keywords. The
+# emitter's bare `len(...)` is untouched and keeps resolving to the builtin.
+#
+# `next` is deliberately ABSENT: it is emitted bare only inside the routed-
+# require router (a self-contained emitted class, item 167), and it is also a
+# common, legitimate revl identifier (a `next` callback parameter, a `next`
+# record field) whose every checked-in use is a local/field that shares no scope
+# with that class. Renaming those would be churn with no collision behind it, so
+# `next` stays off the list until a colliding *module-scope* spelling motivates
+# a narrower guard.
+_EMITTED_BUILTINS = frozenset({
+    "AttributeError", "Exception", "OverflowError", "RuntimeError", "TypeError",
+    "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "globals",
+    "hasattr", "hash", "int", "isinstance", "len", "list", "max", "min",
+    "object", "ord", "range", "repr", "reversed", "set", "sorted", "str",
+    "tuple", "type",
+})
+
+
 def _mangle(name: str) -> str:
     """Rename a syntactically-valid identifier that collides with a *Python*
     reserved word, so a valid revl identifier that happens to be a Python
     keyword (`from`, `class`, `lambda`, …) emits and RUNS instead of crashing
     at emit (roadmap item 165).
+
+    The same append-`_` rename also lifts a user identifier off a *Python
+    builtin the emitter emits bare* (`_EMITTED_BUILTINS`): a top-level `fn len`
+    used to become a module-global `def len` that shadowed the emitter's own
+    `len(...)` (the lowering of `.length()`), so `s.length()` silently returned
+    whatever the user fn did. Escaping the collider — at its declaration and at
+    every use, since both reach this one function — leaves the emitter's bare
+    `len(...)` bound to the builtin. A name that names no keyword and no such
+    builtin is returned byte-for-byte unchanged, so a module that collides with
+    neither is emitted exactly as before.
 
     The scheme is the A3 append-`_` rename `src/revl/lower.py::_safe_name` (and
     `backends/java/emit.py::_fn_name`) already use for revl-keyword bindings.
@@ -333,25 +380,54 @@ def _mangle(name: str) -> str:
     a wrong-value bug, not a compile error.
 
     The injective rule: escape a name iff the name OR any name reachable from
-    it by dropping trailing `_` is a keyword, and escape it by exactly ONE `_`.
-    That splits the identifier space in two halves that cannot meet. Names
-    whose underscore-stripped root is a keyword shift up one rung of the
-    `kw`/`kw_`/`kw__` ladder (`lambda`->`lambda_`, `lambda_`->`lambda__`),
-    which is injective because the shift is; every other name is returned
-    byte-for-byte unchanged, and can never equal a shifted name because a
-    shifted name's root is a keyword and an unchanged name's root is not.
-    The output is never itself a keyword: no Python keyword ends in `_` except
-    the soft `_`, and `_` is only produced from the empty name, which is not an
-    identifier. `_` itself has keyword root `_` and so escapes to `__`, exactly
-    as the old loop did.
+    it by dropping trailing `_` is a keyword OR an `_EMITTED_BUILTINS` name, and
+    escape it by exactly ONE `_`. That splits the identifier space in two halves
+    that cannot meet. Names whose underscore-stripped root is a keyword or such a
+    builtin shift up one rung of the `x`/`x_`/`x__` ladder (`lambda`->`lambda_`,
+    `lambda_`->`lambda__`; `len`->`len_`, `len_`->`len__`), which is injective
+    because the shift is; every other name is returned byte-for-byte unchanged,
+    and can never equal a shifted name because a shifted name's root is a keyword
+    or builtin and an unchanged name's root is neither. The output is never
+    itself a keyword or a guarded builtin: none of those end in `_` (the sole
+    soft-keyword exception, `_`, is only produced from the empty name, which is
+    not an identifier). `_` itself has keyword root `_` and so escapes to `__`,
+    exactly as the old loop did.
 
-    Only a name whose root is a keyword can change, so no existing program that
-    does not name a keyword changes its emitted output. This is TARGET keywords
-    only; the host roots (`Map`/`Pool`/`Job`) are not keywords and stay guarded
-    in `_ident`."""
+    Only a name whose root is a keyword or a guarded builtin can change, so no
+    existing program that names neither changes its emitted output. This is
+    TARGET keywords and the builtins THIS backend emits bare only; the host roots
+    (`Map`/`Pool`/`Job`) are not keywords and stay guarded in `_ident`.
+
+    Two sites are held to the keyword-only rung (`_mangle_kw`), because their
+    name is NOT a Python binding that can shadow a bare-emitted builtin and it
+    carries a contract this rename must not perturb: a provide-method `def`,
+    reached by the runtime under its service-contract name (renaming it would
+    break dispatch — the emitted `def` has to match the SERVICES table key), and
+    a record field annotation, whose values are dict-keyed by the RAW field name
+    so the annotation is cosmetic. Every other user identifier — including the
+    provision/event keys that become `_revl_ctx` string keys and attribute reads
+    — is renamed uniformly at its definition and every use, which is internally
+    consistent (both ends pass through here) and never fires for those keys in
+    practice, since the builtins that are also `_CONTEXT_MEMBERS` are refused as
+    provision keys upstream. Keyword escaping applies at every site regardless,
+    since a Python keyword is illegal in any of them."""
+    return _mangle_escaping(name, _EMITTED_BUILTINS)
+
+
+def _mangle_kw(name: str) -> str:
+    """`_mangle` without the builtin guard: keyword escaping only. For a name
+    emitted as an attribute or a runtime string key (see `_mangle`), which
+    cannot shadow a bare-emitted builtin and so must keep its spelling."""
+    return _mangle_escaping(name, frozenset())
+
+
+def _mangle_escaping(name: str, extra: "frozenset[str]") -> str:
+    """The shared injective append-`_` rung: escape iff `name`, or any name
+    reachable from it by dropping trailing `_`, is a keyword or in `extra`."""
     root = name
     while root:
-        if keyword.iskeyword(root) or keyword.issoftkeyword(root):
+        if (keyword.iskeyword(root) or keyword.issoftkeyword(root)
+                or root in extra):
             return name + "_"
         if not root.endswith("_"):
             break
@@ -387,7 +463,11 @@ def _inverse_lambda(step: dict, slot: str, params: str = "") -> str:
     return f"lambda {bound}" if bound else "lambda"
 
 
-def _ident(name: Any, what: str) -> str:
+def _ident(name: Any, what: str, *, attr: bool = False) -> str:
+    """Validate and rename one user identifier. `attr=True` marks a name emitted
+    as an attribute the runtime dispatches by its contract spelling (a provide-
+    method name) — it takes the keyword-only rung, since it cannot shadow a
+    bare-emitted builtin and renaming it would break that dispatch."""
     if not isinstance(name, str) or not name.isidentifier():
         raise EmitError(f"{what} {name!r} is not a usable Python identifier")
     # The emitter's scaffolding lives in the `_revl*` namespace (`_revl_ctx`,
@@ -405,7 +485,7 @@ def _ident(name: Any, what: str) -> str:
     # component/method binding path emits it verbatim like the rest.
     if name in _RESERVED or (name.startswith("_") and name.lstrip("_").startswith("revl")):
         raise EmitError(f"{what} {name!r} collides with emitter scaffolding")
-    return _mangle(name)
+    return _mangle_kw(name) if attr else _mangle(name)
 
 
 def _snake(name: str) -> str:
@@ -506,6 +586,10 @@ def _scan_uses(root) -> _UsesScan:
                     scan.bounded_int = True
                 elif method == "to_int32":
                     scan.bounded_int32 = True
+                elif method == "to_str" and node.get("recv") == "Float":
+                    # a Float `.to_str()` renders through `_revl_ftoa`, the
+                    # same canonical helper `${aFloat}` pulls in.
+                    scan.float_interp = True
                 scan.builtins.add(method)
             elif kind == "optcall":
                 method = node.get("method")
@@ -951,8 +1035,14 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     if method in _CHECKED_DIVS:
         return f"_revl_{method}({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): python ints on
-    # this tier are already i64-clamped, so str() is the exact decimal.
+    # this tier are already i64-clamped, so str() is the exact decimal. A
+    # Float receiver (review item 12) renders through `_revl_ftoa`, the same
+    # canonical ECMAScript Number::toString a `${aFloat}` interpolation uses,
+    # so `x.to_str()` and `${x}` agree byte-for-byte (str(float) would print
+    # python's `3.0`/`1e+30`, which diverges from every other tier).
     if method == "to_str":
+        if recv == "Float":
+            return f"_revl_ftoa({target})"
         return f"str({target})"
     raise EmitError(f"unknown builtin method {method!r}")
 
@@ -2339,7 +2429,7 @@ class _ComponentEmitter:
         out.add(indent, f"_revl_ctx.set({name!r}, {cls}())")
 
     def _method(self, out: _Lines, indent: int, provide_name: str, method: dict, where: str) -> None:
-        name = _ident(method.get("name"), f"{where}: method name")
+        name = _ident(method.get("name"), f"{where}: method name", attr=True)
         service = self.services.get(self.provides.get(provide_name)) or {}
         spec = (service.get("methods") or {}).get(name)
         if spec is None:
@@ -2515,10 +2605,60 @@ class _ComponentEmitter:
             if not method_is_async:
                 raise EmitError(f"{where}: 'await' is not allowed inside sync provide-method bodies (A1)")
             out.add(indent, f"await {self._expr(step.get('expr'), where)}")
+        elif kind in ("if", "while", "for", "break", "continue"):
+            # issue #548: control flow over the method's value computation. The
+            # arms hold only value steps (registration is refused at lowering),
+            # so the rendering matches the fn-grammar `_fn_stmt` if/while/for
+            # exactly — the only difference is `self._expr`/`_ident` (method
+            # stratum) in place of the module `_expr`/`_mangle`.
+            self._method_control(out, indent, provide_name, method_name, step,
+                                 where, method_is_async)
         elif kind == "provide":
             raise EmitError(f"{where}: nested 'provide' inside a method body is not lowerable")
         else:
             raise EmitError(f"{where}: unknown step {kind!r}")
+
+    def _method_control(
+        self,
+        out: _Lines,
+        indent: int,
+        provide_name: str,
+        method_name: str,
+        step: dict,
+        where: str,
+        method_is_async: bool,
+    ) -> None:
+        """Render an `if`/`while`/`for`/`break`/`continue` step in a provide-
+        method body (issue #548). Byte-for-byte the fn-grammar shape."""
+        kind = step.get("step")
+
+        def block(steps: list) -> None:
+            if not steps:
+                out.add(indent + 1, "pass")
+                return
+            for s in steps:
+                self._method_step(out, indent + 1, provide_name, method_name,
+                                   s, where, method_is_async)
+
+        if kind == "if":
+            out.add(indent, f"if {self._expr(step.get('cond'), where)}:")
+            block(step.get("then") or [])
+            els = step.get("else")
+            if els is not None:
+                out.add(indent, "else:")
+                block(els)
+        elif kind == "while":
+            out.add(indent, f"while {self._expr(step.get('cond'), where)}:")
+            block(step.get("body") or [])
+        elif kind == "for":
+            binder = _ident(step.get("bind"), f"{where}: for bind")
+            out.add(indent,
+                    f"for {binder} in {self._expr(step.get('iterable'), where)}:")
+            block(step.get("body") or [])
+        elif kind == "break":
+            out.add(indent, "break")
+        elif kind == "continue":
+            out.add(indent, "continue")
 
     # -- component ----------------------------------------------------------
 
@@ -2817,7 +2957,7 @@ def _emit_types(types: dict) -> "_Lines":
                 # rename never has to agree with a runtime attribute access,
                 # and it stays INJECTIVE so two revl fields can never collapse
                 # onto one annotation (item 165)
-                out.add(1, f"{_mangle(field)}: {_ann(ftype)}")
+                out.add(1, f"{_mangle_kw(field)}: {_ann(ftype)}")
             emitted.add(name)
         else:
             out.add(0, f"class {name}:")

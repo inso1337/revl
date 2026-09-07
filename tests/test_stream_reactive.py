@@ -733,12 +733,16 @@ def test_go_and_rust_lower_the_blocking_tier(tmp_path):
     assert "sub_undo.close(); Ok(())" in rust
 
 
-@pytest.mark.parametrize("tier", ["java", "typescript"])
+@pytest.mark.parametrize("tier", ["java"])
 def test_unimplemented_tiers_refuse_honestly(tier):
     """A tier Slice 3 did NOT lower must refuse the stream IR kind by name, not
     fall through to the generic `unsupported expression kind` — a half-wired
     tier that emits something whose bracket inverse was never proven reachable
-    is worse than an honest refusal."""
+    is worse than an honest refusal.
+
+    item 130 (roadmap #81): `typescript` is no longer here — it now carries a
+    real `Stream` runtime and lowers the fan-in (see the ts section below).
+    java stays the honest refusal."""
     emit = _tier_emit(tier)
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_FANIN, "s.rvl"))
@@ -761,8 +765,11 @@ component C {
 """
 
 
-@pytest.mark.parametrize("tier", ["java", "typescript"])
+@pytest.mark.parametrize("tier", ["java"])
 def test_source_only_program_is_refused_not_silently_emitted(tier):
+    # item 130 (roadmap #81): `typescript` graduated off this refusal — its
+    # `runtime.ts` now carries `Stream`, so a source-only program EMITS (see
+    # `test_ts_lowers_the_source_only_program`). java stays refused.
     emit = _tier_emit(tier)
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_SOURCE_ONLY, "s.rvl"))
@@ -832,6 +839,124 @@ def test_blocking_tiers_honour_a_declared_buffer(tier):
         "  await sub.next()\n"
         "}\n", "s.rvl"))
     assert ('"error", 3)' in src) or ('"error", 3usize)' in src)
+
+
+# ===========================================================================
+# The ts REACTIVE tier (item 130, roadmap #81): a faithful async-generator
+# mirror of the py reference (design §4.6), NOT a blocking erasure like go/rust.
+# It lowers the core protocol (subscribe / next / close + the cancellation-first
+# race), the Slice 2 derived-combinator chain + backpressure policies, the
+# Slice 3 `merge` fan-in, and the Slice 4 plain `every … in` iteration form. The
+# Slice 5 `on … as` typed-event handler and the §4.5 durable `replay` are still
+# the py reference tier's — the first is refused by name here, the second is a
+# frontend refusal (a provider must declare it) that never reaches the emitter.
+# ===========================================================================
+
+def _ts():
+    return _tier_emit("typescript")
+
+
+def test_ts_lowers_the_source_only_program():
+    """The item-416a honest refusal is gone for ts: `runtime.ts` carries a real
+    `Stream`, so `Stream.source()` opens a provider through `host.Stream` rather
+    than naming a host object that does not exist."""
+    code = _ts().emit(compile_source(_SOURCE_ONLY, "s.rvl"))
+    assert "host.Stream.source()" in code
+    assert "src.close()" in code
+
+
+def test_ts_emits_the_cancellation_first_subscription():
+    """The core protocol: `subscribe` opens a single-consumer subscription
+    through `host.Stream.subscribe`, passing `ctx` so a parked `next` observes
+    owner withdrawal, and the bracket inverse is `sub.close()` — the
+    cancellation-first close the guarantee rests on (design §4.6)."""
+    code = _ts().emit(compile_source(_CONSUMER, "s.rvl"))
+    assert 'host.Stream.subscribe(src, "error", ctx)' in code
+    assert "() => src.close()" in code
+    assert "() => sub.close()" in code
+    # the `await sub.next()` lands, then the iteration boundary yields (A1)
+    assert "await sub.next()" in code
+
+
+def test_ts_emits_the_fan_in_inside_the_subscription():
+    """Slice 3: the `merge(a, b)` fan-in is a derived stream opened INSIDE the
+    subscription, so `sub.close()` unwinds it off the one bracket."""
+    code = _ts().emit(compile_source(_FANIN, "s.rvl"))
+    assert 'host.Stream.subscribe(host.Stream.merge(a, b), "error", ctx)' in code
+    assert "() => sub.close()" in code
+
+
+def test_ts_merge_nests():
+    code = _ts().emit(compile_source("""
+    component C {
+      let a = effect Stream.source() undo a.close()
+      let b = effect Stream.source() undo b.close()
+      let c = effect Stream.source() undo c.close()
+      let sub = subscribe merge(merge(a, b), c) undo sub.close()
+      await sub.next()
+    }
+    """, "s.rvl"))
+    assert "host.Stream.merge(host.Stream.merge(a, b), c)" in code
+
+
+def test_ts_lowers_the_combinator_chain_and_backpressure():
+    """Slice 2: unlike the blocking tiers (which refuse the chain and the lossy
+    policies), the async mirror carries them — the derived chain is `stages`,
+    the declared capacity is `capacity`, each appended only when present."""
+    code = _ts().emit(compile_source("""
+    component C {
+      let a = effect Stream.source() undo a.close()
+      let sub = subscribe a.map(x => x + 1).filter(x => x > 0).take(3) policy drop_oldest buffer 5 undo sub.close()
+      await sub.next()
+    }
+    """, "s.rvl"))
+    assert 'host.Stream.subscribe(a, "drop_oldest", ctx, {' in code
+    assert '["map", ' in code and '["take", 3]' in code and '["filter", ' in code
+    assert "capacity: 5" in code
+
+
+def test_ts_lowers_the_block_drain_window():
+    """The `block`-policy drain interval is `drainMs`, driven by the same
+    deterministic clock the ts timer runtime already ships."""
+    code = _ts().emit(compile_source("""
+    component C {
+      let a = effect Stream.source() undo a.close()
+      let sub = subscribe a policy block drain 5s undo sub.close()
+      await sub.next()
+    }
+    """, "s.rvl"))
+    assert 'host.Stream.subscribe(a, "block", ctx, { drainMs: 5000 })' in code
+
+
+def test_ts_a_slice_1_subscription_omits_the_options_object():
+    """Byte discipline: a subscription with no chain / capacity / drain emits the
+    plain three-argument call, never an empty `{}`."""
+    code = _ts().emit(compile_source(_CONSUMER, "s.rvl"))
+    assert 'host.Stream.subscribe(src, "error", ctx)' in code
+    assert 'host.Stream.subscribe(src, "error", ctx, {' not in code
+
+
+def test_ts_emits_the_iteration_form():
+    """Slice 4: `every … in` is a `while (true)` over `await sub.next()`. Three
+    load-bearing lines: the `yield` sits immediately after the await (a divert
+    while parked abandons the loop, A1); a `Closed` terminal ENDS the loop before
+    the body (`host.Stream.isClosed`); a `Faulted` is not tested — it THROWS out
+    of `next`, failing the activation and reverting the subscription bracket."""
+    code = _ts().emit(compile_source(_ITER, "s.rvl"))
+    assert "while (true) {" in code
+    assert "const o = await sub.next()" in code
+    assert "yield () => {}  // iteration boundary (A1)" in code
+    assert "if (host.Stream.isClosed(o)) break" in code
+    # the item enters the body only after the terminal test
+    assert code.index("host.Stream.isClosed(o)") < code.index("ctx.sink.write(o)")
+
+
+def test_ts_the_iteration_body_forces_an_async_generator():
+    """The await lives inside the loop, not at top level, so the async-generator
+    detection must see the `stream-iter` step or the body would be a sync
+    `function*` with an `await` in it (a tsc error)."""
+    code = _ts().emit(compile_source(_ITER, "s.rvl"))
+    assert "async function* ()" in code
 
 
 # ===========================================================================
@@ -1141,11 +1266,14 @@ def test_rust_still_refuses_the_typed_event_handler_by_name():
     assert "`on … as` typed-event handler" in msg and "backend py" in msg
 
 
-@pytest.mark.parametrize("tier", ["java", "typescript", "wasm"])
+@pytest.mark.parametrize("tier", ["java", "wasm"])
 def test_the_unlowered_tiers_still_refuse_the_iteration_program(tier):
-    """These three refuse the whole stream surface, and the subscription the
+    """These two refuse the whole stream surface, and the subscription the
     loop needs is refused before the loop is reached — so an iteration program
-    gets the same honest refusal a Slice 1 one does."""
+    gets the same honest refusal a Slice 1 one does.
+
+    item 130 (roadmap #81): `typescript` left this set — it lowers the plain
+    `every … in` iteration form (see `test_ts_emits_the_iteration_form`)."""
     emit = _tier_emit(tier)
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_ITER, "s.rvl"))
@@ -1657,9 +1785,25 @@ def test_go_refuses_a_dropped_stream_component_rather_than_emitting_a_stub():
     assert "drop the component" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("tier", ["java", "typescript", "wasm"])
+@pytest.mark.parametrize("tier", ["java", "wasm"])
 def test_the_unlowered_tiers_still_refuse_a_handler_program(tier):
     emit = _tier_emit(tier)
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_EVENT, "s.rvl"))
     assert "suspends a fiber" in str(excinfo.value)
+
+
+def test_ts_refuses_the_handler_program_by_name_not_as_a_whole_surface():
+    """item 130 (roadmap #81): the ts tier lowers subscribe / source / merge /
+    the plain `every … in`, but NOT the Slice 5 `on … as` typed-event handler:
+    its schema-and-dedup contract gate is the py reference tier's. So an event
+    program is refused by NAME (like go and rust), never with the whole-surface
+    `suspends a fiber` message — and never half-wired to a `Stream.contract`
+    this tier's runtime does not carry."""
+    emit = _tier_emit("typescript")
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_EVENT, "s.rvl"))
+    msg = str(excinfo.value)
+    assert "suspends a fiber" not in msg
+    assert "unsupported" not in msg
+    assert "`on … as` typed-event handler" in msg and "backend py" in msg

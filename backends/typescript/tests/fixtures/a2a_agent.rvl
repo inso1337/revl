@@ -99,10 +99,12 @@
 // fault at the boundary; the generated body refuses to poll, refuses to
 // resume, and refuses to guess.
 //
-// A skill is transcribed as text in, text out, because that is all an
-// Agent Card describes. It carries no parameter or result schema, so
-// nothing richer is available to transcribe and nothing richer is
-// invented.
+// A skill is transcribed one `Part` in, one `Part` out: a `text/*`
+// mode as `Str`, a single binary media type as `Bytes` (an A2A file
+// `Part`, inline base64). A `DataPart` (structured JSON) needs the
+// canonical tagged encoding (slice C1) and is refused, not flattened;
+// a card carries no parameter or result schema beyond the modes, so
+// nothing richer is available to transcribe and nothing is invented.
 //
 // COLOUR: EVERY OPERATION BELOW IS `async`, AND THAT IS PART OF THE
 // SERVICE, NOT AN IMPLEMENTATION DETAIL.
@@ -129,13 +131,15 @@ service InvoiceAgent {
   // skill `invoice-lookup` — Invoice lookup
   // tags (the agent's own claim): billing
   // `emission` with NO inverse: a remote effect has no local undo (see the header).
-  // The result is `Untrusted[Str]` — the peer is not this composition's trust domain.
+  // A `Str` message in, an `Untrusted[Str]` reply out — the peer is not
+  // this composition's trust domain. A `Bytes` side is an A2A file `Part`.
   // `async`: a network round trip SUSPENDS on this tier, so callers need an
   // async context (see the header).
   emission async fn invoice_lookup(message: Str) -> Untrusted[Str]
   // skill `draft-reminder` — Draft reminder
   // `emission` with NO inverse: a remote effect has no local undo (see the header).
-  // The result is `Untrusted[Str]` — the peer is not this composition's trust domain.
+  // A `Str` message in, an `Untrusted[Str]` reply out — the peer is not
+  // this composition's trust domain. A `Bytes` side is an A2A file `Part`.
   // `async`: a network round trip SUSPENDS on this tier, so callers need an
   // async context (see the header).
   emission async fn draft_reminder(message: Str) -> Untrusted[Str]

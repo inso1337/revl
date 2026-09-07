@@ -1252,8 +1252,18 @@ _BUILTIN_SIG = {
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): decimal
     # spelling, total over the whole i64 range including Int.MIN. A method
     # on the Int family — the same dispatch div_trunc rides — because revl
-    # has no free-function namespace to pollute.
-    "to_str": ("Int", [], "Str"),
+    # has no free-function namespace to pollute. Spelled for two receiver
+    # families (like `to_int`): the Int decimal AND the Float rendering
+    # (review item 12, the "Float is one-way" wall — a Float could enter
+    # arithmetic but never render back). The Float row emits the SAME
+    # canonical ECMAScript `Number::toString` every tier already produces for
+    # a `${aFloat}` interpolation (docs/strings.md), so the two spellings
+    # agree byte-for-byte; the receiver head selects the row, exactly as it
+    # does for `to_int`.
+    "to_str": {
+        "Int": ("Int", [], "Str"),
+        "Float": ("Float", [], "Str"),
+    },
 }
 
 
