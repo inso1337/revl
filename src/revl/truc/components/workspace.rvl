@@ -5,7 +5,8 @@
 
 use "../externs.rvl" {
   host_manifest_read, host_read, host_exists, host_read_sources,
-  host_commit_add, host_commit_rm, host_write_assembly, host_print
+  host_commit_add, host_commit_rm, host_write_assembly, host_print,
+  host_stack_check, host_apply
 }
 
 pub service Workspace {
@@ -16,6 +17,11 @@ pub service Workspace {
   emission fn commit_add(projectDir: Str, plan: Str) -> Str
   emission fn commit_rm(projectDir: Str, plan: Str) -> Str
   emission fn write_assembly(projectDir: Str, manifest: Str) -> Str
+  // 426 S6: resolve/admit the project's composition layer stack. The
+  // resolution and admission are revl.composition's (decision 7); the report
+  // comes back as a planner `Report` the dispatch prints and returns.
+  emission fn stack_check(projectDir: Str) -> Str
+  emission fn apply(projectDir: Str, trustHostCode: Bool) -> Str
   emission fn print(text: Str)
 }
 
@@ -28,6 +34,8 @@ component Workspace provides ws: Workspace {
     fn commit_add(projectDir, plan) = emit host_commit_add(projectDir, plan)
     fn commit_rm(projectDir, plan) = emit host_commit_rm(projectDir, plan)
     fn write_assembly(projectDir, manifest) = emit host_write_assembly(projectDir, manifest)
+    fn stack_check(projectDir) = emit host_stack_check(projectDir)
+    fn apply(projectDir, trustHostCode) = emit host_apply(projectDir, trustHostCode)
     fn print(text) = emit host_print(text)
   }
 }

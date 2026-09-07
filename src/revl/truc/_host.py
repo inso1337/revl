@@ -221,6 +221,124 @@ def write_assembly(project_dir: str, manifest_json: str) -> str:
     return "written"
 
 
+# -- composition layers: truc's distribution front doors (426 S6) -----------
+
+def _entry_composition(project_dir: str) -> str:
+    """The composition document a truc project applies: the single entry file
+    named in truc.toml `[assembly].entry`.
+
+    426 decision 7 (§7): distribution is truc's and SEMANTICS are the
+    composition's. truc owns *which* file this is, the vendored trucs beside it
+    and the truc.lock that pins them; `revl.composition` owns resolution and
+    admission. Both `apply` and `stack check` hand the entry document to the
+    composition engine and report its verdict verbatim — truc holds no opinion
+    about layer resolution that revl does not (the same premise `admit` rests
+    on: same process, same compiler)."""
+    manifest = json.loads(toml_manifest(project_dir))
+    entry = manifest.get("entry") or []
+    if not entry:
+        raise ValueError("truc.toml [assembly].entry names no composition "
+                         "document to apply")
+    return entry[0]
+
+
+def _render_stack(table: object) -> str:
+    """A header-only rendering of a resolved row table: the rows with their
+    provenance trail and the wiring, no component body lowered (426 §3.3). The
+    format follows `revl layer check`; truc adds only the leading line naming
+    the composition it resolved."""
+    lines = [f"truc: stack resolves — {table.name} "  # type: ignore[attr-defined]
+             f"(origin `{table.origin}`, {len(table.rows)} rows)",
+             "ROWS"]
+    for row in table.rows:  # type: ignore[attr-defined]
+        lines.append(f"  {row.qualified:<24} {row.component}  ({row.source})")
+        if any(level for level, _, _ in row.provenance):
+            trail = " -> ".join(f"{op} by `{layer}` (L{level})"
+                                for level, layer, op in row.provenance)
+            lines.append(f"  {'':<24}   {trail}")
+    lines.append("WIRING")
+    for label, edges in table.wiring().items():  # type: ignore[attr-defined]
+        claims = ", ".join(edges["claims"]) or "nothing"
+        needs = ", ".join(f"`{k}`" for k in edges["requires"]) or "nothing"
+        lines.append(f"  {label:<24} claims {claims}; requires {needs}")
+    lines.append("RESOLVED     header-only: no component body was lowered "
+                 "(run 'truc apply' to admit the rows)")
+    return "\n".join(lines)
+
+
+def stack_check(project_dir: str) -> str:
+    """`truc stack check` — resolve the entry composition's declared layer
+    stack HEADER-ONLY and report a collision before anything is admitted
+    (426 §8, S6: "report a collision at edit time before anything is fetched").
+
+    The pure fold never calls the gate (§3.3), so this can only over-refuse: a
+    peer conflict (exit test 6), an address that resolves to nothing (exit test
+    5), the vendored-dir jail (exit test 15) and the mandatory truc.lock pin
+    (exit test 17) are the resolution-time refusals, each naming the layer. A
+    clean stack prints the resolved wiring and writes nothing. The report shape
+    is the planner's `Report` {code, message, sources, commit}."""
+    from revl.composition import resolve_file  # noqa: PLC0415
+    from revl.errors import RevlError  # noqa: PLC0415
+
+    try:
+        path = _entry_composition(project_dir)
+    except (OSError, ValueError) as error:
+        return json.dumps({"code": 1, "message": f"truc: {error}",
+                           "sources": "", "commit": ""})
+    try:
+        table = resolve_file(path, os.path.abspath(project_dir))
+    except RevlError as error:
+        return json.dumps({
+            "code": 1,
+            "message": f"truc: refused — the layer stack does not resolve:\n"
+                       f"{error}",
+            "sources": "", "commit": ""})
+    return json.dumps({"code": 0, "message": _render_stack(table),
+                       "sources": "", "commit": ""})
+
+
+def apply(project_dir: str, trust_host_code: bool) -> str:
+    """`truc apply` — resolve the entry composition's layer stack and ADMIT it
+    (426 §8, S6). Every gate fires inside `revl.composition`, unchanged: the
+    mandatory truc.lock pin (exit test 17) and the vendored-dir jail (exit test
+    15) at resolution, and the untrusted-author confinement profile (exit test
+    13, CRITICAL A) at admission, so a stack layer's declared-`pure` `@py` body
+    that would exfiltrate has no reachable spelling. A layer shipping a host
+    body is refused by default; `--trust-host-code` lifts that (the §8.8 shape
+    change), exactly as `revl composition --admit --trust-host-code`.
+
+    All-or-nothing: on a clean admit the applied composition manifest is written
+    to build/assembly.json (via the planner's `sources` slot); on any refusal
+    the slot is "" and build/ is untouched. truc adds no admission opinion of
+    its own — it reports the composition's verdict."""
+    from revl.composition import admit_composition  # noqa: PLC0415
+    from revl.errors import RevlError  # noqa: PLC0415
+
+    try:
+        path = _entry_composition(project_dir)
+    except (OSError, ValueError) as error:
+        return json.dumps({"code": 1, "message": f"truc: {error}",
+                           "sources": "", "commit": ""})
+    thc = bool(trust_host_code)
+    try:
+        document = admit_composition(path, os.path.abspath(project_dir),
+                                     confine=True, trust_host_code=thc)
+    except RevlError as error:
+        return json.dumps({
+            "code": 1,
+            "message": f"truc: refused — the layer stack would not admit:\n"
+                       f"{error}",
+            "sources": "", "commit": ""})
+    manifest = document.get("manifest") or {}
+    order = " -> ".join(manifest.get("loadOrder") or [])
+    basis = ("CLAIMED (host code trusted by --trust-host-code)" if thc
+             else "MEASURED (non-first-party rows confined)")
+    msg = (f"truc: applied — the layer stack admitted through the gate "
+           f"[{basis}]; load order {order}; wrote build/assembly.json")
+    return json.dumps({"code": 0, "message": msg,
+                       "sources": json.dumps(manifest), "commit": ""})
+
+
 def commit_add(project_dir: str, plan_json: str) -> str:
     """Execute an `add` commit plan: vendor the registry entry, write the
     lock row, append the `[trucs]` entry to `truc.toml`.

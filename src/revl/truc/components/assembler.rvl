@@ -16,6 +16,8 @@ pub service Assembler {
   emission fn rm(name: Str) -> Int
   emission fn assemble() -> Int
   emission fn assemble_check() -> Int
+  emission fn apply(trustHostCode: Bool) -> Int
+  emission fn stack_check() -> Int
   emission fn unknown(cmd: Str) -> Int
 }
 
@@ -95,8 +97,29 @@ component Assembler
       return plan.report_code(r)
     }
 
+    // §8/S6 — resolve + admit the project's composition layer stack. Every
+    // gate (the pin, the vendored-dir jail, the confinement profile) lives in
+    // revl.composition; the host returns a `Report` and, on ok, the applied
+    // manifest in `sources`. write_assembly is a no-op on the "" a refusal
+    // returns, so build/ is untouched on refusal (all-or-nothing).
+    fn apply(thc) {
+      let r = emit ws.apply(".", thc)
+      emit ws.write_assembly(".", plan.report_sources(r))
+      emit ws.print(plan.report_msg(r))
+      return plan.report_code(r)
+    }
+
+    // §8/S6 dry-run — resolve the layer stack HEADER-ONLY and report a
+    // collision at edit time. No body is lowered and nothing is written; the
+    // Report's `sources` is always "".
+    fn stack_check() {
+      let r = emit ws.stack_check(".")
+      emit ws.print(plan.report_msg(r))
+      return plan.report_code(r)
+    }
+
     fn unknown(cmd) {
-      emit ws.print(`truc: unknown command "${cmd}" — usage: truc <add NAME | rm NAME | assemble [--check]>`)
+      emit ws.print(`truc: unknown command "${cmd}" — usage: truc <add NAME | rm NAME | assemble [--check] | apply [--trust-host-code] | stack check>`)
       return 2
     }
   }

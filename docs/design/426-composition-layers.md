@@ -34,7 +34,32 @@ they land:
   lives and is never minted by a document (§1.2), so writing it on the head
   would be the one place a document names its own origin.
 
-S3 through S6 are still design only, and §11 says what each waits on.
+Slice S3 (§11), incremental admission, is BUILT: `admit_composition` admits
+only the resolved layer delta into the already-admitted base, to the verdict a
+whole-composition compile reaches. `tests/test_composition_layers.py`.
+
+Slice S4 (§11), the confinement split, is BUILT: `compile_files` takes a
+per-root `profiles` map, a non-first-party (stack-layer) row admits under the
+item-329 untrusted-author profile, and §9.3 Part 2's new critical is closed in
+one call. `tests/test_composition_confinement.py`.
+
+Slice S5 (§11), the authority panel, is BUILT: re-keying by row label, the
+`config:` token with its value digest, the fail-closed headline, `open`/`reach`
+and the configure restriction, the BLIND SPOTS block, and the
+`--trust-host-code` shape change. `revl composition --panel`,
+`src/revl/authority_panel.py`, `tests/test_composition_confinement.py`.
+
+Slice S6 (§11), distribution, is BUILT: the mandatory `truc.lock` pin and the
+vendored-dir jail at resolution, reproducibility across differing registry
+indexes (`tests/test_composition_distribution.py`), and truc's two distribution
+CLI verbs — `truc stack check` (header-only resolution, a collision reported at
+edit time) and `truc apply` (resolve + admit, all-or-nothing write) — as thin
+front doors onto the composition engine (decision 7). The verbs live in truc's
+bootstrapped `.rvl` toolchain (`src/revl/truc/components/`, host bodies in
+`src/revl/truc/_host.py`); `tests/test_truc_apply_stack_check.py` covers the
+host behaviour directly and the real CLI end to end under the cordis-py runtime.
+The PROVENANCE block's VERIFIED column still waits on 428 F5, so everything
+registry-sourced prints under CLAIMED until then (§11 S5).
 
 **This document supersedes two earlier notes and they are both kept:**
 

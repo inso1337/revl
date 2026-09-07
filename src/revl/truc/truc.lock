@@ -16,7 +16,7 @@
     },
     {
       "path": "components/workspace.rvl",
-      "sha256": "8f557491202c5ef393ad28203ef77a5f0e5e59e6007b0bad8ec4ca2482150ae1"
+      "sha256": "4c576c4a2fdda24f613d5cf68ddaa2f7a27b9e17191630c329e2cc3d9cb4a25e"
     },
     {
       "path": "components/planner.rvl",
@@ -24,7 +24,7 @@
     },
     {
       "path": "components/assembler.rvl",
-      "sha256": "5924d51aaac60cd3d65b881e2afc469af1ec8545016506b9a3ae8169aee6f6cf"
+      "sha256": "5198243d67148d7b55f64ea11316695d6d8fedc63ea7917a3237811ba3e9ce46"
     },
     {
       "path": "components/shipper.rvl",
@@ -32,7 +32,7 @@
     },
     {
       "path": "components/cli.rvl",
-      "sha256": "8ff38597dfa407b87d813895db4634df622d3fd06c369989a833a992d4bfdc35"
+      "sha256": "544afb6bb519b534806c00faef2fde971d5f49c142b040cfecea1e1daef0cb30"
     }
   ]
 }
