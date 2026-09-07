@@ -4861,12 +4861,41 @@ def _v3_is_float(node: object) -> bool:
     return False
 
 
+class _V3Analyses:
+    """The whole-program scans a `_V3Ctx` needs, computed ONCE per emit (#540).
+
+    The four scans below depend only on the module's functions and types, never
+    on any per-fn emit state — yet `_V3Ctx.__init__` reran them on every
+    construction, and one emit builds a ctx for functions, another for tests,
+    and another for lifecycle tests (three identical reruns). `_emit_v3` now
+    computes this bundle once and threads it into all three constructions, so
+    the scans run once. The results are identical, so the emitted rust is
+    byte-for-byte unchanged."""
+
+    __slots__ = ("fn_borrow", "fn_list_borrow", "fn_char_view",
+                 "fn_char_local", "boxed_cases", "boxed_fields")
+
+    def __init__(self, functions: list, types: dict) -> None:
+        funcs = functions or []
+        self.fn_borrow = _compute_str_param_borrows(funcs)
+        self.fn_list_borrow = _compute_list_param_borrows(funcs)
+        self.fn_char_view, self.fn_char_local = _compute_char_views(funcs)
+        self.boxed_cases, self.boxed_fields = _recursive_boxed_edges(types or {})
+
+
 class _V3Ctx:
     """Names visible to lowered IR v3 expression/statement emitters."""
 
     def __init__(self, types: dict, functions: list, externs: list,
-                 components: list | None = None) -> None:
+                 components: list | None = None,
+                 analyses: "_V3Analyses | None" = None) -> None:
         self.types = types or {}
+        # issue #540: the whole-program scans (`fn_borrow`, `fn_list_borrow`,
+        # the char views, the recursive-Box edges) are pure in `functions`/
+        # `types`; `_emit_v3` computes them once and passes the bundle in, so
+        # the three ctx builds one emit makes share it instead of rerunning it.
+        if analyses is None:
+            analyses = _V3Analyses(functions, self.types)
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
         # Declared return type of every free function / extern, so a `let`
@@ -4926,10 +4955,8 @@ class _V3Ctx:
         # (read-only `Str` params, item 282). Computed once from the whole
         # function list so a call site knows which argument slots take a borrow;
         # shared by every ctx (function bodies, tests, lifecycle tests).
-        self.fn_borrow: dict[str, frozenset] = _compute_str_param_borrows(
-            functions or [])
-        self.fn_list_borrow: dict[str, frozenset] = _compute_list_param_borrows(
-            functions or [])
+        self.fn_borrow: dict[str, frozenset] = analyses.fn_borrow
+        self.fn_list_borrow: dict[str, frozenset] = analyses.fn_list_borrow
         # Parameters of the function CURRENTLY being emitted that are borrowed
         # `&str` (a subset of its `Str` params). Set per fn by
         # `_emit_v3_functions`, empty in every other emit context, so a read of a
@@ -4942,8 +4969,8 @@ class _V3Ctx:
         # `fn_borrow`, so every body that can call one agrees on the shape.
         # `fn_char_local` names the `pub` entries that collect once into a
         # local instead (their signature never changes, so no call site moves).
-        self.fn_char_view, self.fn_char_local = _compute_char_views(
-            functions or [])
+        self.fn_char_view, self.fn_char_local = (
+            analyses.fn_char_view, analyses.fn_char_local)
         # Bindings of the function CURRENTLY being emitted that hold a char
         # view: revl name -> (index expression, argument expression). Set per
         # fn by `_emit_v3_functions`; empty in every other emit context, where
@@ -4956,7 +4983,8 @@ class _V3Ctx:
         # RAW `(enum, case)` / `(record, field)` — the same keys
         # `_recursive_boxed_edges` and `_emit_v3_types` use, so construction Box-
         # wraps exactly the edges the declaration boxed.
-        self.boxed_cases, self.boxed_fields = _recursive_boxed_edges(self.types)
+        self.boxed_cases, self.boxed_fields = (
+            analyses.boxed_cases, analyses.boxed_fields)
         for name, spec in self.types.items():
             _ident(name, "type name")
             if spec.get("kind") == "record":
@@ -6567,8 +6595,9 @@ def _emit_v3_types(types: dict) -> list[str]:
     return out
 
 
-def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]:
-    ctx = _V3Ctx(types, functions, externs)
+def _emit_v3_functions(functions: list, types: dict, externs: list,
+                       analyses: "_V3Analyses | None" = None) -> list[str]:
+    ctx = _V3Ctx(types, functions, externs, analyses=analyses)
     out: list[str] = []
     for fn in functions:
         name = _ident(fn.get("name"), "function name")
@@ -6798,8 +6827,9 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
     return out
 
 
-def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> list[str]:
-    ctx = _V3Ctx(types, functions, externs)
+def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list,
+                   analyses: "_V3Analyses | None" = None) -> list[str]:
+    ctx = _V3Ctx(types, functions, externs, analyses=analyses)
     out: list[str] = []
     # A `#[test] fn <slug>` shares the module namespace with every top-level
     # `fn` and extern (both emit a bare `fn <name>`), so a test slug equal to a
@@ -6843,7 +6873,8 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> 
 
 def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
                              externs: list, services: dict,
-                             components: list) -> list[str]:
+                             components: list,
+                             analyses: "_V3Analyses | None" = None) -> list[str]:
     """`lifecycle test` blocks (syntax-2.0 §7.1) as ``#[test]`` fns driving a
     live cordis-rs context.
 
@@ -6875,7 +6906,7 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
         sname: (svc.get("methods") or {})
         for sname, svc in services.items()
     }
-    ctx = _V3Ctx(types, functions, externs, components)
+    ctx = _V3Ctx(types, functions, externs, components, analyses=analyses)
     out: list[str] = []
     used: set[str] = set()
     for test in tests:
@@ -8128,21 +8159,26 @@ def _emit_v3(ir: dict) -> str:
     if not components and not types and not functions and not externs and not tests:
         raise EmitError("IR document has no components, types, functions, externs, or tests")
     out = _module_header(3)
+    # issue #540: the whole-program scans a `_V3Ctx` needs depend only on
+    # `functions`/`types`, so compute them ONCE and share the bundle across the
+    # function, test, and lifecycle-test ctx builds below (they used to each
+    # rebuild `_V3Ctx` and rerun the scans). Byte-identical output.
+    analyses = _V3Analyses(functions, types)
     if types:
         out.extend(_emit_v3_types(types))
     if externs:
         out.extend(_emit_v3_externs(externs, types))
     if functions:
-        out.extend(_emit_v3_functions(functions, types, externs))
+        out.extend(_emit_v3_functions(functions, types, externs, analyses))
     if tests:
         pure = [t for t in tests if not t.get("lifecycle")]
         lifecycle = [t for t in tests if t.get("lifecycle")]
         if pure:
-            out.extend(_emit_v3_tests(pure, types, functions, externs))
+            out.extend(_emit_v3_tests(pure, types, functions, externs, analyses))
         if lifecycle:
             out.extend(_emit_v3_lifecycle_tests(
                 lifecycle, types, functions, externs,
-                ir.get("services") or {}, components))
+                ir.get("services") or {}, components, analyses))
     out.extend(_emit_components(ir, components))
     return "\n".join(out).rstrip() + "\n"
 
