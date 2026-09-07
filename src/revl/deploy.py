@@ -434,6 +434,20 @@ LINK_EVIDENCE = "evidence-stale"
 
 ACCEPT = "ACCEPT"
 REFUSE = "REFUSE"
+#: The third receipt verdict, distinct from the two admission ones. An ACCEPT
+#: receipt is what `admit` returns in PREPARE — "I verified this chain and LOADED
+#: NOTHING". A COMMITTED receipt is what a host returns in COMMIT — "these are
+#: the exact bytes I measured at the instant I handed them to the runtime"
+#: (design R2 / §1.3 step 7). They share a kind and a signing key but never a
+#: verdict, so one can never stand in for the other: an admission that loaded
+#: nothing must not read as a load, and a load-time measurement must not read as
+#: an admission of a chain it never checked.
+COMMITTED = "COMMITTED"
+#: The phase tag a COMMIT receipt carries, so a COMMITTED receipt is legible as a
+#: load-time measurement even before its verdict is read, and so the conductor's
+#: comparison (:func:`compare_commit_receipt`) refuses anything not minted at
+#: COMMIT-load time.
+COMMIT_PHASE = "commit-load"
 
 RECEIPT_KIND = "revl.deploy.receipt"
 RECEIPT_VERSION = "1.0"
@@ -985,7 +999,7 @@ def verify_receipt(receipt: Mapping, host_key: bytes) -> tuple[bool, str]:
     if receipt.get("version") != RECEIPT_VERSION:
         return False, (f"receipt version is {receipt.get('version')!r}, "
                        f"expected {RECEIPT_VERSION!r}")
-    if receipt.get("verdict") not in (ACCEPT, REFUSE):
+    if receipt.get("verdict") not in (ACCEPT, REFUSE, COMMITTED):
         return False, f"receipt verdict is {receipt.get('verdict')!r}"
     return True, "receipt is authentic"
 
@@ -1056,10 +1070,199 @@ def render_receipt(receipt: Mapping) -> str:
             f"  artifact:    {receipt.get('artifact_hash')}  (re-hashed here)",
             f"  nonce:       {receipt.get('nonce')}",
         ])
+    if receipt.get("verdict") == COMMITTED:
+        return "\n".join([
+            f"commit: COMMITTED ({receipt.get('backend')})",
+            f"  composition: {receipt.get('composition_hash')}  (measured at load)",
+            f"  artifact:    {receipt.get('artifact_hash')}  (measured at load)",
+            f"  loaded_at:   {receipt.get('loaded_at')}",
+            f"  nonce:       {receipt.get('nonce')}",
+        ])
     return "\n".join([
         f"admission: REFUSE — chain link `{receipt.get('link')}`",
         f"  {receipt.get('reason')}",
     ])
+
+
+# ---------------------------------------------------------------------------
+# §1.3 step 7 / R2. the load-measured COMMIT receipt, and the conductor's
+#                   comparison of it
+# ---------------------------------------------------------------------------
+#
+# `admit` (PREPARE) verifies the chain and LOADS NOTHING; `repin` re-derives the
+# two hashes at load time but only answers `(ok, reason)` and signs nothing. The
+# gap design R2 names is between them: PREPARE proved bytes, COMMIT loads bytes,
+# and nothing forced the loaded bytes to equal the verified ones, nor forced the
+# conductor to check. Closing it needs two things design R2 spells out:
+#
+#   1. the COMMIT receipt binds sha256 of the EXACT bytes handed to the runtime,
+#      measured FRESH at COMMIT-load time — never an echo of the hash PREPARE
+#      verified (:func:`commit_receipt`);
+#   2. the CONDUCTOR compares that measured hash against the SIGNED
+#      `artifact/<backend>` binding and REFUSES on mismatch — and the comparison
+#      gates COMMIT, not only PREPARE's verify (:func:`compare_commit_receipt`).
+#
+# The guarantee then SPLITS exactly as R2 requires, and neither half is claimed
+# to be the other: an honest-but-buggy host that loads the wrong bytes by
+# accident is DETECTABLE (the fresh measurement disagrees with the admitted
+# binding, and the conductor sees it); a malicious host that signs one hash and
+# loads another is only ATTRIBUTABLE / non-repudiable (it signed a statement with
+# its own key, so the lie has an owner) and is NOT detectable without hardware
+# the host cannot forge (§5-A2). The residual TOCTOU between this measurement and
+# the runtime's own `exec` of the bytes is unclosable without that hardware and
+# is named here, not papered over.
+
+
+def commit_receipt(bundle_dir: Path | str, *, backend: str, host_key: bytes,
+                   runtime_versions: Optional[Mapping[str, str]] = None,
+                   nonce: Optional[str] = None,
+                   now: Optional[str] = None) -> dict:
+    """The host's signed COMMIT receipt (design R2 step 1 / §1.3 step 7): a FRESH
+    measurement of the exact bytes it is about to hand the runtime, bound and
+    signed with the host's own key.
+
+    The two hashes are re-derived HERE, from the staged bytes on disk, at the
+    moment of COMMIT — the same two re-derivations :func:`admit` and
+    :func:`repin` run, but performed NOW rather than read off the admission
+    receipt. That is the whole point of R2: an echo of PREPARE's verified hash
+    would prove nothing about what COMMIT actually loaded, so a receipt that
+    merely copied the admitted value would be a TOCTOU hole with a signature on
+    it. The host signs the measurement with its own key (its item-55 mTLS
+    identity in the network case, an HMAC key in Slice 1's single trust domain,
+    R3/R5), so a later audit can ATTRIBUTE a lie about what it loaded, not merely
+    notice one.
+
+    Fails CLOSED: a staged IR that cannot be read or canonicalized, and an
+    emitted `backend` tree that is missing or cannot be honestly digested, each
+    RAISE :class:`RevlError` rather than yielding a receipt over bytes that could
+    not be measured. A host that cannot measure what it is loading has not
+    committed, and must report a local COMMIT failure, never a COMMITTED receipt.
+    """
+    root = Path(bundle_dir)
+    if not isinstance(backend, str) or not backend:
+        raise RevlError(str(root), 0,
+                        "a COMMIT receipt must name the backend whose artifact "
+                        "bytes it measured")
+    try:
+        measured_ir = attest.canonical_hash(staged_ir(root))
+    except (RevlError, attest.NotCanonicalizable) as error:
+        raise RevlError(
+            str(root / IR_DOCUMENT), 0,
+            f"the staged {IR_DOCUMENT} cannot be measured at COMMIT-load time: "
+            f"{error}; a host that cannot measure what it loads has not "
+            "committed") from error
+    backend_dir = root / EMITTED_ROOT / backend
+    if not backend_dir.is_dir():
+        raise RevlError(
+            str(backend_dir), 0,
+            f"the emitted/{backend}/ artifact is not staged, so there are no "
+            "bytes to measure at COMMIT-load time")
+    try:
+        measured_artifact = artifact_digest(backend_dir)
+    except RevlError as error:
+        raise RevlError(
+            str(backend_dir), 0,
+            f"the staged emitted/{backend}/ cannot be digested as an artifact "
+            f"at COMMIT-load time: {error}") from error
+    receipt = {
+        "kind": RECEIPT_KIND,
+        "version": RECEIPT_VERSION,
+        "verdict": COMMITTED,
+        "phase": COMMIT_PHASE,
+        "backend": backend,
+        # The FRESH load-time measurement, not an echo of the admitted hash.
+        "composition_hash": measured_ir,
+        "artifact_hash": measured_artifact,
+        "runtime_versions": dict(sorted((runtime_versions or {}).items())),
+        "nonce": nonce or os.urandom(16).hex(),
+        "loaded_at": attest._now_iso(None) if now is None else str(now),
+    }
+    receipt["signature"] = _receipt_mac(receipt, host_key)
+    return receipt
+
+
+def compare_commit_receipt(admission_receipt: Mapping,
+                           commit_receipt: Mapping, *,
+                           host_key: bytes) -> tuple[bool, str]:
+    """The conductor's HARD COMMIT gate (design R2 step 2 / §5-A2). Answers
+    `(ok, reason)`; `ok is False` REFUSES the deploy.
+
+    The comparison is between two records the SAME host signed with its own key:
+    the ACCEPT admission receipt it returned in PREPARE (what it verified and was
+    admitted to load) and the COMMITTED receipt it returned in COMMIT (what it
+    measured at the instant of load). It:
+
+      1. verifies the COMMIT receipt's OWN signature first. A receipt whose MAC
+         does not check is `unattributable` — the conductor cannot even pin the
+         claim on the host's key, so there is nothing to compare and it refuses.
+         This is the attribution R2 leans on: past this point a lie has an owner.
+      2. requires the COMMIT receipt to be a COMMITTED, COMMIT-phase record, and
+         the admission receipt to be an ACCEPT one binding a composition, an
+         artifact and a backend — otherwise there is no admitted binding to
+         compare a load against.
+      3. compares the load-measured `artifact_hash` and `composition_hash`
+         against the SIGNED admission binding with a constant-time compare, and
+         REFUSES on either mismatch, naming which link diverged. A backend that
+         differs between the two receipts is itself a mismatch.
+
+    A False here is design R2's DETECTABLE case: the host loaded bytes other than
+    the ones it was admitted to load, and the conductor caught it at COMMIT
+    rather than trusting PREPARE's verify. It does NOT and cannot prove the host
+    did not lie about the measurement itself — that is the ATTRIBUTABLE-only
+    boundary (§4.2), and closing it needs hardware attestation this slice does
+    not have.
+    """
+    ok, why = verify_receipt(commit_receipt, host_key)
+    if not ok:
+        return False, (f"the COMMIT receipt is unattributable ({why}); a "
+                       "load-time measurement the conductor cannot pin to the "
+                       "host's key is refused rather than compared")
+    if commit_receipt.get("verdict") != COMMITTED:
+        return False, (f"the COMMIT receipt verdict is "
+                       f"{commit_receipt.get('verdict')!r}, not {COMMITTED}: an "
+                       "admission receipt is not a statement about what was "
+                       "loaded")
+    if commit_receipt.get("phase") != COMMIT_PHASE:
+        return False, (f"the COMMIT receipt is not a {COMMIT_PHASE!r} record "
+                       f"(phase is {commit_receipt.get('phase')!r}), so it is "
+                       "not a load-time measurement")
+    if admission_receipt.get("verdict") != ACCEPT:
+        return False, (f"the admission receipt verdict is "
+                       f"{admission_receipt.get('verdict')!r}, not {ACCEPT}: "
+                       "nothing authorised loading, so there is no binding to "
+                       "compare the load against")
+    bound_ir = admission_receipt.get("composition_hash")
+    bound_artifact = admission_receipt.get("artifact_hash")
+    admitted_backend = admission_receipt.get("backend")
+    if not (isinstance(bound_ir, str) and isinstance(bound_artifact, str)
+            and isinstance(admitted_backend, str)
+            and bound_ir and bound_artifact and admitted_backend):
+        return False, ("the admission receipt does not bind a composition, an "
+                       "artifact and a backend, so there is nothing for the "
+                       "load-time measurement to be compared against")
+    loaded_backend = commit_receipt.get("backend")
+    if loaded_backend != admitted_backend:
+        return False, (f"the host was admitted to load the "
+                       f"{admitted_backend!r} artifact but measured the "
+                       f"{loaded_backend!r} one at COMMIT: a different backend "
+                       "is a different artifact")
+    loaded_artifact = commit_receipt.get("artifact_hash")
+    if not (isinstance(loaded_artifact, str)
+            and hmac.compare_digest(loaded_artifact, bound_artifact)):
+        return False, (
+            f"the bytes the host measured at COMMIT-load time do not match the "
+            f"admitted artifact: admission bound {bound_artifact[:12]}…, the "
+            f"host loaded {str(loaded_artifact)[:12]}…. The load-time "
+            "measurement is the authority, not PREPARE's earlier verify.")
+    loaded_ir = commit_receipt.get("composition_hash")
+    if not (isinstance(loaded_ir, str)
+            and hmac.compare_digest(loaded_ir, bound_ir)):
+        return False, (
+            f"the composition the host measured at COMMIT-load time does not "
+            f"match the admitted one: admission bound {bound_ir[:12]}…, the "
+            f"host loaded {str(loaded_ir)[:12]}…")
+    return True, ("the bytes the host measured at COMMIT-load time are the "
+                  "admitted ones, and the measurement is signed by the host")
 
 
 # ---------------------------------------------------------------------------
