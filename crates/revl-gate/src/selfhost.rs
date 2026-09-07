@@ -665,33 +665,90 @@ fn at_top_decl(ts: &[Token], i: i64) -> bool {
     return (((((((atw(ts, i, "type") || atw(ts, i, "fn")) || atw(ts, i, "extern")) || atw(ts, i, "service")) || atw(ts, i, "component")) || atw(ts, i, "use")) || atw(ts, i, "test")) || at_boot(ts, i));
 }
 
-fn type_ctors(ts: &[Token]) -> Vec<String> {
+fn is_builtin_type_name(name: &str) -> bool {
+    return (((((((((((((name == "Int") || (name == "Int32")) || (name == "Float")) || (name == "Str")) || (name == "Bool")) || (name == "Bytes")) || (name == "Unit")) || (name == "Opt")) || (name == "List")) || (name == "Map")) || (name == "Result")) || (name == "Any")) || (name == "Never"));
+}
+
+fn type_decl_end(ts: &[Token], start: i64) -> i64 {
+    let mut j = start;
+    let mut depth = 0i64;
+    while (((j < ts.revl_length()) && (!atk(ts, j, "eof"))) && ((depth > 0i64) || (!at_top_decl(ts, j)))) {
+        let t = tkc(ts, j);
+        if (((t.kind == "{") || (t.kind == "[")) || (t.kind == "(")) {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (((t.kind == "}") || (t.kind == "]")) || (t.kind == ")")) {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return j;
+}
+
+fn has_top_bar(ts: &[Token], start: i64, end: i64) -> bool {
+    let mut j = start;
+    let mut depth = 0i64;
+    while (j < end) {
+        let t = tkc(ts, j);
+        if (((t.kind == "{") || (t.kind == "[")) || (t.kind == "(")) {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (((t.kind == "}") || (t.kind == "]")) || (t.kind == ")")) {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        if ((depth == 0i64) && (t.kind == "|")) {
+            return true;
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn alias_head(ts: &[Token], j: i64, name: &str, multi: bool) -> bool {
+    let nxt = tkc(ts, (j).checked_add(1i64).expect("revl: Int overflow")).kind;
+    if ((nxt == "[") || (nxt == "?")) {
+        return true;
+    }
+    if ((!multi) && is_builtin_type_name(name)) {
+        return true;
+    }
+    return false;
+}
+
+fn collect_ctors(ts: Vec<Token>, start: i64, end: i64, multi: bool, acc: Vec<String>) -> Vec<String> {
+    let mut out = acc;
+    let mut j = start;
+    let mut depth = 0i64;
+    let mut ctor = false;
+    while (j < end) {
+        let t = tkc(&ts, j);
+        if (((t.kind == "{") || (t.kind == "[")) || (t.kind == "(")) {
+            depth = (depth).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (((t.kind == "}") || (t.kind == "]")) || (t.kind == ")")) {
+            depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
+        }
+        if ((depth == 0i64) && ((t.kind == "=") || (t.kind == "|"))) {
+            ctor = true;
+        } else {
+            if (((ctor && (t.kind == "ident")) && is_upper_name(&t.text)) && (!alias_head(&ts, j, &t.text, multi))) {
+                out = union_into(out.clone(), vec![t.text.clone()]);
+            }
+            ctor = false;
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn type_ctors(ts: Vec<Token>) -> Vec<String> {
     let mut out = vec![];
     let mut i = 0i64;
-    while ((i < ts.revl_length()) && (!atk(ts, i, "eof"))) {
-        if atw(ts, i, "type") {
-            let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
-            let mut depth = 0i64;
-            let mut ctor = false;
-            while (((j < ts.revl_length()) && (!atk(ts, j.clone(), "eof"))) && ((depth > 0i64) || (!at_top_decl(ts, j.clone())))) {
-                let t = tkc(ts, j.clone());
-                if (((t.kind == "{") || (t.kind == "[")) || (t.kind == "(")) {
-                    depth = (depth).checked_add(1i64).expect("revl: Int overflow");
-                }
-                if (((t.kind == "}") || (t.kind == "]")) || (t.kind == ")")) {
-                    depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
-                }
-                if ((depth == 0i64) && ((t.kind == "=") || (t.kind == "|"))) {
-                    ctor = true;
-                } else {
-                    if ((ctor && (t.kind == "ident")) && is_upper_name(&t.text)) {
-                        out = union_into(out.clone(), vec![t.text.clone()]);
-                    }
-                    ctor = false;
-                }
-                j = (j).checked_add(1i64).expect("revl: Int overflow");
-            }
-            i = j.clone();
+    while ((i < ts.revl_length()) && (!atk(&ts, i, "eof"))) {
+        if atw(&ts, i, "type") {
+            let end = type_decl_end(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+            out = collect_ctors(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), end, has_top_bar(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), end), out.clone());
+            i = end;
         } else {
             i = (i).checked_add(1i64).expect("revl: Int overflow");
         }
@@ -4903,7 +4960,7 @@ fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
 }
 
 fn collect_nonlink(ts: Vec<Token>, pg: Prog) -> NoLink {
-    let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(&ts));
+    let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone()));
     let cfgv = config_data_refusal(ts.clone(), pg.clone());
     if (cfgv.v != "") {
         return NoLink { done: true, refs: vec![cfgv.clone()] };

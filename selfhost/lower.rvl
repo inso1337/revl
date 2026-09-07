@@ -423,36 +423,109 @@ fn at_top_decl(ts: List[Token], i: Int) -> Bool {
 // NeedTool(ToolCall)`, multi-line arms included — the span runs to the next
 // top-level declaration, not to the end of the line.
 //
-// It still OVER-approximates in one direction: a union of TYPES rather than
-// cases (`type Payload = List[Row] | Str`) contributes its arms too. That is
-// the safe side — over-collecting only ever keeps admitting a program the
-// reference admits, while under-collecting would refuse one, and refusing what
-// the reference admits is the direction this gate may not invent. Iterative for
-// the same reason `boot_names` is.
+// A case head that is not a real constructor is NOT collected, because the
+// reference does not treat it as a callable either. A single-case declaration
+// whose sole "case" is a TYPE EXPRESSION is a transparent alias RHS, not a
+// variant (lower.py `_case_table` skips a non-`variant` spec; typecheck.py
+// `_is_type_expression` is the classifier): `type Rows = List[Row]`,
+// `type M = Row?` and `type Alias = Int` all bind a type, and the reference
+// refuses a call to their RHS head the same G1 way `Int(1)` alone draws. This
+// scan mirrors the token-detectable arms of that classifier:
+//   * a head followed by `[` or `?` is a type application / optional — the
+//     parser (parser.rvl type-decl form) only reaches that spelling as the sole
+//     case, and a later `| …` there is a parse error, so it is skipped
+//     unconditionally;
+//   * a BUILTIN type name (`is_builtin_type_name`) in SINGLE-case position is an
+//     alias to that primitive, never a constructor — but in a MULTI-case variant
+//     (`type T = Int | Bar`) the reference DOES register it as a case, so it is
+//     kept there.
+// It still OVER-approximates in the two arms a token scan cannot see without
+// the type table: a sole case that names ANOTHER declared type (`type A = B`) or
+// a type parameter in scope is a reference alias too, and is collected here.
+// That residual stays on the safe side of one narrow asymmetry — a program that
+// declares such an alias AND calls its RHS head bare — and closing it would
+// require the checker's type table the gate deliberately does not build.
+// Iterative for the same reason `boot_names` is.
+fn is_builtin_type_name(name: Str) -> Bool {
+  return name == "Int" || name == "Int32" || name == "Float" || name == "Str"
+      || name == "Bool" || name == "Bytes" || name == "Unit" || name == "Opt"
+      || name == "List" || name == "Map" || name == "Result" || name == "Any"
+      || name == "Never"
+}
+
+// The end of the `type` declaration whose keyword is at `kw` — the first
+// top-level declaration boundary at or after `kw + 1`, exactly the span the
+// original single-pass scan ran the inner loop over.
+fn type_decl_end(ts: List[Token], start: Int) -> Int {
+  var j = start
+  var depth = 0
+  while (j < ts.length() && !atk(ts, j, "eof")
+         && (depth > 0 || !at_top_decl(ts, j))) {
+    let t = tkc(ts, j)
+    if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
+    if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
+    j += 1
+  }
+  return j
+}
+
+// Whether the declaration span `[start, end)` carries a top-level `|` — i.e. it
+// is a MULTI-case variant. A `|` inside a payload (`Foo(Bar | Baz)` never
+// occurs, but a record/type-application does raise depth) is not a separator.
+fn has_top_bar(ts: List[Token], start: Int, end: Int) -> Bool {
+  var j = start
+  var depth = 0
+  while (j < end) {
+    let t = tkc(ts, j)
+    if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
+    if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
+    if (depth == 0 && t.kind == "|") { return true }
+    j += 1
+  }
+  return false
+}
+
+// Whether the case head at index `j` is a transparent alias RHS, not a
+// constructor — see `type_ctors`.
+fn alias_head(ts: List[Token], j: Int, name: Str, multi: Bool) -> Bool {
+  let nxt = tkc(ts, j + 1).kind
+  if (nxt == "[" || nxt == "?") { return true }
+  if (!multi && is_builtin_type_name(name)) { return true }
+  return false
+}
+
+fn collect_ctors(ts: List[Token], start: Int, end: Int, multi: Bool,
+                 acc: List[Str]) -> List[Str] {
+  var out = acc
+  var j = start
+  var depth = 0
+  var ctor = false
+  while (j < end) {
+    let t = tkc(ts, j)
+    if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
+    if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
+    if (depth == 0 && (t.kind == "=" || t.kind == "|")) {
+      ctor = true
+    } else {
+      if (ctor && t.kind == "ident" && is_upper_name(t.text)
+          && !alias_head(ts, j, t.text, multi)) {
+        out = union_into(out, [t.text])
+      }
+      ctor = false
+    }
+    j += 1
+  }
+  return out
+}
+
 fn type_ctors(ts: List[Token]) -> List[Str] {
   var out: List[Str] = []
   var i = 0
   while (i < ts.length() && !atk(ts, i, "eof")) {
     if (atw(ts, i, "type")) {
-      var j = i + 1
-      var depth = 0
-      var ctor = false
-      while (j < ts.length() && !atk(ts, j, "eof")
-             && (depth > 0 || !at_top_decl(ts, j))) {
-        let t = tkc(ts, j)
-        if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
-        if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
-        if (depth == 0 && (t.kind == "=" || t.kind == "|")) {
-          ctor = true
-        } else {
-          if (ctor && t.kind == "ident" && is_upper_name(t.text)) {
-            out = union_into(out, [t.text])
-          }
-          ctor = false
-        }
-        j += 1
-      }
-      i = j
+      let end = type_decl_end(ts, i + 1)
+      out = collect_ctors(ts, i + 1, end, has_top_bar(ts, i + 1, end), out)
+      i = end
     } else {
       i += 1
     }
@@ -2316,12 +2389,16 @@ fn head_declared(cx: Ctx, name: Str) -> Bool {
 // The legitimate bare Upper-cased calls are the ADT constructors: the built-in
 // `Some`/`None`/`Ok`/`Err` (seeded into `fnNames` by `fn_names_of`) and the
 // program's own `type T = A | B(Int)` cases, which `type_ctors` collects. That
-// collection is deliberately an OVER-approximation — it takes every Upper-cased
-// name appearing in a `type` declaration, field types included — because
-// over-collecting only ever keeps admitting a program the reference admits,
-// while under-collecting would refuse one. A residual `Int("1")` admitted in a
-// program that happens to declare a type with an `Int` field is the price, and
-// it is the safe side of the asymmetry this crate is built on.
+// collection follows the reference's own alias/variant split (see `type_ctors`):
+// a single-case declaration aliasing a builtin type or a type application
+// (`type Alias = Int`, `type Rows = List[Row]`, `type M = Row?`) binds a type,
+// not a constructor, so its RHS head is NOT collected and a call to it draws the
+// same G1 refusal the reference draws — `Int("1")` no longer slips through. What
+// `type_ctors` still over-collects is the two arms it cannot classify without
+// the checker's type table: a sole case that names another declared type
+// (`type A = B`) or a type parameter in scope. That narrow residual is the safe
+// side of the asymmetry this crate is built on — over-collecting only keeps
+// admitting, and closing it would mean building the type table the gate omits.
 fn call_head_declared(cx: Ctx, name: Str) -> Bool {
   return contains(cx.scopeNames, name) || contains(cx.fnNames, name)
       || name == "config"
