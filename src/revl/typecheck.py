@@ -1172,6 +1172,13 @@ _BUILTIN_SIG = {
     "div_trunc": ("Int", ["Int"], "Int"),
     "div_floor": ("Int", ["Int"], "Int"),
     "div_euclid": ("Int", ["Int"], "Int"),
+    # `mod` is the named integer remainder that rides the same Int-family
+    # dispatch as its `div_*` siblings (lower._BUILTIN_METHODS and _DIVIDES_BY
+    # both list it). It was missing here, so `builtin_check` returned `None`
+    # for its result and `let s: Str = 7.mod(3)` type-checked silently
+    # (issue #549). The row pins the result to Int so a mismatched binding is
+    # the compile error it should always have been.
+    "mod": ("Int", ["Int"], "Int"),
     # Width conversions between Int and Int32 (docs/arithmetic.md, "Sized
     # integers"). `.to_int()` is the explicit spelling of the lossless Int32 ->
     # Int widening (which is also implicit at value-flow positions).
@@ -1521,6 +1528,25 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
             target_type = format_type(
                 thead, [elem] if thead == "List" else [targs[0], elem])
             targs = parse_type(target_type)[1]
+    # `join` is declared on `List[Str]` (docs/stdlib-2.0.md §Str table, "join is
+    # declared on List[Str]"): the separator concatenates STRING elements, and
+    # the canonical way to join a `List[Int]` is `xs.map(n => n.to_str()).join`.
+    # The family check above only pins the receiver head to `List`; without an
+    # element constraint `[1, 2, 3].join(",")` type-checked and then diverged at
+    # runtime — the py lowering `",".join([1, 2, 3])` RAISES, while ts silently
+    # coerced to `"1,2,3"` (issue #549). Pinning the element to Str turns that
+    # per-tier surprise into one compile error on every tier. A wildcard or
+    # bottom (`[]`) element is unresolved, not wrong, so it is left alone.
+    if method == "join" and thead == "List" and filename \
+            and elem is not None and not _is_wildcard(elem) and elem != "Never" \
+            and not compatible("Str", elem, types):
+        raise RevlError(
+            filename, line,
+            f"builtin `join` needs a `List[Str]` receiver, got "
+            f"`{render_type(target_type)}` "
+            f"(join concatenates string elements; map to `Str` first, e.g. "
+            f"`xs.map(n => n.to_str()).join(sep)`)",
+            code="T1", category="type-mismatch")
     for spec, actual in zip(params, arg_types):
         expected = {"@elem": elem, "@member": elem if thead == "List" else ("Str" if thead == "Str" else None), "@self": target_type}.get(spec, spec)
         if filename and expected and actual \

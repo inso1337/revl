@@ -17,7 +17,7 @@
 
 /// The identifier `gate_version().frontier` reports. Two gates with different
 /// ids cover different surfaces and their agreement means nothing.
-pub const FRONTIER_ID: &str = "selfhost-admit:930ce76573b3202b";
+pub const FRONTIER_ID: &str = "selfhost-admit:c9259290ae98cd71";
 
 /// Sources above this many bytes are refused rather than decided: the emitted
 /// parser/checker are deeply recursive and a stack exhaustion ABORTS, which no
