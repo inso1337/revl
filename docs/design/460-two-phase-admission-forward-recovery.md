@@ -383,6 +383,20 @@ reclassified a granted provider reports `stale` and writes `abandoned`. The
 non-vacuity check: with the journal-served seam disabled the fenced-completed
 case dispatches twice and the test fails on it.
 
+*Status.* The classification, content CAS and forward finalize landed first
+(the stage records + `recover_forward_admissions` over them). The §4
+journal-served seam then landed on top: `WriteAheadLog.begin_decision`/
+`end_decision` open the admission window over the plug (`session._wire_turn`), so
+each crossing the activation body journals carries the `decisionId` and a fenced
+one a per-decision `ordinal`; `record_fenced_crossing_begin`/`_complete` write
+the fenced-crossing journal; `recovery._served_fenced_crossings` reads it by
+`(decisionId, ordinal)`; and `Session.serve_fenced_crossing` (driven under
+`begin_journal_served`) serves a completed fenced crossing from the journal with
+zero dispatch, while a `begin` with no `complete` reclassifies the decision
+`ambiguous`. Re-materializing the turn's fibers through a LIVE runtime re-plug in
+journal-served mode remains the runtime half; the durable serving verdict and the
+forward finalize it gates are in place.
+
 **Slice 4: E-Stop coupling on py.** The plug-seam refusal writes
 `abandoned {reason: "estop"}`; an `estop-ambiguous` record under a decision is
 read as the §4 in-flight row; the conductor's halt report lists un-finalized

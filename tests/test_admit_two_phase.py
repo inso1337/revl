@@ -703,3 +703,175 @@ def test_failed_admission_disposes_turn_fibers_before_recording_abandonment(
     assert [r for r in on_disk if r.get("record") == "admit-abandoned"
             and r.get("reason") == "plug-failed"], \
         "no admit-abandoned {plug-failed} record was written"
+
+
+# --------------------------------------------------------------------------- #
+# §4: the journal-served plug seam. A fenced crossing recorded complete under a
+# decision is SERVED from the journal on a fresh-process re-apply and dispatches
+# zero times ("no double-run of a fenced extern", §8); one left in flight at the
+# cut refuses to finalize. Pure over the WAL records + the session seam — no
+# live runtime, so it runs everywhere the Slice-3 tests do.
+# --------------------------------------------------------------------------- #
+
+def _crossing_begin(did, ordinal, receiver="fs", method="write", seq=6):
+    return {"record": "admit-crossing", "seq": seq, "phase": "begin",
+            "tier": "fenced", "decisionId": did, "ordinal": ordinal,
+            "call": {"receiver": receiver, "method": method}}
+
+
+def _crossing_complete(did, ordinal, outcome, seq=7):
+    return {"record": "admit-crossing", "seq": seq, "phase": "complete",
+            "tier": "fenced", "decisionId": did, "ordinal": ordinal,
+            "outcome": outcome}
+
+
+def test_fenced_crossing_records_carry_the_decision_and_ordinal(tmp_path):
+    """The recording half (§4): a crossing the activation body journals inside a
+    decision window carries the `decisionId`, a fenced one also carries an
+    `ordinal` and, on completion, its `outcome`. A crossing OUTSIDE any window is
+    byte-identical to today's — no `decisionId` key at all."""
+    from revl.wal import read_wal
+    wal = _wal(tmp_path)
+    # outside any window: no decision tag (byte-identity).
+    outside = wal.record_boundary(
+        "Base", "acquire", resource="file:/tmp/base",
+        inverse_op={"receiver": "fs", "method": "rm", "args": ["/tmp/base"]})
+    assert "decisionId" not in outside
+    # inside the window: tagged, and the fenced crossing gets an ordinal + outcome.
+    wal.begin_decision("D1")
+    tagged = wal.record_boundary(
+        "TurnComp", "acquire", resource="file:/tmp/x",
+        inverse_op={"receiver": "fs", "method": "rm", "args": ["/tmp/x"]})
+    assert tagged["decisionId"] == "D1"
+    o0 = wal.record_fenced_crossing_begin(receiver="fs", method="write")
+    o1 = wal.record_fenced_crossing_begin(receiver="net", method="post")
+    assert (o0, o1) == (0, 1)   # per-decision ordinals, independent of seq
+    comp = wal.record_fenced_crossing_complete(ordinal=o0, outcome={"bytes": 3})
+    assert comp["decisionId"] == "D1" and comp["ordinal"] == 0
+    wal.end_decision()
+    # after the window closes, tagging stops again.
+    after = wal.record_boundary(
+        "Base", "acquire", resource="file:/tmp/y",
+        inverse_op={"receiver": "fs", "method": "rm", "args": ["/tmp/y"]})
+    assert "decisionId" not in after
+    wal.close()
+    got = read_wal(wal.path)["records"]
+    crossings = [r for r in got if r.get("record") == "admit-crossing"]
+    assert len(crossings) == 3   # two begins, one complete, all readable
+
+
+def test_fenced_crossing_recorders_refuse_outside_a_decision_window(tmp_path):
+    """`record_fenced_crossing_*` require an open window: a fenced crossing has no
+    meaning without the decision it is fenced under."""
+    from replay import ReplayError
+    wal = _wal(tmp_path)
+    with pytest.raises(ReplayError):
+        wal.record_fenced_crossing_begin(receiver="fs", method="write")
+    with pytest.raises(ReplayError):
+        wal.record_fenced_crossing_complete(ordinal=0, outcome=None)
+    wal.close()
+
+
+def test_completed_fenced_crossing_is_served_and_finalizes_forward(tmp_path):
+    """§4 fenced row, completed: an advanced decision whose fenced crossing is
+    recorded COMPLETE is served from the journal and finalized forward. The seam
+    dispatches zero times — the guarantee the design's non-vacuity check reads."""
+    from revl.recovery import recover_forward_admissions
+    from revl.wal import read_wal
+    s = _forward_session()
+    decided = _decided_record(s)
+    wal = {"records": [
+        decided,
+        _crossing_begin("D1", 0, seq=6),
+        _crossing_complete("D1", 0, {"bytes": 3}, seq=7),
+        {"record": "admit-applied", "seq": 8, "decisionId": "D1",
+         "observed": {"generation": 1, "surfaceEpoch": 2}}]}
+    path = str(tmp_path / "served.wal")
+    import json as _json
+    with open(path, "w", encoding="utf-8") as h:
+        h.write(_json.dumps({"record": "header", "walVersion": 1}) + "\n")
+    reports = recover_forward_admissions(wal, session=s, forward=True,
+                                         wal_path=path)
+    assert reports[0]["classification"] == "advanced"
+    assert reports[0]["finalized"] is True
+    assert reports[0]["served"] == [0]
+    # the whole point: a completed fenced crossing dispatched ZERO times.
+    assert reports[0]["dispatched"] == 0
+    fin = [r for r in read_wal(path)["records"]
+           if r.get("record") == "admit-finalized"]
+    assert len(fin) == 1 and fin[0]["decisionId"] == "D1"
+
+
+def test_in_flight_fenced_crossing_refuses_to_finalize(tmp_path):
+    """§4 fenced row, in flight: a fenced crossing with a `begin` and no
+    `complete` (a plain crash mid-crossing, not only the E-Stop's
+    `estop-ambiguous`) reclassifies the advanced decision `ambiguous`. Forward
+    recovery finalizes nothing and never re-dispatches the fenced extern."""
+    from revl.recovery import recover_forward_admissions
+    from revl.wal import read_wal
+    s = _forward_session()
+    decided = _decided_record(s)
+    wal = {"records": [
+        decided,
+        _crossing_begin("D1", 0, seq=6),   # no matching complete
+        {"record": "admit-applied", "seq": 8, "decisionId": "D1",
+         "observed": {"generation": 1, "surfaceEpoch": 2}}]}
+    path = str(tmp_path / "inflight.wal")
+    import json as _json
+    with open(path, "w", encoding="utf-8") as h:
+        h.write(_json.dumps({"record": "header", "walVersion": 1}) + "\n")
+    reports = recover_forward_admissions(wal, session=s, forward=True,
+                                         wal_path=path)
+    assert reports[0]["classification"] == "ambiguous"
+    assert reports[0]["finalized"] is False
+    assert reports[0]["inFlight"] == [0]
+    assert not [r for r in read_wal(path)["records"]
+                if r.get("record") == "admit-finalized"]
+
+
+def test_journal_served_seam_serves_from_the_record_and_dispatches_zero():
+    """The session seam directly (§4): in journal-served mode a fenced crossing
+    with a recorded outcome is SERVED (returns the outcome, no dispatch); one with
+    no record falls through to a first-run dispatch. The dispatch counter is the
+    non-vacuity witness — with nothing served, the same crossing dispatches."""
+    s = _forward_session()
+    s.begin_journal_served("D1", {0: {"bytes": 3}, 1: {"ok": True}})
+    served0, out0 = s.serve_fenced_crossing("fs", "write")
+    served1, out1 = s.serve_fenced_crossing("net", "post")
+    served2, out2 = s.serve_fenced_crossing("fs", "unknown")  # ordinal 2, unrecorded
+    s.end_journal_served()
+    assert (served0, out0) == (True, {"bytes": 3})
+    assert (served1, out1) == (True, {"ok": True})
+    assert served2 is False and out2 is None
+    # exactly the one unrecorded crossing dispatched; the two served ones did not.
+    assert s._fenced_dispatch_count == 1
+
+    # non-vacuity: with the seam disabled (no served map), the SAME first crossing
+    # would dispatch instead of being served.
+    s.begin_journal_served("D1", {})
+    served, _ = s.serve_fenced_crossing("fs", "write")
+    s.end_journal_served()
+    assert served is False and s._fenced_dispatch_count == 1
+
+
+def test_advanced_with_no_fenced_records_finalizes_forward_unchanged(tmp_path):
+    """A decision that journalled no fenced crossing finalizes forward exactly as
+    before §4: served empty, dispatched zero, `admit-finalized` written."""
+    from revl.recovery import recover_forward_admissions
+    from revl.wal import read_wal
+    s = _forward_session()
+    decided = _decided_record(s)
+    wal = {"records": [decided,
+                       {"record": "admit-applied", "seq": 7, "decisionId": "D1",
+                        "observed": {"generation": 1, "surfaceEpoch": 2}}]}
+    path = str(tmp_path / "plain.wal")
+    import json as _json
+    with open(path, "w", encoding="utf-8") as h:
+        h.write(_json.dumps({"record": "header", "walVersion": 1}) + "\n")
+    reports = recover_forward_admissions(wal, session=s, forward=True,
+                                         wal_path=path)
+    assert reports[0]["classification"] == "advanced"
+    assert reports[0]["served"] == [] and reports[0]["dispatched"] == 0
+    assert reports[0]["finalized"] is True
+    assert [r for r in read_wal(path)["records"]
+            if r.get("record") == "admit-finalized"]
