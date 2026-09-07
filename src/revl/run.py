@@ -738,6 +738,14 @@ class _Driver:
         self.FiberState = FiberState
         self.root = Context()
         self.fibers: dict[str, object] = {}
+        # item 628: an optional per-attempt settlement ledger. When a caller
+        # (the Session's awaitable teardown) sets this to a list before driving
+        # `_dispose_all`, the disposal records each ORIGINAL provision/disposer's
+        # outcome (owned / attempted / returned / failed / absent) into it, so the
+        # settlement names the exact resources still owned rather than inferring
+        # ownership from the post-disposal `fibers`/structural counters. None (the
+        # default) records nothing, so every non-teardown caller is byte-identical.
+        self._settlement_ledger: list | None = None
         # runtime routing (docs/distribution-model.md): a component carrying the
         # `routes` IR (item 162's multi-realm bind) is realized here, not as a
         # plugged fiber — the driver resolves its N per-realm handles and
@@ -1306,12 +1314,31 @@ class _Driver:
                       f"{', '.join(realms)}) strategy({strategy or 'round_robin'})")
 
     async def _dispose_all(self, ir: dict) -> None:
-        for name in reversed(_load_order(ir)):  # consumers before providers
+        order = list(reversed(_load_order(ir)))  # consumers before providers
+        # item 628: pre-seed the settlement ledger (if a teardown armed one) with
+        # every original component as `owned` (enumerated, not yet reached), so a
+        # disposal that raises part-way leaves the failed AND the unattempted
+        # resources named — `fibers` alone loses the failed one (popped below
+        # before its `dispose` is awaited).
+        ledger = self._settlement_ledger
+        rec_by_name: dict = {}
+        if ledger is not None:
+            seen = {r["component"] for r in ledger}
+            for name in order:
+                if name not in seen:
+                    ledger.append({"component": name, "kind": "component",
+                                   "outcome": "owned"})
+            rec_by_name = {r["component"]: r for r in ledger}
+        for name in order:
+            rec = rec_by_name.get(name)
             disposers = self._route_disposers.pop(name, None)
             if disposers is not None:
                 # a router: withdraw its routing provision(s) at its own LIFO
                 # position (after the consumers above it, before the workers
                 # below) — the no-residue proof needs the provide-effect gone.
+                if rec is not None:
+                    rec["kind"] = "router"
+                    rec["outcome"] = "attempted"
                 self._log("swap", name, "withdraw route provisions (LIFO)")
                 for disposer in reversed(disposers):
                     result = disposer()
@@ -1319,14 +1346,33 @@ class _Driver:
                         await result
                 self.routers = {k: v for k, v in self.routers.items()
                                 if k[0] != name}
+                if rec is not None:
+                    rec["outcome"] = "returned"
                 await self._flush()
                 continue
             fiber = self.fibers.pop(name, None)
             if fiber is None:
+                # never live (or already disposed): nothing owned here.
+                if rec is not None:
+                    rec["outcome"] = "absent"
                 continue
+            if rec is not None:
+                rec["outcome"] = "attempted"
             self._log("swap", name, "dispose -> inverses replay (LIFO)")
             frame = self.runtime._frame_for_ctx(getattr(fiber, "ctx", None))
-            await fiber.dispose()
+            try:
+                await fiber.dispose()
+            except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+                # the ORIGINAL disposer raised: name it in the ledger as failed
+                # (the fiber was popped above, so it is no longer in `fibers`; the
+                # ledger is the authoritative inventory) and re-raise so the
+                # aggregate attempt fails exactly as before this slice.
+                if rec is not None:
+                    rec["outcome"] = "failed"
+                    rec["error"] = f"{type(exc).__name__}: {exc}"
+                raise
+            if rec is not None:
+                rec["outcome"] = "returned"
             if frame is not None:
                 self._compensation_residue.extend(
                     getattr(frame, "compensation_residue", ())
