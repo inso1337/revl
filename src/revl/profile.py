@@ -98,7 +98,7 @@ def _boundary_of(ir: dict) -> dict:
     if isinstance(boundary, dict):
         return boundary
     if ir.get("components") is not None:
-        from .__main__ import _boundary  # noqa: PLC0415 — lazy: breaks the cycle
+        from .boundary import _boundary  # noqa: PLC0415 — lazy: breaks the cycle
 
         return _boundary(ir)
     raise ValueError(

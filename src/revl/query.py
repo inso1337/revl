@@ -140,7 +140,7 @@ def _fn_extern_reach(ir: dict) -> dict:
     """fn name -> externs it transitively reaches. `__main__` owns this walk
     (it is what `revl audit` prints); imported lazily because `__main__`
     imports the rest of the toolchain and this module is also a library."""
-    from .__main__ import _extern_reachability
+    from .boundary import _extern_reachability
 
     reach = dict(_extern_reachability(ir))
     reach.pop("__externs__", None)

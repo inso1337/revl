@@ -2122,14 +2122,18 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         result = None
         scrutinee_t = infer_ast(expr.scrutinee, tenv, types, filename)
         spec = types.get(scrutinee_t or "")
+        # Index the variant's case table once (name -> payload) instead of
+        # rescanning `spec["cases"]` for every arm — O(arms + cases), not
+        # O(arms x cases). A duplicate case name keeps the last payload, exactly
+        # as the prior last-write-wins scan did.
+        cases_by_name = (
+            {case["name"]: case["payload"] for case in spec.get("cases", [])}
+            if spec is not None and spec.get("kind") == "variant" else None)
         for pattern, bind, body in expr.arms:
             inner = dict(tenv)
             if bind is not None:
-                payload = None
-                if spec is not None and spec.get("kind") == "variant":
-                    for case in spec.get("cases", []):
-                        if case["name"] == pattern:
-                            payload = case["payload"]
+                payload = (cases_by_name.get(pattern)
+                           if cases_by_name is not None else None)
                 if payload is not None:
                     inner[bind] = payload
                 else:
@@ -2544,14 +2548,17 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
         # where an arm's type is genuinely unknown.
         scrutinee_t = infer_ast(expr.scrutinee, tenv, types, filename)
         spec = types.get(scrutinee_t or "")
+        # Index the variant's case table once (name -> payload) instead of
+        # rescanning `spec["cases"]` for every arm — O(arms + cases), not
+        # O(arms x cases); last-write-wins on a duplicate name, as before.
+        cases_by_name = (
+            {case["name"]: case["payload"] for case in spec.get("cases", [])}
+            if spec is not None and spec.get("kind") == "variant" else None)
         for pattern, bind, body in expr.arms:
             inner = dict(tenv)
             if bind is not None:
-                payload = None
-                if spec is not None and spec.get("kind") == "variant":
-                    for case in spec.get("cases", []):
-                        if case["name"] == pattern:
-                            payload = case["payload"]
+                payload = (cases_by_name.get(pattern)
+                           if cases_by_name is not None else None)
                 if payload is not None:
                     inner[bind] = payload
                 else:

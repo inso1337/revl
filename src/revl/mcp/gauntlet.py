@@ -82,7 +82,7 @@ def _compile(source: str | None, files: list[str] | None,
 def _boundary_of(ir: dict) -> dict:
     # the CLI owns the G8 walk; import lazily so this module works whether
     # revl runs as `python -m revl` or is imported as a library
-    from ..__main__ import _boundary  # noqa: PLC0415
+    from ..boundary import _boundary  # noqa: PLC0415
 
     return _boundary(ir)
 

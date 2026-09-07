@@ -76,7 +76,7 @@ def _compile(source: str | None, files: list[str] | None,
 def _boundary_of(ir: dict) -> dict:
     """`revl audit`'s G8 walk. Imported lazily: `__main__` imports this
     module, so a module-level import would be circular."""
-    from .__main__ import _boundary  # noqa: PLC0415
+    from .boundary import _boundary  # noqa: PLC0415
 
     return _boundary(ir)
 
