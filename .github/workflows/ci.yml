@@ -1107,6 +1107,7 @@ jobs:
           backends/python/.venv/bin/python -m pytest
           tests/test_163_match_payload_bind_scope.py
           tests/test_async_match_block_arm.py
+          tests/test_cluster_c_emitter_hijack_553.py
           tests/test_crypto_stdlib.py
           tests/test_insert_if_absent.py
           tests/test_json_cross_tier_bytes.py

@@ -26,7 +26,7 @@ an ASSERTED choice with a reason, not an oversight. If branch protection is ever
 updated, update REQUIRED_CHECKS to match and this file documents the new intent.
 
 NOTE on the "13 required checks" figure in ci.yml's merge-queue comment: this
-partition marks 11 jobs required and 4 non-required. The two are reconciled at
+partition marks 11 jobs required and 5 non-required. The two are reconciled at
 the branch-protection settings, which are out of tree; whichever is stale, this
 test at least makes the job-name side of the contract explicit and drift-proof.
 It reads ci.yml as text, so it needs no PyYAML (not a declared dependency) and
@@ -71,6 +71,11 @@ NOT_REQUIRED_CHECKS = {
     # Aggregate/roots recombination job; informational over the per-tier gates
     # that are themselves required.
     "backend-roots-combined": "aggregate over already-required per-tier gates",
+    # Opt-in microVM smoke: gated on `vars.REVL_MICROVM_RUNNER == '1'` and a
+    # self-hosted [linux, kvm] runner with /dev/kvm + boot assets, so it does
+    # not run on a default PR at all. Not in branch protection; run for signal
+    # where a KVM runner is provisioned, never a hard merge gate.
+    "sandbox-microvm": "opt-in self-hosted KVM smoke; not a hard merge gate",
 }
 
 
