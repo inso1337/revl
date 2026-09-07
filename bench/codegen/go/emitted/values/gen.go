@@ -36,26 +36,27 @@ func revlMul(a, b int64) int64 {
 	return p
 }
 
-// ---- built-in Opt as a generic sealed interface -----------------------
-type RevlOpt[T any] interface{ isRevlOpt() }
-type RevlSome[T any] struct{ Value T }
-
-func (RevlSome[T]) isRevlOpt() {}
-
-type RevlNone[T any] struct{}
-
-func (RevlNone[T]) isRevlOpt() {}
+// ---- built-in Opt as a two-value struct (item 434 (d)) ----------------
+// A present-flag + value struct, not a sealed interface: a Some carrying a
+// non-pointer payload no longer heap-boxes to satisfy an interface, so an Opt
+// that escapes a function or lands in a collection costs no allocation. `Ok`
+// discriminates; `None` is the zero value (Ok == false), matching the (T, bool)
+// return shape the component (v1/v2) tier already uses.
+type RevlOpt[T any] struct {
+	Value T
+	Ok    bool
+}
 
 func revlOptMap[A any, B any](o RevlOpt[A], f func(A) B) RevlOpt[B] {
-	if s, ok := o.(RevlSome[A]); ok {
-		return RevlSome[B]{Value: f(s.Value)}
+	if o.Ok {
+		return RevlOpt[B]{Value: f(o.Value), Ok: true}
 	}
-	return RevlNone[B]{}
+	return RevlOpt[B]{}
 }
 
 func revlOptOr[T any](o RevlOpt[T], d T) T {
-	if s, ok := o.(RevlSome[T]); ok {
-		return s.Value
+	if o.Ok {
+		return o.Value
 	}
 	return d
 }
@@ -72,9 +73,9 @@ func revlMapSet[K comparable, V any](m map[K]V, k K, v V) map[K]V {
 
 func revlMapGet[K comparable, V any](m map[K]V, k K) RevlOpt[V] {
 	if v, ok := m[k]; ok {
-		return RevlSome[V]{Value: v}
+		return RevlOpt[V]{Value: v, Ok: true}
 	}
-	return RevlNone[V]{}
+	return RevlOpt[V]{}
 }
 
 func revlMapHas[K comparable, V any](m map[K]V, k K) bool {
@@ -390,18 +391,13 @@ func find(m map[string]int64, k string) int64 {
 	var hit RevlOpt[int64] = revlMapGet(m, k)
 	_ = hit
 	return func() int64 {
-		switch _m := hit.(type) {
-		case RevlSome[int64]:
+		_m := hit
+		if _m.Ok {
 			v := _m.Value
 			_ = v
 			return v
-		case RevlNone[int64]:
-			_ = _m
-			return revlSub(0, 1)
-		default:
-			_ = _m
-			panic("unreachable: non-exhaustive match")
 		}
+		return revlSub(0, 1)
 	}()
 }
 
