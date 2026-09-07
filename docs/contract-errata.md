@@ -365,6 +365,73 @@ This goes in the compiler spec, not the runtimes.
   back to its host default. One per lowering per tier, the same line of
   defence, for the sibling divergence.
 
+- **Emitter-injected host-call hijack across tiers (#553 cluster C).** The
+  other half of #553: every emitter injects host calls (a builtin, a
+  predeclared identifier, a context property) into the code it emits for a user
+  program, and a user name landing on the same host name can shadow the call
+  the emitter relies on — the reference tier then answers differently from the
+  others for a program the checker accepts. The "plausible unconfirmed (C)"
+  cases were confirmed empirically and locked in
+  `tests/test_cluster_c_emitter_hijack_553.py`:
+  - **py — CLOSED.** A top-level `fn` named a Python builtin the emitter emits
+    by bare name (`abs`/`len`/`sorted`/`str`/`ord`/`repr`/`float`/`isinstance`/
+    `getattr`/`globals`/`hash`/`list`/`range`/`reversed`) landed in module scope
+    and SILENTLY hijacked the operation — `Int.mod` (`a % abs(b)`) with a user
+    `fn abs` returned the wrong remainder; a `test`'s failure message
+    (`repr(...)`) with a user `fn repr` crashed. Fixed by folding the injected
+    set (`backends/python/emit.py::_EMITTED_BUILTINS`) into the injective
+    `_mangle` A3 ladder, so the user's `abs` emits and runs as `abs_` while the
+    emitter's `abs(...)` still resolves to the builtin. The escape is applied at
+    LEGB positions only (module `fn`/`type`/variant-case names, locals,
+    parameters, variable uses) and not at method/field/key positions, which are
+    attributes never resolved through the LEGB chain — that scope is also what
+    keeps the change byte-identical to the self-hosted `selfhost/emit_py.rvl`
+    (keyword-escape only) for the whole corpus, so no digest-input change is
+    needed. Two emitted builtins are the exception, left out because they are
+    legitimate corpus identifiers the self-host does not escape (`divmod`, a
+    corpus `fn`; `next`, a corpus parameter); closing those fully needs the
+    self-host mirror + a gate-crate regen and is tracked here.
+  - **go — CLOSED.** The same class, loud instead of silent: a top-level
+    `fn`/`type` named a Go PREDECLARED identifier (`len`, `error`, `make`,
+    `append`, `string`, `int`, …) shadowed the universe-block name a runtime
+    helper used, so `go build` failed. Fixed by carrying the predeclared set in
+    `backends/go/emit.py::_GO_RESERVED` (folded into `_v3_ident`'s ladder).
+  - **ts — CLOSED (loud rejection).** A require/provide key becomes a
+    `ctx.<key>` PROPERTY on cordis's Context; a key colliding with a JS
+    Object/Function member (`then`, `prototype`, `constructor`, `toString`,
+    `valueOf`, `hasOwnProperty`, `__proto__`, …) or cordis's reserved
+    `_`-prefixed namespace resolved to `undefined` on the CONSUMER side while
+    py/go read the same key from a string store — a silent consumer-side hijack
+    (`then` additionally makes the host thenable). A key is the provide/require
+    wire string and cannot be renamed, so `backends/typescript/emit.py::
+    _reject_service_key` refuses it at emit with a clean "rename the key"
+    message (the require side was previously unguarded; the provide side had
+    only the narrower `CONTEXT_MEMBERS` check). A loud portability error in
+    place of a silent wrong resolution — the same posture as the existing
+    `CONTEXT_MEMBERS` and java `_EMITTER_RESERVED` rejections.
+  - **java — SAFE.** The frame/undo scaffolding names (`config`/`fx`/`frame`/
+    `undos`/`ctx`/`root`) are already refused by `_EMITTER_RESERVED`; the
+    flagged `bind`/`require` (and rust's `borrow`/`type_id`) are not scaffolding
+    names and execute correctly (verified live on the go tier, which runs the
+    composition, and by emit inspection on java).
+  - **rust — OPEN, pinned.** A unit-service method named a smart-pointer/prelude
+    method (`to_owned`, `as_ref`, `as_mut`) IS hijacked wherever the receiver is
+    the `Arc<Box<dyn Svc>>` a `call`/require yields (`backends/rust/emit.py`, the
+    lifecycle `call` at the `root.require::<Box<dyn Svc>>(..).expect(..).<m>()`
+    site and the in-body require path): `w.to_owned()` binds `Arc::clone`,
+    `w.as_ref()` binds `Arc::as_ref` — the wrong method, caught as a type error
+    against the `i64` the service method returns. `borrow`/`type_id` need traits
+    not in the prelude (`Borrow`, `Any`), so they resolve to the service method
+    and are safe. The fix is depth-aware fully-qualified dispatch
+    (`Svc::m(&**recv)`, the receiver coerced to exactly `&dyn Svc`) at every
+    service-call site — a rust-backend change (`emit.py` is a digest input, so
+    it also regenerates the gate crates), out of proportion to a contained
+    emitter tweak and left to a dedicated follow-up. Pinned by the
+    strict-`xfail` `test_rust_smart_pointer_named_methods_hijack` (flip to a
+    plain assert once fixed).
+  - **wasm — by-design.** The per-MODULE (not per-component) host-import subset
+    check the issue lists is item 289's extern-trust posture, not a divergence.
+
 ## Arithmetic divergences (open, pinned, one root cause)
 
 Found by executing the same source on every tier
