@@ -3357,37 +3357,88 @@ def _witnessed_extern_names(program: Program) -> set[str]:
     return {ext.name for ext in program.externs if ext.classification == "witnessed"}
 
 
-def _refuse_witnessed_outside_effect_position(program: Program, filename: str) -> None:
-    """Rule 1 (docs/design/243-witnessed-externs.md): a witnessed extern is
-    refused outside effect position — no bare call from a plain `fn`/`test`
-    body.
+def _refuse_effect_position_bound_externs_in_fn_body(
+        program: Program, filename: str) -> None:
+    """One walk over every `fn`/`test` body, refusing the three extern kinds
+    whose effect machinery exists only in effect position — a bare call from a
+    plain fn/test body would silently drop it:
 
-    A witnessed mutation is reversible only because the teardown accumulator
-    auto-registers its declared inverse. A `fn`/`test` body has no accumulator,
-    so a call there would mutate the host with the inverse dropped on the floor
-    — silently irreversible, the one outcome the classification exists to
-    prevent. Every extern is otherwise callable from a fn/test body (they seed
-    the `callables` set), so this is an explicit refusal, checked over the
-    author's AST where the call site still has a line."""
+    * `witnessed` (rule 1, docs/design/243-witnessed-externs.md): the teardown
+      accumulator that auto-registers the declared inverse exists only in a
+      component activation; a fn/test body has none, so the mutation would be
+      irreversible — the one outcome the classification exists to prevent.
+    * `acquire` with an `undo` (item 399): the same accumulator would auto-
+      register that `undo`; without it the acquisition is silently irreversible.
+    * a `deferred` emission (item 400): a fn/test body has no session commit for
+      the deferral to fire at, so it fires immediately, bypassing the commit
+      queue (`deferred` fires at commit; an abort drops the queue, item 245).
+
+    Every extern is otherwise callable from a fn/test body (they seed the
+    `callables` set), so these are explicit refusals, checked over the author's
+    AST where the call site still has a line.
+
+    These were three sequential passes, each re-walking the identical set of
+    fn/test bodies (P-9, #543). Folded into one traversal here. Diagnostic order
+    is preserved verbatim: the walk records the FIRST violation of each kind (in
+    the same fn-then-test, definition-order recursion the passes used) and then
+    reports them witnessed-before-(acquire/deferred) — exactly what running the
+    witnessed pass to completion before the teardown pass produced. An extern
+    carries one classification, so the `witnessed` and `acquire` sets are
+    disjoint; `acquire` is checked before `deferred`, matching the original
+    first-`if`-raises order."""
     from .parser import ExprCall, ExprVar
 
     witnessed = _witnessed_extern_names(program)
-    if not witnessed:
+    acquire_undo = {
+        ext.name for ext in program.externs
+        if ext.classification == "acquire" and ext.undo is not None}
+    deferred = {ext.name for ext in program.externs if ext.deferred}
+    if not witnessed and not acquire_undo and not deferred:
         return
 
+    first_witnessed: RevlError | None = None
+    first_teardown: RevlError | None = None
+
     def _walk(node, where: str):
-        if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar) \
-                and node.callee.name in witnessed:
-            raise RevlError(
-                filename, node.line,
-                f"witnessed extern `{node.callee.name}` cannot be called in {where} "
-                f"— a witnessed mutation is only valid in effect position (G4)",
-                hint="its declared inverse is auto-registered by the teardown "
-                     "accumulator, which exists only in a component activation; a "
-                     "fn/test body has none, so the mutation would be irreversible "
-                     "(docs/design/243-witnessed-externs.md)",
-                code="G4", category="witnessed",
-            )
+        nonlocal first_witnessed, first_teardown
+        if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
+            name = node.callee.name
+            if first_witnessed is None and name in witnessed:
+                first_witnessed = RevlError(
+                    filename, node.line,
+                    f"witnessed extern `{name}` cannot be called in {where} "
+                    f"— a witnessed mutation is only valid in effect position (G4)",
+                    hint="its declared inverse is auto-registered by the teardown "
+                         "accumulator, which exists only in a component activation; a "
+                         "fn/test body has none, so the mutation would be irreversible "
+                         "(docs/design/243-witnessed-externs.md)",
+                    code="G4", category="witnessed",
+                )
+            elif first_teardown is None and name in acquire_undo:
+                first_teardown = RevlError(
+                    filename, node.line,
+                    f"`acquire` extern `{name}` cannot be called in {where}; its "
+                    f"declared `undo` teardown would be dropped, leaving the "
+                    f"acquisition irreversible (G4)",
+                    hint="an `acquire` extern's `undo` is auto-registered by the "
+                         "teardown accumulator, which exists only in a component "
+                         "activation or provide-method body; call it from there so "
+                         "the teardown can run (docs/design/243-witnessed-"
+                         "externs.md)",
+                    code="G4", category="acquire",
+                )
+            elif first_teardown is None and name in deferred:
+                first_teardown = RevlError(
+                    filename, node.line,
+                    f"`deferred` emission extern `{name}` cannot be called in "
+                    f"{where}; a fn/test body has no session commit for the "
+                    f"deferral to fire at (G4)",
+                    hint="a deferred emission enqueues onto the session deferral "
+                         "queue and fires at commit; that queue exists only inside "
+                         "a component activation or provide-method body, so call it "
+                         "from there (docs/design/245-session-commit.md)",
+                    code="G4", category="deferred",
+                )
         if hasattr(node, "__dataclass_fields__"):
             for f in type(node).__dataclass_fields__:
                 _walk(getattr(node, f), where)
@@ -3401,6 +3452,11 @@ def _refuse_witnessed_outside_effect_position(program: Program, filename: str) -
     for test in program.tests:
         for stmt in test.body:
             _walk(stmt, f"the body of test `{test.name}`")
+
+    if first_witnessed is not None:
+        raise first_witnessed
+    if first_teardown is not None:
+        raise first_teardown
 
 
 def _refuse_host_acquire_in_component_reachable_fn(program: Program, filename: str) -> None:
@@ -3479,75 +3535,6 @@ def _refuse_host_acquire_in_component_reachable_fn(program: Program, filename: s
 
     for name in sorted(reached):
         _scan(fns[name].body, name)
-
-
-def _refuse_teardown_bound_externs_in_fn_body(program: Program, filename: str) -> None:
-    """Items 399 and 400: the acquire-with-`undo` and `deferred`-emission twins
-    of the witnessed rule-1 refusal above. Each carries effect machinery that
-    exists only in effect position, so a bare call from a plain `fn`/`test` body
-    would silently drop it:
-
-    * item 399: an `acquire` extern that declares an `undo` has no teardown
-      accumulator to auto-register that `undo` in a fn/test body, so the teardown
-      is dropped on every path and the acquisition is silently irreversible.
-    * item 400: a `deferred` emission has no session commit in a fn/test body to
-      defer to, so it fires immediately (once per loop iteration), bypassing the
-      commit queue that `deferred` exists to feed (item 245: deferred emissions
-      fire at commit, an abort drops the queue).
-
-    An `acquire` with NO `undo`, and a non-deferred emission, are unaffected;
-    both stay callable from a fn/test body. Checked over the author's AST, beside
-    the witnessed refusal, where the call site still has a line."""
-    from .parser import ExprCall, ExprVar
-
-    acquire_undo = {
-        ext.name for ext in program.externs
-        if ext.classification == "acquire" and ext.undo is not None}
-    deferred = {ext.name for ext in program.externs if ext.deferred}
-    if not acquire_undo and not deferred:
-        return
-
-    def _walk(node, where: str):
-        if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
-            name = node.callee.name
-            if name in acquire_undo:
-                raise RevlError(
-                    filename, node.line,
-                    f"`acquire` extern `{name}` cannot be called in {where}; its "
-                    f"declared `undo` teardown would be dropped, leaving the "
-                    f"acquisition irreversible (G4)",
-                    hint="an `acquire` extern's `undo` is auto-registered by the "
-                         "teardown accumulator, which exists only in a component "
-                         "activation or provide-method body; call it from there so "
-                         "the teardown can run (docs/design/243-witnessed-"
-                         "externs.md)",
-                    code="G4", category="acquire",
-                )
-            if name in deferred:
-                raise RevlError(
-                    filename, node.line,
-                    f"`deferred` emission extern `{name}` cannot be called in "
-                    f"{where}; a fn/test body has no session commit for the "
-                    f"deferral to fire at (G4)",
-                    hint="a deferred emission enqueues onto the session deferral "
-                         "queue and fires at commit; that queue exists only inside "
-                         "a component activation or provide-method body, so call it "
-                         "from there (docs/design/245-session-commit.md)",
-                    code="G4", category="deferred",
-                )
-        if hasattr(node, "__dataclass_fields__"):
-            for f in type(node).__dataclass_fields__:
-                _walk(getattr(node, f), where)
-        elif isinstance(node, (list, tuple)):
-            for x in node:
-                _walk(x, where)
-
-    for fn in program.fn_decls:
-        for stmt in fn.body:
-            _walk(stmt, f"the body of fn `{fn.name}`")
-    for test in program.tests:
-        for stmt in test.body:
-            _walk(stmt, f"the body of test `{test.name}`")
 
 
 def _validated_response_schema(name: str, returns: str | None, is_emission: bool,
@@ -6533,15 +6520,14 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # change. Empty `required` set unless an extern declared `requires approval`,
     # so a program with none is byte-identical.
     types[APPROVAL_KEY] = _approval_index(externs)
-    # witnessed externs are refused outside effect position (item 243 rule 1):
-    # a fn/test body has no teardown accumulator, so the auto-registered inverse
-    # would be dropped and the mutation would be silently irreversible.
-    _refuse_witnessed_outside_effect_position(program, program.filename)
-    # items 399/400: the acquire-with-`undo` and `deferred`-emission twins of the
-    # witnessed rule-1 refusal. A fn/test body has no teardown accumulator and no
-    # session commit, so a bare call would drop the declared `undo` (399) or fire
-    # the deferred emission immediately, bypassing the commit queue (400).
-    _refuse_teardown_bound_externs_in_fn_body(program, program.filename)
+    # Externs whose effect machinery exists only in effect position are refused
+    # in a plain fn/test body, in one walk (P-9, #543): a witnessed extern
+    # (item 243 rule 1) whose auto-registered inverse would be dropped; an
+    # `acquire` with an `undo` (399) whose teardown would be dropped; a
+    # `deferred` emission (400) that would fire immediately, bypassing the
+    # commit queue. Reported witnessed-before-teardown, as when these were three
+    # sequential passes.
+    _refuse_effect_position_bound_externs_in_fn_body(program, program.filename)
     _refuse_host_acquire_in_component_reachable_fn(program, program.filename)
     # Slice 2: the set every component's effect-position lowering consults to
     # tell a witnessed acquisition from an ordinary one (docs/design/243-
@@ -11234,8 +11220,8 @@ def _refuse_unbracketed_host_acquire(root: str, verb: str, where: str,
     rather than as a fourth special case.
 
     The `acquire` EXTERN twin of this refusal is
-    `_refuse_teardown_bound_externs_in_fn_body` (items 399/400); the wording
-    below deliberately echoes it."""
+    `_refuse_effect_position_bound_externs_in_fn_body` (items 399/400); the
+    wording below deliberately echoes it."""
     release = _HOST_ACQUIRE_VERBS[f"{root}.{verb}"]
     raise RevlError(
         filename or "<unknown>", line,
