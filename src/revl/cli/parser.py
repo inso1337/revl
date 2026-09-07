@@ -233,6 +233,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="a publisher id in the operator trust set, for `publisher trusted` "
              "clauses (repeatable; item 290)")
 
+    # item 441 / issue #120, S2: `revl goal audit` — the blind-spot report. A
+    # pure function of a compiled IR (no session, no policy, no runtime): the
+    # class-(c) capabilities the run reaches that the termination contract's own
+    # cone does not observe (docs/design/458-termination-language-surface.md §7,
+    # 441-goal-contracts.md §5.2).
+    goal_cmd = sub.add_parser(
+        "goal", help="termination-contract tools (item 441)")
+    goal_sub = goal_cmd.add_subparsers(dest="goal_command", required=True)
+    goal_audit = goal_sub.add_parser(
+        "audit",
+        help="the blind-spot report: the class-(c) capabilities this run "
+             "reaches that no criterion in its contract observes")
+    goal_audit.add_argument("files", nargs="+")
+    goal_audit.add_argument("--json", action="store_true",
+                            help="machine-readable output")
+
     # item 290: `revl policy evaluate` — the dry-run explain verb. Runs the SAME
     # `policy.evaluate` (one comparison site) and reports, per component, which
     # rules select it and which clauses pass/fail with the recorded fact vs the

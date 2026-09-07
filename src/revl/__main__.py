@@ -527,6 +527,26 @@ def _run_policy(args) -> int:
     return 1 if result["refused"] else 0
 
 
+def _run_goal(args, ir: dict) -> int:
+    """`revl goal audit` — the blind-spot report (item 441 / issue #120, S2).
+
+    A pure function of the compiled IR: the class-(c) capabilities the run
+    reaches that the termination contract's cone does not observe
+    (`goal_audit.blind_spot`). A composition with no goal service has no
+    contract, and the command says so and exits 0 (there is nothing to audit;
+    §5.3's empty-contract refusal is a session freeze rule, not a `revl check`
+    fact, and is S3's)."""
+    from .goal_audit import blind_spot, render  # noqa: PLC0415 — lazy
+    if args.goal_command == "audit":
+        report = blind_spot(ir)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(render(report))
+        return 0
+    raise AssertionError(f"unknown goal subcommand {args.goal_command!r}")
+
+
 def _run_audit(args, ir: dict) -> int:
     """`revl audit` — composition manifest + G8 boundary surface, with the
     item-33 policy gate (`--policy`) and the authority-drift gate (`--diff`)."""
@@ -1392,6 +1412,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_erase_report(args, ir)
     if args.command == "audit":
         return _run_audit(args, ir)
+    if args.command == "goal":
+        return _run_goal(args, ir)
     if args.command == "version":
         return _run_version(args, ir)
     return _run_compile(args, ir)
