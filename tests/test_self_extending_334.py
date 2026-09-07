@@ -652,3 +652,100 @@ def test_stateless_swap_reports_no_migration(gate_factory, artifact):
     result = gate.propose(_AGENT_V2, granted=["Ops"], providers=_PROVIDERS)
     assert result.admitted and result.swapped, result.message
     assert result.migration is None
+
+
+# =========================================================================== #
+# The proposal's refusal as MACHINE-READABLE DATA (item 334, this slice).
+#
+# Slice 1 returned a refusal's why-trace only as `code` + a prose `message`, so a
+# self-extension loop could branch on the code but had to PARSE the prose to feed
+# a generator. This slice attaches `ProposeResult.rejection`: the same structured
+# `diagnostics.classify` record `gate_service.admit_structured` emits (the
+# violated G-rule, the offending subject, the why-trace steps, the mapped `fix`),
+# so the refusal crosses to `evolve.rejection_payload` and on to the proposer
+# WITHOUT prose-parsing. This closes the item-334 <-> item-148 loop the exit test
+# names ("REFUSED with the reference why-trace as data"). `rejection` is `None`
+# for a refusal a regenerated candidate could not repair (forbidden-grant, halt).
+# =========================================================================== #
+
+@needs_cordis
+def test_compile_refusal_carries_a_structured_rejection(gate_factory, artifact):
+    """A candidate refused by the decision compile (a smuggled new `extern`, G8)
+    carries the machine-readable why-trace in `rejection`, agreeing with the
+    top-level `code`/`message`, and it normalizes through `evolve.rejection_payload`
+    to the generator-facing shape (g_rule G8) with no prose-parsing."""
+    from revl.evolve_loop import rejection_payload  # noqa: PLC0415
+
+    gate = gate_factory()
+    gate.load(_BASE)
+
+    smuggle = _AGENT_V2 + (
+        "extern pure fn exfil(t: Str) -> Str = @py { import os; return t }\n")
+    result = gate.propose(smuggle, granted=["Ops"], providers=_PROVIDERS)
+    assert not result.admitted
+    assert result.code == "G8"
+
+    # the structured record is present and agrees with the top-level surface.
+    # `message` is the core `error.message` (no file:line prefix, no hint), which
+    # the prose `str(error)` on the top-level surface contains verbatim.
+    assert isinstance(result.rejection, dict)
+    assert result.rejection["code"] == result.code
+    assert result.rejection["message"] in (result.message or "")
+    assert "exfil" in result.rejection["message"]
+
+    # the seam: it feeds evolve's normalizer straight through — no prose-parsing.
+    payload = rejection_payload(result.rejection)
+    assert payload["g_rule"] == "G8"
+    assert payload["message"] == result.rejection["message"]
+
+    # the live composition is byte-identical: still gen N.
+    assert gate.call("tool", "describe", [])["result"] == "v1"
+    assert _pristine(artifact)
+
+
+@needs_cordis
+def test_ungranted_reach_rejection_normalizes_for_a_proposer(gate_factory):
+    """An ungranted-service refusal (R2) also carries the structured `rejection`,
+    and `evolve.rejection_payload` reads its g_rule as R2 — the loop can branch on
+    the machine key without reading the human message."""
+    from revl.evolve_loop import rejection_payload  # noqa: PLC0415
+
+    gate = gate_factory()
+    gate.load(_BASE)
+
+    result = gate.propose(_AGENT_V2, granted=[], providers=_PROVIDERS)
+    assert not result.admitted and result.code == "R2"
+    assert isinstance(result.rejection, dict)
+    assert result.rejection["code"] == "R2"
+    assert rejection_payload(result.rejection)["g_rule"] == "R2"
+
+    assert gate.call("tool", "describe", [])["result"] == "v1"
+
+
+@needs_cordis
+def test_forbidden_grant_has_no_structured_rejection(gate_factory):
+    """The forbidden-grant refusal is NOT a candidate defect a regenerated
+    candidate could repair — it enforces a security deferral. So `rejection` is
+    `None`: the loop must not feed it to a proposer as if a better candidate would
+    pass. The `code`/`message` still name the operator-facing reason."""
+    gate = gate_factory()
+    gate.load(_BASE)
+
+    result = gate.propose(_AGENT_V2, granted=["Ops", "Admission"],
+                          providers=_PROVIDERS)
+    assert not result.admitted and result.code == "FORBIDDEN_GRANT"
+    assert result.rejection is None
+    assert "Admission" in (result.message or "")
+
+
+@needs_cordis
+def test_admitted_swap_reports_no_rejection(gate_factory, artifact):
+    """A candidate that is admitted and swapped in carries no `rejection` — the
+    field is populated only on a compile refusal, so `rejection is None` is a
+    reliable 'the candidate passed' signal."""
+    gate = gate_factory()
+    gate.load(_BASE)
+    result = gate.propose(_AGENT_V2, granted=["Ops"], providers=_PROVIDERS)
+    assert result.admitted and result.swapped, result.message
+    assert result.rejection is None
+    assert result.as_dict()["rejection"] is None
