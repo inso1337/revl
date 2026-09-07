@@ -1,8 +1,13 @@
 """The `revl-gate` crate's differential corpus gate (roadmap item 332, Stage 3).
 
-The roadmap's own exit test for this stage, admit half: *a standalone rust
-binary depending only on the crate returns the same verdict as `revl compile`
-across the corpus*. That is what this file drives.
+The roadmap's own exit test for this stage: *a standalone rust binary depending
+only on the crate returns the same verdict as `revl compile` across the corpus,
+and `compile_to` is byte-identical to the reference on the covered corpus*. Both
+halves are driven here from the SAME standalone consumer — the admit half in
+full (it agrees with the reference byte-for-byte on the covered corpus), and the
+compile half as a fail-closed guard plus a strict-xfail byte-identity tripwire,
+because a native emitter is Stage 4 and not landed (see "the compile_to exit
+clause" below).
 
 Shape
 -----
@@ -132,9 +137,30 @@ pytestmark = pytest.mark.skipif(
 
 CONSUMER_MAIN = r'''use std::io::Read;
 
+// A minimal JSON string encoder, so this consumer takes no dependency beyond
+// `revl-gate` itself (the "only one crate on the dependency line" claim).
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn main() {
     let mut argv = std::env::args().skip(1);
-    if argv.next().as_deref() == Some("--version") {
+    let mode = argv.next();
+    if mode.as_deref() == Some("--version") {
         let v = revl_gate::gate_version();
         println!(
             "{{\"api\":\"{}\",\"language\":\"{}\",\"frontier\":\"{}\",\"layer\":\"{}\"}}",
@@ -144,6 +170,34 @@ fn main() {
     }
     let mut blob = String::new();
     std::io::stdin().read_to_string(&mut blob).expect("read stdin");
+    // `--compile <tier>` is the second half of item 332's exit test, driven
+    // from the SAME standalone binary: for each source, `compile_to` on the
+    // named tier. `ok` is whether an emission was produced; `output` is the
+    // emitted target source verbatim (null when none); `error` is the crate's
+    // fail-closed verdict wire shape when it did not emit.
+    if mode.as_deref() == Some("--compile") {
+        let tier = match argv.next().as_deref() {
+            Some("py") => revl_gate::Tier::Py,
+            Some("rust") => revl_gate::Tier::Rust,
+            other => {
+                eprintln!("unknown tier {:?}", other);
+                std::process::exit(2);
+            }
+        };
+        for source in blob.split('\0') {
+            match revl_gate::compile_to(source, tier) {
+                Ok(output) => println!(
+                    "{{\"ok\":true,\"output\":{},\"error\":null}}",
+                    json_string(&output)
+                ),
+                Err(verdict) => println!(
+                    "{{\"ok\":false,\"output\":null,\"error\":{}}}",
+                    verdict.to_json()
+                ),
+            }
+        }
+        return;
+    }
     for source in blob.split('\0') {
         println!("{}", revl_gate::admit(source).to_json());
     }
@@ -553,6 +607,103 @@ def test_the_crate_ships_its_own_cargo_tests(consumer):
     assert tested.returncode == 0, (
         "cargo test failed inside crates/revl-gate:\n"
         + (tested.stderr or tested.stdout or "")[-4000:])
+
+
+# ------------------------------------------------- the compile_to exit clause
+#
+# Item 332's exit test has TWO halves and the same standalone binary drives
+# both: the admit half above (`admit` verdict == `revl compile`, byte-exact on
+# the covered corpus), and the compile half here — "`compile_to(source, tier)`
+# is byte-identical to the reference on the covered corpus".
+#
+# The compile half is STAGE 4 and not landed: the self-host emitters
+# (`selfhost/emit_py.rvl`, `selfhost/emit_rust.rvl`) still carry `@py`-only
+# helper externs and emit no native target, so the crate's `compile_to` has no
+# native emitter to call and fails closed on every input. Two things are held
+# here rather than left to prose:
+#
+#   * the SECURITY half, hard: over the covered corpus, on both tiers the crate
+#     can name, `compile_to` never returns an emission — it fails closed with a
+#     verdict that reads `admitted:false`, so a consumer can never receive
+#     target source this crate did not actually produce from the reference;
+#   * the byte-identity half, as a strict xfail: the day a native emitter lands,
+#     the crate's output must equal the reference's, and the xfail flips to an
+#     XPASS (a red) that forces this clause to be turned into a live assertion.
+
+
+def _crate_compiles(binary: Path, tier: str, sources: list[str]) -> list[dict]:
+    """Run every source through the crate's `compile_to` for `tier` in ONE
+    process; return the parsed `{ok, output, error}` records, in order."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+    run = subprocess.run([str(binary), "--compile", tier],
+                         input="\0".join(sources), text=True,
+                         capture_output=True, timeout=900, env=env, check=False)
+    assert run.returncode == 0, (
+        "the consumer binary exited nonzero on --compile:\n"
+        + (run.stderr or run.stdout or "")[-4000:])
+    lines = [line for line in run.stdout.splitlines() if line.strip()]
+    assert len(lines) == len(sources), (
+        f"expected {len(sources)} compile records, got {len(lines)}")
+    return [json.loads(line) for line in lines]
+
+
+# The tiers the crate's `compile_to` can name (its `Tier` enum). The reference
+# emits far more; these two are the crate's own surface, so they are what the
+# exit clause is held over.
+_CRATE_TIERS = ("py", "rust")
+
+# The covered corpus for the compile half is the ACCEPTED programs: a program
+# the reference REFUSES has no emission to be byte-identical to.
+_ACCEPTED_CORPUS = [src for _name, src in oracle.ACCEPTED_PROGRAMS]
+
+
+@pytest.mark.parametrize("tier", _CRATE_TIERS)
+def test_compile_to_fails_closed_over_the_covered_corpus(consumer, tier):
+    """The always-valid, security-relevant half of the compile clause: the
+    crate emits NOTHING it did not produce from the reference. Today that means
+    it emits nothing at all, and this holds that over the whole covered corpus
+    from the consumer side — `ok` false, no `output`, and a verdict that reads
+    `admitted:false` on the wire."""
+    records = _crate_compiles(consumer, tier, _ACCEPTED_CORPUS)
+    offenders = []
+    for src, record in zip(_ACCEPTED_CORPUS, records):
+        error = record.get("error")
+        if (record["ok"] is not False
+                or record["output"] is not None
+                or error is None
+                or error.get("admitted") is not False):
+            offenders.append((src[:60], record))
+    assert not offenders, (
+        "the crate's compile_to did not fail closed on the covered corpus "
+        f"(tier {tier}); a consumer could receive an emission the crate did not "
+        "produce from the reference:\n  "
+        + "\n  ".join(f"{src!r}: {record}" for src, record in offenders))
+
+
+# One representative accepted program the reference emits on both crate tiers.
+# Pinned small so, once a native emitter exists, the byte comparison is legible.
+_BYTE_IDENTITY_PROBE = "fn id(x: Int) -> Int { return x }"
+
+
+@pytest.mark.parametrize("tier", _CRATE_TIERS)
+@pytest.mark.xfail(strict=True, reason=(
+    "item 332 Stage 4: the self-host emitters carry @py-only helper externs and "
+    "emit no native target, so the crate's compile_to fails closed and cannot be "
+    "byte-identical to the reference yet (issue #98). When a native emitter "
+    "lands this XPASSES, reddening the strict xfail so the clause is turned live."))
+def test_compile_to_is_byte_identical_to_the_reference(consumer, tier):
+    """The byte-identity half of item 332's exit test, held as a strict xfail
+    tripwire. The reference is `revl.gate.compile_to` (the reference emitters);
+    the crate must, once it emits at all, produce the same bytes."""
+    from revl.gate import compile_to as reference_compile_to  # noqa: PLC0415
+
+    reference = reference_compile_to(_BYTE_IDENTITY_PROBE, tier)
+    record = _crate_compiles(consumer, tier, [_BYTE_IDENTITY_PROBE])[0]
+    assert record["ok"] is True, (
+        f"the crate did not emit on tier {tier}: {record.get('error')}")
+    assert record["output"] == reference.output, (
+        f"tier {tier}: crate emission diverges from the reference")
 
 
 # ------------------------------------------------- the census's fast engine
