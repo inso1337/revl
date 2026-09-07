@@ -2461,8 +2461,8 @@ def _halt_all(children: dict, backends: dict, has_inventory,
 
     Two populations, and the split is the honest part:
 
-      * a child on a tier with NO E-Stop seam (`node`, `rust`, `go`, `java`,
-        `wasm`) is SIGKILLed immediately, because a kill is the only halt that
+      * a child on a tier with NO E-Stop seam (`rust`, `go`, `java`, `wasm`)
+        is SIGKILLed immediately, because a kill is the only halt that
         exists for it. It may have dispatched a crossing microseconds before
         it died and nothing recorded that, so its residue is UNKNOWN;
       * a child on a latch-honoring tier is already refusing new crossings at
