@@ -223,7 +223,12 @@ def test_dangerous_provision_key_is_refused():
             f"  provide {key} {{ fn handle(k) = k }}\n"
             "}\n"
         )
-        with pytest.raises(m.EmitError, match="reserved name|Context member"):
+        # The #553 cluster-C header guard (`_reject_service_key`, landed on
+        # main) refuses these keys for both provide and require with a
+        # host-safety message; that guard subsumes this A5 provision refusal.
+        with pytest.raises(
+                m.EmitError,
+                match="reserved name|Context member|not host-safe"):
             m.emit(compile_source(src))
 
 
