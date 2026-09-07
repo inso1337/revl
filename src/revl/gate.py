@@ -496,6 +496,18 @@ class ProposeResult:
       candidate could not repair — the forbidden-grant rule (it enforces a
       security deferral, not a candidate defect) and a halt (`revl recover`, not
       a better candidate).
+    * `admitted` False, `code` `STATE_UNDISCLOSED` — the candidate compiled, but
+      the item-334 trust-boundary disclosure gate refused the swap BEFORE any
+      teardown: gen N's live OPERATOR state would have crossed onto this
+      AGENT-authored successor through a channel that is not declared and
+      §5-typed on both sides — a live item-10 instance the successor re-declares
+      (correlated by candidate-written template name + host class, no type
+      contract), or a `handoff` whose accepted type cannot hold the running
+      export (the item-53 gate propose's standalone compile never ran). The
+      running composition is UNTOUCHED (nothing was torn down, so this is not a
+      revert). The repair is the candidate's own declared surface (quiesce/rename
+      the template, or widen the accept), so `rejection` is `None`: it is not the
+      compile-refusal why-trace a generator repairs blindly.
     * `admitted` True, `swapped` False, `reverted` True — the candidate admitted
       but FAILED TO ACTIVATE (its activation raised/left a fiber FAILED, or a
       requirement was unmet -> PENDING, or a declared provide never resolved).
@@ -873,8 +885,17 @@ class Gate:
                                  message=str(error),
                                  rejection=_propose_rejection(error))
 
+        from functools import partial  # noqa: PLC0415
         try:
-            state = self._invoke_with_approval(self._session.swap, ir)
+            # `migrate="declared"`: the item-334 trust-boundary disclosure policy.
+            # gen N's live OPERATOR state crosses onto this AGENT-authored
+            # successor ONLY through a `handoff` declared and §5-typed on both
+            # sides; the undeclared/untyped item-10 instance channel refuses
+            # before teardown (STATE_UNDISCLOSED) rather than migrating operator
+            # state by candidate-written name. A plain `swap`'s "generational"
+            # default (operator->operator) would carry it silently.
+            state = self._invoke_with_approval(
+                partial(self._session.swap, ir, migrate="declared"))
         except _session_error() as error:
             # A halt can engage BETWEEN the check above and here, in one thread,
             # with no concurrency: the swap runs the item-246 activation gate,
@@ -894,6 +915,18 @@ class Gate:
                         f"registered up to the halt is STRANDED; read the "
                         f"inventory with `estop_report()` and reconcile with "
                         f"`revl recover --wal <file>`."))
+            # item 334 trust boundary: the disclosure gate refused the candidate
+            # BEFORE any teardown — gen N's live operator state would have crossed
+            # onto this agent-authored successor through an undeclared/untyped
+            # channel. This is NOT a SWAP_REVERTED (nothing was torn down, so
+            # there is no revert): gen N was never disturbed. It is also not the
+            # retry-shaped signal a loop answers by regenerating — the candidate
+            # is repairable (drop the re-declared template / widen the accept),
+            # but the fix is the candidate's declared surface, so report it as its
+            # own refusal with gen N confirmed intact.
+            if getattr(error, "code", None) == "STATE_UNDISCLOSED":
+                return ProposeResult(False, code="STATE_UNDISCLOSED",
+                                     message=str(error))
             # the post-activation health gate (or a migration reject) rolled the
             # swap back: gen N is intact and still serving. Report it as data.
             return ProposeResult(True, swapped=False, reverted=True,
