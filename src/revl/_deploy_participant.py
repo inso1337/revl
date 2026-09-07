@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 WAL_VERSION = 1
@@ -80,8 +81,36 @@ class _Participant:
             return {}
 
     def _write_world(self, world: dict) -> None:
-        Path(self.world_path).write_text(
-            json.dumps(world, sort_keys=True, indent=1) + "\n", encoding="utf-8")
+        """Atomically replace the boundary-state world file (R-C9, issue #538).
+
+        A plain truncate-then-write (``write_text``) leaves a half-written — or
+        empty — world file if this process is killed mid-write, and the recovery
+        path (this process on restart, or ``recovery.py`` reading the mount)
+        then reads that torn file as lost boundary state. Write the payload to a
+        sibling temp file, fsync it, and ``os.replace`` it over the target: the
+        rename is atomic on POSIX, so a reader always sees either the whole old
+        file or the whole new one, never a torn one. The write-behind world file
+        now gets the same crash-atomicity the WAL append already fsyncs for."""
+        path = Path(self.world_path)
+        payload = json.dumps(world, sort_keys=True, indent=1) + "\n"
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent),
+                                   prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                try:
+                    os.fsync(handle.fileno())
+                except (OSError, ValueError):  # pragma: no cover — e.g. a tmpfs
+                    pass
+            os.replace(tmp, path)
+        except BaseException:
+            # never leave the sibling temp file behind on any failure
+            try:
+                os.unlink(tmp)
+            except OSError:  # pragma: no cover — already gone
+                pass
+            raise
 
     def _referent(self, effect: dict) -> str:
         return f"{self.identity}:{effect['name']}"
@@ -117,14 +146,32 @@ class _Participant:
 
     def _apply_one(self, effect: dict) -> None:
         world = self._world()
-        world[self._referent(effect)] = True
+        referent = self._referent(effect)
+        world[referent] = True
         self._write_world(world)
+        # R-C8 (issue #538): the effect record must be written in the SAME
+        # schema `recovery.py`/`settle_stranded` read, or a stranded
+        # participant's own WAL is unreadable — recover's `_referent_key` calls
+        # `World.key(inverse["op"])`, which does `op.get(...)` and raised
+        # `AttributeError` on the old `{"op": "remove", ...}` string form. The
+        # inverse is now a reconstructible boundary inverse: a `remove` call
+        # descriptor recover can re-issue LIFO. `World.key(op)` is
+        # `receiver:args[0]` == `{identity}:{name}` == `_referent(effect)`, so
+        # recover seeds and pops exactly this referent. `undo_idempotent` marks
+        # it item-309 `free`-tier (set-membership removal is idempotent), so a
+        # second recovery pass re-issues it with no fence and never escalates.
         inverse = (None if not effect.get("reversible", True)
-                   else {"op": "remove", "referent": self._referent(effect)})
+                   else {"reconstructible": True,
+                         "undo_idempotent": True,
+                         "op": {"receiver": self.identity,
+                                "method": "remove",
+                                "args": [effect["name"]]}})
         self.applied.append((effect, inverse))
         self._append({"record": "effect", "seq": len(self.applied),
                       "participant": self.identity,
-                      "referent": self._referent(effect),
+                      "component": self.identity,
+                      "label": referent,
+                      "referent": referent,
                       "inverse": inverse,
                       "boundary": {"referent": "outlives-process"}})
 
@@ -133,17 +180,22 @@ class _Participant:
         accumulator, then a re-read no-residue proof off the boundary state."""
         outstanding: list[str] = []
         for effect, inverse in reversed(self.applied):
+            referent = self._referent(effect)
             if inverse is None:
                 # An irreversible crossing: honestly residue, never claimed undone.
-                outstanding.append(self._referent(effect))
+                outstanding.append(referent)
                 self._append({"record": "residue", "participant": self.identity,
-                              "referent": self._referent(effect), "pid": os.getpid()})
+                              "referent": referent, "pid": os.getpid()})
                 continue
+            # The referent this inverse removes is derived from the effect, not
+            # read off the inverse record — the inverse is now a recover-schema
+            # call descriptor (R-C8), and `_referent(effect)` is the same
+            # `{identity}:{name}` key both `_write_world` and recover use.
             world = self._world()
-            world.pop(inverse["referent"], None)
+            world.pop(referent, None)
             self._write_world(world)
             self._append({"record": "undo", "participant": self.identity,
-                          "referent": inverse["referent"], "pid": os.getpid()})
+                          "referent": referent, "pid": os.getpid()})
         self.applied = []
         # the proof: re-read the boundary state and check nothing of ours is left
         world = self._world()
