@@ -53,6 +53,17 @@ def test_expected_version_is_nonempty_and_not_unknown():
     assert EXPECTED_STDLIB_VERSION != "unknown"
 
 
+def test_stamp_is_the_expected_bumped_counter():
+    # The stamp is a monotonic counter bumped once per public stdlib change
+    # (add/remove/signature). Pinning the literal here makes every future bump
+    # DELIBERATE: a public addition that forgets to bump reds this test instead
+    # of shipping a stale stamp. It is "3" as of the two additions that landed
+    # without a bump (fs.rvl is_dir/lexists/resolve_within, shell.rvl
+    # plan_op_name); raise it here in lock-step with the next public change.
+    assert EXPECTED_STDLIB_VERSION == "3"
+    assert read_stamp(STDLIB) == "3"
+
+
 def test_repo_stamp_matches_expected():
     # The compiler and its own bundled stdlib can never silently disagree: the
     # expected version IS the stamp read from stdlib/version.rvl, so no drift is
