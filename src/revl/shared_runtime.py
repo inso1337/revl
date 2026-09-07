@@ -61,6 +61,13 @@ class JournaledSharedGrantBook:
         self._book = SharedGrantBook(ttl=ttl)
         #: handle -> the serialized inverse op, the durable form of the close
         self._inverse_op: dict[str, dict] = {}
+        #: handles whose zero crossing has a TERMINAL durable record written
+        #: here — a ``shared-complete`` on a confirmed close, or a
+        #: ``shared-reclaim-fence`` on an attempted-but-unconfirmed one. Guards
+        #: the live-reclaim finalizer from re-settling a crossing it (or the
+        #: orderly path) already settled, so a faulted close is never later
+        #: overwritten with a false completion (issues #709/#710).
+        self._settled: set[str] = set()
 
     # -- durable ledger ----------------------------------------------------
 
@@ -83,6 +90,18 @@ class JournaledSharedGrantBook:
         holders = sorted(grant.holders) if grant is not None else []
         self._append({"record": "shared-grant", "handle": handle,
                       "inverse": self._inverse_op[handle], "holders": holders})
+
+    def _journal_fence(self, handle: str) -> None:
+        """Durably fence a zero crossing whose inverse was ATTEMPTED but whose
+        success is not confirmed — an orderly fire about to run, or a live
+        reclaim whose inverse raised. This is the same ``shared-reclaim-fence``
+        record `revl recover` reads as 'fenced-before-attempt, outcome unknown':
+        it proves an attempt was ABOUT to start, never that it completed, so a
+        later recover over the same durable ledger re-fires NOTHING and the
+        failed/unknown evidence survives the restart (consume-before-fire, the
+        discipline the WAL seal in #642/#695 and `recover`'s own reclaim fence
+        use)."""
+        self._append({"record": "shared-reclaim-fence", "handle": handle})
 
     def _inverse_callable(self, handle: str) -> Callable[[], None]:
         op = self._inverse_op[handle]
@@ -122,8 +141,9 @@ class JournaledSharedGrantBook:
         """A receiving scope's teardown: a lease RELEASE, count -= 1, a durable
         ledger write. Returns True exactly when this release drove the count to
         zero (the orderly path), in which case the declared inverse runs HERE, in
-        the last releaser's frame, and a ``shared-complete`` is journaled BEFORE
-        the fire so a crash reclaim never double-closes it.
+        the last releaser's frame. The completion marker is journaled only AFTER
+        the inverse returns, behind a durable attempt fence, so a crash reclaim
+        never double-closes it and a raising inverse is never recorded as done.
         """
         inverse = self._book.release(handle, holder_id, now=now)
         if inverse is None:
@@ -132,13 +152,21 @@ class JournaledSharedGrantBook:
             # the reclaim re-fires once, or shows the count the survivors hold.
             self._journal_grant(handle)
             return False
-        # the zero crossing, orderly path. Consume-before-fire: the count-zero
-        # ledger write and the completion marker are durable BEFORE the inverse
-        # fires, so a recover run reads 'done' and the shared-reclaim path stays
-        # out of it — the orderly inverse's exactly-once is the bracket channel's.
+        # the zero crossing, orderly path. Consume-before-fire (the discipline
+        # the WAL seal in #642/#695 and `recover`'s own reclaim fence use): the
+        # count-zero ledger write and a fence recording the ATTEMPT are durable
+        # BEFORE the inverse fires; the ``shared-complete`` marker is written
+        # ONLY after the inverse returns. So a crash — or a raising inverse —
+        # between the fence and completion leaves a durable 'fenced-before-
+        # attempt' that recover reads as outcome-unknown residue, never a false
+        # 'done' concealing an inverse that did not confirm (issue #710). The
+        # orderly inverse's exactly-once stays the bracket channel's: the fence
+        # only fails a later recover CLOSED, it never re-fires.
         self._journal_grant(handle)  # holders == [] now
+        self._journal_fence(handle)  # intent: the attempt is about to start
+        self._settled.add(handle)    # terminal durable state is owned here now
+        inverse()                    # only past the durable fence
         self._append({"record": "shared-complete", "handle": handle})
-        inverse()
         return True
 
     def reclaim_crashed(self, *, probe: LivenessProbe,
@@ -147,12 +175,48 @@ class JournaledSharedGrantBook:
         holder the `probe` confirms gone, decrement; a grant that reaches zero
         with no live holder left fires its inverse out of frame exactly once and
         is reported as `reclaim` residue. A grant a live holder still owns is
-        left standing. The ledger is re-journaled to reflect the survivors."""
+        left standing. The ledger is re-journaled to reflect the survivors.
+
+        A handle the primitive drove to its zero crossing here has ALREADY run
+        (or attempted) its inverse out of frame, exactly once, fenced by
+        ``grant.fired``. Finalizing that crossing in the durable ledger is this
+        wrapper's job: without it the pre-reclaim ``shared-grant`` record still
+        names live holders and no completion, so a later `revl recover` reads it
+        as standing residue and re-fires the inverse a second time (issue #709).
+        So each freshly fired handle gets a terminal record: a ``shared-complete``
+        on a confirmed-clean close, or — when the reclaim inverse RAISED (the
+        handle is in the report's faults) — a ``shared-reclaim-fence`` that keeps
+        the outcome failed/unknown and blocks an automatic recover replay. The
+        per-handle exactly-once fence and the independence of distinct
+        handles/owners (#671/#691) are the primitive's and are left untouched."""
         report = self._book.reclaim_crashed(probe=probe, now=now)
+        faulted = {f.get("handle") for f in report.faults if f.get("handle")}
         for handle in list(self._inverse_op):
             grant = self._book.grant(handle)
-            if grant is not None and not grant.fired:
+            if grant is None:
+                continue
+            if not grant.fired:
+                # a grant a live holder still owns: re-journal the survivor set,
+                # so the durable count stays honest and a later whole-process
+                # crash reclaims it once.
                 self._journal_grant(handle)
+                continue
+            if handle in self._settled:
+                # already given a terminal record (an orderly release, or an
+                # earlier reclaim pass): never re-settle it — that could paper a
+                # faulted close over with a false completion.
+                continue
+            if handle in faulted:
+                # the live reclaim inverse raised: retain failed/unknown
+                # evidence, no clean completion and no automatic recover replay.
+                self._journal_fence(handle)
+            else:
+                # a confirmed-clean live reclaim: journal the zero-crossing count
+                # and its completion, the same terminal record the orderly last
+                # release writes, so recover owes nothing on this handle.
+                self._journal_grant(handle)  # holders == [] now
+                self._append({"record": "shared-complete", "handle": handle})
+            self._settled.add(handle)
         return report
 
     # -- reads -------------------------------------------------------------
