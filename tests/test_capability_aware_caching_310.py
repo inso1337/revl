@@ -203,9 +203,26 @@ def test_cache_on_a_compensate_emission_extern_is_refused():
                "cache capability compensate cleanup() = @py { pass }\n")
 
 
-def test_cache_on_an_interior_emission_extern_is_the_later_slice_refusal():
-    with pytest.raises(RevlError, match="not yet enforceable"):
+def test_cache_capability_on_an_interior_emission_extern_now_lowers():
+    # item 310 slice 4 (issue #97): the interior-crossing refusal is LIFTED — the
+    # crossing-level ledger transaction settles it. The IR carries the cache
+    # descriptor so the emitter wraps the fire in `_revl_frame.cache_crossing`.
+    ir = _lower("extern emission[reg] fn resolve(name: Str) -> Str "
+                "cache capability = @py { pass }\n")
+    externs = ir["externs"]
+    entries = list(externs.values()) if isinstance(externs, dict) else externs
+    assert entries[0]["cache"] == {"class": "capability_result"}
+
+
+def test_cache_pure_on_an_emission_extern_is_refused():
+    with pytest.raises(RevlError, match="result is not pure"):
         _lower("extern emission[reg] fn resolve(name: Str) -> Str "
+               "cache pure = @py { pass }\n")
+
+
+def test_cache_capability_on_a_pure_extern_is_refused():
+    with pytest.raises(RevlError, match="no authority scope"):
+        _lower("extern pure fn compute(x: Str) -> Str "
                "cache capability = @py { pass }\n")
 
 
@@ -702,3 +719,284 @@ def test_a_cache_pure_fn_is_not_inlined():
 def test_a_program_with_no_cache_pure_fn_emits_no_memo_table():
     source, _ = _emitted("fn twice(n: Int) -> Int { return n * 2 }\n")
     assert "_REVL_MEMO" not in source and "_revl_memo_key" not in source
+
+
+# ================================================================ interior
+# item 310 slice 4 (issue #97): the INTERIOR-CROSSING extern cache. The cache
+# clause moves off the seam method onto the emission EXTERN whose crossing is
+# inside the provider body; the crossing-level ledger transaction
+# (`Frame.cache_crossing` + `owner.cache_gate` + the per-call reservation)
+# settles the hit/miss transaction at the crossing, deferring authority
+# consumption to the first interior miss under a cache-only-coverage call.
+
+# the design fixture: an unscoped `emission fn read_db(sink, id)` gains
+# `cache capability`, the seam method `Users.get` loses its clause, and the
+# provider body is `fn get(sink, id) = emit read_db(sink, id)`.
+_INTERIOR_SRC = (
+    "extern emission fn read_db(sink: Str, id: Str) -> Str cache capability = @py {\n"
+    "    with open(sink, 'a') as _f:\n"
+    "        _f.write('r:' + id + '\\n')\n"
+    "    return 'P:' + id\n"
+    "}\n"
+    "service Users { emission fn get(sink: Str, id: Str) -> Str }\n"
+    "component U provides users: Users {\n"
+    "  provide users { fn get(sink, id) = emit read_db(sink, id) }\n"
+    "}\n"
+)
+
+
+def _wal_records(session):
+    from revl.wal import read_wal
+    wal = session.recorder.wal
+    return read_wal(wal.path)["records"]
+
+
+@needs_cordis
+def test_interior_hit_and_miss(tmp_path):
+    ir = compile_source(_INTERIOR_SRC, "i.rvl")
+    s = _session("auto")
+    s.load(copy.deepcopy(ir), record=True)
+    s.mint_standing_grant(capability="read_db", uses=5)
+    sink = str(tmp_path / "i.log")
+    r1 = s.call("users", "get", [sink, "1"])       # miss
+    r2 = s.call("users", "get", [sink, "1"])        # hit
+    r3 = s.call("users", "get", [sink, "2"])        # distinct-args miss
+    assert r1["result"] == "P:1"
+    assert _reads(sink) == 2
+    m = s.approval_metrics()
+    assert m["cacheInterior"] == {"hits": 1, "misses": 2, "refusals": 0}
+    # the hit CALL carries the interior delta and no `cacheHit` key
+    assert r2.get("cacheHit") is None
+    assert r2["cacheInterior"] == {"hits": 1, "misses": 0}
+    assert r1["cacheInterior"] == {"hits": 0, "misses": 1}
+    assert r3["cacheInterior"] == {"hits": 0, "misses": 1}
+
+
+@needs_cordis
+def test_interior_hit_does_not_consume(tmp_path):
+    ir = compile_source(_INTERIOR_SRC, "i.rvl")
+    s = _session("auto")
+    s.load(copy.deepcopy(ir), record=True)
+    s.mint_standing_grant(capability="read_db", uses=5)
+    sink = str(tmp_path / "i.log")
+    s.call("users", "get", [sink, "1"])
+    s.call("users", "get", [sink, "1"])            # the hit
+    s.call("users", "get", [sink, "2"])
+    m = s.approval_metrics()
+    assert m["grantsConsumed"] == 2                 # only the two misses spent
+    assert m["standingGrants"][0]["remainingUses"] == 3
+
+
+@needs_cordis
+def test_interior_no_laundering_on_revoke(tmp_path):
+    from revl.mcp.approval import ApprovalRequired
+    ir = compile_source(_INTERIOR_SRC, "i.rvl")
+    s = _session("auto")
+    s.load(copy.deepcopy(ir), record=True)
+    sink = str(tmp_path / "i.log")
+    # ungranted: refused at the SEAM, nothing crosses
+    with pytest.raises(ApprovalRequired):
+        s.call("users", "get", [sink, "1"])
+    assert _reads(sink) == 0
+    s.mint_standing_grant(capability="read_db", uses=5)
+    s.call("users", "get", [sink, "1"])
+    assert s.call("users", "get", [sink, "1"]).get("cacheInterior") == {
+        "hits": 1, "misses": 0}
+    s.revoke_standing_grant(capability="read_db")
+    # the entry died with the grant; the next access is refused at the seam
+    with pytest.raises(ApprovalRequired):
+        s.call("users", "get", [sink, "1"])
+    assert _reads(sink) == 1                         # the refused access crossed nothing
+
+
+@needs_cordis
+def test_interior_mid_call_death_refuses_before_spend(tmp_path):
+    # the security-critical fail-closed path: authority that dies between the
+    # seam admission and the crossing refuses with CacheCrossingRefused BEFORE
+    # any durable spend and before any fire. Driven at the gate directly (the
+    # emitted-hook variant needs a host callback into the live session).
+    ir = compile_source(_INTERIOR_SRC, "i.rvl")
+    s = _session("auto")
+    s.load(copy.deepcopy(ir), record=True)
+    rt = s._require().runtime            # the SAME runtime module the gate raises from
+    s.mint_standing_grant(capability="read_db", uses=5)
+    # open a reservation exactly as Session.call would for a cache-only call
+    grant_id = s._grants[0]["requestId"]
+    reservation = {"key": "users", "method": "get",
+                   "deferred": {"grants": [grant_id]}, "scope": None,
+                   "approvalExpiresAt": None, "consumed": set()}
+    s._cache_reservations.append(reservation)
+    try:
+        txn = s._runtime_cache_gate("U", "read_db", "read_db", ("sink", "1"))
+        assert txn.hit is False                      # no entry yet
+        s.revoke_standing_grant(capability="read_db")  # authority dies mid-call
+        with pytest.raises(rt.CacheCrossingRefused):
+            txn.consume()
+    finally:
+        s._cache_reservations.pop()
+    assert s.approval_metrics()["cacheInterior"]["refusals"] == 1
+    assert s.approval_metrics()["grantsConsumed"] == 0   # refused before any spend
+
+
+@needs_cordis
+def test_interior_cache_only_is_worst_over_reach(tmp_path):
+    # a body that also crosses an UNCACHED emission under the same grant cone
+    # consumes at the SEAM (a hit still decrements a use); with the uncached
+    # crossing removed it consumes at the crossing (a hit decrements nothing).
+    both = (
+        "extern emission fn read_db(sink: Str, id: Str) -> Str cache capability = @py {\n"
+        "    with open(sink, 'a') as _f:\n"
+        "        _f.write('r:' + id + '\\n')\n"
+        "    return 'P:' + id\n"
+        "}\n"
+        "extern emission fn audit(sink: Str) -> Unit = @py {\n"
+        "    with open(sink, 'a') as _f:\n"
+        "        _f.write('a\\n')\n"
+        "    return\n"
+        "}\n"
+        "service Users { emission fn get(sink: Str, id: Str) -> Str }\n"
+        "component U provides users: Users {\n"
+        "  provide users {\n"
+        "    fn get(sink, id) { emit audit(sink) return emit read_db(sink, id) }\n"
+        "  }\n"
+        "}\n"
+    )
+    ir = compile_source(both, "b.rvl")
+    s = _session("auto")
+    s.load(copy.deepcopy(ir), record=True)
+    s.mint_standing_grant(capability="read_db", uses=10)
+    s.mint_standing_grant(capability="audit", uses=10)
+    sink = str(tmp_path / "b.log")
+    s.call("users", "get", [sink, "1"])              # miss: consumes read_db + audit
+    before = s.approval_metrics()["standingGrants"]
+    read_before = next(g["remainingUses"] for g in before if g["capability"] == "read_db")
+    s.call("users", "get", [sink, "1"])              # cached arrival HITS, audit still fires
+    after = s.approval_metrics()["standingGrants"]
+    read_after = next(g["remainingUses"] for g in after if g["capability"] == "read_db")
+    # not cache-only (audit is uncached) -> the seam consumed read_db too, so a
+    # hit still cost the call a use of read_db.
+    assert read_after == read_before - 1
+
+
+@needs_cordis
+def test_interior_wal_order_and_seam_regression(tmp_path):
+    ir = compile_source(_INTERIOR_SRC, "i.rvl")
+    s = _session("auto")
+    s.load(copy.deepcopy(ir), record=True)
+    s.mint_standing_grant(capability="read_db", uses=5)
+    sink = str(tmp_path / "i.log")
+    s.call("users", "get", [sink, "1"])              # miss -> consumed + fill
+    s.call("users", "get", [sink, "1"])              # hit  -> cache-hit
+    recs = _wal_records(s)
+    kinds = [r["record"] for r in recs
+             if r["record"] in ("approval-consumed", "cache-fill", "cache-hit")]
+    assert kinds == ["approval-consumed", "cache-fill", "cache-hit"]
+    # invariant 2 + 3 hold over the whole log (read_wal did not raise)
+    fill = next(r for r in recs if r["record"] == "cache-fill")
+    assert fill["extern"] == "read_db"
+    assert fill["requestIds"]
+
+
+@needs_cordis
+def test_seam_hit_records_a_cache_hit_now(tmp_path):
+    # finding 1: a SEAM cache hit used to write nothing. It now writes cache-hit.
+    ir = compile_source(_CAP_SRC, "c.rvl")
+    s = _session("auto")
+    s.load(copy.deepcopy(ir), record=True)
+    s.mint_standing_grant(capability="read_db", uses=5)
+    sink = str(tmp_path / "seam.log")
+    s.call("users", "get", [sink, "1"])
+    s.call("users", "get", [sink, "1"])              # the hit
+    recs = _wal_records(s)
+    hits = [r for r in recs if r["record"] == "cache-hit"]
+    assert len(hits) == 1
+    assert hits[0]["key"] == "users" and hits[0]["method"] == "get"
+
+
+def test_read_wal_refuses_the_impossible_cache_shapes(tmp_path):
+    import json
+    from revl.wal import read_wal, WALIntegrityError
+    # a cache-hit with no preceding cache-fill (invariant 3)
+    p1 = tmp_path / "hit_first.wal"
+    p1.write_text(
+        json.dumps({"record": "header", "walVersion": 1}) + "\n" +
+        json.dumps({"record": "cache-hit", "digest": "d", "token": "t",
+                    "extern": "e"}) + "\n")
+    with pytest.raises(WALIntegrityError, match="invariant 3"):
+        read_wal(str(p1))
+    # a cache-fill with no approval-consumed for its requestId (invariant 2)
+    p2 = tmp_path / "fill_no_spend.wal"
+    p2.write_text(
+        json.dumps({"record": "header", "walVersion": 1}) + "\n" +
+        json.dumps({"record": "cache-fill", "digest": "d", "token": "t",
+                    "extern": "e", "requestIds": ["r1"]}) + "\n")
+    with pytest.raises(WALIntegrityError, match="invariant 2"):
+        read_wal(str(p2))
+
+
+@needs_cordis
+def test_interior_ttl_expiry_refetches(tmp_path):
+    src = _INTERIOR_SRC.replace("cache capability", "cache external ttl 5m")
+    ir = compile_source(src, "e.rvl")
+    s = _session("auto")
+    box = {"now": 0}
+    s._clock_ms = lambda: box["now"]
+    s.load(copy.deepcopy(ir), record=True)
+    s.mint_standing_grant(capability="read_db", uses=10)
+    sink = str(tmp_path / "ttl.log")
+    s.call("users", "get", [sink, "1"])
+    box["now"] = 1000
+    assert s.call("users", "get", [sink, "1"])["cacheInterior"] == {
+        "hits": 1, "misses": 0}
+    assert _reads(sink) == 1
+    box["now"] = 300001                              # past the 5m ttl
+    assert s.call("users", "get", [sink, "1"])["cacheInterior"] == {
+        "hits": 0, "misses": 1}
+    assert _reads(sink) == 2
+
+
+@needs_cordis
+def test_interior_no_policy_is_inert(tmp_path):
+    ir = compile_source(_INTERIOR_SRC, "i.rvl")
+    s = _session(None)                               # no policy -> no ledger
+    s.load(copy.deepcopy(ir), record=False)
+    sink = str(tmp_path / "inert.log")
+    s.call("users", "get", [sink, "1"])
+    s.call("users", "get", [sink, "1"])              # every access is a miss
+    assert _reads(sink) == 2                          # no ledger -> no entry store
+    # a no-policy session tracks no interior counters (nothing was gated)
+    assert s._cache_interior == {"hits": 0, "misses": 0, "refusals": 0}
+
+
+def test_non_py_tier_refuses_a_cached_extern():
+    from revl.session_commit import refuse_cache_extern_on_ownerless_tier
+    from revl.errors import RevlError
+    ir = compile_source(_INTERIOR_SRC, "i.rvl")
+    for tier in ("rust", "go", "java", "wasm", "typescript"):
+        with pytest.raises(RevlError, match="needs a session owner runtime"):
+            refuse_cache_extern_on_ownerless_tier(ir, tier)
+    # a no-op on the py tier (it has the driver as owner)
+    refuse_cache_extern_on_ownerless_tier(ir, "python")
+
+
+@needs_cordis
+def test_cache_pure_on_a_pure_extern_memoizes(tmp_path):
+    # slice 4c: a host memo, no ledger, identical on and off policy.
+    src = (
+        "extern pure fn compute(sink: Str, id: Str) -> Str cache pure = @py {\n"
+        "    with open(sink, 'a') as _f:\n"
+        "        _f.write('r:' + id + '\\n')\n"
+        "    return 'P:' + id\n"
+        "}\n"
+        "service S { fn get(sink: Str, id: Str) -> Str }\n"
+        "component C provides s: S { provide s { "
+        "fn get(sink, id) = compute(sink, id) } }\n")
+    ir = compile_source(src, "p.rvl")
+    for policy in (None, "auto"):
+        s = _session(policy)
+        s.load(copy.deepcopy(ir), record=policy is not None)
+        sink = str(tmp_path / f"pe-{policy}.log")
+        s.call("s", "get", [sink, "1"])
+        s.call("s", "get", [sink, "1"])              # memoized
+        s.call("s", "get", [sink, "2"])
+        assert _reads(sink) == 2                      # id1 once + id2 once

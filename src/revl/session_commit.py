@@ -144,6 +144,73 @@ def _approval_diagnostic(component: str, tier: str) -> str:
         f"invariant 5). Target the python tier for approval-bound crossings.")
 
 
+def _cached_extern_names(ir: dict) -> set:
+    """The names of cache-declaring externs declared in ``ir`` (item 310 slice 4,
+    issue #97)."""
+    return {ext["name"] for ext in ir.get("externs") or []
+            if ext.get("cache") is not None}
+
+
+def _cache_diagnostic(component: str, name: str, tier: str) -> str:
+    """The one wording for all five ownerless tiers (item 310 slice 4), so six
+    backends do not invent six messages."""
+    return (
+        f"{component}: cached extern `{name}` needs a session owner runtime — the "
+        f"crossing-level ledger transaction (the per-call reservation, the "
+        f"owner-carried cache gate, and the durable consume-before-fill spend) — "
+        f"which the {tier} tier does not have yet; interior-crossing caching runs "
+        f"on the python tier only. Refusing rather than degrading: emitting the "
+        f"plain call would silently erase the `cache` declaration and re-cross the "
+        f"boundary every time (item 310, §interior crossings). Target the python "
+        f"tier, or drop the `cache` clause from the extern.")
+
+
+def refuse_cache_extern_on_ownerless_tier(ir: dict, tier: str,
+                                          filename: str = "<emit>") -> None:
+    """Refuse a cache-declaring extern CALL on one of the five ownerless tiers
+    (item 310 slice 4's tier gate — the 245 stance). A no-op on py and for any IR
+    that never calls a cached extern. The `cache` metadata is inert to static
+    reach on every tier; only the crossing-level ledger transaction is py-only, so
+    a reached cached extern is refused at emit rather than emitted uncached."""
+    if tier == "python" or tier == "py":
+        return
+    cached = _cached_extern_names(ir)
+    if not cached:
+        return
+    for component, name in _reached_cached_calls(ir, cached):
+        raise RevlError(filename, 0, _cache_diagnostic(component, name, tier),
+                        code="G8", category="cache")
+
+
+def _reached_cached_calls(ir: dict, names: set) -> list:
+    """Every CALL SITE (component, extern-name) that reaches one of ``names``.
+
+    Unlike a `deferred` emission (always a statement `emit` step), a cache-
+    declaring extern is crossed as a plain `fn`-call node in ANY expression
+    position — an expression-bodied `fn get(...) = emit read_db(...)` lowers to a
+    `return` of a `{"kind": "fn", "name": "read_db"}` node, not an `emit` step.
+    So the walk looks for that node ANYWHERE in the component/provide bodies."""
+    reached: list = []
+    seen: set = set()
+
+    def _walk(node, component: str) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "fn" and node.get("name") in names:
+                mark = (component, node["name"])
+                if mark not in seen:
+                    seen.add(mark)
+                    reached.append(mark)
+            for value in node.values():
+                _walk(value, component)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item, component)
+
+    for comp in ir.get("components") or []:
+        _walk(comp, comp.get("name") or "?")
+    return reached
+
+
 def refuse_approval_on_ownerless_tier(ir: dict, tier: str,
                                       filename: str = "<emit>") -> None:
     """Refuse a typed-approval crossing on one of the five ownerless tiers (item

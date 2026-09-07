@@ -4351,6 +4351,14 @@ def _lower_externs(program: Program, filename: str, types: dict,
             _check_extern_undo(decl.compensate, decl.name, "compensate",
                                types, filename)
             entry["compensate"] = _lower_extern_expr(decl.compensate, filename)
+        # item 310 slice 4 (issue #97): the interior-crossing cache descriptor.
+        # ADDITIVE — absent unless the extern declares `cache`, so every existing
+        # extern's IR is byte-identical. Validated (class/freshness/resource walk)
+        # in `_check_cache_declarations`; the emitter reads it to wrap the fire in
+        # `_revl_frame.cache_crossing` and the session gate keys the interior
+        # entry off it.
+        if getattr(decl, "cache", None) is not None:
+            entry["cache"] = _cache_ir(decl.cache)
         externs.append(entry)
     return externs
 
@@ -4673,20 +4681,104 @@ def _check_cache_declarations(program: Program, externs: list, types: dict,
                     kind="blocked",
                     what=f"a `compensate`-declaring emission extern `{decl.name}`",
                     category="a compensated write, not a read", profile=_prof))
-        # every other extern: grammar-forward, enforcement-honest.
-        raise RevlError(
-            filename, decl.line,
-            f"cache on an interior crossing (extern `{decl.name}`) is not yet "
-            f"enforceable; declare it on the seam method",
-            hint="the seam consent gate decides the hit/miss transaction at the "
-                 "call, before execution, so `cache` is enforceable this slice "
-                 "only on a SEAM SERVICE METHOD where the call is the crossing. "
-                 "An interior extern crossing needs a crossing-level ledger "
-                 "transaction that is a later slice (item 310, §enforcement)",
-            code="G4", category="cache",
-            navigate=_nav.cache_navigate(
-                kind="blocked", what=f"an interior extern crossing `{decl.name}`",
-                category="an interior crossing, not a seam method", profile=_prof))
+        # -- the interior crossing surface (item 310 slice 4, issue #97). The
+        # crossing happens INSIDE a body, not at the seam; the crossing-level
+        # ledger transaction (`Frame.cache_crossing` + `owner.cache_gate` +
+        # the per-call reservation) now settles it. An emission extern is the
+        # boundary read the proposal named (registry resolution, service
+        # discovery); a pure extern carries a host memo (`cache pure`, no
+        # ledger). Every other class is fail-closed refused.
+        what = f"extern `{decl.name}`"
+        if cls == "emission":
+            if cache.cls == "pure":
+                raise RevlError(
+                    filename, decl.line,
+                    f"`cache pure` on an emission {what} is not allowed",
+                    hint="an emission extern crosses a capability boundary, so its "
+                         "result is not pure — declare `cache capability` (a "
+                         "boundary-backed deterministic read) or `cache external "
+                         "invalidated_by/ttl` (an external read) (item 310, "
+                         "§interior crossings)",
+                    code="G4", category="cache",
+                    navigate=_nav.cache_navigate(
+                        kind="blocked", what=what,
+                        category="an emission crossing, not a pure computation",
+                        profile=_prof))
+        elif cls == "pure":
+            if cache.cls in ("capability", "external"):
+                raise RevlError(
+                    filename, decl.line,
+                    f"`cache {cache.cls}` on a pure {what} is not allowed",
+                    hint="a pure extern crosses no capability boundary, so it has "
+                         "no authority scope to key a `capability`/`external` "
+                         "entry on; declare `cache pure` to memoize it (item 310)",
+                    code="G4", category="cache",
+                    navigate=_nav.cache_navigate(
+                        kind="blocked", what=what,
+                        category="a pure computation, not a boundary read",
+                        profile=_prof))
+        else:
+            raise RevlError(
+                filename, decl.line,
+                f"cache on a `{cls}` {what} is not supported",
+                hint="`cache` settles a read: an emission extern (the interior "
+                     "crossing, `cache capability`/`external`) or a pure extern "
+                     "(a host memo, `cache pure`). Nothing else has a sound "
+                     "hit/miss transaction (item 310, §interior crossings)",
+                code="G4", category="cache",
+                navigate=_nav.cache_navigate(
+                    kind="blocked", what=what,
+                    category=f"a `{cls}` extern, neither a read nor a pure "
+                             "computation",
+                    profile=_prof))
+        _check_cache_freshness(cache, filename, decl.line, what, untrusted)
+        check_invalidated_by(cache, decl.line, what)
+        _check_cache_resource(cache, filename, decl.line, what,
+                              [p.type for p in decl.params], decl.returns,
+                              resources, untrusted)
+
+    # -- item 310 slice 4: a cache-declaring emission extern reached from a
+    # PLAIN `fn` body has no activation frame (`_revl_frame`) to settle the
+    # crossing against — the emitter cannot emit the cache-step wrapper there,
+    # and silently emitting the plain call would erase the declaration (the
+    # 231a-inliner lesson). Refuse it, naming the fn. Inert unless a cached
+    # emission extern exists AND a module fn reaches it, so byte-identity holds.
+    cached_emit_tokens: set[str] = set()
+    for decl in program.externs:
+        if getattr(decl, "cache", None) is None or decl.classification != "emission":
+            continue
+        for cap in (decl.capabilities or (decl.name,)):
+            cached_emit_tokens.add(cap)
+    if cached_emit_tokens:
+        from . import cap_order  # noqa: PLC0415
+        def _reaches_cached(caps) -> str | None:
+            for c in caps or ():
+                if c in cached_emit_tokens:
+                    return c
+                for t in cached_emit_tokens:
+                    try:
+                        if cap_order.covers(cap_order.parse_cap(c),
+                                            cap_order.parse_cap(t)):
+                            return t
+                    except cap_order.CapError:
+                        continue
+            return None
+        for fn in program.fn_decls:
+            hit = _reaches_cached(emitting_caps.get(fn.name))
+            if hit is not None:
+                raise RevlError(
+                    fn.source or filename, fn.line,
+                    f"cached extern `{hit}` is reached from fn `{fn.name}`, "
+                    f"which has no activation frame to settle the crossing "
+                    f"against",
+                    hint="the interior-crossing cache settles the hit/miss "
+                         "transaction on the enclosing activation frame "
+                         "(`_revl_frame.cache_crossing`); a plain `fn` has none, "
+                         "so emitting the plain call would silently erase the "
+                         "`cache` declaration. Call the cached extern from a "
+                         "component body or a `provide` method (item 310, "
+                         "§interior crossings)",
+                    code="G4", category="cache")
 
     # -- plain fns: `cache pure` only, crossing-free only
     for fn in program.fn_decls:

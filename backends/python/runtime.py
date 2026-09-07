@@ -2941,6 +2941,44 @@ class Frame:
                                          self.name)
         return result
 
+    def cache_crossing(self, token: str, extern: str, args: Any,
+                       fire: Callable[[], Any]) -> Any:
+        """`emit <cached-extern>(...)` at runtime (item 310 slice 4, issue #97).
+        The interior twin of `approval_crossing`: the frame asks the owner's cache
+        gate for a hit/miss verdict AT the crossing, and
+
+          * a HIT re-delivers the stored value — no host body runs, no use is
+            spent, no boundary is crossed, so a hit launders nothing (its entry's
+            own liveness bound it to the authority a prior miss consumed);
+          * a MISS consumes the deferred authority DURABLY first
+            (consume-before-fire, the same `approval-consumed` spend the seam
+            writes), refusing with `CacheCrossingRefused` BEFORE any spend when
+            that authority died since admission, then fires and fills.
+
+        Inert (fires plain) when no owner, no gate, or the gate returns None (no
+        policy / no reservation for a call whose reach has no cached extern) — the
+        no-policy inertness rule extended to the interior. `_estop_check` runs
+        first at every crossing (item 443)."""
+        _estop_check(f"{self.name}.{extern}")
+        owner = self._owner
+        gate = getattr(owner, "cache_gate", None) if owner is not None else None
+        if gate is None:
+            return fire()
+        txn = gate(self.name, token, extern, args)
+        if txn is None:
+            return fire()
+        if txn.hit:
+            txn.record_hit()
+            return txn.value
+        # miss: durable spend BEFORE the fire; may refuse mid-body (fail closed).
+        txn.consume()
+        # item 443: the spend-to-fill window is where an E-Stop lands ambiguous.
+        with _InFlight(component=self.name, method=extern, seq=None,
+                       entry="crossing"):
+            result = fire()
+        txn.fill(result)
+        return result
+
     def begin(self) -> None:
         """Yielded FIRST by the emitted body -> disposed LAST (cordis LIFO), so
         it sits at the BOTTOM of this activation's unwind stack.
@@ -3163,6 +3201,24 @@ class ApprovalCrossingRefused(RuntimeError):
     def __init__(self, capability: str, reason: str) -> None:
         super().__init__(
             f"approval crossing refused for capability `{capability}`: {reason}")
+        self.capability = capability
+        self.reason = reason
+
+
+class CacheCrossingRefused(RuntimeError):
+    """An interior-crossing cache MISS (item 310 slice 4, issue #97) whose
+    admitted authority died between the seam admission and the crossing arrival
+    (a revocation, an `expiresAt`, an exhaustion). Raised at the crossing, on the
+    miss path, BEFORE any durable spend and BEFORE the host body fires, so a
+    hand-built IR or a raced revoke can never launder a stale hit or fire on
+    authority that no longer covers it. The twin of `ApprovalCrossingRefused`:
+    the seam refused-before-work rule holds; a mid-body refusal arises only from
+    authority that was live at admission and is not at arrival. Carries the token
+    and the reason for the why-trace."""
+
+    def __init__(self, capability: str, reason: str) -> None:
+        super().__init__(
+            f"cache crossing refused for capability `{capability}`: {reason}")
         self.capability = capability
         self.reason = reason
 
@@ -3457,6 +3513,15 @@ class SessionOwner:
         # holds for every existing composition.
         self.lease_acquire: Optional[Callable[..., Any]] = None
         self.lease_revoke: Optional[Callable[[str], Any]] = None
+        # item 310 slice 4 (issue #97): the interior-crossing cache gate. A
+        # `(component, token, extern, args) -> CacheTxn | None` callback the
+        # session installs so `Frame.cache_crossing` can ask the session's ledger
+        # for a hit/miss verdict AT the crossing (the entry store, liveness and
+        # the durable spend all live on the session, never a parallel ledger —
+        # item 294's refusal of parallel mechanisms). None (unset, or the callback
+        # returns None) means the crossing fires plain: the no-policy inertness
+        # rule extended to the interior.
+        self.cache_gate: Optional[Callable[..., Any]] = None
 
     def _wal(self) -> Optional[Any]:
         return self._wal_getter() if self._wal_getter is not None else None

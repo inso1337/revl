@@ -434,6 +434,22 @@ class Session:
         self._cache_inval_epoch: dict = {}
         self._cache_inval_tokens: set = set()
         self._cache_hits: int = 0
+        # item 310 slice 4 (issue #97): the interior-crossing surface. A cache-
+        # declaring emission/pure EXTERN whose crossing happens inside a body,
+        # not at the seam. `_cache_externs` maps the extern name to its cache IR;
+        # `_cache_extern_tokens` is the union of capability tokens those externs
+        # carry; `_cache_only_tokens` is the subset crossed ONLY by cache-declaring
+        # emission externs (the static cache-only-coverage rule — worst-over-reach:
+        # a call whose class-(c) reach is entirely cache-only defers its authority
+        # consumption to the crossing). `_cache_reservations` is the per-call
+        # reservation STACK the owner gate reads the top of; `_cache_interior`
+        # counts the crossing-level hits/misses/refusals for `state()`. All reset
+        # per generation.
+        self._cache_externs: dict = {}
+        self._cache_extern_tokens: set = set()
+        self._cache_only_tokens: set = set()
+        self._cache_reservations: list = []
+        self._cache_interior: dict = {"hits": 0, "misses": 0, "refusals": 0}
         # `cache pure` memo table: keyed on (key, method, args digest), no
         # authority scope (the pure class crosses nothing, so it has no ledger
         # interaction by construction — it memoizes even in a no-policy session).
@@ -761,6 +777,12 @@ class Session:
         # gate already minted, and its disposer's own-requestId revoke rides here.
         self._owner.lease_acquire = self._runtime_lease_acquire
         self._owner.lease_revoke = self._runtime_lease_revoke
+        # item 310 slice 4 (issue #97): the owner-carried cache gate — the
+        # question the runtime `Frame.cache_crossing` could not ask (the entry
+        # store, liveness and the durable spend all live on the session). Mirrors
+        # `lease_acquire`: installed here, inert (returns None -> the crossing
+        # fires plain) for a session with no cache-declaring extern.
+        self._owner.cache_gate = self._runtime_cache_gate
         runtime_mod.set_session_owner(self._owner)
 
     def _configure_owner_approvals(self, ir: dict) -> None:
@@ -2767,6 +2789,12 @@ class Session:
         self._cache_inval_epoch = {}
         self._cache_inval_tokens = set()
         self._cache_hits = 0
+        # item 310 slice 4: the interior-crossing state is session-scoped too.
+        self._cache_externs = {}
+        self._cache_extern_tokens = set()
+        self._cache_only_tokens = set()
+        self._cache_reservations = []
+        self._cache_interior = {"hits": 0, "misses": 0, "refusals": 0}
         # item 250: a torn-down session is not a frozen one — clear the fork state
         # so a reused Session object starts fresh and callable.
         self._frozen = False
@@ -3227,8 +3255,40 @@ class Session:
         # A no-policy session never enters this (returns immediately). item 310:
         # `decision` records which authority the miss consumed, so the stored entry
         # binds to THAT grant/approval (not any that could have covered).
-        decision: dict | None = {} if cache_active else None
-        self._approval_decide_call(key, method, args, record=decision)
+        # item 310 slice 4 (issue #97): open an interior-crossing reservation
+        # when the call's reach contains a cache-declaring extern, under an
+        # enforced policy. The owner cache gate (`_runtime_cache_gate`) reads the
+        # TOP of this stack at the crossing; the seam DEFERS its authority
+        # consumption into the crossing only when the call's class-(c) reach is
+        # entirely cache-only (the static worst-over-reach rule). Every other
+        # call is byte-identical (no reservation, seam consumes as today).
+        interior = (self.approval_policy is not None
+                    and self._class_map is not None
+                    and bool(self._cache_externs)
+                    and self._call_reaches_cached_extern(key, method))
+        reservation = None
+        defer = False
+        interior_before = None
+        if interior:
+            defer = self._call_cache_only(key, method)
+            reservation = {"key": key, "method": method, "deferred": {},
+                           "scope": None, "approvalExpiresAt": None,
+                           "consumed": set()}
+            self._cache_reservations.append(reservation)
+            interior_before = dict(self._cache_interior)
+
+        decision: dict | None = {} if (cache_active or interior) else None
+        try:
+            self._approval_decide_call(key, method, args, record=decision,
+                                       defer=defer)
+        except BaseException:
+            if reservation is not None:
+                self._cache_reservations.pop()
+            raise
+        if reservation is not None and decision is not None:
+            reservation["deferred"] = decision.get("deferred") or {}
+            reservation["scope"] = decision.get("scope")
+            reservation["approvalExpiresAt"] = decision.get("approvalExpiresAt")
 
         async def invoke():
             result = target(*(args or []))
@@ -3257,6 +3317,13 @@ class Session:
             result = self._run(invoke())
         finally:
             runtime_mod.clear_session_owner()
+            # item 310 slice 4: the reservation closes in the SAME finally that
+            # clears the owner, so a `CacheCrossingRefused` propagating out of the
+            # body still leaves the stack clean (no stale reservation for a later
+            # call to read the top of).
+            if reservation is not None and self._cache_reservations \
+                    and self._cache_reservations[-1] is reservation:
+                self._cache_reservations.pop()
             if self.recorder is not None:
                 self.recorder.activation_origin()
         # item 330: a per-turn source admitted through the in-language crossing
@@ -3278,7 +3345,17 @@ class Session:
         # composition with no `invalidated_by` clause is byte-identical.
         if self._cache_inval_tokens:
             self._fire_cache_invalidations(key, method)
-        return {"result": render(result), "trace": driver.drain_events()}
+        out = {"result": render(result), "trace": driver.drain_events()}
+        # item 310 slice 4 (issue #97): report the interior-crossing activity of
+        # THIS call — the hits/misses it settled at the crossing — only when
+        # non-zero, so a call that crossed no cached extern is byte-identical. The
+        # call itself is neither a seam hit nor a seam miss, so no `cacheHit` key.
+        if interior_before is not None:
+            dh = self._cache_interior["hits"] - interior_before["hits"]
+            dm = self._cache_interior["misses"] - interior_before["misses"]
+            if dh or dm:
+                out["cacheInterior"] = {"hits": dh, "misses": dm}
+        return out
 
     # -- item 310: the seam-method cache entry store ------------------------
 
@@ -3380,17 +3457,110 @@ class Session:
                     self._cache_inval_epoch.get(token, 0) + 1
 
     def _record_cache_hit(self, key: str, method: str, entry: dict) -> None:
-        """Write a WAL record naming the hit and the miss crossing it re-delivers
-        (design laundering point 5: hits are on the record). Best-effort — a
-        session with no WAL still counts the hit in `state()` (the `cacheHits`
-        counter), it just has no durable audit line."""
+        """Write a WAL record naming the SEAM hit and the miss crossing it
+        re-delivers (design laundering point 5: hits are on the record). Best-
+        effort — a session with no WAL still counts the hit in `state()`, it just
+        has no durable audit line.
+
+        item 310 slice 4 (issue #97), finding 1: this was a `getattr(wal,
+        "record_cache_hit", None)` fallback against a method `replay.py` did not
+        define, so every seam hit was recorded NOWHERE. `record_cache_hit` now
+        exists, so this is a direct call."""
         wal = self._approval_wal()
-        if wal is None:
-            return
-        recorder = getattr(wal, "record_cache_hit", None)
-        if callable(recorder):
-            recorder({"key": key, "method": method,
-                      "grantIds": entry.get("grantIds") or []})
+        if wal is not None:
+            wal.record_cache_hit({"key": key, "method": method,
+                                  "grantIds": entry.get("grantIds") or []})
+
+    # -- item 310 slice 4 (issue #97): the interior-crossing transaction --------
+
+    def _call_reaches_cached_extern(self, key: str, method: str) -> bool:
+        """Whether the reach of `(key, method)` crosses a cache-declaring emission
+        extern — an index lookup on the live class map. When True (and a policy is
+        enforced) `Session.call` opens a reservation the crossing settles against;
+        every other call pays nothing."""
+        if self._class_map is None or not self._cache_extern_tokens:
+            return False
+        reach = self._class_map.classify_call(key, method)
+        if reach is None:
+            return False
+        from .approval import _cap_covers  # noqa: PLC0415
+        caps = reach.get("capabilities") or set()
+        for cap in caps:
+            for tok in self._cache_extern_tokens:
+                if _cap_covers(cap, tok) or _cap_covers(tok, cap):
+                    return True
+        return False
+
+    def _call_cache_only(self, key: str, method: str) -> bool:
+        """The static cache-only-coverage rule (design §the cache-only coverage
+        rule), worst-over-reach: the call's class-(c) reach is ENTIRELY tokens
+        crossed only by cache-declaring emission externs, so the seam may defer
+        authority consumption into the crossing. Conservative — a single non-
+        cache-only token in the reach makes the whole call consume at the seam,
+        today's byte-for-byte path (never defers when it should not)."""
+        if self._class_map is None:
+            return False
+        reach = self._class_map.classify_call(key, method)
+        if reach is None:
+            return False
+        caps = reach.get("capabilities") or set()
+        if not caps:
+            return False
+        from .approval import _cap_covers  # noqa: PLC0415
+        for cap in caps:
+            if cap in self._cache_only_tokens:
+                continue
+            # a token is still cache-only-covered if every cache-only token
+            # covers it or it covers one bidirectionally (scope narrowing).
+            if any(_cap_covers(cap, t) or _cap_covers(t, cap)
+                   for t in self._cache_only_tokens):
+                continue
+            return False   # an uncached or non-cache crossing under the cone
+        return True
+
+    def _runtime_cache_gate(self, component: str, token: str, extern: str,
+                            args):
+        """The owner-carried gate `Frame.cache_crossing` calls at the crossing
+        (design §the owner-carried gate). Builds a per-arrival transaction against
+        THIS session's ledger + entry store (no parallel ledger, item 294), or
+        returns None for the inert path (a `capability`/`external` cached extern
+        under no policy). A `pure` cached extern memoizes with no ledger, on or
+        off policy. A cached crossing under an enforced policy with NO open
+        reservation is the ambient access the design forbids — fail closed."""
+        cache_ir = self._cache_externs.get(extern)
+        if cache_ir is None:
+            return None
+        digest = _cache_args_digest(list(args) if args is not None else [])
+        if cache_ir.get("class") == "pure_fn":
+            return _PureExternCacheTxn(self, extern, digest)
+        if self.approval_policy is None or self._class_map is None:
+            return None      # capability/external cache needs a ledger to bind
+        rt = self._require().runtime
+        if not self._cache_reservations:
+            self._cache_interior["refusals"] += 1
+            raise rt.CacheCrossingRefused(
+                token,
+                f"cached extern `{extern}` crossed outside any admitted call "
+                f"(no open reservation under an enforced policy): an ambient "
+                f"cached access is refused, fail-closed (item 310 slice 4)")
+        reservation = self._cache_reservations[-1]
+        entry_key = ("extern", extern, digest)
+        return _InteriorCacheTxn(self, reservation, entry_key, token, extern,
+                                 cache_ir, digest, component, rt)
+
+    def _grant_by_id(self, request_id: str):
+        """The live grant dict for `request_id`, or None. Used by the crossing to
+        spend a deferred grant durably at the miss."""
+        for g in self._grants:
+            if g["requestId"] == request_id:
+                return g
+        return None
+
+    def _approval_entry_by_id(self, request_id: str):
+        for e in self._ledger:
+            if e.get("requestId") == request_id:
+                return e
+        return None
 
     def _drain_pending_admits(self) -> None:
         """Wire every turn admitted (and queued) during the call that just
@@ -3489,6 +3659,38 @@ class Session:
         for cache in self._cache_index.values():
             for token in cache.get("invalidated_by") or ():
                 self._cache_inval_tokens.add(token)
+        # item 310 slice 4: the interior-crossing extern index + the cache-only
+        # coverage token set, both per-generation (a generation change is a
+        # liveness event). `_cache_only_tokens` is a SOUND, worst-over-reach set:
+        # a token is cache-only iff every emission extern in the composition that
+        # can fire it declares `cache`, so a call whose class-(c) reach is a
+        # subset of it can defer its authority consumption to the crossing.
+        self._cache_externs = {}
+        self._cache_extern_tokens = set()
+        self._cache_only_tokens = set()
+        self._cache_reservations = []
+        self._cache_interior = {"hits": 0, "misses": 0, "refusals": 0}
+        cached_tokens: set = set()
+        uncached_emit_tokens: set = set()
+        for ext in ir.get("externs") or []:
+            cache = ext.get("cache")
+            name = ext.get("name")
+            toks = list(ext.get("capabilities") or ([name] if name else []))
+            if cache is not None and ext.get("class") == "emission":
+                self._cache_externs[name] = cache
+                for t in toks:
+                    self._cache_extern_tokens.add(t)
+                    cached_tokens.add(t)
+                for token in cache.get("invalidated_by") or ():
+                    self._cache_inval_tokens.add(token)
+            elif cache is not None and ext.get("class") == "pure":
+                # `cache pure` on a pure extern is a host memo (4c), no ledger and
+                # no token — recorded for the emitter, not for coverage.
+                self._cache_externs[name] = cache
+            elif ext.get("class") == "emission":
+                for t in toks:
+                    uncached_emit_tokens.add(t)
+        self._cache_only_tokens = cached_tokens - uncached_emit_tokens
 
     def _approval_wal(self):
         """The session's OPEN WAL, when recording (an enabled policy requires
@@ -3810,7 +4012,8 @@ class Session:
             owner.approvals[bucket] += 1
 
     def _approval_decide_call(self, key: str, method: str, args,
-                              record: dict | None = None) -> None:
+                              record: dict | None = None,
+                              defer: bool = False) -> None:
         """The per-call decision (Decision 2). Off -> return immediately (byte-
         identical). class none/(a)/(b) -> proceed and count. class (c) -> consume
         a standing approval and proceed, else mint a ticket, count the prompt, and
@@ -3856,8 +4059,22 @@ class Session:
         from .approval import ApprovalRequired  # noqa: PLC0415
         ticket = self._class_map.build_ticket(
             reach, args, record_values=self.approval_record_values)
+        # item 310 slice 4 (issue #97): DEFER mode. The call's class-(c) reach is
+        # entirely cache-declaring extern crossings (the static cache-only
+        # coverage rule), so the seam ADMITS (finds live covering authority,
+        # refuses before any work when there is none) but does NOT consume: the
+        # first interior MISS spends it durably at the crossing, a hit-only call
+        # spends nothing, and no record is ever retracted. The find logic is
+        # identical to the consuming path — only the spend is withheld — so an
+        # ungranted access is refused at the seam exactly as today.
         standing = self._find_standing_approval(ticket)
         if standing is not None:
+            if defer:
+                if record is not None:
+                    record["deferred"] = {"approval": standing["requestId"],
+                                          "approvalExpiresAt":
+                                              standing.get("expiresAt")}
+                return
             self._consume_approval(standing)   # durable spend before the fire
             if record is not None:
                 record["scope"] = ("approval", standing["requestId"])
@@ -3869,6 +4086,11 @@ class Session:
         # mint instead of prompting per call.
         grants = self._find_standing_grant(ticket)
         if grants is not None:
+            if defer:
+                if record is not None:
+                    record["deferred"] = {
+                        "grants": [g["requestId"] for g in grants]}
+                return
             for g in grants:                   # every class-(c) cap is covered
                 self._consume_grant(g)         # durable spend before the fire
             if record is not None:
@@ -3881,6 +4103,9 @@ class Session:
         # distiller only selected it.
         auto = self._find_auto_approve(ticket)
         if auto is not None:
+            # item 310 slice 4: a distilled auto-rule is NOT deferred — it is
+            # consumed at the seam even for a cache-only-coverage call (a
+            # conservative narrowing: sound, never defers what it should not).
             self._consume_auto_rule(auto)      # durable spend before the fire
             if record is not None:
                 record["scope"] = ("auto", auto["requestId"])
@@ -5087,6 +5312,11 @@ class Session:
             # number). A hit is a prompt avoided by proof of FRESHNESS, not of
             # revertibility — its own line (design laundering point 5).
             "cacheHits": self._cache_hits,
+            # item 310 slice 4 (issue #97): the interior-crossing counters, in
+            # their own sub-object so a seam hit and a crossing hit never share a
+            # line. {hits, misses, refusals} — refusals counts a
+            # `CacheCrossingRefused` (admitted authority died before the crossing).
+            "cacheInterior": dict(self._cache_interior),
             "standingGrants": [
                 {"capability": g["capability"], "component": g["component"],
                  "remainingUses": g.get("remainingUses"),
@@ -5432,3 +5662,177 @@ def _plain(value):
     if hasattr(value, "__dict__") and vars(value):
         return {k: _plain(v) for k, v in vars(value).items() if not k.startswith("_")}
     return repr(value)
+
+
+# ---------------------------------------------------------------------------
+# item 310 slice 4 (issue #97): the interior-crossing cache transactions.
+#
+# `Frame.cache_crossing` (backends/python/runtime.py) asks `owner.cache_gate`
+# for one of these per arrival. They read and mutate the SESSION's own ledger
+# and entry store — never a parallel mechanism (item 294) — so the durable
+# spend at the crossing is byte-for-byte the seam's `approval-consumed`, and
+# the entry an interior miss fills lives in the same `_cache_entries` dict the
+# seam uses, under a distinct `("extern", name, digest)` key.
+# ---------------------------------------------------------------------------
+
+
+class _PureExternCacheTxn:
+    """`cache pure` on a pure extern (slice 4c): a host memo with NO ledger
+    interaction, so it hits in any session, policy or not, and stores nothing
+    authority-scoped. Observationally equivalent to the call (equal args, equal
+    result); generation-scoped like every cache entry (the `_cache_pure` table
+    is cleared per generation)."""
+
+    __slots__ = ("_s", "_extern", "_key")
+
+    def __init__(self, session, extern: str, digest: str) -> None:
+        self._s = session
+        self._extern = extern
+        self._key = ("pure_extern", extern, digest)
+
+    @property
+    def hit(self) -> bool:
+        return self._key in self._s._cache_pure
+
+    @property
+    def value(self):
+        return self._s._cache_pure[self._key]
+
+    def record_hit(self) -> None:
+        self._s._cache_interior["hits"] += 1
+
+    def consume(self) -> None:
+        self._s._cache_interior["misses"] += 1
+
+    def fill(self, value) -> None:
+        self._s._cache_pure[self._key] = value
+
+
+class _InteriorCacheTxn:
+    """A `cache capability`/`external` interior crossing (slice 4a). The seam
+    ADMITTED the call (found live covering authority, or refused before any
+    work); this settles the hit/miss transaction AT the crossing against the
+    per-call reservation the seam opened.
+
+      * a HIT re-delivers a live entry — no spend, no fire, no crossing;
+      * a MISS spends the deferred authority DURABLY first (the same
+        `_consume_grant`/`_consume_approval` the seam calls, same records),
+        refusing with `CacheCrossingRefused` BEFORE any spend when that
+        authority died since admission, then the caller fires and calls `fill`.
+
+    The spend is idempotent per call (`reservation["consumed"]`): a second miss
+    under the same authority in one call spends nothing more, as a use is
+    per-call. A non-deferred interior call (the seam consumed at admission
+    because the reach was not cache-only) binds the entry to that seam scope and
+    spends nothing further here."""
+
+    __slots__ = ("_s", "_res", "_key", "_token", "_extern", "_cache_ir",
+                 "_digest", "_component", "_rt", "_entry", "_scope")
+
+    def __init__(self, session, reservation, entry_key, token, extern,
+                 cache_ir, digest, component, rt) -> None:
+        self._s = session
+        self._res = reservation
+        self._key = entry_key
+        self._token = token
+        self._extern = extern
+        self._cache_ir = cache_ir
+        self._digest = digest
+        self._component = component
+        self._rt = rt
+        self._entry = session._cache_entries.get(entry_key)
+        self._scope = None
+
+    @property
+    def hit(self) -> bool:
+        # entry liveness subsumes the admitted-authority check: a filled entry is
+        # bound to the ids the miss consumed, and `_cache_entry_live` fails it the
+        # moment any of those die (revoke / exhaustion / expiry / generation /
+        # ttl / invalidated_by). So a hit is reachable only under live authority.
+        return self._entry is not None and self._s._cache_entry_live(self._entry)
+
+    @property
+    def value(self):
+        return self._entry["value"]
+
+    def _request_ids(self) -> list:
+        scope = self._scope
+        if scope is None:
+            return []
+        kind, val = scope
+        if kind == "grants":
+            return list(val)
+        if kind in ("approval", "auto"):
+            return [val]
+        return []
+
+    def record_hit(self) -> None:
+        s = self._s
+        s._cache_interior["hits"] += 1
+        wal = s._approval_wal()
+        if wal is not None:
+            wal.record_cache_hit({
+                "digest": self._digest, "token": self._token,
+                "extern": self._extern, "component": self._component,
+                "requestIds": list(self._entry.get("grantIds") or [])})
+
+    def consume(self) -> None:
+        s = self._s
+        res = self._res
+        deferred = res.get("deferred") or {}
+        consumed = res["consumed"]
+        now = s._now_ms()
+        if "grants" in deferred:
+            ids = deferred["grants"]
+            live_any = False
+            for rid in ids:
+                if rid in consumed:
+                    live_any = True
+                    continue
+                g = s._grant_by_id(rid)
+                if g is not None and s._grant_live_by_id(rid, now):
+                    s._consume_grant(g)          # durable spend before the fire
+                    consumed.add(rid)
+                    live_any = True
+            if not live_any:
+                s._cache_interior["refusals"] += 1
+                raise self._rt.CacheCrossingRefused(
+                    self._token,
+                    f"every grant admitted for this call died between the seam "
+                    f"admission and the `{self._extern}` crossing "
+                    f"(revoked / exhausted / expired) — refused before any spend "
+                    f"and before any fire (item 310 slice 4)")
+            self._scope = ("grants", list(ids))
+        elif "approval" in deferred:
+            rid = deferred["approval"]
+            if rid in consumed:
+                self._scope = ("approval", rid)
+            else:
+                e = s._approval_entry_by_id(rid)
+                if e is None or e.get("consumed") or s._expired(e, now):
+                    s._cache_interior["refusals"] += 1
+                    raise self._rt.CacheCrossingRefused(
+                        self._token,
+                        f"the approval admitted for this call died between the "
+                        f"seam admission and the `{self._extern}` crossing — "
+                        f"refused before any spend (item 310 slice 4)")
+                s._consume_approval(e)           # durable spend before the fire
+                consumed.add(rid)
+                self._scope = ("approval", rid)
+        else:
+            # non-deferred: the seam already consumed (the reach was not cache-
+            # only). Bind the entry to that scope; spend nothing more.
+            self._scope = res.get("scope")
+        s._cache_interior["misses"] += 1
+
+    def fill(self, value) -> None:
+        s = self._s
+        decision = {"scope": self._scope,
+                    "approvalExpiresAt": self._res.get("approvalExpiresAt")}
+        s._cache_store(self._key, value, self._cache_ir, decision)
+        wal = s._approval_wal()
+        if wal is not None and self._scope is not None:
+            wal.record_cache_fill({
+                "digest": self._digest, "token": self._token,
+                "extern": self._extern, "component": self._component,
+                "requestIds": self._request_ids()})
