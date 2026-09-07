@@ -263,6 +263,36 @@ def test_selfhosted_emitter_is_byte_identical(emitted, reference, rel):
     )
 
 
+def test_list_ops_prelude_splits_the_partialeq_bound(emitted, reference):
+    """`revl_index_of` is the only `Vec<T>` op needing `T: PartialEq`, so it
+    lives in its own `RevlListSearchOps` trait while the size/copy ops
+    (`length`/`slice`/`concat`/`push`) require only `T: Clone`. That split is
+    what lets a `Vec<Value>` — `cordis::Value` is `Clone` but NOT `PartialEq`,
+    the self-host emitter's own `List[Any]` case — still `.revl_length()`
+    (#106/#98). A single `impl<T: Clone + PartialEq> RevlListOps` rejected the
+    whole `Vec<Value>` outright, so the emitted crate could not `cargo build`.
+    Emitted self-host prelude and reference prelude must agree, and both must
+    carry the split shape, not the old fused bound."""
+    ir = compile_files([str(CORPUS_DIR / "lengths.rvl")])
+    src = emitted["emit_rust_src"](ir)
+    assert src == reference.emit(ir)
+    # The PartialEq-free ops carry only `Clone`, so a non-PartialEq element
+    # type reaches them:
+    assert "impl<T: Clone> RevlListOps<T> for Vec<T> {" in src
+    assert "impl<T: Clone> RevlListOps<T> for [T] {" in src
+    # `index_of` — the one comparing op — is isolated behind the PartialEq bound:
+    assert "trait RevlListSearchOps<T> {" in src
+    assert "impl<T: Clone + PartialEq> RevlListSearchOps<T> for Vec<T> {" in src
+    assert "impl<T: Clone + PartialEq> RevlListSearchOps<T> for [T] {" in src
+    # The old fused bound must be gone from the list-ops trait (`RevlListOps`
+    # never re-acquires `PartialEq`):
+    assert "impl<T: Clone + PartialEq> RevlListOps<T>" not in src
+    # `revl_index_of` is no longer declared inside the `RevlListOps` trait:
+    list_ops = src[src.index("trait RevlListOps<T>"):src.index("trait RevlListSearchOps")]
+    assert "revl_index_of" not in list_ops
+    assert "fn revl_length" in list_ops
+
+
 def test_str_borrow_fixpoint_and_owned_boundaries(emitted, reference):
     ir = compile_files([str(CORPUS_DIR / "str_borrows.rvl")])
     borrow = emitted["compute_str_param_borrows"](ir["functions"])
