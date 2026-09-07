@@ -1890,9 +1890,26 @@ def _infile_programs() -> list[str]:
                 progs.append(section[j + 3:end])
                 idx = end + 3
             elif section[j] == '"':
-                end = section.index('"', j + 1)
-                progs.append(section[j + 1:end])
-                idx = end + 1
+                # A `"`-delimited rvl string literal: `\"` and `\\` are the only
+                # escapes (src/revl/lexer.py `_lex_string`), so scan honouring
+                # them to find the true closing quote and decode the content the
+                # way the compiler does. A naive `.index('"')` truncates the
+                # program at the first `\"`, leaving a trailing `\` that neither
+                # side was meant to see.
+                k = j + 1
+                buf: list[str] = []
+                while k < len(section):
+                    c = section[k]
+                    if c == "\\" and k + 1 < len(section) and section[k + 1] in ('"', "\\"):
+                        buf.append(section[k + 1])
+                        k += 2
+                        continue
+                    if c == '"':
+                        break
+                    buf.append(c)
+                    k += 1
+                progs.append("".join(buf))
+                idx = k + 1
             else:
                 idx = j
     return progs
