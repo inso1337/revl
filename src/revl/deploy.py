@@ -974,6 +974,43 @@ def admit(bundle_dir: Path | str, *, trust: TrustStore,
     return receipt
 
 
+def admit_bundle_chain(bundle_dir: Path | str, *,
+                       key_paths: Sequence[Path | str] = (),
+                       backend: str = "python",
+                       require_gauntlet: bool = False,
+                       require_conformance: bool = False,
+                       now=None) -> dict:
+    """Run the §2 attestation-chain admission over a staged bundle from the
+    CONDUCTOR's own credentials, and return the admission receipt.
+
+    This is the thin bridge that puts :func:`admit` on the `revl deploy` PREPARE
+    path (design §1.3, step 4): before any boundary is opened, the operator's
+    own verify key(s) admit the bundle's whole-composition chain against the
+    bytes staged on THIS disk. It is effect-free — it loads nothing and spawns
+    nothing — so a refusal here is a clean PREPARE-time refusal with nothing to
+    roll back.
+
+    `key_paths` are files holding the raw HMAC verify key bytes; each is keyed
+    by its :func:`attest.key_id` so the attestation's `key_id` selects the right
+    one. With no key the chain cannot be verified, so admission REFUSES at the
+    signer link rather than admitting unverified — the same fail-closed shape
+    `admit` uses for an absent attestation.
+
+    Single trust domain (Slice 1): the operator who signs is the operator who
+    deploys, so the :class:`TrustStore` is NOT `cross_domain` and HMAC is
+    honest here (the module docstring's Ed25519 note is the Slice-2 prerequisite
+    for crossing a domain).
+    """
+    keys: dict[str, bytes] = {}
+    for path in key_paths:
+        raw = Path(path).read_bytes()
+        keys[attest.key_id(raw)] = raw
+    trust = TrustStore(keys=keys, backend=backend,
+                       require_gauntlet=require_gauntlet,
+                       require_conformance=require_conformance)
+    return admit(bundle_dir, trust=trust, now=now)
+
+
 def verify_receipt(receipt: Mapping, host_key: bytes) -> tuple[bool, str]:
     """Check a receipt's own signature — the receiver signed what it claims to
     hold, so an audit can attribute a lie rather than only notice one.
@@ -2855,14 +2892,21 @@ def deploy_command(args) -> int:
     seam-free fail-closes to `seam-set-unknown` — every rule refuses rather than
     downgrades, because the map is unauthenticated operator input (design R4).
 
+    When `--bundle` names an attested bundle, its whole-composition attestation
+    chain is verified on the PREPARE path FIRST (:func:`admit_bundle_chain`,
+    design §1.3 step 4): the receiver re-hashes the staged IR and artifact bytes
+    and checks them against the signed chain under the operator's own key(s),
+    before any boundary opens. A refused chain refuses the whole deploy with
+    nothing to roll back, and `--dry-run` runs this fallible half too.
+
     Without `--dry-run`, the admitted map is DEPLOYED over the process boundary
     (`via = local`): :func:`deploy_local_map` builds one participant per process
     and drives the coordinated PREPARE/COMMIT/ABORT protocol (:func:`run_deploy`)
     — the coordinator holds only the commit ledger and, on any COMMIT failure,
-    aborts in reverse commit order. The attested-bundle staging plus host-side
-    chain verify (§2) and the cross-machine / container launch orchestration are
-    following slices; because admission here supplies no seam set, only a
-    process-boundary target ever reaches the COMMIT path.
+    aborts in reverse commit order. The attested-bundle STAGING and the
+    cross-machine / container launch orchestration are following slices; because
+    admission here supplies no seam set, only a process-boundary target ever
+    reaches the COMMIT path.
     """
     try:
         placement = _load_deploy_map(args.map)
@@ -2876,26 +2920,59 @@ def deploy_command(args) -> int:
     as_json = getattr(args, "json", False)
     dry_run = getattr(args, "dry_run", False)
 
-    # The plan-time surface: `--dry-run`, or ANY refusal, reports the admission
-    # plan and stops before opening a boundary.
-    if dry_run or not verdict.ok:
+    # PREPARE, §2: if an attested bundle is named, verify its whole-composition
+    # chain against the bytes on THIS disk BEFORE any boundary opens (design
+    # §1.3 step 4, load-only-after-verify). It is effect-free, so a refusal is a
+    # clean PREPARE-time refusal — nothing was staged or spawned. `--dry-run`
+    # runs this half too: it is exactly the fallible check the deploy analogue
+    # of `revl plan` is meant to make observable.
+    chain: Optional[dict] = None
+    chain_ok = True
+    bundle_arg = getattr(args, "bundle", None)
+    if bundle_arg is not None:
+        try:
+            chain = admit_bundle_chain(
+                bundle_arg, key_paths=getattr(args, "key", None) or [],
+                backend=getattr(args, "backend", None) or "python",
+                require_gauntlet=getattr(args, "require_gauntlet", False),
+                require_conformance=getattr(args, "require_conformance", False))
+        except OSError as error:
+            print(f"error: cannot admit bundle {bundle_arg!r}: {error}",
+                  file=sys.stderr)
+            return 1
+        chain_ok = chain.get("verdict") == ACCEPT
+
+    # The plan-time surface: `--dry-run`, ANY map refusal, or a REFUSED
+    # attestation chain reports the admission plan and stops before opening a
+    # boundary.
+    if dry_run or not verdict.ok or not chain_ok:
         if as_json:
             print(json.dumps({
-                "ok": verdict.ok,
+                "ok": verdict.ok and chain_ok,
                 "targets": {p: {"via": t.via, "boundary": t.boundary}
                             for p, t in verdict.targets.items()},
                 "refusals": [dict(r) for r in verdict.refusals],
                 "boundaries": verdict.boundaries,
+                "chain": chain,
             }, indent=2))
         else:
+            ok = verdict.ok and chain_ok
             n = len(verdict.targets) if verdict.ok else 0
             head = (f"deploy map {args.map}: admitted, {n} boundary-crossing "
-                    f"target(s)" if verdict.ok
+                    f"target(s)" if ok
                     else f"deploy map {args.map}: REFUSED")
             print(head)
             for line in verdict.render():
                 print(line)
-        return 0 if verdict.ok else 1
+            if chain is not None:
+                if chain_ok:
+                    print(f"  chain: ADMITTED (backend "
+                          f"{chain.get('backend')!r}, artifact "
+                          f"{str(chain.get('artifact_hash'))[:12]}...)")
+                else:
+                    print(f"  chain REFUSED [{chain.get('link')}]: "
+                          f"{chain.get('reason')}")
+        return 0 if (verdict.ok and chain_ok) else 1
 
     # COMMIT: drive the coordinated protocol over the map's local participants.
     from . import wal  # noqa: PLC0415 — lazy; only the COMMIT path needs a WAL dir

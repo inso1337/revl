@@ -1403,6 +1403,34 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_cmd.add_argument("--json", action="store_true",
                             help="machine-readable verdict (targets, refusals, "
                                  "boundaries)")
+    # §2 attestation-chain admission on the PREPARE path. When --bundle is
+    # given, the whole-composition chain is re-hashed against the staged bytes
+    # and verified under the operator's own key(s) BEFORE any boundary opens; a
+    # refused chain refuses the whole deploy with nothing to roll back.
+    deploy_cmd.add_argument(
+        "--bundle", metavar="DIR",
+        help="an attested reproducible bundle (item 305) to admit before "
+             "deploying: its whole-composition attestation chain is re-hashed "
+             "against the staged bytes and verified in PREPARE (item 118 §2), "
+             "and a refused chain refuses the deploy before any boundary opens")
+    deploy_cmd.add_argument(
+        "--key", metavar="PATH", action="append",
+        help="a file holding the raw HMAC verify key the receiver trusts; "
+             "repeatable. Used only with --bundle (each key is selected by its "
+             "attestation key_id). With no key the chain cannot be verified and "
+             "admission refuses at the signer link")
+    deploy_cmd.add_argument(
+        "--backend", metavar="NAME", default="python",
+        help="the receiver backend whose emitted artifact bytes the chain is "
+             "re-hashed over when --bundle is given (default: python)")
+    deploy_cmd.add_argument(
+        "--require-gauntlet", action="store_true",
+        help="with --bundle, REFUSE a chain that binds no item-31 gauntlet "
+             "evidence rather than admitting on absent evidence")
+    deploy_cmd.add_argument(
+        "--require-conformance", action="store_true",
+        help="with --bundle, REFUSE a chain that binds no item-306 conformance "
+             "cert for --backend rather than admitting on absent evidence")
 
     # `revl truc <verb> ...` — a namespaced door onto the standalone `truc`
     # binary (roadmap item 136, slice S2). This is a pure passthrough: the tail
