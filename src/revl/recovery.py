@@ -639,6 +639,37 @@ def _append_admit_record(wal_path: str, record: dict) -> None:
             pass
 
 
+def _served_fenced_crossings(records: list, decision_id: str) -> tuple:
+    """The §4 journal-served view of one decision's fenced crossings: pair the
+    `admit-crossing` records by `(decisionId, ordinal)` and split them into the
+    completed and the in-flight.
+
+    Returns `(served, in_flight)` where `served` maps a fenced crossing's
+    `ordinal` to its recorded `outcome` (a crossing with a `phase: "complete"`
+    record — it RAN to completion, so a re-apply serves the outcome and dispatches
+    zero times) and `in_flight` is the sorted ordinals with a `begin` and no
+    `complete` — a fenced crossing cut mid-flight (a plain `kill -9`, not only the
+    E-Stop's `estop-ambiguous`). The §4 table's three states fall out of this: a
+    completed crossing is in `served`, an in-flight one is in `in_flight`, and a
+    crossing with no record at all is in neither (it simply runs for the first
+    time on re-apply). A torn trailing `complete` line the reader dropped presents
+    as in-flight, which is the fail-closed reading."""
+    begins: dict = {}
+    completes: dict = {}
+    for r in records:
+        if r.get("record") != "admit-crossing" \
+                or r.get("decisionId") != decision_id:
+            continue
+        ordinal = r.get("ordinal")
+        if r.get("phase") == "complete":
+            completes[ordinal] = r.get("outcome")
+        elif r.get("phase") == "begin":
+            begins[ordinal] = r
+    served = {o: completes[o] for o in completes}
+    in_flight = sorted(o for o in begins if o not in completes)
+    return served, in_flight
+
+
 def recover_forward_admissions(wal: dict, *, session=None,
                                snapshot: Optional[dict] = None,
                                forward: bool = False,
@@ -674,12 +705,27 @@ def recover_forward_admissions(wal: dict, *, session=None,
         crossing in flight at the cut, §4/§6). Report the one record; refuse to
         finalize; the operator reconciles it exactly as an `estop-ambiguous`.
 
-    NOTE (design 460 §4, not yet landed): the journal-served re-apply that a
-    fresh-process `advanced` finalize needs — replug the turn in journal-served
-    mode so a completed fenced crossing is served from the journal and dispatches
-    zero times — is the py-runtime plug seam left for a follow-up. This function
-    delivers the durable classification, the content CAS and the forward finalize
-    over the stage records; it does NOT itself re-run a turn's activation body."""
+    The journal-served re-apply (design 460 §4). Before an `advanced` decision is
+    finalized forward, its fenced crossings are read off the journal by
+    `(decisionId, ordinal)` (`_served_fenced_crossings`):
+
+      * a fenced crossing recorded COMPLETE is served from the journal — its
+        outcome is durable, so a re-apply returns it and dispatches zero times
+        ("no double-run of a fenced extern", §8). When `session` exposes the §4
+        seam (`begin_journal_served`/`serve_fenced_crossing`), the served outcomes
+        are driven through it so the finalize is gated on the seam actually
+        serving every one with no dispatch (`dispatched == 0`, the non-vacuity
+        witness the §7 exit test reads);
+      * a fenced crossing left IN FLIGHT at the cut (a `begin` with no `complete`
+        — a plain crash mid-crossing, the same state the E-Stop's
+        `estop-ambiguous` names) reclassifies the decision `ambiguous`: forward
+        recovery refuses to finalize and leaves the one crossing for the operator,
+        never re-dispatching it.
+
+    This function still does not itself re-materialize the turn's fibers in a live
+    runtime (that plug drives `serve_fenced_crossing` at each fenced seam); it
+    delivers the durable classification, the content CAS, the fenced-crossing
+    serving verdict and the forward finalize over the stage records."""
     records = wal.get("records") or []
     decided = [r for r in records if r.get("record") == "admit-decided"]
     if not decided:
@@ -765,7 +811,56 @@ def recover_forward_admissions(wal: dict, *, session=None,
                 "abandoned": bool(forward and wal_path is not None)})
             continue
 
-        # advanced and the surface still matches: finalize forward.
+        # advanced and the surface still matches: the §4 journal-served re-apply.
+        # Read this decision's fenced crossings off the journal. One left in flight
+        # at the cut (a `begin` with no `complete`) is ambiguous — refuse to
+        # finalize and leave it for the operator, exactly as an `estop-ambiguous`.
+        served, in_flight = _served_fenced_crossings(records, did)
+        if in_flight:
+            reports.append({
+                "decisionId": did, "classification": "ambiguous",
+                "decision": ("a fenced crossing was in flight at the cut (an "
+                             "`admit-crossing begin` with no `complete` under this "
+                             "decision); forward recovery refuses to finalize and "
+                             "leaves the one crossing for the operator, never "
+                             "re-dispatching a fenced extern (§4/§8)."),
+                "inFlight": in_flight,
+                "finalized": False})
+            continue
+
+        # every fenced crossing completed: serve them from the journal. When the
+        # session exposes the §4 seam, drive the served outcomes through it so the
+        # finalize is gated on the seam serving each one with ZERO dispatch — the
+        # re-apply re-materializes the turn's provisions without re-running a
+        # fenced extern. `dispatched == 0` is the guarantee (§8), asserted here.
+        dispatched = 0
+        if served and session is not None \
+                and hasattr(session, "begin_journal_served"):
+            session.begin_journal_served(did, served)
+            try:
+                for ordinal in sorted(served):
+                    call = next((r.get("call") for r in records
+                                 if r.get("record") == "admit-crossing"
+                                 and r.get("decisionId") == did
+                                 and r.get("ordinal") == ordinal
+                                 and r.get("phase") == "begin"), {}) or {}
+                    session.serve_fenced_crossing(call.get("receiver", ""),
+                                                  call.get("method", ""))
+                dispatched = session._fenced_dispatch_count
+            finally:
+                session.end_journal_served()
+            if dispatched:
+                # a completed fenced crossing that did NOT serve is a broken seam,
+                # not a finalizable decision — fail closed rather than double-run.
+                reports.append({
+                    "decisionId": did, "classification": "ambiguous",
+                    "decision": ("the journal-served seam did not serve a "
+                                 "completed fenced crossing (dispatched "
+                                 f"{dispatched}); forward recovery refuses to "
+                                 "finalize rather than risk a double-run (§4)."),
+                    "dispatched": dispatched, "finalized": False})
+                continue
+
         if forward and wal_path is not None:
             _append_admit_record(wal_path, {
                 "record": "admit-finalized", "decisionId": did,
@@ -776,7 +871,10 @@ def recover_forward_admissions(wal: dict, *, session=None,
                          "still matches (content CAS passed); the decision is "
                          "finalized forward rather than left ambiguous — its "
                          "effects landed and its approvals were spent, so a "
-                         "dropped admission would be the lie the world contradicts."),
+                         "dropped admission would be the lie the world contradicts. "
+                         "Its fenced crossings are served from the journal, not "
+                         "re-dispatched (§4)."),
+            "served": sorted(served), "dispatched": dispatched,
             "finalized": bool(forward and wal_path is not None)})
     return reports
 
@@ -1811,6 +1909,15 @@ def render(report: dict) -> str:
                                              entry.get("classification"))
         fin = " finalized" if entry.get("finalized") else ""
         fin = " abandoned" if entry.get("abandoned") else fin
+        # design 460 §4: name the journal-served fenced crossings on an advanced
+        # decision (served from the journal, dispatched zero) and the in-flight
+        # ones that refused an ambiguous decision.
+        served = entry.get("served")
+        if served:
+            fin += (f" [served {len(served)} fenced crossing(s) from the journal,"
+                    f" dispatched {entry.get('dispatched', 0)}]")
+        if entry.get("inFlight"):
+            fin += f" [fenced crossing(s) in flight: {entry['inFlight']}]"
         lines.append(f"  admission {tag:<9} {did}...{fin} — "
                      f"{entry.get('decision', '')}")
     # item 308 S1 (issue #96): one line per `shared` reclaim, so a lease-lapse
