@@ -14,6 +14,11 @@
 //     the subscription. Multi-source teardown rides the one bracket the
 //     subscribe registers: `close` closes the merge, which detaches it from both
 //     sources, and each source is left to its own bracket.
+//   Iterate  — `every o in sub { … }` (Slice 4, §4.7): the async-iteration form,
+//     a plain blocking `next` loop on this tier. Each delivered item runs the
+//     effectful body (an emission to a required Sink); a `Closed` terminal ends
+//     the loop without entering the body; unloading the owner while parked trips
+//     the cancel channel, resolves the park as `Closed`, and closes the bracket.
 
 component Consumer {
   let pool = effect Pool.open("orders", 2) undo pool.close()
@@ -32,4 +37,14 @@ component Fanin {
   let b = effect Stream.source() undo b.close()
   let sub = subscribe merge(a, b) undo sub.close()
   await sub.next()
+}
+
+service Sink { emission fn write(v: Str) }
+
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
 }
