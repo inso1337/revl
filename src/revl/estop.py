@@ -9,9 +9,10 @@ and the py runtime (`backends/python/runtime.py`) cannot drift apart on them:
   * what an armed latch means, including a malformed one (`read_latch`);
   * which tiers actually HONOR the latch (`TIERS_WITH_ESTOP`).
 
-The third is the honest half. Five of revl's six tiers have no E-Stop seam,
-and a conductor that halted a placement without saying which of its processes
-were merely KILLED would be reporting a stop it did not perform.
+The third is the honest half. The tiers that still have no E-Stop seam keep
+their cooperative teardown, and a conductor that halted a placement without
+saying which of its processes were merely KILLED would be reporting a stop it
+did not perform.
 """
 
 from __future__ import annotations
@@ -22,13 +23,18 @@ import os
 #: The ambient latch path, equivalent to `--estop-latch FILE`.
 LATCH_ENV = "REVL_ESTOP_LATCH"
 
-#: The tiers whose runtime checks the latch at every boundary-crossing seam.
-#: A component on any OTHER tier keeps its cooperative teardown and has no
-#: E-Stop: the only halt available for it is a SIGKILL, which unwinds nothing
-#: and leaves its residue UNKNOWN. That is honest and visible rather than a
-#: silently degraded halt, and `_estop_halt_report` names every such component
-#: individually (docs/design/443-estop.md, "Per-tier status").
-TIERS_WITH_ESTOP = frozenset({"py"})
+#: The tiers whose runtime checks the latch at every boundary-crossing seam:
+#: the py reference tier (item 443), and the go and rust tiers (issue #122),
+#: whose placement runners now read the latch, refuse a new crossing at the
+#: accept seam, record what is in flight, and — via an idle watcher — print
+#: their inventory and die where they stand rather than being SIGKILLed.
+#: A component on any OTHER tier (java, wasm, and — until #598 lands — node)
+#: keeps its cooperative teardown and has no E-Stop: the only halt available
+#: for it is a SIGKILL, which unwinds nothing and leaves its residue UNKNOWN.
+#: That is honest and visible rather than a silently degraded halt, and
+#: `_estop_halt_report` names every such component individually
+#: (docs/design/443-estop.md, "Per-tier status").
+TIERS_WITH_ESTOP = frozenset({"py", "go", "rust"})
 
 #: What the py runner prints when the latch trips: its own in-flight
 #: inventory, on one line, so the conductor can merge it into the halt report
