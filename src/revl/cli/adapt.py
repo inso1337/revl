@@ -169,7 +169,7 @@ def _run_adapt(args) -> int:
             provide_key=args.provide_key or rs.lower(),
             require_key=args.require_key,
             carried_tokens=tuple(carried),
-            prov_types=prov_types,
+            prov_types=prov_types, req_types=req_types,
             derivation=derivation, chain_depth=depth)
         plan["derivation"] = derivation
         plan["source"] = source
