@@ -717,6 +717,33 @@ def _safe_name(name: str, taken: set[str]) -> str:
     return candidate
 
 
+def _is_dunder_name(name: str) -> bool:
+    """True if `name` is a dunder / prototype name like `__init__`, `__proto__`.
+
+    issue #319: such names hijack host protocols when they reach a record field
+    or service method — a py dataclass grows an `__init__`/`__getattr__` hook,
+    and ts `__proto__` silently drops the value instead of storing it. They are
+    refused at the frontend (see `_reject_dunder_name`) so no backend ever emits
+    one. This detector is the single authority on what counts as a dunder, kept
+    disjoint from the reserved-word / predeclared handling `_safe_name` applies
+    (that pass renames legal-but-colliding identifiers; this one refuses names
+    that are unsafe on every tier)."""
+    return bool(re.match(r"^__\w+__$", name))
+
+
+def _reject_dunder_name(name: str, kind: str, owner: str,
+                        filename: str, line: int) -> None:
+    """Refuse a dunder / prototype name in a `kind` (`field`/`method`/`config
+    field`) position, naming its `owner` (record / service / component). A no-op
+    for every ordinary name, so nothing that compiled before is affected."""
+    if _is_dunder_name(name):
+        raise RevlError(
+            filename, line,
+            f"dunder {kind} `{name}` in {owner} is not allowed: dunder / "
+            f"prototype names hijack host protocols (e.g. Python dataclass "
+            f"`__init__`/`__getattr__`, JS `__proto__`) — rename it (issue #319)")
+
+
 # item 274: a minimal profile marker `navigate.is_untrusted` reads as the
 # untrusted-author view, so a body-level refusal can collapse its navigable map
 # without threading the whole `AdmissionProfile` down every lowering path. The
@@ -779,6 +806,11 @@ class Env:
         # "config.<field>" and "req.<local>" markers infer_ir resolves
         self.type_env: dict[str, str] = {}
         for cfg_field in component.config:
+            # issue #319: refuse dunder / prototype config field names (protocol
+            # hijacking) before they reach a backend.
+            _reject_dunder_name(cfg_field.name, "config field",
+                                f"component `{component.name}`",
+                                filename, cfg_field.line)
             self.type_env[f"config.{cfg_field.name}"] = cfg_field.type
         self.config_fields = {f.name for f in component.config}
         self.requires = dict()  # binding (local name) -> service name
@@ -1355,6 +1387,11 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
         if decl.fields:
             fields: dict[str, str] = {}
             for field in decl.fields:
+                # issue #319: refuse dunder / prototype field names before they
+                # reach a backend (protocol hijacking). Complementary to the
+                # reserved-word renaming `_safe_name` applies at binding sites.
+                _reject_dunder_name(field.name, "field", f"record `{decl.name}`",
+                                    filename, field.line)
                 if field.name in fields:
                     raise RevlError(filename, field.line,
                                     f"duplicate field `{field.name}` in record `{decl.name}`")
@@ -6483,6 +6520,11 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         prior = ambient_services.get(svc.name)
         if prior is not None:
             _admit_service_replacement(program, svc, prior, ambient)
+        # issue #319: refuse dunder / prototype service-method names (protocol
+        # hijacking) before they reach a backend.
+        for method in (svc.methods or {}).values():
+            _reject_dunder_name(method.name, "method", f"service `{svc.name}`",
+                                program.filename, getattr(method, "line", svc.line))
         services[svc.name] = svc
     for name, svc in ambient_services.items():
         services.setdefault(name, svc)
