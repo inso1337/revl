@@ -164,28 +164,27 @@ fn digit_val(cc: Int) -> Int {
   return 0 - 1
 }
 
-// Fold an underscore-free digit string in `base` to its Int value, or -1 when
-// the value does not fit an i64. The token TEXT must be the parsed value's
-// decimal spelling (the reference canonicalizes an int token as
-// `str(int(digits, base))`), so `0xFF` -> `255` and `1_000` -> `1000`.
+// Fold an underscore-free NON-DECIMAL digit string (base 2/8/16) to its Int
+// value, or -1 when the value does not fit an i64. The token TEXT must be the
+// parsed value's decimal spelling (the reference canonicalizes an int token as
+// `str(int(digits, base))`), so `0xFF` -> `255`.
 //
 // The fold is Int arithmetic, and revl's Int TRAPS at the 64-bit edge on every
 // tier (docs/arithmetic.md) — it does not wrap and it does not promote to a
-// bignum as the reference's Python int does. An earlier comment here claimed a
-// wrap and called the case out-of-corpus; what actually happened was that
-// `9223372036854775808` — nineteen digits, no context needed — made the fold
-// trap, so the LEXER faulted on an input the reference lexes without
-// complaint. A gate that raises where it should refuse is a gate that cannot
-// be called from a `catch`-less consumer, which is what `crates/revl-gate` is.
+// bignum as the reference's Python int does. So the bound is tested BEFORE the
+// multiply that would cross it: with base and digit both positive,
+// `v * base + d <= MAX` is exactly `v <= (MAX - d) / base` in truncating
+// integer division. The -1 answer becomes an `error` token at the non-decimal
+// call site.
 //
-// So the bound is tested BEFORE the multiply that would cross it: with base and
-// digit both positive, `v * base + d <= MAX` is exactly `v <= (MAX - d) / base`
-// in truncating integer division. The -1 answer becomes an `error` token at the
-// two call sites, which is a refusal the reference agrees with — an Int literal
-// outside the 64-bit range is refused there too (typecheck's
-// `_reject_int_literal_range`, examples/rejections/t20_int_literal_range.rvl).
-// Only the INT paths fold; a float keeps its source spelling, so a float with a
-// huge integer part is unaffected. Found by tools/fuzz_frontend.py.
+// PARITY RESIDUAL (item 391, toward #106): the reference lexer accepts an
+// over-i64 non-decimal literal (`0xFFFFFFFFFFFFFFFFFF`), canonicalizing it to a
+// big decimal through Python bignum, and lets the checker refuse the value.
+// The self-host cannot reproduce that decimal string without bignum
+// base-conversion, so it still refuses at lex time here. The DECIMAL path no
+// longer folds at all (see `decimal_canon` below), which is why the common
+// `9223372036854775808`-shaped literal (examples/rejections/t20) now lexes on
+// both sides — the residual is only the rarer over-range non-decimal spelling.
 fn radix_value(digits: Str, base: Int) -> Int {
   let max = 9223372036854775807
   var v = 0
@@ -198,6 +197,22 @@ fn radix_value(digits: Str, base: Int) -> Int {
     i += 1
   }
   return v
+}
+
+// Canonicalize a DECIMAL digit string (underscores already stripped by
+// `scan_grouped`) to the reference's int-token TEXT, which is `str(int(num))`:
+// base-10 canonicalization is exactly leading-zero removal, so `007` -> `7`,
+// `000` -> `0`, and `9223372036854775808` -> itself. Crucially this needs NO
+// fold, so it does not trap at the i64 edge — the reference lexer likewise
+// never range-checks a decimal literal (it converts through Python bignum and
+// defers the 64-bit bound to typecheck's `_reject_int_literal_range`), so the
+// two lexers now agree token-for-token on an over-range decimal. Keeps at
+// least one digit for an all-zero run.
+fn decimal_canon(digits: Str) -> Str {
+  let n = digits.length()
+  var i = 0
+  while (i < n - 1 && digits.charAt(i) == "0") { i += 1 }
+  return digits.slice(i, n)
 }
 
 // A plain string body after the opening quote, `q` being the closing quote's
@@ -681,12 +696,8 @@ fn step(source: Str, i: Int, line: Int) -> Step {
       let ftext = ip.out.concat(fracpart).concat(exppart)
       return { i: jj, line: line, tok: { kind: "float", text: ftext, line: line } }
     }
-    let ival = radix_value(ip.out, 10)
-    if (ival == 0 - 1) {
-      return { i: source.length(), line: line,
-               tok: { kind: "error", text: "int literal out of 64-bit range", line: line } }
-    }
-    return { i: jj, line: line, tok: { kind: "int", text: ival.to_str(), line: line } }
+    let itext = decimal_canon(ip.out)
+    return { i: jj, line: line, tok: { kind: "int", text: itext, line: line } }
   }
   if (cc == 64) {
     // `@backend { ... }` host body -> a single `hostbody` token (reference

@@ -260,3 +260,37 @@ def test_selfhosted_lexer_loop_control_match_reference(lex_src, src):
     got = _canon_emitted(lex_src(src))
     assert "error" not in {k for k, _, _ in got}, got
     assert got == _canon_reference(reference_lex(src, "loop_control_case.rvl"))
+
+
+# An `Int` DECIMAL literal outside the 64-bit range (item 391, self-host port,
+# toward #106). The reference lexer never range-checks a decimal literal: it
+# converts through Python bignum and hands the checker
+# (`_reject_int_literal_range`, examples/rejections/t20) the 64-bit bound, so
+# `9223372036854775808` (2**63, one past i64 max) lexes as an `int` token. The
+# self-host lexer used to FOLD the digits with i64 arithmetic that TRAPS at that
+# edge, so it emitted an `error` token where the reference emits an `int` — a
+# token-for-token divergence the 8-file corpus never exercised, and (at the
+# gate) the error token degraded into a spurious "unbalanced braces" refusal.
+# `decimal_canon` now canonicalizes a decimal literal by leading-zero removal
+# (`str(int(num))` with no fold), so the two lexers agree on the token TEXT for
+# any decimal magnitude. NOTE the residual: an over-i64 NON-decimal literal
+# (`0xFFFFFFFFFFFFFFFFFF`) still needs bignum base-conversion the self-host
+# lacks, so it is intentionally NOT in this list and stays a known divergence.
+INT_RANGE_CASES = [
+    "9223372036854775807",             # i64 max (in range — the boundary)
+    "9223372036854775808",             # 2**63, one past max (the t20 literal)
+    "9223372036854775809",
+    "18446744073709551616",            # 2**64
+    "99999999999999999999999999999999",  # far past the range
+    "9_223_372_036_854_775_808",       # over-range with `_` group separators
+    "007", "000", "0",                 # leading-zero canonicalization (in range)
+    "let big = 9223372036854775808 + 1",
+    "[9223372036854775808, 1]",
+]
+
+
+@pytest.mark.parametrize("src", INT_RANGE_CASES)
+def test_selfhosted_lexer_int_range_match_reference(lex_src, src):
+    got = _canon_emitted(lex_src(src))
+    assert "error" not in {k for k, _, _ in got}, got
+    assert got == _canon_reference(reference_lex(src, "int_range_case.rvl"))
