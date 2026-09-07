@@ -1045,6 +1045,14 @@ def build_parser() -> argparse.ArgumentParser:
                               "the `requires approval` gate re-arms; a `recovery may "
                               "re-issue owed emissions` rule additionally turns on "
                               "the item-440 re-issue seam (off by default)")
+    recover.add_argument("--forward", action="store_true",
+                         help="design 460 §5: finalize forward a two-phase "
+                              "admission (`admit-decided` with no `admit-finalized`) "
+                              "whose runtime advanced past the crash and whose "
+                              "surface still matches (content CAS). Without it, "
+                              "recover reports the classification per un-finalized "
+                              "decision and changes nothing, matching `revl estop "
+                              "--report`")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
 
     estop = sub.add_parser(
