@@ -423,36 +423,109 @@ fn at_top_decl(ts: List[Token], i: Int) -> Bool {
 // NeedTool(ToolCall)`, multi-line arms included — the span runs to the next
 // top-level declaration, not to the end of the line.
 //
-// It still OVER-approximates in one direction: a union of TYPES rather than
-// cases (`type Payload = List[Row] | Str`) contributes its arms too. That is
-// the safe side — over-collecting only ever keeps admitting a program the
-// reference admits, while under-collecting would refuse one, and refusing what
-// the reference admits is the direction this gate may not invent. Iterative for
-// the same reason `boot_names` is.
+// A case head that is not a real constructor is NOT collected, because the
+// reference does not treat it as a callable either. A single-case declaration
+// whose sole "case" is a TYPE EXPRESSION is a transparent alias RHS, not a
+// variant (lower.py `_case_table` skips a non-`variant` spec; typecheck.py
+// `_is_type_expression` is the classifier): `type Rows = List[Row]`,
+// `type M = Row?` and `type Alias = Int` all bind a type, and the reference
+// refuses a call to their RHS head the same G1 way `Int(1)` alone draws. This
+// scan mirrors the token-detectable arms of that classifier:
+//   * a head followed by `[` or `?` is a type application / optional — the
+//     parser (parser.rvl type-decl form) only reaches that spelling as the sole
+//     case, and a later `| …` there is a parse error, so it is skipped
+//     unconditionally;
+//   * a BUILTIN type name (`is_builtin_type_name`) in SINGLE-case position is an
+//     alias to that primitive, never a constructor — but in a MULTI-case variant
+//     (`type T = Int | Bar`) the reference DOES register it as a case, so it is
+//     kept there.
+// It still OVER-approximates in the two arms a token scan cannot see without
+// the type table: a sole case that names ANOTHER declared type (`type A = B`) or
+// a type parameter in scope is a reference alias too, and is collected here.
+// That residual stays on the safe side of one narrow asymmetry — a program that
+// declares such an alias AND calls its RHS head bare — and closing it would
+// require the checker's type table the gate deliberately does not build.
+// Iterative for the same reason `boot_names` is.
+fn is_builtin_type_name(name: Str) -> Bool {
+  return name == "Int" || name == "Int32" || name == "Float" || name == "Str"
+      || name == "Bool" || name == "Bytes" || name == "Unit" || name == "Opt"
+      || name == "List" || name == "Map" || name == "Result" || name == "Any"
+      || name == "Never"
+}
+
+// The end of the `type` declaration whose keyword is at `kw` — the first
+// top-level declaration boundary at or after `kw + 1`, exactly the span the
+// original single-pass scan ran the inner loop over.
+fn type_decl_end(ts: List[Token], start: Int) -> Int {
+  var j = start
+  var depth = 0
+  while (j < ts.length() && !atk(ts, j, "eof")
+         && (depth > 0 || !at_top_decl(ts, j))) {
+    let t = tkc(ts, j)
+    if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
+    if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
+    j += 1
+  }
+  return j
+}
+
+// Whether the declaration span `[start, end)` carries a top-level `|` — i.e. it
+// is a MULTI-case variant. A `|` inside a payload (`Foo(Bar | Baz)` never
+// occurs, but a record/type-application does raise depth) is not a separator.
+fn has_top_bar(ts: List[Token], start: Int, end: Int) -> Bool {
+  var j = start
+  var depth = 0
+  while (j < end) {
+    let t = tkc(ts, j)
+    if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
+    if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
+    if (depth == 0 && t.kind == "|") { return true }
+    j += 1
+  }
+  return false
+}
+
+// Whether the case head at index `j` is a transparent alias RHS, not a
+// constructor — see `type_ctors`.
+fn alias_head(ts: List[Token], j: Int, name: Str, multi: Bool) -> Bool {
+  let nxt = tkc(ts, j + 1).kind
+  if (nxt == "[" || nxt == "?") { return true }
+  if (!multi && is_builtin_type_name(name)) { return true }
+  return false
+}
+
+fn collect_ctors(ts: List[Token], start: Int, end: Int, multi: Bool,
+                 acc: List[Str]) -> List[Str] {
+  var out = acc
+  var j = start
+  var depth = 0
+  var ctor = false
+  while (j < end) {
+    let t = tkc(ts, j)
+    if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
+    if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
+    if (depth == 0 && (t.kind == "=" || t.kind == "|")) {
+      ctor = true
+    } else {
+      if (ctor && t.kind == "ident" && is_upper_name(t.text)
+          && !alias_head(ts, j, t.text, multi)) {
+        out = union_into(out, [t.text])
+      }
+      ctor = false
+    }
+    j += 1
+  }
+  return out
+}
+
 fn type_ctors(ts: List[Token]) -> List[Str] {
   var out: List[Str] = []
   var i = 0
   while (i < ts.length() && !atk(ts, i, "eof")) {
     if (atw(ts, i, "type")) {
-      var j = i + 1
-      var depth = 0
-      var ctor = false
-      while (j < ts.length() && !atk(ts, j, "eof")
-             && (depth > 0 || !at_top_decl(ts, j))) {
-        let t = tkc(ts, j)
-        if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
-        if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
-        if (depth == 0 && (t.kind == "=" || t.kind == "|")) {
-          ctor = true
-        } else {
-          if (ctor && t.kind == "ident" && is_upper_name(t.text)) {
-            out = union_into(out, [t.text])
-          }
-          ctor = false
-        }
-        j += 1
-      }
-      i = j
+      let end = type_decl_end(ts, i + 1)
+      out = collect_ctors(ts, i + 1, end, has_top_bar(ts, i + 1, end), out)
+      i = end
     } else {
       i += 1
     }
@@ -541,6 +614,116 @@ fn function_return_ty(ty: Str) -> Str {
 
 fn is_async_fn_ty(ty: Str) -> Bool {
   return starts_with(function_return_ty(ty), "Async[")
+}
+
+// An identifier byte in a rendered type string (`[A-Za-z0-9_]`). Type HEADS are
+// the only identifiers a rendered type carries, and each is delimited by a
+// non-identifier byte (`[`, `]`, `,`, ` `, `(`, `)`, `?`, or an end), so a head
+// is exactly an identifier run bounded by non-identifier bytes.
+fn ty_word_char(c: Str) -> Bool {
+  if (c == "_") { return true }
+  if (c.is_alpha()) { return true }
+  return c.is_digit()
+}
+
+// The rendered-string form of typecheck.py's `_mentions_async`: does the type
+// name `Async` at its head OR nested in any argument/return position? A rendered
+// type writes every head as an identifier run, so `Async` as a head — at index
+// 0, or preceded and followed by a non-identifier byte — is the whole of
+// `_mentions_async`'s "head == 'Async', else any arg mentions_async" with no
+// case analysis. A nominal `AsyncThing`/`MyAsync` is NOT a match (its `Async`
+// substring abuts an identifier byte), exactly as the reference's `head` test.
+fn ty_mentions_async(ty: Str) -> Bool {
+  let n = ty.length()
+  var i = 0
+  while (i + 5 <= n) {
+    if (ty.slice(i, i + 5) == "Async") {
+      let leftOk = i == 0 ? true : !ty_word_char(ty.slice(i - 1, i))
+      let aft = i + 5
+      let rightOk = aft >= n ? true : !ty_word_char(ty.slice(aft, aft + 1))
+      if (leftOk && rightOk) { return true }
+    }
+    i += 1
+  }
+  return false
+}
+
+// Rule C1 (typecheck.py's `refuse_self_declared_async`, restated on the
+// component lowering path by `_assert_colour_is_positional`): an arrow may not
+// name its own async colour. Colour is POSITIONAL — an `Async[…]` written on a
+// lowered arrow is a certificate that some declaration promised to await it,
+// which the leak scan and callee-collection stop-set read; a self-declared
+// annotation would forge that certificate with no consumer behind it, and the
+// leak check would then SKIP the arrow, laundering its async reach out of the
+// enclosing scope. So the annotation is refused at the source. This scan visits
+// every arrow the gate walks (bodies and nested arrows), returning the
+// reference's verbatim message on the first offending arrow, "" if none.
+fn self_async_msg() -> Str {
+  return "an arrow may not declare its own async colour"
+}
+
+fn self_async_exprs(xs: List[Expr], i: Int) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = self_async_expr(xs[i])
+  if (r != "") { return r }
+  return self_async_exprs(xs, i + 1)
+}
+
+fn self_async_inits(xs: List[InitN], i: Int) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = self_async_expr(xs[i].value)
+  if (r != "") { return r }
+  return self_async_inits(xs, i + 1)
+}
+
+fn self_async_arms(xs: List[ArmN], i: Int) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = self_async_expr(xs[i].body)
+  if (r != "") { return r }
+  return self_async_arms(xs, i + 1)
+}
+
+fn self_async_parts(xs: List[PartN], i: Int) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = self_async_expr(xs[i].e)
+  if (r != "") { return r }
+  return self_async_parts(xs, i + 1)
+}
+
+fn self_async_expr(e: Expr) -> Str {
+  return match e {
+    IntLit(_)   => "",
+    FloatLit(_) => "",
+    StrLit(_)   => "",
+    BoolLit(_)  => "",
+    NullLit     => "",
+    Var(_)      => "",
+    Hole(_)     => "",
+    Bad(_)      => "",
+    Bin(b)      => or2(self_async_expr(b.l), self_async_expr(b.r)),
+    Un(u)       => self_async_expr(u.e),
+    Emit(u)     => self_async_expr(u.e),
+    Call(c)     => or2(self_async_expr(c.target), self_async_exprs(c.args, 0)),
+    Field(f)    => self_async_expr(f.target),
+    OptField(f) => self_async_expr(f.target),
+    OptCall(c)  => or2(self_async_expr(c.target), self_async_exprs(c.args, 0)),
+    Index(x)    => or2(self_async_expr(x.target), self_async_expr(x.idx)),
+    If(x)       => or2(self_async_expr(x.cond),
+                       or2(self_async_expr(x.then_), self_async_expr(x.els))),
+    Rec(r)      => self_async_inits(r.fields, 0),
+    Lst(l)      => self_async_exprs(l.items, 0),
+    Arrow(ar)   => ty_mentions_async(ar.ret) ? self_async_msg()
+                                             : self_async_expr(ar.body),
+    Match(m)    => or2(self_async_expr(m.scrut), self_async_arms(m.arms, 0)),
+    Templ(t)    => self_async_parts(t.parts, 0),
+  }
+}
+
+fn self_async_body(ss: List[Stmt], i: Int) -> Str {
+  if (i >= ss.length()) { return "" }
+  let r = self_async_expr(ss[i].e)
+  if (r != "") { return r }
+  return self_async_body(ss, i + 1)
 }
 
 // The parameter INDICES whose declared type is an async function type — the
@@ -2316,12 +2499,16 @@ fn head_declared(cx: Ctx, name: Str) -> Bool {
 // The legitimate bare Upper-cased calls are the ADT constructors: the built-in
 // `Some`/`None`/`Ok`/`Err` (seeded into `fnNames` by `fn_names_of`) and the
 // program's own `type T = A | B(Int)` cases, which `type_ctors` collects. That
-// collection is deliberately an OVER-approximation — it takes every Upper-cased
-// name appearing in a `type` declaration, field types included — because
-// over-collecting only ever keeps admitting a program the reference admits,
-// while under-collecting would refuse one. A residual `Int("1")` admitted in a
-// program that happens to declare a type with an `Int` field is the price, and
-// it is the safe side of the asymmetry this crate is built on.
+// collection follows the reference's own alias/variant split (see `type_ctors`):
+// a single-case declaration aliasing a builtin type or a type application
+// (`type Alias = Int`, `type Rows = List[Row]`, `type M = Row?`) binds a type,
+// not a constructor, so its RHS head is NOT collected and a call to it draws the
+// same G1 refusal the reference draws — `Int("1")` no longer slips through. What
+// `type_ctors` still over-collects is the two arms it cannot classify without
+// the checker's type table: a sole case that names another declared type
+// (`type A = B`) or a type parameter in scope. That narrow residual is the safe
+// side of the asymmetry this crate is built on — over-collecting only keeps
+// admitting, and closing it would mean building the type table the gate omits.
 fn call_head_declared(cx: Ctx, name: Str) -> Bool {
   return contains(cx.scopeNames, name) || contains(cx.fnNames, name)
       || name == "config"
@@ -3659,6 +3846,10 @@ fn check_reachable_fn_acquire(pg: Prog) -> Verd {
 }
 
 fn fn_a1_verdict(f: FnD, base: Ctx) -> Str {
+  // Rule C1 first: the reference refuses a self-declared arrow colour in the
+  // checker, before the async-coloring fixed point the value/leak twins read.
+  let sda = self_async_body(f.body, 0)
+  if (sda != "") { return tagged("A1", sda) }
   let vals = sort_strs(col_values_body(f.body, 0, base.colored, []))
   if (vals.length() > 0) {
     return tagged("A1", "function `".concat(f.name)
@@ -3734,6 +3925,10 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
   if (sa.msg != "") {
     return mk_verd(tagged(sa.tag, sa.msg), body_line(comp.setup, scx, comp.line))
   }
+  // rule C1 on the component lowering path (`_assert_colour_is_positional`): a
+  // self-declared arrow colour in setup is refused as it is anywhere else.
+  let setupSda = self_async_body(comp.setup, 0)
+  if (setupSda != "") { return mk_verd(tagged("A1", setupSda), comp.line) }
   // the per-statement effect-composition A1 rules over the activation body
   // (`_admit_effect_async` / `_admit_emit_async`, run during lowering): the
   // exact await/async pairing and a suspending teardown, statement by statement.
@@ -3762,6 +3957,11 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
       if (a.msg != "") {
         return mk_verd(tagged(a.tag, a.msg), body_line(pm.body, mcx, comp.line))
       }
+      // rule C1 on the component lowering path (`_assert_colour_is_positional`,
+      // restated because stratum 3 never runs the checker over arrows): a
+      // provide-method arrow may not name its own async colour either.
+      let mSda = self_async_body(pm.body, 0)
+      if (mSda != "") { return mk_verd(tagged("A1", mSda), comp.line) }
       // `await` outside a component body (parser.py's `await` statement check,
       // which fires on the METHOD's own `async fn` modifier — `in_method and
       // not in_async_method` — before any lowering or service resolution): an
