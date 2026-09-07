@@ -180,6 +180,26 @@ _V3_TYPES: dict = {}
 _V3_TYPED_COMPONENTS = False
 
 
+def _reset_v3_typed_component_state() -> None:
+    """Restore the per-emit component-tier globals to their module defaults.
+
+    `_V3_MODE`, `_V3_TYPES` and `_V3_TYPED_COMPONENTS` are set at the top of
+    every `emit()` / `emit_placement()` call and, per their own contract, are
+    "never read outside a single call". Leaving them set past a call turns the
+    component/method renderer's typed-core mode on for whatever runs next: a
+    tool that pokes `_expr` directly (the dispatcher-conformance harness reads
+    the tables' refused kinds this way) would then see a leaked v3 document's
+    types and render a deliberately-refused kind like a bare `record` literal
+    instead of raising the named tier-limit refusal. Reset them on the way out
+    so each caller starts from the documented defaults regardless of what
+    emitted before it. Every entry point re-initialises them on entry, so
+    resetting to defaults here never changes a real emit's output."""
+    global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
+    _V3_MODE = False
+    _V3_TYPES = {}
+    _V3_TYPED_COMPONENTS = False
+
+
 def _go_type(t) -> str:
     """Map a revl type name to a Go type (value position)."""
     if t is None:
@@ -7878,6 +7898,16 @@ def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
 
 def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
          record: bool = False) -> str:
+    # Restore the per-emit component-tier globals on the way out so they never
+    # leak into whatever runs next (see `_reset_v3_typed_component_state`).
+    try:
+        return _emit(ir, package, package_name, record)
+    finally:
+        _reset_v3_typed_component_state()
+
+
+def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
+          record: bool = False) -> str:
     # `package_name` is the conformance harness's per-case naming kwarg (the
     # same one the java tier takes); accept it as an alias for `package`.
     if package_name is not None:
@@ -8866,6 +8896,16 @@ def emit_placement(ir: dict, package: str = "emitted") -> str:
     takes the combined path: the typed-core tier and the live stc-go
     components in one module, plus the bridge — records and ADTs cross the
     seam (records as json-tagged structs, variants as {"$kind","$value"})."""
+    # Restore the per-emit component-tier globals on the way out; the typed
+    # `_emit_v3_placement` path sets them and would otherwise leak
+    # (see `_reset_v3_typed_component_state`).
+    try:
+        return _emit_placement(ir, package)
+    finally:
+        _reset_v3_typed_component_state()
+
+
+def _emit_placement(ir: dict, package: str = "emitted") -> str:
     ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
