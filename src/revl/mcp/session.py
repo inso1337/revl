@@ -2177,6 +2177,23 @@ class Session:
         snapshot = owner.witness_snapshot(self._generation)
         token = owner.verdict_review_token(self._generation, verdict)
         outstanding = [e for e in snapshot.effects if e.status != "settled"]
+        # issue #623: an accurate call-outcome inventory over the enumerated
+        # effects, tallied from the receipts/outcomes the guarded witnessed
+        # writes bound onto their witnesses — never a parallel reconstruction.
+        # success / failed / unknown / unattempted are distinguished; a legacy
+        # witnessed effect that bound no outcome is counted separately as
+        # `unrecorded` rather than being force-fit into one of the four.
+        outcomes = {k: 0 for k in
+                    ("success", "failed", "unknown", "unattempted")}
+        unrecorded = 0
+        receipts_bound = 0
+        for e in snapshot.effects:
+            if e.outcome in outcomes:
+                outcomes[e.outcome] += 1
+            else:
+                unrecorded += 1
+            if e.receipt is not None:
+                receipts_bound += 1
         summary = {
             "verdict": verdict,
             "session": snapshot.session,
@@ -2186,6 +2203,10 @@ class Session:
             "escrowed": sum(1 for e in outstanding if e.status == "escrowed"),
             "droppedDeferred": len(owner._queue),
             "effects": [e.to_dict() for e in snapshot.effects],
+            # issue #623: bound original-receipt provenance + partial-call
+            # inventory, consumed from the effects rather than rebuilt.
+            "receiptsBound": receipts_bound,
+            "outcomes": dict(outcomes, unrecorded=unrecorded),
         }
         return VerdictReview(verdict=verdict, token=token, summary=summary,
                              snapshot=snapshot)

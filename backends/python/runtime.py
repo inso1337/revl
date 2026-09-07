@@ -3279,6 +3279,32 @@ def _digest_witness(witness: Any) -> str:
     return "rev:sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _bound_receipt(witness: Any):
+    """The ORIGINAL held-target receipt a guarded witnessed write bound onto its
+    witness (issue #623), or None for a legacy witness that carries none. Read
+    from `entry.witness` — the same place the discharge descriptor and the review
+    token read — so the verdict/inspection surface consumes the original facts
+    instead of reconstructing a parallel inventory from the path. Purely
+    structural: the sensitive `preimage` stays out of it (that lives on the
+    trusted `witness` field), only the original identity/size/digest crosses."""
+    if isinstance(witness, dict):
+        r = witness.get("receipt")
+        if isinstance(r, dict):
+            # identity + content facts of the original inode; never the preimage
+            # sidecar path, which stays on the trusted `witness`.
+            return {k: r.get(k) for k in
+                    ("dev", "ino", "size", "digest", "created")}
+    return None
+
+
+def _bound_outcome(witness: Any):
+    """The call outcome recorded on a witness (issue #623): success / failed /
+    unknown / unattempted, or None for a witness that records none."""
+    if isinstance(witness, dict):
+        return witness.get("outcome")
+    return None
+
+
 @dataclasses.dataclass(frozen=True)
 class WitnessEffect:
     """One outstanding (or already-settled) witnessed effect in a
@@ -3301,12 +3327,22 @@ class WitnessEffect:
     seq: Optional[int]
     revision: str
     witness: Any = None
+    #: issue #623: the ORIGINAL held-target receipt (dev/ino/size/digest/created)
+    #: this effect's witnessed write bound at registration, or None for a legacy
+    #: witness. Unlike `witness`, the receipt identity is NOT gated on `trusted`:
+    #: it is the non-sensitive original-inode fact the verdict/inspection APIs
+    #: are meant to consume; the sensitive preimage stays on `witness`.
+    receipt: Any = None
+    #: issue #623: the recorded call outcome (success/failed/unknown/
+    #: unattempted), or None for a witness that records none.
+    outcome: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {"id": self.id, "status": self.status, "kind": self.kind,
                 "component": self.component, "method": self.method,
                 "seq": self.seq, "revision": self.revision,
-                "witness": self.witness}
+                "witness": self.witness,
+                "receipt": self.receipt, "outcome": self.outcome}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3684,6 +3720,7 @@ class SessionOwner:
             if len(effects) >= _WITNESS_SNAPSHOT_BOUND:
                 truncated = True
                 break
+            _w = getattr(entry, "witness", None)
             effects.append(WitnessEffect(
                 id=self._entry_identity(entry),
                 status=self._entry_status(entry, escrowed=escrowed),
@@ -3691,8 +3728,10 @@ class SessionOwner:
                 component=getattr(entry, "component", None),
                 method=getattr(entry, "method", None),
                 seq=getattr(entry, "seq", None),
-                revision=_digest_witness(getattr(entry, "witness", None)),
-                witness=(getattr(entry, "witness", None) if trusted else None),
+                revision=_digest_witness(_w),
+                witness=(_w if trusted else None),
+                receipt=_bound_receipt(_w),
+                outcome=_bound_outcome(_w),
             ))
         return WitnessSnapshot(
             session=self.session_id,
