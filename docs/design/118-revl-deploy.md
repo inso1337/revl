@@ -787,6 +787,36 @@ Why this is the right Slice 1:
 without making "signer untrusted" a fiction. This is the one non-reuse dependency
 that must land with (or before) Slice 1.
 
+### Slice 2 - cross-machine (multi-slice, in progress)
+
+Slice 2 is the heavy cross-machine half, split into several independently
+landable pieces. Progress is tracked here so a piece is never started twice.
+
+- **[LANDED] the remote deploy-admit runner protocol + its message shapes,
+  over an in-process transport stub** (§1.3 steps 3-5). `deploy.AdmitRequest` /
+  `deploy.AdmitResponse` are the fail-closed wire shapes of the orchestration-
+  channel handshake; `deploy.serve_admit_request` is the runner side (verifies
+  the staged chain against the HOST's own local trust store per S2.4, signs the
+  verdict, loads nothing); `deploy.request_admission` is the conductor side
+  (sends, then binds the reply to its request via a challenge nonce);
+  `deploy.InProcessTransport` stands in for the SSH/subprocess channel so the
+  whole PREPARE handshake is buildable and tested on ONE host. Two S2.4
+  host-authority properties are enforced: the request carries no key, and the
+  host's evidence floor cannot be loosened by the request. Tested in
+  `tests/test_deploy_admit_runner_118.py`.
+- **[REMAINS] the live cross-machine transport**: staging the sliced bundle
+  over scp/rsync, spawning `revl deploy-admit` over ssh, and the pinned SSH
+  host key (§1.3). Implements the same `send` contract as the stub; verified
+  end-to-end on the two self-hosted runners (azure-amd-1 + oracle-arm64).
+- **[REMAINS] the load-measured COMMIT receipt gate across the seam**: the
+  primitive (`deploy.commit_receipt` / `deploy.compare_commit_receipt`) is
+  landed local; carrying it over the runner protocol is the remaining wiring.
+- **[REMAINS] mTLS staging identity, replicated WAL, the partition-safe
+  distributed commit coordinator, and the Ed25519 migration** of the receipt/
+  attestation signatures (the hard prerequisite for a genuinely cross-trust-
+  domain deploy, S2.4 / S5-A1). Ed25519 needs a new asymmetric primitive
+  `attest.py` does not yet have (R3) and is deferred to its own slice.
+
 ### Deferred (named, so the boundary is explicit)
 
 - **Multi-host orchestration + the two-phase commit/abort** (S3): the full
