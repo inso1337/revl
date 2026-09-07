@@ -13,7 +13,7 @@ The verb set, in the order the parser declares it:
 compile  explain  grammar  adapt  doctor  scaffold  composition  layer
 audit  goal  policy  diff  changelog  version  contract  erase-report
 plan  apply  undo  canary  query  fmt  quarantine  analyze  test  mcp
-import  export  serve  run  recover  estop  branch  compare  why
+import  export  serve  run  recover  estop  branch  compare  replay  why
 metrics  trace  profile  attest  dash  repair  bundle  emit  verify
 deploy  truc
 ```
@@ -346,6 +346,25 @@ subcommand, `audit` (roadmap item 441,
 ```bash
 revl goal audit app.rvl
 revl goal audit app.rvl --json
+```
+
+### `revl replay`
+
+Replay-mode readiness over a durable write-ahead log (roadmap item 250,
+Slice 3b, [250-slice3b-replay-modes.md](design/250-slice3b-replay-modes.md)).
+For each mode - `exact`, `tool-only`, `model-substitute`, `counterfactual` - it
+reports whether the WAL's durable model decisions carry enough to inform that
+mode and what a live executor would still need. It reads the record and runs
+nothing, the same offline-reader contract as `revl branch` and `revl compare`.
+
+- `WAL` - a write-ahead log, ideally one written by a Slice-3a runtime that
+  recorded its model decisions (required).
+- `--mode <mode>` - report readiness for one mode only, instead of all four.
+- `--json` - machine-readable output.
+
+```bash
+revl replay run.wal
+revl replay run.wal --mode exact --json
 ```
 
 ### `revl diff`
