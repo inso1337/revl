@@ -103,6 +103,183 @@ through a directory fd walked down from the root one component at a time with
 `stdlib/fs.rvl` and fails if any path reaches a mutation by another route, so
 the enumeration cannot quietly grow a fifth member.
 
+### Python process-lifetime physical root binding (API 1)
+
+Trusted Python hosts can opt into a **supported, separately versioned** bootstrap
+API before `Session.load` or any filesystem guard use:
+
+```python
+from revl.fs_workspace import PINNED_ROOT_API_VERSION, bind_workspace_root
+
+if PINNED_ROOT_API_VERSION != 1:
+    raise RuntimeError("unsupported physical workspace binding API")
+bind_workspace_root(root_fd, expected_dev, expected_ino, root_label=root_label)
+```
+
+`bind_workspace_root(root_fd: int, expected_dev: int, expected_ino: int, *,
+root_label: str) -> None` duplicates the caller-owned directory descriptor,
+checks its device/inode/type and checks that the label names that directory at
+binding. The label must be an absolute normalized string. The caller may close
+or reuse its descriptor afterward. `revl.fs_workspace` locates the Python
+backend in either the checkout or wheel and binds the **same module state**
+used by the real emitted stdlib bodies, not a second copy. A conflicting
+already-imported backend installation is refused.
+
+After binding, the label is an immutable namespace, **never authority to reopen
+its pathname**. Every named-endpoint walk, sidecar directory, inverse source,
+mutation and `READ_HELPERS` lookup starts from a duplicate of the pinned fd.
+Preimages are read from the verified write fd and copied/cloned into the same
+physical root. Renaming the root and replacing its old pathname therefore
+continues on the admitted original directory, including rollback; it never
+switches to the replacement. `REVL_FS_WORKSPACE` changes have no effect.
+
+Bound mode accepts only absolute paths under the original label, with no `..`
+components. It refuses **all symlinks below the root**, including internal
+aliases; no-follow descriptor traversal re-establishes this at syscall time.
+It does not add capabilities or broaden metadata access. Sidecar inverse
+sources remain restricted to their matching runtime-reserved directories;
+this API exposes no general file-reading or mutation helper to the host.
+`resolve_within` returns a label, **not a pathname safe for a host `open()`**.
+Hosts doing their own reads or classification must use their own admitted
+directory fd and no-follow traversal, and retain their existing `.revl`/private
+metadata exclusions. The observations below do not make arbitrary host reads
+physically pinned.
+
+The binding is process-lifetime and has no close, unbind, or rebind API: the
+runtime cannot prove that all live handles, sessions and retained witnesses
+have discharged. Its private fd is non-inheritable across exec and stays open
+until process exit. Run one root per actor process; bind before starting work,
+not after forking an already active runtime. Keep the actor alive while its
+lifecycle remains owed. **Exit does not commit, abort, delete sidecars, or
+recover witnesses.** Serialized witness paths do not encode physical identity:
+post-crash recovery must independently re-establish the admitted physical root;
+replaying under an unbound or newly granted replacement root is not protected
+by this process-lifetime contract.
+
+Failures raise the exported `FsOpError` / `ConfinementError` with explicit
+codes: `EBOUND` for duplicate or late binding, `EIDENTITY` for identity/type
+mismatch, `EINVAL` for malformed arguments, ordinary descriptor/path errno
+codes where applicable, and `ENOTSUP` if directory-fd/no-follow primitives are
+unavailable. A failed bind releases its duplicate and leaves no partial binding.
+There is no unsafe platform fallback. Without binding, legacy relative paths,
+symlink resolution and environment-based root selection remain unchanged;
+root replacement is still outside that legacy mode's guarantee.
+
+This is not a root-ownership registry, protection from arbitrary host Python,
+or serialization against other writers. A descendant directory already held
+open may itself be moved by another writer; pinning the workspace root is not a
+filesystem-wide namespace lock. Hosts still own exclusive actor/root lifecycle
+coordination and must not reload the guard or manipulate its private fd.
+
+`tests/test_fs_pinned_root.py` runs fresh processes and real `Session.load(...,
+record=True)` / `FsOpsC` methods, with barriers immediately before actual opens,
+preimage creation/copy, writes, inverse classification and rename/unlink/rmdir
+syscalls. The replacement tree stays unchanged across repeated write/abort
+cycles, while original preimages and garbage are consumed by real inverses.
+
+### Trusted committed-preimage cleanup (API 1)
+
+The Python-only host facade separately exports
+`COMMITTED_SIDECAR_API_VERSION = 1` and:
+
+```python
+finalize_committed_sidecar(
+    path: str, expected_sha256: str, *, expected_dev: int, expected_ino: int
+) -> None
+```
+
+This is **not** a Revl extern, agent/plugin tool, general deletion API, commit
+receipt, or proof that a witness has discharged. Before invoking it, the trusted
+host must capture authoritative ownership of the actual live witness's preimage
+(original-label path, SHA-256, device, inode), durably prepare its ledger, obtain
+and durably acknowledge a successful actual `Session.commit_confirm`, and retain
+exclusive actor/root lifecycle ownership. It must drain all cooperative
+filesystem actors and hold **exclusive sidecar-directory write ownership**
+through capture, commit, and finalization: no concurrent forward captures,
+inverses, or other sidecar mutations. No boolean argument can prove that premise.
+Unknown ownership or missing/lost commit acknowledgment never authorizes cleanup.
+
+Under that contract, the helper requires an active pinned root and accepts only
+the exact normalized original-label path
+`<root>/.revl-fs-preimage/pre-<32 lowercase hex digits>`. The directory must be
+caller-owned and private (no group/other permissions), as when the runtime
+creates it with mode `0700`; cleanup never repairs permissions. The leaf must
+be regular, no-follow, singly linked, match the captured device/inode, and have
+the supplied 64-lowercase-hex SHA-256 digest. Descriptor-relative traversal,
+reading, and unlink stay on the admitted physical root even if its label is
+renamed or replaced. No project paths, `.revl` metadata, garbage sidecars, nested
+paths, symlinks, or recursive/directory cleanup are accepted.
+
+Successful removal returns `None`. Refusals raise `FsOpError` (including
+`ConfinementError`): `EWORKSPACE` without binding, `EINVAL` for malformed digest
+or identity, `EOUTSIDE` for a forbidden target/type/directory, `EIDENTITY` for
+identity/link-count/content changes, and ordinary OS codes where applicable.
+**`ENOENT` is an error**, including a second call after successful removal.
+The helper cannot distinguish interrupted successful cleanup from evidence
+that went missing for another reason. Hosts must preserve that uncertainty,
+freeze/quarantine the lifecycle, and reconcile their durable ledger explicitly,
+not silently retry or clean unknown evidence after restart.
+
+The helper checks the opened file and final named entry for detectable changes
+before unlink; detected mismatch preserves evidence. **Portable POSIX unlink is
+not inode-conditional.** Arbitrary same-UID/native writers violating exclusive
+sidecar access can still replace the name between the final check and unlink.
+This is outside the supported finalizer concurrency contract, not a race this
+API claims to close. Exclusivity applies to reserved metadata cleanup only:
+root pinning and no-follow project-path confinement do not rely on it.
+
+`tests/test_fs_committed_sidecar.py` uses real files, identity/content corruption,
+syscall barriers for root replacement, and actual recorded write/commit/reopen/
+abort/reopen cycles. Sidecar-swap probes cover detectable stale evidence, not
+adversarial safety across the final check/unlink window.
+
+### Runtime-owned cleanup handle (API 1)
+
+`finalize_committed_sidecar` proves none of its lifecycle premises: the host
+reconstructs the sidecar's ownership, asserts elsewhere that the commit landed,
+and passes the pieces in as loose arguments. The Python-only facade also exports
+`COMMITTED_SIDECAR_CLEANUP_API_VERSION = 1` and a handle that folds ownership and
+commit-acknowledgment into one opaque token instead:
+
+```python
+issue_committed_sidecar_receipt(
+    path: str, expected_sha256: str, *, expected_dev: int, expected_ino: int
+) -> CommittedSidecarReceipt
+CommittedSidecarCleanup(receipt: CommittedSidecarReceipt)
+CommittedSidecarCleanup.run() -> CleanupOutcome  # .completed / .state / .code / .message / .path
+```
+
+`issue_committed_sidecar_receipt` is the **only** way to obtain a
+`CommittedSidecarReceipt`: its private grant never leaves the runtime, so a host
+cannot forge one. The trusted commit path calls it *after* it holds the durable
+acknowledgment of the actual `Session.commit_confirm` that the finalizer declines
+to assume — that is where the acknowledgment is asserted, giving it one owner and
+one carrier rather than scattered host state. Minting validates the same
+argument shape the finalizer requires (64-lowercase-hex digest, nonnegative
+device/inode), so a receipt can never name a target the finalizer would only
+reject later. The runtime still cannot prove the host's storage flushed; this
+widens nothing the finalizer promised.
+
+A `CommittedSidecarCleanup` refuses to construct from anything that is not a
+runtime receipt (`ERECEIPT`), and a receipt is single-use: binding it to a handle
+consumes it, so one receipt authorizes cleanup of exactly the one sidecar it
+named. `run()` performs the same `finalize_committed_sidecar` under the same
+exclusivity contract — it makes **no** stronger atomicity claim against writers
+violating that exclusivity — but *reports* the result rather than raising:
+`CleanupOutcome(completed=True)` when the owned preimage was removed, or
+`completed=False` with the finalizer's own `(code, message, path)` when the
+sidecar is **unresolved** (missing evidence, a detectable mismatch, a lost root,
+or an unbound process). An explicit missing/mismatch failure stays unresolved; it
+is never silently reported as "already clean". Success is idempotent — a
+completed handle re-reports completed without a second filesystem touch — and an
+unresolved handle stays live, so the host can drain cooperative actors and call
+`run()` again.
+
+`tests/test_fs_committed_sidecar_cleanup.py` covers completed removal and its
+idempotence, an unresolved-then-retried-to-completion cycle, unresolved
+missing-evidence reporting, the receipt gate (no receipt, forged grant, malformed
+ownership, single-use), and unbound reporting, all against real files.
+
 ## Observation: the read half, and the door it opens
 
 The four ops above mutate. A consumer also needs to *look*: read a workspace
@@ -140,7 +317,8 @@ What was left was a relative path guess into the install tree
 revl moves; revl-harness hit that three times.
 
 So the door is a revl one. The consumer asks revl for the decision and does its
-own reading with the plain host filesystem module:
+own reading with the plain host filesystem module in **legacy, unbound mode**.
+In pinned mode it must instead read through its admitted fd as described above:
 
 ```revl sketch
 // Elided host bodies, so this block is a sketch. The same consumer, whole and
