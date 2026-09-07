@@ -540,6 +540,15 @@ class Session:
         # what is still owed. None until an attempt settles; cleared with the
         # future by `load`, a re-arm, or a strand.
         self._teardown_settlement: dict | None = None
+        # item 628 (residual): the unresolved settlement CARRIED FORWARD across
+        # an explicit `rearm_teardown`, so re-arming a failed original-disposer
+        # attempt does not lose the original identity or its prior failure/
+        # unknown evidence. `teardown_disposition` reports it while a re-armed
+        # attempt has not yet been re-driven, and the next attempt PRE-SEEDS its
+        # ledger from it so the fresh settlement carries each original resource's
+        # prior outcome. None until a re-arm carries one; cleared once the next
+        # attempt settles, and by `load`/`_reset`.
+        self._carried_unresolved: dict | None = None
 
     # -- plumbing ----------------------------------------------------------
 
@@ -579,6 +588,7 @@ class Session:
         # rather than replaying the old settlement.
         self._teardown_future = None
         self._teardown_settlement = None
+        self._carried_unresolved = None
         # booting is admission: a draft with open obligations is checkable but
         # not runnable, and the refusal belongs here rather than in the Python
         # emitter's lap (docs/holes.md)
@@ -2320,6 +2330,24 @@ class Session:
         disposal = {"invoked": True, "returned": False,
                     "failed": None, "cancelled": False}
         ledger: list = []
+        # item 628 (residual): a re-arm carried the prior attempt's unresolved
+        # ownership forward. PRE-SEED this attempt's ledger with each still-owed
+        # original resource, recording its PRIOR outcome/error so the failed/
+        # unknown evidence survives the re-arm. `_dispose_all` re-targets the
+        # retained ORIGINAL disposer (or the still-live provider) and overwrites
+        # the outcome with the re-attempt's honest result; a resource whose
+        # original object is gone and cannot be re-driven keeps its carried
+        # evidence instead of reading `absent`.
+        carried = self._carried_unresolved
+        if carried is not None:
+            owed = set(carried.get("unresolved", {}).get("ownedResources", ()))
+            for r in carried.get("resources", ()):
+                if r.get("component") in owed:
+                    seed = dict(r)
+                    seed["priorOutcome"] = r.get("outcome")
+                    if r.get("error") is not None:
+                        seed["priorError"] = r["error"]
+                    ledger.append(seed)
 
         def _drive() -> None:
             driver._settlement_ledger = ledger
@@ -2337,6 +2365,10 @@ class Session:
         result = self._settlement(driver, owner, aborting, disposal, ledger,
                                   verdict=verdict, finalize=finalize)
         self._teardown_settlement = result
+        # the carried evidence has been folded into this settlement's ledger; the
+        # fresh result is now authoritative (a clean re-attempt releases; a
+        # still-owed one retains its own unresolved inventory).
+        self._carried_unresolved = None
         return result
 
     def _settlement(self, driver, owner, aborting: bool, disposal: dict,
@@ -2440,6 +2472,13 @@ class Session:
         once the attempt has finished."""
         fut = self._teardown_future
         if fut is None:
+            # item 628 (residual): a re-armed-but-not-yet-re-driven attempt still
+            # owns its carried unresolved evidence — report it rather than
+            # reading `none` and losing the original identity between the re-arm
+            # and the next `aclose`.
+            if self._carried_unresolved is not None:
+                return {"attempt": "rearmed",
+                        "settlement": self._carried_unresolved}
             return {"attempt": "none", "settlement": None}
         if not fut.done():
             return {"attempt": "in-flight", "settlement": None}
@@ -2471,6 +2510,13 @@ class Session:
         prior = self._teardown_settlement
         self._teardown_future = None
         self._teardown_settlement = None
+        # item 628 (residual): CARRY the prior unresolved evidence forward rather
+        # than erasing it. The next `aclose`/`aabort`/`acommit_confirm` pre-seeds
+        # its ledger from this (so each original resource's prior outcome/error
+        # survives the re-arm), the retained ORIGINAL disposers on the driver let
+        # that attempt re-target the SAME resource, and `teardown_disposition`
+        # keeps reporting the retained ownership until that attempt settles.
+        self._carried_unresolved = prior
         return {"rearmed": True, "priorSettlement": prior}
 
     def strand_teardown(self) -> dict:
