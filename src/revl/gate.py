@@ -91,6 +91,38 @@ def _language_version() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _json_string(value: str) -> str:
+    """Minimal JSON string encoder that mirrors the native crate's `json_string`
+    (`crates/revl-gate/src/lib.rs`) byte for byte, so `Verdict.to_json` on py and
+    on the crate serialise the same `(code, message)` identically.
+
+    Deliberately NOT `json.dumps`: the stdlib encoder shortens U+0008/U+000C to
+    `\\b`/`\\f`, which the rust encoder spells `\\u0008`/`\\u000c`, and the shared
+    wire contract is the rust spelling. Every other control character below
+    U+0020 is `\\u00xx` (lower-case hex) on both sides; `"`, `\\`, and the three
+    named whitespace escapes match. The wire carries strings only, so this is the
+    whole serialisation need and, like the crate, it takes no JSON dependency."""
+    out = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif code < 0x20:
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
 class Verdict:
     """A structured admission verdict. The one shape designed tier-agnostically
     (design "The Verdict is structured; the message is verbatim"): `admitted`
@@ -113,6 +145,40 @@ class Verdict:
     def as_dict(self) -> dict:
         return {"admitted": self.admitted, "code": self.code,
                 "message": self.message}
+
+    def kind(self) -> str:
+        """The stable wire arm name, shared with the native crate's
+        `Verdict::kind` (`crates/revl-gate/src/lib.rs`). A py verdict is one of
+        two arms: `"admitted"` (the reference compiler accepted AND the admission
+        gate let it run) or `"refused"`. The native (rust) gate additionally has
+        `"no_objection"` and `"outside_frontier"` and NEVER `"admitted"` — it
+        issues no admissions — so the ONE arm both tiers share is `"refused"`,
+        and on that arm the two tiers produce byte-equal `to_json()` (the
+        verdict-shape-agreement contract, design "Verdict shape agreement")."""
+        return "admitted" if self.admitted else "refused"
+
+    def to_json(self) -> str:
+        """The design's fixed cross-tier wire shape, byte-for-byte identical to
+        the native crate's `Verdict::to_json` (`crates/revl-gate/src/lib.rs`) on
+        the arm both tiers share (`refused`): the fields `verdict`, `admitted`,
+        `code`, `message`, IN THAT ORDER, with the same JSON string escaping. A
+        host that reads a gate only through this string cannot tell a py gate
+        from a rust gate on a refusal, which is what lets item 337's mesh treat
+        a py receiver and a rust receiver as the same admission surface. The
+        `admitted` field is a real boolean here (a py gate does admit), where the
+        crate pins it `false` on every arm; the shared refusal arm agrees.
+
+        `as_dict()` is the structured twin for a py-only caller; `to_json()` is
+        the tier-portable one. Deliberately not `json.dumps` — see
+        `_json_string`."""
+        return (
+            '{"verdict":' + _json_string(self.kind())
+            + ',"admitted":' + ("true" if self.admitted else "false")
+            + ',"code":'
+            + (_json_string(self.code) if self.code is not None else "null")
+            + ',"message":'
+            + (_json_string(self.message) if self.message is not None else "null")
+            + "}")
 
     @classmethod
     def from_native(cls, wire: str) -> "Verdict":
