@@ -20,14 +20,18 @@ structural-meets-nominal rule that returns True only because no type table is
 present). A permissive True at a bridged position would prove nothing, so those
 positions refuse (`non-total-conversion`).
 
-Slice 2 landed IR-level synthesis (`render_adapter`) + the alias-token-carry
-gate change (see parser `require_carry` / emission_analysis). Slice 3 landed the
+Slice 2 landed the alias-token-carry gate change (see parser `require_carry` /
+emission_analysis) and IR-level synthesis (`render_adapter`), now COMPLETE for
+every catalogue return shape the predicate admits, raising rather than emitting
+wrong source for any it cannot spell (section 4's contract). Slice 3 landed the
 resolver surface (`registry.resolve` reports `compatible-with-adapter` below
 direct-compatible, with chain depth and the outcome-merge evidence discount) on
-the `adapter_marking` header this module renders, and `revl adapt --check` chain
-FLATTENING (`flatten_committed_hop`, section 6.4). TODO(296-slice3, remaining):
-`revl diff` and the federation pin. TODO(296-slice4): the 414 matrix rows and
-the generative dichotomy test.
+the `adapter_marking` header this module renders, `revl adapt --check` chain
+FLATTENING (`flatten_committed_hop`, section 6.4), and the `federation.check`
+satisfied-via-adapter pin. Slice 4 landed the generative DICHOTOMY standing
+proof (`tests/test_296_synthesis_catalogue.py`): the predicate and the gate
+never disagree. TODO(296-slice3, remaining): `revl diff` (item 123).
+TODO(296-slice4, remaining): the 414 matrix rows (folds see through, E6).
 """
 
 from __future__ import annotations
@@ -733,6 +737,7 @@ def render_adapter(component_name: str, required, provided,
                    provide_key: str, require_key: str = "backing",
                    carried_tokens: tuple[str, ...] = (),
                    prov_types: dict | None = None,
+                   req_types: dict | None = None,
                    derivation: str | None = None,
                    chain_depth: int = 1) -> str:
     """Render the synthesized adapter as ordinary `.rvl` source (section 4, the
@@ -751,11 +756,20 @@ def render_adapter(component_name: str, required, provided,
     `derivation` carries no marking, and a later resolve reads it as depth 0 -
     ordinary code - which is the honest reading of an unmarked component.
 
-    Slice 1 renders the flagship-class bodies (emission/plain passthrough, B1
-    trailing defaults, B4 identity, B4 `Result[V,E] -> Opt[V]` merge - total
-    waiver and per-variant). TODO(296-slice2): IR-level synthesis for every
-    catalogue combination; a shape this renderer does not cover raises so it is
-    never emitted as wrong source."""
+    Renders every RETURN shape `bridge_plan` admits (section 2.2, B4/B6):
+    emission/plain passthrough and the implicit total coercions (identity,
+    `V->Opt[V]`, numeric widening, resolved equal-field records); the
+    `Result[V,E] -> Opt[V]` outcome-merge (total waiver and per-variant); the
+    `Opt[V] -> Result[V,E]` and `Opt[V] -> V` fabrications (opt-in `on_none`);
+    the explicit `Result[V,E1] -> Result[V,E2]` error map (opt-in `err_map`,
+    per-variant or single arm); and B6 record projection with opt-in field
+    fabrication. Argument-side B1 defaults / B2 drops / B3 coercions render via
+    `_render_call_args`. A shape this renderer cannot spell RAISES `ValueError`
+    so it is never emitted as wrong source (section 4's contract); the three
+    callers (`registry.resolve`, `revl adapt`, `federation.check`) catch it and
+    fall back to a plan-only report. The slice-4 dichotomy sweep
+    (`tests/test_296_synthesis_catalogue.py`) is the standing proof that an
+    admitted plan never renders source the ordinary gate rejects."""
     opt_ins = opt_ins or {}
     carry = ""
     if carried_tokens:
@@ -776,7 +790,8 @@ def render_adapter(component_name: str, required, provided,
         pm = provided.methods[mname]
         lines.extend("    " + ln for ln in
                      _render_method(mname, rm, pm, opt_ins.get(mname) or {},
-                                    require_key, prov_types or {}))
+                                    require_key, prov_types or {},
+                                    req_types or {}))
     lines.append("  }")
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -804,32 +819,120 @@ def _render_call_args(mname, rm, pm, opt: dict, prov_types: dict) -> list[str]:
     return args
 
 
+def _match_body(call: str, arms: list[str]) -> list[str]:
+    """A `return match <call> { <arms> }` block body (the arms already carry
+    their own trailing comma and indentation)."""
+    return [f"  return match {call} {{"] + arms + ["  }"]
+
+
+def _render_return(mname: str, rret: str | None, pret: str | None,
+                   ret_opt: dict, call: str,
+                   req_types: dict, prov_types: dict) -> list[str]:
+    """Render the return position of one method (section 2.2, B4/B6), mirroring
+    `_bridge_return`'s admitting branches EXACTLY.
+
+    Returns the body of `fn m(params) <body>`: either a single expression line
+    (`= <expr>`) or the inner lines of a `{ ... }` block. Every shape
+    `bridge_plan` admits renders here to source the ordinary gate accepts; a
+    shape not covered RAISES `ValueError` rather than emitting source that would
+    type-check wrong, so the three callers (`registry.resolve`, `revl adapt`,
+    `federation.check`) fall back to a plan-only report and never a broken
+    artifact (the "raises, never emits wrong source" contract of section 4).
+    """
+    # Passthrough: identity, or an implicit TOTAL coercion the checker applies
+    # for us (`V -> Opt[V]` injection, numeric widening, same-head containers,
+    # resolved equal-field records). `= call` is correct because the compiler
+    # coerces the candidate's return into the declared one, exactly as any
+    # hand-written wrapper would rely on.
+    if rret is None or pret is None or rret == pret or compatible_total(
+            rret, pret, e_types=req_types, a_types=prov_types):
+        return [f"= {call}"]
+    rhead, _ = parse_type(rret)
+    phead, _ = parse_type(pret)
+
+    # B4 `Result[V, E] -> Opt[V]`: the outcome-merge (S4c). Total waiver over an
+    # opaque `E`, or a per-variant map over a closed variant `E`.
+    if rhead == "Opt" and phead == "Result":
+        merge = ret_opt.get("merge")
+        if merge == "total":
+            arms = ["    Ok(v) => Some(v),", "    Err(_) => None,"]
+        elif isinstance(merge, dict):
+            arms = ["    Ok(v) => Some(v),"]
+            for variant, target in merge.items():
+                arms.append(f"    Err({variant}) => {target},")
+        else:
+            raise ValueError(f"cannot render merge for {mname}")
+        return _match_body(call, arms)
+
+    # B4 `Opt[V] -> Result[V, E]`: fabricate an error for `None` (opt-in). The
+    # predicate refuses this without `on_none`, so an admitted plan has it.
+    if rhead == "Result" and phead == "Opt":
+        on_none = ret_opt.get("on_none")
+        if on_none is None:
+            raise ValueError(f"cannot render fabricated return for {mname}")
+        return _match_body(call, ["    Some(v) => Ok(v),",
+                                  f"    None => {on_none},"])
+
+    # B4 `Result[V, E1] -> Result[V, E2]`: reached ONLY when the error types are
+    # not `compatible_total` (the auto case took the passthrough above), so an
+    # explicit `Err` map is required, and an admitted plan carries it.
+    if rhead == "Result" and phead == "Result":
+        err_map = ret_opt.get("err_map")
+        if err_map is None:
+            raise ValueError(f"cannot render error map for {mname}")
+        if isinstance(err_map, dict):
+            arms = ["    Ok(v) => Ok(v),"]
+            for variant, target in err_map.items():
+                arms.append(f"    Err({variant}) => {target},")
+        else:
+            arms = ["    Ok(v) => Ok(v),", f"    Err(e) => {err_map},"]
+        return _match_body(call, arms)
+
+    # B4 `Opt[V] -> V`: send `None` to an explicit value (opt-in; merges absence
+    # into data). Refused without `on_none`, so an admitted plan carries it.
+    if phead == "Opt" and rhead != "Opt":
+        on_none = ret_opt.get("on_none")
+        if on_none is None:
+            raise ValueError(f"cannot render Opt->value for {mname}")
+        return _match_body(call, ["    Some(v) => v,",
+                                  f"    None => {on_none},"])
+
+    # B6 return record projection: bind the candidate record once, project the
+    # consumer's field set (S4b: fields the consumer never named are dropped),
+    # fabricating opted-in fields the candidate lacks.
+    r_struct = _resolve_struct(rret, req_types)
+    p_struct = _resolve_struct(pret, prov_types)
+    if r_struct is not None and p_struct is not None:
+        fabricate = ret_opt.get("fabricate") or {}
+        fields: list[str] = []
+        for f in r_struct:
+            if f in p_struct:
+                fields.append(f"{f}: r.{f}")
+            elif f in fabricate:
+                fields.append(f"{f}: {fabricate[f]}")
+            else:
+                raise ValueError(
+                    f"cannot render record field `{f}` for {mname}")
+        return [f"  let r = {call}", "  return { " + ", ".join(fields) + " }"]
+
+    raise ValueError(
+        f"cannot render return bridge for {mname}: `{pret}` -> `{rret}`")
+
+
 def _render_method(mname, rm, pm, opt: dict, require_key: str,
-                   prov_types: dict) -> list[str]:
+                   prov_types: dict, req_types: dict | None = None) -> list[str]:
+    req_types = req_types or {}
     args = _render_call_args(mname, rm, pm, opt, prov_types)
     params = ", ".join(pn for pn, _ in rm.params)
     call = f"{require_key}.{mname}({', '.join(args)})"
     if pm.emission:
         call = f"emit {call}"
     ret_opt = opt.get("return") or {}
-    rhead, _ = parse_type(rm.returns)
-    phead, _ = parse_type(pm.returns)
-    # Result[V, E] -> Opt[V] merge
-    if rhead == "Opt" and phead == "Result":
-        merge = ret_opt.get("merge")
-        if merge == "total":
-            arms = ["      Ok(v) => Some(v),", "      Err(_) => None,"]
-        elif isinstance(merge, dict):
-            arms = ["      Ok(v) => Some(v),"]
-            for variant, target in merge.items():
-                arms.append(f"      Err({variant}) => {target},")
-        else:
-            raise ValueError(f"cannot render merge for {mname}")
-        return ([f"fn {mname}({params}) {{",
-                 f"    return match {call} {{"] + arms
-                + ["    }", "}"])
-    # identity / total passthrough (emission or plain)
-    return [f"fn {mname}({params}) = {call}"]
+    body = _render_return(mname, rm.returns, pm.returns, ret_opt, call,
+                          req_types, prov_types)
+    if len(body) == 1 and body[0].startswith("="):
+        return [f"fn {mname}({params}) {body[0]}"]
+    return [f"fn {mname}({params}) {{"] + body + ["}"]
 
 
 def service_surface(decl) -> str:
