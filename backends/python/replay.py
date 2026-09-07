@@ -2137,6 +2137,24 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_cache_hit(self, *, key: str, method: str,
+                         grant_ids: list) -> dict:
+        """Append the ``cache-hit`` record when an item-310 seam cache serves a
+        LIVE entry instead of crossing (design 310 laundering point 5 / design
+        462 finding 1: every hit is on the record). Names the seam
+        (``key``/``method``) the hit re-delivers and the recorded grant ids the
+        entry's liveness is bound to, so an audit reads a hit against the same
+        authority a miss would have consumed. A FACT record, like
+        ``approval-emission``: it names a delivery that already happened and
+        consumes no seq. Before this writer existed `Session._record_cache_hit`
+        resolved the method with ``getattr(..., None)`` and silently wrote
+        nothing — the counter moved in ``state()`` but the durable audit line
+        the seam slice claimed did not exist."""
+        record = {"record": "cache-hit", "key": key, "method": method,
+                  "grantIds": list(grant_ids)}
+        self._write(record)
+        return record
+
     def record_commit_approved(self, manifest_hash: str) -> dict:
         """Append the ``commit-approved`` marker (item 245, Decision 4). Its
         presence IS the commit verdict, written BEFORE the first flush fire and
