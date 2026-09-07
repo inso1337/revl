@@ -46,6 +46,84 @@ def _log(name: str, channel: str, subject: str, detail: str = "") -> None:
     print(f"[{name}] {channel:<6}| {subject:<16}| {detail}".rstrip(), flush=True)
 
 
+# --- the operator E-Stop, wasm tier (item 443 / issue #122) -----------------
+#
+# The wasm tier is single-process and REFUSED from placement (there is no wasm
+# placement runner, bridge client, or stub — src/revl/placement.py refuses it
+# with a redirect), so it has no conductor and no cross-process crossing seam.
+# Its E-Stop is therefore a SINGLE-PROCESS seam, honored exactly where the py
+# reference runtime honors it (backends/python/runtime.py::_estop_check, called
+# from `plug`): an activation is a fresh batch of boundary crossings, so once an
+# operator arms the latch this harness refuses to START a new one. It stops
+# plugging, prints its in-flight inventory on one line, and dies where it stands
+# with NO teardown — no LIFO unplug, no compiled inverses replayed, no
+# no-residue proof, no DOWN — because an E-Stop is deliberately shaped to look
+# like a crash to the recovery path (docs/design/443-estop.md). The harness
+# stays revl-free (json + stdlib only), so this reader is a self-contained twin
+# of `revl.estop.read_latch`, not an import of it.
+_ESTOP_LATCH_ENV = "REVL_ESTOP_LATCH"
+_ESTOP_EXIT = 75            # == _process_runner._ESTOP_EXIT
+HALTED_LINE = "HALTED"      # == revl.estop.HALTED_LINE
+
+
+def _estop_latch_path(spec: dict) -> str | None:
+    """The latch to watch: the spec's ``estopLatch`` (what the driver threads
+    through from ``revl run --estop-latch``), else the ambient env var, else
+    none. Prefers the spec, matching how the py runner reads it."""
+    explicit = spec.get("estopLatch")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    return os.environ.get(_ESTOP_LATCH_ENV) or None
+
+
+def _read_latch(path: str | None) -> dict | None:
+    """The halt an operator armed at ``path``, or None when the latch is absent.
+    A latch that exists but does not parse — or cannot be read — still reads as
+    HALTED (fail closed); only a genuinely absent file reads as not-halted. Kept
+    byte-for-byte in step with ``revl.estop.read_latch``."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _unreadable()
+    except (ValueError, TypeError):
+        return _unreadable()
+    return record if isinstance(record, dict) else _unreadable()
+
+
+def _unreadable() -> dict:
+    return {"halted": True, "reason": "operator halt (unreadable latch)",
+            "operator": "unknown"}
+
+
+def _emit_halt(name: str, record: dict, loaded: list[str]) -> None:
+    """Print ``[name] HALTED {json}`` — the in-flight inventory on one line, in
+    the merged residue schema (docs/design/teardown-contract.md). A single
+    process crosses no seam, so nothing is AMBIGUOUS (``inFlight`` is empty);
+    every component already ACTIVE is STRANDED, because the halt runs none of
+    their inverses."""
+    inventory = {
+        "process": name,
+        "verdict": "halted",
+        "reason": record.get("reason"),
+        "operator": record.get("operator"),
+        "activations": [],
+        "inFlight": [],
+        "stranded": [
+            {"component": cname, "kind": "estop-stranded", "method": None,
+             "outcome": "not-attempted", "seq": None}
+            for cname in loaded
+        ],
+        "resumable": False,
+    }
+    print(f"[{name}] {HALTED_LINE} {json.dumps(inventory)}", flush=True)
+    sys.stdout.flush()
+
+
 def _read_wasm_str(memory, store, ptr: int) -> str:
     """Decode a canonical-ABI Str (`[u32 byte_len][utf8 bytes]`) at ``ptr`` from
     a plugged module's exported memory — the wasm tier's string layout
@@ -96,8 +174,21 @@ def main() -> int:
     # activation and its framing calls relay while the mutation registers.
     if record:
         _install_wal_channel(rt)
+    # item 443: the single-process E-Stop seam. `plug` is where this tier crosses
+    # a boundary (an activation), so the latch is read once per plug and an armed
+    # one refuses to START the next activation — the wasm mirror of the py
+    # runtime's `_estop_check`. Unarmed (the default), `_read_latch` short-circuits
+    # on a null path and this stats nothing, so an ordinary run is unchanged.
+    latch = _estop_latch_path(spec)
     fibers = []
     for cname in order:
+        halt = _read_latch(latch)
+        if halt is not None:
+            # Stop where we stand: name the ACTIVE components as stranded, print
+            # the inventory, and die with NO teardown (os._exit runs no atexit,
+            # no unplug, no residue proof, no DOWN — by design).
+            _emit_halt(name, halt, [c for c, _ in fibers])
+            os._exit(_ESTOP_EXIT)  # noqa: SLF001 — no teardown, by design
         fiber = rt.plug(cname, modules[cname])
         fibers.append((cname, fiber))
         _log(name, "load", cname, f"state={fiber.state.value}")

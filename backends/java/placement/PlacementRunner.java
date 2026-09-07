@@ -44,6 +44,10 @@ import java.util.concurrent.CountDownLatch;
 
 public final class PlacementRunner {
     static String name = "?";
+    // item 443 / issue #122: the latch this process watches, or null when the
+    // placement armed no E-Stop. Read once from the spec at boot (see main);
+    // the crossing seams consult `Estop.engaged(estopLatch)` per crossing.
+    static volatile String estopLatch = null;
     static final List<Disposable> fibers = new ArrayList<>();
 
     // The one choke point every console line passes through (the py tier's
@@ -101,6 +105,12 @@ public final class PlacementRunner {
         name = (String) spec.get("name");
         String container = (String) spec.getOrDefault("module", "revl.Components");
         bindSecretRegistry(container); // before the first line is printed
+        // item 443: point the crossing seams at the E-Stop latch, and start the
+        // idle watcher so a process parked at `latch.await()` (crossing nothing)
+        // still halts on the button rather than sitting through the emergency.
+        // A placement that armed no latch reads null here and nothing polls.
+        estopLatch = Estop.latchPath(spec);
+        Estop.startWatcher(name, estopLatch);
         Map<String, Object> ifaces = (Map<String, Object>) spec.getOrDefault("ifaces", Map.of());
         Map<String, Object> config = (Map<String, Object>) spec.getOrDefault("config", Map.of());
 
@@ -353,6 +363,18 @@ public final class PlacementRunner {
         BridgeClient(String path) { this.path = path; }
 
         Object call(String key, String method, List<Object> args) {
+            // item 443: once the latch is armed this process refuses to
+            // DISPATCH a new crossing — the outgoing twin of the accept-seam
+            // refusal in Stub.serveConn, and of estop.ts's makeProxy. Checked
+            // before anything goes on the wire, so a halted process starts no
+            // crossing it cannot finish (docs/design/443-estop.md).
+            if (Estop.engaged(estopLatch)) throw Estop.refuse(key, method);
+            // The crossing is now in flight: register it BEFORE the request
+            // goes out and deregister when the reply lands, so a halt arriving
+            // inside the window snapshots it as the at-most-one AMBIGUOUS
+            // crossing (it MAY have landed) in the HALTED inventory.
+            Map<String, Object> crossing = Estop.mark(key, method);
+            try {
             RuntimeException last = null;
             for (int attempt = 0; attempt < 100; attempt++) { // retry while the provider comes up
                 try (SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX)) {
@@ -374,6 +396,9 @@ public final class PlacementRunner {
                 }
             }
             throw last != null ? last : new RuntimeException("bridge connect failed");
+            } finally {
+                Estop.inFlight.remove(crossing);
+            }
         }
 
         void close() {}
@@ -509,11 +534,24 @@ public final class PlacementRunner {
                     try {
                         Map<String, Object> req = (Map<String, Object>) Json.parse(line);
                         String key = (String) req.get("key");
+                        String method = (String) req.get("method");
+                        // item 443: an armed latch means an operator hit the
+                        // button, so this crossing is REFUSED at the accept seam
+                        // before the service is dispatched — the E-Stop verdict,
+                        // not a fault (docs/design/443-estop.md). The mirror of
+                        // the outgoing refusal in BridgeClient.call and of
+                        // estop.ts's serve.
+                        if (Estop.engaged(estopLatch)) {
+                            reply.put("ok", false);
+                            reply.put("error", Estop.refuse(key, method).getMessage());
+                            w.write(Json.write(reply)); w.write("\n"); w.flush();
+                            continue;
+                        }
                         Class<?> iface = served.get(key);
                         if (iface == null) throw new RuntimeException("key " + key + " not exported");
                         Object service = ctx.get((Class) iface);
                         args = (List<Object>) req.getOrDefault("args", List.of());
-                        Method m = findMethod(iface, (String) req.get("method"), args.size());
+                        Method m = findMethod(iface, method, args.size());
                         Object result = m.invoke(service, coerceArgs(m, args));
                         reply.put("ok", true);
                         reply.put("value", BridgeCodec.encode(result));
@@ -839,6 +877,153 @@ public final class PlacementRunner {
             }
             return Object.class;
         }
+    }
+
+    // --- the operator E-Stop, java tier (item 443 / issue #122) -------------
+    //
+    // The java twin of src/revl/estop.py and backends/typescript/estop.ts. Once
+    // an operator arms the latch, this process must STOP DISPATCHING NEW
+    // CROSSINGS — BridgeClient.call refuses to dispatch, Stub.serveConn refuses
+    // to accept — and an IDLE process (parked at `latch.await()`, crossing
+    // nothing) must still halt on the button rather than sit through the
+    // emergency. All three read the SAME latch the py runtime and the conductor
+    // read, so the tiers cannot drift on what an armed — or malformed — latch
+    // means (docs/design/443-estop.md). Inlined here (not a shared file) so the
+    // single-file javac builds pick it up, the same convention Json/BridgeCodec
+    // already follow.
+    static final class Estop {
+        static final String LATCH_ENV = "REVL_ESTOP_LATCH";
+        static final int HALT_EXIT = 75;   // == _process_runner._ESTOP_EXIT
+        static final long POLL_MS = 50;    // == _process_runner._ESTOP_POLL * 1000
+
+        // The at-most-one dispatched-and-unconfirmed crossing this process is
+        // mid-flight on, plus any others racing: the java mirror of the py
+        // runtime's _INFLIGHT. Concurrent because BridgeClient.call runs off the
+        // main thread and the watcher snapshots it from its own.
+        static final java.util.Set<Map<String, Object>> inFlight =
+                java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+        // The latch file to watch: the spec's `estopLatch` (what the conductor
+        // writes for a tier in TIERS_WITH_ESTOP, and what a sandboxed child that
+        // never inherited the conductor's environment can still see), else the
+        // ambient env var, else none. Mirrors estop.py::latch_path /
+        // estop.ts::latchPath, preferring the spec exactly as _process_runner
+        // reads `spec["estopLatch"]` first and the environment only as a
+        // fallback.
+        static String latchPath(Map<String, Object> spec) {
+            Object explicit = spec.get("estopLatch");
+            if (explicit instanceof String s && !s.isEmpty()) return s;
+            String env = System.getenv(LATCH_ENV);
+            return (env != null && !env.isEmpty()) ? env : null;
+        }
+
+        // The halt an operator wrote at `path`, or null when the latch is
+        // ABSENT. A latch that EXISTS but does not parse to a JSON object still
+        // reads as HALTED — failing open on a malformed emergency stop is the
+        // one failure mode this feature exists to prevent — as does one that
+        // exists but cannot be read. Only a genuinely absent file reads as
+        // not-halted. Kept in step with estop.py::read_latch (FileNotFoundError
+        // -> null; every other error, and any non-object, fails CLOSED).
+        @SuppressWarnings("unchecked")
+        static Map<String, Object> readLatch(String path) {
+            if (path == null) return null;
+            Path p = Path.of(path);
+            if (!Files.exists(p)) return null;
+            String text;
+            try {
+                text = Files.readString(p);
+            } catch (java.io.IOException unreadableRead) {
+                return unreadable();
+            }
+            try {
+                Object record = Json.parse(text);
+                if (record instanceof Map<?, ?> m) return (Map<String, Object>) m;
+                return unreadable();
+            } catch (RuntimeException malformed) {
+                return unreadable();
+            }
+        }
+
+        static Map<String, Object> unreadable() {
+            Map<String, Object> r = new java.util.LinkedHashMap<>();
+            r.put("halted", true);
+            r.put("reason", "operator halt (unreadable latch)");
+            r.put("operator", "unknown");
+            return r;
+        }
+
+        static boolean engaged(String path) {
+            return readLatch(path) != null;
+        }
+
+        // Register one crossing as in flight and return its descriptor (the
+        // caller removes it in a `finally`). Fields match the merged residue
+        // schema the conductor's _estop_halt_report reads: a forward crossing
+        // that is out and unconfirmed is `estop-ambiguous` with outcome unknown.
+        static Map<String, Object> mark(String key, String method) {
+            Map<String, Object> desc = new java.util.LinkedHashMap<>();
+            desc.put("component", key);
+            desc.put("kind", "estop-ambiguous");
+            desc.put("method", method);
+            desc.put("outcome", "unknown");
+            desc.put("seq", null);
+            inFlight.add(desc);
+            return desc;
+        }
+
+        // The idle watcher: the java half of _process_runner._estop_watch. An
+        // ACTIVE process halts by itself the moment a crossing seam refuses, but
+        // an idle one parked waiting to be stopped crosses nothing and would sit
+        // through the emergency. This closes that gap: on the button it prints
+        // the in-flight inventory the conductor merges into its report, then
+        // dies where it stands. `Runtime.halt` is the point, not a shortcut —
+        // `System.exit` would run the shutdown hook and its LIFO teardown, which
+        // is exactly the graceful unwind an E-Stop exists to NOT do; the entries
+        // stay stranded and `revl recover` reads them back, because an E-Stop is
+        // deliberately shaped to look like a crash to the recovery path.
+        static void startWatcher(String name, String path) {
+            if (path == null) return;
+            Thread t = new Thread(() -> {
+                while (true) {
+                    Map<String, Object> record = readLatch(path);
+                    if (record != null) {
+                        printHalted(name, record);
+                        Runtime.getRuntime().halt(HALT_EXIT); // NO shutdown hook, by design
+                    }
+                    try { Thread.sleep(POLL_MS); } catch (InterruptedException ignored) { return; }
+                }
+            }, "estop-watch");
+            t.setDaemon(true);
+            t.start();
+        }
+
+        // `[name] HALTED {json}` — the in-flight inventory on one line, in the
+        // merged residue schema the conductor's _estop_halt_report reads
+        // (src/revl/placement.py), byte-compatible with the py runner's line.
+        static void printHalted(String name, Map<String, Object> record) {
+            Map<String, Object> inv = new java.util.LinkedHashMap<>();
+            inv.put("process", name);
+            inv.put("verdict", "halted");
+            inv.put("reason", record.get("reason"));
+            inv.put("operator", record.get("operator"));
+            inv.put("activations", new ArrayList<>());
+            inv.put("inFlight", new ArrayList<>(inFlight));
+            inv.put("stranded", new ArrayList<>());
+            inv.put("resumable", false);
+            System.out.println("[" + name + "] HALTED " + Json.write(inv));
+            System.out.flush();
+        }
+
+        // The refusal a crossing seam raises once the halt is engaged. Mirrors
+        // estop.ts's makeProxy/serve message and py's EstopHalted.
+        static RuntimeException refuse(String key, String method) {
+            return new RuntimeException(
+                "revl E-Stop engaged: this process is HALTED and refuses new "
+                + "crossings (key " + key + ", method " + method + ") — "
+                + "docs/design/443-estop.md");
+        }
+
+        private Estop() {}
     }
 
     private PlacementRunner() {}

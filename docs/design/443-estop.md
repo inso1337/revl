@@ -390,11 +390,29 @@ UNKNOWN.
 
 ## Per-tier status
 
-The halt itself is landed on the **py reference tier only**, and the conductor
-above is what makes that honest across a mixed placement rather than silently
-partial. The five other tiers keep their existing cooperative teardown and have
-no E-Stop seam: under a placement halt they are killed and reported UNKNOWN by
-name. The formal layer is tier-independent and already carries the verdict, so
-a later tier's loop is built against the same table, and wiring one is a matter
-of adding it to `revl.estop.TIERS_WITH_ESTOP` once its runtime reads the latch
-and prints the `HALTED` inventory line.
+The set of tiers that HONOR the halt is `revl.estop.TIERS_WITH_ESTOP`, and the
+conductor above is what makes a mixed placement honest rather than silently
+partial. A tier joins that set once its runtime reads the latch, refuses new
+crossings at its own seams, and prints the `HALTED` inventory line; a tier that
+is NOT in it keeps its cooperative teardown and has no E-Stop seam, so under a
+placement halt its children are killed and reported UNKNOWN by name. The formal
+layer is tier-independent and already carries the verdict, so each tier's loop
+is built against the same table.
+
+Landed so far:
+
+* **py** — the reference tier (the seam described above), in `TIERS_WITH_ESTOP`;
+* **java** — the crossing seams (outgoing dispatch and accept) in
+  `backends/java/placement/{,Real}PlacementRunner.java` plus an idle watcher,
+  gated by `java` in `TIERS_WITH_ESTOP` (issue #122);
+* **wasm** — a SINGLE-PROCESS seam, not a placement tier: `wasm` is refused
+  from placement, so its harness (`backends/wasm/run_harness.py`) honors the
+  latch at its own `plug` boundary exactly as the py runtime does, halting the
+  bring-up with no teardown (issue #122). It is deliberately NOT in
+  `TIERS_WITH_ESTOP`, which is the conductor's placement-child set.
+
+The ts tier's crossing seams already exist (`backends/typescript/{estop,
+bridge}.ts`); joining `node` to `TIERS_WITH_ESTOP` so the conductor hands a
+node child the latch is issue #598 (open). **go** and **rust** are issue #611
+(open): their runtimes read the latch but are not yet wired into a placement
+halt.

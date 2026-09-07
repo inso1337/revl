@@ -78,6 +78,19 @@ components = ["HotWorker"]
 components = ["Edge"]
 """
 
+# One py process and one JAVA process. java joined `TIERS_WITH_ESTOP` (issue
+# #122), so unlike the `node` edge above the java edge is a LATCH-HONORING tier:
+# the conductor hands it the latch in its spec and it halts at its own crossing
+# seams rather than being SIGKILLed and reported UNKNOWN.
+PY_JAVA = """
+[processes.provider]
+components = ["HotWorker"]
+
+[processes.edge]
+backend = "java"
+components = ["Edge"]
+"""
+
 
 def _inventory(name: str) -> dict:
     """What the py runner's watcher prints when the latch trips it: the halt
@@ -411,6 +424,50 @@ def test_the_latch_is_handed_only_to_tiers_that_can_honor_it(
     capsys.readouterr()
     assert procs["provider"].spec.get("estopLatch") == latch
     assert "estopLatch" not in procs["edge"].spec
+
+
+def test_a_java_placement_child_honors_the_latch_at_its_own_seams(
+        tmp_path, monkeypatch, capsys):
+    """java joined `TIERS_WITH_ESTOP` (issue #122). A java-placed child is
+    handed the latch in its spec and halts at its own crossing seams — exactly
+    like the py reference tier — rather than joining the SIGKILL-and-report-
+    UNKNOWN population the seamless tiers do. With BOTH children on honoring
+    tiers, nothing is un-nameable and the report has no UNKNOWN residue.
+
+    The java BUILD (javac) is not what is under test — the halt is — so the JDK
+    resolution is stubbed to the in-repo (non-reactive) runner path exactly as
+    the node build is stubbed above; the command it would produce is never run
+    because `Popen` is faked with the honoring-child stub.
+    """
+    monkeypatch.setattr(_placement, "_find_jdk21", lambda: None)
+    monkeypatch.setattr(_placement, "_find_cordis4j_classes", lambda: None)
+    monkeypatch.setattr(_placement, "_build_java", lambda ir, tmp: str(tmp))
+    latch = str(tmp_path / "halt.estop")
+    rc, procs, elapsed = _run(tmp_path, monkeypatch, latch=latch,
+                              placement=PY_JAVA, live=8.0)
+    err = capsys.readouterr().err
+
+    # prompt, and never clean
+    assert elapsed < 5.0, f"the halt did not interrupt a live placement ({elapsed:.1f}s)"
+    assert rc != 0
+
+    # 1. the java child was TOLD where the latch is — the spec key that only a
+    #    tier in TIERS_WITH_ESTOP is handed
+    assert procs["edge"].spec.get("estopLatch") == latch
+
+    # 2. it halted at its own seams: it was never asked to unwind (that is the
+    #    graceful path an E-Stop bypasses), and it named its own books. Whether
+    #    the conductor also killed it AFTER it named them is a race the report
+    #    absorbs — "halted-self-exit" and "halted-then-killed" are both honoring
+    #    outcomes — so only `terminated` (the cooperative stop) is pinned here.
+    assert procs["edge"].terminated is False, \
+        "the E-Stop asked the java child to unwind — that is the graceful path"
+    assert "Edge" in err and "process edge" in err and "tier java" in err
+    assert "HALTED at its own crossing seams" in err
+
+    # 3. no tier here is seamless, so nothing is reported UNKNOWN
+    assert "NO E-Stop seam" not in err
+    assert "0 of them UNKNOWN" in err
 
 
 # ---------------------------------------------------------------------------

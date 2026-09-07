@@ -9,9 +9,9 @@ and the py runtime (`backends/python/runtime.py`) cannot drift apart on them:
   * what an armed latch means, including a malformed one (`read_latch`);
   * which tiers actually HONOR the latch (`TIERS_WITH_ESTOP`).
 
-The third is the honest half. Five of revl's six tiers have no E-Stop seam,
-and a conductor that halted a placement without saying which of its processes
-were merely KILLED would be reporting a stop it did not perform.
+The third is the honest half. Not every tier has an E-Stop seam, and a
+conductor that halted a placement without saying which of its processes were
+merely KILLED would be reporting a stop it did not perform.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ LATCH_ENV = "REVL_ESTOP_LATCH"
 #: and leaves its residue UNKNOWN. That is honest and visible rather than a
 #: silently degraded halt, and `_estop_halt_report` names every such component
 #: individually (docs/design/443-estop.md, "Per-tier status").
-TIERS_WITH_ESTOP = frozenset({"py"})
+TIERS_WITH_ESTOP = frozenset({"py", "java"})
 
 #: What the py runner prints when the latch trips: its own in-flight
 #: inventory, on one line, so the conductor can merge it into the halt report
