@@ -51,7 +51,7 @@ test with it) to admit a new one.
    lived and planted it inside the workspace. `resolve_sidecar` confines the
    source AND requires it to sit inside the matching sidecar directory, so an
    inverse can consume only a sidecar this workspace itself produced — never an
-   arbitrary path, inside the root or out (see "why the inverses stay `pure`").
+   arbitrary path, inside the root or out (see "why the inverses are `acquire`").
 4. `syscall-time` (`open_confined_write`, `replace_confined`, `remove_confined`,
    `mkdir_confined`, `rmdir_confined`, `snapshot_preimage`, `write_through`,
    `confirm_landed`), the mutation itself. Resolving a path and then
@@ -127,29 +127,35 @@ right trade here — the workspace jail's whole premise is that the workspace
 writer is untrusted, unlike `hostfile.py`'s item-396 jail, where an accepted
 hardlink residual is justified by the author already controlling the bytes.
 
-# Why the inverses stay `pure` (and what makes that safe now)
+# Why the inverses are `acquire`, not `pure` (and what makes that safe)
 
-The `restore`/`unrm`/`unmove`/`rmdir_if_empty` externs are `pure`, which means
-they carry NO capability: they are callable from every pure position. That
-classification is not a slip, and it cannot simply be changed:
+The `restore`/`unrm`/`unmove`/`rmdir_if_empty` externs MUTATE the filesystem —
+they unlink or rename real files — so they are `acquire`, not `pure`. `pure`
+would be a false statement of effect: a `pure` extern carries no effect in the
+G8 audit and is callable from every pure position, so a plain `fn` could unlink
+or rename a confined file with no effect-gate crossing at all. `acquire` states
+the effect honestly. The classification choice is constrained:
 `_check_witnessed_inverse` (src/revl/lower.py, item 243 rule 3, G5) requires a
 witnessed extern's declared inverse to be non-emitting and non-witnessed — an
 emitting inverse crosses a one-way boundary during teardown, a witnessed one is
 infinite regress — which leaves `pure` and `acquire`; the parser refuses a
 `[caps]` bracket on both (only `witnessed[...]`/`emission[...]` are
-capability-scoped), and an `acquire` inverse would itself have to declare an
-`undo`. There is no spelling of "capability-scoped inverse" in the surface, by
-design.
+capability-scoped). Of those two, only `acquire` reports the mutation. It has no
+capability token, but it IS effect-position-bound: a bare call to an `acquire`
+inverse from a plain `fn`/`test` body is refused (G4,
+`_refuse_effect_position_bound_externs_in_fn_body`). `acquire` mandates an
+`undo`; the reversal is terminal (nothing left to release once the world is
+back), so each names the `settled` no-op as its own teardown.
 
-So the fix is not to gate the primitive but to shrink it. After this change the
-inverses' entire authority is: move a sidecar THIS WORKSPACE PRODUCED back over
-a path inside the same workspace, or delete a path inside the workspace. Every
-endpoint, source and target, is confined; the source is additionally restricted
-to the sidecar directories. A capability-free inverse can no longer name an
-outside file at all, so the WAL-replay vector (`revl recover` reconstructing an
-inverse from a forged witness, src/revl/recovery.py) hits the same guard with
-no revl source involved. What remains is bounded by the jail itself, which is
-exactly the property the jail is supposed to provide.
+Two things bound the residual authority. First, the effect gate above: the
+inverse cannot be invoked as a free pure primitive. Second, the shrunken reach:
+the inverses' entire authority is to move a sidecar THIS WORKSPACE PRODUCED back
+over a path inside the same workspace, or delete a path inside the workspace.
+Every endpoint, source and target, is confined; the source is additionally
+restricted to the sidecar directories. So the WAL-replay vector (`revl recover`
+reconstructing an inverse from a forged witness, src/revl/recovery.py) hits the
+same guard with no revl source involved. What remains is bounded by the jail
+itself, which is exactly the property the jail is supposed to provide.
 
 # Configuring the root
 
