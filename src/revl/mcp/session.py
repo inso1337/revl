@@ -471,6 +471,17 @@ class Session:
         # self-evolution loop never swaps synchronously). Empty in every session
         # that does not admit, so nothing changes for one that does not.
         self._pending_admits: list[dict] = []
+        # design 460 §4 (two-phase admission, Slice 2 — same-process half): the
+        # applied set keyed by a turn's CONTENT decision key, so re-wiring the
+        # identical turn plugs once and returns the recorded keys. This closes the
+        # double-wire hazard `_drain_pending_admits` documents WITHOUT relying on
+        # the queue being emptied first. Keyed by content (source digest, granted,
+        # base manifest) and NOT by the durable `decisionId` — the durable id
+        # carries the WAL seq for global uniqueness, but the in-process dedup must
+        # catch the same turn wired twice regardless of where the WAL sits.
+        # Process-local: a fresh process has an empty set and re-materializes the
+        # turn through forward recovery (§5), never from this map.
+        self._applied_decisions: dict[str, tuple] = {}
         # item 250 (session branching): once a session is FORKED, it is FROZEN —
         # retired at the fork step k, non-callable, so the shared rewound
         # workspace has exactly one live owner, the branch (Decision 4). `_frozen`
@@ -2840,18 +2851,40 @@ class Session:
         # synchronously (`demo/evolve_bridge.propose`), a turn admitted from
         # inside a live call is QUEUED and wired the moment that call returns; a
         # turn admitted directly (no loop in flight) wires now.
+        # design 460 §2.1: the re-admittable turn bundle the decision record
+        # carries — the source verbatim (not the compiled IR), so a restart
+        # re-runs the checker and the untrusted-author profile over it. Threaded
+        # into `_wire_turn` alongside the compiled `turn_doc` so the durable
+        # `admit-decided` record names what forward recovery would re-admit.
+        turn_bundle = {"sources": {filename: source},
+                       "granted": sorted(granted or ()),
+                       "modules": dict(modules or {})}
         if self._loop is not None and self._loop.is_running():
-            self._pending_admits.append(turn_doc)
+            self._pending_admits.append((turn_doc, turn_bundle))
         else:
-            self._wire_turn(turn_doc)
+            self._wire_turn(turn_doc, bundle=turn_bundle)
         return AdmitVerdict(True, handle=AdmitHandle(self, keys), keys=keys)
 
-    def _wire_turn(self, turn_doc: dict) -> tuple[str, ...]:
+    def _wire_turn(self, turn_doc: dict, *,
+                   bundle: dict | None = None) -> tuple[str, ...]:
         """Plug an admitted turn's components into the LIVE driver with the
         session owner active — so every frame the turn builds joins the same
         live-frame registry the enclosing session's commit/abort iterate — then
         adopt the turn into the live composition ir so `call`, commit and abort
         span it. Returns the turn's provided keys.
+
+        Two-phase commit (design 460 §2). When the session is recording, wiring
+        writes three durable stage records around the runtime touch:
+        `admit-decided` after the pre-plug gates cleared and the spends were
+        committed and BEFORE the plug, `admit-applied` after the plug settled and
+        the turn was adopted, `admit-finalized` after the per-generation indexes
+        were installed. A plug that raises writes `admit-abandoned {plug-failed}`
+        and disposes the turn's already-plugged fibers, so the crash window between
+        "gate decided" and "composition live" is a settled decision on disk rather
+        than an ambiguous one a restart has to guess at. `bundle` is the
+        re-admittable turn source the `admit-decided` record carries (§2.1); a
+        `_wire_turn` reached without one (a legacy internal call) writes no records
+        and keeps today's in-process-only atomicity.
 
         Under the item-329 no-extern profile the turn holds no host code of its
         own; its granted-emission and witnessed-fs crossings execute in the
@@ -2882,6 +2915,15 @@ class Session:
         runtime_mod = driver.runtime
         turn_components = list(turn_doc["components"])
 
+        # design 460 §4 (Slice 2, same-process): the applied set closes the
+        # double-wire hazard before any gate re-spends or any fiber is re-plugged.
+        # Keyed by the turn's CONTENT (source, granted, base manifest), so the
+        # identical turn wired twice plugs once and returns the recorded keys.
+        content_key = self._turn_content_key(bundle) if bundle is not None \
+            else None
+        if content_key is not None and content_key in self._applied_decisions:
+            return self._applied_decisions[content_key]
+
         # the post-admission composition, built BEFORE anything is plugged so the
         # pre-boot gates decide against the surface the turn actually creates.
         merged = self._merged_turn_ir(turn_doc)
@@ -2892,11 +2934,40 @@ class Session:
         self._enforce_lease_gate({"components": turn_components})
         # item 246, Fix 1: the turn's ACTIVATION body answers for its class-(c)
         # crossings before it runs, exactly as a loaded/swapped generation does.
-        self._enforce_activation_gate(merged, new_map, components=turn_names)
+        # `spends` collects the requestIds committed here so the decision record
+        # can name the authority it spent (§2.1).
+        spends: list[str] = []
+        self._enforce_activation_gate(merged, new_map, components=turn_names,
+                                      spent_out=spends)
         # item 310, surface H: a turn widens the composition, so a cached method
         # the turn newly resolves (or newly reaches) is folded against the MERGED
         # closure before anything is plugged.
         self._check_cache_applicability(merged, new_map)
+
+        # design 460 §2: STAGE 1. Every pre-plug gate cleared and the spends are
+        # committed, so the decision — and the authority already on the ledger
+        # behind it — is durable BEFORE the runtime is touched. Written only when
+        # recording (a WAL-less session keeps today's in-process atomicity, §8).
+        # `decisionId` binds the seq the record will occupy, so two admits of the
+        # same turn text at different WAL positions are distinct durable decisions.
+        wal = self._approval_wal()
+        decision_id = None
+        if wal is not None and bundle is not None:
+            base_hash = self._base_manifest_hash()   # base: turn not yet adopted
+            decision_id = _decision_id_of(
+                bundle["sources"], bundle["granted"], base_hash, wal._seq)
+            keys_preview = [k for c in turn_components
+                            for k in (c.get("provides") or {})]
+            wal.record_admit_decided(
+                decision_id=decision_id, turn=bundle,
+                expected={"generation": self._generation,
+                          "surfaceEpoch": self._surface_epoch,
+                          "baseManifestHash": base_hash,
+                          # the class-map digest is over the MERGED composition —
+                          # the surface the decision was actually checked against.
+                          "classMapDigest": self._class_map_digest(
+                              class_map=new_map)},
+                spends=spends, components=sorted(turn_names), keys=keys_preview)
 
         module = self._prepare_module(turn_doc)
 
@@ -2917,9 +2988,22 @@ class Session:
         # the owner must be the process-global session owner while the turn's
         # frames are BUILT, so each `Frame.__init__` joins its registry; cleared
         # after, exactly as `load` scopes it, so no later stray frame joins.
+        #
+        # design 460 §2: the plug is the window between STAGE 1 and STAGE 2. A
+        # failure here — a plug that raises, or the E-Stop's plug-seam refusal —
+        # disposes the turn's already-plugged fibers and closes the decision with
+        # `admit-abandoned {plug-failed}`, so a halt during admission is a settled
+        # decision and never an owed one. Nothing is adopted, so the running
+        # composition is untouched exactly as the pre-plug gates' refusal leaves it.
         runtime_mod.set_session_owner(self._owner)
         try:
             self._run(_plug())
+        except BaseException:
+            self._dispose_turn_fibers(turn_names)
+            if wal is not None and decision_id is not None:
+                wal.record_admit_abandoned(decision_id=decision_id,
+                                           reason="plug-failed")
+            raise
         finally:
             runtime_mod.clear_session_owner()
 
@@ -2932,6 +3016,15 @@ class Session:
             self.ir["services"].setdefault(name, spec)
         self.ir["manifest"] = turn_doc["manifest"]
         driver.ir = self.ir
+
+        # design 460 §2: STAGE 2. The plug settled and the turn is adopted into the
+        # live composition; its activation body ran (or was cut). The runtime holds
+        # the turn, so the decision has advanced past the crash window that a bare
+        # `decided` would leave ambiguous.
+        if wal is not None and decision_id is not None:
+            wal.record_admit_applied(decision_id=decision_id,
+                                     generation=self._generation,
+                                     surface_epoch=self._surface_epoch)
 
         # the per-generation indexes go live with the widened surface, atomically
         # and in the same order `load` and `swap` install them, so no call is ever
@@ -2956,7 +3049,59 @@ class Session:
         keys: list[str] = []
         for comp in turn_components:
             keys.extend((comp.get("provides") or {}).keys())
-        return tuple(keys)
+        result = tuple(keys)
+
+        # design 460 §2: STAGE 3. The per-generation indexes are installed, so the
+        # surface the class map describes matches what is live — the decision is
+        # fully committed. `admit-finalized` is the terminal proof forward recovery
+        # reads to skip a decision (design 460 §5); its absence is what marks a
+        # decision the restart must classify and finish.
+        if wal is not None and decision_id is not None:
+            wal.record_admit_finalized(decision_id=decision_id,
+                                       generation=self._generation,
+                                       surface_epoch=self._surface_epoch)
+        # §4: record the applied result so a same-process re-wire of the identical
+        # turn returns these keys without re-plugging.
+        if content_key is not None:
+            self._applied_decisions[content_key] = result
+        return result
+
+    def _dispose_turn_fibers(self, turn_names: set) -> None:
+        """Dispose the fibers a failed turn plug left in `driver.fibers` (design
+        460 §2, the `plug-failed` path). A turn that raised mid-plug may have
+        landed some of its components before the failure; leaving them in the
+        driver would strand fibers the composition never adopted. Best-effort and
+        never raising — the caller is already unwinding a plug failure and must
+        re-raise the original error, not a teardown one."""
+        driver = self._driver
+        if driver is None:
+            return
+        for name in list(turn_names):
+            fiber = driver.fibers.pop(name, None)
+            if fiber is None:
+                continue
+            disposer = getattr(driver, "_dispose_fiber", None)
+            if disposer is None:
+                continue
+            try:
+                self._run(disposer(fiber))
+            except BaseException:  # noqa: BLE001 — unwinding a plug failure
+                pass
+
+    def _turn_content_key(self, bundle: dict) -> str:
+        """The in-process applied-set key for a turn (design 460 §4): a digest of
+        the turn's re-admittable content — its sources, its granted set, and the
+        LIVE base manifest hash — so the same turn text against the same base is
+        one applied decision, and the same text against a different base is not.
+        Deliberately free of the WAL seq that the durable `decisionId` carries: the
+        in-process dedup must catch a re-wire regardless of where the WAL sits."""
+        import json  # noqa: PLC0415 — stdlib
+        payload = json.dumps(
+            {"sources": bundle.get("sources") or {},
+             "granted": sorted(bundle.get("granted") or ()),
+             "base": self._base_manifest_hash()},
+            sort_keys=True, separators=(",", ":"))
+        return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _merged_turn_ir(self, turn_doc: dict) -> dict:
         """The composition that WILL be live once `turn_doc` is wired: the running
@@ -3231,8 +3376,8 @@ class Session:
         if not self._pending_admits:
             return
         pending, self._pending_admits = self._pending_admits, []
-        for turn_doc in pending:
-            self._wire_turn(turn_doc)
+        for turn_doc, bundle in pending:
+            self._wire_turn(turn_doc, bundle=bundle)
 
     # -- the auto-approve policy (roadmap item 246) ------------------------
 
@@ -3601,11 +3746,16 @@ class Session:
                 record["remainingUses"] = release["remainingUses"]
         plan.clear()
 
-    def _commit_spends(self, plan: list) -> None:
+    def _commit_spends(self, plan: list, spent_out: list | None = None) -> None:
         """Make every reservation in `plan` real: the durable `approval-consumed`
         record and the spend counters the one-shot `_consume_*` helpers write.
         Called only once the walk has cleared, and still before any crossing
-        fires, so consume-before-fire holds for each spend in the set."""
+        fires, so consume-before-fire holds for each spend in the set.
+
+        `spent_out` (design 460 §2.1, additive out-param) is filled in place with
+        the `requestId` of every spend this call committed, so `_wire_turn` can
+        name them in the `admit-decided` record's `spends` block. Default `None`
+        keeps every existing caller byte-identical."""
         wal = self._approval_wal()
         for release in plan:
             record = release["record"]
@@ -3615,6 +3765,8 @@ class Session:
                 self._auto_consumed += 1
             if wal is not None:
                 wal.record_approval_consumed(record["requestId"])
+            if spent_out is not None:
+                spent_out.append(record["requestId"])
         plan.clear()
 
     def _count_posture(self, action_class: str | None) -> None:
@@ -3708,7 +3860,8 @@ class Session:
         raise ApprovalRequired(ticket)
 
     def _enforce_activation_gate(self, ir: dict, class_map=None,
-                                 components: set | None = None) -> None:
+                                 components: set | None = None,
+                                 spent_out: list | None = None) -> None:
         """The activation gate (Fix 1): under an enabled policy, a candidate whose
         ACTIVATION reach is class (c) turns the load/swap response itself into the
         ticket two-step before boot. class (a)/(b) activation reach follows the
@@ -3770,8 +3923,10 @@ class Session:
             raise
         # every body is covered, so this walk has cleared and the generation
         # boots: spend now — durably, and still strictly BEFORE any activation
-        # crossing can fire (consume-before-fire, Decision 3).
-        self._commit_spends(plan)
+        # crossing can fire (consume-before-fire, Decision 3). `spent_out`
+        # collects the committed requestIds so a wiring turn's `admit-decided`
+        # record can name the authority it spent (design 460 §2.1).
+        self._commit_spends(plan, spent_out=spent_out)
 
     # -- item 294 Slice 2: the capability-lease gate ------------------------
 
@@ -5043,6 +5198,43 @@ class Session:
         return _class_map_digest_of(self._class_map if class_map is None
                                     else class_map)
 
+    def _forward_surface_for_turn(self, bundle: dict) -> dict:
+        """Recompute the surface a recorded turn's decision was taken against, from
+        the RESTORED base plus the recorded turn source (design 460 §3, forward
+        recovery's content CAS). Returns `{baseManifestHash, classMapDigest}` where
+        `baseManifestHash` is the restored base's manifest and `classMapDigest` is
+        the digest of the class map over the MERGED (base + turn) composition — the
+        two halves an `admit-decided` record's `expected` block carries.
+
+        The turn is recompiled under the item-329 untrusted-author profile and
+        merged into the live base exactly as `_wire_turn` would, but nothing is
+        plugged: this is a pure re-derivation of the surface, never trusted from
+        the record. Raises `SessionError` if the recorded turn no longer compiles
+        against the restored base (a checker that now refuses it) — forward
+        recovery reads that as a turn it must not resume, exactly as `restore`
+        refuses a base the current checker rejects (§2.1)."""
+        from ..admit_profile import AdmissionProfile  # noqa: PLC0415
+        from ..compiler import compile_source  # noqa: PLC0415
+        from ..errors import RevlError  # noqa: PLC0415
+        sources = bundle.get("sources") or {}
+        granted = bundle.get("granted") or ()
+        modules = bundle.get("modules") or {}
+        # one file per the admit bundle (a per-turn source is a single unit).
+        filename, source = next(iter(sources.items()))
+        profile = AdmissionProfile.untrusted_author(granted)
+        try:
+            turn_doc = compile_source(source, filename, manifest=self.ir,
+                                      modules=modules, profile=profile)
+        except RevlError as error:
+            raise SessionError(
+                f"the recorded turn no longer compiles against the restored base "
+                f"({error}); forward recovery does not resume it on stale "
+                f"authority (design 460 §2.1)") from None
+        merged = self._merged_turn_ir(turn_doc)
+        return {"baseManifestHash": self._base_manifest_hash(),
+                "classMapDigest": self._class_map_digest(
+                    class_map=self._build_class_map(merged))}
+
     def _surface_digests(self) -> dict:
         """The across-restart content form of the surface CAS key, recomputed from
         the live composition (design 460 §3)."""
@@ -5126,6 +5318,23 @@ class Session:
                if self.approval_policy is not None else {}),
             **({"trace": driver.drain_events()} if drain else {}),
         }
+
+
+def _decision_id_of(sources: dict, granted, base_manifest_hash: str | None,
+                    seq: int) -> str:
+    """The `decisionId` of an admission (design 460 §2.1): a sha256 over the turn
+    source digest, the granted set, the base manifest hash and the WAL seq the
+    `admit-decided` record occupies. The seq makes two admits of the same turn
+    text against the same base — at different points in one session — distinct
+    durable decisions; the rest binds the id to exactly the surface and source it
+    was taken against. Pure and recomputable, so forward recovery re-derives the
+    same id from the recorded bundle."""
+    import json  # noqa: PLC0415 — stdlib
+    payload = json.dumps(
+        {"sources": sources or {}, "granted": sorted(granted or ()),
+         "baseManifestHash": base_manifest_hash, "seq": seq},
+        sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _base_manifest_hash_of(ir: dict | None) -> str | None:
