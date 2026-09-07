@@ -13,12 +13,16 @@ const PREC = {
   or: 2,
   nullish: 3,
   and: 4,
-  equality: 5,
-  comparison: 6,
-  additive: 7,
-  multiplicative: 8,
-  unary: 9,
-  postfix: 10,
+  bitwise_or: 5,
+  bitwise_xor: 6,
+  bitwise_and: 7,
+  equality: 8,
+  comparison: 9,
+  shift: 10,
+  additive: 11,
+  multiplicative: 12,
+  unary: 13,
+  postfix: 14,
 };
 
 const commaSep = (rule) => optional(commaSep1(rule));
@@ -30,12 +34,26 @@ module.exports = grammar({
 
   externals: ($) => [$.template_string, $._host_body],
 
-  extras: ($) => [/\s/, $.comment],
+  // `;` is an optional statement separator/terminator (item 157). The
+  // reference lexer skips it between statements (`_skip_semis`), so it carries
+  // no syntax of its own; treating it as an extra mirrors that exactly.
+  extras: ($) => [/\s/, ';', $.comment],
 
   conflicts: ($) => [
+    // `{ … }` heads a block, a record literal and a functional record update;
+    // one lookahead token cannot tell them apart.
     [$.record_literal, $.block],
     [$.record_literal, $.effect_block],
+    // A value / type / arrow-parameter that begins with `IDENT`, `IDENT[…]` or
+    // `( … )` is ambiguous until more of it is seen (revl has no statement
+    // terminator token — `;`/newlines are extras — so a type in a trailing
+    // slot like `handoff k: T` can abut the next statement).
     [$.parameter, $._expression],
+    [$._expression, $.generic_type],
+    [$._expression, $.type_identifier],
+    [$.type_identifier, $.generic_type],
+    [$.parameter, $.type_identifier],
+    [$.parameter, $._expression, $.type_identifier],
   ],
 
   rules: {
@@ -53,6 +71,7 @@ module.exports = grammar({
         $.extern_declaration,
         $.test_declaration,
         $.fault_test_declaration,
+        $.prop_test_declaration,
       ),
 
     // ---------------------------------------------------------------- use
@@ -98,7 +117,27 @@ module.exports = grammar({
         'commutative',
       ),
 
-    capability_list: ($) => seq('[', commaSep1NoTrail($.identifier), ']'),
+    // A capability set: `[net]`, `[net(requests=100)]`, `[fs.write(path="/tmp")]`,
+    // `[fs, shell]`. Each capability is a dotted name with an optional
+    // parameter list of `key = <literal>` (or bare) arguments (items 260/296).
+    capability_list: ($) => seq('[', commaSep1NoTrail($.capability), ']'),
+
+    capability: ($) =>
+      seq(
+        field('name', $.capability_name),
+        optional(field('parameters', $.capability_parameters)),
+      ),
+
+    capability_name: ($) =>
+      seq($.identifier, repeat(seq('.', $.identifier))),
+
+    capability_parameters: ($) => seq('(', commaSep($.capability_parameter), ')'),
+
+    capability_parameter: ($) =>
+      seq(
+        field('name', $.identifier),
+        optional(seq('=', field('value', $._literal))),
+      ),
 
     typed_parameters: ($) => seq('(', commaSep($.typed_parameter), ')'),
 
@@ -109,6 +148,7 @@ module.exports = grammar({
 
     component_declaration: ($) =>
       seq(
+        optional('boot'),
         'component',
         field('name', $.identifier),
         repeat(choice($.requires_clause, $.provides_clause)),
@@ -131,7 +171,18 @@ module.exports = grammar({
         field('name', $.identifier),
         ':',
         field('type', $._type),
+        optional(field('bound', $.config_bound)),
         optional(seq('=', field('default', $._literal))),
+      ),
+
+    // The optional admission bound on a `boot component` config field
+    // (item 350): `under "<prefix>"` (a confined path) or `in [lit, ...]`
+    // (an enumerated set). The reference restricts it to boot components at
+    // parse time — a context-sensitive rule not expressible here.
+    config_bound: ($) =>
+      choice(
+        seq('under', field('prefix', $.string)),
+        seq('in', field('values', $.list_literal)),
       ),
 
     // --------------------------------------------------------------- type
@@ -169,7 +220,7 @@ module.exports = grammar({
       seq(
         optional('pub'),
         'extern',
-        optional(field('classification', choice('pure', 'acquire', 'emission'))),
+        repeat($.extern_modifier),
         'fn',
         field('name', $.identifier),
         optional($.type_parameters),
@@ -178,6 +229,17 @@ module.exports = grammar({
         optional(seq('undo', field('undo', $._expression))),
         optional(seq('compensate', field('compensate', $._expression))),
         repeat1(seq('=', $.host_block)),
+      ),
+
+    // An extern's classification/colour prelude: `pure` / `acquire` /
+    // `emission[caps]?` plus an optional `async` colour, in any order
+    // (`extern emission async fn …`, `extern pure fn …`).
+    extern_modifier: ($) =>
+      choice(
+        'pure',
+        'acquire',
+        'async',
+        seq('emission', optional($.capability_list)),
       ),
 
     host_block: ($) =>
@@ -212,6 +274,18 @@ module.exports = grammar({
     // latter to `lifecycle test` bodies; that is a context-sensitive rule.
     test_body: ($) =>
       seq('{', repeat(choice($._lifecycle_statement, $._statement)), '}'),
+
+    // `prop test "name" (p: T, …) { assert … }` — property test with
+    // type-derived generated inputs (item 37). The parameter list is a `fn`
+    // parameter list; the body is the pure statement grammar a plain test uses.
+    prop_test_declaration: ($) =>
+      seq(
+        'prop',
+        'test',
+        field('name', $.string),
+        field('parameters', $.typed_parameters),
+        field('body', $.block),
+      ),
 
     fault_test_declaration: ($) =>
       seq(
@@ -272,11 +346,45 @@ module.exports = grammar({
         $.isolate_statement,
         $.intercept_statement,
         $.provide_statement,
+        $.handoff_statement,
+        $.timer_statement,
         $.expression_statement,
       ),
 
     _lifecycle_statement: ($) =>
-      choice($.load_statement, $.unload_statement, $.call_statement, $.swap_statement),
+      choice(
+        $.load_statement,
+        $.unload_statement,
+        $.call_statement,
+        $.advance_statement,
+      ),
+
+    // `handoff <key>: <Type>` — the verified state hand-off prelude of a
+    // stateful component (item 53). A component prelude declaration, refused
+    // inside a method body by the reference (a context-sensitive rule).
+    handoff_statement: ($) =>
+      seq('handoff', field('key', $.identifier), ':', field('type', $._type)),
+
+    // `every <dur> { emit … }` (periodic) / `after <dur> { emit … }` (one-shot).
+    // The delay is `<int><unit>` (`30s`, `5m`, `250ms`); the body is emissions.
+    // (item 57, docs/time-coeffect.md)
+    timer_statement: ($) =>
+      seq(
+        field('mode', choice('every', 'after')),
+        field('interval', $.duration),
+        field('body', $.timer_body),
+      ),
+
+    timer_body: ($) => seq('{', repeat($.emit_statement), '}'),
+
+    // A duration literal — the reference lexer has no duration token, so `30s`
+    // is an integer immediately followed by a bare unit ident (ms|s|m|h|d).
+    duration: ($) =>
+      seq(field('count', $.integer), field('unit', alias($.identifier, $.time_unit))),
+
+    // `advance <dur>` — drive the deterministic test clock forward, the one
+    // lifecycle statement that takes a duration (item 102).
+    advance_statement: ($) => seq('advance', field('interval', $.duration)),
 
     let_statement: ($) =>
       seq(
@@ -284,7 +392,7 @@ module.exports = grammar({
         field('binding', choice($.identifier, $.record_pattern, $.list_pattern)),
         optional(seq(':', field('type', $._type))),
         '=',
-        field('value', choice($.effect_expression, $._expression)),
+        field('value', choice($.effect_expression, $.emit_expression, $._expression)),
       ),
 
     record_pattern: ($) => seq('{', commaSep1NoTrail($.identifier), '}'),
@@ -339,6 +447,7 @@ module.exports = grammar({
     effect_expression: ($) =>
       seq(
         'effect',
+        optional('await'),
         choice($.spawn_expression, $.effect_block, $._expression),
         optional(seq('undo', field('undo', $._expression))),
       ),
@@ -411,9 +520,6 @@ module.exports = grammar({
     bound_call: ($) =>
       seq(choice('let', 'var'), field('binding', $.identifier), '=', $.call_statement),
 
-    swap_statement: ($) =>
-      seq('swap', field('from', $.identifier), '->', field('to', $.identifier)),
-
     expression_statement: ($) => $._expression,
 
     // --------------------------------------------------------- expressions
@@ -430,6 +536,7 @@ module.exports = grammar({
         $.null,
         $.hole,
         $.record_literal,
+        $.record_update,
         $.list_literal,
         $.match_expression,
         $.arrow_function,
@@ -450,7 +557,7 @@ module.exports = grammar({
     unary_expression: ($) =>
       prec.right(
         PREC.unary,
-        seq(field('operator', choice('!', '-')), field('operand', $._expression)),
+        seq(field('operator', choice('!', '-', '~')), field('operand', $._expression)),
       ),
 
     // `emit <call>` in value position (parser.py EmitExpr): the value of an
@@ -465,6 +572,9 @@ module.exports = grammar({
         ['||', PREC.or],
         ['??', PREC.nullish],
         ['&&', PREC.and],
+        ['|', PREC.bitwise_or],
+        ['^', PREC.bitwise_xor],
+        ['&', PREC.bitwise_and],
         ['==', PREC.equality],
         ['===', PREC.equality],
         ['!=', PREC.equality],
@@ -473,6 +583,8 @@ module.exports = grammar({
         ['>', PREC.comparison],
         ['<=', PREC.comparison],
         ['>=', PREC.comparison],
+        ['<<', PREC.shift],
+        ['>>', PREC.shift],
         ['+', PREC.additive],
         ['-', PREC.additive],
         ['*', PREC.multiplicative],
@@ -500,9 +612,9 @@ module.exports = grammar({
         seq(
           field('condition', $._expression),
           '?',
-          field('consequence', $._expression),
+          field('consequence', choice($.emit_expression, $._expression)),
           ':',
-          field('alternative', $._expression),
+          field('alternative', choice($.emit_expression, $._expression)),
         ),
       ),
 
@@ -525,14 +637,29 @@ module.exports = grammar({
         -1,
         seq(
           field('parameters', choice($.identifier, $.parameters)),
+          optional(seq(':', field('return_type', $._type))),
           '=>',
-          field('body', $._expression),
+          field('body', choice($.block, $.emit_expression, $._expression)),
         ),
       ),
 
     record_literal: ($) => seq('{', commaSep($.record_entry), '}'),
     record_entry: ($) =>
       seq(field('name', $.identifier), ':', field('value', $._expression)),
+
+    // Functional record update: `{ base | field = expr, … }` (item 382). The
+    // base is any expression; each entry replaces one field by name.
+    record_update: ($) =>
+      seq(
+        '{',
+        field('base', $._expression),
+        '|',
+        commaSep1($.record_update_entry),
+        '}',
+      ),
+
+    record_update_entry: ($) =>
+      seq(field('name', $.identifier), '=', field('value', $._expression)),
 
     list_literal: ($) => seq('[', commaSep($._expression), ']'),
 
@@ -584,10 +711,32 @@ module.exports = grammar({
     boolean: ($) => choice('true', 'false'),
     null: ($) => 'null',
 
-    integer: ($) => /\d+/,
-    float: ($) => token(choice(/\d+\.\d+([eE][+-]?\d+)?/, /\d+[eE][+-]?\d+/)),
+    // Integer literals with the `0x` / `0b` / `0o` radices and `_` digit-group
+    // separators (item 381). The reference canonicalizes them numerically.
+    integer: ($) =>
+      token(
+        choice(
+          /0[xX][0-9a-fA-F][0-9a-fA-F_]*/,
+          /0[bB][01][01_]*/,
+          /0[oO][0-7][0-7_]*/,
+          /\d[\d_]*/,
+        ),
+      ),
+    float: ($) =>
+      token(choice(/\d[\d_]*\.\d[\d_]*([eE][+-]?\d+)?/, /\d[\d_]*[eE][+-]?\d+/)),
 
-    string: ($) => token(seq('"', /[^"\n]*/, '"')),
+    // String literals in all three spellings — `"…"`, `'…'` and triple-quoted
+    // `"""…"""` — with `\"` / `\'` / `\\` (and other `\x`) escapes (items
+    // 182/382). The reference lexer treats a `\`-escape as one unit, so an
+    // escaped quote never closes the string.
+    string: ($) =>
+      token(
+        choice(
+          seq('"""', repeat(choice(/[^"\\]/, /"[^"]/, /""[^"]/, /\\./)), '"""'),
+          seq('"', repeat(choice(/[^"\\\n]/, /\\./)), '"'),
+          seq("'", repeat(choice(/[^'\\\n]/, /\\./)), "'"),
+        ),
+      ),
 
     identifier: ($) => /[A-Za-z_][A-Za-z0-9_]*/,
   },
