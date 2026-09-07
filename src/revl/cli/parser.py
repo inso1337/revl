@@ -14,6 +14,11 @@ from ..run import KNOWN_BACKENDS, RUNNABLE_BACKENDS
 # it mirrors `revl.bundle.DEFAULT_BACKENDS`, which is the authority.
 BUNDLE_BACKENDS = ("python", "typescript", "rust", "java", "go", "wasm")
 
+# The replay modes `revl replay --mode` accepts (item 250, Slice 3b). A literal
+# here so parser assembly stays import-light; it mirrors
+# `revl.replay_modes.MODES`, which is the authority.
+REPLAY_MODES = ("exact", "tool-only", "model-substitute", "counterfactual")
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
@@ -1114,6 +1119,24 @@ def build_parser() -> argparse.ArgumentParser:
                              help="the other session's write-ahead log")
     compare_cmd.add_argument("--json", action="store_true",
                              help="machine-readable output")
+
+    replay_cmd = sub.add_parser(
+        "replay",
+        help="replay-mode readiness over a durable write-ahead log (item 250, "
+             "Slice 3b): per mode (exact / tool-only / model-substitute / "
+             "counterfactual), whether the WAL's durable model decisions carry "
+             "enough to inform that mode, and what the live executor would still "
+             "need. Reads the record; runs nothing "
+             "(docs/design/250-slice3b-replay-modes.md)")
+    replay_cmd.add_argument("wal", metavar="WAL",
+                            help="a write-ahead log, ideally one written by a "
+                                 "Slice-3a runtime that recorded its model "
+                                 "decisions")
+    replay_cmd.add_argument(
+        "--mode", default=None, choices=list(REPLAY_MODES),
+        help="report readiness for one mode only, instead of all four")
+    replay_cmd.add_argument("--json", action="store_true",
+                            help="machine-readable output")
 
     why = sub.add_parser(
         "why",

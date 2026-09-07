@@ -636,6 +636,37 @@ def _run_compare(args) -> int:
     return 0 if doc["comparable"] else 1
 
 
+def _run_replay(args) -> int:
+    """`revl replay WAL [--mode MODE]` — replay-mode readiness over a durable WAL
+    (item 250, Slice 3b, the offline half).
+
+    Reports, per mode (exact / tool-only / model-substitute / counterfactual),
+    whether the WAL's durable model decisions (item 250 Slice 3a) carry enough
+    to inform that mode, and what the live executor would still need. Reads the
+    tier-agnostic WAL core, so any tier's WAL plans the same. Runs nothing: an
+    offline reader has no live component, so every mode reads `executable:
+    false` and the live Slice-3b executor is what would run one.
+
+    Exit status: 0 when at least one mode is plannable from the record (the WAL
+    carries model decisions), 1 when none is (no model decision recorded, so
+    the WAL cannot inform any LLM-aware replay mode), which doubles as an honest
+    gate on "is this WAL model-aware".
+    """
+    from ..replay_modes import ReplayPlanError, plan, render  # noqa: PLC0415
+
+    try:
+        doc = plan(args.wal, mode=args.mode)
+    except ReplayPlanError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(doc, indent=2))
+    else:
+        print(render(doc))
+    return 0 if any(m["plannable"] for m in doc["modes"]) else 1
+
+
 def _run_repair(args) -> int:
     """`revl repair <files> --component NAME ...` — the repair loop (item 62).
 
