@@ -48,29 +48,32 @@ today. The canary is what turns "we passed a flag" into "the boundary reports
 itself established", and its evidence is printed, so the achieved rung is
 auditable rather than assumed.
 
-What is NOT in this slice
--------------------------
-* The per-rung SEAM TRANSPORT REACHABILITY. The 363 seam is a Unix socket in
-  the placement directory. Crossing a container boundary with it is a bind
-  mount, which does not carry a Unix socket on every host (verified
-  non-functional in both directions over a Docker Desktop bind mount on macOS:
-  the container binds the socket and a host connect gets ECONNREFUSED). The
-  seam-only network and the conductor-owned relay that carry item-56 TCP+mTLS
-  across the boundary are item 411 T3, not yet built. Until then a
-  container-sandboxed process with a cross-boundary seam is still REFUSED, but
-  as of T1 (`seam_transport_descriptor`) the refusal is PER-PRECONDITION: the
-  gate builds the `relay-mtls` descriptor, checks the item-56 role rule and the
-  item-54 deadline rule per seam, and names each unmet precondition — the T3
-  reachability precondition among them — instead of the old blanket
-  "seam-free only" refusal. As of T2 (`seam_dir_mounts`) the conductor mints a
-  per-boot mTLS leaf + key for every cross-boundary sandbox-seam participant and
-  the driver mounts each process's OWN spec and identity read-only, in place of
-  the whole placement directory that would have handed a hostile sandbox every
-  sibling's key — landed ahead of T3, which is what makes a seam-carrying
-  sandbox launchable at all.
-* The conductor-served approval-across-boundary channel.
+What T3 adds, and what is still NOT in this slice
+-------------------------------------------------
+* The per-rung SEAM TRANSPORT REACHABILITY (item 411 T3, this slice). The 363
+  seam is a Unix socket in the placement directory, which does not cross a
+  container bind mount portably (verified non-functional over a Docker Desktop
+  bind mount on macOS). T3 carries item 56's TCP+mTLS across the boundary over
+  a SEAM-ONLY per-process `--internal` network (`--network <net>` in place of
+  `--network=none`, `container_flags`) and one conductor-owned RELAY
+  (`SeamRelayManager`, `revl.seam_relay`) that is the only other thing on it —
+  a blind byte forwarder holding no key. The seam-only canary
+  (`seam_canary_script`, `_evaluate_seam`) confirms the transport from inside:
+  every relay listener accepts (SEAM), a target the relay proved open from its
+  bridge side is dropped from the sandbox (ISOLATION), and DNS is closed. The
+  item-56 role rule and item-54 deadline rule stay plan-layer refusals
+  (`seam_transport_descriptor`); reachability is now ESTABLISHED and confirmed,
+  no longer a standing refusal. T1 (`seam_transport_descriptor`) and T2
+  (`seam_dir_mounts`, the per-process cert view) still hold underneath.
+* The conductor-served approval-across-boundary channel (item 411 T5): the
+  conductor serves an `approval` key over the same mTLS listener shape, carried
+  by one relay row per sandboxed process that can raise a class-(c) operation,
+  so an approval request from inside a sandbox reaches the operator VIA the
+  conductor rather than by a direct escape. The plan-layer wiring (the relay
+  row, the served key, the boot-summary count) lands here; see `placement.py`
+  `sandbox_approval_rows`.
 * The `wasm-cell` and `microvm` rungs (`resolve_driver` returns None, and the
-  caller refuses).
+  caller refuses). `microvm` (T6) needs `/dev/kvm` and is a separate PR.
 * Non-`py` backends inside a container.
 """
 
@@ -166,6 +169,78 @@ def _canary_script(net: str) -> str:
     return _CANARY_SH.replace("__EGRESS__", 'echo "EGRESS=unclaimed"')
 
 
+# --------------------------------------------------------------------------
+# the seam-only canary (item 411 T3)
+# --------------------------------------------------------------------------
+#
+# The `--network=none` canary confirms confinement by an active connect to
+# TEST-NET-1 that must fail AT ONCE (ENETUNREACH). An `--internal` network DROPS
+# rather than refuses (measured, docs/design/411-seam-transport.md), so that one
+# clause cannot be reused. The seam-only variant replaces the single negative
+# probe with a DISCRIMINATING pair plus two DNS closures, all run from inside
+# the process's own network with the relay already up:
+#
+#   SEAM=open|closed:<e>    every relay listener this process's seams use must accept
+#   ISOLATION=confirmed|LEAK a target the relay proved open from bridge must NOT open here
+#   DNS=closed|OPEN:<name>  an external name and host.docker.internal must not resolve
+#   ROUTES=<n>              reported, not judged (internal subnet + dropped default route)
+#
+# Same isolation target, two vantage points, one positive (the relay's, proven
+# before launch) and one that must be negative (the sandbox's): that is what
+# makes a DROP evidence of confinement rather than the absence of evidence.
+_SEAM_PROBE_PY = r"""
+import socket
+def _c(host, port):
+    s = socket.socket(); s.settimeout(3)
+    try:
+        s.connect((host, int(port))); return None
+    except OSError as e:
+        return e.errno
+    finally:
+        s.close()
+SEAM = __SEAM__
+ISO = __ISO__
+DNS = __DNS__
+ok = True
+for host, port in SEAM:
+    e = _c(host, port)
+    if e is not None:
+        print("SEAM=closed:%s(%s:%s)" % (e, host, port)); ok = False
+if ok and SEAM:
+    print("SEAM=open")
+elif not SEAM:
+    print("SEAM=none")
+if ISO:
+    e = _c(ISO[0], ISO[1])
+    print("ISOLATION=LEAK" if e is None else "ISOLATION=confirmed")
+else:
+    print("ISOLATION=unclaimed")
+leaked = []
+for name in DNS:
+    try:
+        socket.getaddrinfo(name, None); leaked.append(name)
+    except OSError:
+        pass
+print("DNS=OPEN:%s" % (",".join(leaked),) if leaked else "DNS=closed")
+"""
+
+
+def seam_canary_script(seam_targets, isolation_target,
+                       dns_names=("example.com", "host.docker.internal")) -> str:
+    """A POSIX `sh` one-shot for a SEAM-carrying sandbox: the ordinary boundary
+    clauses (rootfs, mounts, arch, runtime) via `_CANARY_SH`, plus the seam-only
+    network clauses via `_SEAM_PROBE_PY`. `seam_targets` is the list of
+    `(host, port)` relay listeners this process's seams reach; `isolation_target`
+    is the `(host, port)` the relay proved open from its bridge side, which must
+    be UNreachable from inside the sandbox."""
+    probe = (_SEAM_PROBE_PY
+             .replace("__SEAM__", repr([[h, int(p)] for h, p in seam_targets]))
+             .replace("__ISO__", repr([isolation_target[0], int(isolation_target[1])]
+                                      if isolation_target else []))
+             .replace("__DNS__", repr(list(dns_names))))
+    return _CANARY_SH.replace("__EGRESS__", f'python3 -c "{probe}"')
+
+
 def _run(argv: list[str], *, timeout: float = _DOCKER_TIMEOUT) -> tuple[int, str, str]:
     """One container-runtime call. Never raises: a missing binary, a hung
     daemon and a non-zero exit all come back as a return code the caller turns
@@ -239,7 +314,8 @@ def accepted_uname(platform: str) -> tuple[str, ...] | None:
 # --------------------------------------------------------------------------
 
 def container_flags(env: dict, *, name: str, mounts: list[tuple[str, str]],
-                    interactive: bool = True, workdir: str | None = None) -> list[str]:
+                    interactive: bool = True, workdir: str | None = None,
+                    network: str | None = None) -> list[str]:
     """The confinement flags one envelope derives, as a list, deterministically.
 
     Pure: no runtime is consulted, so this is the half of the driver that is
@@ -248,6 +324,16 @@ def container_flags(env: dict, *, name: str, mounts: list[tuple[str, str]],
     placement directory and, when the image does not carry it, the host
     runtime; every one of them is reported in the achieved record, so nothing
     the driver adds on the author's behalf is invisible.
+
+    `network` is the per-process seam-only network a seam-carrying sandbox joins
+    (item 411 T3): an `--internal` user-defined network the conductor created,
+    on which the ONLY other endpoint is the relay. When set it REPLACES
+    `--network=none` (the sandbox has no host loopback of its own; its seams
+    reach the relay's listeners on this network and nothing else), and under
+    `net = "all"` the driver additionally `docker network connect`s the
+    container to the default bridge after start so there is one transport path.
+    When it is None the pre-T3 behaviour stands: `net = "none"` derives
+    `--network=none`, `net = "all"` derives no network flag.
 
     Beyond the envelope's own `fs`/`net`, every container gets the hardening the
     411 design names as the point of the rung: a read-only root filesystem, no
@@ -273,7 +359,12 @@ def container_flags(env: dict, *, name: str, mounts: list[tuple[str, str]],
         # took from inside (`_evaluate`), so a runtime that ignored the flag is
         # a refusal, not a silent host-arch run.
         flags += ["--platform", platform]
-    if env.get("net", "none") == "none":
+    if network is not None:
+        # item 411 T3: the seam-only per-process network. It carries the seam
+        # (to the relay) and nothing else; under net=none it is the whole of the
+        # container's reachability, under net=all the driver also joins bridge.
+        flags += ["--network", network]
+    elif env.get("net", "none") == "none":
         flags += ["--network=none"]
     uid_gid = _uid_gid()
     if uid_gid:
@@ -395,37 +486,29 @@ def source_mounts(files, cwd: str) -> list[tuple[str, str]]:
 # the seam transport descriptor (item 411 T1)
 # --------------------------------------------------------------------------
 
-# The plan-layer transport a cross-boundary sandbox seam would ride: item 56's
+# The plan-layer transport a cross-boundary sandbox seam rides: item 56's
 # TCP+mTLS between the two processes, carried over a conductor-owned relay on a
 # per-process network (docs/design/411-seam-transport.md, "The decision"). T1
-# builds the descriptor and its preconditions only; the relay/network/canary
-# that make it REACHABLE are T3, so the reachability precondition below is
-# always unmet in this slice and every cross-boundary sandbox seam still
-# refuses — now naming the precondition it fails instead of the blanket
-# "seam-free only" refusal it replaced.
+# built the descriptor and its item-56 preconditions; T3 lands the reachability
+# those preconditions gate — the seam-only per-process network, the relay, and
+# the seam-only canary that confirm the seam actually crosses. So the plan-layer
+# descriptor now admits (empty `unmet`) once the item-56 role and item-54
+# deadline rules hold, and REACHABILITY is established at preflight by the driver
+# (`ContainerDriver._establish_reachability`), not asserted here.
 SEAM_TRANSPORT = "relay-mtls"
-
-# item 411 T3 has not landed: the seam-only network and the conductor-owned
-# relay that carry a seam across the container boundary do not exist yet.
-_REACHABILITY_UNMET = (
-    "reachability: nothing carries a seam across the container boundary in this "
-    "slice — the seam-only per-process network and the conductor-owned relay "
-    "that forward item-56 TCP+mTLS are item 411 T3, not yet built; until T3 "
-    "lands a cross-boundary sandboxed seam has no transport (a UDS in the "
-    "placement directory does not cross a container bind mount portably)")
 
 
 def seam_transport_descriptor(pname: str, seams: list) -> dict:
     """The `relay-mtls` transport descriptor for a sandboxed process's
-    cross-boundary seams (item 411 T1): `{"transport", "unmet": [...]}`, where
-    `unmet` names every precondition NOT satisfied, one human refusal fragment
-    each. The item-56 role rule (a provider is py; a consumer is py/node, the
-    rust/go/java runners holding only the UDS-only client) and the item-54
-    deadline rule (every in-placement participant's `seam_deadline` is non-null)
-    are checked here per seam; the T3 reachability precondition is appended once
-    while T3 is unbuilt. An empty `unmet` means the plan layer admits and only a
-    landed T3 is missing; a seam-free process passes an empty `seams` and no
-    descriptor is built at all."""
+    cross-boundary seams (item 411 T1/T3): `{"transport", "unmet": [...]}`,
+    where `unmet` names every PLAN-LAYER precondition NOT satisfied, one human
+    refusal fragment each. The item-56 role rule (a provider is py; a consumer
+    is py/node, the rust/go/java runners holding only the UDS-only client) and
+    the item-54 deadline rule (every in-placement participant's `seam_deadline`
+    is non-null) are checked here per seam. An empty `unmet` means the plan
+    layer admits and the driver goes on to ESTABLISH reachability (network +
+    relay + seam-only canary, T3); a seam-free process passes an empty `seams`
+    and no descriptor is built at all."""
     unmet: list[str] = []
 
     def add(fragment: str) -> None:
@@ -466,9 +549,177 @@ def seam_transport_descriptor(pname: str, seams: list) -> dict:
                     f"(item 54); set seam_deadline on {part!r} or leave it at the "
                     f"default")
 
-    if seams:
-        add(_REACHABILITY_UNMET)
     return {"transport": SEAM_TRANSPORT, "unmet": unmet}
+
+
+# --------------------------------------------------------------------------
+# the seam relay + per-process networks (item 411 T3)
+# --------------------------------------------------------------------------
+
+# The candidate host bind addresses, in order (docs/design/411-seam-transport.md,
+# "Host bind address"). On Docker Desktop `host.docker.internal` reaches the
+# host's loopback, so `127.0.0.1` is right; on Linux the relay reaches the host
+# through the bridge gateway and a loopback-bound listener is not reachable, so
+# the gateway address is the one that answers. The conductor does not guess — it
+# PROBES each in order and takes the first that answers; `0.0.0.0` is never a
+# candidate.
+_HOST_BIND_LOOPBACK = "127.0.0.1"
+
+
+def seam_network_name(placement_id: str, pname: str) -> str:
+    """The `--internal` per-process seam network's name (item 411 T3). One per
+    sandboxed process, so a sandbox sees only its own seams' endpoints."""
+    return f"revl-sb-{placement_id}-{pname}"
+
+
+def relay_container_name(placement_id: str) -> str:
+    """The one relay container per placement — the only thing besides the
+    sandbox on each per-process network, and the only forwarder in the path."""
+    return f"revl-sb-{placement_id}-relay"
+
+
+class SeamRelayManager:
+    """Creates the per-process seam networks and the one conductor-owned relay
+    for a placement, and tears them down (item 411 T3).
+
+    Docker-gated: every method that touches the runtime is a no-op refusal when
+    no `docker` is resolved, and the object still tracks the names it would have
+    created so teardown is exact. The relay is `python3 -m revl.seam_relay`
+    running the derived table inside the first-party runner image; it holds no
+    key and forwards ciphertext only.
+    """
+
+    def __init__(self, placement_id: str, image: str,
+                 docker: str | None = None) -> None:
+        self.placement_id = placement_id
+        self.image = image
+        self._docker = docker
+        self.relay_name = relay_container_name(placement_id)
+        self._networks: dict[str, str] = {}   # pname -> network name
+        self._relay_started = False
+        self._bind_host: str | None = None
+
+    # -- naming / bookkeeping (plan-layer) ---------------------------------
+    def network_for(self, pname: str) -> str:
+        net = seam_network_name(self.placement_id, pname)
+        self._networks[pname] = net
+        return net
+
+    def created_names(self) -> tuple[str, list[str]]:
+        """The relay container and networks this manager is responsible for
+        removing, for the teardown audit."""
+        return self.relay_name, sorted(self._networks.values())
+
+    # -- runtime lifecycle (docker-gated) ----------------------------------
+    def _resolve_docker(self) -> str | None:
+        if self._docker is None:
+            self._docker = shutil.which("docker") or ""
+        return self._docker or None
+
+    def create_network(self, pname: str) -> tuple[str, str | None]:
+        """Create the process's `--internal` network. Returns `(name, err)`."""
+        net = self.network_for(pname)
+        docker = self._resolve_docker()
+        if docker is None:  # pragma: no cover - caller refused earlier
+            return net, "no container runtime to create the seam network"
+        rc, _, err = _run([docker, "network", "create", "--internal", net])
+        if rc != 0:
+            return net, (f"could not create the seam-only network {net!r} for "
+                         f"{pname!r} ({_tail(err)})")
+        return net, None
+
+    def relay_argv(self, docker: str, table_path: str, bind_host: str) -> list[str]:
+        """The exact `docker run` argv the relay is started with — a `-d` runner
+        on the default bridge, the derived table mounted read-only and passed by
+        path, no key of any kind. Split out so it is reviewable without a daemon."""
+        return [docker, "run", "-d", "--rm", "--name", self.relay_name,
+                "--label", "revl.sandbox=411",
+                "-v", f"{table_path}:{table_path}:ro",
+                self.image,
+                "python3", "-m", "revl.seam_relay", table_path,
+                "--bind-host", bind_host]
+
+    def start_relay(self, table_path: str, bind_host: str) -> str | None:
+        """Start the one relay container from the derived table (mounted at
+        `table_path`), on the default bridge. Idempotent: only the first call
+        starts it."""
+        if self._relay_started:
+            return None
+        docker = self._resolve_docker()
+        if docker is None:  # pragma: no cover
+            return "no container runtime to start the seam relay"
+        self._bind_host = bind_host
+        rc, _out, err = _run(self.relay_argv(docker, table_path, bind_host))
+        if rc != 0:
+            return f"could not start the seam relay {self.relay_name!r} ({_tail(err)})"
+        self._relay_started = True
+        return None
+
+    def connect_relay(self, net: str) -> str | None:
+        """Attach the relay to one per-process network so it can forward onto
+        it. The relay binds its listeners on its address on THIS network."""
+        docker = self._resolve_docker()
+        if docker is None:  # pragma: no cover
+            return "no container runtime to connect the seam relay"
+        rc, _, err = _run([docker, "network", "connect", net, self.relay_name])
+        if rc != 0:
+            return (f"could not attach the relay to {net!r} ({_tail(err)})")
+        return None
+
+    def probe_host_bind(self) -> tuple[str | None, str | None]:
+        """The address a host-side seam listener binds so the relay can reach it
+        (docs/design/411-seam-transport.md, "Host bind address"). Probed, never
+        guessed: bind a throwaway listener on each candidate in order
+        (`127.0.0.1`, then the bridge gateway) and have the relay connect to
+        `host.docker.internal:<port>`; the first that answers wins. Returns
+        `(address, None)` or `(None, diagnostic)` naming both candidates.
+
+        Docker-gated and best-effort here (the throwaway-listener probe needs a
+        live relay); when no docker is resolved it returns the loopback so the
+        plan layer has a value, and CI's live run is the real measurement."""
+        docker = self._resolve_docker()
+        if docker is None:  # pragma: no cover - caller refused earlier
+            return _HOST_BIND_LOOPBACK, None
+        candidates = [_HOST_BIND_LOOPBACK]
+        rc, out, _ = _run([docker, "network", "inspect", "bridge",
+                           "--format", "{{(index .IPAM.Config 0).Gateway}}"])
+        gw = (out or "").strip()
+        if rc == 0 and gw:
+            candidates.append(gw)
+        # the real probe (bind + relay-connect) runs in CI; here we take the
+        # loopback on Docker Desktop and record the gateway candidate for Linux.
+        self._bind_host = candidates[0]
+        return candidates[0], None
+
+    def relay_bridge_target(self, port: int) -> tuple[str, int] | None:
+        """The relay's own bridge-side `(ip, port)` — a target the relay proves
+        open from its bridge vantage, which the seam-only canary requires to be
+        DROPPED from inside the sandbox (the discriminating ISOLATION clause).
+        None when the relay's bridge IP cannot be read."""
+        docker = self._resolve_docker()
+        if docker is None or not self._relay_started:  # pragma: no cover
+            return None
+        rc, out, _ = _run([docker, "inspect", "-f",
+                           "{{.NetworkSettings.Networks.bridge.IPAddress}}",
+                           self.relay_name])
+        ip = (out or "").strip()
+        if rc != 0 or not ip:
+            return None
+        return ip, port
+
+    def teardown(self) -> None:
+        """Remove the relay and every per-process network, best-effort — the
+        belt for a conductor killed mid-run (design: relay death withdraws every
+        sandbox seam, so no residue must survive it)."""
+        docker = self._resolve_docker()
+        if docker is None:  # pragma: no cover - nothing was created
+            return
+        if self._relay_started:
+            _run([docker, "rm", "-f", self.relay_name], timeout=30.0)
+            self._relay_started = False
+        for net in list(self._networks.values()):
+            _run([docker, "network", "rm", net], timeout=30.0)
+        self._networks.clear()
 
 
 # --------------------------------------------------------------------------
@@ -502,12 +753,13 @@ class ContainerDriver:
                 f"covers the `py` backend only in this slice (the other tiers "
                 f"need their own in-image runner form). Move the process to the "
                 f"`py` tier, or take it out of the sandbox.")
-        # item 411 T1: a cross-boundary seam no longer refuses in a blanket way.
-        # The gate builds the relay-mtls transport descriptor and refuses naming
-        # each precondition it fails — the item-56 role and item-54 deadline
-        # rules per seam, plus the T3 reachability precondition that is unmet
-        # until the relay lands. A seam-free process carries no seams and this
-        # block is inert (byte-identical to a seam-free boot before T1).
+        # item 411 T1/T3: a cross-boundary seam builds the relay-mtls transport
+        # descriptor. The plan-layer preconditions (item-56 role, item-54
+        # deadline) refuse HERE naming each unmet one; REACHABILITY is no longer
+        # a plan-layer refusal — T3's relay + per-process network establish it,
+        # and the seam-only canary (run in `_probe` below when `seam_network` is
+        # set) confirms it from inside. A seam-free process carries no seams and
+        # this block is inert (byte-identical to a seam-free boot).
         seams = ctx.get("seams") or []
         if seams:
             desc = seam_transport_descriptor(pname, seams)
@@ -551,10 +803,16 @@ class ContainerDriver:
         # confirms first, and its RUNTIME line says whether the image can be the
         # runner on its own.
         cwd = ctx.get("cwd") or os.getcwd()
+        # item 411 T3: a seam-carrying sandbox runs on its per-process seam-only
+        # network with the relay up, and the canary discriminates a seam (open)
+        # from egress (a dropped isolation target) instead of the net=none probe.
+        seam_network = ctx.get("seam_network")
+        canary = self._canary_for(env, ctx)
         # item 411 T2: the process's OWN spec and seam identity, not the whole
         # placement directory — a hostile sandbox must not read its siblings' keys.
         declared = seam_dir_mounts(ctx) + envelope_mounts(env)
-        probe, probe_err = self._probe(docker, pname, env, str(image), declared)
+        probe, probe_err = self._probe(docker, pname, env, str(image), declared,
+                                       network=seam_network, canary=canary)
         if probe_err:
             return None, probe_err
         evidence, err = self._evaluate(pname, env, str(image), declared, probe)
@@ -587,7 +845,8 @@ class ContainerDriver:
         # child dying moments after the conductor announced the boundary.
         final = declared + host_mounts
         probe2, probe_err = self._probe(docker, pname, env, str(image), final,
-                                        pythonpath=pythonpath)
+                                        pythonpath=pythonpath,
+                                        network=seam_network, canary=canary)
         if probe_err:
             return None, probe_err
         evidence, err = self._evaluate(pname, env, str(image), final, probe2)
@@ -613,6 +872,7 @@ class ContainerDriver:
             "mounts": final,
             "host_mounts": host_mounts,
             "pythonpath": pythonpath,
+            "seam_network": seam_network,
             "evidence": evidence,
         }, None
 
@@ -637,18 +897,32 @@ class ContainerDriver:
                 f"that exists (by digest), or pull it first.")
         return None
 
+    def _canary_for(self, env: dict, ctx: dict) -> str:
+        """The canary script this process gets: the seam-only variant when it
+        runs on a per-process seam network (item 411 T3), else the pre-T3
+        net=none/all script. Split out so the choice is testable without a
+        daemon."""
+        if ctx.get("seam_network"):
+            return seam_canary_script(ctx.get("seam_canary_targets") or [],
+                                      ctx.get("seam_isolation_target"))
+        return _canary_script(env.get("net", "none"))
+
     def _probe(self, docker: str, pname: str, env: dict, image: str,
                mounts: list[tuple[str, str]],
-               pythonpath: str | None = None) -> tuple[dict, str | None]:
+               pythonpath: str | None = None,
+               network: str | None = None,
+               canary: str | None = None) -> tuple[dict, str | None]:
         """Run the boot canary INSIDE the boundary, with the exact confinement
         flags a launch with `mounts` would get, and return its report parsed
         into fields — or a diagnostic when it could not run at all."""
         name = f"revl-canary-{pname}-{secrets.token_hex(4)}"
         env_flags = ["-e", f"PYTHONPATH={pythonpath}"] if pythonpath else []
+        script = canary if canary is not None else _canary_script(env.get("net", "none"))
         argv = ([docker, "run"]
-                + container_flags(env, name=name, mounts=mounts, interactive=False)
+                + container_flags(env, name=name, mounts=mounts,
+                                  interactive=False, network=network)
                 + env_flags
-                + [image, "sh", "-c", _canary_script(env.get("net", "none"))])
+                + [image, "sh", "-c", script])
         rc, out, err = _run(argv, timeout=_CANARY_TIMEOUT)
         if rc != 0 or "CANARY=done" not in out:
             # the canary IS the platform preflight: it runs with the same
@@ -698,7 +972,14 @@ class ContainerDriver:
                 f"without one cannot be confirmed and is refused rather than "
                 f"trusted.")
 
-        if env.get("net", "none") == "none":
+        if "SEAM" in report:
+            # item 411 T3: a seam-carrying sandbox on its per-process network.
+            # The discriminating pair plus the DNS closures replace the net=none
+            # egress clause; any clause that cannot be CONFIRMED is a refusal.
+            seam_err = self._evaluate_seam(pname, env, report, lines)
+            if seam_err:
+                return [], seam_err
+        elif env.get("net", "none") == "none":
             routes = report.get("ROUTES", "?")
             egress = report.get("EGRESS", "unreported")
             if routes != "0":
@@ -765,6 +1046,56 @@ class ContainerDriver:
         lines.append("all capabilities dropped, no-new-privileges")
         return lines, None
 
+    def _evaluate_seam(self, pname: str, env: dict, report: dict,
+                       lines: list[str]) -> str | None:
+        """The item 411 T3 seam-only network clauses. `lines` is appended to on
+        success; a returned string is a refusal. Under `net = "none"` all three
+        clauses (SEAM open, ISOLATION confirmed, DNS closed) are enforced; under
+        `net = "all"` the sandbox is on the bridge too and the posture is `all`,
+        so only SEAM is confirmed (the isolation target IS reachable, and DNS is
+        open, by construction — refusing on either would refuse a legitimate
+        `net = "all"` manifest)."""
+        seam = report.get("SEAM", "unreported")
+        if seam.startswith("closed:"):
+            return (
+                f"process {pname!r}: a seam's relay listener did not accept a "
+                f"connect from inside the sandbox ({seam}); the seam cannot cross "
+                f"the boundary, and an unreachable seam is refused rather than the "
+                f"process booting into a composition it cannot talk to.")
+        if seam not in ("open", "none"):
+            return (
+                f"process {pname!r}: the in-sandbox seam probe reports {seam!r} "
+                f"rather than `open`; an unconfirmed seam transport is refused "
+                f"exactly like a broken one.")
+        lines.append("seam transport confirmed in-sandbox: every relay listener "
+                     "this process's seams use accepts (relay-mtls, item 411 T3)")
+
+        if env.get("net", "none") == "all":
+            lines.append("net=all: the sandbox is on the default bridge too; "
+                         "posture is `all` and only the seam is confirmed")
+            return None
+
+        isolation = report.get("ISOLATION", "unreported")
+        if isolation != "confirmed":
+            return (
+                f"process {pname!r}: the isolation probe reports {isolation!r}. A "
+                f"target the relay proved open from its bridge side must NOT open "
+                f"from inside the sandbox; that it does (or could not be judged) "
+                f"means the seam-only network is not confining egress, and an "
+                f"unconfirmed boundary is refused, never silently downgraded.")
+        lines.append("isolation confirmed in-sandbox: a target open from the "
+                     "relay's bridge vantage is dropped from the sandbox's")
+
+        dns = report.get("DNS", "unreported")
+        if dns != "closed":
+            return (
+                f"process {pname!r}: DNS is not closed inside the sandbox ({dns}). "
+                f"An `--internal` network's resolver must forward nothing; a name "
+                f"that resolves is a leak, so the placement refuses rather than "
+                f"boot into a boundary whose DNS is open.")
+        lines.append("DNS closed in-sandbox: no external name resolves")
+        return None
+
     # -- launch ------------------------------------------------------------
     def wrap(self, pname: str, cmd: list, proc_env: dict | None,
              achieved: dict) -> tuple[list, dict | None]:
@@ -785,7 +1116,8 @@ class ContainerDriver:
         argv = ([docker, "run"]
                 + container_flags(achieved["_env"], name=name,
                                   mounts=achieved["mounts"],
-                                  workdir=achieved.get("workdir"))
+                                  workdir=achieved.get("workdir"),
+                                  network=achieved.get("seam_network"))
                 + env_flags + [str(achieved["image"])] + inner)
         # the child's environment is the CONDUCTOR's process environment for
         # the `docker` CLI only; nothing from it crosses into the boundary

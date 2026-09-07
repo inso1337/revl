@@ -874,16 +874,19 @@ byte-identical throughout (the 342/363/396 additivity discipline).
   summary; the static `revl audit --placement` view says which rungs have a
   driver at all, and therefore which placements would refuse.
 
-  **Not yet, and why (the seam transport).** A container-sandboxed process
-  with a cross-boundary seam is REFUSED rather than launched. The 363 seam is
-  a Unix socket in the placement directory, and a bind mount does not carry
-  one portably: measured on Docker Desktop (macOS), a container binding the
-  socket under the mount is not connectable from the host, and the reverse
-  direction gets ECONNREFUSED. So the composing half of Stage 2 waits on the
-  per-rung transport variant (TCP+mTLS over the item-56 network seam, or a
-  shared network namespace), which is also what Stage 5 needs. Until then a
-  container-sandboxed process must be seam-free, and the approval channel
-  rides on the same missing transport.
+  **The seam transport (landed: T3).** A container-sandboxed process with a
+  cross-boundary seam once had to be REFUSED, because the 363 Unix socket in
+  the placement directory does not cross a bind mount portably (measured on
+  Docker Desktop: the container binds the socket and a host connect gets
+  ECONNREFUSED). That gap is now closed by item 411 T3: item-56 TCP+mTLS is
+  carried across the boundary over a SEAM-ONLY per-process `--internal` network
+  and one conductor-owned RELAY that is the only other thing on it (a blind
+  byte forwarder holding no key), with a seam-only canary confirming the
+  transport from inside (SEAM open, ISOLATION dropped, DNS closed). The full
+  decision, the measurement table, and the slice plan live in
+  `docs/design/411-seam-transport.md`; the approval channel (T5) rides the same
+  relay as one more served key. Still deferred to their own slices: the
+  `wasm-cell` rung and the `microvm` rung (T6, which needs `/dev/kvm`).
 
 - **Stage 3 (all compiled tiers + mixed-arch).** The wrapper generalized to
   node/rust/go/java runner images; `platform` and the emulation preflight;

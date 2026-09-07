@@ -39,7 +39,10 @@ from revl.placement import (  # noqa: E402
     _normalize_sandbox_table,
     _parse_need,
     expand_tiers,
+    render_seam_transport_summary,
+    sandbox_approval_rows,
     sandbox_capability_gate,
+    sandbox_relay_table,
 )
 from revl import sandbox_runtime as _sb  # noqa: E402
 
@@ -363,9 +366,16 @@ def _drive(tmp_path, toml_text, driver=None):
         return _FakeProc(s["name"])
 
     stub = _StubDriver() if driver is None else driver
+    # item 411 T3: the seam relay is resolved through a factory, patched here to
+    # a manager that resolves NO container runtime — so `_establish_seam_transport`
+    # short-circuits and these plan-layer tests never touch a live daemon, the
+    # same discipline `resolve_sandbox_driver` is stubbed under.
+    from revl import sandbox_runtime as _sbrt
     with mock.patch.object(_placement, "_cordis_py_installed", lambda: True), \
          mock.patch.object(_placement, "_preflight", lambda *a, **k: None), \
          mock.patch.object(_placement, "resolve_sandbox_driver", lambda rung: stub), \
+         mock.patch.object(_placement, "_new_relay_manager",
+                           lambda pid, img: _sbrt.SeamRelayManager(pid, img, docker="")), \
          mock.patch.object(_placement.subprocess, "Popen", fake_popen):
         rc = _placement.run_placement([app], toml, once=True)
     return rc, specs
@@ -722,3 +732,167 @@ def test_gate_admits_a_canonical_need_the_mount_really_covers(tmp_path):
                         "fs": ["/scratch:rw"]},
                        {"fetch": ["fs:/scratch/work:rw"]})
     assert sandbox_capability_gate(*args) is None
+
+
+# ==========================================================================
+# T3: the relay forwarding table, derived purely from the seam graph
+# ==========================================================================
+
+
+def _relay_table(sandboxes, processes, provides, requires, owner, backends,
+                 remotes=None):
+    return sandbox_relay_table(
+        "plc", sandboxes, processes, requires, provides, owner, backends,
+        remotes or {}, 3.0)
+
+
+def test_relay_row_for_a_sandboxed_provider_and_host_consumer():
+    # the relay PUBLISHES a host loopback port and forwards it to the sandboxed
+    # provider by network alias; the host consumer dials 127.0.0.1:<published>.
+    plan = _relay_table(
+        {"P": {"isolation": "container", "net": "none"}},
+        {"P": {"seam_deadline": 5.0}, "C": {"seam_deadline": 5.0}},
+        {"P": {"work": "Work"}, "C": {}}, {"P": {}, "C": {"work": "Work"}},
+        {"work": "P"}, {"P": "py", "C": "py"})
+    assert len(plan["rows"]) == 1
+    row = plan["rows"][0]
+    assert row["direction"] == "sandboxed-provider"
+    assert "publish" in row["listen"] and row["target"] == "P:9443"
+    ep = plan["consumer_endpoints"][("C", "work")]
+    assert ep["via"] == "loopback" and ep["host"] == "127.0.0.1"
+    assert plan["networks"] == {"P": "revl-sb-plc-P"}
+    assert plan["relay"] == "revl-sb-plc-relay"
+
+
+def test_relay_row_for_a_sandboxed_consumer_and_host_provider():
+    # the relay listens on the consumer's network and forwards to the host
+    # provider via host.docker.internal; the consumer dials <relay>:<port>.
+    plan = _relay_table(
+        {"C": {"isolation": "container", "net": "none"}},
+        {"H": {"seam_deadline": 5.0}, "C": {"seam_deadline": 5.0}},
+        {"H": {"work": "Work"}, "C": {}}, {"H": {}, "C": {"work": "Work"}},
+        {"work": "H"}, {"H": "py", "C": "py"})
+    assert len(plan["rows"]) == 1
+    row = plan["rows"][0]
+    assert row["direction"] == "sandboxed-consumer"
+    assert row["listen"]["network"] == "revl-sb-plc-C"
+    assert row["target"].startswith("host.docker.internal:")
+    ep = plan["consumer_endpoints"][("C", "work")]
+    assert ep["via"] == "relay" and ep["host"] == "revl-sb-plc-relay"
+
+
+def test_relay_row_for_two_sandboxed_processes():
+    plan = _relay_table(
+        {"P": {"isolation": "container", "net": "none"},
+         "C": {"isolation": "container", "net": "none"}},
+        {"P": {"seam_deadline": 5.0}, "C": {"seam_deadline": 5.0}},
+        {"P": {"work": "Work"}, "C": {}}, {"P": {}, "C": {"work": "Work"}},
+        {"work": "P"}, {"P": "py", "C": "py"})
+    assert len(plan["rows"]) == 1
+    row = plan["rows"][0]
+    assert row["direction"] == "both-sandboxed"
+    assert row["listen"]["network"] == "revl-sb-plc-C"   # listens on consumer net
+    assert row["target"] == "P:9443"                      # forwards to provider
+    assert set(plan["networks"]) == {"P", "C"}
+
+
+def test_an_internal_seam_needs_no_relay_row():
+    # both components in one sandboxed process: the seam is internal, so the
+    # table is empty and nothing is established (byte-identical to before T3).
+    plan = _relay_table(
+        {"W": {"isolation": "container", "net": "none"}},
+        {"W": {"seam_deadline": 5.0}},
+        {"W": {"work": "Work"}}, {"W": {"work": "Work"}},
+        {"work": "W"}, {"W": "py"})
+    assert plan["rows"] == []
+
+
+def test_a_remote_consumed_key_is_not_this_relays_row():
+    # a sandboxed consumer dialing a [remotes] provider: that provider serves
+    # its own transport in another composition, not this relay.
+    plan = _relay_table(
+        {"C": {"isolation": "container", "net": "none"}},
+        {"C": {"seam_deadline": 5.0}},
+        {"C": {}}, {"C": {"rem": "Work"}}, {},
+        {"C": "py"}, remotes={"rem": {"service": "Work"}})
+    assert plan["rows"] == []
+
+
+# ==========================================================================
+# T5: the approval-across-boundary channel
+# ==========================================================================
+
+
+def test_approval_rows_reach_the_conductor_via_the_relay():
+    plan = sandbox_approval_rows("plc", {"P"}, {"P": "revl-sb-plc-P"})
+    assert len(plan["rows"]) == 1
+    row = plan["rows"][0]
+    assert row["direction"] == "approval" and row["id"] == "approval:P"
+    assert row["listen"]["network"] == "revl-sb-plc-P"
+    # the request is forwarded to the CONDUCTOR's own listener, not a direct escape
+    assert row["target"] == f"host.docker.internal:{plan['listen_port']}"
+    assert plan["endpoints"]["P"]["host"] == "revl-sb-plc-relay"
+
+
+def test_a_process_with_no_class_c_gets_no_approval_row():
+    plan = sandbox_approval_rows("plc", set(), {})
+    assert plan["rows"] == [] and plan["endpoints"] == {}
+
+
+def test_approval_row_ports_are_disjoint_from_seam_row_ports():
+    # a placement with a seam row (port base 15000) and an approval row (base
+    # 16001) must never collide the two.
+    appr = sandbox_approval_rows("plc", {"P", "Q"}, {"P": "n1", "Q": "n2"})
+    ports = [r["listen"]["port"] for r in appr["rows"]]
+    assert all(p >= 16001 for p in ports)
+    assert len(set(ports)) == len(ports)
+
+
+# ==========================================================================
+# T3/T5: the boot-summary lines
+# ==========================================================================
+
+
+def test_seam_transport_summary_prints_the_table_and_posture():
+    plan = _relay_table(
+        {"P": {"isolation": "container", "net": "none"}},
+        {"P": {"seam_deadline": 5.0}, "C": {"seam_deadline": 5.0}},
+        {"P": {"work": "Work"}, "C": {}}, {"P": {}, "C": {"work": "Work"}},
+        {"work": "P"}, {"P": "py", "C": "py"})
+    appr = sandbox_approval_rows("plc", set(), {})
+    lines = render_seam_transport_summary(
+        {"P": {"isolation": "container", "net": "none"}}, plan, appr)
+    text = "\n".join(lines)
+    assert "relay-mtls" in text and "holds no key" in text
+    assert "P:9443" in text
+    assert "posture P: net=none" in text
+    assert "loopback network seam with cryptographic admission" in text
+
+
+def test_seam_transport_summary_says_all_is_all():
+    plan = _relay_table(
+        {"P": {"isolation": "container", "net": "all"}},
+        {"P": {"seam_deadline": 5.0}, "C": {"seam_deadline": 5.0}},
+        {"P": {"work": "Work"}, "C": {}}, {"P": {}, "C": {"work": "Work"}},
+        {"work": "P"}, {"P": "py", "C": "py"})
+    lines = render_seam_transport_summary(
+        {"P": {"isolation": "container", "net": "all"}}, plan,
+        sandbox_approval_rows("plc", set(), {}))
+    text = "\n".join(lines)
+    assert "posture P: net=all" in text and "narrows NOTHING" in text
+
+
+def test_seam_transport_summary_counts_the_approval_channel():
+    appr = sandbox_approval_rows("plc", {"P"}, {"P": "revl-sb-plc-P"})
+    lines = render_seam_transport_summary(
+        {"P": {"isolation": "container", "net": "none"}},
+        {"rows": [], "relay": "revl-sb-plc-relay"}, appr)
+    text = "\n".join(lines)
+    assert "approval-across-boundary channel (item 411 T5)" in text
+    assert "via the conductor" in text
+
+
+def test_seam_transport_summary_is_empty_without_a_cross_boundary_seam():
+    empty = {"rows": [], "relay": "revl-sb-plc-relay"}
+    assert render_seam_transport_summary(
+        {}, empty, {"rows": [], "endpoints": {}}) == []
