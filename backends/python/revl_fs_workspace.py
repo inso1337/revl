@@ -1041,7 +1041,7 @@ class WriteHandle:
     step uses the fd rather than re-walking the name."""
 
     __slots__ = ("fd", "real", "created", "mode", "atime_ns", "mtime_ns",
-                 "preimage")
+                 "dev", "ino", "size", "preimage")
 
     def __init__(self, fd: int, real: str, created: bool, st) -> None:
         self.fd = fd
@@ -1050,6 +1050,17 @@ class WriteHandle:
         self.mode = stat.S_IMODE(st.st_mode)
         self.atime_ns = st.st_atime_ns
         self.mtime_ns = st.st_mtime_ns
+        #: Identity of the ORIGINAL held target inode, captured from the fstat
+        #: of the fd `open_confined_write` verified, BEFORE any content mutation
+        #: (issue #523). `(dev, ino)` is what an inode-swap of same-named,
+        #: same-BYTE content cannot forge: a replacement file has a different
+        #: `ino`, so a receipt bound to this identity is not satisfied by the
+        #: new inode's facts. `size` is the original length; the digest is
+        #: computed on demand from the held fd (`original_receipt`), never by
+        #: reopening the path.
+        self.dev = st.st_dev
+        self.ino = st.st_ino
+        self.size = st.st_size
         #: the preimage sidecar `snapshot_preimage` took, so `discard_write`
         #: can remove it when the write is abandoned after the snapshot. The
         #: body cannot clean it up itself: the AST scan requires every path
@@ -1231,6 +1242,122 @@ def confirm_landed(handle: WriteHandle) -> None:
             "bytes written; nothing outside the session workspace root was "
             "reached and no undo was registered. Retry the write, or serialize "
             "with the other writer before retrying",
+            handle.real,
+        )
+
+
+# ---------------------------------------------------------------------------
+# original native write receipts + expected-before guards (issue #523)
+# ---------------------------------------------------------------------------
+# OPT-IN and NOT YET WIRED. No `@py` body in `stdlib/fs.rvl` calls anything
+# below, so legacy execution is byte-for-byte unchanged (issue #523 requirement
+# 7) and no public fs.rvl API name is committed here — issue #523 asks that the
+# public surface be chosen only after the contract is mapped onto #500/#498
+# (docs/design/478-native-write-receipts.md). These helpers are the smallest
+# tractable piece the host genuinely cannot do for itself: they read facts from
+# the ORIGINAL held descriptor `open_confined_write` verified, so a same-bytes
+# inode swap performed before the first host observation cannot supply the
+# receipt's identity. When a future opt-in witnessed variant wires them in, they
+# join `PATH_FAMILIES` and gain the table-driven totality the rest of family 4
+# has; until then they raise `FsOpError` directly and are unit-tested against
+# this module (tests/test_fs_write_receipts.py).
+
+#: The receipt fields an expectation may pin. Identity (`dev`, `ino`) and `size`
+#: come from the fstat of the held fd with no extra syscall; `digest` is a
+#: content hash read back through that same fd.
+RECEIPT_FIELDS: tuple[str, ...] = ("dev", "ino", "size", "digest")
+
+
+def _digest_held(handle: WriteHandle) -> str:
+    """A SHA-256 of the held target's current bytes, read THROUGH `handle.fd`.
+
+    Reading through the fd rather than reopening the name is the whole point
+    (issue #523 requirement 4: "Reopening a path after the operation is not
+    original-handle evidence"): the bytes hashed are the ones on the very inode
+    the containment/type/link-count check admitted, so a name swapped underneath
+    the check cannot divert the hash to some other file. Called before
+    `write_through` truncates, so it observes the original content."""
+    h = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(handle.fd, 1 << 20, offset)
+        if not chunk:
+            break
+        offset += len(chunk)
+        h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def original_receipt(handle: WriteHandle, digest: bool = True) -> dict:
+    """Facts captured from the ORIGINAL held target descriptor (issue #523
+    requirement 4), as WAL-serializable data suitable for binding to an effect
+    entry / witness.
+
+    `dev`/`ino`/`size`/`mode`/`mtime_ns` are the fstat the handle captured at
+    open, before any byte was written; `digest` (when requested) is read back
+    through the held fd. Every field is derived from the held descriptor, never
+    from a reopened path, so a receipt bound here names the inode that actually
+    participated in the native write. `created` is carried through so a receipt
+    for an absent-required create (`size == 0`, a fresh `ino`) is distinguishable
+    from one for an existing-required overwrite."""
+    fact = {
+        "dev": handle.dev,
+        "ino": handle.ino,
+        "size": handle.size,
+        "mode": handle.mode,
+        "mtime_ns": handle.mtime_ns,
+        "created": handle.created,
+    }
+    if digest:
+        fact["digest"] = _digest_held(handle)
+    return fact
+
+
+def expect_existing(handle: WriteHandle, expected: dict) -> None:
+    """Refuse the write unless the ORIGINAL held descriptor matches the caller's
+    explicit expected facts, BEFORE any content mutation (issue #523 requirement
+    1 + 2).
+
+    `expected` names any non-empty subset of `RECEIPT_FIELDS`: `dev`/`ino` pin
+    the target's identity, `size` its original length, `digest` its original
+    content. Each named field is compared against the held descriptor (identity
+    and size from the captured fstat, `digest` read through the held fd). A
+    mismatch is `EEXPECT` — the target drifted from what the caller recorded, so
+    the guarded write is refused with the target still byte-identical (the open
+    does not truncate).
+
+    An `expected` with none of `RECEIPT_FIELDS` is itself `EINVAL`: an
+    expected-existing check with no facts would silently adopt whatever state is
+    observed as the expectation, which requirement 1 forbids ("Never silently
+    adopt newly observed state as the expectation")."""
+    named = [k for k in RECEIPT_FIELDS if k in expected]
+    if not named:
+        raise FsOpError(
+            "EINVAL",
+            "an expected-existing guard needs at least one recorded fact to "
+            f"check against (one of {', '.join(RECEIPT_FIELDS)}); an empty "
+            "expectation would adopt the observed state as its own expectation",
+            handle.real,
+        )
+    actual = {"dev": handle.dev, "ino": handle.ino, "size": handle.size}
+    drift = []
+    for key in ("dev", "ino", "size"):
+        if key in expected and expected[key] != actual[key]:
+            drift.append((key, expected[key], actual[key]))
+    if "digest" in expected:
+        cur = _digest_held(handle)
+        if expected["digest"] != cur:
+            drift.append(("digest", expected["digest"], cur))
+    if drift:
+        detail = "; ".join(
+            f"{k}: expected {e!r}, held descriptor has {a!r}" for k, e, a in drift)
+        raise FsOpError(
+            "EEXPECT",
+            "the write target does not match the expected-before facts the "
+            f"caller recorded ({detail}). The target drifted since it was "
+            "recorded, so the guarded write is refused and the target is "
+            "unchanged; re-record the expectation against the current target, "
+            "or serialize with the other writer, before retrying",
             handle.real,
         )
 
