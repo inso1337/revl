@@ -129,6 +129,19 @@ class MethodDecl:
     # literal. Legal only alongside `validated` (there is no validation fault to
     # retry without it), checked in lower next to the sibling modifier rules.
     retry: int = 0
+    # roadmap item 441 / issue #120 (docs/design/458-termination-language-surface.md):
+    # the two builtin marker type heads `Criterion` and `Guard`, when this
+    # operation's return type is one of them. `"criterion"` or `"guard"`, else
+    # `None`. Set in `service()` where the return type is ERASED to `Opt[Bool]`
+    # (the marker's value-level erasure on every tier): `returns` therefore
+    # reads `Opt[Bool]` here and every downstream check / inference / emitter
+    # sees an ordinary optional, while this flag carries the obligation to the
+    # per-operation `termination` IR key (L5) and to the L1 read-only walk over
+    # a provider's body. `None` for every existing operation, so their IR is
+    # byte-identical (L6). Nothing is lexed — the two heads are ordinary
+    # identifiers the type parser already reads — so the self-host lexer parity
+    # oracle is untouched.
+    termination: str | None = None
 
 
 @dataclass
@@ -2669,6 +2682,35 @@ class Parser:
             if self.at("arrow"):
                 self.next()
                 returns = self.type_()
+            # roadmap item 441 / issue #120
+            # (docs/design/458-termination-language-surface.md): the two builtin
+            # marker type heads `Criterion` and `Guard` in a service-operation
+            # return position. They ERASE to `Opt[Bool]` (their value-level
+            # spelling on every tier), so the returned `Opt[Bool]` type flows
+            # through every downstream check, inference and emitter unchanged and
+            # only the recorded `termination` marker carries the obligation. L2:
+            # a marker may not sit on an `emission` operation — a criterion is a
+            # READING of the world, not a boundary crossing, and this is refused
+            # at the signature before any provider exists. A `Criterion[..]` or
+            # `Guard[..]` application is NOT a marker (the heads take no
+            # arguments); it falls through unerased and is refused as an
+            # ill-positioned marker by L4 in `check_type_wellformed`.
+            termination = None
+            if returns in ("Criterion", "Guard"):
+                if emission:
+                    raise self.err(
+                        mline,
+                        f"an `emission` operation may not return `{returns}` — a "
+                        f"termination {'criterion' if returns == 'Criterion' else 'guard'} "
+                        "is a READING of whether the goal is met, not a boundary "
+                        "crossing (L2)",
+                        hint="drop `emission`: a criterion observes the world and "
+                             "returns `Opt[Bool]`; if the operation really crosses a "
+                             "boundary it is not a criterion "
+                             "(docs/design/458-termination-language-surface.md §3)",
+                    )
+                termination = "criterion" if returns == "Criterion" else "guard"
+                returns = "Opt[Bool]"
             # item 310: the `cache` trailing clause, after the return type. `cache`
             # is a contextual keyword recognised only here, so a method with no
             # cache clause is byte-identical and a service using `cache` as a key
@@ -2683,6 +2725,7 @@ class Parser:
                 commutative=method_commutative, idempotent=method_idempotent,
                 capabilities=capabilities, endorse_origins=endorse_origins,
                 cache=cache, validated=method_validated, retry=method_retry,
+                termination=termination,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)

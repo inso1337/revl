@@ -866,7 +866,15 @@ class Env:
 # builtin (non-record) type heads: destructuring a value of one of these with
 # a record/list pattern is a type error, not a host pass-through
 _BUILTIN_NONRECORD = {"Str", "Int", "Int32", "Bool", "Float", "Bytes", "Unit",
-                      "List", "Map", "Opt", "Result"}
+                      "List", "Map", "Opt", "Result",
+                      # roadmap item 441 / issue #120 (docs/design/458-...): the
+                      # two termination marker heads. Reserved builtin heads with
+                      # no constructor, so a record pattern over one is a type
+                      # error rather than a host pass-through; they never denote a
+                      # value (a service-operation return erases them to
+                      # `Opt[Bool]` in the parser), so this is inert for every
+                      # program and refused outright by L4 elsewhere.
+                      "Criterion", "Guard"}
 
 # host roots a pure fn may call without an explicit binding (DESIGN §7 builtins).
 # `Stream` (item 130) is the reference stream provider host: `Stream.source()`
@@ -3026,6 +3034,63 @@ def _check_site_inverse_emission(undo_expr, env, filename: str, line: int,
 
     _walk_inverse_emissions(undo_expr, extern_class, emitting, witness,
                             refuse=_refuse, env=env, refuse_opaque=_refuse_opaque)
+
+
+def _check_criterion_readonly(body_stmts, kind: str, op_name: str, svc_name: str,
+                              env, filename: str, line: int) -> None:
+    """L1 (roadmap item 441 / issue #120,
+    docs/design/458-termination-language-surface.md §3): a termination criterion
+    or guard body reaches NO emission and NO witnessed extern.
+
+    A criterion is the agent's honest READING of whether the goal is met; if its
+    body could cross a boundary it could cause its own satisfaction — 441's C1,
+    "a criterion that causes its own satisfaction". The rule is exactly 243 rule 3
+    for a witnessed inverse (an emission may not run in teardown) applied to a new
+    body: the SAME teardown-slot walker `_walk_inverse_emissions` resolves the six
+    shapes that reach a boundary (a direct `emission`/`witnessed` extern, a plain
+    `fn` transitively reaching one, an `emission` service operation off a required
+    binding, a spawn-handle provision op, a first-class arrow, a first-class
+    reference), so this is a THIRD caller of an already-shared walk that supplies
+    only the criterion-naming diagnostic.
+
+    Runs BEFORE the G4 provider upper-bound check (`_method_emissions`) so a
+    criterion reaching an emission is refused as a criterion (naming the marked
+    operation) rather than as a plain provider, and — unlike G4 — it also refuses
+    a WITNESSED extern, which a provide-method body is otherwise allowed to reach
+    (item 318). Inert for a criterion whose body is pure or only `acquire`s, so a
+    read-only criterion compiles unchanged.
+
+    Filed under G6 (purity outside effect forms): a criterion body is not an
+    effect form."""
+    extern_class = getattr(env, "extern_class", None) or {}
+    emitting = getattr(env, "emitting_fns", None) or set()
+    witness = getattr(getattr(env, "emission_evidence", None), "witness", None) or {}
+
+    def _refuse(node, name, terminal, chain):
+        crossing = "itself witnessed" if terminal == "witnessed" else "an emission"
+        if len(chain) > 1:
+            reached = chain[-1]
+            path = " -> ".join(chain)
+            message = (
+                f"the termination {kind} `{svc_name}.{op_name}` calls `{name}`, a "
+                f"fn that reaches {crossing} `{reached}` (through {path}) — a "
+                f"{kind} may only READ the world (L1)")
+        else:
+            message = (
+                f"the termination {kind} `{svc_name}.{op_name}` reaches {crossing} "
+                f"`{name}` — a {kind} may only READ the world (L1)")
+        raise RevlError(
+            filename, getattr(node, "line", 0) or line, message,
+            hint=f"a {kind} is the agent's honest reading of whether the goal is "
+                 f"met; if its body could cross a boundary it could cause its own "
+                 f"satisfaction (441 C1). Move the crossing into the forward path "
+                 f"and let the {kind} observe its RESULT "
+                 f"(docs/design/458-termination-language-surface.md §3)",
+            code="L1", category="termination")
+
+    for st in body_stmts:
+        _walk_inverse_emissions(st, extern_class, emitting, witness,
+                                refuse=_refuse, env=env)
 
 
 def _check_witnessed_inverse(decl, extern_class: dict, emitting_fns: set,
@@ -6803,6 +6868,16 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                         "params": _ir_params(
                             m.params, getattr(m, "secret_params", ())),
                         "returns": m.returns,
+                        # roadmap item 441 / issue #120 (L5,
+                        # docs/design/458-termination-language-surface.md §3, §6):
+                        # which operations are termination criteria/guards is a
+                        # HEADER fact, readable without lowering a body — the
+                        # freeze and `revl goal audit` read this key. Present only
+                        # when the operation's return was a `Criterion`/`Guard`
+                        # marker (erased to the `Opt[Bool]` in `returns` above),
+                        # so every existing service's IR is byte-identical (L6).
+                        **({"termination": m.termination}
+                           if getattr(m, "termination", None) else {}),
                         "emission": m.emission,
                         # only a *scoped* emission carries the key: bare
                         # `emission` means "any capability", and its absence
@@ -10106,6 +10181,35 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         method_locals: dict[str, str] = {}
         for surface, (_, ptype) in zip(method.params, decl.params):
             env.type_env[env.params[surface]] = ptype
+
+        # L1 (roadmap item 441 / issue #120,
+        # docs/design/458-termination-language-surface.md §3): a termination
+        # criterion/guard body may only READ the world. Walk the method's AST
+        # body BEFORE it is lowered, so the criterion-naming refusal OWNS every
+        # boundary-reaching shape the shared G5 walker resolves — including an
+        # `emission` service operation off a required binding, which the forward
+        # lowering's emit-marking rule would otherwise refuse first with a generic
+        # message — and so a WITNESSED extern (which an ordinary provide body is
+        # allowed to reach, item 318) is caught too. A first-class arrow bound in
+        # the body is followed through a local pre-scan into `env.local_arrows`,
+        # the same channel the forward lowering fills for the teardown walk; a
+        # spawn-handle emission, needing provision provenance the forward pass
+        # builds, is left to that pass (still refused, one message over). Set only
+        # for a marked operation, so this is inert for every ordinary provide
+        # method (L6).
+        if getattr(decl, "termination", None):
+            body_arrows = dict(env.local_arrows)
+            for _ms in method.body:
+                if isinstance(_ms, LetStmt) and isinstance(_ms.value, ExprArrow):
+                    body_arrows[_ms.name] = _ms.value
+            saved_body_arrows = env.local_arrows
+            env.local_arrows = body_arrows
+            try:
+                _check_criterion_readonly(
+                    method.body, decl.termination, method.name, svc.name,
+                    env, comp.source or filename, method.line)
+            finally:
+                env.local_arrows = saved_body_arrows
 
         def _check_rebind(name: str, line: int) -> None:
             """A method-body binding may not collide with anything already in
