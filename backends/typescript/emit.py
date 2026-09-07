@@ -621,6 +621,20 @@ def _int_as_number(node: object, ctx: "_Ctx") -> str:
     return f"Number({_expr(node, ctx)})"
 
 
+def _stream_head(node: object, ctx: "_Ctx") -> str:
+    """The stream a `subscribe` acquires: a plain source, or a `merge(a, b)`
+    fan-in (item 130 Slice 3). Recursive, because a merged stream is itself a
+    stream. Every link is a DERIVED stream owned by the subscription, so
+    `close` unwinds the whole chain off the ONE bracket the subscribe
+    registers, leaving each plain source to its own (mirrors
+    backends/python/emit.py `_ComponentEmitter._stream_head`)."""
+    if isinstance(node, dict) and node.get("kind") == "stream-merge":
+        args = ", ".join(_stream_head(src, ctx)
+                         for src in node.get("sources") or [])
+        return f"host.Stream.merge({args})"
+    return _expr(node, ctx)
+
+
 def _expr(node: object, ctx: "_Ctx") -> str:
     """The single expression renderer for both of revl's IR dialects.
 
@@ -1116,17 +1130,47 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             raise EmitError(f"bad instance-get key {key!r}")
         return f"{target}.get({_string(key)})"
 
-    if kind in ("subscribe", "stream-merge"):
-        # item 130: a stream subscription suspends a fiber. Slice 1 shipped the
-        # py reference and Slice 3 the go/rust blocking erasure; the ts tier
-        # takes the same `async function*` shape as py (design §4.6) but has not
-        # been written or run, so refuse honestly rather than emit a
-        # subscription whose queue-vs-cancel race has never been exercised.
-        raise EmitError(
-            "a stream subscription suspends a fiber; the ts lowering (the same "
-            "queue-vs-cancel race the py reference runs) is not implemented — "
-            "streams run on py, go and rust (item 130 §4.6); try `--backend py`"
-        )
+    if kind == "stream-merge":
+        # item 130 Slice 3: the `merge(a, b)` fan-in behind `subscribe
+        # merge(a, b)` — a derived stream owned by the subscription below it, so
+        # `sub.close()` unwinds the whole chain off the ONE bracket the
+        # `subscribe` registers (see `_stream_head`). Recursive, because a merged
+        # stream is itself a stream.
+        return _stream_head(node, ctx)
+    if kind == "subscribe":
+        # item 130 (roadmap #81): `subscribe <stream>` opens a single-consumer
+        # subscription on the source and registers the bracket. The ts tier
+        # takes the same async-generator shape as the py reference (design §4.6):
+        # `host.Stream.subscribe` returns a `Subscription` whose `next()` awaits
+        # an item raced against a cancel future and whose `close()` trips that
+        # future synchronously — so the bracket inverse is reachable off the
+        # teardown path even while a `next` is parked (the cancellation-first
+        # fix, §9 Part A). `ctx` lets the subscription observe owner withdrawal.
+        stream = _stream_head(node.get("stream") or {}, ctx)
+        policy = node.get("policy") or "error"
+        # Slice 2: the derived combinator chain, the declared buffer capacity and
+        # the `block`-policy drain window are each appended to an options object
+        # only when DECLARED (a Slice 1 subscription emits the three-arg call).
+        opts: list[str] = []
+        stages = node.get("stages") or []
+        if stages:
+            rendered = []
+            for stage in stages:
+                name = stage.get("stage")
+                if name == "take":
+                    rendered.append(f'["take", {int(stage.get("count"))}]')
+                else:
+                    # a G6-pure arrow (rule 3.5) — a plain sync arrow
+                    rendered.append(f'[{_string(name)}, {_expr(stage.get("fn"), ctx)}]')
+            opts.append(f"stages: [{', '.join(rendered)}]")
+        if node.get("buffer") is not None:
+            opts.append(f"capacity: {int(node.get('buffer'))}")
+        if node.get("drain") is not None:
+            opts.append(f"drainMs: {int(node.get('drain'))}")
+        base = f"host.Stream.subscribe({stream}, {_string(policy)}, ctx"
+        if opts:
+            return f"{base}, {{ {', '.join(opts)} }})"
+        return f"{base})"
 
     raise EmitError(f"unsupported expression kind {kind!r}")
 
@@ -1981,10 +2025,64 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         lines.append(indent + _bracket_yield(
             frame_var, handle, verb, f"{component['name']}.body:{handle}",
             "cancel", f"() => {{ {handle}.cancel(); {inflight}.clear() }}"))
+    elif kind == "stream-iter":
+        _stream_iter(step, component, services, ctx, indent, lines, frame_var)
     elif kind == "return":
         raise EmitError("return steps are only allowed inside method bodies")
     else:
         raise EmitError(f"unknown step: {kind!r}")
+
+
+def _stream_iter(step: dict, component: dict, services: dict, ctx: "_Ctx",
+                 indent: str, lines: list[str], frame_var: Optional[str]) -> None:
+    """A `stream-iter` body step (item 130 Slice 4): `every <x> in <sub> { … }`,
+    the async-iteration form, on the ts tier's async-generator body.
+
+    The whole form is the three operations Slice 1 shipped, so it adds no
+    runtime primitive and no new teardown accounting (mirrors
+    backends/python/emit.py `_ComponentEmitter._stream_iter`):
+
+        while (true) {
+          const <x> = await <sub>.next()
+          yield () => {}   // iteration boundary (A1)
+          if (host.Stream.isClosed(<x>)) break
+          <body>
+        }
+
+    Three properties carry the guarantee, each a line above: the `yield` sits
+    immediately after the await (exactly as the plain `await` step emits it), so
+    a divert while the consumer is parked abandons the loop; a `Closed` terminal
+    ENDS the loop rather than entering the body (a terminal is not an item); a
+    `Faulted` terminal is NOT tested for, because `next` THROWS `StreamFaulted`
+    — it propagates out of the loop and out of the generator, the activation
+    fails, and the accumulated prefix reverts LIFO with the subscription bracket
+    on it, which CLOSES the subscription (A8, §4.7).
+
+    Slice 5's typed-event handler (`on <Event> as <x> in <sub>`) is THIS loop
+    with a schema-and-dedup contract gate added between the terminal test and the
+    body. That gate is the py reference tier's — this tier does not lower it, so
+    a step carrying an `event` contract is REFUSED by name (the same call the
+    rust tier makes), not half-wired to a runtime with no `Stream.contract`. The
+    plain `every … in` below IS lowered here."""
+    if step.get("event") is not None:
+        raise EmitError(
+            "the `on … as` typed-event handler is not lowered on the ts tier; "
+            "its schema-and-dedup contract gate runs on the py reference tier "
+            "(item 130 Slice 5) while the plain `every … in` iteration form "
+            "lowers here — try `--backend py`")
+    scope = ctx.component_scope
+    item = scope.bind(step.get("bind"))
+    subject = _expr(step.get("subject"), ctx)
+    body = step.get("body") or []
+    if not body:  # pragma: no cover — the parser rejects an empty body
+        raise EmitError("an `every … in` body is empty")
+    lines.append(f"{indent}while (true) {{")
+    lines.append(f"{indent}  const {item} = await {subject}.next()")
+    lines.append(f"{indent}  yield () => {{}}  // iteration boundary (A1)")
+    lines.append(f"{indent}  if (host.Stream.isClosed({item})) break")
+    for inner in body:
+        _component_step(inner, component, services, ctx, indent + "  ", lines, frame_var)
+    lines.append(f"{indent}}}")
 
 
 def _config_interface(component: dict) -> list[str]:
@@ -2066,7 +2164,7 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     # excluded: a timer's async flag colors its OWN runtime-awaited firing (item
     # 170), not the activation body generator.
     is_async = any(
-        step.get("step") == "await"
+        step.get("step") in ("await", "stream-iter")
         or (step.get("step") in ("effect", "let-effect", "emit")
             and step.get("async"))
         for step in component.get("body") or []
@@ -2234,18 +2332,16 @@ _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 # call is emitted verbatim against whatever `host` supplies, so a root with no
 # runtime behind it produced a program that compiled here and died in the
 # consumer's own build with a name error — a SILENT EMIT where the design
-# promises a refusal. `subscribe` was already refused; `Stream.source()` alone
-# was not, so the honest refusal only fired for half the surface. Refuse the
-# whole root, in the shape wasm uses, and name the tiers that do carry it.
-_UNIMPLEMENTED_HOST_ROOTS = {
-    "Stream": (
-        "opens a stream, and a stream subscription suspends a fiber. This tier "
-        "has no `Stream`/`Subscription` runtime primitive at all (`runtime.ts` "
-        "implements Pool, Map and Job), so the emitted program would name a "
-        "host object that does not exist: streams run on py, go and rust "
-        "(item 130 §4.6, tracked for this tier as roadmap 419e); try "
-        "`--backend py`"
-    ),
+# promises a refusal. Refuse the whole root, in the shape wasm uses, and name
+# the tiers that do carry it.
+#
+# item 130 (roadmap #81): `Stream` graduated OFF this table — `runtime.ts` now
+# carries a real `Stream`/`StreamSource`/`Subscription`/`StreamStage` runtime
+# (the same async-generator mirror the py reference runs, design §4.6), so
+# `Stream.source()` / `subscribe` / `merge` and the `every … in` iteration form
+# lower here. The typed-event (`on … as`) and durable-replay surfaces are still
+# the py reference tier's and are refused by name (see `_component_step`).
+_UNIMPLEMENTED_HOST_ROOTS: dict = {
 }
 
 

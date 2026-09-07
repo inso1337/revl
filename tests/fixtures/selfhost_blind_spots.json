@@ -346,10 +346,14 @@
       "transactional witnessed steps use the reference-only undo/frame/replay protocol (`_witnessed_step`, `_method_witnessed_step`, and `_witnessed_extern`); the self-host v3 slice deliberately refuses this component class rather than emitting an unsound partial transaction": [
         "class=witnessed"
       ],
-      "v3 TypeScript rejects deferred runtime facilities before expression emission: holes and stream subscribe/merge require the runtime refusal channel that is not present in the mirrored emitter": [
-        "kind=hole",
+      "v3 TypeScript rejects a hole before expression emission through the runtime refusal channel that is not present in the mirrored emitter": [
+        "kind=hole"
+      ],
+      "item 130 (roadmap #81) lowered the ts reactive tier in the REFERENCE emitter (subscribe/merge/source, the derived combinator chain and the `every ... in` iteration form, against the new runtime.ts Stream); the self-host port selfhost/emit_ts.rvl has NOT yet mirrored it, so these stream constructs are reference-only until the self-host stream port lands (the tracked remainder of #81, alongside the java tier and the `on ... as` handler)": [
         "kind=stream-merge",
-        "kind=subscribe"
+        "kind=subscribe",
+        "stage=take",
+        "step=stream-iter"
       ],
       "the reference routes `do` through `_v3_do_expr`, whose frame-neutral control-transfer protocol is not mirrored; the self-host emitter keeps this expression outside its declared v3 subset": [
         "kind=do"
