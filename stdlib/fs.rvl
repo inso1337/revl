@@ -223,14 +223,33 @@ pub extern pure fn is_dir(path: Str) -> Result[Bool, FsError] = @py {
 } = @ts ref fsIsDir from "../backends/typescript/revl_fs_ts.ts"
 
 // ----------------------------------------------------------------- the inverses
-// Each inverse is a `pure` extern (host-LOCAL restore/rename, non-emission and
-// non-witnessed — the classification check of item 243 rule 3 forbids a
-// witnessed or emitting inverse). Each is IDEMPOTENT on replay (item 243 rule
-// 5): a second run once the world is already restored is a no-op, so an abort
-// that crashes mid-replay and a subsequent `revl recover` cannot clobber. Each
-// re-runs the workspace-confinement check on its target (confinement must #2).
+// Each inverse is an `acquire` extern (host-LOCAL restore/rename, non-emission
+// and non-witnessed — the classification check of item 243 rule 3 forbids a
+// witnessed or emitting inverse, and admits exactly `pure`/`acquire`). It is
+// `acquire`, NOT `pure`, because it genuinely MUTATES the filesystem — it
+// unlinks or renames real files. A `pure` spelling would be a false statement
+// of effect: it would carry no effect in the G8 audit and would be callable
+// from any pure position, so a plain `fn` could unlink or rename a confined
+// file with no effect-gate crossing at all. `acquire` states the effect
+// honestly and, being effect-position-bound, refuses that bare call (G4). The
+// reversal is TERMINAL — once the world is back there is nothing further to
+// release — so each names the `settled` no-op as its own teardown inverse
+// (`acquire` requires an `undo`; a completed restore discharges nothing).
+// Each is IDEMPOTENT on replay (item 243 rule 5): a second run once the world
+// is already restored is a no-op, so an abort that crashes mid-replay and a
+// subsequent `revl recover` cannot clobber. Each re-runs the
+// workspace-confinement check on its target (confinement must #2).
 
-pub extern pure fn restore(w: WriteWitness) -> Unit = @py {
+// The terminal inverse every restore names as its `undo`. A completed
+// host-local reversal has acquired nothing to release, so tearing it down is a
+// no-op — this is the honest statement of that, and it is what lets the four
+// restores below be `acquire` (which mandates an `undo`) without inventing a
+// spurious re-mutation. It touches no filesystem, so it needs no confinement.
+pub extern pure fn settled() -> Unit = @py {
+    return None
+} = @ts ref fsSettled from "../backends/typescript/revl_fs_ts.ts"
+
+pub extern acquire fn restore(w: WriteWitness) -> Unit undo settled() = @py {
     import revl_fs_workspace as _ws
     # must #2: BOTH endpoints are confined, not just the target. The target is
     # a `named-endpoint`; the preimage is the SOURCE of a rename, and a rename
@@ -255,7 +274,7 @@ pub extern pure fn restore(w: WriteWitness) -> Unit = @py {
     return
 } = @ts ref fsRestore from "../backends/typescript/revl_fs_ts.ts"
 
-pub extern pure fn unrm(w: RmWitness) -> Unit = @py {
+pub extern acquire fn unrm(w: RmWitness) -> Unit undo settled() = @py {
     import revl_fs_workspace as _ws
     target = _ws.resolve_within(w["path"])   # must #2, the TARGET endpoint
     # ...and the SOURCE endpoint, the same rename-steals-what-it-names hole
@@ -268,7 +287,7 @@ pub extern pure fn unrm(w: RmWitness) -> Unit = @py {
     return
 } = @ts ref fsUnrm from "../backends/typescript/revl_fs_ts.ts"
 
-pub extern pure fn unmove(w: MoveWitness) -> Unit = @py {
+pub extern acquire fn unmove(w: MoveWitness) -> Unit undo settled() = @py {
     import revl_fs_workspace as _ws
     src = _ws.resolve_within(w["from"])      # must #2: BOTH endpoints confined
     dst = _ws.resolve_within(w["to"])
@@ -278,7 +297,7 @@ pub extern pure fn unmove(w: MoveWitness) -> Unit = @py {
     return
 } = @ts ref fsUnmove from "../backends/typescript/revl_fs_ts.ts"
 
-pub extern pure fn rmdir_if_empty(w: MkdirWitness) -> Unit = @py {
+pub extern acquire fn rmdir_if_empty(w: MkdirWitness) -> Unit undo settled() = @py {
     import revl_fs_workspace as _ws
     target = _ws.resolve_within(w["path"])   # must #2
     # remove the created directory iff still empty — never delete a dir the

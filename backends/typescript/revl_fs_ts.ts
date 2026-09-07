@@ -65,11 +65,10 @@
 //    `fsRestore`'s `preimage`, `fsUnrm`'s `garbage`. Previously handed straight
 //    to `replace()`, which is a RENAME, so the source is REMOVED from where it
 //    lives: a witness naming a file outside the root both STOLE it and
-//    DESTROYED it at its original location, from a capability-free `pure`
-//    inverse callable from any pure position (and reconstructible by `revl
-//    recover` from a forged WAL witness, with no revl source involved). The
-//    source now goes through `resolveSidecar`, which confines it AND requires
-//    it to be a sidecar this workspace itself produced.
+//    DESTROYED it at its original location (and the inverse was reconstructible
+//    by `revl recover` from a forged WAL witness, with no revl source
+//    involved). The source now goes through `resolveSidecar`, which confines it
+//    AND requires it to be a sidecar this workspace itself produced.
 // 4. `syscall-time` (`openConfinedWrite`, `writeThrough`, `snapshotPreimage`,
 //    `confirmLanded`, `replaceConfined`, `removeConfined`, `mkdirConfined`,
 //    `rmdirConfined`, `closeHandle`, `discardWrite`), the mutation itself.
@@ -147,15 +146,20 @@
 // the fd instead. Snapshots of a large file are no longer O(1) on APFS; a
 // correct snapshot is worth more than a cheap one.
 //
-// # Why the inverses stay `pure`
+// # Why the inverses are `acquire`, not `pure`
 //
-// Unchanged from the py tier and forced, not chosen: item 243 rule 3 requires a
-// witnessed extern's declared inverse to be non-emitting and non-witnessed, and
-// the parser refuses a `[caps]` bracket on `pure` and `acquire` alike, so there
-// is no capability-scoped spelling of an inverse in the surface. The fix is to
-// shrink the primitive instead of gating it. After this change an inverse's
-// entire authority is: move a sidecar THIS WORKSPACE PRODUCED back over a path
-// inside the same workspace, or delete a path inside the workspace.
+// Same shape as the py tier: the inverses MUTATE (they unlink or rename real
+// files), so they are `acquire`, not `pure` — a `pure` spelling would misreport
+// the effect (invisible to the G8 audit) and leave them callable from any pure
+// position. item 243 rule 3 requires a witnessed extern's declared inverse to
+// be non-emitting and non-witnessed, and the parser refuses a `[caps]` bracket
+// on `pure` and `acquire` alike, so there is no capability-scoped spelling of an
+// inverse; of the two admissible classifications only `acquire` reports the
+// mutation, and it is effect-position-bound (a bare inverse call from a plain
+// `fn` is refused, G4). `acquire` mandates an `undo`; the reversal is terminal,
+// so each names the `fsSettled` no-op. The residual authority is shrunk too: an
+// inverse's entire reach is to move a sidecar THIS WORKSPACE PRODUCED back over
+// a path inside the same workspace, or delete a path inside the workspace.
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -1256,6 +1260,15 @@ export function fsMkdir(p: string): FsResult<MkdirWitness> {
     if (e instanceof FsOpError) return { kind: 'Err', value: e.asError() }
     throw e
   }
+}
+
+/** The terminal inverse every restore names as its `undo`. A completed
+ * host-local reversal has acquired nothing to release, so tearing it down is a
+ * no-op. It touches no filesystem, so it needs no confinement. This is what
+ * lets the restores below be `acquire` (which mandates an `undo`) without
+ * inventing a spurious re-mutation. */
+export function fsSettled(): void {
+  return
 }
 
 /** Inverse of `fsWrite`: restore the preimage snapshot over the target, or

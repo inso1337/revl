@@ -37,10 +37,16 @@ a portable byte copy otherwise. That is the "clonefile preimage" decision: the
 snapshot is cheap even for a large file because CoW shares storage with the
 original until the subsequent write forces divergence.
 
-Every inverse is a `pure` extern (host-local, non-emission, non-witnessed, as
-item 243 rule 3 requires) and is idempotent on replay (rule 5): once the world
-is already restored, a second run is a no-op, so an abort that crashes mid
-replay and a later `revl recover` cannot clobber. Fallibility is real (rule 6):
+Every inverse is an `acquire` extern (host-local, non-emission, non-witnessed,
+as item 243 rule 3 requires, which admits exactly `pure`/`acquire`) and is
+idempotent on replay (rule 5): once the world is already restored, a second run
+is a no-op, so an abort that crashes mid replay and a later `revl recover`
+cannot clobber. It is `acquire` rather than `pure` because it genuinely mutates
+the filesystem — it unlinks or renames real files — so `pure` would be a false
+statement of effect, invisible to the G8 audit and callable from any pure
+position. `acquire` states the effect and, being effect-position-bound, refuses
+a bare call from a plain `fn` (G4). The reversal is terminal, so each names a
+`settled` no-op as its own `undo` (`acquire` mandates one). Fallibility is real (rule 6):
 `rm` on a missing path, `mkdir` over an existing one, and a confinement refusal
 all return `Err` and register nothing, because a mutation that did not happen
 must schedule no rollback (Ok-conditional registration).
@@ -78,12 +84,14 @@ The guard has three properties that make it real rather than decorative:
    overwrite hole but a steal-and-destroy primitive for any file the process
    can reach. Those sources go through `resolve_sidecar`, which confines them
    and additionally requires them to be a sidecar this workspace itself
-   produced. The inverses are `pure` externs, so they carry no capability and
-   are callable from any pure position (and are reconstructed from WAL data by
-   `revl recover` with no revl source involved at all). Item 243 rule 3 leaves
-   no capability-scoped spelling for an inverse, so what makes that
-   classification safe is how small their authority is: a sidecar we made,
-   moved back inside the root we own.
+   produced. The inverses are `acquire` externs (they mutate, so `pure` would
+   misreport their effect and leave them callable from any pure position); they
+   are effect-position-bound and carry no capability token — item 243 rule 3
+   leaves no capability-scoped spelling for an inverse — and are reconstructed
+   from WAL data by `revl recover` with no revl source involved at all. Two
+   things keep that safe: the effect gate (a bare inverse call from a plain `fn`
+   is refused, G4) and the shrunken authority — a sidecar we made, moved back
+   inside the root we own.
 3. **The reversal machinery lives inside the root.** The session garbage dir
    (`.revl-fs-garbage`) and the preimage snapshots (`.revl-fs-preimage`) are
    subdirectories of the workspace root, so an `rm` parks its target inside the

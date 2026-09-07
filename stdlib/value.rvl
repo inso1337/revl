@@ -150,7 +150,12 @@ pub extern pure fn value_field(v: Value, name: Str) -> Value =
     return v.get(name) if isinstance(v, dict) else None
   }
   = @ts {
-    if (v !== null && typeof v === "object" && !Array.isArray(v) && (name in v)) {
+    // OWN keys only (`hasOwnProperty`, not `name in v`): the `in` operator walks
+    // the prototype chain, so `constructor`/`toString`/`__proto__` would read
+    // back as inherited members of a plain object — a field the document never
+    // carried. `dict.get` on the py tier sees own keys only; this matches it.
+    if (v !== null && typeof v === "object" && !Array.isArray(v)
+        && Object.prototype.hasOwnProperty.call(v, name)) {
       return (v as Record<string, unknown>)[name];
     }
     return null;
@@ -184,7 +189,10 @@ pub extern pure fn value_opt(v: Value, name: Str) -> Opt[Value] =
     // Opt is `value | undefined` on the ts tier (json.rvl); an absent key,
     // a present-null value, and a non-record receiver all read back as the
     // Opt's `None` (`undefined`), matching the @py `v.get(name)`.
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+    // OWN keys only — `hasOwnProperty`, so an inherited `toString`/`constructor`
+    // is not read back as `Some(<function>)`; matches the py `v.get(name)`.
+    if (v !== null && typeof v === "object" && !Array.isArray(v)
+        && Object.prototype.hasOwnProperty.call(v, name)) {
       const r = (v as Record<string, unknown>)[name];
       return (r === null || r === undefined) ? undefined : r;
     }
@@ -225,7 +233,10 @@ pub extern pure fn value_has(v: Value, name: Str) -> Bool =
     return isinstance(v, dict) and v.get(name) is not None
   }
   = @ts {
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+    // OWN keys only — `hasOwnProperty`, so an inherited member is not reported
+    // as a carried key; matches the py `v.get(name) is not None`.
+    if (v !== null && typeof v === "object" && !Array.isArray(v)
+        && Object.prototype.hasOwnProperty.call(v, name)) {
       const r = (v as Record<string, unknown>)[name];
       return r !== null && r !== undefined;
     }

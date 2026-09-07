@@ -296,3 +296,39 @@ def test_wasm_tier_refuses_extern_without_body(consumer_ir):
     with pytest.raises(Exception, match="not a lowerable function"):
         _emit_with("wasm", consumer_ir)
 
+
+
+# ------------------------------------------ prototype-pollution regression
+
+def test_ts_json_parse_sanitizes_a_proto_key():
+    """A JSON `"__proto__"` key must land as OWN DATA on the parsed object, not
+    invoke the Object.prototype setter — a plain `o[k] = value()` on a `{}`
+    would set the object's PROTOTYPE (prototype pollution, sibling of #319).
+    The @ts object branch guards it with `Object.defineProperty`, matching the
+    py tier where `json.loads` keeps `"__proto__"` an ordinary dict key.
+
+    Pinned at the source level so the guard cannot be dropped without a red even
+    where node is unavailable; the runtime proof runs under vitest
+    (backends/typescript/tests/json_proto_pollution.test.ts)."""
+    ir = compile_files([str(STDLIB)])
+    ts = next(e for e in ir["externs"]
+              if e["name"] == "json_parse")["bodies"]["ts"]
+    assert '"__proto__"' in ts and "defineProperty" in ts, \
+        "the ts json_parse object branch must sanitize a `__proto__` key"
+    # the dangerous straight assignment for the proto key must be gone
+    assert "o[k] = value()" not in ts
+
+
+def test_py_tier_treats_proto_as_an_ordinary_key(consumer_ir):
+    """The py tier has no prototype to pollute — `json.loads` decodes
+    `"__proto__"` to a plain dict key — and its stringify∘parse round-trip
+    preserves it as data. This is the behaviour the ts tier now matches."""
+    ns = _exec_python(consumer_ir)
+    parsed = ns["json_parse"]('{"__proto__": {"x": 1}, "keep": 2}')
+    assert isinstance(parsed, dict)
+    assert parsed["__proto__"] == {"x": 1}
+    assert parsed["keep"] == 2
+    # an ordinary dict never inherits a "constructor"/"toString" key
+    assert "constructor" not in parsed
+    # round-trips as data (compacted), the same string the ts tier produces
+    assert _compact(ns["roundtrip"]('{"__proto__":{"x":1}}')) == '{"__proto__":{"x":1}}'

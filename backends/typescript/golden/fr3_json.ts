@@ -123,7 +123,23 @@ export function json_parse(s: string): any {
         const k = str(); ws();
         if (s[i] !== ":") fail("expected a colon");
         i++;
-        o[k] = value(); ws();
+        const kv = value(); ws();
+        // A JSON key of "__proto__" must land as OWN DATA, not invoke the
+        // Object.prototype setter — a plain `o[k] = kv` there would set the
+        // parsed object's PROTOTYPE (prototype pollution, sibling of #319).
+        // `defineProperty` stores it as an ordinary own property, so it reads
+        // back as data (the own property shadows the inherited accessor),
+        // matching the py tier where `json.loads` keeps "__proto__" a normal
+        // dict key. "constructor"/"prototype" assigned with `o[k]=` are
+        // harmless own properties (they shadow, they do not mutate
+        // Object.prototype); the READ side (stdlib/value.rvl) reads OWN keys
+        // only, so an inherited "constructor"/"toString" is never mistaken
+        // for a field the document carries.
+        if (k === "__proto__") {
+          Object.defineProperty(o, k, { value: kv, writable: true, enumerable: true, configurable: true });
+        } else {
+          o[k] = kv;
+        }
         if (s[i] === ",") { i++; continue; }
         if (s[i] === "}") { i++; return o; }
         fail("expected a comma or closing brace");

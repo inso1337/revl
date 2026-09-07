@@ -33,7 +33,8 @@ from pathlib import Path
 
 import pytest
 
-from revl.compiler import compile_files
+from revl.compiler import compile_files, compile_source
+from revl.errors import RevlError
 
 _ROOT = Path(__file__).resolve().parents[1]
 _BACKEND = _ROOT / "backends" / "python"
@@ -183,27 +184,60 @@ def test_every_syscall_argument_came_from_a_guard(bodies):
 # The classification decision, pinned
 # ===========================================================================
 
-def test_the_inverses_are_pure_and_the_mutations_are_capability_scoped():
-    """The inverses stay `pure`, so they carry no capability. That is forced,
-    not chosen: item 243 rule 3 (`_check_witnessed_inverse`, src/revl/lower.py)
-    requires a witnessed extern's declared inverse to be non-emitting and
-    non-witnessed, and the parser refuses a `[caps]` bracket on anything that is
-    not `witnessed`/`emission`, so there is no capability-scoped spelling of an
-    inverse in the surface at all.
+def test_the_inverses_are_acquire_and_the_mutations_are_capability_scoped():
+    """The inverses are `acquire`, not `pure` — they MUTATE (they unlink or
+    rename real files), so `pure` would be a false statement of effect: it
+    carries no effect in the G8 audit and is callable from every pure position.
+    The classification is constrained: item 243 rule 3 (`_check_witnessed_inverse`,
+    src/revl/lower.py) requires a witnessed extern's declared inverse to be
+    non-emitting and non-witnessed, and the parser refuses a `[caps]` bracket on
+    anything that is not `witnessed`/`emission`, so of the two admissible
+    classifications (`pure`/`acquire`) only `acquire` reports the mutation. It
+    carries no capability token but is effect-position-bound (see the bare-call
+    refusal test below).
 
-    What makes that safe is not the classification but the shrunken authority:
-    `resolve_sidecar` limits an inverse's SOURCE to a sidecar this workspace
-    produced, and `resolve_within` limits its target to the root, so a
-    capability-free inverse cannot name anything outside the jail — including
-    when `revl recover` reconstructs one from a WAL witness with no revl source
-    in play. This test pins both halves of the shape so a future edit to either
-    is deliberate."""
+    What further bounds it is the shrunken authority: `resolve_sidecar` limits an
+    inverse's SOURCE to a sidecar this workspace produced, and `resolve_within`
+    limits its target to the root, so the inverse cannot name anything outside
+    the jail — including when `revl recover` reconstructs one from a WAL witness
+    with no revl source in play. This test pins both halves of the shape so a
+    future edit to either is deliberate. See the guard module's 'why the inverses
+    are `acquire`' section."""
     ir = compile_files([str(_FS_RVL)])
     classes = {e["name"]: (e["class"], tuple(e.get("capabilities", ())))
                for e in ir["externs"]}
     for inverse in ("restore", "unrm", "unmove", "rmdir_if_empty"):
-        assert classes[inverse] == ("pure", ()), \
-            f"{inverse} changed classification; see the guard module's " \
-            "'why the inverses stay pure' section before accepting this"
+        assert classes[inverse] == ("acquire", ()), \
+            f"{inverse} changed classification; the fs inverses mutate, so they " \
+            "must not be `pure` (see the guard module's 'why the inverses are " \
+            "`acquire`' section before accepting this)"
     for mutation in ("write", "rm", "move", "mkdir"):
         assert classes[mutation] == ("witnessed", ("fs",))
+
+
+def test_a_bare_inverse_call_from_a_plain_fn_is_refused():
+    """The inverses mutate the filesystem, so they must not be reachable as free
+    pure primitives. Because they are `acquire` (not `pure`), a bare call from a
+    plain `fn` body is refused (G4): a `pure` misclassification would carry no
+    effect and let a plain `fn` unlink or rename a confined file with no
+    effect-gate crossing at all. Regression for the classification fix.
+
+    The real `restore` takes a `WriteWitness` and has a host body; this fixture
+    reproduces the shape the module uses (an `acquire` inverse whose `undo` is a
+    terminal no-op) and shows the refusal a `pure` spelling would not give."""
+    src = (
+        "type W = { path: Str }\n"
+        "extern pure fn settled() -> Unit = @py { return None }\n"
+        "extern acquire fn restore(w: W) -> Unit undo settled() = @py { return None }\n"
+        "pub fn reach(w: W) -> Unit { return restore(w) }\n"
+    )
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "t.rvl")
+    msg = str(ei.value)
+    assert "restore" in msg and "cannot be called" in msg
+    # and the `pure` spelling the fix removed compiled the same reach with no
+    # refusal at all — the hole the reclassification closes.
+    pure = src.replace(
+        "extern acquire fn restore(w: W) -> Unit undo settled()",
+        "extern pure fn restore(w: W) -> Unit")
+    compile_source(pure, "t.rvl")  # no raise: a pure inverse is freely callable
