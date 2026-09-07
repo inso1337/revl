@@ -1099,8 +1099,14 @@ def _v3_builtin(method: object, target: str, args: list[str],
         return f"revlMapRemove({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): the receiver
     # lowers to a long, and String.valueOf(long) is exact decimal —
-    # including Long.MIN_VALUE, no |MIN| detour needed.
+    # including Long.MIN_VALUE, no |MIN| detour needed. A Float receiver
+    # (review item 12) renders through revlFtoa, the canonical ECMAScript
+    # Number::toString a `${aFloat}` interpolation uses, so `x.to_str()` and
+    # `${x}` agree byte-for-byte (String.valueOf(double) would print Java's
+    # `3.0`/`1.0E30`, which diverges from every other tier).
     if method == "to_str":
+        if recv == "Float":
+            return f"revlFtoa({target})"
         return f"String.valueOf({target})"
     raise EmitError(f"unknown builtin method {method!r}")
 
@@ -1441,8 +1447,9 @@ def _is_float_expr(node: object) -> bool:
 
 
 def _uses_float_interp(ir: dict) -> bool:
-    """True when any `${…}` interpolates a provably-`Float` expression, so the
-    canonical Float renderer is emitted only where it is used."""
+    """True when the canonical Float renderer (revlFtoa) is needed: any `${…}`
+    interpolates a provably-`Float` expression, or a `Float.to_str()` builtin
+    renders one (review item 12) — either way it is emitted only where used."""
     found = False
 
     def walk(node) -> None:
@@ -1456,6 +1463,10 @@ def _uses_float_interp(ir: dict) -> bool:
                             and part[0] == "expr" and _is_float_expr(part[1])):
                         found = True
                         return
+            if (node.get("kind") == "builtin" and node.get("method") == "to_str"
+                    and node.get("recv") == "Float"):
+                found = True
+                return
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):

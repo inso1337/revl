@@ -506,6 +506,10 @@ def _scan_uses(root) -> _UsesScan:
                     scan.bounded_int = True
                 elif method == "to_int32":
                     scan.bounded_int32 = True
+                elif method == "to_str" and node.get("recv") == "Float":
+                    # a Float `.to_str()` renders through `_revl_ftoa`, the
+                    # same canonical helper `${aFloat}` pulls in.
+                    scan.float_interp = True
                 scan.builtins.add(method)
             elif kind == "optcall":
                 method = node.get("method")
@@ -951,8 +955,14 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     if method in _CHECKED_DIVS:
         return f"_revl_{method}({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): python ints on
-    # this tier are already i64-clamped, so str() is the exact decimal.
+    # this tier are already i64-clamped, so str() is the exact decimal. A
+    # Float receiver (review item 12) renders through `_revl_ftoa`, the same
+    # canonical ECMAScript Number::toString a `${aFloat}` interpolation uses,
+    # so `x.to_str()` and `${x}` agree byte-for-byte (str(float) would print
+    # python's `3.0`/`1e+30`, which diverges from every other tier).
     if method == "to_str":
+        if recv == "Float":
+            return f"_revl_ftoa({target})"
         return f"str({target})"
     raise EmitError(f"unknown builtin method {method!r}")
 

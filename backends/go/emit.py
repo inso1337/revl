@@ -1129,6 +1129,13 @@ def _comp_builtin(method, recv_surface, target, args):
     if method == "to_str":
         global _COMP_NEEDS_STRCONV
         _COMP_NEEDS_STRCONV = True
+        if recv_surface == "Float":
+            # A Float renders with the same shortest-round-trip digits the
+            # component tier already uses for a `${aFloat}` interpolation (which
+            # lowers to `fmt.Sprintf("%v", x)`, and `%v` on a float64 IS
+            # `strconv.FormatFloat(x, 'g', -1, 64)`) — so `x.to_str()` and `${x}`
+            # agree on this tier. FormatInt would not compile on a float64.
+            return "strconv.FormatFloat(%s, 'g', -1, 64)" % target
         return "strconv.FormatInt(%s, 10)" % _go_widen_int(target)
     # The Map value type (docs/stdlib-2.0.md §Map): the same helpers the v3
     # tier uses; they live in _V3_MAP_PREAMBLE, pulled in by
@@ -4660,6 +4667,12 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     # (f): 2 allocs/16 B -> 1 alloc/4 B). Int32 widens first; FormatInt's
     # parameter is int64.
     if method == "to_str":
+        if rt == "Float":
+            # A Float renders through revlFtoa, the canonical ECMAScript
+            # Number::toString a `${aFloat}` interpolation uses on this tier —
+            # so `x.to_str()` and `${x}` agree byte-for-byte (review item 12).
+            ctx.needs_ftoa = True
+            return f"revlFtoa({target})"
         ctx.needs_strconv = True
         if rt == "Int32":
             return f"strconv.FormatInt(int64({target}), 10)"

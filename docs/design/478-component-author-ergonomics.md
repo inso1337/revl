@@ -53,7 +53,14 @@ land it without a design decision that touches the effect calculus.
 ### Group 1 — surface bugs (bounded, do these next)
 
 1. **Template scope in block match arms (review item 8).** DONE, this note.
-   The template of the group: a walk that misses one node kind.
+   The template of the group: a walk that misses one node kind. LATER: the same
+   wall had a **component-path twin** — a `${...}` template in a *provide-method*
+   match arm lowered through the env-only `_lower_expr`, so the arm binding was
+   invisible and ``Ident(w) => `word:${w}` `` refused with "`w` is not a
+   declared requirement". Fixed in the realistic-components slice (#548): the
+   component `Interp` case now lowers its expression parts in the current
+   lexical scope, exactly as the fn-body lowerer does. Pinned by
+   `tests/test_548_realistic_components.py` (the token-describer component).
 
 2. **Untyped arrow params in provide scope (review item, roadmap 77 ticked,
    gap untracked).** Item 77 landed arrow-parameter annotations
@@ -87,7 +94,16 @@ land it without a design decision that touches the effect calculus.
    arithmetic but cannot render or convert back. Same shape as Str: a table row
    family plus six bodies plus a self-host row. `to_str` is the single highest
    value one (a Float that cannot print is the sharpest wall) and can go first
-   alone.
+   alone. **`abs` LANDED** already (it type-checks and emits on every Float
+   tier). **`to_str` LANDED** in the realistic-components slice (#548): the
+   `to_str` builtin gained a `Float` receiver row that emits each tier's
+   canonical ECMAScript Number::toString — the very `ftoa` a `${aFloat}`
+   interpolation already used (`_revl_ftoa`/`revlFtoa`/`revl_ftoa`; go's
+   component tier matches its `%v` float interp via
+   `strconv.FormatFloat(x, 'g', -1, 64)`). So `x.to_str()` and `${x}` agree.
+   Pinned by `tests/test_548_realistic_components.py` (the statistics
+   component). REMAINDER: `to_int`/`floor`/`round`/`min`/`max`/`pow` (each needs
+   a rounding/overflow contract fixed cross-tier — deferred, no clean spec yet).
 
 7. **Opt/Result methods (review item 13).** `map`/`unwrap_or`/`ok_or` and
    friends. Function-value callbacks like the List methods, so it inherits

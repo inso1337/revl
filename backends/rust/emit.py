@@ -6012,8 +6012,13 @@ def _v3_builtin(method: str, target: str, args: list[str],
         return _v3_checked_div(method, target, args[0])
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): i64::to_string
     # is exact decimal over the whole range, Int.MIN included, and String is
-    # this tier's Str.
+    # this tier's Str. A Float receiver (review item 12) renders through
+    # revl_ftoa, the canonical ECMAScript Number::toString a `${aFloat}`
+    # interpolation uses, so `x.to_str()` and `${x}` agree byte-for-byte
+    # (f64::to_string prints Rust's `3`/`3.5`, which diverges from the tiers).
     if method == "to_str":
+        if recv == "Float":
+            return f"revl_ftoa({target})"
         return f"({target}).to_string()"
     # Single-character ASCII classification (item 233, docs/stdlib-2.0.md
     # §Str.is_alnum), mirroring the python backend's native forms
@@ -7784,8 +7789,9 @@ def _uses_stdlib(ir: dict) -> bool:
 
 
 def _uses_float_interp(ir: dict) -> bool:
-    """True when any `${…}` template interpolates a provably-`Float`
-    expression, so the canonical Float renderer is emitted only then."""
+    """True when the canonical Float renderer (revl_ftoa) is needed: any `${…}`
+    template interpolates a provably-`Float` expression, or a `Float.to_str()`
+    builtin renders one (review item 12) — emitted only then either way."""
     found = False
 
     def walk(node) -> None:
@@ -7799,6 +7805,10 @@ def _uses_float_interp(ir: dict) -> bool:
                             and part[0] == "expr" and _v3_is_float(part[1])):
                         found = True
                         return
+            if (node.get("kind") == "builtin" and node.get("method") == "to_str"
+                    and node.get("recv") == "Float"):
+                found = True
+                return
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):

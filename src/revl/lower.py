@@ -5861,12 +5861,15 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             node: dict = {"kind": "builtin", "method": method,
                           "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
                           "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
-            if method == "to_int":
+            if method in ("to_int", "to_str"):
                 # `to_int` is spelled for two receiver families (Int32 widen,
                 # Str parse) — the backends must dispatch on the receiver's
                 # static type, which the IR node would otherwise not carry
                 # (the same reason `un` annotates Int negation). Annotate it,
-                # exactly as the checker selected the row.
+                # exactly as the checker selected the row. `to_str` rides the
+                # same annotation so the tiers can tell a Float receiver (which
+                # renders through the canonical `ftoa`, byte-identical to a
+                # `${aFloat}` interpolation) from an Int one.
                 node["recv"] = infer_ast(expr.callee.target, type_env, types, None)
             return node
         # A call argument that widens Int -> Float is marked on the argument
@@ -7341,7 +7344,27 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             raise null_error(filename, line)
         return {"kind": "lit", "value": _literal_value(expr.value, filename, line)}
     if isinstance(expr, Interp):
-        return _lower_expr(expr, env, mode=getattr(env, "_expr_mode", "setup"))
+        # A `${...}` template in a component/method body. Each interpolated
+        # expression must lower in the CURRENT lexical `scope`, not through the
+        # env-only `_lower_expr` — otherwise a name bound locally here (a
+        # match-arm payload, `Word(w) => `word:${w}``) is invisible to the
+        # template and misresolves as a component requirement (`w` is not a
+        # declared requirement). This is the component-path twin of the fn-body
+        # template-scope fix (#570, review item 8): the fn-body lowerer already
+        # walks template parts in scope (`_lower_pure_expr`); the component path
+        # deferred to `_lower_expr(env)` and lost the arm binding. Build the
+        # same `format` node `_lower_expr` builds, but lower the expr parts in
+        # `scope`.
+        template: list[str] = []
+        fmt_args: list = []
+        for part_kind, value in expr.parts:
+            if part_kind == "text":
+                template.append(value.replace("$", "$$"))  # A4: literal dollars
+            else:
+                template.append(f"${len(fmt_args)}")
+                fmt_args.append(_lower_component_pure_expr(
+                    value, env, scope, callables, pure_only))
+        return {"kind": "format", "template": "".join(template), "args": fmt_args}
     if isinstance(expr, ExprVar):
         name = expr.name
         if name in scope:
@@ -7530,8 +7553,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                               "target": _lower_component_pure_expr(expr.callee.target, env, scope,
                                                                    callables, pure_only),
                               "args": args}
-                if method == "to_int":
-                    # receiver-family dispatch (`recv`), as in a fn body
+                if method in ("to_int", "to_str"):
+                    # receiver-family dispatch (`recv`), as in a fn body — the
+                    # tiers read it to tell a Float `to_str` (canonical `ftoa`)
+                    # from an Int one, and a Str/Int32 `to_int` apart.
                     node["recv"] = infer_ir({"kind": "name", "id": scope[root]},
                                             env.type_env, env.types, env.services)
                 return node
@@ -7593,7 +7618,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                                 f"argument(s), {len(args)} given")
             node: dict = {"kind": "builtin", "method": method, "target": target,
                           "args": args}
-            if method == "to_int":
+            if method in ("to_int", "to_str"):
                 # receiver-family dispatch (`recv`), as in a fn body
                 node["recv"] = infer_ast(expr.callee.target, env.type_env,
                                          env.types, None)
