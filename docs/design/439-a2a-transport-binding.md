@@ -113,12 +113,23 @@ what it refuses:
   body would be `await` inside a non-`async` function. The remote row must not
   recolour a `service` it did not write (unlike the importer, which writes it),
   so the ts projection waits on the async crossing.
-- **Value tainting is slice C3, shared with the canonical wire.** Item 424
-  D-424c.9 requires every value a remote provider returns to be `Untrusted[T]`.
-  That is slice C3, which neither the canonical wire nor `through a2a` has landed.
-  Until it does, the header carries the same caveat the canonical row already
-  carries: a value that crossed this boundary is indistinguishable at a call site
-  from a local one, so treat it as untrusted. Both wires gain tainting together.
+- **Value tainting (slice C3) has landed, shared with the canonical wire.** Item
+  424 D-424c.9 requires every value a remote provider returns to be
+  `Untrusted[T]`. This is now done for BOTH wires together, in the one place they
+  share (`_remote_source`): the synthesized extern's declared return is wrapped
+  `Untrusted[<T>]` (`on_failure(result)` wraps the whole `Result[T, Str]`), which
+  `taint.extract_and_normalize` reads as a taint source whose origin is the
+  crossing's reach class (`net`). The provide method returns that source, so the
+  flow walk taints it interprocedurally at every consumer of the key — exactly
+  how `revl import a2a` taints by declaring its service operation
+  `-> Untrusted[Str]`, except here the service the engineer wrote is unchanged
+  and the qualifier lives only on the synthesized crossing. A remote result
+  reaching a `Trusted[T]` sink is refused (G9) with no `endorse`, and admits with
+  one. The taint IS the admission fact of remoteness: a consumer of a LOCAL
+  provider of the same service is untainted and unchanged (D-424c.1), so bringing
+  the provider back in-process removes the qualifier with no source edit. Because
+  the qualifier is orthogonal to the base type and stripped before base typing,
+  the synthesized provider still satisfies the service's declared `-> T`.
 
 ## What remains for full closure of item 439
 
@@ -131,21 +142,37 @@ what it refuses:
 3. Non-text `Part`s (`FilePart`, `DataPart`) and richer skill schemas.
 4. gRPC and HTTP+JSON/REST as `through a2a` sub-transports (the importer already
    binds JSON-RPC and HTTP+JSON; the row binds only JSON-RPC so far).
-5. The `Untrusted[T]` return tainting, slice C3, shared with the canonical wire.
+5. ~~The `Untrusted[T]` return tainting, slice C3, shared with the canonical
+   wire.~~ **LANDED** (this branch), for both wires together — see the scope-limit
+   note above and `test_439_a2a_transport.py` / `test_424_remote_row.py`.
 6. The runtime half of `on_failure(withdraw)`: wiring a transport fault into the
-   provider-withdrawal cascade (R2/R3). The declaration and the fault are built;
-   the cascade is armed by the placement bridge's monitor connection, which a
-   synthesized row does not yet join (see `test_424_remote_row.py`).
+   provider-withdrawal cascade (R2/R3). STILL OPEN. The declaration, the check,
+   the IR contract and the fault-raising body are all built and pinned; what is
+   missing is purely runtime. The cascade is armed by the placement bridge's
+   monitor connection (`backends/python/bridge.py` `watch(on_lost)`, fired on
+   monitor EOF), a SEAM-CLIENT mechanism. A synthesized row's `@py` body is a
+   plain `urllib` POST, not a seam client, so it does not join that path for
+   free: the fault it raises unwinds the calling fiber but does not withdraw the
+   provision or reactively deactivate consumers. Closing it means either the
+   synthesized provider joining the withdrawal monitor, or the activation runtime
+   catching the declared transport fault and driving R2/R3 — a runtime-backend
+   change with its own activation-level test, not a synthesizer edit. Measured,
+   not assumed (see `test_424_remote_row.py`).
 
 ## Files
 
 - `src/revl/synthesize.py`: `BOUND_TRANSPORTS`, `check_transport`,
   `_check_a2a_method`, `_py_body_a2a`, `_a2a_header_lines`, and the `is_a2a`
-  branch in `_remote_source`.
+  branch in `_remote_source`. The C3 tainting is the `Untrusted[<T>]` wrapper on
+  the synthesized extern's return in `_remote_source` (both wires) and the taint
+  paragraph in `_remote_header`.
 - `tests/test_439_a2a_transport.py`: the seam/remote-provider exit test for the
-  binding.
+  binding, plus the C3 taint section (returns `Untrusted`, sink refusal, endorse
+  admits, the `Result` wire).
 - `tests/test_424_remote_row.py`: `test_a_named_through_transport_is_refused`
-  updated, `a2a` moved from the refused set to the bound set.
+  updated, `a2a` moved from the refused set to the bound set; the C3 taint
+  section for the canonical wire (a remote result is refused at a sink; a local
+  provider of the same service is untainted).
 
 Gate digest inputs (`tools/build_gate_crate.py` `DIGEST_INPUTS`,
 `tools/build_gate_wasm.py`) are `selfhost/*.rvl`, `backends/rust/emit.py`,
