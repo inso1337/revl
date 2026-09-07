@@ -90,6 +90,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -246,7 +247,12 @@ def seam_canary_script(seam_targets, isolation_target,
              .replace("__ISO__", repr([isolation_target[0], int(isolation_target[1])]
                                       if isolation_target else []))
              .replace("__DNS__", repr(list(dns_names))))
-    return _CANARY_SH.replace("__EGRESS__", f'python3 -c "{probe}"')
+    # The probe is a full Python program carrying double-quoted string literals
+    # (e.g. print("SEAM=closed:...")). Interpolating it into a `python3 -c "..."`
+    # double-quoted word lets those inner quotes terminate the shell argument and
+    # exposes the following text (parentheses, %s) as shell syntax, so the emitted
+    # `sh -c` program fails to parse. Transport it as one shell-quoted argument.
+    return _CANARY_SH.replace("__EGRESS__", f"python3 -c {shlex.quote(probe)}")
 
 
 def _run(argv: list[str], *, timeout: float = _DOCKER_TIMEOUT) -> tuple[int, str, str]:
