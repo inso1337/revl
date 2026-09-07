@@ -7916,6 +7916,15 @@ fn radix_value(digits: &str, base: i64) -> i64 {
     return v;
 }
 
+fn decimal_canon(digits: &str) -> String {
+    let n = digits.revl_length();
+    let mut i = 0i64;
+    while ((i < (n).checked_sub(1i64).expect("revl: Int overflow")) && ({ digits.chars().nth((i) as usize).unwrap().to_string() } == "0")) {
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return digits.revl_slice(i, n.clone());
+}
+
 fn scan_quoted(source: &str, i: i64, q: i64, source_revl_cs: &[char]) -> Scan {
     let mut j = i;
     let n = (source_revl_cs.len() as i64);
@@ -8315,11 +8324,8 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
             let ftext = (ip.out.revl_concat(&fracpart)).revl_concat(&exppart);
             return Step { i: jj, line: line, tok: Token { kind: String::from("float"), text: ftext, line: line } };
         }
-        let ival = radix_value(&ip.out, 10i64);
-        if (ival == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-            return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("int literal out of 64-bit range"), line: line } };
-        }
-        return Step { i: jj, line: line, tok: Token { kind: String::from("int"), text: (ival).to_string(), line: line } };
+        let itext = decimal_canon(&ip.out);
+        return Step { i: jj, line: line, tok: Token { kind: String::from("int"), text: itext.clone(), line: line } };
     }
     if (cc == 64i64) {
         let nxt = { let _rsa = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let _rsb = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() };
