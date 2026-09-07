@@ -1076,9 +1076,18 @@ class WriteHandle:
 _OPEN_ATTEMPTS = 8
 
 
-def _open_leaf(dirfd: int, leaf: str, real: str) -> tuple[int, bool]:
+def _open_leaf(dirfd: int, leaf: str, real: str,
+               create: bool = True) -> tuple[int, bool]:
     """Open `leaf` inside the already-verified directory fd, creating it if it
     does not exist, and report which happened.
+
+    When `create` is False the leaf is opened existing-only: the `O_CREAT`
+    branch is never taken, so a missing target is refused (`ENOENT`) with no
+    inode created and no create/unlink cycle. This is the mode a positive
+    content expectation needs — the target must already be there to satisfy the
+    recorded content, and creating it just to refuse it would be a fail-open
+    (issue #626). With `create` True (the default) the original create-or-open
+    behaviour is unchanged.
 
     `O_NOFOLLOW` is the point: `resolve_within` saw a real file (or nothing),
     so a symlink here means the leaf was swapped after the check — refused as a
@@ -1100,7 +1109,17 @@ def _open_leaf(dirfd: int, leaf: str, real: str) -> tuple[int, bool]:
             return os.open(leaf, os.O_RDWR | _O_NOFOLLOW | _O_NONBLOCK,
                            dir_fd=dirfd), False
         except FileNotFoundError:
-            pass
+            if not create:
+                # Existing-only open: the target is not there and this mode may
+                # not create it, so refuse now — before any inode exists. No
+                # `O_CREAT` open is attempted, so there is no create/unlink
+                # cycle and the target namespace is left byte-unchanged.
+                raise FsOpError(
+                    "ENOENT",
+                    "write target does not exist and this open was not "
+                    "permitted to create it",
+                    real,
+                ) from None
         except IsADirectoryError:
             raise FsOpError(
                 "ENOTFILE", "write target exists and is not a regular file",
@@ -1131,7 +1150,7 @@ def _open_leaf(dirfd: int, leaf: str, real: str) -> tuple[int, bool]:
     )
 
 
-def open_confined_write(path: str) -> WriteHandle:
+def open_confined_write(path: str, *, create: bool = True) -> WriteHandle:
     """Open `path` for writing, inside the root, without a check-to-syscall
     window and without a hardlink write-through.
 
@@ -1142,12 +1161,22 @@ def open_confined_write(path: str) -> WriteHandle:
     the file is writable at all. Nothing is truncated by the open, so a refusal
     leaves the target byte-identical.
 
+    `create` (keyword-only, default True) chooses create-or-open vs existing-
+    only. With `create` False a missing leaf is refused (`ENOENT`) instead of
+    being created: the mode a positive content expectation uses, so that a
+    guarded write against a target that recorded content can be refused with no
+    inode ever created (issue #626). `create` is not a path argument, so the
+    `SYSCALL_PATH_ARGS` contract for this entry point (positional arg 0 only) is
+    unchanged.
+
     Refusals, all as `FsOpError` (an `Err` on the forward path, which registers
     no inverse):
       * `EOUTSIDE`   - outside the root, or a symlink appeared where the check
         saw a real file (a lost race, refused rather than followed);
       * `ENOENT`     - the parent directory does not exist (we create no
-        directories, so the inverse leaves zero residue);
+        directories, so the inverse leaves zero residue); or, when `create` is
+        False, the target leaf itself does not exist (refused before any inode
+        is created);
       * `ENOTFILE`   - the target exists and is not a regular file;
       * `EMULTILINK` - the target has more than one link. `realpath` cannot see
         through a hardlink and writing through the fd would still mutate the
@@ -1170,7 +1199,7 @@ def open_confined_write(path: str) -> WriteHandle:
             real,
         ) from None
     try:
-        fd, created = _open_leaf(dirfd, leaf, real)
+        fd, created = _open_leaf(dirfd, leaf, real, create=create)
     finally:
         os.close(dirfd)
     try:

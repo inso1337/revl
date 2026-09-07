@@ -108,6 +108,66 @@ def test_expect_digest_on_absent_target_refuses(root):
     assert not (root / "missing.txt").exists()
 
 
+def test_expect_digest_on_missing_target_never_creates_the_inode(root, monkeypatch):
+    """Issue #626 regression: `expect=<digest>` on a MISSING target must refuse
+    WITHOUT first creating the target inode.
+
+    The old code opened create-capable, saw `handle.created`, refused EEXPECT
+    and relied on cleanup to unlink the inode it had just made — a fail-open
+    (observable create/unlink events, plus a process-death window in which the
+    empty file survives). The fix opens the target existing-only for a positive
+    content expectation, so no `O_CREAT` open is ever attempted on the refused
+    path. We prove that at the syscall level: spy on the runtime's `os.open`
+    and assert no create of the target leaf happened, and that the path both
+    stays absent AND was never transiently present."""
+    ws = fs._runtime
+    real_open = ws.os.open
+    creates: list = []
+
+    def spy(path, flags, *args, **kwargs):
+        # record every create that names our leaf, whatever the dir_fd
+        if (flags & os.O_CREAT) and str(path).endswith("missing.txt"):
+            creates.append((path, flags))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(ws.os, "open", spy)
+
+    with pytest.raises(fs.FsOpError) as ei:
+        fs.write("missing.txt", "new", expect=_sha(b"recorded content"))
+
+    assert ei.value.code == "EEXPECT"
+    # the fix: not a create-then-unlink, but never a create at all
+    assert creates == [], f"the refused missing-target path created an inode: {creates}"
+    # and the target namespace is byte-unchanged: still absent afterward
+    assert not (root / "missing.txt").exists()
+
+
+def test_existing_modes_still_hold_after_the_fix(root):
+    """The #626 fix must not disturb the other expectation modes."""
+    # expect=<digest> on an existing, MATCHING target writes.
+    r1 = fs.write("f.txt", "first")
+    r2 = fs.write("f.txt", "second", expect=r1.new_digest)
+    assert r2.replaced is True
+    assert (root / "f.txt").read_bytes() == b"second"
+
+    # expect=<digest> on an existing but DRIFTED target refuses, unchanged.
+    with pytest.raises(fs.FsOpError) as ei:
+        fs.write("f.txt", "third", expect=r1.new_digest)  # stale digest now
+    assert ei.value.code == "EEXPECT"
+    assert (root / "f.txt").read_bytes() == b"second"
+
+    # expect=ABSENT on an existing target refuses, unchanged.
+    with pytest.raises(fs.FsOpError) as ei:
+        fs.write("f.txt", "fourth", expect=fs.ABSENT)
+    assert ei.value.code == "EEXPECT"
+    assert (root / "f.txt").read_bytes() == b"second"
+
+    # expect=ABSENT on a missing target still creates it.
+    r3 = fs.write("brand_new.txt", "hello", expect=fs.ABSENT)
+    assert r3.replaced is False
+    assert (root / "brand_new.txt").read_bytes() == b"hello"
+
+
 # ---------------------------------------------------------------------------
 # expect=ABSENT: creates when absent, refuses when present
 # ---------------------------------------------------------------------------
