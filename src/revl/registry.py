@@ -1928,6 +1928,7 @@ def _bridge_entry(entry: RegistryEntry, needs: list[_Need], ir_cache: dict,
                     f"{need.decl.name}Adapter", need.decl, provided, opt_ins,
                     provide_key=key, require_key="backing",
                     carried_tokens=tuple(carried), prov_types=prov_types,
+                    req_types=need.types,
                     derivation=derivation, chain_depth=depth)
             except ValueError as error:
                 # the slice-1 renderer does not cover every catalogue
