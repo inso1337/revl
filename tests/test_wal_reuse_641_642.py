@@ -164,6 +164,19 @@ def _run_two_crashes(path: str) -> None:
     wal.close()   # <-- crash: no commit_run()
 
 
+def _run_two_crashes_before_activation(path: str) -> None:
+    """Run 2 REUSES the same `path` and crashes DURING activation: it appends an
+    activation-body effect, then `kill -9` — BEFORE it stamps its own
+    `activation-complete` (and so before any `run-complete`). The last
+    `activation-complete` in the file is therefore run 1's, and run 1's clean
+    `run-complete` sits in the tail AHEAD of run 2's outstanding effect."""
+    wal = replay.WriteAheadLog(path, ir={}, generation=2).open()
+    tl = replay.Timeline("Svc")
+    tl.record_emission("bus", "send", ("run2-event",), "Bus", ("<f>", 2))
+    wal.append_timeline(tl)
+    wal.close()   # <-- crash: no commit_activation() and no commit_run()
+
+
 def test_later_run_crash_residue_is_not_masked_by_an_earlier_run_complete(tmp_path):
     """Issue #642. Run 1 completed cleanly and Run 2 (same WAL file) crashed in
     steady state. Run 1's `run-complete` must NOT settle Run 2's outstanding
@@ -185,6 +198,68 @@ def test_later_run_crash_residue_is_not_masked_by_an_earlier_run_complete(tmp_pa
     assert len(outstanding) == 1
     assert outstanding[0]["kind"] == "steady-state-residue"
     # and it is RUN 2's crossing that is surfaced, not run 1's completed one.
+    referent = outstanding[0].get("referent") or ""
+    assert "run2-event" in referent
+    assert "run1-event" not in referent
+
+
+def test_preactivation_second_run_crash_is_not_masked_by_an_earlier_run_complete(
+        tmp_path):
+    """Issue #642, the PREactivation residual. Run 1 completed cleanly (its own
+    `activation-complete` then `run-complete`); Run 2 (same WAL file) appended an
+    activation-body effect and crashed BEFORE stamping its own
+    `activation-complete`. The last `activation-complete` in the file is thus run
+    1's, and run 1's `run-complete` sits in the roll-forward tail AHEAD of run
+    2's outstanding effect. That historical marker must NOT settle run 2's
+    crossing — recover must surface run 2's residue, never a false CLEAN. Before
+    the fix `any(run-complete)` over the whole tail zeroed the residue here."""
+    path = str(tmp_path / "reused-preact.wal")
+    _run_one_clean(path)
+    _run_two_crashes_before_activation(path)
+
+    # exactly ONE activation-complete (run 1's; run 2 crashed before its own)
+    # and ONE run-complete (run 1's), with run 2's effect appended AFTER both.
+    records = wal_core.read_wal(path)["records"]
+    assert sum(r.get("record") == "activation-complete" for r in records) == 1
+    assert sum(r.get("record") == "run-complete" for r in records) == 1
+    kinds = [r.get("record") for r in records]
+    assert kinds.index("run-complete") < len(kinds) - 1  # an effect follows it
+    assert records[-1].get("record") == "effect"
+
+    report = recover(path)
+    assert report["verdict"] == "rolled-forward"
+    # the crux: NOT falsely CLEAN — run 2's preactivation crossing is still out.
+    assert report["residue"]["clean"] is False
+    outstanding = report["steadyState"]["outstanding"]
+    assert len(outstanding) == 1
+    assert outstanding[0]["kind"] == "steady-state-residue"
+    # and it is RUN 2's crossing surfaced, not run 1's completed one.
+    referent = outstanding[0].get("referent") or ""
+    assert "run2-event" in referent
+    assert "run1-event" not in referent
+
+
+def test_cli_recover_preactivation_second_run_crash_exits_nonzero(
+        tmp_path, capsys):
+    """Issue #642, the preactivation residual driven end to end through
+    `revl recover --wal` (`main()`). Run 1 completed cleanly; Run 2 crashed
+    DURING activation (an effect appended, no `activation-complete`, no
+    `run-complete`). The CLI must exit NON-ZERO and name run 2's crossing as
+    residue, never a false clean/exit-0 hidden behind run 1's `run-complete`."""
+    path = str(tmp_path / "reused-preact-cli.wal")
+    _run_one_clean(path)
+    _run_two_crashes_before_activation(path)
+
+    rc = main(["recover", "--wal", path, "--json"])
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    report = json.loads(out)
+    assert report["verdict"] == "rolled-forward"
+    assert report["residue"]["clean"] is False
+    outstanding = report["steadyState"]["outstanding"]
+    assert len(outstanding) == 1
+    assert outstanding[0]["kind"] == "steady-state-residue"
     referent = outstanding[0].get("referent") or ""
     assert "run2-event" in referent
     assert "run1-event" not in referent

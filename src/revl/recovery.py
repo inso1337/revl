@@ -512,17 +512,30 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
                       len(records))
     complete = records[marker_idx] if marker_idx < len(records) else {}
     tail = records[marker_idx + 1:]
-    # A `run-complete` settles a run ONLY within its own interval. A stale
-    # marker from an EARLIER run (before this run's activation marker) must
-    # never account for this run's crossings, or a historical clean shutdown
-    # would mask a later run's crash residue and report a false CLEAN (#642).
-    run_complete = any(r.get("record") == "run-complete" for r in tail)
-    steady = [r for r in tail if r.get("record") == "effect"]
-    # a clean shutdown (`run-complete`) accounts for the whole run; only a
-    # steady-state crash (marker absent) turns post-activation crossings into
-    # residue.
-    steady_residue = ({"crossed": [], "moot": [], "outstanding": []}
-                      if run_complete else _steady_state_residue(steady))
+    # A `run-complete` settles ONLY the crossings committed BEFORE it, within
+    # its own run's interval. Scoping to the LAST activation marker is not enough
+    # to keep an earlier run's clean shutdown from masking a later run's crash:
+    # a reused WAL whose LATEST run crashed BEFORE stamping its own
+    # `activation-complete` (a PREactivation crash — the crash caught it while
+    # activation was still in flight, so the last `activation-complete` belongs
+    # to the PRIOR run) leaves that prior run's `run-complete` sitting in this
+    # tail, AHEAD of the later run's outstanding effect. Testing
+    # `any(run-complete)` over the whole tail would let that historical marker
+    # zero the later effect and report a false CLEAN (#642, the preactivation
+    # residual). So bound the settling to what the marker actually precedes:
+    # find the LAST `run-complete` in the tail and treat only the effects AFTER
+    # it as this run's unaccounted, steady-state residue. An effect BEFORE the
+    # last `run-complete` was accounted by that orderly shutdown; an effect after
+    # it belongs to a later run that reused the file and is still outstanding.
+    # With no `run-complete` in the tail every post-activation effect is residue,
+    # and on a single-run WAL the marker is the last record (or absent), so both
+    # branches stay byte-identical to the pre-#642 reports.
+    last_run_complete = next(
+        (i for i in range(len(tail) - 1, -1, -1)
+         if tail[i].get("record") == "run-complete"), -1)
+    steady = [r for r in tail[last_run_complete + 1:]
+              if r.get("record") == "effect"]
+    steady_residue = _steady_state_residue(steady)
     resumed = None
     if session is not None and snapshot is not None:
         from .mcp.approval import ApprovalRequired  # noqa: PLC0415
