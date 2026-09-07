@@ -104,6 +104,7 @@ composition Demo {
   use "services.rvl"
   row @db from "sqlite.rvl" provides db
     config { url: "sqlite://local" }
+    open   { url, pool }
   row @cache from "cache.rvl" provides cache
 %s}
 """

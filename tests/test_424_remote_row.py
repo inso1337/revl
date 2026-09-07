@@ -580,8 +580,9 @@ composition Net {
 
 def test_synthesize_provider_refuses_an_unknown_kind():
     """§4's claim is that four constructs are four KINDS of one function. The
-    function says which kinds it has rather than silently doing the wrong one."""
+    function says which kinds it has rather than silently doing the wrong one.
+    `remote` (slice C2) and `seam` (slice B2) are built; `configure` is not."""
     program = Parser(BILLING, "t.rvl").parse()
     with pytest.raises(ValueError) as excinfo:
-        synthesize_provider(program.services[0], "seam", {})
+        synthesize_provider(program.services[0], "configure", {})
     assert "'remote'" in str(excinfo.value)

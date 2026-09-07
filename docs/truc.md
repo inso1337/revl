@@ -215,6 +215,61 @@ frontend-only, so it needs no runtime installed, the same as `assemble`'s gate.
 `revl truc reproduce <component@version>` is the namespaced spelling of the same
 engine.
 
+### `truc stack check` / `truc apply`
+
+Compose with **layers** (roadmap item 426). Where `add`/`assemble` build a
+composition out of whole trucs, a stack layer *patches* the composition it sits
+on — adding a row, replacing a provider, or re-configuring one — and the result
+is re-admitted, never blindly merged. `stack check` and `apply` are the two
+front doors onto that, and the division is deliberate: **distribution is truc's,
+the semantics are the composition's** (item 426 decision 7). truc owns which
+document is applied, the trucs vendored beside it and the `truc.lock` that pins
+them; `revl`'s composition engine owns resolution and admission. truc holds no
+opinion about a layer that revl does not.
+
+`truc stack check` resolves your composition's declared layer stack
+**header-only** — every row id resolves and the whole wiring renders without
+lowering a single component body — and reports a collision at edit time, before
+anything is admitted:
+
+```console
+$ truc stack check
+truc: stack resolves — Demo (origin `.`, 2 rows)
+ROWS
+  .::@db                   PgDb  (trucs/pg_database/component.rvl)
+  metrics_kit::@metrics    KitMetrics  (trucs/metrics_kit/component.rvl)
+                             add by `MetricsKit` (L1)
+WIRING
+  …
+```
+
+The fold that resolves the stack never calls the gate, so a bug there can only
+over-refuse. A peer conflict (two stack layers replacing one row), an address
+that resolves to nothing, a stack layer whose `from` climbs out of its own
+truc's vendored directory, or a vendored truc with no `truc.lock` pin is a
+**refusal** naming the layer — the same refusals `apply` would raise, surfaced
+before you fetch or admit anything.
+
+`truc apply` resolves the stack and **admits** it. Every gate fires inside the
+composition engine, unchanged: the mandatory `truc.lock` pin and the
+vendored-dir jail at resolution, and the untrusted-author confinement profile at
+admission — so a stack layer's declared-`pure` host body that would exfiltrate
+has no reachable spelling, and a layer shipping any host body is refused by
+default, naming the bodies. On a clean admit the applied composition manifest is
+written to `build/assembly.json`; on any refusal nothing is written
+(all-or-nothing).
+
+```console
+$ truc apply
+truc: applied — the layer stack admitted through the gate [MEASURED …]; load order PgDb; wrote build/assembly.json
+```
+
+`--trust-host-code` admits a layer that ships host code, changes the reported
+trust basis from `MEASURED` to `CLAIMED`, and forfeits any claim of a clean
+authority panel — the [§8.8](design/426-composition-layers.md) shape change,
+made loud. It is the same lever `revl composition --admit --trust-host-code`
+carries, because it is the same engine.
+
 ### Files and layout
 
 - **`truc.toml`** — the manifest. What your composition is, which petits bouts

@@ -255,6 +255,7 @@ export function resetHost(): void {
   jobCounter = 0
   jobHandles.length = 0
   Clock.reset()
+  Stream.reset()
 }
 
 /** Append one entry to the shared observability trace (`hostLog`) and notify
@@ -1452,8 +1453,566 @@ function applyConfigDefaults(
   return config
 }
 
+// ---------------------------------------------------------------------------
+// Stream[T] — the reactive tier (item 130, docs/design/130-stream-reactive-types.md)
+//
+// The ts tier lowers the SAME `async function*` shape the py reference runs
+// (design §4.6): a subscription's `next()` awaits an item raced against a
+// cancel token, and `close()` trips that token synchronously, so the bracket
+// inverse stays reachable off the teardown path even while a `next` is parked
+// (the cancellation-first fix, §9 Part A). This is a faithful mirror of
+// backends/python/runtime.py's `StreamSource`/`StreamStage`/`Subscription`/
+// `Stream`; the same states, policies, drain clock and combinator chain, spelt
+// for node's single-threaded event loop with a wake-Promise where the py tier
+// uses an asyncio.Event. The typed-event contract (`on … as`) and durable
+// replay remain the py reference tier's — the ts EMITTER refuses them by name.
+
+export class StreamFaulted extends Error {
+  readonly reason: string
+  constructor(reason: string) {
+    super(reason)
+    this.name = 'StreamFaulted'
+    this.reason = reason
+  }
+}
+
+/** The terminal value `next` returns on an orderly close — the `Closed` event
+ *  (design §4.3). A singleton so a consumer can identity-test it. */
+export const STREAM_CLOSED: unique symbol = Symbol('stream Closed')
+
+const STREAM_DEFAULT_CAPACITY = 8
+
+type StreamTerminal = readonly ['closed', null] | readonly ['faulted', string | null]
+
+interface StreamDownstream {
+  _deliver(item: unknown): boolean
+  _terminate(kind: string, reason: string | null): void
+}
+
+/** The provider side of a `Stream[T]` (design §1), and — for a `merge(a, b)` —
+ *  the derived fan-in that composes two providers into one. */
+export class StreamSource implements StreamDownstream {
+  _subs: StreamDownstream[] = []
+  _down: StreamSource[] = []
+  private _up: StreamSource[]
+  private _pending: number
+  private _stateName: 'open' | 'closed' | 'faulted' = 'open'
+  private _reason: string | null = null
+  readonly _kind: string
+
+  constructor(kind = 'source', up: StreamSource[] = []) {
+    this._kind = kind
+    this._up = [...up]
+    this._pending = this._up.length
+    Stream._sources.push(this)
+    record(`stream.${kind} open`)
+  }
+
+  get state(): string {
+    return this._stateName
+  }
+
+  /** Whether this stream is OWNED by the subscription below it (a `merge`
+   *  fan-in) rather than by a bracket of its own (a `Stream.source()`). */
+  get _derived(): boolean {
+    return this._kind !== 'source'
+  }
+
+  /** Deliver one item to the single consumer; a no-op once terminal. Returns
+   *  whether the item was ACCEPTED, so a refusal (a `block` pause, an `error`
+   *  overflow, a spent `take`) is backpressure the provider sees, never a
+   *  silent loss (§4.4). */
+  emit(item: unknown): boolean {
+    if (this._stateName !== 'open') return false
+    const accepted = this._forward(item)
+    record(accepted ? `stream.emit ${item}` : `stream.emit ${item} refused`)
+    return accepted
+  }
+
+  _forward(item: unknown): boolean {
+    if (this._stateName !== 'open') return false
+    let accepted = true
+    for (const sub of [...this._subs]) {
+      if (!sub._deliver(item)) accepted = false
+    }
+    for (const down of [...this._down]) {
+      if (!down._forward(item)) accepted = false
+    }
+    return accepted
+  }
+
+  /** Orderly teardown: deliver `Closed` to every subscription and (for a merge)
+   *  detach from both upstreams. The terminal rule 3.6 requires (§9 Part B). */
+  close(): boolean {
+    const first = this._stateName === 'open'
+    if (first) {
+      this._stateName = 'closed'
+      for (const sub of [...this._subs]) sub._terminate('closed', null)
+      for (const down of [...this._down]) down._upstreamTerminal('closed', null)
+    }
+    const ups = this._up
+    this._up = []
+    for (const up of ups) {
+      up._detachDown(this)
+      if (up._derived) up.close()
+    }
+    if (first) record(`stream.${this._kind} close`)
+    return first
+  }
+
+  /** Provider abort: deliver `Faulted(reason)` to every outstanding `next`. */
+  fault(reason = 'provider fault'): boolean {
+    if (this._stateName !== 'open') return false
+    this._stateName = 'faulted'
+    this._reason = reason
+    record(`stream.${this._kind} fault ${reason}`)
+    for (const sub of [...this._subs]) sub._terminate('faulted', reason)
+    for (const down of [...this._down]) down._upstreamTerminal('faulted', reason)
+    return true
+  }
+
+  _deliver(item: unknown): boolean {
+    return this._forward(item)
+  }
+
+  _terminate(kind: string, reason: string | null): void {
+    this._upstreamTerminal(kind, reason)
+  }
+
+  _detach(sub: StreamDownstream): void {
+    const i = this._subs.indexOf(sub)
+    if (i >= 0) this._subs.splice(i, 1)
+  }
+
+  _attachDown(merged: StreamSource): void {
+    if (this._stateName !== 'open') {
+      merged._upstreamTerminal(this._stateName, this._reason)
+      return
+    }
+    this._down.push(merged)
+  }
+
+  _detachDown(merged: StreamSource): void {
+    const i = this._down.indexOf(merged)
+    if (i >= 0) this._down.splice(i, 1)
+  }
+
+  /** How a merged stream learns one source is done (§Slice 3): a FAULT
+   *  propagates at once; an orderly CLOSE only counts down, so the fan-in stays
+   *  live while any source is and delivers its own `Closed` when the last one
+   *  closes — a parked `next` is terminated, never stranded on a dead fan-in. */
+  _upstreamTerminal(kind: string, reason: string | null): void {
+    if (this._stateName !== 'open') return
+    if (kind === 'faulted') {
+      this._stateName = 'faulted'
+      this._reason = reason
+    } else {
+      this._pending -= 1
+      if (this._pending > 0) return
+      this._stateName = 'closed'
+      kind = 'closed'
+    }
+    for (const sub of [...this._subs]) sub._terminate(kind, reason)
+    for (const down of [...this._down]) down._upstreamTerminal(kind, reason)
+  }
+}
+
+/** One link of a derived-stream combinator chain — `map(f)`, `filter(p)` or
+ *  `take(n)` (Slice 2). Both a subscriber of its upstream and an upstream of
+ *  the next link, so a chain is `StreamSource -> stage -> … -> Subscription`
+ *  and teardown stays one LIFO stack. The transforms are G6-pure (rule 3.5). */
+export class StreamStage implements StreamDownstream {
+  _subs: StreamDownstream[] = []
+  private _upstream: StreamSource | StreamStage
+  private _kind: 'map' | 'filter' | 'take'
+  private _arg: unknown
+  private _stateName: 'open' | 'closed' = 'open'
+  private _remaining: number | null
+  readonly _derived = true
+
+  constructor(upstream: StreamSource | StreamStage, kind: string, arg: unknown) {
+    if (kind !== 'map' && kind !== 'filter' && kind !== 'take') {
+      throw new Error(`unknown stream combinator ${kind}`)
+    }
+    this._upstream = upstream
+    this._kind = kind
+    this._arg = arg
+    this._remaining = kind === 'take' ? Number(arg) : null
+    upstream._subs.push(this)
+    Stream._stages.push(this)
+    record(`stream.stage ${kind}`)
+  }
+
+  get state(): string {
+    return this._stateName
+  }
+
+  _deliver(item: unknown): boolean {
+    if (this._stateName !== 'open') return false
+    if (this._kind === 'map') {
+      item = (this._arg as (v: unknown) => unknown)(item)
+    } else if (this._kind === 'filter') {
+      // a predicate rejection is not backpressure: the provider's emit
+      // succeeded, this derived stream simply has nothing to forward.
+      if (!(this._arg as (v: unknown) => unknown)(item)) return true
+    } else {
+      if ((this._remaining as number) <= 0) return false
+    }
+    let accepted = true
+    for (const sub of [...this._subs]) {
+      if (!sub._deliver(item)) accepted = false
+    }
+    if (this._kind === 'take' && accepted) {
+      this._remaining = (this._remaining as number) - 1
+      if (this._remaining === 0) {
+        // `take(n)` exhausted: push a `Closed` TERMINAL downstream (never
+        // silence, §4.3) and detach from the upstream so it stops feeding.
+        record('stream.take exhausted')
+        this._upstream._detach(this)
+        for (const sub of [...this._subs]) sub._terminate('closed', null)
+      }
+    }
+    return accepted
+  }
+
+  _terminate(kind: string, reason: string | null): void {
+    for (const sub of [...this._subs]) sub._terminate(kind, reason)
+  }
+
+  _detach(sub: StreamDownstream): void {
+    const i = this._subs.indexOf(sub)
+    if (i >= 0) this._subs.splice(i, 1)
+  }
+
+  /** The chained inverse: release this link and its derived upstream chain.
+   *  Idempotent and infallible (G5) — teardown never suspends. */
+  close(): boolean {
+    if (this._stateName !== 'open') return false
+    this._stateName = 'closed'
+    this._upstream._detach(this)
+    record(`stream.stage close ${this._kind}`)
+    if (this._upstream._derived) this._upstream.close()
+    return true
+  }
+}
+
+/** True once the owning activation is no longer live (its fiber left
+ *  ACTIVE/LOADING). The cancellation-first signal §9 Part A needs on the
+ *  event-loop tier: cordis disposal awaits the body's in-flight `await` before
+ *  running the collected inverses, so a `next` parked forever would deadlock
+ *  teardown. The fiber flips to UNLOADING synchronously when withdrawal begins,
+ *  and a `next` that observes it resolves as `Closed`. Duck-typed. */
+function _fiberWithdrawn(ctx: any): boolean {
+  if (ctx === null || ctx === undefined) return false
+  try {
+    const state = ctx.fiber?.state
+    if (state === undefined) return false
+    const name = typeof state === 'number'
+      ? fiberStateName(state)
+      : String((state as any).name ?? state)
+    return name !== 'ACTIVE' && name !== 'LOADING'
+  } catch {
+    return false
+  }
+}
+
+// The parked-`next` withdrawal sweep (item 416b): one shared poll for every
+// parked owner-bearing consumer, mirroring py's `_stream_withdrawal_sweep`.
+const _streamParked: Subscription[] = []
+let _streamSweeper: Promise<void> | null = null
+
+function _streamParkRegister(sub: Subscription): void {
+  _streamParked.push(sub)
+  if (_streamSweeper === null) _streamSweeper = _streamWithdrawalSweep()
+}
+
+function _streamParkUnregister(sub: Subscription): void {
+  const i = _streamParked.indexOf(sub)
+  if (i >= 0) _streamParked.splice(i, 1)
+}
+
+async function _streamWithdrawalSweep(): Promise<void> {
+  try {
+    while (_streamParked.length) {
+      const seen = new globalThis.Map<unknown, boolean>()
+      for (const sub of [..._streamParked]) {
+        const ctx = sub._ctx
+        let withdrawn = seen.get(ctx)
+        if (withdrawn === undefined) {
+          withdrawn = _fiberWithdrawn(ctx)
+          seen.set(ctx, withdrawn)
+        }
+        if (withdrawn) sub._signal()
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    }
+  } finally {
+    _streamSweeper = null
+  }
+}
+
+/** A single-consumer subscription (design §1, §4.6). `next()` awaits the next
+ *  item raced against the cancel token; `close()` trips it synchronously. */
+export class Subscription {
+  static readonly POLICIES = ['error', 'drop_newest', 'drop_oldest', 'block'] as const
+
+  private _source: StreamSource | StreamStage
+  private _policy: string
+  private _capacity: number
+  _ctx: any
+  private _buffer: unknown[] = []
+  private _terminal: StreamTerminal | null = null
+  private _closed = false
+  private _paused = false
+  private _drainMs: number | null
+  private _drain: TimerHandle | null = null
+  private _wake: (() => void) | null = null
+
+  constructor(
+    source: StreamSource | StreamStage,
+    policy = 'error',
+    ctx: any = null,
+    capacity: number = STREAM_DEFAULT_CAPACITY,
+    drainMs: number | null = null,
+  ) {
+    if (!Subscription.POLICIES.includes(policy as any)) {
+      throw new Error(`unknown backpressure policy ${policy}`)
+    }
+    this._source = source
+    this._policy = policy
+    this._capacity = capacity
+    this._ctx = ctx
+    this._drainMs = drainMs
+    source._subs.push(this)
+    Stream._subs.push(this)
+    record('stream.subscribe')
+  }
+
+  get state(): string {
+    if (this._closed) return 'closed'
+    if (this._paused) return 'paused'
+    return 'active'
+  }
+
+  _deliver(item: unknown): boolean {
+    if (this._closed || this._terminal !== null) return false
+    if (this._paused) return false
+    if (this._buffer.length < this._capacity) {
+      this._buffer.push(item)
+      this._signal()
+      return true
+    }
+    if (this._policy === 'drop_newest') {
+      record(`stream.drop_newest ${item}`)
+      return true
+    }
+    if (this._policy === 'drop_oldest') {
+      const evicted = this._buffer.shift()
+      this._buffer.push(item)
+      this._signal()
+      record(`stream.drop_oldest ${evicted}`)
+      return true
+    }
+    if (this._policy === 'block') {
+      this._pause()
+      return false
+    }
+    // backpressure `error` (default, §4.4): a full buffer is a terminal
+    // `Faulted(overflow)` — deterministic, no silent loss.
+    this._terminal = ['faulted', 'overflow']
+    this._signal()
+    record('stream.overflow')
+    return false
+  }
+
+  private _pause(): void {
+    if (this._paused || this._closed) return
+    this._paused = true
+    record('stream.paused')
+    if (this._drainMs !== null) this._armDrain()
+  }
+
+  private _armDrain(): void {
+    if (this._drain === null) {
+      this._drain = scheduleAfter(this._drainMs as number, () => this._drainFire())
+    }
+  }
+
+  private _drainFire(): void {
+    this._drain = null
+    if (this._closed || !this._paused) return
+    if (this._buffer.length < this._capacity) this._resume()
+    else this._armDrain()
+  }
+
+  private _cancelDrain(): void {
+    if (this._drain !== null) {
+      this._drain.cancel()
+      this._drain = null
+    }
+  }
+
+  private _resume(): void {
+    this._paused = false
+    this._cancelDrain()
+    record('stream.resume')
+  }
+
+  private _maybeResume(): void {
+    if (!this._paused || this._closed) return
+    if (this._buffer.length >= this._capacity) return
+    if (this._drainMs === null) this._resume()
+  }
+
+  _terminate(kind: string, reason: string | null): void {
+    if (this._closed || this._terminal !== null) return
+    this._terminal = kind === 'faulted' ? ['faulted', reason] : ['closed', null]
+    this._signal()
+  }
+
+  _signal(): void {
+    const wake = this._wake
+    if (wake !== null) {
+      this._wake = null
+      wake()
+    }
+  }
+
+  private async _park(): Promise<void> {
+    if (this._ctx === null || this._ctx === undefined) {
+      await new Promise<void>((resolve) => { this._wake = resolve })
+      return
+    }
+    _streamParkRegister(this)
+    try {
+      await new Promise<void>((resolve) => { this._wake = resolve })
+    } finally {
+      _streamParkUnregister(this)
+    }
+  }
+
+  /** Await the next item or a terminal event — a suspension point raced against
+   *  the cancel token. Returns the item, returns `STREAM_CLOSED` on a `Closed`
+   *  terminal (orderly close or owner withdrawal), or throws `StreamFaulted` on
+   *  a `Faulted` terminal (provider abort / overflow). */
+  async next(): Promise<unknown> {
+    for (;;) {
+      // cancellation-first (§9 Part A): the tripped token — or a withdrawn
+      // owner — wins over a buffered item.
+      if (this._closed || _fiberWithdrawn(this._ctx)) return STREAM_CLOSED
+      if (this._buffer.length) {
+        const item = this._buffer.shift()
+        this._maybeResume()
+        return item
+      }
+      if (this._terminal !== null) {
+        const [kind, reason] = this._terminal
+        if (kind === 'faulted') throw new StreamFaulted(reason ?? 'faulted')
+        return STREAM_CLOSED
+      }
+      await this._park()
+    }
+  }
+
+  /** The bracket inverse: trip the cancel token synchronously, resolve any
+   *  parked `next` as `Closed`, and cascade the close through every DERIVED
+   *  upstream. The PROVIDERS are untouched — each is closed by its own bracket,
+   *  keeping the LIFO close order the core guarantee is pinned on. */
+  close(): boolean {
+    if (this._closed) return false
+    this._closed = true
+    this._signal()
+    this._cancelDrain()
+    this._source._detach(this)
+    record('stream.close')
+    if (this._source._derived) this._source.close()
+    return true
+  }
+}
+
+/** Host builtin (item 130): `Stream.source()` opens a provider; a `subscribe`
+ *  lowers to `host.Stream.subscribe(source, policy, ctx, opts)`. `pending()` is
+ *  the residue probe — open sources + un-closed subscriptions + live links. */
+export const Stream = {
+  _sources: [] as StreamSource[],
+  _subs: [] as Subscription[],
+  _stages: [] as StreamStage[],
+
+  source(): StreamSource {
+    return new StreamSource()
+  },
+
+  /** True for the `Closed` terminal a `next` returned (Slice 4). `Faulted` is
+   *  deliberately NOT a value here — it THROWS out of `next`. */
+  isClosed(value: unknown): boolean {
+    return value === STREAM_CLOSED
+  },
+
+  /** The fan-in behind `subscribe merge(a, b)` — one derived stream from two
+   *  (Slice 3). Owned by the subscription opened on it, so multi-source
+   *  teardown rides the one bracket the `subscribe` registers. */
+  merge(a: StreamSource, b: StreamSource): StreamSource {
+    const merged = new StreamSource('merge', [a, b])
+    a._attachDown(merged)
+    b._attachDown(merged)
+    return merged
+  },
+
+  /** Open a single-consumer subscription, optionally through a derived
+   *  combinator chain (Slice 2). `stages` is the emitted `[[kind, arg], …]`
+   *  list applied left to right, so the LAST link is the immediate upstream. */
+  subscribe(
+    source: StreamSource,
+    policy = 'error',
+    ctx: any = null,
+    opts: {
+      stages?: Array<[string, unknown]>
+      capacity?: number
+      drainMs?: number | null
+    } = {},
+  ): Subscription {
+    let upstream: StreamSource | StreamStage = source
+    for (const [kind, arg] of opts.stages ?? []) {
+      upstream = new StreamStage(upstream, kind, arg)
+    }
+    return new Subscription(
+      upstream, policy, ctx,
+      opts.capacity ?? STREAM_DEFAULT_CAPACITY,
+      opts.drainMs ?? null,
+    )
+  },
+
+  pending(): number {
+    return (
+      this._sources.filter((s) => s.state === 'open').length
+      + this._subs.filter((s) => s.state !== 'closed').length
+      + this._stages.filter((s) => s.state === 'open').length
+    )
+  },
+
+  sources(): StreamSource[] {
+    return [...this._sources]
+  },
+
+  lastSource(): StreamSource | undefined {
+    return this._sources[this._sources.length - 1]
+  },
+
+  stages(): StreamStage[] {
+    return [...this._stages]
+  },
+
+  reset(): void {
+    this._sources.length = 0
+    this._subs.length = 0
+    this._stages.length = 0
+    _streamParked.length = 0
+  },
+}
+
 /** The namespace emitted code resolves `host.<fn>` calls against. */
 export const host = {
+  Stream,
   Pool: {
     open(url: any, size: any): PoolHandle {
       if (String(url).startsWith('boom://')) {

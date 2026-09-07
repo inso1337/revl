@@ -38,12 +38,14 @@ from __future__ import annotations
 
 import os
 
+from .admit_profile import AdmissionProfile
 from .errors import RevlError
 from .lower import _config_default_type
 from .parser import (Address, CompositionDecl, IsolateStmt, LayerDecl, Program,
                      RowDecl, parse_file)
 from .synthesize import (
-    cap_token, check_address, check_remotable, synthesize_provider)
+    OBSERVER_METHOD, cap_token, check_address, check_remotable,
+    synthesize_provider)
 from .typecheck import compatible
 
 # The project's own origin. Reserved and unmintable by anyone else: a third
@@ -134,10 +136,11 @@ class Row:
 
     __slots__ = ("label", "origin", "source", "component", "claims",
                  "extra_claims", "requires", "config", "granted", "line",
-                 "provenance", "remote")
+                 "provenance", "remote", "seam", "open", "reach")
 
     def __init__(self, label, origin, source, component, claims, extra_claims,
-                 requires, config, granted, line, provenance=None, remote=None):
+                 requires, config, granted, line, provenance=None, remote=None,
+                 seam=None, open=None, reach=None):
         self.label = label
         self.origin = origin
         self.source = source
@@ -157,6 +160,18 @@ class Row:
         # "remoteness is an ADMISSION fact, never a wiring fact" is literally
         # true: it sits beside the wiring, and `wiring()` does not read it.
         self.remote = remote
+        # item 424 B2: the interposition facts of a `seam` row — the edge it
+        # wraps, the kind, the observer, the declared `through` reach. `None`
+        # for an ordinary row. Like `remote`, an ADMISSION fact beside the
+        # wiring, not read by `wiring()`.
+        self.seam = seam
+        # 426 S5: the config fields a stack layer may `configure` (§8.6, `open`)
+        # and the composition-level host bound on a host-bearing field
+        # (§8.3/§8.4, `reach`). `open` is a set of field names; `reach` maps a
+        # field name to its declared host bound. Both `None` when the clause
+        # was not written, so a row that uses neither is byte-identical.
+        self.open = open              # set[str] | None
+        self.reach = reach            # dict[str, str] | None
 
     @property
     def qualified(self) -> str:
@@ -181,6 +196,10 @@ class Row:
             out["config"] = dict(self.config)
         if self.granted is not None:
             out["granted"] = list(self.granted)
+        if self.open is not None:
+            out["open"] = sorted(self.open)
+        if self.reach:
+            out["reach"] = {field: self.reach[field] for field in sorted(self.reach)}
         if any(level for level, _, _ in self.provenance):
             # Only recorded once a layer actually touched the row, so a
             # composition with no layers produces the S1 document byte for byte.
@@ -188,6 +207,8 @@ class Row:
                                  for level, layer, op in self.provenance]
         if self.remote is not None:
             out["remote"] = dict(self.remote)
+        if self.seam is not None:
+            out["seam"] = dict(self.seam)
         return out
 
 
@@ -371,6 +392,143 @@ def _check_granted(row: RowDecl, header: _Header, doc: str) -> list[str] | None:
     return allowed
 
 
+def _check_open_reach(row: RowDecl, header: _Header, doc: str,
+                      rel: str) -> tuple[set[str] | None, dict[str, str] | None]:
+    """`open { ... }` and `reach { ... }` name config FIELDS, so both are
+    checked against the component's declared config exactly as a config value
+    is (426 §8.6, §8.3). A clause naming a field the component does not declare
+    is a refusal, never a silent no-op — same discipline as `_check_config`.
+    """
+    open_fields: set[str] | None = None
+    if row.open is not None:
+        open_fields = set()
+        for name, line in row.open:
+            if name not in header.config:
+                known = ", ".join(f"`{f}`" for f in header.config) or "<none>"
+                raise RevlError(
+                    doc, line,
+                    f"`open` on row `@{row.label}` names `{name}`, which is not "
+                    f"a config field of `{header.name}`",
+                    hint=f"config fields of `{header.name}` in `{rel}`: {known} "
+                         "(426 §8.6)")
+            open_fields.add(name)
+    reach: dict[str, str] | None = None
+    if row.reach is not None:
+        reach = {}
+        for name, bound, line in row.reach:
+            if name not in header.config:
+                known = ", ".join(f"`{f}`" for f in header.config) or "<none>"
+                raise RevlError(
+                    doc, line,
+                    f"`reach` on row `@{row.label}` bounds `{name}`, which is "
+                    f"not a config field of `{header.name}`",
+                    hint=f"config fields of `{header.name}` in `{rel}`: {known}. "
+                         "`reach` bounds a host-bearing config field (426 §8.3)")
+            reach[name] = bound
+    return open_fields, reach
+
+
+def _host_of(value: object) -> str | None:
+    """The host authority a config VALUE reaches, or `None` if it names none.
+
+    A `host("h:port")` bound and a config value like
+    `"postgres://primary:5432/app"` are compared on this normalized authority
+    (host, and port when present). The extraction is deliberately syntactic and
+    conservative: anything it cannot parse to a host returns `None` and is
+    treated by the caller as UNCLASSIFIABLE, which is the fail-closed direction
+    §8.5 conjunct 5 requires — never silence.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    # drop any path/query and any userinfo
+    text = text.split("/", 1)[0].split("?", 1)[0]
+    if "@" in text:
+        text = text.rsplit("@", 1)[1]
+    text = text.strip()
+    return text or None
+
+
+def _check_reach_bounds(label: str, config: dict, reach: dict[str, str] | None,
+                        doc: str, line: int, where: str) -> None:
+    """A config value on a field with a declared `reach` bound is checked
+    against that bound (426 §8.3). A value whose host is outside the bound is a
+    REFUSAL, never a silent redirect — "Widen the bound in your site layer, or
+    refuse the layer." `where` names the layer/site the value came from, for
+    the diagnostic.
+    """
+    if not reach:
+        return
+    for field, bound in reach.items():
+        if field not in config:
+            continue
+        got = _host_of(config[field])
+        want = _host_of(bound) or bound
+        if got is not None and got != want:
+            raise RevlError(
+                doc, line,
+                f"row `@{label}` configures `{field}` ({where}) to a value "
+                f"outside the reach declared for it in the composition",
+                hint=f"declared:  host(\"{want}\")\n"
+                     f"requested: host(\"{got}\")\n"
+                     "Widen the bound in your site layer, or refuse the layer "
+                     "(426 §8.3)")
+
+
+def _vendor_truc_of(abspath: str, root: str) -> str | None:
+    """The truc a source path is VENDORED under (`trucs/<truc>/...`), or `None`
+    if the path is the project's own (426 §7). Distribution facts key off where
+    the bytes physically live, not off which document named them."""
+    rel = os.path.relpath(abspath, root)
+    parts = rel.split(os.sep)
+    if len(parts) >= 2 and parts[0] == _VENDOR_DIR and parts[1] not in ("", ".."):
+        return parts[1]
+    return None
+
+
+def _load_lock(root: str) -> dict | None:
+    """The project's `truc.lock` as `name -> sourceHash`, or `None` if there is
+    no lock file. A composition with no vendored truc needs no lock (§7); a
+    composition that references one and has no lock is refused by the caller."""
+    import json  # noqa: PLC0415
+    path = os.path.join(root, "truc.lock")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.loads(fh.read())
+    except (ValueError, OSError):
+        return {}
+    return {r.get("name"): r.get("sourceHash") for r in data.get("trucs", [])
+            if isinstance(r, dict)}
+
+
+def _require_pin(truc: str, root: str, doc: str, line: int) -> None:
+    """426 exit test 17 / 428 F3, at composition resolution: a vendored truc a
+    composition references must carry a NON-BLANK lock pin, or resolution
+    refuses. This is the composition-side of the F3 gate `truc assemble`
+    enforces for the vendor step — "the lock does not define a row and cannot
+    add one; what the lock does is refuse" (§7). A missing lock, a missing row
+    or a blank `sourceHash` are all "no pin"; a blank pin is no pin.
+    """
+    lock = _load_lock(root)
+    pin = None if lock is None else lock.get(truc)
+    if not pin:
+        detail = ("there is no `truc.lock`" if lock is None
+                  else f"its lock row has a blank sourceHash"
+                  if truc in (lock or {}) else
+                  f"no lock row names it")
+        raise RevlError(
+            doc, line,
+            f"unpinned truc `{truc}`: a vendored truc the composition "
+            f"references must carry a lock pin, but {detail}",
+            hint="run `truc assemble` to pin the vendored trucs, and commit "
+                 "`truc.lock` (426 §7 / exit test 17, the 428 F3 gate). A blank "
+                 "`sourceHash` is no pin.")
+
+
 def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
                  root: str) -> tuple[Row, _Header]:
     """One `row` declaration into one resolved `Row`, header-only.
@@ -380,15 +538,45 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
     order and still reach one answer (426 §3.3). The cross-row check is
     `_check_disjoint`, and it runs ONCE, over the folded result.
     """
-    source = os.path.join(base, row.path)
+    source = os.path.abspath(os.path.join(base, row.path))
     if not os.path.isfile(source):
         raise RevlError(
             doc, row.line,
             f"row `@{row.label}` reads `{row.path}`, which does not exist",
             hint=f"resolved against `{_relative(base, root)}`")
+
+    # 426 §4.1, exit test 15's second half — the VENDORED-DIR JAIL. A row a
+    # vendored stack layer introduces must resolve inside that layer's OWN truc
+    # directory (`trucs/<origin>/`). A layer whose `from` climbs out of its
+    # vendored directory is refused, so it cannot read another truc's bytes or
+    # the project's own sources and launder them as its own row. Project-local
+    # documents (origin `.`) are the operator's and are not jailed.
+    if origin != PROJECT_ORIGIN:
+        jail = os.path.abspath(os.path.join(root, _VENDOR_DIR, origin))
+        if os.path.commonpath([source, jail]) != jail:
+            raise RevlError(
+                doc, row.line,
+                f"row `@{row.label}` of vendored layer `{origin}` reads "
+                f"`{row.path}`, which resolves outside `{_VENDOR_DIR}/{origin}/`",
+                hint="a stack layer's `from` path must resolve inside its own "
+                     "truc's vendored directory (426 §4.1); it cannot reach "
+                     "another truc's or the project's own sources")
+
+    # 426 §7, exit test 17 — the MANDATORY PIN. When a document OUTSIDE a truc
+    # (the consuming project, or another truc) references bytes vendored inside
+    # `trucs/<T>/`, that truc must carry a non-blank lock pin. A truc's own
+    # internal reference (its composition reading its sibling component) needs
+    # no project lock — the pin is the CONSUMING project's integrity proof (§7).
+    vendored = _vendor_truc_of(source, root)
+    if vendored is not None and _vendor_truc_of(base, root) != vendored:
+        _require_pin(vendored, root, doc, row.line)
+
     rel = _relative(source, root)
     header = _pick_component(row, _headers(source), doc, rel)
     claims, extra = _check_claims(row, header, doc, rel)
+    config = _check_config(row, header, doc, rel)
+    open_fields, reach = _check_open_reach(row, header, doc, rel)
+    _check_reach_bounds(row.label, config, reach, doc, row.line, "declared")
     return Row(
         label=row.label,
         origin=origin,
@@ -397,9 +585,11 @@ def _resolve_row(row: RowDecl, origin: str, doc: str, base: str,
         claims=claims,
         extra_claims=extra,
         requires=sorted(header.requires),
-        config=_check_config(row, header, doc, rel),
+        config=config,
         granted=_check_granted(row, header, doc),
         line=row.line,
+        open=open_fields,
+        reach=reach,
     ), header
 
 
@@ -560,6 +750,247 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
     )
 
 
+def _seam_inner_key(key: str) -> str:
+    """The DISTINCT inner key a seam's forwarder requires the wrapped provider
+    under (item 424 B2).
+
+    Same-key interposition is not expressible today — `isolate` binds ONE realm
+    per key (`lower.py`), so a component cannot require `db` from an inner realm
+    and provide `db` in the parent realm, and the only same-key shape the
+    language admits routes through `realms(...)`, which is `run.py:747`'s hole
+    (compiles, admits, never runs). So the forwarder requires the wrapped
+    provider under THIS key and provides the outer key. The wrapped provider is
+    placed under this key in its own source — §2.2's measured cost, unchanged —
+    which is why a seam is not yet source-transparent for the wrapped provider.
+    """
+    return f"{key}__seamed"
+
+
+def _synth_seam_path(origin: str, label: str) -> str:
+    """The provenance path a synthesized SEAM forwarder is recorded under,
+    the seam counterpart of `_synth_path`. No file is written."""
+    scope = "_project" if origin == PROJECT_ORIGIN else origin
+    return f".revl/synthesized/{scope}/{label}.seam.rvl"
+
+
+def _edge_provider(rows: list["Row"], root: str, key: str,
+                   realm: str | None) -> tuple[str | None, "Row | None"]:
+    """The file row providing `(key, realm)` and the service it provides, or
+    `(None, None)`. Header-only, and synthesized rows (no file on disk) are
+    skipped: a seam wraps a placed provider, not another synthesized one."""
+    for row in rows:
+        source = os.path.join(root, row.source)
+        if not os.path.isfile(source):
+            continue
+        for header in _headers(source):
+            if header.name != row.component:
+                continue
+            if key in header.provides and header.realm_of(key) == realm:
+                return header.provides[key][0], row
+    return None, None
+
+
+def _observer_provision(rows: list["Row"], root: str,
+                        label: str) -> tuple[str | None, str | None]:
+    """The `(key, service)` the observer row named by `@label` provides. The
+    observer row must provide EXACTLY ONE key — a seam names one observer and
+    the forwarder calls one method on it."""
+    for row in rows:
+        if row.label != label:
+            continue
+        source = os.path.join(root, row.source)
+        if not os.path.isfile(source):
+            return None, None
+        for header in _headers(source):
+            if header.name != row.component:
+                continue
+            if len(header.provides) != 1:
+                return None, None
+            (key, (svc, _line)), = header.provides.items()
+            return key, svc
+    return None, None
+
+
+def _seam_reach_ceiling(service) -> frozenset | None:
+    """The capabilities the wrapped SERVICE already declares across its methods —
+    the emission bound a seam's `through` reach must stay within under §2.4's
+    fallback.
+
+    `None` means UNBOUNDED: some method is a bare `emission` ("any capability",
+    `capabilities is None`), so nothing in `through` can exceed it and the subset
+    check is vacuous. A plain `fn` method contributes nothing (its forwarder
+    emits nothing there to bound, and G4 refuses a seam over a pure method
+    anyway), and a method declaring `emission[caps]` contributes those caps.
+    """
+    ceiling: set[str] = set()
+    for method in service.methods.values():
+        if not method.emission:
+            continue
+        if method.capabilities is None:
+            return None  # bare `emission` == any capability, no ceiling
+        ceiling.update(method.capabilities)
+    return frozenset(ceiling)
+
+
+def _check_seam_through(service, seam, doc: str) -> None:
+    """§2.4's FALLBACK for D-424b.5 — the no-rule-change half, and the half that
+    IS buildable today. A seam's declared `through` reach must be a SUBSET of the
+    wrapped service's own declared emission bound.
+
+    G4 still checks the synthesized forwarder against the service declaration
+    exactly as it checks any provider (no rule change, so a seam still compiles
+    only where the service's bound already covers the crossing, §2.4). This adds
+    only that the operator's declared `through` may not claim a reach the service
+    never granted, so `through` names an ENFORCED reach rather than a decorative
+    one — 424(b)'s exit is an interception surface whose reach is DECLARED and
+    admitted, and this is the admission.
+
+    The WIDENING variant — checking the forwarder against `through` INSTEAD of
+    the service, letting the composition MINT a bound the service did not declare
+    — is the rule change §2.4 reserves for the architect, weakens transitive
+    purity of a plain `fn` across the seamed edge, and needs 426 S5's `seam:`
+    token to keep the panel from printing `clean` across the insertion. It is
+    not made here.
+    """
+    if not seam.through:
+        return
+    ceiling = _seam_reach_ceiling(service)
+    if ceiling is None:
+        return  # a bare `emission` method grants any capability
+    for cap in seam.through:
+        if cap not in ceiling:
+            declared = ", ".join(f"`{c}`" for c in sorted(ceiling)) or "<none>"
+            raise RevlError(
+                doc, seam.line,
+                f"seam row `@{seam.label}` declares `through {cap}`, a reach the "
+                f"wrapped service `{service.name}` does not grant (it declares "
+                f"{declared})",
+                hint="§2.4's fallback bounds a seam's `through` reach by the "
+                     "wrapped service's own `emission[...]` declaration: "
+                     "`through` may name only a capability the service already "
+                     "declares. Reaching a capability the service did NOT declare "
+                     "is the D-424b.5 WIDENING, reserved for the architect and "
+                     "dependent on 426 S5's `seam:` token (424 D-424b.5, §2.4)")
+
+
+def _resolve_seams(decl: CompositionDecl, doc: str, origin: str, root: str,
+                   uses: list[str], rows: list["Row"]) -> dict:
+    """item 424 B2: append the rows whose provider is a SYNTHESIZED FORWARDER,
+    and return the in-memory `<relative path> -> revl source` map they compiled
+    from.
+
+    Resolved after the file rows AND the remote rows, because a seam wraps an
+    edge another row provides: the wrapped provider and the observer are looked
+    up in what is already placed. The catalog is built from FILE sources only —
+    a synthesized provider is not on disk to re-parse.
+    """
+    sources: dict[str, str] = {}
+    if not decl.seams:
+        return sources
+    file_paths = [*uses, *(r.source for r in rows
+                           if os.path.isfile(os.path.join(root, r.source)))]
+    catalog = _service_catalog(file_paths, root)
+    for seam in decl.seams:
+        rows.append(_resolve_seam(seam, catalog, rows, decl, doc, origin, root,
+                                  sources))
+    return sources
+
+
+def _resolve_seam(seam, catalog: dict, rows: list["Row"], decl: CompositionDecl,
+                  doc: str, origin: str, root: str, sources: dict) -> "Row":
+    """Resolve one `seam` row: find the wrapped provider and the observer,
+    synthesize the forwarder, and return an ordinary `Row`.
+
+    Like `_resolve_remote`, it returns an ORDINARY row: everything downstream
+    treats the seam exactly like a file row, which is D-424b.2 holding at the
+    level of this module's data structures — the composition places the seam and
+    the seam never registers itself.
+    """
+    inner_key = _seam_inner_key(seam.key)
+    wrapped_service, _row = _edge_provider(rows, root, inner_key, seam.realm)
+    if wrapped_service is None:
+        raise RevlError(
+            doc, seam.line,
+            f"seam row `@{seam.label}` wraps `{claim_str((seam.key, seam.realm))}`,"
+            f" but no row provides the inner key `{inner_key}`",
+            hint=f"a seam is a DISTINCT-KEY forwarder: it provides `{seam.key}` "
+                 f"and requires the wrapped provider under `{inner_key}`, so the "
+                 f"wrapped provider is placed under `{inner_key}` in its own "
+                 "source (§2.2's cost; same-key interposition is run.py:747's "
+                 "hole and is not expressible). Add the row that provides "
+                 f"`{inner_key}`")
+
+    obs_key, obs_service = _observer_provision(rows, root, seam.observer)
+    if obs_key is None:
+        raise RevlError(
+            doc, seam.line,
+            f"seam row `@{seam.label}` observes `with @{seam.observer}`, which is "
+            "not a row that provides exactly one service",
+            hint="`with @observer` names a row in this composition that provides "
+                 "the observer service; that row must provide exactly one key, "
+                 "the observer surface the forwarder calls (424 D-424b.3)")
+
+    method = OBSERVER_METHOD[seam.kind]
+    if obs_service not in catalog:
+        raise RevlError(
+            doc, seam.line,
+            f"seam row `@{seam.label}`: observer service `{obs_service}` is not "
+            "declared in this composition",
+            hint="add a `use` for the file declaring the observer service")
+    obs_decl = catalog[obs_service][0]
+    if method not in obs_decl.methods:
+        raise RevlError(
+            doc, seam.line,
+            f"seam row `@{seam.label}` is `{seam.kind}`, so its observer service "
+            f"`{obs_service}` must declare `fn {method}(...)`, and it does not",
+            hint=f"an `{seam.kind}` seam calls `{method}` on the observer: "
+                 "`observe` calls `saw`, `decide` calls `allow` (424 D-424b.4)")
+
+    if wrapped_service not in catalog:
+        raise RevlError(
+            doc, seam.line,
+            f"seam row `@{seam.label}`: wrapped service `{wrapped_service}` is "
+            "not declared in this composition",
+            hint="add a `use` for the file declaring the wrapped service")
+    wrapped_decl = catalog[wrapped_service][0]
+    # §2.4's fallback for D-424b.5: the declared `through` reach must stay within
+    # the wrapped service's own emission bound. Enforced here at resolution,
+    # before synthesis, so the refusal names the seam row and the capability.
+    _check_seam_through(wrapped_decl, seam, doc)
+
+    component, text = synthesize_provider(wrapped_decl, "seam", {
+        "label": seam.label, "key": seam.key, "realm": seam.realm,
+        "inner_key": inner_key, "observer_key": obs_key,
+        "observer_service": obs_service, "kind": seam.kind,
+        "through": tuple(seam.through),
+        "doc": doc, "line": seam.line,
+    })
+    rel = _synth_seam_path(origin, seam.label)
+    sources[rel] = text
+    return Row(
+        label=seam.label,
+        origin=origin,
+        source=rel,
+        component=component,
+        claims=[(seam.key, seam.realm)],
+        extra_claims=[],
+        requires=sorted([inner_key, obs_key]),
+        config={},
+        granted=None,
+        line=seam.line,
+        seam={
+            "edge": claim_str((seam.key, seam.realm)),
+            "kind": seam.kind,
+            "observer": seam.observer,
+            "innerKey": inner_key,
+            "service": wrapped_service,
+            "observerService": obs_service,
+            **({"realm": seam.realm} if seam.realm else {}),
+            **({"through": list(seam.through)} if seam.through else {}),
+        },
+    )
+
+
 def resolve(decl: CompositionDecl, doc_path: str,
             root: str | None = None) -> RowTable:
     """Resolve one composition declaration into its row table.
@@ -582,6 +1013,7 @@ def resolve(decl: CompositionDecl, doc_path: str,
     rows = [_resolve_row(row, origin, doc, base, root)[0] for row in decl.rows]
     uses = _resolve_uses(decl, doc, base, root)
     sources = _resolve_remotes(decl, doc, origin, root, uses, rows)
+    sources.update(_resolve_seams(decl, doc, origin, root, uses, rows))
     _check_disjoint(rows, decl.name, doc)
     return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
                     sources)
@@ -1047,6 +1479,18 @@ def _apply_op(target, layer, layer_origin, op, rel, slots, decl, doc,
         # is a new implementation of the same row, not a new row.
         row.label, row.origin = slot.row.label, slot.row.origin
         row.provenance = [*slot.row.provenance, (level, layer.name, "replace")]
+        # 426 §8.3/§8.6: the composition-level `reach` bound and the `open` set
+        # belong to the base composition; a stack-layer `replace` cannot drop
+        # them (that would be raising its own authority). They are carried
+        # forward whenever the replacement does not declare its own, and the
+        # carried bound is re-checked against the replacement's config.
+        if row.reach is None:
+            row.reach = slot.row.reach
+        if row.open is None:
+            row.open = slot.row.open
+        _check_reach_bounds(row.label, row.config, row.reach,
+                            layer.source or doc, op.row.line,
+                            f"by layer `{layer.name}`")
         slots[target] = _Slot(row, header, layer.name, level)
         return
     if op.op == "configure":
@@ -1083,6 +1527,34 @@ def _configure(target, layer, op, slot, decl, doc, level) -> None:
             hint="`configure` against a non-config row is a refusal, never a "
                  "best-effort patch: the fields would be written and nothing "
                  "would read them (426 §3.2)")
+    # 426 §8.6: a STACK layer (level 1) may configure only a row it also
+    # add/replaces, or a field the base composition declared `open`. The SITE
+    # layer (level 2) and the invocation overlay (level 3) configure anything —
+    # the operator is not attacking themselves. An unrestricted `configure` on
+    # a row a stack layer does not own is an authority with no declared reach,
+    # the shape 424(b) refuses for interception.
+    if level == 1:
+        owns = any(lname == layer.name and o in ("add", "replace")
+                   for _lvl, lname, o in slot.row.provenance)
+        if not owns:
+            allowed = slot.row.open or set()
+            for name, _value, _line in op.config:
+                # A field the component does not declare is a typo, not an
+                # authority question — let `_check_config` give the clearer
+                # "unknown config field" refusal below.
+                if name not in slot.header.config:
+                    continue
+                if name not in allowed:
+                    listed = ", ".join(f"`{f}`" for f in sorted(allowed)) or "<none>"
+                    raise _layer_error(
+                        layer, op.line,
+                        f"stack layer `{layer.name}` configures `{name}` on row "
+                        f"`{target}`, which it does not own and the base "
+                        f"composition did not declare `open`",
+                        hint=f"fields `open` on `{target}`: {listed}. A stack "
+                             "layer configures only a row it add/replaces or a "
+                             "field the base opened; the operator's SITE layer "
+                             "configures anything (426 §8.6)")
     merged = RowDecl(
         label=slot.row.label, path="", claims=[], line=op.line,
         component=slot.row.component,
@@ -1092,6 +1564,11 @@ def _configure(target, layer, op, slot, decl, doc, level) -> None:
     )
     slot.row.config = _check_config(merged, slot.header, layer.source or doc,
                                     slot.row.source)
+    # 426 §8.3: a `configure` that moves a bounded field outside its reach is a
+    # refusal, re-checked against the folded value here rather than only at base
+    # resolution — this is CRITICAL B's redirect (`url -> attacker.example`).
+    _check_reach_bounds(slot.row.label, slot.row.config, slot.row.reach,
+                        layer.source or doc, op.line, f"by layer `{layer.name}`")
     slot.row.provenance = [*slot.row.provenance, (level, layer.name, "configure")]
 
 
@@ -1250,6 +1727,58 @@ def _carry_rows(document: dict, table: RowTable) -> dict:
     return document
 
 
+def row_trust(row: "Row") -> str:
+    """The row's TRUST CLASS by the DECLARING DOCUMENT (426 §4.1).
+
+    Trust class is a distribution fact, not something a document chooses: a row
+    whose current source was contributed by a STACK layer (level 1) is
+    non-first-party whatever its `from` path names; the base composition (level
+    0) and the operator's site layer (level 2) are first-party (§4.1). Read off
+    the last add/replace/row entry in the fold provenance, which is where the
+    source was set.
+    """
+    level = 0
+    for lvl, _layer, op in row.provenance:
+        if op in ("row", "add", "replace"):
+            level = lvl
+    return "non-first-party" if level == 1 else "first-party"
+
+
+def _trusts(trust_host_code, qualified: str) -> bool:
+    """Whether the operator asked to admit `qualified` under `--trust-host-code`
+    (426 §8.8). `True` trusts every non-first-party row; a set trusts the named
+    rows only. Anything else trusts none."""
+    if trust_host_code is True:
+        return True
+    if isinstance(trust_host_code, (set, frozenset)):
+        return qualified in trust_host_code
+    return False
+
+
+def _row_profiles(table: RowTable, root: str,
+                  trust_host_code=False) -> dict | None:
+    """The per-root admission-profile map `compile_files` takes (426 S4, §9.3
+    Part 2), computed from each row's trust class (§4.1).
+
+    A non-first-party row admits under `untrusted_author` — no host code, reach
+    bounded to its `granted` set — so 425 F1's declared-`pure` exfiltrating body
+    has no reachable spelling on the layer path. A first-party row is unmapped
+    and falls back to the caller's single profile (the default trusted author).
+    `--trust-host-code` lifts the profile off the named rows: they then admit
+    like first-party source, which is the SHAPE change §8.8 describes, and the
+    panel forfeits `clean` for having done so.
+    """
+    profiles: dict[str, AdmissionProfile] = {}
+    for row in table.rows:
+        if row_trust(row) != "non-first-party":
+            continue
+        if _trusts(trust_host_code, row.qualified):
+            continue
+        profiles[os.path.join(root, row.source)] = \
+            AdmissionProfile.untrusted_author(row.granted or ())
+    return profiles or None
+
+
 def _admit_full(table: RowTable, root: str, **kwargs) -> dict:
     """Compile every row a table names — whole-composition admission.
 
@@ -1259,6 +1788,19 @@ def _admit_full(table: RowTable, root: str, **kwargs) -> dict:
     reach this.
     """
     from .compiler import compile_files  # noqa: PLC0415 (cycle: compiler -> parser -> here)
+
+    # 426 S4/S5 (§9.3 Part 2, §4.1): the per-root admission-profile map. A
+    # caller confining non-first-party rows passes `confine=True`, which builds
+    # the map from the row table's trust classes (each stack-layer row under its
+    # own `untrusted_author`, honouring `trust_host_code`); an explicit
+    # `profiles=` still wins, and the default (neither given) is byte-identical
+    # to the single-profile path S1 shipped.
+    trust_host_code = kwargs.pop("trust_host_code", False)
+    confine = kwargs.pop("confine", False)
+    if confine and "profiles" not in kwargs:
+        profiles = _row_profiles(table, root, trust_host_code)
+        if profiles is not None:
+            kwargs["profiles"] = profiles
 
     # item 424 C2: a synthesized provider is compiled from memory. It is
     # ORDINARY revl source and the ordinary compiler compiles it, so `_link`
@@ -1339,7 +1881,7 @@ def compile_composition(path: str, root: str | None = None,
 
 def admit_composition(path: str, root: str | None = None,
                       overlay: dict | None = None, full: bool = False,
-                      **kwargs) -> dict:
+                      trust_host_code=False, **kwargs) -> dict:
     """Admit a composition, INCREMENTALLY by default (426 S3, §5.1).
 
     A composition that declares layers is a DELTA over an already-admitted
@@ -1371,14 +1913,17 @@ def admit_composition(path: str, root: str | None = None,
     decl = sole_composition(parse_file(path), path)
     final = resolve_file(path, root, overlay)
 
+    confine = kwargs.pop("confine", False)
     if full or (not decl.stack and decl.site is None):
-        return _admit_full(final, root, **kwargs)
+        return _admit_full(final, root, trust_host_code=trust_host_code,
+                           confine=confine, **kwargs)
 
     base = resolve(decl, path, root)
     delta_rows, replacing = _resolved_delta(base, final)
 
     # The already-admitted base: one whole compile, the running manifest every
-    # delta row is admitted INTO.
+    # delta row is admitted INTO. The base is all first-party, so it carries no
+    # per-root profile; the layer delta is where the trust classes appear.
     base_doc = _admit_full(base, root, **kwargs)
     if not delta_rows and not replacing:
         # A configure-only delta changes no wiring and no component, so the base
@@ -1389,8 +1934,15 @@ def admit_composition(path: str, root: str | None = None,
     extra = dict(kwargs.pop("sources", None) or {})
     paths, synth = _delta_sources(delta_rows, final, root)
     extra.update(synth)
+    # 426 S4/S5: with `confine`, the delta admits each row against its own trust
+    # profile, in one call, into the base manifest (§9.3 Part 2). The profile
+    # map is built from the FOLDED table's trust classes; keys not among the
+    # delta roots are inert. An explicit `profiles=` still wins.
+    profiles = kwargs.pop("profiles", None)
+    if profiles is None and confine:
+        profiles = _row_profiles(final, root, trust_host_code)
     document = compile_files(
         [os.path.join(root, p) for p in paths],
         manifest=base_doc, replacing=replacing,
-        sources=extra or None, **kwargs)
+        sources=extra or None, profiles=profiles, **kwargs)
     return _carry_rows(document, final)
