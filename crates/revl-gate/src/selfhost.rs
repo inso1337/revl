@@ -505,6 +505,7 @@ pub type ParamN = Bind;
 pub struct ArrowN {
     params: Vec<ParamN>,
     body: Expr,
+    ret: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -803,6 +804,120 @@ fn function_return_ty(ty: &str) -> String {
 
 fn is_async_fn_ty(ty: &str) -> bool {
     return starts_with(&function_return_ty(ty), "Async[");
+}
+
+fn ty_word_char(c: &str) -> bool {
+    if (c == "_") {
+        return true;
+    }
+    if { let _rc: &str = &c; ("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z") } {
+        return true;
+    }
+    return { let _rc: &str = &c; "0" <= _rc && _rc <= "9" };
+}
+
+fn ty_mentions_async(ty: &str) -> bool {
+    let n = ty.revl_length();
+    let mut i = 0i64;
+    while ((i).checked_add(5i64).expect("revl: Int overflow") <= n) {
+        if (ty.revl_slice(i, (i).checked_add(5i64).expect("revl: Int overflow")) == "Async") {
+            let leftOk = if (i == 0i64) { true } else { (!ty_word_char(&(ty.revl_slice((i).checked_sub(1i64).expect("revl: Int overflow"), i)))) };
+            let aft = (i).checked_add(5i64).expect("revl: Int overflow");
+            let rightOk = if (aft >= n) { true } else { (!ty_word_char(&(ty.revl_slice(aft.clone(), (aft).checked_add(1i64).expect("revl: Int overflow"))))) };
+            if (leftOk && rightOk) {
+                return true;
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn self_async_msg() -> String {
+    return String::from("an arrow may not declare its own async colour");
+}
+
+fn self_async_exprs(xs: &[Expr], i: i64) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let r = self_async_expr((xs)[(i) as usize].clone());
+    if (r != "") {
+        return r;
+    }
+    return self_async_exprs(xs, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn self_async_inits(xs: &[InitN], i: i64) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let r = self_async_expr((xs)[(i) as usize].clone().value);
+    if (r != "") {
+        return r;
+    }
+    return self_async_inits(xs, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn self_async_arms(xs: &[ArmN], i: i64) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let r = self_async_expr((xs)[(i) as usize].clone().body);
+    if (r != "") {
+        return r;
+    }
+    return self_async_arms(xs, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn self_async_parts(xs: &[PartN], i: i64) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let r = self_async_expr((xs)[(i) as usize].clone().e);
+    if (r != "") {
+        return r;
+    }
+    return self_async_parts(xs, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn self_async_expr(e: Expr) -> String {
+    return match e {
+    Expr::IntLit(_) => String::from(""),
+    Expr::FloatLit(_) => String::from(""),
+    Expr::StrLit(_) => String::from(""),
+    Expr::BoolLit(_) => String::from(""),
+    Expr::NullLit => String::from(""),
+    Expr::Var(_) => String::from(""),
+    Expr::Hole(_) => String::from(""),
+    Expr::Bad(_) => String::from(""),
+    Expr::Bin(b) => { let b = *b; or2(self_async_expr(b.l.clone()), self_async_expr(b.r.clone())) },
+    Expr::Un(u) => { let u = *u; self_async_expr(u.e.clone()) },
+    Expr::Emit(u) => { let u = *u; self_async_expr(u.e.clone()) },
+    Expr::Call(c) => { let c = *c; or2(self_async_expr(c.target.clone()), self_async_exprs(&c.args, 0i64)) },
+    Expr::Field(f) => { let f = *f; self_async_expr(f.target.clone()) },
+    Expr::OptField(f) => { let f = *f; self_async_expr(f.target.clone()) },
+    Expr::OptCall(c) => { let c = *c; or2(self_async_expr(c.target.clone()), self_async_exprs(&c.args, 0i64)) },
+    Expr::Index(x) => { let x = *x; or2(self_async_expr(x.target.clone()), self_async_expr(x.idx.clone())) },
+    Expr::If(x) => { let x = *x; or2(self_async_expr(x.cond.clone()), or2(self_async_expr(x.then_.clone()), self_async_expr(x.els.clone()))) },
+    Expr::Rec(r) => self_async_inits(&r.fields, 0i64),
+    Expr::Lst(l) => self_async_exprs(&l.items, 0i64),
+    Expr::Arrow(ar) => { let ar = *ar; if ty_mentions_async(&ar.ret) { self_async_msg() } else { self_async_expr(ar.body.clone()) } },
+    Expr::Match(m) => { let m = *m; or2(self_async_expr(m.scrut.clone()), self_async_arms(&m.arms, 0i64)) },
+    Expr::Templ(t) => self_async_parts(&t.parts, 0i64),
+    _ => unreachable!(),
+};
+}
+
+fn self_async_body(ss: &[Stmt], i: i64) -> String {
+    if (i >= ss.revl_length()) {
+        return String::from("");
+    }
+    let r = self_async_expr((ss)[(i) as usize].clone().e);
+    if (r != "") {
+        return r;
+    }
+    return self_async_body(ss, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
 fn async_slots_of(ps: &[ParamN]) -> Vec<i64> {
@@ -3264,6 +3379,10 @@ fn check_reachable_fn_acquire(pg: Prog) -> Verd {
 }
 
 fn fn_a1_verdict(f: FnD, base: Ctx) -> String {
+    let sda = self_async_body(&f.body, 0i64);
+    if (sda != "") {
+        return tagged("A1", &sda);
+    }
     let vals = sort_strs(&col_values_body(f.body.clone(), 0i64, base.colored.clone(), vec![]));
     if (vals.revl_length() > 0i64) {
         return tagged("A1", &((((String::from("function `").revl_concat(&f.name)).revl_concat("` uses async callable `")).revl_concat(&(vals)[(0i64) as usize].clone())).revl_concat("` as a function value, but an async callable has no arrow type")));
@@ -3319,6 +3438,10 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
     if (sa.msg != "") {
         return mk_verd(tagged(&sa.tag, &sa.msg), body_line(&comp.setup, scx.clone(), comp.line));
     }
+    let setupSda = self_async_body(&comp.setup, 0i64);
+    if (setupSda != "") {
+        return mk_verd(tagged("A1", &setupSda), comp.line);
+    }
     let sA1 = stmt_a1_verdict(comp.clone(), &comp.setup, 0i64, scx.clone());
     if (sA1 != "") {
         return mk_verd(tagged("A1", &sA1), comp.line);
@@ -3339,6 +3462,10 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
             let a = walk_stmts(&pm.body, 0i64, mcx.clone(), empty_ac());
             if (a.msg != "") {
                 return mk_verd(tagged(&a.tag, &a.msg), body_line(&pm.body, mcx.clone(), comp.line));
+            }
+            let mSda = self_async_body(&pm.body, 0i64);
+            if (mSda != "") {
+                return mk_verd(tagged("A1", &mSda), comp.line);
             }
             if ((!pm.isAsync) && has_await(&pm.body, 0i64)) {
                 return mk_verd(tagged("A1", "`await` is only allowed in a component body"), comp.line);
@@ -9578,7 +9705,17 @@ fn arrow_ahead(ts: &[Token], i: i64) -> bool {
         if ((k == ")") || (k == "]")) {
             depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
             if (depth == 0i64) {
-                return (tk(ts, (j).checked_add(1i64).expect("revl: Int overflow")).kind == "=>");
+                if (tk(ts, (j).checked_add(1i64).expect("revl: Int overflow")).kind == "=>") {
+                    return true;
+                }
+                if (tk(ts, (j).checked_add(1i64).expect("revl: Int overflow")).kind == ":") {
+                    let rt = p_type(ts, (j).checked_add(2i64).expect("revl: Int overflow"), 0i64);
+                    if (!rt.ok) {
+                        return false;
+                    }
+                    return (tk(ts, rt.i).kind == "=>");
+                }
+                return false;
             }
         }
         j = (j).checked_add(1i64).expect("revl: Int overflow");
@@ -9826,7 +9963,7 @@ fn p_primary(ts: &[Token], i: i64, d: i64) -> PR {
                 return b;
             }
             let one = vec![Bind { name: t.text.clone(), ty: String::from("") }];
-            return PR { i: b.i, e: Expr::Arrow(Box::new(ArrowN { params: one.clone(), body: b.e.clone() })) };
+            return PR { i: b.i, e: Expr::Arrow(Box::new(ArrowN { params: one.clone(), body: b.e.clone(), ret: String::from("") })) };
         }
         return PR { i: (i).checked_add(1i64).expect("revl: Int overflow"), e: Expr::Var(t.text.clone()) };
     }
@@ -9877,14 +10014,25 @@ fn p_primary(ts: &[Token], i: i64, d: i64) -> PR {
             if (!ps.ok) {
                 return bad(String::from("bad arrow params"));
             }
-            if (!at(ts, ps.i, "=>")) {
+            let mut ai = ps.i;
+            let mut ret = String::from("");
+            if at(ts, ai, ":") {
+                let rt = p_type(ts, (ai).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
+                if (!rt.ok) {
+                    return bad(String::from("bad arrow return type"));
+                }
+                ret = rt.ty;
+                ai = rt.i;
+            }
+            if (!at(ts, ai, "=>")) {
                 return bad(String::from("expected =>"));
             }
-            let ab = p_expr_d(ts, (ps.i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
+            let ab = p_expr_d(ts, (ai).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
             if is_bad(ab.e.clone()) {
                 return ab;
             }
-            return PR { i: ab.i, e: Expr::Arrow(Box::new(ArrowN { params: ps.xs.clone(), body: ab.e.clone() })) };
+            let rr = ret;
+            return PR { i: ab.i, e: Expr::Arrow(Box::new(ArrowN { params: ps.xs.clone(), body: ab.e.clone(), ret: rr.clone() })) };
         }
         let inner = p_expr_d(ts, (i).checked_add(1i64).expect("revl: Int overflow"), (d).checked_add(1i64).expect("revl: Int overflow"));
         if is_bad(inner.e.clone()) {

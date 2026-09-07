@@ -1,8 +1,5 @@
 {
  "buckets": {
-  "false-admit/A1": [
-   "examples/rejections/t34_arrow_self_declared_async.rvl"
-  ],
   "false-admit/A6": [
    "examples/rejections/a6_method_not_in_service.rvl"
   ],
@@ -846,18 +843,6 @@
    "reference": {
     "message": "`f` is a `(Any) -> Str` and takes 1 argument(s), 2 given",
     "tag": "T1"
-   }
-  },
-  "examples/rejections/t34_arrow_self_declared_async.rvl": {
-   "bucket": "false-admit/A1",
-   "gate": {
-    "code": "",
-    "kind": "no_objection",
-    "message": ""
-   },
-   "reference": {
-    "message": "an arrow may not declare its own async colour",
-    "tag": "A1"
    }
   },
   "examples/rejections/t35_arrow_annotation_not_quantified.rvl": {
