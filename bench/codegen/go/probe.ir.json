@@ -702,7 +702,8 @@
                     "name": "i"
                   }
                 ]
-              }
+              },
+              "unique": true
             },
             {
               "step": "assign",
