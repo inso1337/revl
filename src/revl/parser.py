@@ -1635,6 +1635,17 @@ class Parser:
         # that sub-parser (`_parse_template_parts`) — otherwise nested
         # templates reset the count and walk straight past the bound.
         self._nesting = 0
+        # issue #542: how many statements deep the cursor currently is, held
+        # against `NESTING_LIMIT` the same way `_nesting` bounds expressions.
+        # `if`/`while`/`for` bodies (and match-block arms) recurse through
+        # `fn_stmt`, so a program that nests them ~300 deep once parsed and
+        # type-checked fine — the frontend gave itself `recursion_headroom`
+        # (12000 frames) — and then died with an uncaught `RecursionError` in
+        # every AST-walking emitter, which runs at python's DEFAULT limit: a raw
+        # traceback out of `revl emit`, and an unhandled server fault through
+        # `revl.gate` admit. Counting the statement depth here refuses such input
+        # at parse time with a diagnostic, well before an emitter is reached.
+        self._stmt_nesting = 0
 
     # -- token helpers
 
@@ -5429,6 +5440,33 @@ class Parser:
         return PropTestDecl(name, params, body, line)
 
     def fn_stmt(self):
+        # issue #542: bound statement nesting the way `_ternary` bounds
+        # expression nesting. `if`/`while`/`for` bodies and match-block arms all
+        # recurse back through here, so this one guard counts the depth of every
+        # statement-nesting form. Refuse past `NESTING_LIMIT` with a diagnostic
+        # that names the bound, rather than accepting the tree and letting an
+        # emitter — which runs at python's default recursion limit — die on it.
+        self._stmt_nesting += 1
+        try:
+            if self._stmt_nesting > NESTING_LIMIT:
+                raise self._stmt_nesting_too_deep()
+            return self._fn_stmt()
+        finally:
+            self._stmt_nesting -= 1
+
+    def _stmt_nesting_too_deep(self) -> RevlError:
+        return self.err(
+            self.peek().line,
+            f"statement nesting is deeper than the parser's limit of "
+            f"{NESTING_LIMIT} levels",
+            hint="this is an implementation bound, not a language one: the "
+                 "parser is recursive descent and nesting `if`/`while`/`for` "
+                 "this deep would exhaust the stack of a downstream emitter. "
+                 "Lift the inner statements into a helper fn and the nesting "
+                 "goes away.",
+        )
+
+    def _fn_stmt(self):
         tok = self.peek()
         if tok.kind == "kw" and tok.value == "fail":
             raise self.err(
