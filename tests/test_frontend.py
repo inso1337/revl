@@ -299,6 +299,12 @@ REJECTIONS = {
     "g5_undo_fn_value_emission.rvl":
         "the `undo` of this bracket calls `wrap`, a fn that reaches an "
         "emission `send` (through wrap -> send)",
+    # issue 276: the plain-`fn` (no arrow, no value passing) shape, added as
+    # the formal G5 row's caught violation — its `undo` head is a resolvable
+    # `FN` name whose reach the oracle folds to a positive registration count.
+    "g5_undo_fn_emission.rvl":
+        "the `undo` of this bracket calls `wrap`, a fn that reaches an "
+        "emission `send` (through wrap -> send)",
     # A method-local binding may not shadow an activation-body one: the method
     # lowers into a closure over the activation frame, and the shadow took the
     # component local's own host-safe name.

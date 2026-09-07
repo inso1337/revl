@@ -1,0 +1,35 @@
+// REJECTED — G5: a bracket inverse may not cross a boundary, and reaching the
+// crossing through a plain top-level `fn` — no arrow, no value passing — does
+// not exempt it.
+//
+// `undo wrap(key)` calls the top-level fn `wrap`, whose body calls the
+// `emission` extern `send` DIRECTLY. So the teardown crosses a one-way
+// boundary, one `fn` indirection later. This is the shape the formal G5 row
+// exists to catch: the effect's inverse head is a resolvable name (`wrap`, a
+// FN row), and the reach fold puts `wrap -> send` over the extern table, so
+// `registrations` scores this teardown a POSITIVE crossing count on both
+// sides (issue 276, `formal/harness/diff_corpus.py::prog_coverage`). The three
+// pre-existing g5 fixtures are all first-class-dispatch shapes (an arrow, a
+// passed value, a spawn handle), which are `n/a` in the Lean model, so none of
+// them supply this caught violation.
+//
+// expected error:
+//   the `undo` of this bracket calls `wrap`, a fn that reaches an emission
+//     `send` (through wrap -> send) — a bracket inverse runs in teardown and
+//     may not cross a boundary (G5)
+
+extern emission fn send(x: Str) -> Int = @py { return 1 }
+
+fn wrap(x: Str) -> Int { return send(x) }
+
+service Cache { emission fn set(key: Str) }
+
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(key) {
+      effect store.insert(key, "v")
+      undo   wrap(key)
+    }
+  }
+}

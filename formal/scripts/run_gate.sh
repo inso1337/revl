@@ -188,6 +188,7 @@ python3 scripts/axioms_gate.py \
   RevL.G5Classified.fold_must_run_to_stability \
   RevL.G5Classified.sneaky_inverse_run_emits \
   RevL.G5Classified.clean_inverse_run_is_silent \
+  RevL.G5Classified.g5_row_not_vacuous \
   RevL.G8Classified.surface_enumerates_reached_crossings \
   RevL.G8Classified.surface_only_declared_crossings \
   RevL.G8Classified.surface_implies_crossing \
@@ -196,6 +197,7 @@ python3 scripts/axioms_gate.py \
   RevL.G8Classified.raw_leak_is_on_the_surface \
   RevL.G8Classified.g8_surface_is_not_universal \
   RevL.G8Classified.witness_surface_traces_to_its_declaration \
+  RevL.G8Classified.g8_row_not_vacuous \
   RevL.G1.g1_not_vacuous \
   RevL.G3.g3_not_vacuous \
   RevL.G4.g4_shape_not_vacuous \
@@ -222,6 +224,9 @@ cat .oracle-axioms.out
 python3 scripts/axioms_gate.py \
   RevLOracle.heads_exprOfHeads \
   RevLOracle.confinedB_iff \
+  RevLOracle.bodyNames_bodyOfHeads \
+  RevLOracle.stmtSurfaceB_iff \
+  RevLOracle.registrationsB_iff \
   RevLOracle.linkOKB_iff \
   RevLOracle.pathPrefixB_iff \
   RevLOracle.pleqB_iff \
