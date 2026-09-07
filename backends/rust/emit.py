@@ -3644,7 +3644,6 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     )
     name = component["name"]
     cname = _ident(name, "component")
-    snake = _snake(name)
     isolate = component.get("isolate") or {}
     intercept = component.get("intercept") or {}
     has_effectful = _component_has_effectful_methods(component)
@@ -3992,7 +3991,6 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     )
     name = component["name"]
     cname = _ident(name, "component")
-    snake = _snake(name)
     out: list[str] = []
 
     config_ty = _emit_config_struct(component, out)

@@ -2196,7 +2196,7 @@ class Session:
         outstanding witness identity/revision drifted since `prepare_verdict`,
         the confirm is REFUSED with a fresh review — never silently adopting the
         changed state. On an exact match it enacts the verdict (abort)."""
-        driver = self._require()
+        self._require()
         self._refuse_if_halted("confirm_verdict")
         owner = self._owner
         if owner is None:

@@ -9,7 +9,6 @@ backend ever emits one. The refusal is complementary to the reserved-word /
 predeclared-name renaming (`_safe_name`) that legal-but-colliding identifiers get.
 """
 
-import sys
 
 import pytest
 
