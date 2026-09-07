@@ -221,9 +221,9 @@ def test_the_covered_layer_is_stated_identically_everywhere():
 
 @pytest.mark.parametrize("relpath", [
     "Cargo.toml", "GENERATED.json", "README.md",
-    "src/lib.rs", "src/frontier.rs", "src/selfhost.rs", "src/session.rs",
-    "src/symbols.rs",
-    "tests/admit.rs", "tests/symbols.rs",
+    "src/lib.rs", "src/frontier.rs", "src/ir.rs", "src/selfhost.rs",
+    "src/session.rs", "src/symbols.rs",
+    "tests/admit.rs", "tests/ir.rs", "tests/symbols.rs",
 ])
 def test_every_generated_file_is_committed(relpath):
     assert (CRATE / relpath).is_file(), f"crates/revl-gate/{relpath} is missing"
