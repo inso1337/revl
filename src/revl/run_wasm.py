@@ -202,7 +202,8 @@ def _emit_modules(ir: dict, record: bool = False) -> dict[str, str]:
 
 
 def run_wasm(ir: dict, config: dict, files, once: bool = False,
-             interactive: bool = False, policy=None) -> int:
+             interactive: bool = False, policy=None,
+             estop_latch: str | None = None) -> int:
     """Emit -> boot the composition on the cordis-wasm runtime as a process,
     then run the once round-trip (LIFO teardown + no-residue proof) and exit.
     Returns 0 on a clean ``UP`` -> ``NO-RESIDUE`` -> ``DOWN``; nonzero otherwise.
@@ -263,13 +264,20 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
     drained_seqs: list[int] = []
     try:
         spec_file = tmp / "run.spec.json"
-        spec_file.write_text(json.dumps({
+        run_spec = {
             "name": "run",
             "once": True,
             "record": record,
             "order": order,
             "modules": {name: modules[name] for name in order},
-        }), encoding="utf-8")
+        }
+        # item 443: arm the single-process E-Stop seam this harness watches, so
+        # `revl estop --latch FILE` from another terminal halts the bring-up
+        # (backends/wasm/run_harness.py::_estop_latch_path). Only written when a
+        # latch was armed, so an ordinary run's spec is byte-identical to before.
+        if estop_latch:
+            run_spec["estopLatch"] = estop_latch
+        spec_file.write_text(json.dumps(run_spec), encoding="utf-8")
 
         if record:
             # open the durable WAL and stamp the header BEFORE the harness boots,

@@ -1641,7 +1641,8 @@ def run_command(args) -> int:
         # item 443: `--estop-latch` means the same thing for a placement as for
         # a single process — an operator in another terminal halts it — but the
         # conductor has to carry the halt across the process boundary, since
-        # only the py tier honors the latch at its own seams.
+        # only a tier in `TIERS_WITH_ESTOP` honors the latch at its own seams;
+        # every other tier's children are killed outright and reported UNKNOWN.
         return run_placement(args.files, args.placement,
                              once=getattr(args, "once", False),
                              estop_latch=getattr(args, "estop_latch", None))
@@ -1725,7 +1726,8 @@ def run_command(args) -> int:
                 return 1
         from .run_wasm import run_wasm  # noqa: PLC0415 — lazy: no wasmtime needed to compile/plan
         return run_wasm(ir, config, args.files, once=once,
-                        interactive=interactive, policy=policy)
+                        interactive=interactive, policy=policy,
+                        estop_latch=getattr(args, "estop_latch", None))
 
     backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:

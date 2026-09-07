@@ -575,12 +575,15 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
 - `--estop-latch FILE` - watch FILE for an operator E-Stop, so `revl estop
   --latch FILE` from another terminal halts this run immediately
   ([443-estop.md](design/443-estop.md)). Unarmed by default; an unarmed run
-  checks nothing. With `--placement` the CONDUCTOR watches the latch too and
-  halts every process: a py child reads the latch itself, names its in-flight
-  inventory and dies without unwinding; a child on any other tier is SIGKILLed,
-  because that tier has no E-Stop seam. The halt report names every component
-  left un-torn-down, one line each, and marks the residue it cannot enumerate
-  UNKNOWN rather than omitting it.
+  checks nothing. On a single-process run every tier that has an E-Stop seam
+  (`py`, `java`, and the single-process `wasm` harness) refuses to start a new
+  activation once the latch is armed, names its in-flight inventory and dies
+  without unwinding. With `--placement` the CONDUCTOR watches the latch too and
+  halts every process: a child on a latch-honoring tier reads the latch itself,
+  names its in-flight inventory and dies without unwinding; a child on a tier
+  with no E-Stop seam is SIGKILLed instead. The halt report names every
+  component left un-torn-down, one line each, and marks the residue it cannot
+  enumerate UNKNOWN rather than omitting it.
 - `--trace FILE` - write a causal lifecycle trace (JSONL); every transition
   carries the cause chain, queryable with `revl why` ([why-runtime.md](why-runtime.md)).
 - `--withdraw COMPONENT` - one-shot: boot, withdraw this live component while
