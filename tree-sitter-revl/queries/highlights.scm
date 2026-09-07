@@ -51,7 +51,8 @@
 
 ; effects / emissions / capabilities — revl's defining surface
 (method_modifier) @keyword.effect
-(capability_list (identifier) @label)
+(capability_name (identifier) @label)
+(capability_parameter name: (identifier) @property)
 
 ; ------------------------------------------------------------------- match
 (match_pattern case: (identifier) @constructor)
@@ -66,7 +67,8 @@
   "==" "===" "!=" "!==" "<" ">" "<=" ">="
   "+" "-" "*" "/" "%"
   "&&" "||" "??" "!"
-  "->" "=>" "?." "?" ":" "|"
+  "|" "^" "&" "<<" ">>" "~"
+  "->" "=>" "?." "?" ":"
 ] @operator
 
 ; --------------------------------------------------------------- punctuation
@@ -88,11 +90,18 @@
   "effect" "undo" "emit" "emission" "compensate"
   "isolate" "intercept" "realm" "in" "with" "spawn"
   "acquire" "pure" "await" "async" "fail" "verified" "commutative"
+  "handoff"
 ] @keyword.effect
+
+; timers (item 57) and the boot component (item 350)
+[ "every" "after" "boot" "under" ] @keyword
 
 "hole" @keyword.debug
 "assert" @keyword.exception
 
+; property test (item 37)
+[ "prop" ] @keyword
+
 ; contextual statement keywords (lifecycle / fault tests)
-[ "load" "unload" "call" "swap" ] @keyword
+[ "load" "unload" "call" "advance" ] @keyword
 [ "fault" "lifecycle" ] @keyword
