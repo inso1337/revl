@@ -399,6 +399,17 @@ def _is_host_valued(expr, scope) -> bool:
 IR_VERSION_V2 = 2  # emitted only when a compiled component uses realms/interception
 IR_VERSION_V3 = 3  # emitted when a program uses full-language features (fn/type)
 
+# The immutable set of IR schema revisions this frontend understands (roadmap
+# item 479). A staged IR document stamps exactly one of these onto `ir_version`;
+# the wire codec that carries a revision is only ever emitted at a member of
+# this set. A document whose `ir_version` is a revision outside it was produced
+# by a schema revision this frontend does not know (a newer/forked emitter, or a
+# drifted gate crate): the IR-boundary decode REFUSES it BY NAME rather than
+# best-effort decoding an unknown revision, which is exactly how a
+# gate-crate/frontend skew would slip past. Add a new revision here in the same
+# change that starts emitting it.
+IR_SCHEMA_REVISIONS = frozenset({IR_VERSION, IR_VERSION_V2, IR_VERSION_V3})
+
 # The complete top-level surface of a compiled IR document (roadmap item 479).
 # Every member `check_and_lower` (below) and `compile_source`/`compile_files`
 # (compiler.py) can stamp onto the returned document, in one place beside the
