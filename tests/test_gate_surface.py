@@ -566,6 +566,51 @@ def test_refusal_does_not_leak_into_the_ignored_path():
     assert "driftedGateField" in verdict.message
 
 
+# item 479, companion half: a KNOWN field (`ir_version`) carrying an
+# unrecognized schema REVISION must also refuse by name. A field-name check
+# alone would wave through a document forged at (or drifted to) a revision this
+# frontend cannot decode — the same undetected-skew defect one level down.
+
+
+def test_unknown_schema_revision_refuses_by_name_via_admit_into():
+    """A staged IR at a schema revision this frontend does not know refuses at
+    the runtime-admission entrypoint, NAMING the offending revision."""
+    forged = _running_ir()
+    forged["ir_version"] = 999  # a revision no frontend emitted
+    verdict = admit_into(_CANDIDATE, forged)
+    assert not verdict.admitted
+    assert "unknown schema revision" in verdict.message
+    assert "999" in verdict.message
+
+
+def test_unknown_schema_revision_refuses_by_name_via_compile_source():
+    """The same refusal at the raw compiler boundary, naming the revision, so
+    the negative does not depend on the gate facade."""
+    forged = _running_ir()
+    forged["ir_version"] = "v42"
+    with pytest.raises(RevlError) as exc:
+        compile_source(_CANDIDATE, manifest=forged)
+    message = str(exc.value)
+    assert "unknown schema revision" in message
+    assert "v42" in message
+
+
+def test_known_schema_revision_still_admits():
+    """A control: the frontend's own stamped `ir_version` is a known revision,
+    so the schema-revision refusal never fires on a genuine document."""
+    verdict = admit_into(_CANDIDATE, _running_ir())
+    assert verdict.admitted, verdict.message
+
+
+def test_absent_schema_revision_is_not_refused():
+    """A bare manifest may omit `ir_version` (an unversioned handoff); absence
+    is not an unknown revision, so it must not trip the refusal."""
+    bare = _running_ir()
+    del bare["ir_version"]
+    verdict = admit_into(_CANDIDATE, bare)
+    assert verdict.admitted, verdict.message
+
+
 # The public-surface compat gate (an EXACT pin of `revl.gate.__all__`, plus
 # `gate_version()` compat semantics) is item 338's public compat gate, in
 # tests/test_gate_compat.py. It supersedes the subset check that used to live
