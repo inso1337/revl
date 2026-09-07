@@ -27,6 +27,26 @@ rather than reinventing them — and is documented in
 `tests/test_fs_public_write_api.py`. The witnessed `stdlib/fs.rvl` bodies are
 still untouched, so requirement 7 (legacy execution byte-identical) holds.
 
+**Update (#623: the witnessed binding, done).** The residual #606 deferred is
+now wired, opt-in, at the Python tier. `revl.fs.write_witnessed(path, data, *,
+expect=..., bind=...)` performs the same held-descriptor guard as `write` and
+then registers the write as a transactional witnessed effect whose witness
+carries the original receipt (`backends/python/revl_fs_workspace.py:
+witnessed_write_record`, versioned by `WITNESS_RECEIPT_VERSION`). Because the
+receipt rides `entry.witness`, the existing `SessionOwner.witness_snapshot` and
+`Session.prepare_verdict` surfaces consume the original held-target facts (a new
+`receipt`/`outcome` on `runtime.WitnessEffect`, an `outcomes`/`receiptsBound`
+tally on the verdict summary) instead of a reconstructed inventory, and the
+review token drifts when a receipt or preimage changes. `write_all` reports an
+accurate success/failed/unknown/unattempted inventory with no automatic retry or
+whole-batch rollback; a batch past `MAX_WITNESS_BATCH_WRITES` is refused before
+any mutation (requirement 6). The legacy `write` stays the opt-out: it binds
+nothing and never touches the witnessed/WAL machinery (requirement 7). A durable
+witness whose receipt version is unreadable is refused (`EVERSION`). Coverage:
+`tests/test_fs_witnessed_receipt_binding_623.py`. Slice-2b (`stdlib/fs.rvl`
+`@py`/`@ts` body wiring into `PATH_FAMILIES` and the ts peer) remains available
+on top of this Python surface and is not part of this slice.
+
 Companion docs:
 [243-witnessed-externs.md](243-witnessed-externs.md),
 [245-session-commit.md](245-session-commit.md),
