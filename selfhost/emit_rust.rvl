@@ -307,7 +307,9 @@ extern pure fn mangle(name: Str) -> Str
                 "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
                 "self", "Self", "static", "struct", "super", "trait", "true",
                 "type", "unsafe", "use", "where", "while", "async", "await",
-                "dyn", "ctx", "config", "root", "plugin")
+                "dyn", "abstract", "become", "box", "do", "final", "macro",
+                "override", "priv", "typeof", "unsized", "virtual", "try",
+                "yield", "gen", "ctx", "config", "root", "plugin")
     root = name
     while root:
         if root in reserved:
@@ -324,7 +326,9 @@ extern pure fn mangle(name: Str) -> Str
         "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
         "self", "Self", "static", "struct", "super", "trait", "true",
         "type", "unsafe", "use", "where", "while", "async", "await",
-        "dyn", "ctx", "config", "root", "plugin",
+        "dyn", "abstract", "become", "box", "do", "final", "macro",
+        "override", "priv", "typeof", "unsized", "virtual", "try",
+        "yield", "gen", "ctx", "config", "root", "plugin",
     ];
     let mut root: &str = name.as_str();
     while !root.is_empty() {
