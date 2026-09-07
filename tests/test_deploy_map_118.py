@@ -585,8 +585,12 @@ def test_a_destroyed_container_is_unresolved_and_never_rolled_back(tmp_path):
     records = [json.loads(line) for line in
                (state / "db.wal").read_text(encoding="utf-8").splitlines() if line]
     effects = [r for r in records if r.get("record") == "effect"]
-    assert effects and effects[0]["inverse"] == {"op": "remove",
-                                                 "referent": "db:row"}
+    assert effects
+    assert effects[0]["inverse"] == {
+        "reconstructible": True,
+        "undo_idempotent": True,
+        "op": {"receiver": "db", "method": "remove", "args": ["row"]},
+    }
     world = json.loads((state / "world.json").read_text(encoding="utf-8"))
     settled = recover(str(state / "db.wal"), world=world)
     assert settled["verdict"]
