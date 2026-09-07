@@ -585,6 +585,10 @@ def _scan_uses(root) -> _UsesScan:
                     scan.bounded_int = True
                 elif method == "to_int32":
                     scan.bounded_int32 = True
+                elif method == "to_str" and node.get("recv") == "Float":
+                    # a Float `.to_str()` renders through `_revl_ftoa`, the
+                    # same canonical helper `${aFloat}` pulls in.
+                    scan.float_interp = True
                 scan.builtins.add(method)
             elif kind == "optcall":
                 method = node.get("method")
@@ -1030,8 +1034,14 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
     if method in _CHECKED_DIVS:
         return f"_revl_{method}({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): python ints on
-    # this tier are already i64-clamped, so str() is the exact decimal.
+    # this tier are already i64-clamped, so str() is the exact decimal. A
+    # Float receiver (review item 12) renders through `_revl_ftoa`, the same
+    # canonical ECMAScript Number::toString a `${aFloat}` interpolation uses,
+    # so `x.to_str()` and `${x}` agree byte-for-byte (str(float) would print
+    # python's `3.0`/`1e+30`, which diverges from every other tier).
     if method == "to_str":
+        if recv == "Float":
+            return f"_revl_ftoa({target})"
         return f"str({target})"
     raise EmitError(f"unknown builtin method {method!r}")
 
@@ -2594,10 +2604,60 @@ class _ComponentEmitter:
             if not method_is_async:
                 raise EmitError(f"{where}: 'await' is not allowed inside sync provide-method bodies (A1)")
             out.add(indent, f"await {self._expr(step.get('expr'), where)}")
+        elif kind in ("if", "while", "for", "break", "continue"):
+            # issue #548: control flow over the method's value computation. The
+            # arms hold only value steps (registration is refused at lowering),
+            # so the rendering matches the fn-grammar `_fn_stmt` if/while/for
+            # exactly — the only difference is `self._expr`/`_ident` (method
+            # stratum) in place of the module `_expr`/`_mangle`.
+            self._method_control(out, indent, provide_name, method_name, step,
+                                 where, method_is_async)
         elif kind == "provide":
             raise EmitError(f"{where}: nested 'provide' inside a method body is not lowerable")
         else:
             raise EmitError(f"{where}: unknown step {kind!r}")
+
+    def _method_control(
+        self,
+        out: _Lines,
+        indent: int,
+        provide_name: str,
+        method_name: str,
+        step: dict,
+        where: str,
+        method_is_async: bool,
+    ) -> None:
+        """Render an `if`/`while`/`for`/`break`/`continue` step in a provide-
+        method body (issue #548). Byte-for-byte the fn-grammar shape."""
+        kind = step.get("step")
+
+        def block(steps: list) -> None:
+            if not steps:
+                out.add(indent + 1, "pass")
+                return
+            for s in steps:
+                self._method_step(out, indent + 1, provide_name, method_name,
+                                   s, where, method_is_async)
+
+        if kind == "if":
+            out.add(indent, f"if {self._expr(step.get('cond'), where)}:")
+            block(step.get("then") or [])
+            els = step.get("else")
+            if els is not None:
+                out.add(indent, "else:")
+                block(els)
+        elif kind == "while":
+            out.add(indent, f"while {self._expr(step.get('cond'), where)}:")
+            block(step.get("body") or [])
+        elif kind == "for":
+            binder = _ident(step.get("bind"), f"{where}: for bind")
+            out.add(indent,
+                    f"for {binder} in {self._expr(step.get('iterable'), where)}:")
+            block(step.get("body") or [])
+        elif kind == "break":
+            out.add(indent, "break")
+        elif kind == "continue":
+            out.add(indent, "continue")
 
     # -- component ----------------------------------------------------------
 

@@ -1129,6 +1129,13 @@ def _comp_builtin(method, recv_surface, target, args):
     if method == "to_str":
         global _COMP_NEEDS_STRCONV
         _COMP_NEEDS_STRCONV = True
+        if recv_surface == "Float":
+            # A Float renders with the same shortest-round-trip digits the
+            # component tier already uses for a `${aFloat}` interpolation (which
+            # lowers to `fmt.Sprintf("%v", x)`, and `%v` on a float64 IS
+            # `strconv.FormatFloat(x, 'g', -1, 64)`) — so `x.to_str()` and `${x}`
+            # agree on this tier. FormatInt would not compile on a float64.
+            return "strconv.FormatFloat(%s, 'g', -1, 64)" % target
         return "strconv.FormatInt(%s, 10)" % _go_widen_int(target)
     # The Map value type (docs/stdlib-2.0.md §Map): the same helpers the v3
     # tier uses; they live in _V3_MAP_PREAMBLE, pulled in by
@@ -1645,6 +1652,35 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
                 out.append("%s\treturn nil" % pad)
             out.append("%s})" % pad)
             out.append("%s_ = %s" % (pad, bind))
+        elif s == "if":
+            # issue #548: control flow over the method's value computation. The
+            # arms are pure and their inner steps are ordinary method steps, so
+            # they recurse through this same renderer — byte-for-byte the
+            # fn-grammar `_go_v3_stmt` shape.
+            out.append("%sif %s {" % (pad, _expr(step["cond"], env)))
+            _emit_method_body(step.get("then") or [], env, out, indent + 1, ret_surface)
+            if step.get("else"):
+                out.append("%s} else {" % pad)
+                _emit_method_body(step["else"], env, out, indent + 1, ret_surface)
+            out.append("%s}" % pad)
+        elif s == "while":
+            out.append("%sfor %s {" % (pad, _expr(step["cond"], env)))
+            _emit_method_body(step.get("body") or [], env, out, indent + 1, ret_surface)
+            out.append("%s}" % pad)
+        elif s == "for":
+            bind = _safe_local(step["bind"])
+            it_node = step.get("iterable")
+            it_t = _comp_infer(it_node, env)
+            if isinstance(it_t, str) and it_t.startswith("List[") and it_t.endswith("]"):
+                env.var_types[step["bind"]] = it_t[5:-1]
+            out.append("%sfor _, %s := range %s {" % (pad, bind, _expr(it_node, env)))
+            out.append("%s\t_ = %s" % (pad, bind))
+            _emit_method_body(step.get("body") or [], env, out, indent + 1, ret_surface)
+            out.append("%s}" % pad)
+        elif s == "break":
+            out.append("%sbreak" % pad)
+        elif s == "continue":
+            out.append("%scontinue" % pad)
         else:
             raise EmitError("unsupported method step: %r" % (s,))
 
@@ -4631,6 +4667,12 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     # (f): 2 allocs/16 B -> 1 alloc/4 B). Int32 widens first; FormatInt's
     # parameter is int64.
     if method == "to_str":
+        if rt == "Float":
+            # A Float renders through revlFtoa, the canonical ECMAScript
+            # Number::toString a `${aFloat}` interpolation uses on this tier —
+            # so `x.to_str()` and `${x}` agree byte-for-byte (review item 12).
+            ctx.needs_ftoa = True
+            return f"revlFtoa({target})"
         ctx.needs_strconv = True
         if rt == "Int32":
             return f"strconv.FormatInt(int64({target}), 10)"

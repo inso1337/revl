@@ -39,8 +39,12 @@ def _err(src: str) -> str:
 # ---------------------------------------------------------------- checker
 
 def test_receiver_must_be_int():
-    assert "needs a Int receiver" in _err(
-        "fn bad(s: Str) -> Str { return s.to_str() }")
+    # `to_str` is spelled for two receiver families (Int decimal, Float
+    # rendering — #548 review item 12), so a `Str` receiver is refused with the
+    # multi-family message, listing the admitted families (as `to_int` does).
+    msg = _err("fn bad(s: Str) -> Str { return s.to_str() }")
+    assert "has no form for a `Str` receiver" in msg
+    assert "Float, Int" in msg
 
 
 def test_arity_is_zero():
