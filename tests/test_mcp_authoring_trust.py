@@ -359,6 +359,79 @@ def test_an_operator_authored_file_keeps_its_own_relative_imports(tmp_path):
     assert payload["ok"] is True, _message(payload)
 
 
+# ------------------------------------ (4c) the jail covers the resolve `policy`
+#
+# `revl_resolve` takes a `policy` path (item 290 §5's boundary-policy predictor).
+# It is a caller-supplied path argument like `files`, `traceFile` and `registry`,
+# and the loader opens it: an unconfined one read any file on the machine and
+# echoed a line back. It rides through the SAME argument jail as the others, so
+# a `policy` outside the sanctioned root is refused before anything is read, and
+# an in-root policy still loads and threads through unchanged.
+
+def _empty_registry(root: Path) -> Path:
+    """A minimal in-root registry: an index the resolver accepts with no
+    entries, so the call reaches the policy load without needing a candidate."""
+    reg = root / "reg"
+    reg.mkdir()
+    (reg / "index.json").write_text(json.dumps({"components": {}}),
+                                    encoding="utf-8")
+    return reg
+
+_NEED = "service Database { fn ping() -> Bool }\n"
+_POLICY = "component registry:* requires evidence [attestation valid]\n"
+
+
+@pytest.mark.parametrize("policy_path", [
+    "/etc/passwd",
+    "/etc/definitely-not-here-9f2c",
+    "../../../../../etc/passwd",
+])
+def test_a_resolve_policy_outside_the_root_is_refused(tmp_path, policy_path):
+    reg = _empty_registry(tmp_path)
+    payload = _call("revl_resolve", {"need": _NEED, "registry": str(reg),
+                                     "policy": policy_path})
+    assert payload["ok"] is False
+    assert "outside the operator-sanctioned root" in _message(payload)
+    assert payload["note"] == "nothing was read, compiled or loaded"
+
+
+def test_the_resolve_policy_refusal_is_not_itself_an_oracle(tmp_path):
+    """Present and absent policy paths outside the jail are indistinguishable:
+    refused before the loader opens them, so neither existence nor a first line
+    can leak the way the unconfined loader's echo did."""
+    reg = _empty_registry(tmp_path)
+    present = "/etc/passwd"
+    absent = "/etc/definitely-not-here-9f2c"
+    a = _call("revl_resolve", {"need": _NEED, "registry": str(reg),
+                               "policy": present})
+    b = _call("revl_resolve", {"need": _NEED, "registry": str(reg),
+                               "policy": absent})
+    assert a["diagnostics"][0]["message"].replace(present, "X") == \
+        b["diagnostics"][0]["message"].replace(absent, "X")
+
+
+def test_a_resolve_policy_symlink_out_of_the_root_is_refused(tmp_path):
+    reg = _empty_registry(tmp_path)
+    link = tmp_path / "escape.policy"
+    link.symlink_to("/etc/passwd")
+    payload = _call("revl_resolve", {"need": _NEED, "registry": str(reg),
+                                     "policy": str(link)})
+    assert payload["ok"] is False
+    assert "outside the operator-sanctioned root" in _message(payload)
+
+
+def test_a_resolve_policy_inside_the_root_still_loads(tmp_path):
+    """The shape that must keep working: an in-root policy passes the jail and
+    is loaded, so the §5 prediction still reaches the agent."""
+    reg = _empty_registry(tmp_path)
+    policy_file = tmp_path / "boundary.policy"
+    policy_file.write_text(_POLICY, encoding="utf-8")
+    payload = _call("revl_resolve", {"need": _NEED, "registry": str(reg),
+                                     "policy": str(policy_file)})
+    assert payload["ok"] is True, _message(payload)
+    assert "policyPreview" in payload
+
+
 # ------------------------------------------- the operator's granted providers
 
 _PROVIDER = (

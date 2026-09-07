@@ -195,7 +195,7 @@ def set_authoring_trust(**fields) -> AuthoringTrust:
 # `revl_restore` + `revl_snapshot` handed back a file's entire CONTENT.
 
 _PATH_ARGUMENTS = frozenset({"files", "candidateFiles", "baselineFiles",
-                             "traceFile", "registry"})
+                             "traceFile", "registry", "policy"})
 
 
 def _file_roots() -> tuple[str, ...]:
