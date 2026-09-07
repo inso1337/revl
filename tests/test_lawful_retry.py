@@ -21,7 +21,6 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import peer_offer  # noqa: E402
 from revl.lawful_retry import (  # noqa: E402
     Attempt,
-    Decision,
     Disposition,
     EffectClass,
     classify_extern,
