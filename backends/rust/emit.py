@@ -5930,7 +5930,15 @@ def _v3_builtin(method: str, target: str, args: list[str],
     # values, so `.ok()` is exactly the tier's `Opt[Int]`.
     if method == "to_int":
         if recv == "Str":
-            return f"{{ ({target}).parse::<i64>().ok() }}"
+            # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): the ASCII
+            # digits with an optional leading `-`, NO leading `+`. Rust's
+            # `str::parse::<i64>` accepts a leading `+` and answered `Some(7)`
+            # for `"+7"` — the #549 divergence against py/ts/go/wasm, which all
+            # answer `None`. Guard the `+` explicitly; every other spelling
+            # rust rejects (empty/partial/out-of-range) already matches.
+            return (f'{{ let _s = ({target}); '
+                    f"if _s.starts_with('+') {{ None }} "
+                    f"else {{ _s.parse::<i64>().ok() }} }}")
         return f"(({target}) as i64)"
     if method == "to_int32":
         return f'(i32::try_from({target}).expect("revl: Int32 overflow"))'
