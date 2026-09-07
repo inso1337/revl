@@ -1034,6 +1034,10 @@ _COMP_NEEDS_STRCONV = False
 _COMP_NEEDS_TIMER = False
 # Per-emit counter for unique timer local names (`_revlTimer1`, `_revlTimer2`).
 _TIMER_COUNTER = 0
+# item 130 Slice 4: per-emit counter for unique `every … in` loop-item local
+# names (`_revlStreamItem1`, `_revlStreamErr1`), so two iterations in one
+# component body do not collide.
+_STREAM_ITER_COUNTER = 0
 # item 130 Slice 3: a `subscribe` bracket (or any `Stream.*` host verb) in a
 # component body flags the stream host runtime (`_STREAM_PREAMBLE`) — the
 # cancel-channel `select` this tier's `next` parks on. A document that uses no
@@ -2755,24 +2759,69 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         out.append("%sreturn nil, err" % inner)
         out.append("%s}" % pad)
     elif s == "stream-iter":
-        # item 130 Slice 4: `every <x> in <sub> { … }`. This tier lowers the
-        # Slice 1/3 protocol (subscribe / next / close and the `merge` fan-in) as
-        # a blocking cancel-channel select, but not the ITERATION form: the loop
-        # binds each delivered item and runs an effectful body per item, and the
-        # go emitter's activation-body walk has no per-item scope to bind it in.
-        # Refuse by name rather than emit a subscription whose body silently
-        # never runs — the same call `_refuse_unlowered_stream_surface` makes for
-        # the Slice 2 surface this tier does not lower. Slice 5's `on … as`
-        # typed-event handler lowers to this SAME step (an event is a stream
-        # item with a contract), so it is refused here too — and named for the
-        # form the author actually wrote.
-        form = ("`on … as` typed-event handler" if step.get("event")
-                else "`every … in` stream iteration form")
-        raise EmitError(
-            f"the {form} is not lowered on the go "
-            "tier; this tier lowers subscribe / next / close and `merge` "
-            "(item 130 Slices 1 and 3) while the iteration form runs on the py "
-            "reference tier (Slices 4 and 5) — try `--backend py`")
+        if step.get("event") is not None:
+            # Slice 5's `on … as` typed-event handler lowers to this SAME step
+            # with an additive `event` contract (schema + a bounded dedup
+            # window). That contract gate is not lowered on this tier yet — it
+            # runs on the py reference tier — so refuse it by name. The plain
+            # `every … in` iteration form below IS lowered here (Slice 4).
+            raise EmitError(
+                "the `on … as` typed-event handler is not lowered on the go "
+                "tier; its schema-and-dedup contract gate runs on the py "
+                "reference tier (item 130 Slice 5) while the plain `every … in` "
+                "iteration form lowers here — try `--backend py`")
+        # item 130 Slice 4: `every <x> in <sub> { … }` on this blocking tier is
+        # a plain for-loop over the cancel-channel `next` (design §4.6, the go
+        # row). It adds NO runtime primitive: `Next` and `IsStreamClosed` are
+        # the Slice 1/3 protocol this tier already lowers. Each turn:
+        #
+        #   * `next` parks in the cancel-channel select. A `Closed` terminal —
+        #     an orderly provider close, OR the owner's own teardown tripping
+        #     the cancel channel — is an ordinary value that ENDS the loop. It
+        #     is not an item and never enters the body (running the effectful
+        #     callback on it would be the silent-data invention §1 forbids);
+        #   * a `Faulted` terminal is the error return. It is NOT caught: it
+        #     fails the activation, so the accumulated prefix reverts LIFO with
+        #     the subscription bracket on it and the stream is closed. That is
+        #     the "a failed handler does not leave a subscription active"
+        #     obligation (A8, §4.7), delivered by not catching anything.
+        #
+        # The core guarantee (§0) rides the `subscribe` bracket ABOVE the loop
+        # exactly as Slice 1 proved it: unloading the owner trips the cancel
+        # token, the parked `next` resolves as `Closed`, the loop exits, and
+        # `close` runs on the same LIFO disposer stack — teardown never waits on
+        # the provider (§9 Part A). Nested acquisitions in the body are refused
+        # by the frontend (§4.7), so the body is emissions only, each rendered
+        # through the same path a top-level `emit` takes.
+        global _STREAM_ITER_COUNTER
+        _flag_stream()
+        _STREAM_ITER_COUNTER += 1
+        n = _STREAM_ITER_COUNTER
+        itemvar = "_revlStreamItem%d" % n
+        errvar = "_revlStreamErr%d" % n
+        subject = _expr(step.get("subject"), env)
+        bind = _safe_local(step.get("bind"))
+        body = step.get("body") or []
+        if not body:  # pragma: no cover — the parser rejects an empty body
+            raise EmitError("an `every … in` body is empty")
+        out.append("%sfor {" % pad)
+        out.append("%s%s, %s := %s.Next()" % (inner, itemvar, errvar, subject))
+        out.append("%sif %s != nil {" % (inner, errvar))
+        out.append("%s\treturn nil, %s" % (inner, errvar))
+        out.append("%s}" % inner)
+        out.append("%sif IsStreamClosed(%s) {" % (inner, itemvar))
+        out.append("%s\tbreak" % inner)
+        out.append("%s}" % inner)
+        # go stream items are strings on this tier (the host runtime's buffer is
+        # `chan string`), so the delivered `any` is recovered as one. The blank
+        # assignment keeps a body that does not read the item from tripping go's
+        # declared-and-not-used error.
+        out.append("%s%s := %s.(string)" % (inner, bind, itemvar))
+        out.append("%s_ = %s" % (inner, bind))
+        for inner_step in body:
+            _emit_component_step(comp, inner_step, services, env, out,
+                                 indent + 1)
+        out.append("%s}" % pad)
     elif s == "intercept":
         # handled at load site (metadata); no-op in Apply
         pass
@@ -7815,13 +7864,14 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_STRCONV
-    global _COMP_NEEDS_TIMER, _TIMER_COUNTER
+    global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _STREAM_ITER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET, _COMP_NEEDS_STREAM
     global _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
+    _STREAM_ITER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
     # item 243/247: witnessed externs by name, for this document's component
     # steps (see `_witnessed_extern`); empty for a document with none, so

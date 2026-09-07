@@ -127,6 +127,27 @@ def test_stream_host_gets_no_no_op_stub():
     assert "func StreamSource() *Stream {" in src
 
 
+def test_iteration_lowers_as_a_blocking_next_loop():
+    """item 130 Slice 4 on the go tier: `every o in sub { … }` is a plain
+    for-loop over the cancel-channel `next` the Slice 1/3 protocol ships — no new
+    runtime primitive. The three lines that carry the guarantee: a `Faulted`
+    terminal is the uncaught error return (it fails the activation and reverts
+    the prefix with the subscription bracket on it); a `Closed` terminal ENDS the
+    loop; the item enters the effectful body only after both."""
+    src = _emit_go()
+    body = src.split("func Iterate() stc.Component {", 1)[1].split("\nfunc ", 1)[0]
+    assert "for {" in body
+    assert ".Next()" in body
+    # a Faulted terminal fails the activation (uncaught error return)
+    assert "return nil, _revlStreamErr" in body
+    # a Closed terminal ends the loop before the body runs
+    assert "if IsStreamClosed(" in body
+    assert "break" in body
+    assert body.index("break") < body.index("sink.Write(")
+    # the item is recovered from the delivered value and the body runs it
+    assert ".(string)" in body
+
+
 # ---------------------------------------------------------------------------
 # the executable proof (the only thing that proves the select unparks)
 # ---------------------------------------------------------------------------
