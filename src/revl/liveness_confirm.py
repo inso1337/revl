@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 # ---------------------------------------------------------------- probe
 
