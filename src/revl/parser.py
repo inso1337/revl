@@ -5046,6 +5046,24 @@ class Parser:
         cache = None
         if self.at("ident", "cache"):
             cache = self._cache_clause()
+        # #548 (component-author gaps, review item 3): an expression-bodied
+        # top-level fn — `fn f(x) -> T = <pure expr>`. This is the SAME sugar a
+        # provide method already accepts (see `provide` above, which desugars
+        # `fn m(..) = e` to `[ReturnStmt(e)]`), extended to the one position the
+        # component-author review found it missing. A component author writing a
+        # small pure helper reaches for the `= expr` shape on autopilot and hit a
+        # bare "expected {" wall. The `=` is unambiguous: a block body opens with
+        # `{`, never `=` — the same disambiguation the parameter-default `=`
+        # (item 187) and the provide-method `=` already rely on. It desugars to a
+        # single-`return` block so the checker, lowering and every emitter see
+        # the identical AST a `{ return <expr> }` body produces — no new IR node,
+        # no emitter change, no gate-crate movement.
+        if self.at("="):
+            self.next()
+            body = [ReturnStmt(self.pure_expr(), line)]
+            return FnDecl(name, params, returns, body, public, line, verified,
+                          source=self.filename, type_params=type_params,
+                          endorse_origins=endorse_origins, cache=cache)
         self.expect("{")
         body = []
         while True:
