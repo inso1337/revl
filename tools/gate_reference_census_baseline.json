@@ -100,6 +100,7 @@
    "stdlib/render.rvl",
    "stdlib/value.rvl",
    "tests/fixtures/emit_py_corpus/witnessed.rvl",
+   "tests/fixtures/erase_net.rvl",
    "tests/fixtures/v2_math_lib.rvl"
   ],
   "false-reject/G1": [
@@ -1172,6 +1173,18 @@
    }
   },
   "tests/fixtures/emit_py_corpus/witnessed.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "expected fn after extern"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "tests/fixtures/erase_net.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
