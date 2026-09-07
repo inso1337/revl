@@ -21,7 +21,7 @@ from .hostfile import program_has_body_file as _program_has_body_file
 from .hostfile import resolve_body_files as _resolve_body_files
 from .hostref import program_has_ref as _program_has_ref
 from .hostref import resolve_refs as _resolve_refs
-from .lower import check_and_lower
+from .lower import IR_TOPLEVEL_FIELDS, check_and_lower
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
 from .typecheck import format_type, parse_type
 
@@ -593,6 +593,34 @@ def compile_source(source: str, filename: str = "<string>",
                          sources=virtual, profile=profile)
 
 
+def _refuse_unknown_ir_fields(manifest: dict, filename: str) -> None:
+    """Refuse a staged IR document that carries a top-level field this frontend
+    does not know, naming the field (roadmap item 479).
+
+    The IR boundary is where a previously compiled IR document re-enters the
+    frontend as the runtime-admission gate's `manifest`. A field outside
+    `IR_TOPLEVEL_FIELDS` is one no schema revision this frontend understands has
+    ever emitted: silently ignoring it is exactly how a gate-crate/frontend skew
+    (or a hand-forged document) slips an unaccounted-for member past the gate.
+    Refuse by name instead — fail closed at the boundary. Unknown members are
+    reported sorted so the diagnostic is deterministic across dict orderings.
+    """
+    unknown = sorted(set(manifest) - IR_TOPLEVEL_FIELDS)
+    if not unknown:
+        return
+    named = ", ".join(f"`{field}`" for field in unknown)
+    plural = "s" if len(unknown) > 1 else ""
+    known = ", ".join(sorted(IR_TOPLEVEL_FIELDS))
+    raise RevlError(
+        filename, 0,
+        f"staged IR carries unknown top-level field{plural} {named}; this "
+        f"frontend refuses an IR document with a field it does not know rather "
+        f"than ignoring it (known fields: {known})",
+        hint=("a field outside the known IR surface means the document was "
+              "produced by a different schema revision or a drifted gate — "
+              "recompile it with this frontend, or upgrade the frontend"))
+
+
 def compile_files(paths: list[str], manifest: dict | None = None,
                   replacing: tuple[str, ...] = (),
                   sources: dict[str, str] | None = None,
@@ -765,6 +793,9 @@ def compile_files(paths: list[str], manifest: dict | None = None,
 
     ambient = None
     if manifest is not None:
+        # item 479: refuse an unknown top-level field at the IR boundary BY NAME
+        # before reading any member, rather than silently ignoring it.
+        _refuse_unknown_ir_fields(manifest, paths[0] if paths else "<manifest>")
         running = manifest.get("manifest", manifest)
         dropped = set(replacing) | {comp.name for comp in merged.components}
         ambient = {
