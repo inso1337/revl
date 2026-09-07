@@ -419,17 +419,18 @@ def test_the_reach_token_is_folded_from_the_host_alone():
 
 def test_a_named_through_transport_is_refused(tmp_path):
     """`through <wire>` names the transport a remote row crosses (D-424c.1's
-    `through billing_wire`). The synthesizer speaks exactly one wire, the
-    canonical envelope selected by OMITTING `through`, and no named transport
-    is bound yet. A named one is refused naming the transport and the row
-    rather than emitted as the canonical wire under a header that claims
-    otherwise — the honesty rule the version, redirect and modality checks
-    keep, on the transport axis.
+    `through billing_wire`). The synthesizer speaks the canonical envelope
+    (selected by OMITTING `through`) and one NAMED wire, `through a2a` (item
+    439). Any OTHER named transport is refused naming the transport and the row
+    rather than emitted as a wire the body would not actually speak — the
+    honesty rule the version, redirect and modality checks keep, on the
+    transport axis.
 
-    `through a2a` in particular is item 439's A2A 1.0.0 binding, still gated on
-    its Task-lifecycle decision, so it refuses here until that binding lands.
+    `through a2a` is bound (see `test_439_a2a_transport.py`); `jsonrpc` and
+    `grpc` are not — gRPC in particular is a binary HTTP/2 transport, not the
+    JSON POST this synthesizer emits — so both still refuse here.
     """
-    for wire in ("a2a", "jsonrpc", "grpc"):
+    for wire in ("jsonrpc", "grpc"):
         write(tmp_path, services=BILLING, base="""
 composition Shop {
   use "services.rvl"

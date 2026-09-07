@@ -102,18 +102,37 @@ import re
 from .crossing_redirect import CROSSING_TIMEOUT, py_policy
 from .errors import RevlError
 from .import_openapi import _authority_host, _comment_safe
+# Item 439: the A2A 1.0.0 version claim and the set of terminal task states live
+# in the importer (`revl import a2a`), the sibling entry point onto the same
+# protocol. They are imported here rather than re-declared so the version a
+# `through a2a` row claims and the terminal states its body accepts cannot drift
+# from the importer's. There is no import cycle: `import_a2a` imports the
+# openapi helpers and the redirect policy, never this module.
+from .import_a2a import A2A_VERSION, _TERMINAL_STATES
 
 #: The kinds `synthesize_provider` knows. `remote` is the one this slice
 #: builds; the other three of §4's table are callers to add.
 KINDS = ("remote",)
 
-#: The NAMED transports the synthesizer can actually speak. The default wire —
-#: `through` omitted, `transport is None` — is the canonical envelope over
-#: HTTPS (`{"key","method","args"}` -> `{"ok","value"|"error"}`, the placement
-#: bridge's own). No named wire is bound yet, so this is empty and every
-#: `through <name>` is refused; `through a2a` is item 439's A2A 1.0.0 binding
-#: and joins here only once its Task-lifecycle question is decided.
-BOUND_TRANSPORTS: tuple[str, ...] = ()
+#: The one NAMED transport this slice binds: A2A 1.0.0's `message/send` (item
+#: 439). The default wire — `through` omitted, `transport is None` — is the
+#: canonical envelope over HTTPS (`{"key","method","args"}` ->
+#: `{"ok","value"|"error"}`, the placement bridge's own), and `through a2a`
+#: MAPS THAT SAME CANONICAL SEAM ENVELOPE onto the A2A message shape at the
+#: boundary: the canonical `method` becomes the `revl.skill` reference, the
+#: canonical `args[0]` becomes the message's one text `Part`, and the reply's
+#: `value` is extracted from a TERMINAL A2A `Task`/`Message`. Every other
+#: `through <name>` is still refused (`check_transport`).
+_A2A = "a2a"
+BOUND_TRANSPORTS: tuple[str, ...] = (_A2A,)
+
+#: A2A 1.0.0 JSON-RPC posts `message/send` to the agent's endpoint. A remote row
+#: carries a bare authority (`check_address` refuses a path or userinfo), so the
+#: endpoint is that authority's HTTPS root. An agent served under a path — the
+#: `url` an Agent Card carries — is the importer's case (`revl import a2a` reads
+#: the full `url` from the card); a `through a2a` row binds the root-endpoint
+#: subset and says so in its header.
+_A2A_ENDPOINT = "https://%s"
 
 #: Scalars that cross the canonical encoding untagged and unchanged.
 _SCALARS = ("Str", "Int", "Int32", "Float", "Bool")
@@ -322,6 +341,153 @@ def _py_body(host: str, key: str, op: str, in_band: bool,
 {err}{ok}    """
 
 
+def _check_a2a_method(service, op, method, in_band: bool, *, doc: str,
+                      line: int, label: str) -> None:
+    """`through a2a` binds A2A 1.0.0's `message/send`, which crosses ONE user
+    message — text in, text out (item 439; the same modality `revl import a2a`
+    projects, because it is the only one an Agent Card describes well enough to
+    bind). So a method remoted over this wire takes exactly one `Str` parameter
+    (the message text) and returns `Str` (`Result[Str, Str]` under
+    `on_failure(result)`). A richer signature is refused naming the method
+    rather than flattened onto the one text `Part` the crossing sends — the
+    honesty rule the transport, version and modality checks already keep.
+    """
+    hint = ("A2A 1.0.0 `message/send` crosses ONE user message: a single text "
+            "`Part` out, and text parts back. `through a2a` therefore binds a "
+            "method of shape `emission fn <op>(message: Str) -> Str` (or "
+            "`-> Result[Str, Str]` under `on_failure(result)`). A parameter or "
+            "result that is not `Str` has no A2A `Part` this slice projects and "
+            "is refused rather than flattened (item 439; the text-only subset "
+            "`revl import a2a` also binds). A non-text modality is a later slice.")
+    if len(method.params) != 1:
+        raise RevlError(
+            doc, line,
+            f"remote row `@{label}` over `through a2a` needs method `{op}` of "
+            f"service `{service.name}` to take exactly one `Str` message "
+            f"parameter, and it takes {len(method.params)}",
+            hint=hint)
+    pname, ptype = method.params[0]
+    if ptype != "Str":
+        raise RevlError(
+            doc, line,
+            f"remote row `@{label}` over `through a2a`: method `{op}`'s "
+            f"parameter `{pname}` is `{ptype}`, not the `Str` the A2A message "
+            f"text is carried as",
+            hint=hint)
+    if in_band:
+        head, args = _type_head(method.returns or "")
+        payload = args[0] if args else ""
+        if head != "Result" or payload != "Str":
+            raise RevlError(
+                doc, line,
+                f"remote row `@{label}` over `through a2a` with "
+                f"`on_failure(result)` needs method `{op}` to return "
+                f"`Result[Str, Str]`, not "
+                f"{'nothing' if not method.returns else f'`{method.returns}`'}",
+                hint=hint)
+    elif (method.returns or "") != "Str":
+        raise RevlError(
+            doc, line,
+            f"remote row `@{label}` over `through a2a` needs method `{op}` to "
+            f"return `Str` (the reply text), not "
+            f"{'nothing' if not method.returns else f'`{method.returns}`'}",
+            hint=hint)
+
+
+def _py_body_a2a(host: str, op: str, in_band: bool,
+                 follow_redirects: bool = False) -> str:
+    """One crossing, Python tier, over A2A 1.0.0 JSON-RPC 2.0 `message/send`.
+
+    This is the `through a2a` wire (item 439). It maps the canonical seam
+    envelope onto the A2A message shape: the canonical `args[0]` becomes the one
+    text `Part` of a `message/send`, the canonical `method` (`op`) rides in the
+    message metadata as the `revl.skill` reference the agent may route on, and
+    the canonical reply `value` is the text extracted from a TERMINAL `Task` or
+    `Message`. Everything the default wire's `_py_body` decides — one crossing,
+    redirect-refusing (`crossing_redirect`), time-bound (`CROSSING_TIMEOUT`),
+    `on_failure` withdraw/result branching — it decides identically; only the
+    payload built and the reply parsed differ.
+
+    The `py` tier is the only one emitted, for the reason `_py_body` states: an
+    `emission` method emits a SYNCHRONOUS ts function, and a network round trip
+    is not synchronous, so a `fetch` body would be `await` inside a non-`async`
+    function. A2A's own async colour (item 80, issue #251) is the importer's
+    to declare because it writes the service; a remote row must not recolour a
+    `service` it did not write, so it emits the sync `@py` body and the ts
+    projection waits on the async crossing.
+
+    Terminal-only: a `message/send` whose task is still `working`,
+    `input-required`, `auth-required` or `unknown` is a LIFECYCLE this slice
+    does not express (item 439's open question), so the body faults rather than
+    polls or resumes.
+    """
+    url = json.dumps(_A2A_ENDPOINT % host)
+    oj = json.dumps(op)
+    terminal = json.dumps(list(_TERMINAL_STATES))
+    policy = py_policy(_A2A, follow=follow_redirects)
+
+    def fault(indent: int, expr: str, cause: str = "") -> str:
+        pad = " " * indent
+        if in_band:
+            return f"{pad}return Err({expr})\n"
+        tail = f" from {cause}" if cause else ""
+        return f"{pad}raise RuntimeError({expr}){tail}\n"
+
+    transport_fail = (
+        '        # `on_failure(withdraw)`: a transport failure is a FAULT, never\n'
+        '        # a quietly-empty result. Nothing is retried and nothing is\n'
+        '        # undone — a remote effect has no local inverse.\n'
+        if not in_band else "")
+    ok = "    return Ok(_text)\n" if in_band else "    return _text\n"
+    return f"""
+    import json as _json, urllib.request as _req, urllib.parse as _urlp
+    import uuid as _uuid
+    # A2A {A2A_VERSION}, JSON-RPC 2.0 `message/send`. ONE crossing. The one
+    # canonical arg is the message text; the method name rides as `revl.skill`.
+    _message = _args[0]
+    _payload = _json.dumps({{
+        "jsonrpc": "2.0",
+        "id": str(_uuid.uuid4()),
+        "method": "message/send",
+        "params": {{"message": {{
+            "role": "user",
+            "messageId": str(_uuid.uuid4()),
+            "parts": [{{"kind": "text", "text": _message}}],
+            "metadata": {{"revl.skill": {oj}}},
+        }}}},
+    }}).encode()
+    _r = _req.Request({url}, data=_payload,
+                      headers={{"content-type": "application/json"}})
+{policy}    try:
+        # A crossing that never returns is not a crossing.
+        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) as _resp:
+            _rpc = _json.loads(_resp.read())
+    except _RedirectRefused:
+        # NOT a transport failure, and so NOT `on_failure`'s to classify: a
+        # redirect is the peer declining to be the declared endpoint at all.
+        raise
+    except Exception as _exc:
+{transport_fail}{fault(8, '"a2a: transport failure"', cause="_exc")}    if _rpc.get("error"):
+{fault(8, '"a2a: JSON-RPC error %s" % (_rpc["error"].get("code"),)')}    _result = _rpc.get("result")
+    if not _result:
+{fault(8, '"a2a: response carried no result"')}    _kind = _result.get("kind")
+    if _kind == "task":
+        _state = (_result.get("status") or {{}}).get("state")
+        if _state not in {terminal}:
+            # Item 439's open question: a task still in flight is a LIFECYCLE
+            # this slice does not express. Fault; never poll, never resume.
+{fault(12, '"a2a: task returned non-terminal state %r - this binding crosses once and does not poll" % (_state,)')}        if _state != "completed":
+{fault(12, '"a2a: task ended %r" % (_state,)')}        _parts = [p for a in (_result.get("artifacts") or [])
+                  for p in (a.get("parts") or [])]
+    elif _kind == "message":
+        _parts = _result.get("parts") or []
+    else:
+{fault(8, '"a2a: unexpected result kind %r" % (_kind,)')}    _text = "".join(p.get("text", "") for p in _parts
+                    if p.get("kind") == "text" and isinstance(p.get("text"), str))
+    if not _text and _parts:
+{fault(8, '"a2a: reply carried only non-text parts"')}{ok}    """
+
+
 def _remote_source(service, params: dict) -> tuple[str, str]:
     label = params["label"]
     key = params["key"]
@@ -337,10 +503,12 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
     doc, line = params["doc"], params["line"]
     in_band = on_failure == "result"
 
-    # A named `through <wire>` is refused before a single line is synthesized:
-    # the only wire below is the canonical envelope, and a named one the body
-    # would not speak must not ship under its label (424 D-424c.1, item 439).
+    # A `through <wire>` naming an unbound transport is refused before a single
+    # line is synthesized: a named wire the body would not speak must not ship
+    # under its label (424 D-424c.1, item 439). `through a2a` IS bound and takes
+    # the A2A branch below; the default (omitted) wire is the canonical envelope.
     check_transport(transport, doc=doc, line=line, label=label)
+    is_a2a = transport == _A2A
 
     component = f"Remote{_pascal(label)}Provider"
     externs: list[str] = []
@@ -357,6 +525,13 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
                      "approximating an async one. Declare the method "
                      "`emission fn` if the crossing is single, or wait for the "
                      "async projection")
+        # `through a2a` binds the text-in/text-out `message/send` subset (item
+        # 439); a method that is not that shape is refused before the generic
+        # projection checks, so its message names the A2A modality rather than
+        # the canonical JSON-transparency it also fails.
+        if is_a2a:
+            _check_a2a_method(service, op, method, in_band,
+                              doc=doc, line=line, label=label)
         for pname, ptype in method.params:
             if not _projectable(ptype):
                 _refuse_type(doc, line, label, op, f"parameter `{pname}`", ptype)
@@ -390,10 +565,13 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
         # type fidelity and costs nothing the decision asked for. `_args` is the
         # marshalled argument list, bound in the body rather than interpolated
         # per parameter so the envelope is identical for every arity.
+        body_src = (_py_body_a2a(host, op, in_band, redirect == 'same_origin')
+                    if is_a2a else
+                    _py_body(host, key, op, in_band, redirect == 'same_origin'))
         externs.append(
             f"extern emission[{capability}] fn {extern}({sig}){arrow}\n"
             f"  = @py {{\n    _args = [{', '.join(names)}]\n"
-            f"{_py_body(host, key, op, in_band, redirect == 'same_origin')}}}")
+            f"{body_src}}}")
         provides.append(f"    fn {op}({', '.join(names)}) = "
                         f"{extern}({', '.join(names)})")
 
@@ -403,6 +581,39 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
     body = (f"component {component} provides {key}: {service.name} {{\n"
             f"{isolate}  provide {key} {{\n" + "\n".join(provides) + "\n  }\n}")
     return component, "\n\n".join([header, *externs, body]) + "\n"
+
+
+def _a2a_header_lines() -> list[str]:
+    """The `through a2a` header block (item 439). It states the protocol exactly
+    (A2A 1.0.0, never bare "A2A", decision (3)), the wire, the terminal subset
+    this slice binds, and — the load-bearing one — that the peer is a CLAIM, not
+    a checked composition (decision (2); item 329's untrusted-author case)."""
+    return [
+        f"// Transport: A2A {A2A_VERSION} over JSON-RPC 2.0 (`message/send`)."
+        " The peer",
+        "//   authority above is the agent's HTTPS endpoint root. The canonical",
+        "//   seam envelope is MAPPED onto the A2A message shape: the one `Str`",
+        "//   argument becomes the message's single text `Part`, the method name",
+        "//   rides as the `revl.skill` metadata reference, and the reply text is",
+        "//   read back from a TERMINAL `Task`/`Message`.",
+        "//   Version is claimed EXACTLY, never as bare \"A2A\": the protocol",
+        "//   moves and a binding that followed it silently would assert a",
+        "//   compatibility nobody checked (item 439 decision (3)).",
+        "//   SCOPE: a `message/send` whose task reaches a TERMINAL state in that",
+        "//   one crossing — the subset where \"does an A2A Task map to one",
+        "//   emission, to a stream (item 130), or to a session (item 250)?\"",
+        "//   does not arise. A non-terminal reply (`working`, `input-required`,",
+        "//   `auth-required`) faults at the boundary; the body never polls,",
+        "//   resumes, or guesses. Streaming, gRPC and non-text `Part`s are not",
+        "//   this wire (item 439; `revl import a2a` binds the same subset).",
+        "//",
+        "// THE A2A PEER IS A CLAIM, NOT A CHECKED COMPOSITION. An external agent",
+        "//   is not a revl composition, so nothing about it is verified: this row",
+        "//   admits, verifies and re-admits NOTHING about the callee (a client is",
+        "//   the SENDER, D-424c.8; item 337 requires the RECEIVER to re-compile",
+        "//   from its own source). Every A2A provider is item 329's",
+        "//   untrusted-author case BY CONSTRUCTION (item 439 decision (2)).",
+    ]
 
 
 def _remote_header(service, label, key, host, capability, on_failure,
@@ -419,7 +630,9 @@ def _remote_header(service, label, key, host, capability, on_failure,
         "//   not an identifier, and must never become part of a capability",
         "//   spelling (item 424 D-424c.10, roadmap 421 F4).",
     ]
-    if transport:
+    if transport == _A2A:
+        lines += _a2a_header_lines()
+    elif transport:
         lines.append(f"// Transport requested: `{_comment_safe(transport)}`.")
     lines += [
         f"// Redirect: `{redirect}`. THE PEER ADDRESS ABOVE IS THE ADDRESS.",
@@ -539,24 +752,27 @@ def check_transport(transport: str | None, *, doc: str, line: int,
                     label: str) -> None:
     """D-424c.1's `through <wire>` names the transport a remote row crosses.
 
-    The synthesizer speaks exactly one wire, the canonical envelope over HTTPS
-    (`{"key","method","args"}` -> `{"ok","value"|"error"}`, the placement
-    bridge's own), and it is selected by OMITTING `through`. No NAMED transport
-    is bound yet, so a `through <name>` clause is refused naming the transport
-    and the row rather than emitted as the canonical wire wearing a header
-    comment that claims the named one.
+    The synthesizer speaks two wires. The default — `through` OMITTED — is the
+    canonical envelope over HTTPS (`{"key","method","args"}` ->
+    `{"ok","value"|"error"}`, the placement bridge's own). The one NAMED wire is
+    `through a2a` (item 439): A2A 1.0.0's `message/send`, which maps that same
+    canonical envelope onto the A2A message shape at the boundary. Any OTHER
+    `through <name>` is refused naming the transport and the row rather than
+    emitted as a wire the generated body would not actually speak.
 
     This is the honesty rule the version, redirect and modality checks already
-    keep, restated for the transport axis: a named wire the generated body would
-    not actually speak must not ship as the default one under its label. Before
-    this refusal a `through a2a` row parsed, synthesized the canonical envelope,
-    and annotated the header `Transport requested: a2a` — three statements the
-    crossing did not honour.
+    keep, restated for the transport axis: a named wire the body would not speak
+    must not ship under its label. `through a2a` is honoured because the body
+    below now genuinely speaks it; `through grpc`, say, is refused because it
+    does not — gRPC is a binary transport over HTTP/2 with protobuf framing, not
+    the JSON POST this synthesizer emits.
 
-    `through a2a` is item 439's A2A 1.0.0 binding. It stays refused here until
-    that binding lands, and it lands only once item 439's load-bearing open
-    question is decided: does an A2A Task map to one emission, to a stream
-    (item 130), or to a session (item 250)?
+    `through a2a` binds only the subset where item 439's load-bearing open
+    question — does an A2A Task map to one emission, to a stream (item 130), or
+    to a session (item 250)? — does not arise: a `message/send` whose task
+    reaches a TERMINAL state in that one crossing. A non-terminal reply is a
+    fault at the boundary; the generated body refuses to poll or resume (the
+    same subset `revl import a2a` binds).
     """
     if transport is None or transport in BOUND_TRANSPORTS:
         return
@@ -564,13 +780,12 @@ def check_transport(transport: str | None, *, doc: str, line: int,
         doc, line,
         f"remote row `@{label}` names transport `{transport}` with `through`, "
         "but the synthesizer binds no transport by that name",
-        hint="omit `through` for the one wire this slice speaks — the canonical "
-             'envelope over HTTPS (`{"key","method","args"}` -> '
-             '`{"ok","value"|"error"}`, docs/composition-rows.md). No named '
-             "transport is bound yet; `through a2a` is item 439's A2A 1.0.0 "
-             "binding, still gated on its Task-lifecycle decision. Refusing a "
-             "named wire the generated body would not actually speak is the "
-             "honesty rule the version and redirect checks already keep "
+        hint="omit `through` for the default wire — the canonical envelope over "
+             'HTTPS (`{"key","method","args"}` -> `{"ok","value"|"error"}`, '
+             "docs/composition-rows.md) — or write `through a2a` for A2A 1.0.0's "
+             "`message/send` (item 439). No other named transport is bound: "
+             "refusing a named wire the generated body would not actually speak "
+             "is the honesty rule the version and redirect checks already keep "
              "(424 D-424c.1, item 439)")
 
 
