@@ -231,6 +231,12 @@ pub struct DfsRes {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NoLink {
+    done: bool,
+    refs: Vec<Verd>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cut {
     s: String,
     rest: String,
@@ -3881,9 +3887,9 @@ fn collect_routes(comps: Vec<CompD>, ci: i64, provs: Vec<Prov3>, refs: Vec<Verd>
     return collect_routes(comps.clone(), (ci).checked_add(1i64).expect("revl: Int overflow"), provs.clone(), refs2);
 }
 
-fn link_refusals(pg: Prog) -> Vec<Verd> {
+fn link_refusals(pg: Prog, seed: Vec<Prov3>) -> Vec<Verd> {
     let live = non_template_comps(&pg.comps, &spawn_templates(&pg.comps));
-    let g2 = collect_g2(live.clone(), 0i64, vec![], vec![]);
+    let g2 = collect_g2(live.clone(), 0i64, seed.clone(), vec![]);
     let mut refs = g2.refs;
     refs = collect_routes(live.clone(), 0i64, g2.provs.clone(), refs.clone());
     let edges = build_edges(&live, 0i64, &g2.provs, std::collections::HashMap::new());
@@ -4396,19 +4402,19 @@ fn too_deep_msg() -> String {
     return format!("expression nesting is deeper than the parser's limit of {} levels", (nesting_limit()).to_string());
 }
 
-fn collect_refusals(ts: &[Token], pg: Prog) -> Vec<Verd> {
+fn collect_nonlink(ts: &[Token], pg: Prog) -> NoLink {
     let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(ts));
     let cachev = check_cache_fns(&pg.fns);
     if (cachev.v != "") {
-        return vec![cachev.clone()];
+        return NoLink { done: true, refs: vec![cachev.clone()] };
     }
     let acq = check_reachable_fn_acquire(pg.clone());
     if (acq.v != "") {
-        return vec![acq.clone()];
+        return NoLink { done: true, refs: vec![acq.clone()] };
     }
     let mf = first_module_fn(&pg.fns, 0i64, base.clone());
     if (mf.v != "") {
-        return vec![mf.clone()];
+        return NoLink { done: true, refs: vec![mf.clone()] };
     }
     let mut refs: Vec<Verd> = vec![];
     let cnames = comp_names(pg.comps.clone(), 0i64, vec![]);
@@ -4439,7 +4445,15 @@ fn collect_refusals(ts: &[Token], pg: Prog) -> Vec<Verd> {
     if (boots.revl_length() > 1i64) {
         refs.push(mk_verd(tagged("BOOT", &(String::from("a composition declares at most one `boot` component, found ").revl_concat(&join_comma(&boots, 0i64, String::from(""))))), comp_line(&pg.comps, &(boots)[(1i64) as usize].clone(), 0i64)));
     }
-    return append_verds(refs.clone(), link_refusals(pg.clone()));
+    return NoLink { done: false, refs: refs.clone() };
+}
+
+fn collect_refusals(ts: &[Token], pg: Prog) -> Vec<Verd> {
+    let nl = collect_nonlink(ts, pg.clone());
+    if nl.done {
+        return nl.refs;
+    }
+    return append_verds(nl.refs.clone(), link_refusals(pg.clone(), vec![]));
 }
 
 pub fn admit_src(src: String) -> String {
@@ -4526,16 +4540,23 @@ fn parse_manifest(m: String) -> Vec<Prov3> {
 }
 
 pub fn admit_ambient(src: String, manifest: String) -> String {
-    let self_v = admit_src(src.clone());
-    if (self_v != "") {
-        return self_v;
-    }
     let ts = lex_src(src.clone());
+    let fgn = foreign_scan_ts(&ts);
+    if (fgn != "") {
+        return tagged("FOREIGN", &fgn);
+    }
+    if (nesting_depth(&ts) > nesting_limit()) {
+        return tagged("BAD", &too_deep_msg());
+    }
     let pg = parse_prog_ts(ts.clone());
-    let live = non_template_comps(&pg.comps, &spawn_templates(&pg.comps));
-    let seed = parse_manifest(manifest.clone());
-    let r = collect_g2(live.clone(), 0i64, seed.clone(), vec![]);
-    return pick_min(&r.refs);
+    if (pg.bad != "") {
+        return tagged("BAD", &pg.bad);
+    }
+    let nl = collect_nonlink(&ts, pg.clone());
+    if nl.done {
+        return pick_min(&nl.refs);
+    }
+    return pick_min(&append_verds(nl.refs.clone(), link_refusals(pg.clone(), parse_manifest(manifest.clone()))));
 }
 
 fn mk_irres(ok: bool, js: String) -> IrRes {
@@ -4897,7 +4918,7 @@ fn duration_ms_str(numText: &str, unit: &str) -> String {
     if (mult == 0i64) {
         return String::from("");
     }
-    let n = match { (numText).parse::<i64>().ok() } {
+    let n = match { let _s = (numText); if _s.starts_with('+') { None } else { _s.parse::<i64>().ok() } } {
     Some(v) => v,
     None => (0i64).checked_sub(1i64).expect("revl: Int overflow"),
     _ => unreachable!(),
@@ -9609,6 +9630,33 @@ fn an_internally_refused_component_is_forwarded_unchanged__whatever_the_manifest
 fn a_disjoint_manifest_key_never_conflicts_with_the_incoming_component() {
     let v = admit_ambient(String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"), String::from("OldCache/cache/"));
     assert!((v == ""));
+}
+
+#[test]
+fn a_route_whose_realms_are_all_provided_by_the_manifest_admits__ambient_route_() {
+    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r2\") strategy(round_robin)\n  provide api { fn go(k) { return kv.get(k) } }\n}"), String::from("StoreA/kv/r1;StoreB/kv/r2"));
+    assert!((v == ""));
+}
+
+#[test]
+fn the_ambient_route_slice_equals_single_source_of_the_manifest_components____src() {
+    let stores = String::from("component StoreA provides kv: Kv {\n  isolate kv in realm(\"r1\")\n  provide kv { fn get(k) { return k } }\n}\ncomponent StoreB provides kv: Kv {\n  isolate kv in realm(\"r2\")\n  provide kv { fn get(k) { return k } }\n}\n");
+    let svc = String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\n");
+    let router = String::from("component Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r2\") strategy(round_robin)\n  provide api { fn go(k) { return kv.get(k) } }\n}");
+    assert!((admit_ambient(svc.revl_concat(&router), String::from("StoreA/kv/r1;StoreB/kv/r2")) == admit_src((svc.revl_concat(&stores)).revl_concat(&router))));
+}
+
+#[test]
+fn a_routed_realm_provided_by_neither_text_nor_manifest_still_refuses__ambient_route_() {
+    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str }\nservice Api { fn go(k: Str) -> Str }\ncomponent Router requires kv: Kv provides api: Api {\n  isolate kv in realms(\"r1\", \"r9\")\n  provide api { fn go(k) { return kv.get(k) } }\n}"), String::from("StoreA/kv/r1"));
+    assert!((v == "ROUTE|multi-realm bind of `kv` in Router names realm `r9`, but no component provides `kv` in realm `r9` (item 162: every routed realm needs a provider)"));
+}
+
+#[test]
+fn an_earlier_line_ambient_g2_conflict_outranks_a_later_internal_refusal() {
+    let src = String::from("service D { fn q(s: Str) -> Int }\ncomponent Early provides db: D { provide db { fn q(s) { let x = s   return 0 } } }\ncomponent Late provides ap: D { provide ap { fn q(s) { let x = nope   return 0 } } }");
+    let v = admit_ambient(src.clone(), String::from("OldStore/db/"));
+    assert!((v == "G2|provision conflict: key `db` is provided by both OldStore and Early (G2)"));
 }
 
 #[test]

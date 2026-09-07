@@ -2196,7 +2196,7 @@ class Session:
         outstanding witness identity/revision drifted since `prepare_verdict`,
         the confirm is REFUSED with a fresh review — never silently adopting the
         changed state. On an exact match it enacts the verdict (abort)."""
-        driver = self._require()
+        self._require()
         self._refuse_if_halted("confirm_verdict")
         owner = self._owner
         if owner is None:
@@ -2468,10 +2468,12 @@ class Session:
          "why": "no RNG seed or clock reading is recorded, so a branch is a "
                 "divergent continuation, not a bit-reproducible replay"},
         {"axis": "modelDecisions",
-         "why": "the LLM-aware WAL (item 250's deferred replay-modes slice, "
-                "overlapping item 121) is not written, so the model and tool "
-                "calls above the fork point are not on the branch's record and "
-                "no counterfactual replay mode can be honest yet"},
+         "why": "each session's own WAL records its model decisions (model, "
+                "usage, latency, attempts; item 250 Slice 3a) but the branch "
+                "does not copy the parent's decisions below the fork point onto "
+                "its record, and no prompt/response digest, tool call, "
+                "temperature or seed is recorded, so no counterfactual replay "
+                "mode can be honest yet"},
     )
 
     def _branch_provenance(self, at: int) -> dict:
@@ -3088,25 +3090,52 @@ class Session:
 
     def _dispose_turn_fibers(self, turn_names: set) -> None:
         """Dispose the fibers a failed turn plug left in `driver.fibers` (design
-        460 §2, the `plug-failed` path). A turn that raised mid-plug may have
-        landed some of its components before the failure; leaving them in the
-        driver would strand fibers the composition never adopted. Best-effort and
-        never raising — the caller is already unwinding a plug failure and must
-        re-raise the original error, not a teardown one."""
+        460 §2, the `plug-failed` path), through the SUPPORTED runtime disposal
+        path — `await fiber.dispose()` then a flush, exactly as
+        `_Driver._dispose_all` and `_perform_withdrawal` tear a live fiber down.
+        A turn that raised mid-plug may have landed some of its components before
+        the failure; leaving those handles in the driver would strand fibers the
+        composition never adopted — their provisions/effects stay live while the
+        turn is never adopted into the IR, so ordinary IR-ordered disposal can
+        never reach them (issue #644).
+
+        `_wire_turn` calls this BEFORE `record_admit_abandoned`, so the terminal
+        settlement is written only once the fibers it abandons are actually torn
+        down — the WAL never claims a decision is abandoned while its fibers are
+        still leaking.
+
+        Consumers before providers: `driver.fibers` is insertion-ordered and the
+        turn's fibers were stored in plug (load) order, so tearing them down in
+        the reverse of that order replays inverses LIFO, matching
+        `_dispose_all`'s `reversed(_load_order(ir))`.
+
+        Best-effort and never raising — the caller is already unwinding a plug
+        failure and must re-raise the original error, not a teardown one. A fiber
+        whose own `dispose()` raises is LEFT in `driver.fibers` so its ownership
+        stays inspectable rather than being silently dropped undisposed."""
         driver = self._driver
         if driver is None:
             return
-        for name in list(turn_names):
-            fiber = driver.fibers.pop(name, None)
+
+        async def _teardown(fiber) -> None:
+            await fiber.dispose()
+            await driver._flush()
+
+        # reverse plug (load) order over the driver's own insertion order, kept
+        # to the names this turn owns: consumers come down before the providers
+        # they reached, the direction `_dispose_all` tears a live composition in.
+        ordered = [n for n in reversed(list(driver.fibers)) if n in turn_names]
+        for name in ordered:
+            fiber = driver.fibers.get(name)
             if fiber is None:
                 continue
-            disposer = getattr(driver, "_dispose_fiber", None)
-            if disposer is None:
-                continue
             try:
-                self._run(disposer(fiber))
+                self._run(_teardown(fiber))
             except BaseException:  # noqa: BLE001 — unwinding a plug failure
-                pass
+                # a fiber that could not be torn down stays in `driver.fibers`,
+                # inspectable, rather than being dropped as if it were disposed.
+                continue
+            driver.fibers.pop(name, None)
 
     def _turn_content_key(self, bundle: dict) -> str:
         """The in-process applied-set key for a turn (design 460 §4): a digest of
@@ -3383,14 +3412,16 @@ class Session:
         """Write a WAL record naming the hit and the miss crossing it re-delivers
         (design laundering point 5: hits are on the record). Best-effort — a
         session with no WAL still counts the hit in `state()` (the `cacheHits`
-        counter), it just has no durable audit line."""
+        counter), it just has no durable audit line. The record names the
+        recorded grant ids the entry's liveness is bound to, so the audit joins
+        the hit to the same authority a miss would have consumed."""
         wal = self._approval_wal()
         if wal is None:
             return
         recorder = getattr(wal, "record_cache_hit", None)
         if callable(recorder):
-            recorder({"key": key, "method": method,
-                      "grantIds": entry.get("grantIds") or []})
+            recorder(key=key, method=method,
+                     grant_ids=entry.get("grantIds") or [])
 
     def _drain_pending_admits(self) -> None:
         """Wire every turn admitted (and queued) during the call that just

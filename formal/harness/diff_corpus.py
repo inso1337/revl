@@ -2145,7 +2145,6 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     srows = [r for r in rows if r and r[0] == "S" and len(r) == 4]
     harows = [r for r in rows if r and r[0] == "HA" and len(r) == 5]
     irows = [r for r in rows if r and r[0] == "I" and len(r) == 7]
-    pgrows = [r for r in rows if r and r[0] == "PG" and len(r) == 3]
     exrows = [r for r in rows if r and r[0] == "EX" and len(r) == 7]
     fnrows = [r for r in rows if r and r[0] == "FN" and len(r) == 5]
 

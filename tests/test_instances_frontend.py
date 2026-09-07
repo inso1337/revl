@@ -387,3 +387,109 @@ def test_emit_on_non_emission_through_handle_is_rejected():
     provision-read shape), pointing at `task.status`."""
     with pytest.raises(RevlError, match=r"`emit` on `task\.status`"):
         _handle("emission", "emit w.task.status()")
+
+
+# -- placement-file spelling: `[processes.<p>] instances = [...]` (item 10) --
+# The placement horizon's plan-time surface: a placement keys on an instance
+# ADDRESS (`Spawner/name`), validated as a pure read against the manifest's
+# `named_instances` index. Malformed / unknown / double-placed addresses are
+# refused before anything spawns; runtime honour is the deferred cross-tier
+# port (docs/design-v2-instances.md). Driven on a compiled IR — no processes.
+
+from revl import placement as _placement  # noqa: E402
+
+
+_TWO_NAMED = """
+component Sup {
+  let a = effect spawn Worker with { tag: "x" } as "worker-a" undo a.dispose()
+  let b = effect spawn Worker with { tag: "y" } as "worker-b" undo b.dispose()
+}
+"""
+
+
+def test_valid_named_instance_placement_has_no_diagnostic():
+    ir = _compile(_TWO_NAMED)
+    processes = {
+        "hot":  {"components": ["Sup"], "instances": ["Sup/worker-a"]},
+        "cold": {"instances": ["Sup/worker-b"]},
+    }
+    assert _placement.named_instance_placement_diagnostic(processes, ir) is None
+
+
+def test_placement_without_an_instances_key_is_a_no_op():
+    """Additive: a classic placement (no `instances`) validates trivially even
+    when the composition has named instances — byte-identical to today."""
+    ir = _compile(_TWO_NAMED)
+    processes = {"p": {"components": ["Sup"]}}
+    assert _placement.named_instance_placement_diagnostic(processes, ir) is None
+
+
+def test_no_op_for_a_composition_with_no_named_instances():
+    ir = _compile("component Sup { let w = effect spawn Worker with { tag: \"x\" } undo w.dispose() }")
+    processes = {"p": {"components": ["Sup"]}}
+    assert _placement.named_instance_placement_diagnostic(processes, ir) is None
+
+
+def test_unknown_instance_address_is_refused():
+    ir = _compile(_TWO_NAMED)
+    processes = {"p": {"components": ["Sup"], "instances": ["Sup/typo"]}}
+    problem = _placement.named_instance_placement_diagnostic(processes, ir)
+    assert problem is not None
+    assert "'Sup/typo'" in problem
+    assert "does not declare" in problem
+    # the diagnostic lists the addresses the composition DOES declare
+    assert "Sup/worker-a" in problem and "Sup/worker-b" in problem
+
+
+def test_malformed_address_without_a_slash_is_refused():
+    ir = _compile(_TWO_NAMED)
+    processes = {"p": {"components": ["Sup"], "instances": ["worker-a"]}}
+    problem = _placement.named_instance_placement_diagnostic(processes, ir)
+    assert problem is not None
+    assert "Spawner/name" in problem
+
+
+def test_double_placed_instance_is_refused():
+    ir = _compile(_TWO_NAMED)
+    processes = {
+        "hot":  {"instances": ["Sup/worker-a"]},
+        "cold": {"instances": ["Sup/worker-a"]},
+    }
+    problem = _placement.named_instance_placement_diagnostic(processes, ir)
+    assert problem is not None
+    assert "placed in both" in problem
+    assert "'Sup/worker-a'" in problem
+
+
+def test_same_name_across_spawners_are_independently_placeable():
+    """(spawner, name) is the address: `SupA/primary` and `SupB/primary` are two
+    distinct instances and may sit in different processes."""
+    ir = _compile("""
+component SupA { let w = effect spawn Worker with { tag: "x" } as "primary" undo w.dispose() }
+component SupB { let w = effect spawn Worker with { tag: "y" } as "primary" undo w.dispose() }
+""")
+    processes = {
+        "a": {"components": ["SupA"], "instances": ["SupA/primary"]},
+        "b": {"components": ["SupB"], "instances": ["SupB/primary"]},
+    }
+    assert _placement.named_instance_placement_diagnostic(processes, ir) is None
+
+
+def test_instance_name_may_contain_a_slash():
+    """The address membership check is a full-string match, so a name that itself
+    contains `/` (`SupA/a/b`) resolves against the manifest, not the first slash."""
+    ir = _compile("""
+component Sup { let w = effect spawn Worker with { tag: "x" } as "a/b" undo w.dispose() }
+""")
+    processes = {"p": {"components": ["Sup"], "instances": ["Sup/a/b"]}}
+    assert _placement.named_instance_placement_diagnostic(processes, ir) is None
+
+
+def test_placed_named_instances_maps_address_to_process():
+    processes = {
+        "hot":  {"instances": ["Sup/worker-a"]},
+        "cold": {"instances": ["Sup/worker-b"]},
+    }
+    assert _placement.placed_named_instances(processes) == {
+        "Sup/worker-a": "hot", "Sup/worker-b": "cold",
+    }

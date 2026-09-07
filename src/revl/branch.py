@@ -32,10 +32,13 @@ What this module does NOT do, and will not pretend to
 -----------------------------------------------------
 It never RUNS anything. An offline reader has no live component, no workspace
 handle and no fiber; the only honest post-mortem verbs are *enumerate* and
-*compare*. Re-executing a branch (``revl replay branch``) and the exact /
-tool-only / model-substitute / counterfactual replay modes need an LLM-aware WAL
-that records each model decision, which is not written yet — see
-:data:`NOT_COMPARABLE` and the design doc's Slice 3.
+*compare*. Since item 250 Slice 3a the WAL carries one ``model-decision`` record
+per completion crossing (model, tokens, cost, latency, attempts), and
+:func:`compare` lists them per side; what it still does not carry is the
+prompt/response digest, the tool calls and the request parameters (temperature,
+seed), so re-executing a branch (``revl replay branch``) and the exact /
+tool-only / model-substitute / counterfactual replay modes remain out of reach;
+see :data:`NOT_COMPARABLE` and the design doc's Slice 3b.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ from typing import Optional
 
 from .wal import (KIND_BOUNDARY, KIND_COMPENSATION, KIND_EFFECT, KIND_EMISSION,
                   KIND_HINGE, KIND_OPAQUE, KIND_PROVISION, WALIntegrityError,
-                  read_wal, scope_host_confined)
+                  model_decisions, read_wal, scope_host_confined)
 
 
 class BranchError(RuntimeError):
@@ -54,14 +57,15 @@ class BranchError(RuntimeError):
 
 #: What a comparison of two recorded histories cannot say, and why. Reported on
 #: every compare document. A diff of two branches can say WHAT each did
-#: differently; it cannot say WHY, because the decision that chose the divergence
-#: is not on the record. Emptying this list is a claim that the WAL now carries
-#: those decisions.
+#: differently, and since Slice 3a WHICH model answered at what cost; it cannot
+#: say WHY, because what the model was asked and what it answered are not on the
+#: record. Emptying this list is a claim that the WAL now carries those too.
 NOT_COMPARABLE = (
     {"axis": "decisionCause",
-     "why": "no model decision is recorded (no prompt/response digest, model, "
-            "tool call, temperature or seed), so a comparison shows the two "
-            "histories' effects, never the reasoning that chose between them"},
+     "why": "a model decision records the model, usage, latency and attempts "
+            "(item 250 Slice 3a) but no prompt/response digest, tool call, "
+            "temperature or seed, so a comparison shows which model each side "
+            "asked and what it cost, never the reasoning that chose between them"},
     {"axis": "counterfactual",
      "why": "neither side can be re-executed from the WAL, so `what would have "
             "happened if` is not answerable here — only `what did happen` on "
@@ -500,9 +504,39 @@ def _side(path: str, doc: dict, diverged: Optional[int]) -> dict:
         "steps": [_entry(r) for r in tail],
         "emissionsCrossed": [_entry(r) for r in tail
                              if r.get("kind") == KIND_EMISSION],
+        "modelDecisions": _decisions(wal["records"], tail),
         "capabilities": (doc.get("preserved") or {}).get("capabilities"),
         "complete": doc.get("complete"),
     }
+
+
+def _decisions(records: list, tail: list) -> list:
+    """The model decisions made in `tail` (item 250 Slice 3a), one entry per
+    `model-decision` record whose crossing is a step of the tail, in the tail's
+    order. Joined on the crossing identity the writer keyed the record by,
+    ``(component, stepIndex)``; a tail step with no record made no completion
+    (or was written before Slice 3a, which the reader cannot tell apart and
+    :data:`NOT_COMPARABLE` says so)."""
+    by_crossing = model_decisions(records)
+    out = []
+    for step in tail:
+        record = by_crossing.get((step.get("component"), step.get("stepIndex")))
+        if record is None:
+            continue
+        llm = record.get("llm") or {}
+        out.append({
+            "seq": step.get("seq"),
+            "label": step.get("label"),
+            "outcome": record.get("outcome"),
+            "model": llm.get("model"),
+            "tokensIn": llm.get("tokensIn"),
+            "tokensOut": llm.get("tokensOut"),
+            "cost": llm.get("cost"),
+            "latencySeconds": llm.get("latencySeconds"),
+            "attempts": llm.get("attempts"),
+            "attemptCeiling": llm.get("attemptCeiling"),
+        })
+    return out
 
 
 def _delta(left: dict, right: dict) -> dict:
@@ -537,6 +571,10 @@ def _delta(left: dict, right: dict) -> dict:
         "emissions": {
             "left": len(left["emissionsCrossed"]),
             "right": len(right["emissionsCrossed"]),
+        },
+        "modelDecisions": {
+            "left": len(left.get("modelDecisions") or []),
+            "right": len(right.get("modelDecisions") or []),
         },
         "capabilities": {
             "onlyLeft": sorted(lcaps - rcaps),
@@ -653,7 +691,13 @@ def _render_compare(doc: dict) -> str:
         entry = doc[side]
         lines.append(f"  {side:<5} {entry.get('session') or entry['wal']}  "
                      f"[{entry['role']}]  {len(entry['steps'])} step(s), "
-                     f"{len(entry['emissionsCrossed'])} emission(s)")
+                     f"{len(entry['emissionsCrossed'])} emission(s), "
+                     f"{len(entry.get('modelDecisions') or [])} model decision(s)")
+        for decision in entry.get("modelDecisions") or []:
+            lines.append(f"        model {decision.get('model') or '(unreported)'}"
+                         f"  {decision['label']}  {decision['outcome']}  "
+                         f"attempts {decision.get('attempts')}/"
+                         f"{decision.get('attemptCeiling')}")
     lines += ["", f"  shared prefix: {delta['sharedPrefix']} step(s)"]
     first = delta["firstDifference"]
     if first is None:

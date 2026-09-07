@@ -406,6 +406,13 @@ jobs:
       # runner image ever stops shipping Docker, this fails loudly instead of
       # letting the sandbox level quietly go back to skipping.
       - run: docker version
+      # the mixed-arch bridge (item 411) runs a component in a container OF a
+      # FOREIGN arch, which needs qemu/binfmt emulation. GitHub-hosted ubuntu
+      # ships Docker but registers no binfmt handlers, so register them here.
+      # Without this the foreign-arch boot canary FAILS (not skips), so a runner
+      # that lost emulation is loud, never silently host-arch.
+      - name: register qemu/binfmt for foreign-arch containers
+        run: docker run --rm --privileged tonistiigi/binfmt:latest --install all
       # item 118 Slice 2a rides the same gate and the same `revl.sandbox=411`
       # label: `revl deploy`'s container boundary IS item 411's rung, so it is
       # exercised here rather than in a second job with its own runtime.

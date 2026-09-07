@@ -126,6 +126,39 @@ def test_no_platform_adds_no_run_flag():
     assert "--platform" not in _sb.container_flags(_ENV_NONE, name="c", mounts=[])
 
 
+def test_wrap_threads_the_declared_platform_into_the_launch_argv():
+    """The launch path — not just `container_flags` — must carry `--platform`.
+
+    `container_flags` deriving the flag is one thing; `wrap` is what actually
+    builds the `docker run` argv the runner is spawned with, and it reads the
+    envelope back out of `achieved["_env"]` (placement injects it there). A
+    dropped `--platform` here would silently run a foreign-arch component on the
+    host arch — the exact silent downgrade the mixed-arch bridge exists to make
+    impossible — so the launch argv is pinned directly."""
+    achieved = {
+        "_env": {"isolation": "container", "image": _IMAGE_TAG,
+                 "fs": [], "net": "none", "platform": "linux/arm64"},
+        "image": _IMAGE_TAG, "mounts": [], "workdir": "/w", "pythonpath": None,
+    }
+    argv, err = _sb.ContainerDriver().wrap(
+        "p", [sys.executable, "-m", "revl._process_runner", "/spec"], None, achieved)
+    assert err is None
+    assert "--platform" in argv
+    assert argv[argv.index("--platform") + 1] == "linux/arm64"
+    # and the image's own python3 replaces the conductor's interpreter path
+    assert "python3" in argv and sys.executable not in argv
+
+
+def test_wrap_adds_no_platform_when_the_envelope_declares_none():
+    achieved = {
+        "_env": {"isolation": "container", "image": _IMAGE_TAG,
+                 "fs": [], "net": "none"},
+        "image": _IMAGE_TAG, "mounts": [], "workdir": "/w", "pythonpath": None,
+    }
+    argv, err = _sb.ContainerDriver().wrap("p", [sys.executable], None, achieved)
+    assert err is None and "--platform" not in argv
+
+
 def test_accepted_uname_maps_known_arches_and_rejects_the_rest():
     assert "aarch64" in _sb.accepted_uname("linux/arm64")
     assert _sb.accepted_uname("linux/amd64") == ("x86_64",)
@@ -178,16 +211,20 @@ def _preflight_seams(seams):
                                              "seams": seams})
 
 
-def test_a_cross_boundary_seam_refuses_until_the_transport_lands():
-    # retargeted (item 411 T1): the blanket "seam-free only" refusal became a
-    # per-precondition one. With every item-56 precondition satisfied, the only
-    # thing still missing is the T3 relay, so the refusal names reachability/T3.
+def test_a_cross_boundary_seam_no_longer_refuses_for_reachability():
+    # retargeted again (item 411 T3): T1 made a satisfied seam refuse naming the
+    # T3 reachability precondition. T3 LANDS that reachability (the relay + the
+    # per-process network), so a fully item-56-satisfied seam no longer refuses
+    # at the plan layer — preflight proceeds to establish the boundary, and here
+    # (with a bogus docker) refuses at the RUNTIME step, not for reachability.
     achieved, err = _preflight_seams([_seam(consumer_backend="node")])
     assert achieved is None
-    assert "relay-mtls" in err
-    assert "reachability" in err and "T3" in err
-    # and nothing else is falsely blamed
+    # reachability/T3 is no longer the refusal reason; the item-56 preconditions
+    # are met, so nothing plan-layer is blamed.
+    assert "reachability" not in err
     assert "backend:" not in err and "null" not in err
+    # it got past the transport descriptor to the container runtime check.
+    assert "container" in err
 
 
 def test_a_sandboxed_provider_with_a_rust_consumer_refuses_naming_the_tier():
@@ -234,12 +271,12 @@ def test_a_seam_free_sandbox_does_not_touch_the_transport_path():
 # -- the descriptor itself (plan-layer, no driver) -------------------------
 
 def test_a_fully_satisfied_descriptor_admits_at_the_plan_layer():
-    # every item-56 precondition met: the ONLY unmet precondition is the T3
-    # relay that does not exist yet — the plan layer itself admits.
+    # every item-56 precondition met and, as of T3, reachability is established
+    # at runtime rather than a standing plan-layer refusal — so `unmet` is EMPTY
+    # and the plan layer admits outright.
     desc = _sb.seam_transport_descriptor("p", [_seam(consumer_backend="node")])
     assert desc["transport"] == "relay-mtls"
-    assert len(desc["unmet"]) == 1
-    assert "reachability" in desc["unmet"][0] and "T3" in desc["unmet"][0]
+    assert desc["unmet"] == []
 
 
 def test_the_descriptor_names_every_unmet_precondition_at_once():
@@ -249,9 +286,10 @@ def test_the_descriptor_names_every_unmet_precondition_at_once():
     text = " || ".join(desc["unmet"])
     assert "go" in text                 # consumer tier
     assert "seam_deadline" in text      # null deadline
-    assert "reachability" in text       # T3
-    # three preconditions named, none swallowed
-    assert len(desc["unmet"]) == 3
+    # reachability is no longer a plan-layer precondition (T3 lands it); exactly
+    # the two item-56 preconditions are named, none swallowed, none invented.
+    assert "reachability" not in text
+    assert len(desc["unmet"]) == 2
 
 
 def test_a_seam_free_descriptor_has_no_unmet():
@@ -267,9 +305,10 @@ def test_a_remote_consumer_does_not_check_the_remote_side():
         _seam(self_role="consumer", remote=True, provider="remote 'work'",
               provider_backend="py", provider_deadline=None,
               consumer="p", consumer_backend="node", consumer_deadline=5.0)])
-    # only reachability remains; the remote provider's null deadline is not ours
-    assert len(desc["unmet"]) == 1
-    assert "reachability" in desc["unmet"][0]
+    # the remote provider's null deadline and py backend are not ours to judge,
+    # and reachability is no longer a plan-layer precondition (T3) — so with the
+    # consumer side satisfied the descriptor admits outright.
+    assert desc["unmet"] == []
 
 
 def test_sandbox_seam_roles_carry_role_peer_backend_and_deadline():
@@ -454,6 +493,121 @@ def test_a_platform_with_no_arch_reading_refuses():
     assert err and "linux/arm64" in err and "unknown" in err
 
 
+# ==========================================================================
+# T3: the seam transport — per-process network, relay, seam-only canary
+# ==========================================================================
+
+
+def test_a_seam_network_replaces_network_none():
+    # a seam-carrying sandbox joins its per-process --internal network in place
+    # of --network=none: one transport path, its egress the relay's listeners.
+    flags = _sb.container_flags(_ENV_NONE, name="c", mounts=[],
+                                network="revl-sb-plc-sandbox_p")
+    assert "--network=none" not in flags
+    assert "--network" in flags
+    assert flags[flags.index("--network") + 1] == "revl-sb-plc-sandbox_p"
+
+
+def test_no_seam_network_is_byte_identical_to_before():
+    # the common case: no network arg means the pre-T3 net=none derivation.
+    assert _sb.container_flags(_ENV_NONE, name="c", mounts=[]) == \
+        _sb.container_flags(_ENV_NONE, name="c", mounts=[], network=None)
+    assert "--network=none" in _sb.container_flags(_ENV_NONE, name="c", mounts=[])
+
+
+def test_network_names_are_stable_and_scoped():
+    assert _sb.seam_network_name("plc", "sandbox_A") == "revl-sb-plc-sandbox_A"
+    assert _sb.relay_container_name("plc") == "revl-sb-plc-relay"
+
+
+def test_the_seam_canary_probes_seam_isolation_and_dns():
+    script = _sb.seam_canary_script(
+        [("revl-sb-plc-relay", 15001)], ("172.17.0.9", 15001))
+    # the ordinary boundary clauses survive (rootfs/mounts/arch/runtime)
+    assert "ROOTFS=" in script and "CANARY=done" in script
+    # the discriminating pair plus the DNS closures are compiled in
+    assert "SEAM=" in script and "ISOLATION=" in script and "DNS=" in script
+    assert "revl-sb-plc-relay" in script and "15001" in script
+    assert "172.17.0.9" in script
+    assert "example.com" in script and "host.docker.internal" in script
+
+
+def _seam_report(**over):
+    base = {"PY": "yes", "ROUTES": "1", "ROOTFS": "ro", "RUNTIME": "image",
+            "SEAM": "open", "ISOLATION": "confirmed", "DNS": "closed",
+            "MOUNTS": {"/seam": "rw,relatime"}}
+    base.update(over)
+    return base
+
+
+def test_a_confirmed_seam_boundary_reports_seam_isolation_and_dns():
+    lines, err = _judge(_seam_report(), mounts=[("/seam", "rw")])
+    assert err is None
+    assert any("seam transport confirmed in-sandbox" in ln for ln in lines)
+    assert any("isolation confirmed in-sandbox" in ln for ln in lines)
+    assert any("DNS closed in-sandbox" in ln for ln in lines)
+
+
+def test_a_closed_seam_listener_refuses():
+    _, err = _judge(_seam_report(SEAM="closed:111(relay:15001)"),
+                    mounts=[("/seam", "rw")])
+    assert err and "did not accept" in err and "unreachable seam is refused" in err
+
+
+def test_an_isolation_leak_refuses_net_none():
+    # the discriminating clause: a target the relay proved open must NOT open
+    # from inside. If it does, the --internal network is not confining egress.
+    _, err = _judge(_seam_report(ISOLATION="LEAK"), mounts=[("/seam", "rw")])
+    assert err and "must NOT open from inside" in err and "downgraded" in err
+
+
+def test_open_dns_refuses_net_none():
+    _, err = _judge(_seam_report(DNS="OPEN:example.com"), mounts=[("/seam", "rw")])
+    assert err and "DNS is not closed" in err
+
+
+def test_net_all_seam_confirms_only_the_seam():
+    # under net=all the sandbox is on the bridge too, so the isolation target IS
+    # reachable and DNS is open by construction — only SEAM is confirmed, and the
+    # posture is `all`.
+    lines, err = _judge(_seam_report(ISOLATION="LEAK", DNS="OPEN:example.com"),
+                        mounts=[("/seam", "rw")], env={**_ENV_NONE, "net": "all"})
+    assert err is None
+    assert any("posture is `all`" in ln for ln in lines)
+    assert not any("isolation confirmed" in ln for ln in lines)
+
+
+# -- the relay manager (plan-layer bookkeeping) -----------------------------
+
+
+def test_relay_manager_tracks_names_for_teardown():
+    mgr = _sb.SeamRelayManager("plc", "img:1", docker="")   # no runtime
+    mgr.network_for("sandbox_a")
+    mgr.network_for("sandbox_b")
+    relay, nets = mgr.created_names()
+    assert relay == "revl-sb-plc-relay"
+    assert nets == ["revl-sb-plc-sandbox_a", "revl-sb-plc-sandbox_b"]
+
+
+def test_relay_argv_mounts_the_table_and_holds_no_key():
+    mgr = _sb.SeamRelayManager("plc", "img:1")
+    argv = mgr.relay_argv("/usr/bin/docker", "/t/relay_table.json", "127.0.0.1")
+    assert argv[:2] == ["/usr/bin/docker", "run"]
+    assert "-d" in argv and "--rm" in argv
+    assert "revl-sb-plc-relay" in argv
+    assert "/t/relay_table.json:/t/relay_table.json:ro" in argv
+    assert "revl.seam_relay" in argv and "/t/relay_table.json" in argv
+    # no cert/key/ca is ever handed to the relay — it forwards ciphertext only.
+    joined = " ".join(argv)
+    assert "seam.key" not in joined and "seam.crt" not in joined and "ca" not in argv
+
+
+def test_no_runtime_probe_host_bind_defaults_to_loopback():
+    mgr = _sb.SeamRelayManager("plc", "img:1", docker="")
+    addr, err = mgr.probe_host_bind()
+    assert err is None and addr == "127.0.0.1"
+
+
 # -- the placement-level refusal --------------------------------------------
 
 _APP = """
@@ -559,6 +713,45 @@ def test_the_boundary_is_established_and_the_canary_confirms_it(runner_image, tm
     assert achieved["host_mounts"], "driver-added mounts must be reported"
 
 
+# A platform that is foreign to BOTH x86-64 and aarch64 runners, so the boundary
+# can only come up THROUGH emulation (qemu/binfmt) — a `linux/386` or `arm64`
+# probe could run natively on some runner and prove nothing about the bridge.
+# `busybox` is a tiny multi-arch image that carries an s390x manifest, and the
+# canary needs nothing but a POSIX `sh` + `uname`, so this costs one <5MB pull.
+_FOREIGN_PLATFORM = "linux/s390x"
+_FOREIGN_UNAME = "s390x"
+
+
+@_needs_docker
+def test_a_foreign_arch_boundary_is_confirmed_by_uname_under_emulation():
+    """The RUNTIME half of the mixed-arch bridge (item 411): `_evaluate`'s arch
+    confirmation is unit-tested against mocked reports, but nothing proved a
+    foreign-arch container actually boots and reports its own `uname -m` from
+    inside. Here the driver's real `container_flags` (with `--platform`) and its
+    real boot canary run against a foreign-arch image; the boundary comes up
+    only if the runtime supplies emulation, and the canary's ARCH line is read
+    from inside it — turning "we passed --platform" into "the boundary reports
+    the requested arch". Needs qemu/binfmt on the runner (the `sandbox-container`
+    CI job registers it); a runner with the gate set but no emulation FAILS here
+    with the arch it did run as, never silently passes as the host arch."""
+    env = {"isolation": "container", "image": "busybox:latest",
+           "net": "all", "platform": _FOREIGN_PLATFORM}
+    flags = _sb.container_flags(env, name="revl-sandbox-411-archprobe",
+                                mounts=[], interactive=False)
+    proc = _docker("run", *flags, "busybox:latest", "sh", "-c",
+                   _sb._canary_script("all"))
+    assert "CANARY=done" in proc.stdout, (
+        f"the foreign-arch boot canary did not run: is qemu/binfmt registered "
+        f"for {_FOREIGN_PLATFORM} on this runner?\n{proc.stdout}\n{proc.stderr}")
+    arch = dict(
+        ln.split("=", 1) for ln in proc.stdout.splitlines() if "=" in ln
+    ).get("ARCH")
+    assert arch == _FOREIGN_UNAME, (
+        f"the container ran as {arch!r}, not {_FOREIGN_UNAME!r}: the runtime "
+        f"applied no emulation for {_FOREIGN_PLATFORM}, so the boundary did not "
+        f"come up under the requested arch.\n{proc.stdout}\n{proc.stderr}")
+
+
 @_needs_docker
 def test_an_unresolvable_image_refuses_instead_of_launching(tmp_path):
     env = {"isolation": "container", "fs": [], "net": "none",
@@ -658,6 +851,7 @@ def test_the_gate_is_read_bare_so_ci_must_set_it():
     # applied to nothing is the same silence by another route.
     for gated in (test_the_boundary_is_established_and_the_canary_confirms_it,
                   test_a_component_really_boots_inside_the_container,
+                  test_a_foreign_arch_boundary_is_confirmed_by_uname_under_emulation,
                   test_an_unresolvable_image_refuses_instead_of_launching):
         assert _needs_docker.mark in gated.pytestmark, gated.__name__
 
