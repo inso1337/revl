@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 4110,
+      "statements": 4193,
       "uncovered": {
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
@@ -192,7 +192,7 @@
           "_go_v3_construct": 29
         },
         "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return. The oracle calls emit(ir) on module-only v3 documents.": {
-          "emit": 101
+          "emit": 102
         },
         "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised.": {
           "_go_v3_expr": 47
@@ -230,7 +230,7 @@
           "_emit_v3_go_types": 2
         },
         "Remaining scalar-wildcard payload binding is compatibility IR: source wildcard arms do not introduce that bind. Other residuals lower explicitly deferred Opt/Result cases or reject an unknown case. Scalar wildcard-only and fresh user-constructor scrutinees are now repaired and covered.": {
-          "_go_v3_match": 10
+          "_go_v3_match": 7
         },
         "Remaining statements emit destructive stdlib self-rebinds, optimized code-point scans, or reject an unknown step. Their prerequisite builtin families are deferred; ordinary assignments, loops and accumulator builders are not excluded.": {
           "_go_v3_stmt": 12
@@ -249,6 +249,9 @@
         "The non-boxing Opt[T] match discriminator (item 434(d), #114): `_go_v3_match_opt` renders the `.Ok` if/else for a v3 Opt match; the go v3 module byte-agreement corpus has no Opt-match program, so the oracle never enters it. Reachable in principle, not exercised by the corpus.": {
           "_go_v3_match_opt": 54
         },
+        "The non-boxing Result[T, E] match discriminator (item 434(d), #114): `_go_v3_match_result` renders the `.Ok` if/else for a v3 Result match, the sibling of `_go_v3_match_opt`. The go v3 module byte-agreement corpus has no Result-match program, so the oracle never enters it. Reachable in principle, not exercised by the corpus.": {
+          "_go_v3_match_result": 61
+        },
         "emit calls this Secret-marking scan only after the pure-module early return, to select component record/WAL redaction. The corpus already exercises a pure extern Secret return, but service secret parameters, config secrets and secret_witness descriptors remain a separate roadmap 421F6 runtime/redaction gap; pure wrapping is not evidence of runtime parity.": {
           "_declares_secret": 16
         },
@@ -256,7 +259,7 @@
           "_acquire_value_go_type": 17,
           "_collect_host_calls": 10,
           "_emit_component": 85,
-          "_emit_component_step": 124,
+          "_emit_component_step": 145,
           "_emit_host_stubs": 12,
           "_emit_method_body": 56,
           "_emit_provide_impl": 37,
@@ -268,10 +271,10 @@
           "_needs_sync": 1
         }
       },
-      "uncovered_statements": 2937
+      "uncovered_statements": 3017
     },
     "java": {
-      "statements": 2551,
+      "statements": 2555,
       "uncovered": {
         "backends/java/emit.py::<module>: The __main__ CLI entry is not invoked by the emit(ir) API oracle.": {
           "<module>": 1
@@ -334,10 +337,10 @@
           "_emit_checked_div_helpers": 1
         },
         "backends/java/emit.py::_emit_component: Residual requirement/bind fields and constructor assignments, config fields, ctx.get and let-effect/effect/emit branches are the nonsimple legacy effect/bind path, excluded by component_simple_ok. The final unsupported-step raise is refusal. Empty and provide-only legacy components are now covered.": {
-          "_emit_component": 17
+          "_emit_component": 18
         },
         "backends/java/emit.py::_emit_component_modern: Missing branches reject invalid isolate/intercept keys, bind a routed requirement and emit the router class. Frontend validates placement keys; routers remain an explicit boundary, not general realm exclusion. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
-          "_emit_component_modern": 6
+          "_emit_component_modern": 7
         },
         "backends/java/emit.py::_emit_component_stmts: Residual setup delegation and nonhost/witnessed or Map.compare_and_set let-effect acquisition are excluded by the host-only binding/setup gate. Body return raises (methods only); unknown body steps delegate to deferred setup lowering.": {
           "_emit_component_stmts": 15
@@ -595,13 +598,13 @@
           "emit": 2
         }
       },
-      "uncovered_statements": 914
+      "uncovered_statements": 916
     },
     "py": {
-      "statements": 2355,
+      "statements": 2358,
       "uncovered": {
         "Activation residuals: Map.cas conditional undo belongs to component host runtime; non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). Deferred/approval/await/stream paths belong to the named runtime boundaries. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms.": {
-          "_ComponentEmitter._body_step": 16
+          "_ComponentEmitter._body_step": 17
         },
         "Approval/lease runtime boundary: _approval_step renders frame.approval handles; _emit_fire renders approval_crossing with capability and callback. Neither exists in selfhost/emit_py.rvl. Representative accepted inputs are tests/test_approval_typed.py and tests/test_capability_leases.py::_SOURCE, not ordinary witnessed effects.": {
           "_ComponentEmitter._approval_step": 3,
@@ -626,6 +629,9 @@
         "Async/walrus match-binding path: _match_expr.bind_payload uses a walrus for emitter temps or a comprehension to retain an awaited binder; _walrus_temp recognizes generated names/optional-temp regex. Sync binder use/folding is covered by result/control/services_match and branches fixtures. Async match source is represented by emit_ts_corpus/async_module_switch.rvl; async lowering is the retained boundary, not ordinary match.": {
           "_match_expr.bind_payload": 3,
           "_walrus_temp": 1
+        },
+        "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run.": {
+          "_ComponentEmitter._compensated_extern": 3
         },
         "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; host/format/spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, advance.rvl, stream_130.rvl, async TS fixtures and validation tests. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior.": {
           "_ComponentEmitter._expr": 87
@@ -715,6 +721,9 @@
           "_arm_body_mentions": 1,
           "_match_expr": 1
         },
+        "Match-binder short-circuit made unreachable by #320: _arm_body_is_bind's `bind in (\"Some\", \"None\")` guard returns False for a payload bound to a constructor spelling, but the frontend now mangles a predeclared binder in lower.py `_predeclared_mangle` (`Some` -> `Some_`) BEFORE the emitter reads the IR, and `None` carries no payload so it is never a binder. So `bind` is never literally `Some`/`None` at this emitter and the guard's early `return False` is unreachable through the byte-agreement oracle. match_binder_scan.rvl's some_binder still drives the arm (`Some(Some) => 0`), but now through the mangled `Some_` binder, which the arm body never reads.": {
+          "_arm_body_is_bind": 1
+        },
         "Method declaration rejection only: _method rejects a method absent from its service or wrong arity. Frontend checking supplies matching names/arity; services_methods.rvl covers ordinary rendering.": {
           "_ComponentEmitter._method": 2
         },
@@ -763,18 +772,15 @@
         },
         "Witness lookup non-dict guard: after a witnessed table exists, _witnessed_extern returns None for a malformed/non-dict acquire. Legal effect acquires are expression dictionaries. witnessed.rvl covers matching and nonmatching fn lookups; the port's final missing-name return is equivalent.": {
           "_ComponentEmitter._witnessed_extern": 1
-        },
-        "Match-binder short-circuit made unreachable by #320: _arm_body_is_bind's `bind in (\"Some\", \"None\")` guard returns False for a payload bound to a constructor spelling, but the frontend now mangles a predeclared binder in lower.py `_predeclared_mangle` (`Some` -> `Some_`) BEFORE the emitter reads the IR, and `None` carries no payload so it is never a binder. So `bind` is never literally `Some`/`None` at this emitter and the guard's early `return False` is unreachable through the byte-agreement oracle. match_binder_scan.rvl's some_binder still drives the arm (`Some(Some) => 0`), but now through the mangled `Some_` binder, which the arm body never reads.": {
-          "_arm_body_is_bind": 1
         }
       },
-      "uncovered_statements": 628
+      "uncovered_statements": 632
     },
     "rust": {
-      "statements": 3275,
+      "statements": 3398,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and stream refusal. Those require the live plugin/frame runtime that the self-host component slice explicitly marks DEFER.": {
-          "_emit_step": 95,
+          "_emit_step": 108,
           "_guard_frame_neutral_loop": 1,
           "_uses_timer.walk": 2
         },
@@ -793,8 +799,8 @@
           "_split_result": 12
         },
         "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls.": {
-          "_emit_component": 4,
-          "_emit_component_new": 26,
+          "_emit_component": 5,
+          "_emit_component_new": 27,
           "_emit_components": 8,
           "_emit_req_bindings": 2,
           "_provide_let_type": 1
@@ -832,7 +838,7 @@
         },
         "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions.": {
           "_emit_v3_lifecycle_tests": 81,
-          "_emit_v3_tests": 25,
+          "_emit_v3_tests": 26,
           "_lifecycle_uses_advance": 1,
           "_refuse_fault_tests": 2
         },
@@ -956,10 +962,10 @@
           "_stream_host_rust": 8
         }
       },
-      "uncovered_statements": 1248
+      "uncovered_statements": 1267
     },
     "ts": {
-      "statements": 1994,
+      "statements": 2043,
       "uncovered": {
         "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), emits sync/async timer scheduling and in-flight tracking, dispatches the item-130 `stream-iter` step (roadmap #81), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards and fail are covered; witnessed transactions, timers and the ts reactive-tier stream steps are declared port boundaries": {
           "_component_step": 44
@@ -1048,6 +1054,11 @@
         "Test-mode statement rendering only: `_v3_stmt`'s remaining structural/truthy assertion lines emit vitest `expect` calls when `test_mode=True`, plus the final unknown-step rejection. Runtime function assertions use the covered throwing form; in-file test harness generation is a separate declared boundary": {
           "_v3_stmt": 8
         },
+        "The #278/#302 install-tree-reach refusal diagnostic: `_reject_install_tree_reach`, its `_door` closure, and the `_strip_ts_comments` scrubber it runs first (so a token named only in a comment is not read as a reach) refuse a verbatim @ts body that loads an install-tree host module. No corpus document reaches them because such a document is refused by this very check, and selfhost/emit_ts.rvl does not port the diagnostic.": {
+          "_reject_install_tree_reach": 5,
+          "_reject_install_tree_reach._door": 1,
+          "_strip_ts_comments": 9
+        },
         "Top-level emitter dispatch: `emit` rejects non-object/unsupported versions, delegates temporal IR, and rejects mixed temporal documents. The corpus supplies valid v1/v2/v3 objects; temporal delegation is a declared separate backend": {
           "emit": 4
         },
@@ -1071,11 +1082,6 @@
         },
         "v1/v2 live-component routing is selected before the v3 emitter mirrored by `selfhost/emit_ts.rvl`; the remaining statements are the legacy runtime branch": {
           "_emit_v1": 7
-        },
-        "The #278/#302 install-tree-reach refusal diagnostic: `_reject_install_tree_reach`, its `_door` closure, and the `_strip_ts_comments` scrubber it runs first (so a token named only in a comment is not read as a reach) refuse a verbatim @ts body that loads an install-tree host module. No corpus document reaches them because such a document is refused by this very check, and selfhost/emit_ts.rvl does not port the diagnostic.": {
-          "_reject_install_tree_reach": 5,
-          "_reject_install_tree_reach._door": 1,
-          "_strip_ts_comments": 9
         }
       },
       "uncovered_statements": 449
@@ -1580,7 +1586,7 @@
       "uncovered_statements": 182
     },
     "py": {
-      "statements": 1876,
+      "statements": 1877,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
@@ -1613,6 +1619,9 @@
           "cmatch": 1,
           "match_expr": 2,
           "match_folds": 1
+        },
+        "Match source bookkeeping: TWO statements of arm_body_is_bind are unreachable through the byte-agreement oracle. (1) The non-record body guard returns false, but every match arm body is an expression record, so no document reaches that defensive branch (the reference folds the same guard into _arm_body_is_bind). (2) The Some/None-binder short-circuit: #320 now mangles a predeclared binder in the frontend (`Some` -> `Some_`) before either emitter reads the IR, and `None` carries no payload, so `bind` is never literally `Some`/`None` here. match_binder_scan's some_binder still drives the arm but through the mangled `Some_` binder (an unread bind). arm_body_mentions' conservative object-KEY retention and exhausted-list walk stay graded on both sides by match_binder_scan (#306); control/result/services_match exercise ordinary binder use and folding.": {
+          "arm_body_is_bind": 2
         },
         "Method let-effect lookup/acquire sequence is source-bound to spawn or result-declared host verbs; witnessed provide binds are frontend-refused, pinned in tests. Ordinary unbound witnessed/adopt/compensation are covered. Final method marker covers deferred await and invalid nested/unknown steps, not supported return/effect rendering.": {
           "method_step": 11
@@ -1683,9 +1692,6 @@
         },
         "witnessed_extern final miss after a nonempty table: legal matching fn acquires are covered, and unknown fn names are frontend-rejected. The lookup's None fallback mirrors the reference dictionary miss.": {
           "witnessed_extern": 1
-        },
-        "Match source bookkeeping: TWO statements of arm_body_is_bind are unreachable through the byte-agreement oracle. (1) The non-record body guard returns false, but every match arm body is an expression record, so no document reaches that defensive branch (the reference folds the same guard into _arm_body_is_bind). (2) The Some/None-binder short-circuit: #320 now mangles a predeclared binder in the frontend (`Some` -> `Some_`) before either emitter reads the IR, and `None` carries no payload, so `bind` is never literally `Some`/`None` here. match_binder_scan's some_binder still drives the arm but through the mangled `Some_` binder (an unread bind). arm_body_mentions' conservative object-KEY retention and exhausted-list walk stay graded on both sides by match_binder_scan (#306); control/result/services_match exercise ordinary binder use and folding.": {
-          "arm_body_is_bind": 2
         }
       },
       "uncovered_statements": 95
@@ -1781,7 +1787,7 @@
       "uncovered_statements": 142
     },
     "ts": {
-      "statements": 2086,
+      "statements": 2102,
       "uncovered": {
         "Async emission-node negative tests: `emission_call_node` returns false for a non-call, a call whose target is not `req`, or a requirement method absent from the component's async operation keys. Async req calls and async arrows exercise its true branch": {
           "emission_call_node": 3
