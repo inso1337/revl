@@ -6651,6 +6651,7 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         "templates": set(),  # components that are spawn targets (excluded from static composition)
         "sites": [],        # G4 spawn-boundary obligations, checked after lowering
         "names": {},        # spawner component -> set of named-instance addresses (item 10)
+        "named_instances": [],  # ordered records of every `as "<name>"` spawn (item 10)
     }
 
     # item 386, Stage 1: collect ALL refusals in one pass instead of aborting
@@ -6810,6 +6811,19 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         # key, so its manifest is byte-identical to before (docs/capability-
         # attenuation.md).
         manifest["instances"] = attenuation_chain
+    if manifest and spawn_reg["named_instances"]:
+        # item 10 placement horizon, next slice: enumerate the named instances
+        # (`spawn C … as "<name>"`) at the composition layer, so a later
+        # placement slice can key on an instance ADDRESS instead of only a
+        # template component. Sorted by (spawner, name) for a deterministic
+        # manifest; each name is unique within its spawner (checked in
+        # `_lower_spawn`) while a name may recur across spawners, so (spawner,
+        # name) is the stable address. Additive and named-only: a composition
+        # with no named spawn carries no `named_instances` key and is
+        # byte-identical to before (docs/design-v2-instances.md).
+        manifest["named_instances"] = sorted(
+            spawn_reg["named_instances"],
+            key=lambda r: (r["spawner"], r["name"]))
 
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
@@ -11579,6 +11593,20 @@ def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:
             )
         seen.add(expr.name)
         node["name"] = expr.name
+        # item 10 placement horizon, next slice: surface every named instance
+        # at the COMPOSITION layer. The address landed on this deeply-nested
+        # acquire node (#454), but nothing above it could enumerate named
+        # instances — the stated prerequisite for teaching the placement plan
+        # to assign one to a process. Record (spawner, name, target component,
+        # line) here; `_link` sorts these into `manifest["named_instances"]`.
+        # Purely additive: absent when no spawn is named, so the manifest is
+        # byte-identical for existing programs (docs/design-v2-instances.md).
+        reg["named_instances"].append({
+            "spawner": env.component.name,
+            "name": expr.name,
+            "component": expr.component,
+            "line": expr.line,
+        })
     return node
 
 
