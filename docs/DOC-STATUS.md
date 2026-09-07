@@ -99,14 +99,14 @@ was corrected by hand and had drifted back within a day.
 | capability-realm-placement.md | needs-work | 11 |  |
 | closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
-| commands-reference.md | current | 10 |  |
+| commands-reference.md | current | 8 |  |
 | component-leases.md | needs-work | 26 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 15 |  |
 | composition-rows.md | needs-work | 17 |  |
 | conformance.md | needs-work | 0 |  |
 | contract-errata.md | needs-work | 0 | yes |
-| crash-recovery.md | needs-work | 44 |  |
+| crash-recovery.md | needs-work | 51 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
 | deploy.md | needs-work | 12 |  |
@@ -171,7 +171,7 @@ was corrected by hand and had drifted back within a day.
 | schedule-testing.md | needs-work | 0 |  |
 | seam-deadlines.md | needs-work | 15 |  |
 | selfhost-compile.md | stale-fixed | 2 |  |
-| selfhost-findings.md | live-owned (not audited) | 247 |  |
+| selfhost-findings.md | live-owned (not audited) | 246 |  |
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 17 |  |
@@ -197,5 +197,5 @@ was corrected by hand and had drifted back within a day.
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |
-| witnessed-fs.md | needs-work | 5 |  |
+| witnessed-fs.md | needs-work | 9 |  |
 <!-- docgen:doc-status end -->

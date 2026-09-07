@@ -147,17 +147,21 @@ lands until the same checker that guards human commits says yes. A rejected
 candidate cannot deploy, and every rejection carries the guarantee it violated
 plus the rewrite that fixes it. Tool safety annotations are derived from the
 method body rather than asserted by an author, so a tool cannot call itself
-read-only when it emits. In-memory admission runs a median 0.165 ms per
-candidate, fast enough to sit inside a generation loop.
+read-only when it emits. In-memory admission runs in about a millisecond per
+candidate (its guard test holds the round-trip under a 20 ms regression
+ceiling; the tracked figure lives in
+[bench/results/admission-latency.md](bench/results/admission-latency.md)), fast
+enough to sit inside a generation loop.
 [docs/mcp-bridge.md](docs/mcp-bridge.md) has the shapes;
 [docs/guide-ai-agents.md](docs/guide-ai-agents.md) has the workflow.
 
 ### Tooling that operates a running system
 
 Because the compiler knows every effect and its inverse, it can answer
-questions no ordinary toolchain can. `revl swap` migrates a live component to
-another runtime tier, re-pointing every consumer across the cutover and ending
-with a proof the old provider left nothing behind
+questions no ordinary toolchain can. The `swap` verb of `revl run --placement`
+(a REPL verb, not a `revl` subcommand) migrates a live component to another
+runtime tier, re-pointing every consumer across the cutover and ending with a
+proof the old provider left nothing behind
 ([docs/swap.md](docs/swap.md)). `revl plan` shows the exact delta a hot-swap
 would produce and `revl apply` executes it with a derived rollback, so a
 mid-plan failure unwinds by inverses instead of by hand
@@ -171,12 +175,15 @@ effect, what is moot, what compensates, and what must be undone
 
 ### It compiles itself, and disagreement is a bug report
 
-`selfhost/compile.rvl` is the revl compiler written in revl. Its output is
-byte-identical to the reference compiler with no reference stage in the chain,
-which makes self-hosting more than a stunt: two independent implementations of
-one grammar run every input, and any divergence is a real defect in one of
-them. The defects this differential oracle has already caught are written up in
-[docs/selfhost-findings.md](docs/selfhost-findings.md).
+`selfhost/compile.rvl` is the revl compiler written in revl. Where its native
+pipeline runs today (24 of the 61 constructs in the conformance matrix, 39%,
+with no reference compiler in the chain), its output is byte-identical to the
+reference compiler, which makes self-hosting more than a stunt: two independent
+implementations of one grammar run the same input, and any divergence is a real
+defect in one of them. The remaining constructs are the documented self-host
+frontier ([docs/conformance.md](docs/conformance.md) has the per-construct
+`revl` column). The defects this differential oracle has already caught are
+written up in [docs/selfhost-findings.md](docs/selfhost-findings.md).
 
 The supporting cast is what you would expect from a checked language, done
 plainly: bidirectional type checking, no `null` (absence is `Opt[T]` and never

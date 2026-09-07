@@ -157,10 +157,14 @@ is no syntactic path from a `fn` body to an effect.
   captures the whole `m.lookup("}")`.
 - operators: `+ - * / %`, comparisons, `&& || !`, ternary `c ? a : b`
 - `?.` optional chaining and `??` nullish coalescing, typed against `Opt[T]`
-- arrow functions `x => expr`, `(a, b) => { ... }`; captures are by-value
-  snapshots (no shared mutable environment; see §3.5)
-- method calls, indexing `xs[i]`, slicing via methods, spread `[...xs, y]`,
-  destructuring `let { id, name } = row`, `let [head, ...rest] = xs`
+- arrow functions `x => expr`, `(a, b) => expr`; the body is a single
+  expression (there is no block-bodied `=> { ... }` arrow), and captures are
+  by-value snapshots (no shared mutable environment; see §3.5)
+- method calls, indexing `xs[i]`, slicing via methods, and destructuring
+  `let { id, name } = row`, `let [head, ...rest] = xs`. There is no
+  list-literal or record-literal spread (`[...xs, y]` and `{ ...r, x: 1 }` do
+  not parse); the functional way to derive a changed record is record update,
+  `{ b | tokens = 1 }` ([docs/records.md](records.md))
 
 ### 3.3 Where TS semantics diverge, revl syntax diverges
 
@@ -464,6 +468,11 @@ pub service Database {
   is TS's own (suspend on a promise), so the principle holds; the *boundary*
   reading of `await` is exclusive to component bodies and the checker
   enforces the separation (a body `await` in a method is still rejected, A1).
+  `await` is a **statement**, not an expression: `await e` on its own line is
+  the only spelling, so `let x = await e` does not parse. To bind the result
+  of an `async fn` operation, call it plainly and let the result bind, and
+  the driver awaits it implicitly (`let s = db.stats()` where `stats` is
+  `async fn`), the same implicit-await the lifecycle test relies on (§7.1).
 - `commutative` on a service (or a single operation) declares Def. 39
   order-independence, discharged under §7. It is the opt-in that upgrades a key
   from LIFO-only to reorderable recovery.
