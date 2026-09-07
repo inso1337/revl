@@ -224,6 +224,144 @@ def test_selfhost_oracle_map_covers_the_tree():
             assert (root / t).is_file(), f"{stem} maps to a missing test {t}"
 
 
+# --- CI-3: a .md / docs change compiles the doc snippets (issue #550) ------- #
+def test_markdown_change_selects_doc_examples():
+    """Before #550 a `.md` edit matched no pytest rule and selected ZERO tests,
+    so a rotted ```revl block in README/docs landed green. Every doc edit must
+    re-run tests/test_doc_examples.py, which sweeps README.md + docs/**.md."""
+    for f in ("README.md", "docs/guide-humans.md", "docs/conformance.md"):
+        r = sel(f)
+        assert r["full"] is False, f"{f} should be a targeted selection"
+        assert "tests/test_doc_examples.py" in r["pytest"], (
+            f"{f} does not select the doc-examples compiler"
+        )
+        assert "docs" in r["gates"] and "conformance" in r["gates"]
+
+
+def test_doc_examples_test_exists():
+    """Anti-vacuity: the node the .md rule selects must be a real file."""
+    assert (ROOT / "tests" / "test_doc_examples.py").is_file()
+
+
+# --- CI-3: stdlib change pulls the self-host oracles that `use` it (#550) ---- #
+def test_stdlib_change_selects_selfhost_oracles_that_use_it():
+    """stdlib/*.rvl is `use`d by the self-host compiler sources, which are
+    compiled inside the self-host oracle tests. Nothing under tests/ names those
+    `use` imports, so before #550 a stdlib edit that broke only the self-host
+    emitters shipped green. value.rvl is used by all six emitters, so its change
+    must select their oracles + the line-coverage gate."""
+    r = sel("stdlib/value.rvl")
+    assert r["full"] is False
+    for tier in ("go", "java", "py", "rust", "ts", "wasm"):
+        assert f"tests/test_selfhost_emit_{tier}.py" in r["pytest"], (
+            f"stdlib/value.rvl misses the emit_{tier} self-host oracle"
+        )
+    assert "tests/test_selfhost_line_coverage.py" in r["pytest"]
+
+
+def test_stdlib_change_follows_use_graph_transitively():
+    """json.rvl is `use`d only by compile.rvl, so a json.rvl edit must select
+    the compile oracle. render.rvl is `use`d only by emit_ts.rvl; a change to it
+    must not drag in unrelated emitter oracles."""
+    rj = sel("stdlib/json.rvl")
+    assert "tests/test_selfhost_compile.py" in rj["pytest"]
+    rr = sel("stdlib/render.rvl")
+    assert "tests/test_selfhost_emit_ts.py" in rr["pytest"]
+    # tightness: render is used by no other selfhost file, so a sibling
+    # emitter's oracle is not selected.
+    assert "tests/test_selfhost_emit_go.py" not in rr["pytest"]
+
+
+# --- CI-3: selfhost change follows the `use` graph to dependents (#550) ------ #
+def test_selfhost_lexer_change_selects_its_dependents_oracles():
+    """lexer.rvl is `use`d by parser/lower/checker (and lower/emitters feed
+    compile), so a lexer.rvl edit changes what all of them compile to. Before
+    #550 only the lexer oracle ran while the rest silently changed output."""
+    r = sel("selfhost/lexer.rvl")
+    assert r["full"] is False
+    for t in ("lexer", "parser", "checker"):
+        assert f"tests/test_selfhost_{t}.py" in r["pytest"], (
+            f"lexer.rvl change misses the {t} dependent oracle"
+        )
+    # lower is a dependent, but via its fast IR oracle, NOT the slow descent
+    # test the FULL fallback timed out on (issue #431).
+    assert "tests/test_selfhost_lower_ir.py" in r["pytest"]
+    assert "tests/test_selfhost_lower.py" not in r["pytest"]
+    assert "tests/test_selfhost_compile.py" in r["pytest"]
+    assert r["backends"] == []
+
+
+def test_selfhost_emitter_change_selects_compile_dependent():
+    """compile.rvl `use`s emit_py/emit_rust/emit_ts + lower, so a change to one
+    of those emitters must also run the compile oracle. It must NOT drag in a
+    sibling emitter that compile reaches independently."""
+    r = sel("selfhost/emit_py.rvl")
+    assert "tests/test_selfhost_emit_py.py" in r["pytest"]
+    assert "tests/test_selfhost_compile.py" in r["pytest"]
+    # emit_go is not on emit_py's reverse-reachable set.
+    assert "tests/test_selfhost_emit_go.py" not in r["pytest"]
+
+
+def test_selfhost_leaf_emitter_has_no_extra_dependents():
+    """emit_go/emit_java/emit_wasm are `use`d by nothing, so their change stays
+    exactly their own oracle (+ line coverage) — the narrow #431 behaviour."""
+    r = sel("selfhost/emit_go.rvl")
+    assert sorted(x for x in r["pytest"] if "selfhost" in x) == [
+        "tests/test_selfhost_emit_go.py",
+        "tests/test_selfhost_line_coverage.py",
+    ]
+
+
+def test_selfhost_use_graph_is_parsed_from_the_tree():
+    """The `use` edges are recomputed from selfhost/*.rvl on disk, so a new
+    import cannot silently escape the dependent selection."""
+    sh_deps, std_deps = at._selfhost_use_graph(ROOT)
+    # every selfhost file is a node
+    on_disk = {p.stem for p in (ROOT / "selfhost").glob("*.rvl")}
+    assert set(sh_deps) == on_disk
+    # the composition backbone the selector relies on
+    assert "lexer" in sh_deps["parser"]
+    assert {"lexer", "parser"} <= sh_deps["lower"]
+    assert {"lower", "emit_py"} <= sh_deps["compile"]
+    assert "value" in std_deps["emit_py"]
+
+
+# --- CI-3: a modified test file also runs its importers (#550) -------------- #
+def test_modified_test_file_selects_its_importers():
+    """Tests import one another (five gate tests `import test_selfhost_lower as
+    oracle`), so editing a shared test module must run the importers too, not
+    just the file itself."""
+    r = sel("tests/test_selfhost_lower.py")
+    assert r["full"] is False
+    assert "tests/test_selfhost_lower.py" in r["pytest"]
+    for imp in ("test_gate_crate_admit", "test_gate_wasm_vector",
+                "test_inprocess_gate_rust"):
+        assert f"tests/{imp}.py" in r["pytest"], (
+            f"modified test_selfhost_lower.py does not select importer {imp}"
+        )
+
+
+def test_modified_test_file_without_importers_is_only_itself():
+    """A leaf test nothing imports still selects just itself (no over-selection).
+    A synthetic name is used so the assertion does not rot when tests are added."""
+    r = sel("tests/test__no_importer_sentinel__.py")
+    assert r["pytest"] == ["tests/test__no_importer_sentinel__.py"]
+
+
+def test_test_importers_ignores_prefix_siblings():
+    """The sibling-import match is anchored: an edit to a module whose name is a
+    strict PREFIX of an imported one must not be matched. test_selfhost_lower is
+    imported `as oracle` by five gate tests; querying the prefix `test_selfhost`
+    must not sweep those in."""
+    lower = at._test_importers(ROOT, "test_selfhost_lower")
+    assert lower, "expected test_selfhost_lower to have sibling importers"
+    prefix = at._test_importers(ROOT, "test_selfhost")
+    assert not (prefix & lower), (
+        "prefix query test_selfhost matched test_selfhost_lower's importers; "
+        "the import forms are not anchored"
+    )
+
+
 def test_bench_dependent_tests_is_the_actual_set_of_bench_readers():
     """`bench/` selects BENCH_DEPENDENT_TESTS instead of the FULL gate, so that
     tuple has to BE the set of test modules that depend on a bench artifact.
