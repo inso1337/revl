@@ -490,3 +490,91 @@ def test_709_multihandle_reclaim_settles_each_handle_independently(tmp_path):
     assert "db1" not in by                             # completed, owes nothing
     assert by["db2"]["outcome"] == "unknown"           # faulted, fenced-unknown
     assert fresh.present(_REFERENT) is True            # db1 not fired again
+
+
+# ---------------------------------------------------------------------------
+# the residual crash windows PR #715 left open (adjudicated by revl-harness):
+# both interrupt BEFORE the fence is durable — the committed #715 tests all
+# crash AFTER it (a raising/crashing inverse, past the fence), so they cannot
+# reach these. The fix writes the fence write-ahead of the destructive step in
+# both paths, so recovery always finds a fence whenever an inverse was owed or
+# attempted.
+# ---------------------------------------------------------------------------
+
+
+def test_710_crash_at_the_reclaim_fence_write_recovers_the_owed_inverse(tmp_path):
+    # #710: the process dies AT the reclaim-fence write of an orderly zero
+    # crossing — the exact gap between durably zeroing the count and recording
+    # that an inverse is owed. With the fence written BEFORE the count-zero
+    # ledger record, no durable holders == [] can be left standing without a
+    # fence to explain it, so recover still sees the crossing as owed and
+    # re-fires the inverse exactly once instead of misreading an empty count as a
+    # balanced accumulator and dropping the close. (Pre-fix, the count-zero
+    # record landed first, so this crash left a fence-less holders == [] that
+    # recover reported `{"reclaims": [], "clean": true}` and the close was lost.)
+    path = str(tmp_path / "s.wal")
+    _new_wal(path)
+    live = _CountingWorld()
+    live.seed(_REFERENT)
+    book = JournaledSharedGrantBook(path, world=live)
+    book.mint("db", _INVERSE, "A")
+
+    real_append = book._append
+
+    def _die_at_the_fence(record):
+        if record.get("record") == "shared-reclaim-fence":
+            raise SystemExit("process died writing the reclaim fence")
+        return real_append(record)
+
+    book._append = _die_at_the_fence
+    with pytest.raises(SystemExit):
+        book.release("db", "A")                 # zero crossing, dies at the fence
+    assert live.fires == []                     # the inverse never fired live
+
+    fresh = _CountingWorld()
+    fresh.seed(_REFERENT)
+    report = recover(path, world=fresh)
+    owed = [r for r in report["shared"]["reclaims"] if r["handle"] == "db"]
+    assert owed, "the owed inverse must be reported, not silently dropped (#710)"
+    assert fresh.fires == [_REFERENT]           # recovered and fired exactly once
+    assert fresh.present(_REFERENT) is False
+
+
+def test_709_crash_during_the_live_reclaim_inverse_does_not_double_invoke(tmp_path):
+    # #709: a LIVE crash reclaim whose inverse effect lands and then the process
+    # DIES before the primitive returns (before any finalization) — not the
+    # #715-covered inverse that raises and is caught. Pre-fix the durable ledger
+    # still showed holders and no completion, so a later recover fired the
+    # inverse a SECOND time. The bound inverse now forces a fence to disk BEFORE
+    # the effect, so recover reads outcome-unknown residue and re-fires nothing.
+    path = str(tmp_path / "s.wal")
+    _new_wal(path)
+
+    class _CrashMidReclaim(_CountingWorld):
+        def apply_inverse(self, op):
+            super().apply_inverse(op)            # the external effect lands...
+            raise SystemExit("process died mid-reclaim, before finalization")
+
+    live = _CrashMidReclaim()
+    live.seed(_REFERENT)
+    book = JournaledSharedGrantBook(path, world=live)
+    book.mint("db", _INVERSE, "A", now=0.0)
+    probe = DictProbe()
+    probe.kill("A")                              # the sole holder is confirmed gone
+    with pytest.raises(SystemExit):
+        book.reclaim_crashed(probe=probe, now=1000.0)
+    assert live.fires == [_REFERENT]             # the effect landed exactly once
+    assert live.present(_REFERENT) is False
+    # the fence is durable even though the process died before any completion,
+    # so recover cannot prove the effect confirmed and must not blindly retry.
+    kinds = _kinds(path)
+    assert "shared-reclaim-fence" in kinds and "shared-complete" not in kinds
+
+    fresh = _CountingWorld()
+    fresh.seed(_REFERENT)                        # a fresh process, referent back
+    report = recover(path, world=fresh)
+    rec = report["shared"]["reclaims"][0]
+    assert rec["outcome"] == "unknown"           # honest residue, not a re-fire
+    assert report["shared"]["clean"] is False
+    assert fresh.fires == []                      # NOT invoked a second time (#709)
+    assert fresh.present(_REFERENT) is True
