@@ -5466,15 +5466,35 @@ fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool) -> IrMethR 
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
   var retJson = "null"
+  // roadmap item 441 / issue #120 (docs/design/458-termination-language-surface.md
+  // §6): the two termination marker heads `Criterion` and `Guard` in a service
+  // operation's return position ERASE to `Opt[Bool]` and leave a per-operation
+  // `termination` key ("criterion"/"guard"). Empty for every ordinary operation,
+  // so the services IR is byte-identical to the reference on every existing
+  // corpus document (L6). The reference erases in its parser and emits the key
+  // between `returns` and `emission`; this mirrors both.
+  var term = ""
   var nexti = ps.i
   if (atk(ts, ps.i, "arrow")) {
     let tr = type_at(ts, ps.i + 1)
-    retJson = jstr(taint_strip(tr.ty))
+    let rawRet = taint_strip(tr.ty)
+    if (rawRet == "Criterion") {
+      term = "criterion"
+      retJson = jstr("Opt[Bool]")
+    } else if (rawRet == "Guard") {
+      term = "guard"
+      retJson = jstr("Opt[Bool]")
+    } else {
+      retJson = jstr(rawRet)
+    }
     nexti = tr.i
   }
   var mj = jstr(nm).concat(": {\"params\": [").concat(ir_params_json(ps.ps))
     .concat("], \"returns\": ").concat(retJson)
-    .concat(", \"emission\": ").concat(em ? "true" : "false")
+  if (term != "") {
+    mj = mj.concat(", \"termination\": ").concat(jstr(term))
+  }
+  mj = mj.concat(", \"emission\": ").concat(em ? "true" : "false")
   if (scoped) {
     mj = mj.concat(", \"capabilities\": [").concat(ir_caps_json(caps)).concat("]")
   }
