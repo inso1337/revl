@@ -5141,6 +5141,83 @@ pub fn admit_tag(src: Str) -> Str {
   return v.slice(0, bar)
 }
 
+// ================================================== ambient / running-manifest
+//
+// item 186 / issue #86, SLICE 1 — provision disjointness against an ALREADY
+// RUNNING manifest. `admit_src(src)` decides one program text; the reference's
+// `check_and_lower` carries a second input, `ambient`, that `admit_src` has no
+// analogue for — the running composition a component is joining is not in the
+// incoming text, so there is nothing in one program to compare it against. This
+// is a DIFFERENT admission entry point (hot-swap / state-migration, not "does
+// this one program admit"), and it needs its own signature:
+//
+//   admit_ambient(src, manifest) -> the same "<TAG>|<message>" | "" wire.
+//
+// The FULL surface behind `ambient` (service replacement, `handoff` STATE
+// replacement, a differential oracle that builds a running manifest on BOTH
+// sides) is a wave, not a slice (roadmap item 186). Slice 1 lands the one piece
+// that is self-contained today: a component that provides a `(key, realm)` the
+// manifest already provides is a G2 conflict — the cross-manifest analogue of
+// the in-text G2 `_link`/`collect_g2` already computes among one text's
+// components. See docs/design/186-ambient-admission.md.
+//
+// The manifest is the linker's already-live provision table, serialised as rows
+// "<component>/<key>/<realm>" joined by ";" (realm "" = the shared realm), e.g.
+// "Store/db/;KvA/kv/tenant_a". An empty manifest is the empty table, so
+// `admit_ambient(src, "")` == `admit_src(src)` exactly.
+
+// The head of `s` up to the first `sep` (one char), and the remainder past it.
+// `rest` "" when `sep` is absent — the whole of `s` is the head.
+type Cut = { s: Str, rest: Str }
+
+fn cut(s: Str, sep: Str) -> Cut {
+  let ix = s.indexOf(sep)
+  if (ix == 0 - 1) { return { s: s, rest: "" } }
+  return { s: s.slice(0, ix), rest: s.slice(ix + 1, s.length()) }
+}
+
+// Parse the manifest wire into the same `Prov3` (`{key, rlm, comp}`) rows the
+// in-text linker builds, so `collect_g2` reads a running manifest exactly as it
+// reads the composed text. An empty row (a trailing/duplicate ";") is skipped.
+fn parse_manifest_rows(m: Str, acc: List[Prov3]) -> List[Prov3] {
+  if (m == "") { return acc }
+  let row = cut(m, ";")
+  var acc2 = acc
+  if (row.s != "") {
+    let a = cut(row.s, "/")
+    let b = cut(a.rest, "/")
+    acc2 = acc.push({ key: b.s, rlm: b.rest, comp: a.s })
+  }
+  return parse_manifest_rows(row.rest, acc2)
+}
+
+fn parse_manifest(m: Str) -> List[Prov3] {
+  return parse_manifest_rows(m, [])
+}
+
+// Admit `src` against a running `manifest`. An ambient composition never
+// launders an internally refused component, so a non-empty single-source
+// verdict is forwarded unchanged — this is the seam a later wave relaxes for
+// handoff / state-migration, where a replacement legitimately overrides what the
+// manifest already holds. Otherwise seed the G2 table with the manifest's
+// live provisions and scan the incoming components' provision keys against it:
+// a `(key, realm)` the manifest already provides conflicts, reported against the
+// incoming component (the SECOND provider) with `_link`'s exact G2 wording.
+pub fn admit_ambient(src: Str, manifest: Str) -> Str {
+  let self_v = admit_src(src)
+  if (self_v != "") { return self_v }
+  let ts = lex_src(src)
+  let pg = parse_prog_ts(ts)
+  // spawn templates are runtime instances, not static composition members — they
+  // take no place in the G2 table (decision 5/6), exactly as `link_refusals`
+  // excludes them from the in-text scan. Seed the surviving live components'
+  // provision scan with the running manifest's provisions.
+  let live = non_template_comps(pg.comps, spawn_templates(pg.comps))
+  let seed = parse_manifest(manifest)
+  let r = collect_g2(live, 0, seed, [])
+  return pick_min(r.refs)
+}
+
 // ============================================================ interchange IR
 //
 // SEAM 1 (roadmap item 227): lower.rvl also PRODUCES the emittable interchange
@@ -8320,6 +8397,46 @@ test "same key in the same realm conflicts (G2), realm named" {
 
 test "same key in different realms composes (per-realm G2)" {
   let v = admit_src("""service Kv { fn get(k: Str) -> Str } component StoreOne provides kv: Kv { isolate kv in realm("tenant_a") provide kv { fn get(k) { return k } } } component StoreTwo provides kv: Kv { isolate kv in realm("tenant_b") provide kv { fn get(k) { return k } } }""")
+  assert v == ""
+}
+
+// ---- ambient / running-manifest admission (item 186 / issue #86, slice 1) ---
+
+test "empty manifest admits exactly as single-source (base invariant)" {
+  let src = "service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }"
+  assert admit_ambient(src, "") == admit_src(src)
+}
+
+test "a provision the running manifest already holds conflicts (ambient G2)" {
+  let v = admit_ambient("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }", "OldStore/db/")
+  assert v == "G2|provision conflict: key `db` is provided by both OldStore and NewStore (G2)"
+}
+
+test "ambient admission equals the single-source composition of manifest ++ src" {
+  let manifest_comp = "component OldStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  let newc = "component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  let svc = "service D { fn q(s: Str) -> Int } "
+  assert admit_ambient(svc.concat(newc), "OldStore/db/")
+    == admit_src(svc.concat(manifest_comp).concat(" ").concat(newc))
+}
+
+test "a manifest provision in a DIFFERENT realm composes (per-realm ambient G2)" {
+  let v = admit_ambient("""service Kv { fn get(k: Str) -> Str } component StoreB provides kv: Kv { isolate kv in realm("tenant_b") provide kv { fn get(k) { return k } } }""", "StoreA/kv/tenant_a")
+  assert v == ""
+}
+
+test "a manifest provision in the SAME realm conflicts, realm named (ambient G2)" {
+  let v = admit_ambient("""service Kv { fn get(k: Str) -> Str } component StoreB provides kv: Kv { isolate kv in realm("tenant_a") provide kv { fn get(k) { return k } } }""", "StoreA/kv/tenant_a")
+  assert v == "G2|provision conflict: key `kv` in realm `tenant_a` is provided by both StoreA and StoreB (G2)"
+}
+
+test "an internally refused component is forwarded unchanged, whatever the manifest" {
+  let src = "service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute(\"x\") undo db.execute(\"y\") }"
+  assert admit_ambient(src, "Other/svc/") == admit_src(src)
+}
+
+test "a disjoint manifest key never conflicts with the incoming component" {
+  let v = admit_ambient("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }", "OldCache/cache/")
   assert v == ""
 }
 

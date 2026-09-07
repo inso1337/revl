@@ -231,6 +231,12 @@ pub struct DfsRes {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Cut {
+    s: String,
+    rest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IrRes {
     ok: bool,
     js: String,
@@ -4491,6 +4497,45 @@ pub fn admit_tag(src: String) -> String {
         return v;
     }
     return v.revl_slice(0i64, bar.clone());
+}
+
+fn cut(s: String, sep: &str) -> Cut {
+    let ix = s.revl_index_of(&sep);
+    if (ix == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return Cut { s: s.clone(), rest: String::from("") };
+    }
+    return Cut { s: s.revl_slice(0i64, ix.clone()), rest: s.revl_slice((ix).checked_add(1i64).expect("revl: Int overflow"), s.revl_length()) };
+}
+
+fn parse_manifest_rows(m: String, acc: Vec<Prov3>) -> Vec<Prov3> {
+    if (m == "") {
+        return acc;
+    }
+    let row = cut(m.clone(), ";");
+    let mut acc2 = acc.clone();
+    if (row.s != "") {
+        let a = cut(row.s.clone(), "/");
+        let b = cut(a.rest.clone(), "/");
+        acc2 = acc.revl_push(Prov3 { key: b.s.clone(), rlm: b.rest.clone(), comp: a.s.clone() });
+    }
+    return parse_manifest_rows(row.rest.clone(), acc2.clone());
+}
+
+fn parse_manifest(m: String) -> Vec<Prov3> {
+    return parse_manifest_rows(m.clone(), vec![]);
+}
+
+pub fn admit_ambient(src: String, manifest: String) -> String {
+    let self_v = admit_src(src.clone());
+    if (self_v != "") {
+        return self_v;
+    }
+    let ts = lex_src(src.clone());
+    let pg = parse_prog_ts(ts.clone());
+    let live = non_template_comps(&pg.comps, &spawn_templates(&pg.comps));
+    let seed = parse_manifest(manifest.clone());
+    let r = collect_g2(live.clone(), 0i64, seed.clone(), vec![]);
+    return pick_min(&r.refs);
 }
 
 fn mk_irres(ok: bool, js: String) -> IrRes {
@@ -9519,6 +9564,50 @@ fn same_key_in_the_same_realm_conflicts__g2___realm_named() {
 #[test]
 fn same_key_in_different_realms_composes__per_realm_g2_() {
     let v = admit_src(String::from("service Kv { fn get(k: Str) -> Str } component StoreOne provides kv: Kv { isolate kv in realm(\"tenant_a\") provide kv { fn get(k) { return k } } } component StoreTwo provides kv: Kv { isolate kv in realm(\"tenant_b\") provide kv { fn get(k) { return k } } }"));
+    assert!((v == ""));
+}
+
+#[test]
+fn empty_manifest_admits_exactly_as_single_source__base_invariant_() {
+    let src = String::from("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }");
+    assert!((admit_ambient(src.clone(), String::from("")) == admit_src(src.clone())));
+}
+
+#[test]
+fn a_provision_the_running_manifest_already_holds_conflicts__ambient_g2_() {
+    let v = admit_ambient(String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"), String::from("OldStore/db/"));
+    assert!((v == "G2|provision conflict: key `db` is provided by both OldStore and NewStore (G2)"));
+}
+
+#[test]
+fn ambient_admission_equals_the_single_source_composition_of_manifest____src() {
+    let manifest_comp = String::from("component OldStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    let newc = String::from("component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }");
+    let svc = String::from("service D { fn q(s: Str) -> Int } ");
+    assert!((admit_ambient(svc.revl_concat(&newc), String::from("OldStore/db/")) == admit_src(((svc.revl_concat(&manifest_comp)).revl_concat(" ")).revl_concat(&newc))));
+}
+
+#[test]
+fn a_manifest_provision_in_a_different_realm_composes__per_realm_ambient_g2_() {
+    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str } component StoreB provides kv: Kv { isolate kv in realm(\"tenant_b\") provide kv { fn get(k) { return k } } }"), String::from("StoreA/kv/tenant_a"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_manifest_provision_in_the_same_realm_conflicts__realm_named__ambient_g2_() {
+    let v = admit_ambient(String::from("service Kv { fn get(k: Str) -> Str } component StoreB provides kv: Kv { isolate kv in realm(\"tenant_a\") provide kv { fn get(k) { return k } } }"), String::from("StoreA/kv/tenant_a"));
+    assert!((v == "G2|provision conflict: key `kv` in realm `tenant_a` is provided by both StoreA and StoreB (G2)"));
+}
+
+#[test]
+fn an_internally_refused_component_is_forwarded_unchanged__whatever_the_manifest() {
+    let src = String::from("service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute(\"x\") undo db.execute(\"y\") }");
+    assert!((admit_ambient(src.clone(), String::from("Other/svc/")) == admit_src(src.clone())));
+}
+
+#[test]
+fn a_disjoint_manifest_key_never_conflicts_with_the_incoming_component() {
+    let v = admit_ambient(String::from("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"), String::from("OldCache/cache/"));
     assert!((v == ""));
 }
 
