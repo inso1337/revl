@@ -1,10 +1,22 @@
 # Design: verifiable private peer pool (#480)
 
-Status: design proposed. Slice 1 (the authority-monotonicity invariant) landed
-with this doc as `src/revl/peer_authority.py` + `tests/test_peer_authority_
-monotonicity.py`. Signed peer attestation and the lawful-retry dispatcher are
-designed here and queue behind their dependencies (#421 F8 network seam, #107
-seam transport, #475 hostile-wire TCK).
+Status: all three primitives landed as language-level kernels.
+
+* Primitive 3 (authority-monotonicity invariant): `src/revl/peer_authority.py`
+  + `tests/test_peer_authority_monotonicity.py`.
+* Primitive 1 (signed peer offer / attestation + placement matching):
+  `src/revl/peer_offer.py` + `tests/test_peer_offer.py`.
+* Primitive 2 (lawful-retry dispatcher): `src/revl/lawful_retry.py` +
+  `tests/test_lawful_retry.py`.
+
+What remains is NOT a language primitive: wiring these kernels to a LIVE dispatch
+(constructing the chain and candidate offers from real placement + the network
+transport) needs #421 (F8 network seam) and #107 (seam transport), and the
+hostile-wire TCK #475 is the adversarial consumer that keeps the still-hostile
+wire honest. The primitives are proven in isolation here — the signing/matching
+math and the dispatch decision table — so the transport work that consumes them
+rides on a verified kernel. All three are Python-only: they touch no lexer,
+typecheck, selfhost, or rust emit, so no gate-crate regen.
 
 ## Scope: three primitives, not a P2P monolith
 
@@ -139,7 +151,15 @@ regen.
 
 ---
 
-## Primitive 1: signed peer capability + attestation advertisement (design)
+## Primitive 1: signed peer capability + attestation advertisement (landed)
+
+Landed as `src/revl/peer_offer.py`. `PeerOffer`/`Attestation`/`ResourceOffer`
+model the record; `sign_offer`/`verify_offer` are the hmac round-trip (borrowing
+`attest._canonical_bytes` + `attest.key_id`, with the distinct
+`revl.peer-offer/v1` MAC domain); `PlacementSlot` + `offer_eligible` are the
+three-gate match (signature, attested facets, ceiling-covers-grant). The section
+below is the design it implements.
+
 
 ### What a peer advertises
 
@@ -190,7 +210,17 @@ to) and #107 (seam transport).
 
 ---
 
-## Primitive 2: lawful-retry dispatcher (design)
+## Primitive 2: lawful-retry dispatcher (landed)
+
+Landed as `src/revl/lawful_retry.py`. `EffectClass` is the classification it
+consults (with `classify_extern` mapping the real extern facet names —
+`secret`/`deferred`/`witnessed`/`idempotent` — to a class, tightest-first);
+`dispatch_on_loss` returns a `Decision` per the table below, bracketed by
+`peer_authority.check_delegation_chain` on the replay side and
+`peer_offer.offer_eligible` on the peer-selection side. Transport (actually
+handing the work over) is #421's job; this is the lawful DECISION. The section
+below is the design it implements.
+
 
 ### The classification already exists
 
