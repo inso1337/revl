@@ -510,6 +510,31 @@ def peer_identity(writer) -> str | None:
     return None
 
 
+async def _read_frames(reader: asyncio.StreamReader, chunk: int = 65536):
+    """Yield newline-delimited request frames off `reader` with no line-length
+    cap (R-C5, issue #538).
+
+    `asyncio.StreamReader.readline()` raises `ValueError` once its buffered line
+    reaches the stream limit (64KiB by default) before a newline, and that
+    exception kills the connection handler — so one oversized argument silently
+    closes the seam. `read(n)` carries no such separator limit, so we accumulate
+    chunks and split on the framing newline here. A trailing partial frame left
+    by an abrupt EOF is dropped (its request was never completed), exactly as
+    the previous `readline()`/`break` path did."""
+    buf = bytearray()
+    while True:
+        nl = buf.find(b"\n")
+        while nl < 0:
+            data = await reader.read(chunk)
+            if not data:            # EOF: monitor connections and clean closes
+                return
+            buf.extend(data)
+            nl = buf.find(b"\n")
+        frame = bytes(buf[:nl])
+        del buf[:nl + 1]
+        yield frame
+
+
 async def serve(ctx, exports, endpoint, module=None, correlation=None, peers=None,
                 replay=None):
     """Listen on `endpoint` and answer calls against `ctx` for the exported
@@ -591,10 +616,14 @@ async def serve(ctx, exports, endpoint, module=None, correlation=None, peers=Non
                         "peer_refused": reason}) + "\n").encode())
                     await writer.drain()
                     return
-            while True:
-                line = await reader.readline()
-                if not line:  # monitor connections never send: this is EOF
-                    break
+            # `StreamReader.readline()` caps at the stream's 64KiB limit and
+            # raises `ValueError` on any longer line, which — uncaught here —
+            # tears the whole seam down on a single large argument (R-C5, issue
+            # #538). Frame on the newline ourselves over fixed-size `read()`
+            # chunks (which are NOT subject to that separator limit) so an
+            # arbitrarily large request is delivered whole and the connection
+            # stays up, matching the client's own unbounded `makefile` read.
+            async for line in _read_frames(reader):
                 try:
                     req = json.loads(line)
                 except json.JSONDecodeError:
