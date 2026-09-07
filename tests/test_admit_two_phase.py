@@ -589,3 +589,117 @@ def test_recover_reports_admissions_and_scan_is_noop_without_admits(tmp_path):
     w.close()
     report = recover(withadmit, session=s, forward_admissions=False)
     assert report["admissions"][0]["classification"] == "owed"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #644: a FAILED admission must DISPOSE the turn's already-plugged fibers
+# through the supported `fiber.dispose()` path BEFORE it records the terminal
+# `admit-abandoned {plug-failed}`. The #619 helper looked up a non-existent
+# `driver._dispose_fiber`, so disposal was a silent no-op — the abandonment was
+# written on disk while every plugged fiber (and its live provisions/effects)
+# leaked, unreachable to ordinary IR-ordered disposal since the un-adopted turn
+# never entered the composition IR. This needs a live cordis composition (the
+# fiber, its `dispose()`, and the driver's `_flush`), so it is cordis-gated.
+# --------------------------------------------------------------------------- #
+
+@needs_cordis
+def test_failed_admission_disposes_turn_fibers_before_recording_abandonment(
+        tmp_path):
+    from revl.wal import read_wal
+
+    session = _gated_session(tmp_path)
+    driver = session._driver
+    runtime_mod = driver.runtime
+
+    events: list = []          # ordered log: ("dispose", probe) / ("abandon",)
+    probes: list = []          # every fiber the plug actually stored
+
+    # 1. Wrap each fiber the plug stores so we can observe its REAL `dispose()`
+    #    being invoked — the whole bug is that it never was.
+    real_plug = runtime_mod.plug
+
+    class _FiberProbe:
+        def __init__(self, inner):
+            self._inner = inner
+            self.disposed = False
+
+        @property
+        def state(self):
+            return self._inner.state
+
+        def __await__(self):
+            return self._inner.__await__()
+
+        def dispose(self):
+            self.disposed = True
+            events.append(("dispose", self))
+            return self._inner.dispose()
+
+        def __getattr__(self, key):
+            return getattr(self._inner, key)
+
+    def _probing_plug(ctx, component, config=None):
+        probe = _FiberProbe(real_plug(ctx, component, config))
+        probes.append(probe)
+        return probe
+
+    # 2. Spy the terminal-abandonment write so we can assert it lands AFTER the
+    #    fibers are disposed (same instance `_wire_turn`'s `wal` resolves to).
+    wal = session._approval_wal()
+    real_abandoned = wal.record_admit_abandoned
+
+    def _spy_abandoned(*a, **k):
+        events.append(("abandon",))
+        return real_abandoned(*a, **k)
+
+    # 3. Force the plug to FAIL right after the first fiber is stored: raise on
+    #    the first flush that runs once a fiber has been plugged (the in-plug
+    #    flush), then let teardown's own flushes run for real. The pre-plug gates
+    #    flush with `probes` still empty, so only the in-plug flush trips.
+    real_flush = driver._flush
+    tripped = {"done": False}
+
+    async def _flaky_flush():
+        if probes and not tripped["done"]:
+            tripped["done"] = True
+            raise RuntimeError("injected plug/flush failure (issue #644 repro)")
+        return await real_flush()
+
+    runtime_mod.plug = _probing_plug
+    wal.record_admit_abandoned = _spy_abandoned
+    driver._flush = _flaky_flush
+    try:
+        with pytest.raises(RuntimeError, match="injected plug/flush failure"):
+            session.admit(_TURN_FORWARD, granted=["Ops"])
+    finally:
+        runtime_mod.plug = real_plug
+        driver._flush = real_flush
+        try:
+            del wal.record_admit_abandoned
+        except AttributeError:
+            pass
+
+    # the repro actually reached the plug and stored a fiber.
+    assert probes, "no fiber was plugged — the repro never reached the plug"
+
+    # (a) the turn's already-plugged fiber was disposed through the supported
+    #     path (with the bug, `dispose()` was never called at all).
+    assert any(p.disposed for p in probes), \
+        "a plugged turn fiber was never disposed (issue #644 leak)"
+
+    # (b) disposal happened BEFORE the terminal abandonment was recorded.
+    assert ("abandon",) in events, "admit-abandoned was never recorded"
+    first_abandon = events.index(("abandon",))
+    assert any(e[0] == "dispose" and i < first_abandon
+               for i, e in enumerate(events)), \
+        "admit-abandoned was recorded before the turn's fibers were disposed"
+
+    # (c) the disposed fiber is gone from the driver — not stranded.
+    assert "TurnComp" not in driver.fibers, \
+        "a disposed turn fiber was left stranded in driver.fibers"
+
+    # (d) the honest terminal record is on disk, with its reason.
+    on_disk = read_wal(session._wal_path)["records"]
+    assert [r for r in on_disk if r.get("record") == "admit-abandoned"
+            and r.get("reason") == "plug-failed"], \
+        "no admit-abandoned {plug-failed} record was written"
