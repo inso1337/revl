@@ -912,6 +912,19 @@ jobs:
       # the baselined gate: new toolchain rejections fail, and a baselined
       # failure that starts passing fails too, so the list can only shrink
       - run: pytest tests/test_conformance_validate.py -q
+      # Issue #475: the hostile-wire seam-envelope TCK section. These property
+      # and system-level tests pin how the sealed seam envelope (the
+      # `revl.deploy.Correlation` + `CorrelationGuard` authenticator) behaves
+      # when the wire underneath it is adversarial: truncated, reordered,
+      # duplicated, bounced (reconnect-storm soak), or partitioned mid-envelope.
+      # Each shape must produce the DECLARED refusal or recovery, never a crash
+      # or a silent frame-layer dedup. It is pure python plus a real UDS socket,
+      # so it runs fast and needs none of the six toolchains this job
+      # provisions; it lives in the `conformance` job because this is the seam
+      # and tier semantics gate, the natural home the issue names, rather than
+      # only riding the broad `frontend` sweep. It is sequenced here so the F8
+      # network seam (#421 / #107 T3) lands build-to-test against this corpus.
+      - run: pytest tests/test_hostile_wire_tck.py -q
       # The matrix's THIRD question (issue #244). Everything above stops at
       # compile/typecheck depth, so it certifies that a construct emits and
       # compiles per tier and never what it evaluates to — two tiers could be
