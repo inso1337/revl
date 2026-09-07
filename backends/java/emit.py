@@ -4782,17 +4782,50 @@ def _method_body_lines(
     _pin_value_map_locals(method.get("body"), method.get("params"), v3_ctx)
     rename = {b: f"this.{b}" for b in _binds(env.component)}
     rename.update({local: f"this.{local}" for local in env.reqs})
-    for stmt in method.get("body") or []:
+
+    def render(steps: list, lines: list[str], pad: str) -> None:
+      for stmt in steps or []:
         step = stmt.get("step")
+        if step in ("if", "while", "for", "break", "continue"):
+            # issue #548: control flow over the method's value computation. The
+            # arms are pure and their inner steps are ordinary method steps, so
+            # they recurse through `render` — the same shape as the fn-grammar
+            # `_v3_stmt` if/while/for (javac ignores the indentation, added only
+            # for readability).
+            if step == "break":
+                lines.append(f"{pad}break;")
+            elif step == "continue":
+                lines.append(f"{pad}continue;")
+            elif step == "if":
+                lines.append(f"{pad}if ({_expr(stmt['cond'], v3_ctx, rename, env)}) {{")
+                render(stmt.get("then") or [], lines, pad + "    ")
+                if stmt.get("else"):
+                    lines.append(f"{pad}}} else {{")
+                    render(stmt["else"], lines, pad + "    ")
+                lines.append(f"{pad}}}")
+            elif step == "while":
+                lines.append(f"{pad}while ({_expr(stmt['cond'], v3_ctx, rename, env)}) {{")
+                render(stmt.get("body") or [], lines, pad + "    ")
+                lines.append(f"{pad}}}")
+            else:  # for
+                bind = _ident(stmt["bind"], "loop binding")
+                # `var` lets javac infer the element type from the Iterable —
+                # correct for every `List[T]` and free of a surface->Java type map.
+                lines.append(
+                    f"{pad}for (var {bind} : "
+                    f"{_expr(stmt['iterable'], v3_ctx, rename, env)}) {{")
+                render(stmt.get("body") or [], lines, pad + "    ")
+                lines.append(f"{pad}}}")
+            continue
         if step == "return":
             if stmt.get("expr") is None:
-                lines.append("return;")
+                lines.append(f"{pad}return;")
             elif returns_void:
                 # `void` methods run the expression for its effect.
-                lines.append(f"{_expr(stmt['expr'], v3_ctx, rename, env)};")
-                lines.append("return;")
+                lines.append(f"{pad}{_expr(stmt['expr'], v3_ctx, rename, env)};")
+                lines.append(f"{pad}return;")
             else:
-                lines.append(f"return {_expr(stmt['expr'], v3_ctx, rename, env)};")
+                lines.append(f"{pad}return {_expr(stmt['expr'], v3_ctx, rename, env)};")
         elif step == "effect":
             wit = _witnessed_extern_for(stmt.get("acquire"), v3_ctx.witnessed)
             if wit is not None:
@@ -4853,7 +4886,7 @@ def _method_body_lines(
             # a plain value binding inside a method body
             name = _ident(stmt.get("name"), "binding")
             raw = stmt.get("value")
-            if step == "let" and _bind_local_arrow(v3_ctx, name, raw, lines, "", rename, env):
+            if step == "let" and _bind_local_arrow(v3_ctx, name, raw, lines, pad, rename, env):
                 continue
             v3_ctx.arrows.pop(name, None)
             value = _expr(raw, v3_ctx, rename, env)
@@ -4864,13 +4897,16 @@ def _method_body_lines(
                 decl = _empty_map_decl_type(stmt, v3_ctx.map_locals)
             else:
                 decl = _adt_binding_type(raw, v3_ctx) or "var"
-            lines.append(f"{decl} {name} = {value};" if step == "let"
-                         else f"{name} = {value};")
+            lines.append(f"{pad}{decl} {name} = {value};" if step == "let"
+                         else f"{pad}{name} = {value};")
         elif step == "provide":
             raise EmitError("provide steps are not allowed inside method bodies")
         else:
             raise EmitError(f"unknown step in method body: {step!r}")
+
+    render(method.get("body") or [], lines, "")
     return lines
+
 
 def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad: str) -> None:
     kind = step.get("step")

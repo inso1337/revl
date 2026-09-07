@@ -100,19 +100,33 @@ These change the provide/activation grammar, the lowering, all six emitters,
 the self-host port, and the gate crates. Each deserves its own design note and
 its own PR series. Listed in the review's own priority order.
 
-8. **`if` statement in provide-method bodies (review item 2).** The parser's
-   own "expected a statement" diagnostic lists `if` among the accepted forms,
-   then the `in_method` guard refuses it and points at the pure `if`
-   expression instead. Closing the gap means a conditional-effect statement in
-   a method body, which is a real extension of the effect grammar (what does a
-   half-emitting conditional mean for teardown), not a parser tweak. Highest
-   author value of the whole issue; highest cost too.
+8. **`if` statement in provide-method bodies (review item 2).** LANDED for the
+   PURE case (issue #548 control-flow slice). The parser now admits an `if`
+   STATEMENT in a method body (`parser._method_if`), the checker/lowering emit
+   the same `if` IR step a module `fn` does (`lower._lower_control_stmt`), and
+   all six tiers render it by mirroring their own fn-grammar renderer. The
+   teardown question the note flagged is sidestepped by a deliberate bound: the
+   arms are PURE. A teardown-registering step (`effect`/`emit`/`let-effect`/
+   `await`) inside a branch is refused at lowering, so no conditional ever
+   half-registers and the activation frame still owns every inverse, registered
+   at the method's top level. A guard-then-emit method (a top-level `if` that
+   `return`s early, then a top-level `emit`) is the realistic shape this
+   admits. REMAINDER: a conditional/looped teardown-registering step needs the
+   teardown contract amended and stays deferred to its own note.
 
-9. **`while`/`for` in provide-method bodies (review item 1).** Sanctioned
-   recursion is the current answer and it dies on rust/java/wasm and hits a
-   ~1000-frame limit on py. A bounded loop form in method bodies is the fix,
-   and it is the largest single effort in the issue: iteration boundaries,
-   teardown accumulation across iterations, and six emitters.
+9. **`while`/`for` in provide-method bodies (review item 1).** LANDED for the
+   PURE case alongside item 8. `while`/`for` STATEMENTS now compute values in a
+   method body (`parser._method_while`/`_method_for`), with `break`/`continue`
+   inside a method loop. The frame-neutrality invariant is unchanged in
+   substance: a registering step still may not sit inside a loop body
+   (`lower._validate_no_loop_scoped_registration` now enforces it over method
+   loops instead of refusing method loops outright), so sanctioned recursion is
+   no longer the only answer and the rust/java/wasm death and the ~1000-frame py
+   limit are gone. Five tiers (py/ts/go/java/rust) carry method-body `for`;
+   wasm carries `if`/`while`/`break`/`continue`, and a method-body `for (x of
+   xs)` on wasm is the TRACKED REMAINDER (the List-cursor apparatus is fn-only;
+   the refusal redirects to a `while`+index count). REMAINDER: registering steps
+   inside a loop (teardown across iterations), and wasm method-body `for`.
 
 10. **Expression-bodied top-level fns (review item 3).** `fn f(x) = expr` works
     in a provide method but not at module top level, so an author writing a

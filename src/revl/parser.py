@@ -1628,6 +1628,14 @@ class Parser:
         # switches the refusal to the block-arm voice (C1,
         # docs/design/379-break-continue.md).
         self._loop_depth = 0
+        # issue #548 (control flow in provide methods): the method-grammar twin
+        # of `_loop_depth`. A `while`/`for` STATEMENT is now valid in a provide-
+        # method body (not only the fn grammar), so `break`/`continue` need a
+        # loop-depth counter on the method side too. Kept separate from
+        # `_loop_depth` because the two grammars never nest into each other
+        # during a single parse and mixing the counters would let a stray fn-side
+        # depth authorise a method `break` (or vice versa).
+        self._method_loop_depth = 0
         self._in_block_arm = False
         # issue #310: how many expressions deep the cursor currently is, held
         # against `NESTING_LIMIT`. A `${...}` interpolation is parsed by a
@@ -3788,13 +3796,24 @@ class Parser:
             return FailStmt(self.pure_expr(), tok.line)
         if tok.kind == "kw" and tok.value == "if":
             if in_method:
-                raise self.err(
-                    tok.line,
-                    "`if` guards are only allowed in a component activation body",
-                    hint="provide-method bodies run while the component is ACTIVE; "
-                         "use a pure `if` expression in the method value instead (G6)",
-                )
+                # issue #548 review item 2: an `if` STATEMENT in a provide-method
+                # body. Unlike the activation-body `if` guard (`component_if`),
+                # this is control flow over the method's computation — its arms
+                # hold method statements (`let`/`var`/assignment/`return`, and
+                # nested control flow) and it produces the same `if` IR the fn
+                # grammar does. The arms are pure: a teardown-registering step
+                # (`effect`/`emit`/…) inside a branch is refused at lowering, so
+                # the half-emitting-conditional question stays out of scope.
+                return self._method_if(in_async_method)
             return self.component_if()
+        if tok.kind == "kw" and tok.value == "while" and in_method:
+            # issue #548 review item 1: a `while` STATEMENT in a provide-method
+            # body. The sharpest wall in the review — sanctioned recursion is the
+            # only current answer and it dies on rust/java/wasm. Same pure-body
+            # rule as the method `if`.
+            return self._method_while(in_async_method)
+        if tok.kind == "kw" and tok.value == "for" and in_method:
+            return self._method_for(in_async_method)
         if tok.kind == "kw" and tok.value == "emit":
             self.next()
             return self._emit_stmt(tok.line, is_async=False)
@@ -3862,16 +3881,25 @@ class Parser:
                 raise self.err(tok.line, "`provide` is not allowed inside a method body")
             return self.provide()
         if tok.kind == "kw" and tok.value in ("break", "continue"):
-            # item 379: `break`/`continue` are loop control, and the
-            # activation/provide-method grammar has no loop form (loops live
-            # only in the fn statement grammar). Redirect in the block-arm
-            # voice `_refuse_block_arm_stmt` uses for loops themselves.
+            # issue #548: a provide-method `while`/`for` body now carries
+            # `break`/`continue` too, so inside a method loop they land as loop
+            # control (`_method_loop_depth > 0`). Everywhere else in the
+            # activation/method grammar there is still no loop to target — item
+            # 379's redirect in the block-arm voice stands.
+            if in_method and self._method_loop_depth > 0:
+                self.next()
+                return (BreakStmt(tok.line) if tok.value == "break"
+                        else ContinueStmt(tok.line))
             raise self.err(
                 tok.line,
                 f"`{tok.value}` is not valid here: activation and provide-method "
-                "bodies have no loops",
+                "bodies have no loops"
+                + (" outside a `while`/`for`" if in_method else ""),
                 hint="iterate in a module `fn` (the only grammar with `while`/"
-                     "`for`, and thus `break`/`continue`) and call it from here",
+                     "`for`, and thus `break`/`continue`) and call it from here"
+                     if not in_method else
+                     f"`{tok.value}` targets an enclosing `while`/`for`; there is "
+                     "none here",
             )
         self._reject_foreign_keyword(tok)  # item 384
         raise self.err(
@@ -3879,6 +3907,107 @@ class Parser:
             f"expected a statement (`let`, `effect`, `emit`, `fail`, `if`{', `return`' if in_method else ', `provide`'}), found {tok.value!r}",
             hint="revl bodies contain only effect forms — plain expressions have no effect to record (G6)",
         )
+
+    # --- provide-method control flow (issue #548) --------------------------
+    # `if`/`while`/`for` STATEMENTS in a provide-method body. Their arms hold
+    # METHOD statements (`self.stmt(in_method=True)`), so a nested `let`/`var`/
+    # assignment/`return`/`break`/`continue`/inner control flow all work, while a
+    # teardown-registering step (`effect`/`emit`/…) inside a branch is left for
+    # lowering to refuse. The statement-nesting bound is shared with the fn
+    # grammar (`_stmt_nesting`) so a method that nests control flow this deep is
+    # refused at parse time exactly as a `fn` is (issue #542).
+
+    def _method_stmt(self, in_async_method: bool):
+        self._stmt_nesting += 1
+        try:
+            if self._stmt_nesting > NESTING_LIMIT:
+                raise self._stmt_nesting_too_deep()
+            return self.stmt(in_method=True, in_async_method=in_async_method)
+        finally:
+            self._stmt_nesting -= 1
+
+    def _method_block_or_stmt(self, in_async_method: bool) -> list:
+        if not self.at("{"):
+            return [self._method_stmt(in_async_method)]
+        self.expect("{")
+        stmts = []
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
+            stmts.append(self._method_stmt(in_async_method))
+        self.expect("}")
+        return stmts
+
+    def _method_if(self, in_async_method: bool) -> IfStmt:
+        line = self.expect("kw", "if").line
+        self.expect("(")
+        cond = self.pure_expr()
+        self.expect(")")
+        then = self._method_block_or_stmt(in_async_method)
+        # item 384: keep the `elif` redirect the fn grammar gives.
+        if self.at("ident", "elif"):
+            raise self.err(
+                self.peek().line,
+                "revl has no `elif`",
+                hint="chain conditionals with `else if` (syntax-2.0 §3.2)",
+            )
+        otherwise = None
+        if self.at("kw", "else"):
+            self.next()
+            if self.at("kw", "if"):
+                otherwise = [self._method_if(in_async_method)]
+            else:
+                otherwise = self._method_block_or_stmt(in_async_method)
+        return IfStmt(cond, then, otherwise, line)
+
+    def _method_while(self, in_async_method: bool) -> WhileStmt:
+        line = self.expect("kw", "while").line
+        self.expect("(")
+        cond = self.pure_expr()
+        self.expect(")")
+        self._method_loop_depth += 1
+        try:
+            body = self._method_block_or_stmt(in_async_method)
+        finally:
+            self._method_loop_depth -= 1
+        return WhileStmt(cond, body, line)
+
+    def _method_for(self, in_async_method: bool) -> ForStmt:
+        line = self.expect("kw", "for").line
+        self.expect("(")
+        # item 384: the same C-style / `in` redirects the fn `for` gives.
+        if self.at("kw", "let") or self.at("kw", "var"):
+            raise self.err(
+                self.peek().line,
+                "revl has no C-style `for (init; cond; step)` loop",
+                hint="iterate with `for (x of xs)`, or count with a `var` and a "
+                     "`while (cond)` loop (syntax-2.0 §3.5)",
+            )
+        bind = self.expect("ident").value
+        if self.at("=") or self.at(";"):
+            raise self.err(
+                self.peek().line,
+                "revl has no C-style `for (init; cond; step)` loop",
+                hint="iterate with `for (x of xs)`, or count with a `var` and a "
+                     "`while (cond)` loop (syntax-2.0 §3.5)",
+            )
+        if self.at("kw", "in"):
+            raise self.err(
+                self.peek().line,
+                "revl iterates elements with `for (x of xs)`, not `for (x in xs)`",
+                hint="`of` binds each element; revl has no key-enumerating "
+                     "`in` loop (syntax-2.0 §3.5)",
+            )
+        self.expect("kw", "of")
+        iterable = self.pure_expr()
+        self.expect(")")
+        self._method_loop_depth += 1
+        try:
+            body = self._method_block_or_stmt(in_async_method)
+        finally:
+            self._method_loop_depth -= 1
+        return ForStmt(bind, iterable, body, line)
 
     def _emit_stmt(self, line: int, *, is_async: bool) -> "EmitStmt":
         """Parse an `emit` statement body (the `emit` keyword already consumed).
