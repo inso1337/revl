@@ -521,7 +521,7 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
      `Pool.open` is not pure"</span>,
   <span class="j-k">"guarantee"</span>: <span class="j-s">"every mutation carries an inverse,
      or admits irreversibility with `emit`"</span>,
-  <span class="j-k">"hint"</span>: <span class="j-s">"write `effect Pool.open(...) undo <expr>`,
+  <span class="j-k">"hint"</span>: <span class="j-s">"write `effect Pool.open(...) undo &lt;expr&gt;`,
      or mark the call `emit`"</span> }</code></pre>
         </div>
         <div class="msg" data-x="3">

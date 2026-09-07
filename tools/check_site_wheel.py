@@ -131,15 +131,27 @@ def main() -> int:
         else:
             print(f"{rel} is current")
 
-    # Exit 0 either way: the wheel is not a required context for the merge
-    # gate (PR #347). But the final line must not contradict the warnings
-    # above it: a stale wheel printed "matches a fresh build" for a day,
-    # and a log tail read the opposite of the truth.
+    # Exit non-zero when stale. `site-wheel.yml` (main-only, issue #252) is the
+    # owner that runs this CHECK form on every push to main and turns a drift
+    # into a red run via its `if: failure()` step — but that whole design was
+    # inert while this returned 0 unconditionally: the workflow could never
+    # fail, so the wheel drifted 38 files / 4 modules behind main with nothing
+    # going red (issue #547). A non-zero exit is what makes the owner real.
+    #
+    # This does NOT reintroduce the per-PR outage class roadmap 110c removed:
+    # ci.yml deliberately does not run this tool (guarded by
+    # tests/test_site_wheel_gate_runs_in_ci.py), so no pull_request check reds
+    # on a source change. The failure surfaces post-merge on main and at
+    # merge/release time in `make pre-merge`, exactly where 110c placed it.
+    #
+    # The final line must not contradict the warnings above it: a stale wheel
+    # printed "matches a fresh build" for a day, and a log tail read the
+    # opposite of the truth.
     if any_stale:
         print("committed playground/site wheel is STALE (see the warnings above); "
-              "not a merge blocker, rebuild with `python3 tools/check_site_wheel.py --write`")
-    else:
-        print("committed playground/site wheel matches a fresh build")
+              "rebuild with `python3 tools/check_site_wheel.py --write`")
+        return 1
+    print("committed playground/site wheel matches a fresh build")
     return 0
 
 
