@@ -3005,9 +3005,18 @@ class Session:
 
     # -- interaction -------------------------------------------------------
 
-    def call(self, key: str, method: str, args: list | None = None) -> dict:
+    def call(self, key: str, method: str, args: list | None = None,
+             *, raw: bool = False) -> dict:
         """Invoke a provided service operation on the running composition —
-        how an agent actually *tests* what it just loaded."""
+        how an agent actually *tests* what it just loaded.
+
+        `result` is rendered for JSON by `_plain` (best-effort, lossy for an ADT
+        / `Result` case, which becomes its `repr`) — the shape the MCP wire and
+        the agent-inspection callers want. `raw=True` skips that render and
+        returns the live runtime value untouched, for a caller that applies its
+        own canonical encoding (the HTTP face's `_encode_value`, which must see
+        the native case instance, not its `repr`)."""
+        render = (lambda v: v) if raw else _plain
         driver = self._require()
         self._refuse_if_halted("call")   # item 443
         namespace = driver._namespace()
@@ -3040,7 +3049,7 @@ class Session:
             pure_key = (key, method, _cache_args_digest(args))
             if pure_key in self._cache_pure:
                 self._cache_hits += 1
-                return {"result": _plain(self._cache_pure[pure_key]),
+                return {"result": render(self._cache_pure[pure_key]),
                         "trace": [], "cacheHit": True}
         cache_active = (
             cache_class in ("capability_result", "external_effect")
@@ -3061,7 +3070,7 @@ class Session:
                 # miss path below and is refused exactly as an uncached call.
                 self._cache_hits += 1
                 self._record_cache_hit(key, method, entry)
-                return {"result": _plain(entry["value"]), "trace": [],
+                return {"result": render(entry["value"]), "trace": [],
                         "cacheHit": True}
             # MISS: fall through to today's consume-before-fire path, then store.
 
@@ -3124,7 +3133,7 @@ class Session:
         # composition with no `invalidated_by` clause is byte-identical.
         if self._cache_inval_tokens:
             self._fire_cache_invalidations(key, method)
-        return {"result": _plain(result), "trace": driver.drain_events()}
+        return {"result": render(result), "trace": driver.drain_events()}
 
     # -- item 310: the seam-method cache entry store ------------------------
 

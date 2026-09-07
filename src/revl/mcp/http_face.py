@@ -199,7 +199,11 @@ class HttpComposedServer:
             return _BAD_REQUEST, _err(problem, code="request")
 
         try:
-            result = self.session.call(key, op, args)
+            # `raw=True`: this face's contract is the placement bridge's canonical
+            # encoding (`_encode_value` below), so it must see the live runtime
+            # value — an ADT / `Result` case as its native instance, not the
+            # lossy `_plain` `repr` the MCP wire renders for agent inspection.
+            result = self.session.call(key, op, args, raw=True)
         except SessionError as error:
             return _BAD_REQUEST, {"ok": False, "diagnostics": [{
                 "severity": "error", "code": "REVL", "category": "session",
