@@ -338,13 +338,62 @@ def test_a_non_terminal_task_is_a_fault_not_a_poll():
             "`tasks/resubscribe` are NOT projected", "")
 
 
-def test_a_non_text_modality_is_refused():
+def test_a_datapart_json_modality_is_refused():
+    """A structured-JSON mode is a `DataPart`: it needs the tagged half of the
+    canonical encoding (slice C1) and is refused naming the skill and the field,
+    on either backend, rather than flattened into a string."""
+    for backend in ("ts", "py"):
+        doc = _card()
+        doc["skills"][0]["outputModes"] = ["application/json"]
+        message = _refusal(doc, backend=backend)
+        assert "application/json" in message
+        assert "DataPart" in message
+        assert "invoice-lookup" in message
+        assert "#/skills/0/outputModes" in message
+
+
+def test_mixed_text_and_file_modality_is_refused():
+    """A single `message/send` crosses ONE `Part`, so a side that advertises
+    both text and a binary type has no single `Part` to become and is refused
+    rather than guessed at."""
+    doc = _card()
+    doc["skills"][0]["outputModes"] = ["text/plain", "application/pdf"]
+    message = _refusal(doc, backend="py")
+    assert "application/pdf" in message
+    assert "#/skills/0/outputModes" in message
+
+
+def test_two_binary_modalities_on_one_side_are_refused():
+    doc = _card()
+    doc["skills"][0]["outputModes"] = ["application/pdf", "image/png"]
+    message = _refusal(doc, backend="py")
+    assert "two binary modalities" in message
+
+
+def test_a_file_modality_binds_bytes_on_the_py_backend():
+    """Item 439: a single binary media type is a file `Part`, projected as a
+    `Bytes` message/return with inline base64 bytes. The generated source
+    compiles, and the crossing still returns `Untrusted[Bytes]`."""
+    doc = _card()
+    doc["skills"][0]["inputModes"] = ["application/pdf"]
+    doc["skills"][0]["outputModes"] = ["application/pdf"]
+    source = import_a2a(doc, filename="card.json", backend="py")
+    assert "fn invoice_lookup(message: Bytes) -> Untrusted[Bytes]" in source
+    assert "b64encode" in source and "b64decode" in source
+    compile_source(source, "billing.rvl")
+
+
+def test_a_file_modality_is_refused_on_the_ts_backend():
+    """The `@ts` base64 binding (a `Uint8Array` under the `tsc --strict` gate)
+    is a later slice, so a file `Part` is bound on `--backend py` only and
+    refused on ts naming the skill — a modality the emitted body would not carry
+    is not shipped under its label."""
     doc = _card()
     doc["skills"][0]["outputModes"] = ["application/pdf"]
-    message = _refusal(doc)
-    assert "application/pdf" in message
+    message = _refusal(doc, backend="ts")
     assert "invoice-lookup" in message
-    assert "#/skills/0/outputModes" in message
+    assert "--backend ts" in message
+    assert "Bytes" in message
 
 
 def test_a_card_with_no_skills_is_refused():
@@ -470,7 +519,8 @@ def test_cli_allow_plaintext(tmp_path):
 
 # ------------------------------- the generated crossing, executed (py backend)
 
-def _run_py_body(reply: dict, *, backend_source: str | None = None):
+def _run_py_body(reply: dict, *, backend_source: str | None = None,
+                 arg: object = "ping"):
     """Execute the generated python host body against a stubbed transport.
 
     The body is real code, not a stub, so the slice's load-bearing refusal — a
@@ -512,7 +562,7 @@ def _run_py_body(reply: dict, *, backend_source: str | None = None):
     original = urllib.request.build_opener
     urllib.request.build_opener = lambda *handlers: _Opener()
     try:
-        return namespace["_crossing"]("ping"), calls
+        return namespace["_crossing"](arg), calls
     finally:
         urllib.request.build_opener = original
 
@@ -580,6 +630,26 @@ def test_a_reply_of_only_non_text_parts_is_a_fault():
     with pytest.raises(RuntimeError) as excinfo:
         _run_py_body(reply)
     assert "non-text parts" in str(excinfo.value)
+
+
+def test_a_file_modality_round_trips_base64_bytes_on_py():
+    """Item 439: a `file`-modality skill sends a `Bytes` message as a file
+    `Part` with inline base64 and reads a file `Part` reply back the same way —
+    executed end to end, not just greppa."""
+    import base64
+    doc = _card()
+    doc["skills"][0]["inputModes"] = ["application/pdf"]
+    doc["skills"][0]["outputModes"] = ["application/pdf"]
+    source = import_a2a(doc, filename="card.json", backend="py")
+    b64 = base64.b64encode(b"reply-bytes").decode("ascii")
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "message", "parts": [{"kind": "file", "file": {"bytes": b64}}]}}
+    out, calls = _run_py_body(reply, backend_source=source, arg=b"\x00PDF\xff")
+    assert out == b"reply-bytes"
+    sent = json.loads(calls[0])
+    part = sent["params"]["message"]["parts"][0]
+    assert part["kind"] == "file"
+    assert base64.b64decode(part["file"]["bytes"]) == b"\x00PDF\xff"
 
 
 def test_the_crossing_sends_no_credential():
