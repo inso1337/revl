@@ -1944,6 +1944,16 @@ class WriteAheadLog:
         self._generation = generation
         self._seq = 0
         self._handle = None
+        # design 460 §4: the admission a turn's activation body is running under,
+        # set by the session around the plug (`begin_decision`/`end_decision`) so
+        # every crossing the body journals is tagged with the `decisionId` and a
+        # per-decision `ordinal`. Absent (the default) means no admission is being
+        # applied, and every record is written byte-identical to today's. The
+        # ordinal is a stable position WITHIN one decision, independent of the
+        # session-wide `_seq`, so a fresh process serves a fenced crossing by
+        # `(decisionId, ordinal)` regardless of where the crossing landed in seq.
+        self._admit_decision_id: Optional[str] = None
+        self._admit_ordinal = 0
         # item 256 Slice 3: the log is plaintext at rest for the life of the run
         # and is created 0644, so a `Secret[T]` argument is redacted before it
         # reaches `_write`, not after. Built from the same IR marking the
@@ -2044,6 +2054,10 @@ class WriteAheadLog:
                                "process",
                         **({"undo_idempotent": True} if undo_idempotent else {}),
                         **({"register": register} if register else {})},
+            # design 460 §4: tag with the admission being applied, when one is
+            # open, so the audit joins this crossing to its decision and forward
+            # recovery reads the crossings a decision journalled. Absent otherwise.
+            **self._admit_tag(),
         }
         self._seq += 1
         self._write(record)
@@ -2103,6 +2117,9 @@ class WriteAheadLog:
             # byte-identical: only written when the author declared it.
             **({"undo_idempotent": True} if undo_idempotent else {}),
             **({"register": register} if register else {}),
+            # design 460 §4: the admission this inverse was registered under, when
+            # one is open. Absent otherwise, so a pre-460 descriptor is byte-identical.
+            **self._admit_tag(),
         }
         self._seq += 1
         self._write(record)
@@ -2168,6 +2185,9 @@ class WriteAheadLog:
             "origin": {"key": receiver, "method": method},
             "idempotency": idempotency,
             **({"register": register} if register else {}),
+            # design 460 §4: the admission this deferral was enqueued under, when
+            # one is open. Absent otherwise, so a pre-460 descriptor is byte-identical.
+            **self._admit_tag(),
         }
         self._seq += 1
         self._write(record)
@@ -2302,6 +2322,103 @@ class WriteAheadLog:
         record = {
             "record": "admit-abandoned", "seq": self._seq,
             "decisionId": decision_id, "reason": reason,
+        }
+        self._seq += 1
+        self._write(record)
+        return record
+
+    # -- design 460 §4: the decision context and the fenced-crossing journal --
+
+    def begin_decision(self, decision_id: str) -> None:
+        """Open the admission window `decision_id` runs its activation body in
+        (design 460 §4). While it is open every crossing the body journals is
+        tagged with `decisionId` and an incrementing per-decision `ordinal`, so a
+        fresh process can find each crossing's record by `(decisionId, ordinal)`
+        and serve a completed fenced one from the journal instead of dispatching
+        it again. The session opens this around the plug in `_wire_turn` and
+        closes it (`end_decision`) whether the plug settles or raises. Nested or
+        re-opened windows are not a thing here — one plug, one decision — so a
+        second `begin_decision` resets the ordinal, which is what a re-apply of
+        the same decision wants."""
+        self._admit_decision_id = decision_id
+        self._admit_ordinal = 0
+
+    def end_decision(self) -> None:
+        """Close the current admission window (design 460 §4). Idempotent: a
+        double close, or a close with none open, is a no-op, so the session's
+        `finally` can call it unconditionally."""
+        self._admit_decision_id = None
+        self._admit_ordinal = 0
+
+    @property
+    def active_decision(self) -> Optional[str]:
+        """The `decisionId` whose activation body is being journalled now, or
+        None. Read by the crossing writers to tag their records (design 460 §4)."""
+        return self._admit_decision_id
+
+    def _admit_tag(self) -> dict:
+        """The `{decisionId}` a crossing record carries when it is written under
+        an open admission window, or `{}` when none is open (design 460 §4, "every
+        record a turn's activation body writes carries the `decisionId`").
+
+        Absent-by-default is load-bearing: a composition that never admits, and
+        every crossing outside the plug window, writes a byte-identical record to
+        today's (design 460 §7, the per-slice byte-identity exit). No `ordinal`
+        here — the ordinal is a FENCED-crossing coordinate only (its own counter),
+        so a decision's generic effect/emission records never perturb the position
+        a fresh process serves a fenced crossing by."""
+        if self._admit_decision_id is None:
+            return {}
+        return {"decisionId": self._admit_decision_id}
+
+    def record_fenced_crossing_begin(self, *, receiver: str, method: str) -> int:
+        """Journal that a FENCED crossing under the open admission is ABOUT TO
+        dispatch, and return its `ordinal` (design 460 §4).
+
+        A fenced crossing is exactly the one whose second attempt "cannot be
+        proven safe" (item 309): no `read`/`keyed`/declared-idempotent register,
+        so a fresh process must not re-dispatch it. Written and fsync'd BEFORE the
+        dispatch — the same consume-before-fire fence `record_fence` uses — so a
+        `kill -9` between this record and the completion leaves a `begin` with no
+        `complete`, which forward recovery reads as "in flight at the cut" and
+        refuses to finalize over (the §4 in-flight row), never re-dispatching it.
+        A crash before this record leaves NO record, and the crossing simply runs
+        for the first time on re-apply. Requires an open decision window."""
+        if self._admit_decision_id is None:
+            raise ReplayError(
+                "record_fenced_crossing_begin outside a decision window — "
+                "call begin_decision first (design 460 §4)")
+        ordinal = self._admit_ordinal
+        self._admit_ordinal += 1
+        record = {
+            "record": "admit-crossing", "seq": self._seq, "phase": "begin",
+            "tier": "fenced", "call": {"receiver": receiver, "method": method},
+            "decisionId": self._admit_decision_id, "ordinal": ordinal,
+        }
+        self._seq += 1
+        self._write(record)
+        return ordinal
+
+    def record_fenced_crossing_complete(self, *, ordinal: int,
+                                        outcome: Any) -> dict:
+        """Journal a FENCED crossing's OUTCOME on completion (design 460 §4).
+
+        Its presence is the only evidence a fresh process has that the first
+        attempt RAN TO COMPLETION, so a re-apply serves `outcome` from here and
+        dispatches zero times ("no double-run of a fenced extern", §8). `outcome`
+        is what the body returned, redacted through the same funnel as any
+        durable value — a fenced crossing whose recorded args were `Secret[T]`
+        can still record its outcome, since the outcome is the body's return, not
+        the redacted argument (§9 open question 3). Paired to its `begin` by
+        `(decisionId, ordinal)`; requires an open decision window."""
+        if self._admit_decision_id is None:
+            raise ReplayError(
+                "record_fenced_crossing_complete outside a decision window — "
+                "call begin_decision first (design 460 §4)")
+        record = {
+            "record": "admit-crossing", "seq": self._seq, "phase": "complete",
+            "tier": "fenced", "outcome": _describe(outcome),
+            "decisionId": self._admit_decision_id, "ordinal": ordinal,
         }
         self._seq += 1
         self._write(record)
