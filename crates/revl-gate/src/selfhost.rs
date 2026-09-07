@@ -15,6 +15,7 @@ pub struct FnD {
     asyncParams: Vec<String>,
     body: Vec<Stmt>,
     cachePure: bool,
+    line: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -38,6 +39,7 @@ pub struct Stmt {
     bind: String,
     spawnTarget: String,
     awaited: bool,
+    line: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -78,6 +80,7 @@ pub struct CompD {
     iso: Vec<ProvKey>,
     routes: Vec<Route>,
     refuse: String,
+    line: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -184,6 +187,12 @@ pub struct AcqRoot {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Verd {
+    v: String,
+    line: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReachAcc {
     names: Vec<String>,
     hasReq: bool,
@@ -203,15 +212,16 @@ pub struct Prov3 {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct LinkR {
+pub struct G2R {
     provs: Vec<Prov3>,
-    msg: String,
+    refs: Vec<Verd>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EdgeR {
     succ: std::collections::HashMap<String, Vec<String>>,
     msg: String,
+    line: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -875,16 +885,16 @@ fn mk_step(p: Prog, i: i64) -> PStep {
     return PStep { pg: p.clone(), i: i };
 }
 
-fn mk_fnd(nm: String, em: bool, asy: bool, cs: Vec<String>, slots: Vec<i64>, aps: Vec<String>, bd: Vec<Stmt>) -> FnD {
-    return FnD { name: nm.clone(), isEmExtern: em, isAsyncExtern: asy, callees: cs.clone(), asyncSlots: slots.clone(), asyncParams: aps.clone(), body: bd.clone(), cachePure: false };
+fn mk_fnd(nm: String, em: bool, asy: bool, cs: Vec<String>, slots: Vec<i64>, aps: Vec<String>, bd: Vec<Stmt>, ln: i64) -> FnD {
+    return FnD { name: nm.clone(), isEmExtern: em, isAsyncExtern: asy, callees: cs.clone(), asyncSlots: slots.clone(), asyncParams: aps.clone(), body: bd.clone(), cachePure: false, line: ln };
 }
 
 fn mk_msig(nm: String, em: bool, cs: Vec<String>, asy: bool) -> MSig {
     return MSig { name: nm.clone(), isEm: em, caps: cs.clone(), isAsync: asy };
 }
 
-fn mk_compd(nm: String, pks: Vec<ProvKey>, pvs: Vec<Provide>, rq: Vec<Bind>, su: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, refuse: String) -> CompD {
-    return CompD { name: nm.clone(), provKeys: pks.clone(), provs: pvs.clone(), reqMap: rq.clone(), setup: su.clone(), iso: iso.clone(), routes: rts.clone(), refuse: refuse.clone() };
+fn mk_compd(nm: String, pks: Vec<ProvKey>, pvs: Vec<Provide>, rq: Vec<Bind>, su: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, refuse: String, ln: i64) -> CompD {
+    return CompD { name: nm.clone(), provKeys: pks.clone(), provs: pvs.clone(), reqMap: rq.clone(), setup: su.clone(), iso: iso.clone(), routes: rts.clone(), refuse: refuse.clone(), line: ln };
 }
 
 fn mk_provkey(k: String, r: String) -> ProvKey {
@@ -892,23 +902,23 @@ fn mk_provkey(k: String, r: String) -> ProvKey {
 }
 
 fn mkstmt(kind: String, e: Expr) -> Stmt {
-    return Stmt { kind: kind.clone(), e: e.clone(), bind: String::from(""), spawnTarget: String::from(""), awaited: false };
+    return Stmt { kind: kind.clone(), e: e.clone(), bind: String::from(""), spawnTarget: String::from(""), awaited: false, line: 0i64 };
 }
 
 fn mkstmtb(kind: String, e: Expr, bind: String) -> Stmt {
-    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from(""), awaited: false };
+    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from(""), awaited: false, line: 0i64 };
 }
 
 fn mkstmt_aw(kind: String, e: Expr, bind: String, aw: bool) -> Stmt {
-    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from(""), awaited: aw };
+    return Stmt { kind: kind.clone(), e: e.clone(), bind: bind.clone(), spawnTarget: String::from(""), awaited: aw, line: 0i64 };
 }
 
 fn mkstmt_spawn(bn: String, target: String) -> Stmt {
-    return Stmt { kind: String::from("effect"), e: int_lit0(), bind: bn.clone(), spawnTarget: target.clone(), awaited: false };
+    return Stmt { kind: String::from("effect"), e: int_lit0(), bind: bn.clone(), spawnTarget: target.clone(), awaited: false, line: 0i64 };
 }
 
 fn mkstmt_spawn_unbound(target: String) -> Stmt {
-    return Stmt { kind: String::from("spawn_unbound"), e: int_lit0(), bind: String::from(""), spawnTarget: target.clone(), awaited: false };
+    return Stmt { kind: String::from("spawn_unbound"), e: int_lit0(), bind: String::from(""), spawnTarget: target.clone(), awaited: false, line: 0i64 };
 }
 
 fn int_lit0() -> Expr {
@@ -1089,6 +1099,17 @@ fn append_stmts(a: Vec<Stmt>, bs: Vec<Stmt>) -> Vec<Stmt> {
     return out;
 }
 
+fn stamp_lines(ss: &[Stmt], ln: i64) -> Vec<Stmt> {
+    let mut out: Vec<Stmt> = vec![];
+    let mut i = 0i64;
+    while (i < ss.revl_length()) {
+        let s = (ss)[(i) as usize].clone();
+        out.push(Stmt { kind: s.kind.clone(), e: s.e.clone(), bind: s.bind.clone(), spawnTarget: s.spawnTarget.clone(), awaited: s.awaited, line: ln });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
 fn p_stmts(ts: Vec<Token>, lo: i64, hi: i64, acc: Vec<Stmt>) -> Vec<Stmt> {
     if ((lo >= hi) || atk(&ts, lo, "}")) {
         return acc;
@@ -1096,7 +1117,7 @@ fn p_stmts(ts: Vec<Token>, lo: i64, hi: i64, acc: Vec<Stmt>) -> Vec<Stmt> {
     let le = line_end(&ts, lo, hi);
     let r = p_stmt_run(ts.clone(), lo, le);
     let nx = if (r.i > lo) { r.i } else { le };
-    return p_stmts(ts.clone(), nx, hi, append_stmts(acc.clone(), r.ss.clone()));
+    return p_stmts(ts.clone(), nx, hi, append_stmts(acc.clone(), stamp_lines(&r.ss, tkc(&ts, lo).line)));
 }
 
 fn callee_name(tg: Expr) -> String {
@@ -1312,7 +1333,7 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
     }
-    return mk_step(push_fn(pg.clone(), mk_fnd(nm.clone(), isEm, isAsync, vec![], async_slots_of(&ps.ps), async_params_of(&ps.ps), vec![])), k);
+    return mk_step(push_fn(pg.clone(), mk_fnd(nm.clone(), isEm, isAsync, vec![], async_slots_of(&ps.ps), async_params_of(&ps.ps), vec![], tkc(&ts, i).line)), k);
 }
 
 fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
@@ -1331,7 +1352,7 @@ fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
         return PStep { pg: bad_prog(pg.clone(), String::from("unbalanced braces in fn body")), i: ts.revl_length() };
     }
     let body = p_stmts(ts.clone(), (rti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
-    return mk_step(push_fn(pg.clone(), FnD { name: nm.clone(), isEmExtern: false, isAsyncExtern: false, callees: body_callees(body.clone(), 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), body: body.clone(), cachePure: cachePure.clone() }), bend);
+    return mk_step(push_fn(pg.clone(), FnD { name: nm.clone(), isEmExtern: false, isAsyncExtern: false, callees: body_callees(body.clone(), 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), body: body.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line }), bend);
 }
 
 fn mk_meths(xs: Vec<MSig>, i: i64, ok: bool) -> MethsR {
@@ -1758,7 +1779,7 @@ fn p_component(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
         pks.push(mk_provkey((pkeys)[(pi) as usize].clone(), realm_of(&body.iso, &(pkeys)[(pi) as usize].clone(), 0i64)));
         pi = (pi).checked_add(1i64).expect("revl: Int overflow");
     }
-    return mk_step(push_comp(pg.clone(), mk_compd(nm.clone(), pks.clone(), body.provs.clone(), reqs.clone(), body.setup.clone(), body.iso.clone(), body.routes.clone(), body.refuse.clone())), end);
+    return mk_step(push_comp(pg.clone(), mk_compd(nm.clone(), pks.clone(), body.provs.clone(), reqs.clone(), body.setup.clone(), body.iso.clone(), body.routes.clone(), body.refuse.clone(), tkc(&ts, i).line)), end);
 }
 
 fn p_top(ts: Vec<Token>, i: i64, pg: Prog) -> Prog {
@@ -2497,6 +2518,58 @@ fn tagged(tag: &str, msg: &str) -> String {
     return (tag.revl_concat("|")).revl_concat(&msg);
 }
 
+fn no_verd() -> Verd {
+    return Verd { v: String::from(""), line: 0i64 };
+}
+
+fn mk_verd(v: String, line: i64) -> Verd {
+    return Verd { v: v.clone(), line: line };
+}
+
+fn pick_min(rs: &[Verd]) -> String {
+    if (rs.revl_length() == 0i64) {
+        return String::from("");
+    }
+    let mut best = (rs)[(0i64) as usize].clone();
+    let mut i = 1i64;
+    while (i < rs.revl_length()) {
+        if ((rs)[(i) as usize].clone().line < best.line) {
+            best = (rs)[(i) as usize].clone();
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return best.v;
+}
+
+fn append_verds(a: Vec<Verd>, b: Vec<Verd>) -> Vec<Verd> {
+    let mut out = a;
+    let mut i = 0i64;
+    while (i < b.revl_length()) {
+        out.push((b)[(i) as usize].clone());
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn refusal_line(ss: &[Stmt], i: i64, cx: Ctx, a: Ac) -> i64 {
+    if (i >= ss.revl_length()) {
+        return 0i64;
+    }
+    let na = walk_one_stmt((ss)[(i) as usize].clone(), cx.clone(), a.clone());
+    if (na.msg != "") {
+        return (ss)[(i) as usize].clone().line;
+    }
+    return refusal_line(ss, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), na.clone());
+}
+
+fn body_line(ss: &[Stmt], cx: Ctx, fallback: i64) -> i64 {
+    let ln = refusal_line(ss, 0i64, cx.clone(), empty_ac());
+    if (ln == 0i64) {
+        return fallback;
+    }
+    return ln;
+}
+
 fn passed_async_verdict(svcName: &str, mname: &str, a: Ac, cx: Ctx) -> String {
     if (a.avals.revl_length() == 0i64) {
         return String::from("");
@@ -3106,22 +3179,32 @@ fn acq_body(ss: &[Stmt], i: i64) -> String {
     return acq_body(ss, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
-fn check_fn_acquire(fns: &[FnD], reached: &[String], i: i64) -> String {
+fn fnd_line(fns: &[FnD], n: &str, i: i64) -> i64 {
+    if (i >= fns.revl_length()) {
+        return 0i64;
+    }
+    if ((fns)[(i) as usize].clone().name == n) {
+        return (fns)[(i) as usize].clone().line;
+    }
+    return fnd_line(fns, n, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn check_fn_acquire(fns: &[FnD], reached: &[String], i: i64) -> Verd {
     if (i >= reached.revl_length()) {
-        return String::from("");
+        return no_verd();
     }
     let n = (reached)[(i) as usize].clone();
     let hit = acq_body(&fnd_body(fns, &n, 0i64), 0i64);
     if (hit != "") {
         let dot = hit.revl_index_of(".");
-        return tagged("G4", &host_acquire_msg(&(hit.revl_slice(0i64, dot.clone())), &(hit.revl_slice((dot).checked_add(1i64).expect("revl: Int overflow"), hit.revl_length())), &host_acquire_release(&(hit.revl_slice(0i64, dot.clone())), &(hit.revl_slice((dot).checked_add(1i64).expect("revl: Int overflow"), hit.revl_length()))), &((String::from("`fn ").revl_concat(&n)).revl_concat("`, which a component body reaches"))));
+        return mk_verd(tagged("G4", &host_acquire_msg(&(hit.revl_slice(0i64, dot.clone())), &(hit.revl_slice((dot).checked_add(1i64).expect("revl: Int overflow"), hit.revl_length())), &host_acquire_release(&(hit.revl_slice(0i64, dot.clone())), &(hit.revl_slice((dot).checked_add(1i64).expect("revl: Int overflow"), hit.revl_length()))), &((String::from("`fn ").revl_concat(&n)).revl_concat("`, which a component body reaches")))), fnd_line(fns, &n, 0i64));
     }
     return check_fn_acquire(fns, reached, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
-fn check_reachable_fn_acquire(pg: Prog) -> String {
+fn check_reachable_fn_acquire(pg: Prog) -> Verd {
     if ((pg.comps.revl_length() == 0i64) || (pg.fns.revl_length() == 0i64)) {
-        return String::from("");
+        return no_verd();
     }
     let seed = comps_called(pg.comps.clone(), 0i64, vec![]);
     return check_fn_acquire(&pg.fns, &sort_strs(&reached_fns(&pg.fns, &seed)), 0i64);
@@ -3139,18 +3222,18 @@ fn fn_a1_verdict(f: FnD, base: Ctx) -> String {
     return String::from("");
 }
 
-fn check_module_fns(fns: &[FnD], i: i64, base: Ctx) -> String {
+fn first_module_fn(fns: &[FnD], i: i64, base: Ctx) -> Verd {
     if (i >= fns.revl_length()) {
-        return String::from("");
+        return no_verd();
     }
     let v = fn_a1_verdict((fns)[(i) as usize].clone(), base.clone());
     if (v != "") {
-        return v;
+        return mk_verd(v.clone(), (fns)[(i) as usize].clone().line);
     }
-    return check_module_fns(fns, (i).checked_add(1i64).expect("revl: Int overflow"), base.clone());
+    return first_module_fn(fns, (i).checked_add(1i64).expect("revl: Int overflow"), base.clone());
 }
 
-fn check_cache_fns(fns: &[FnD]) -> String {
+fn check_cache_fns(fns: &[FnD]) -> Verd {
     let mut has_cache = false;
     let mut n = 0i64;
     while (n < fns.revl_length()) {
@@ -3160,7 +3243,7 @@ fn check_cache_fns(fns: &[FnD]) -> String {
         n = (n).checked_add(1i64).expect("revl: Int overflow");
     }
     if (!has_cache) {
-        return String::from("");
+        return no_verd();
     }
     let caps = emit_caps_reach(fns, true);
     let mut i = 0i64;
@@ -3168,24 +3251,24 @@ fn check_cache_fns(fns: &[FnD]) -> String {
         let f = (fns)[(i) as usize].clone();
         let crossed = sort_strs(&caps_of(caps.clone(), f.name.clone()));
         if (f.cachePure && (crossed.revl_length() > 0i64)) {
-            return tagged("G4", &((((String::from("the reach of fn `").revl_concat(&f.name)).revl_concat("` crosses ")).revl_concat(&(crossed)[(0i64) as usize].clone())).revl_concat(": a crossing result is not pure")));
+            return mk_verd(tagged("G4", &((((String::from("the reach of fn `").revl_concat(&f.name)).revl_concat("` crosses ")).revl_concat(&(crossed)[(0i64) as usize].clone())).revl_concat(": a crossing result is not pure"))), f.line);
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
-    return String::from("");
+    return no_verd();
 }
 
-fn check_component(comp: CompD, cx: Ctx) -> String {
+fn check_component(comp: CompD, cx: Ctx) -> Verd {
     let setupAlias = alias_in(&comp.setup, 0i64, cx.handles.clone(), std::collections::HashMap::new());
     let setupArrows = arrows_in(&comp.setup, 0i64, std::collections::HashMap::new());
     let scx = ctx_arrows(ctx_alias(cx.clone(), setupAlias.clone()), setupArrows.clone());
     let sa = walk_stmts(&comp.setup, 0i64, scx.clone(), empty_ac());
     if (sa.msg != "") {
-        return tagged(&sa.tag, &sa.msg);
+        return mk_verd(tagged(&sa.tag, &sa.msg), body_line(&comp.setup, scx.clone(), comp.line));
     }
     let sA1 = stmt_a1_verdict(comp.clone(), &comp.setup, 0i64, scx.clone());
     if (sA1 != "") {
-        return tagged("A1", &sA1);
+        return mk_verd(tagged("A1", &sA1), comp.line);
     }
     let pcx = cx.clone();
     let mut pi = 0i64;
@@ -3197,33 +3280,33 @@ fn check_component(comp: CompD, cx: Ctx) -> String {
             let pm = (pv.methods)[(mi) as usize].clone();
             let decl = find_msig(dsvc.clone(), &pm.name, 0i64);
             if ((decl.name != "") && (pm.isAsync != decl.isAsync)) {
-                return tagged("A1", &async_sig_msg(&pv.key, &pm.name, &pv.svcName, pm.isAsync, decl.isAsync));
+                return mk_verd(tagged("A1", &async_sig_msg(&pv.key, &pm.name, &pv.svcName, pm.isAsync, decl.isAsync)), comp.line);
             }
             let mcx = ctx_arrows(ctx_alias(pcx.clone(), alias_in(&pm.body, 0i64, pcx.handles.clone(), setupAlias.clone())), arrows_in(&pm.body, 0i64, setupArrows.clone()));
             let a = walk_stmts(&pm.body, 0i64, mcx.clone(), empty_ac());
             if (a.msg != "") {
-                return tagged(&a.tag, &a.msg);
+                return mk_verd(tagged(&a.tag, &a.msg), body_line(&pm.body, mcx.clone(), comp.line));
             }
             if (((decl.name != "") && (!decl.isAsync)) && has_await(&pm.body, 0i64)) {
-                return tagged("A1", "`await` is only allowed in a component body");
+                return mk_verd(tagged("A1", "`await` is only allowed in a component body"), comp.line);
             }
             if (decl.name != "") {
                 let g4 = g4_verdict(&pv.svcName, &pm.name, decl.clone(), a.clone());
                 if (g4 != "") {
-                    return tagged("G4", &g4);
+                    return mk_verd(tagged("G4", &g4), comp.line);
                 }
                 let pa = passed_async_verdict(&pv.svcName, &pm.name, a.clone(), cx.clone());
                 if (pa != "") {
-                    return tagged("A1", &pa);
+                    return mk_verd(tagged("A1", &pa), comp.line);
                 }
                 let a1 = a1_verdict(&pv.svcName, &pm.name, decl.clone(), a.clone(), cx.clone());
                 if (a1 != "") {
-                    return tagged("A1", &a1);
+                    return mk_verd(tagged("A1", &a1), comp.line);
                 }
             }
             let leak = leaky_body(&pm.body, 0i64, pcx.clone(), true);
             if (leak != "") {
-                return tagged("A1", &leak);
+                return mk_verd(tagged("A1", &leak), comp.line);
             }
             mi = (mi).checked_add(1i64).expect("revl: Int overflow");
         }
@@ -3231,9 +3314,9 @@ fn check_component(comp: CompD, cx: Ctx) -> String {
     }
     let su = setup_async_verdict(comp.clone(), &comp.setup, scx.clone(), cx.clone());
     if (su != "") {
-        return tagged("A1", &su);
+        return mk_verd(tagged("A1", &su), comp.line);
     }
-    return String::from("");
+    return no_verd();
 }
 
 fn stmt_spawns(ss: Vec<Stmt>, i: i64, acc: Vec<String>) -> Vec<String> {
@@ -3470,13 +3553,13 @@ fn bounds_comp(comp: CompD, cx: Ctx, closed: std::collections::HashMap<String, V
     return String::from("");
 }
 
-fn check_spawn_bounds(comps: &[CompD], ci: i64, cx: Ctx, closed: std::collections::HashMap<String, Vec<String>>) -> String {
+fn check_spawn_bounds(comps: &[CompD], ci: i64, cx: Ctx, closed: std::collections::HashMap<String, Vec<String>>) -> Verd {
     if (ci >= comps.revl_length()) {
-        return String::from("");
+        return no_verd();
     }
     let r = bounds_comp((comps)[(ci) as usize].clone(), cx.clone(), closed.clone());
     if (r != "") {
-        return r;
+        return mk_verd(tagged("G4", &r), (comps)[(ci) as usize].clone().line);
     }
     return check_spawn_bounds(comps, (ci).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), closed.clone());
 }
@@ -3498,13 +3581,13 @@ fn atten_comp(comp: CompD, base: std::collections::HashMap<String, Vec<String>>,
     return String::from("");
 }
 
-fn check_spawn_atten(comps: &[CompD], ci: i64, base: std::collections::HashMap<String, Vec<String>>, closed: std::collections::HashMap<String, Vec<String>>) -> String {
+fn check_spawn_atten(comps: &[CompD], ci: i64, base: std::collections::HashMap<String, Vec<String>>, closed: std::collections::HashMap<String, Vec<String>>) -> Verd {
     if (ci >= comps.revl_length()) {
-        return String::from("");
+        return no_verd();
     }
     let r = atten_comp((comps)[(ci) as usize].clone(), base.clone(), closed.clone());
     if (r != "") {
-        return r;
+        return mk_verd(tagged("G4", &r), (comps)[(ci) as usize].clone().line);
     }
     return check_spawn_atten(comps, (ci).checked_add(1i64).expect("revl: Int overflow"), base.clone(), closed.clone());
 }
@@ -3558,23 +3641,23 @@ fn spawn_form_comp(comp: CompD, names: &[String]) -> String {
     return String::from("");
 }
 
-fn check_spawn(pg: Prog, cx: Ctx) -> String {
+fn check_spawn(pg: Prog, cx: Ctx) -> Verd {
     let edges = spawn_edges(&pg.comps);
     if (edges.revl_length() == 0i64) {
-        return String::from("");
+        return no_verd();
     }
     let emisClosed = surf_closure(emis_surface_map(&pg.comps, cx.clone()), &edges);
     let bv = check_spawn_bounds(&pg.comps, 0i64, cx.clone(), emisClosed.clone());
-    if (bv != "") {
-        return tagged("G4", &bv);
+    if (bv.v != "") {
+        return bv;
     }
     let reachBase = reach_surface_map(&pg.comps);
     let reachClosed = surf_closure(reachBase.clone(), &edges);
     let av = check_spawn_atten(&pg.comps, 0i64, reachBase.clone(), reachClosed.clone());
-    if (av != "") {
-        return tagged("G4", &av);
+    if (av.v != "") {
+        return av;
     }
-    return String::from("");
+    return no_verd();
 }
 
 fn non_template_comps(comps: &[CompD], templates: &[String]) -> Vec<CompD> {
@@ -3606,27 +3689,35 @@ fn realm_where(rlm: &str) -> String {
     return (String::from(" in realm `").revl_concat(&rlm)).revl_concat("`");
 }
 
-fn scan_prov_keys(comp: CompD, pks: Vec<ProvKey>, ki: i64, acc: Vec<Prov3>) -> LinkR {
-    if (ki >= pks.revl_length()) {
-        return LinkR { provs: acc.clone(), msg: String::from("") };
+fn comp_line(comps: &[CompD], name: &str, i: i64) -> i64 {
+    if (i >= comps.revl_length()) {
+        return 1i64;
     }
-    let pk = (pks)[(ki) as usize].clone();
-    let first = find_provider(&acc, &pk.key, &pk.rlm, 0i64);
-    if (first != "") {
-        return LinkR { provs: acc.clone(), msg: (((((((String::from("provision conflict: key `").revl_concat(&pk.key)).revl_concat("`")).revl_concat(&realm_where(&pk.rlm))).revl_concat(" is provided by both ")).revl_concat(&first)).revl_concat(" and ")).revl_concat(&comp.name)).revl_concat(" (G2)") };
+    if ((comps)[(i) as usize].clone().name == name) {
+        return (comps)[(i) as usize].clone().line;
     }
-    return scan_prov_keys(comp.clone(), pks.clone(), (ki).checked_add(1i64).expect("revl: Int overflow"), acc.revl_push(Prov3 { key: pk.key.clone(), rlm: pk.rlm.clone(), comp: comp.name.clone() }));
+    return comp_line(comps, name, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
-fn g2_scan(comps: Vec<CompD>, ci: i64, provs: Vec<Prov3>) -> LinkR {
+fn collect_g2_keys(comp: CompD, pks: Vec<ProvKey>, ki: i64, provs: Vec<Prov3>, refs: Vec<Verd>) -> G2R {
+    if (ki >= pks.revl_length()) {
+        return G2R { provs: provs.clone(), refs: refs.clone() };
+    }
+    let pk = (pks)[(ki) as usize].clone();
+    let first = find_provider(&provs, &pk.key, &pk.rlm, 0i64);
+    if (first != "") {
+        let msg = (((((((String::from("provision conflict: key `").revl_concat(&pk.key)).revl_concat("`")).revl_concat(&realm_where(&pk.rlm))).revl_concat(" is provided by both ")).revl_concat(&first)).revl_concat(" and ")).revl_concat(&comp.name)).revl_concat(" (G2)");
+        return collect_g2_keys(comp.clone(), pks.clone(), (ki).checked_add(1i64).expect("revl: Int overflow"), provs.clone(), refs.revl_push(mk_verd(tagged("G2", &msg), comp.line)));
+    }
+    return collect_g2_keys(comp.clone(), pks.clone(), (ki).checked_add(1i64).expect("revl: Int overflow"), provs.revl_push(Prov3 { key: pk.key.clone(), rlm: pk.rlm.clone(), comp: comp.name.clone() }), refs.clone());
+}
+
+fn collect_g2(comps: Vec<CompD>, ci: i64, provs: Vec<Prov3>, refs: Vec<Verd>) -> G2R {
     if (ci >= comps.revl_length()) {
-        return LinkR { provs: provs.clone(), msg: String::from("") };
+        return G2R { provs: provs.clone(), refs: refs.clone() };
     }
-    let r = scan_prov_keys((comps)[(ci) as usize].clone(), (comps)[(ci) as usize].clone().provKeys, 0i64, provs.clone());
-    if (r.msg != "") {
-        return r;
-    }
-    return g2_scan(comps.clone(), (ci).checked_add(1i64).expect("revl: Int overflow"), r.provs.clone());
+    let r = collect_g2_keys((comps)[(ci) as usize].clone(), (comps)[(ci) as usize].clone().provKeys, 0i64, provs.clone(), refs.clone());
+    return collect_g2(comps.clone(), (ci).checked_add(1i64).expect("revl: Int overflow"), r.provs.clone(), r.refs.clone());
 }
 
 fn succ_of(succ: std::collections::HashMap<String, Vec<String>>, name: String) -> Vec<String> {
@@ -3654,7 +3745,7 @@ fn route_edges(rlms: &[String], ri: i64, key: &str, cname: String, provs: &[Prov
 
 fn scan_reqs(comp: CompD, provs: &[Prov3], keys: &[String], ki: i64, succ: std::collections::HashMap<String, Vec<String>>) -> EdgeR {
     if (ki >= keys.revl_length()) {
-        return EdgeR { succ: succ.clone(), msg: String::from("") };
+        return EdgeR { succ: succ.clone(), msg: String::from(""), line: 0i64 };
     }
     let key = (keys)[(ki) as usize].clone();
     if routes_has(&comp.routes, &key, 0i64) {
@@ -3662,7 +3753,7 @@ fn scan_reqs(comp: CompD, provs: &[Prov3], keys: &[String], ki: i64, succ: std::
     }
     let provider = find_provider(provs, &key, &realm_of(&comp.iso, &key, 0i64), 0i64);
     if (provider == comp.name) {
-        return EdgeR { succ: succ.clone(), msg: (((String::from("component ").revl_concat(&comp.name)).revl_concat(" requires a key it provides itself (`")).revl_concat(&key)).revl_concat("`) (G3)") };
+        return EdgeR { succ: succ.clone(), msg: (((String::from("component ").revl_concat(&comp.name)).revl_concat(" requires a key it provides itself (`")).revl_concat(&key)).revl_concat("`) (G3)"), line: comp.line };
     }
     if (provider != "") {
         return scan_reqs(comp.clone(), provs, keys, (ki).checked_add(1i64).expect("revl: Int overflow"), add_edge(succ.clone(), provider.clone(), comp.name.clone()));
@@ -3672,7 +3763,7 @@ fn scan_reqs(comp: CompD, provs: &[Prov3], keys: &[String], ki: i64, succ: std::
 
 fn build_edges(comps: &[CompD], ci: i64, provs: &[Prov3], succ: std::collections::HashMap<String, Vec<String>>) -> EdgeR {
     if (ci >= comps.revl_length()) {
-        return EdgeR { succ: succ.clone(), msg: String::from("") };
+        return EdgeR { succ: succ.clone(), msg: String::from(""), line: 0i64 };
     }
     let comp = (comps)[(ci) as usize].clone();
     let keys = sort_strs(&bind_names(comp.reqMap.clone(), 0i64, vec![]));
@@ -3775,36 +3866,29 @@ fn route_comp_scan(rts: &[Route], i: i64, cname: &str, provs: &[Prov3]) -> Strin
     return route_comp_scan(rts, (i).checked_add(1i64).expect("revl: Int overflow"), cname, provs);
 }
 
-fn route_scan(comps: &[CompD], ci: i64, provs: &[Prov3]) -> String {
+fn collect_routes(comps: Vec<CompD>, ci: i64, provs: Vec<Prov3>, refs: Vec<Verd>) -> Vec<Verd> {
     if (ci >= comps.revl_length()) {
-        return String::from("");
+        return refs;
     }
-    let r = route_comp_scan(&(comps)[(ci) as usize].clone().routes, 0i64, &(comps)[(ci) as usize].clone().name, provs);
-    if (r != "") {
-        return r;
-    }
-    return route_scan(comps, (ci).checked_add(1i64).expect("revl: Int overflow"), provs);
+    let r = route_comp_scan(&(comps)[(ci) as usize].clone().routes, 0i64, &(comps)[(ci) as usize].clone().name, &provs);
+    let refs2 = if (r != "") { refs.revl_push(mk_verd(tagged("ROUTE", &r), (comps)[(ci) as usize].clone().line)) } else { refs.clone() };
+    return collect_routes(comps.clone(), (ci).checked_add(1i64).expect("revl: Int overflow"), provs.clone(), refs2);
 }
 
-fn link_g2_g3(pg: Prog) -> String {
+fn link_refusals(pg: Prog) -> Vec<Verd> {
     let live = non_template_comps(&pg.comps, &spawn_templates(&pg.comps));
-    let g2 = g2_scan(live.clone(), 0i64, vec![]);
-    if (g2.msg != "") {
-        return tagged("G2", &g2.msg);
-    }
-    let rv = route_scan(&live, 0i64, &g2.provs);
-    if (rv != "") {
-        return tagged("ROUTE", &rv);
-    }
+    let g2 = collect_g2(live.clone(), 0i64, vec![], vec![]);
+    let mut refs = g2.refs;
+    refs = collect_routes(live.clone(), 0i64, g2.provs.clone(), refs.clone());
     let edges = build_edges(&live, 0i64, &g2.provs, std::collections::HashMap::new());
     if (edges.msg != "") {
-        return tagged("G3", &edges.msg);
+        refs.push(mk_verd(tagged("G3", &edges.msg), edges.line));
     }
     let cyc = find_cycle(&live, 0i64, edges.succ.clone(), std::collections::HashMap::new());
     if (cyc.revl_length() > 0i64) {
-        return tagged("G3", &((String::from("dependency cycle: ").revl_concat(&arrow_join(&cyc))).revl_concat(" (G3)")));
+        refs.push(mk_verd(tagged("G3", &((String::from("dependency cycle: ").revl_concat(&arrow_join(&cyc))).revl_concat(" (G3)"))), comp_line(&live, &(cyc)[(0i64) as usize].clone(), 0i64)));
     }
-    return String::from("");
+    return refs;
 }
 
 fn foreign_names() -> Vec<String> {
@@ -4306,6 +4390,52 @@ fn too_deep_msg() -> String {
     return format!("expression nesting is deeper than the parser's limit of {} levels", (nesting_limit()).to_string());
 }
 
+fn collect_refusals(ts: &[Token], pg: Prog) -> Vec<Verd> {
+    let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(ts));
+    let cachev = check_cache_fns(&pg.fns);
+    if (cachev.v != "") {
+        return vec![cachev.clone()];
+    }
+    let acq = check_reachable_fn_acquire(pg.clone());
+    if (acq.v != "") {
+        return vec![acq.clone()];
+    }
+    let mf = first_module_fn(&pg.fns, 0i64, base.clone());
+    if (mf.v != "") {
+        return vec![mf.clone()];
+    }
+    let mut refs: Vec<Verd> = vec![];
+    let cnames = comp_names(pg.comps.clone(), 0i64, vec![]);
+    let mut ci = 0i64;
+    while (ci < pg.comps.revl_length()) {
+        let comp = (pg.comps)[(ci) as usize].clone();
+        if (comp.refuse != "") {
+            refs.push(mk_verd(comp.refuse.clone(), comp.line));
+        } else {
+            let sf = spawn_form_comp(comp.clone(), &cnames);
+            if (sf != "") {
+                refs.push(mk_verd(sf.clone(), comp.line));
+            } else {
+                let cx = ctx_for(base.clone(), comp.clone());
+                let v = check_component(comp.clone(), cx.clone());
+                if (v.v != "") {
+                    refs.push(v.clone());
+                }
+            }
+        }
+        ci = (ci).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let sv = check_spawn(pg.clone(), base.clone());
+    if (sv.v != "") {
+        refs.push(sv.clone());
+    }
+    let boots = boot_names(ts);
+    if (boots.revl_length() > 1i64) {
+        refs.push(mk_verd(tagged("BOOT", &(String::from("a composition declares at most one `boot` component, found ").revl_concat(&join_comma(&boots, 0i64, String::from(""))))), comp_line(&pg.comps, &(boots)[(1i64) as usize].clone(), 0i64)));
+    }
+    return append_verds(refs.clone(), link_refusals(pg.clone()));
+}
+
 pub fn admit_src(src: String) -> String {
     let ts = lex_src(src.clone());
     let fgn = foreign_scan_ts(&ts);
@@ -4319,46 +4449,36 @@ pub fn admit_src(src: String) -> String {
     if (pg.bad != "") {
         return tagged("BAD", &pg.bad);
     }
-    let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(&ts));
-    let cachev = check_cache_fns(&pg.fns);
-    if (cachev != "") {
-        return cachev;
+    return pick_min(&collect_refusals(&ts, pg.clone()));
+}
+
+pub fn admit_all(src: String) -> String {
+    let ts = lex_src(src.clone());
+    let fgn = foreign_scan_ts(&ts);
+    if (fgn != "") {
+        return fmt_all(&(vec![mk_verd(tagged("FOREIGN", &fgn), 0i64)]));
     }
-    let acq = check_reachable_fn_acquire(pg.clone());
-    if (acq != "") {
-        return acq;
+    if (nesting_depth(&ts) > nesting_limit()) {
+        return fmt_all(&(vec![mk_verd(tagged("BAD", &too_deep_msg()), 0i64)]));
     }
-    let fnv = check_module_fns(&pg.fns, 0i64, base.clone());
-    if (fnv != "") {
-        return fnv;
+    let pg = parse_prog_ts(ts.clone());
+    if (pg.bad != "") {
+        return fmt_all(&(vec![mk_verd(tagged("BAD", &pg.bad), 0i64)]));
     }
-    let cnames = comp_names(pg.comps.clone(), 0i64, vec![]);
-    let mut ci = 0i64;
-    while (ci < pg.comps.revl_length()) {
-        let comp = (pg.comps)[(ci) as usize].clone();
-        if (comp.refuse != "") {
-            return comp.refuse;
+    return fmt_all(&collect_refusals(&ts, pg.clone()));
+}
+
+fn fmt_all(rs: &[Verd]) -> String {
+    let mut out = String::from("");
+    let mut i = 0i64;
+    while (i < rs.revl_length()) {
+        if (i > 0i64) {
+            out.push_str("\\n");
         }
-        let sf = spawn_form_comp(comp.clone(), &cnames);
-        if (sf != "") {
-            return sf;
-        }
-        let cx = ctx_for(base.clone(), comp.clone());
-        let v = check_component(comp.clone(), cx.clone());
-        if (v != "") {
-            return v;
-        }
-        ci = (ci).checked_add(1i64).expect("revl: Int overflow");
+        out = ((out.revl_concat(&((rs)[(i) as usize].clone().line).to_string())).revl_concat("|")).revl_concat(&(rs)[(i) as usize].clone().v);
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
-    let sv = check_spawn(pg.clone(), base.clone());
-    if (sv != "") {
-        return sv;
-    }
-    let boots = boot_names(&ts);
-    if (boots.revl_length() > 1i64) {
-        return tagged("BOOT", &(String::from("a composition declares at most one `boot` component, found ").revl_concat(&join_comma(&boots, 0i64, String::from("")))));
-    }
-    return link_g2_g3(pg.clone());
+    return out;
 }
 
 pub fn admit_tag(src: String) -> String {
