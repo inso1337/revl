@@ -26,6 +26,7 @@ third-party imports) and a handful of short-lived containers, all labelled
 """
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -530,6 +531,38 @@ def test_the_seam_canary_probes_seam_isolation_and_dns():
     assert "revl-sb-plc-relay" in script and "15001" in script
     assert "172.17.0.9" in script
     assert "example.com" in script and "host.docker.internal" in script
+
+
+def test_the_seam_canary_is_a_parseable_posix_shell_program():
+    # Regression for #670. The seam probe is a full Python program carrying
+    # double-quoted string literals (print("SEAM=closed:%s(%s:%s)" ...)). It has
+    # to be transported as a single shell-quoted argument to `python3 -c`; the
+    # earlier `python3 -c "{probe}"` interpolation let those inner double quotes
+    # terminate the shell word and exposed the trailing text (parentheses, %s) as
+    # shell syntax, so the `sh -c` program the transport runs failed to parse.
+    # Safe/default target values are enough to exercise the defect.
+    script = _sb.seam_canary_script(
+        [("revl-sb-plc-relay", 15001)], ("172.17.0.9", 15001))
+
+    # `sh -n` parses the program without running it: this is the load-bearing
+    # check. The old interpolation kept the double quotes balanced overall, so
+    # the shell simply re-paired them and the exposed `(` became syntax — `sh -n`
+    # exits non-zero on it, where a substring assertion would still pass.
+    proc = subprocess.run(["sh", "-n"], input=script,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, (
+        "generated seam canary is not a parseable POSIX shell program:\n"
+        + proc.stderr)
+
+    # shlex.split tokenises it the way the shell splits words; with the probe
+    # transported as one shell-quoted argument it comes back as a single token,
+    # carrying every inner double quote intact rather than being torn apart.
+    tokens = shlex.split(script)
+    probe = next(t for t in tokens if "SEAM=closed" in t)
+    assert 'print("SEAM=closed:%s(%s:%s)" % (e, host, port))' in probe
+    assert "socket.getaddrinfo(name, None)" in probe
+    assert "['revl-sb-plc-relay', 15001]" in probe
+    assert "['172.17.0.9', 15001]" in probe
 
 
 def _seam_report(**over):
