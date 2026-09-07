@@ -48,7 +48,7 @@ def _run(case, base):
 
 
 @pytest.mark.parametrize("case", [
-    "binding", "late", "unsupported", "legacy", "symlinks", "lifetime",
+    "binding", "late", "unsupported", "stat-capabilities", "legacy", "symlinks", "lifetime",
     "pre-effect", "leaf-open", "preimage-mkdir", "preimage-copy",
     "write-syscall", "pre-inverse", "inverse-stat", "inverse-replace",
     "rm-syscall", "move-syscall", "mkdir-syscall", "unlink-inverse",
@@ -340,7 +340,23 @@ def _binding_cases(case, base, ws):
                 patch.setattr(os, "supports_dir_fd", set())
                 with pytest.raises(ConfinementError, match="ENOTSUP"):
                     bind()
+            for capability in ("supports_dir_fd", "supports_follow_symlinks"):
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(os, capability, getattr(os, capability) - {os.stat})
+                    with pytest.raises(ConfinementError, match="ENOTSUP"):
+                        bind()
             bind()  # Refused attempts must not leave partial binding state.
+        elif case == "stat-capabilities":
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(os, "supports_dir_fd", os.supports_dir_fd - {os.lstat})
+                bind()
+                (root / ws.GARBAGE_DIRNAME).symlink_to(other, target_is_directory=True)
+                (root / ws.PREIMAGE_DIRNAME).symlink_to(
+                    other / "missing", target_is_directory=True)
+                for sidecar in (ws.garbage_dir, ws.preimage_dir):
+                    with pytest.raises(ConfinementError, match="EOUTSIDE"):
+                        sidecar()
+                assert not list(other.iterdir())
         elif case == "legacy":
             os.environ[ws.WORKSPACE_ENV] = str(root)
             assert ws.resolve_within("file") == str(root / "file")
@@ -401,7 +417,8 @@ if __name__ == "__main__":
     from revl.fs_workspace import bind_workspace_root
     import revl_fs_workspace as ws
     assert bind_workspace_root is ws.bind_workspace_root
-    if case in ("binding", "late", "unsupported", "legacy", "symlinks", "lifetime"):
+    if case in ("binding", "late", "unsupported", "stat-capabilities",
+                "legacy", "symlinks", "lifetime"):
         result = _binding_cases(case, base, ws)
     else:
         result = _race(case, base, ws)

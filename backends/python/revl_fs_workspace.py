@@ -393,7 +393,7 @@ def bind_workspace_root(root_fd: int, expected_dev: int, expected_ino: int,
             raise ConfinementError(
                 "EBOUND", "workspace binding must precede all filesystem use "
                 "and cannot be repeated", _sanitized(root_label))
-        required = (os.open, os.stat, os.lstat, os.mkdir, os.unlink, os.rmdir,
+        required = (os.open, os.stat, os.mkdir, os.unlink, os.rmdir,
                     os.rename)
         if (not _O_DIRECTORY or not _O_NOFOLLOW
                 or any(fn not in os.supports_dir_fd for fn in required)
@@ -928,7 +928,7 @@ def _sidecar_dir_real(kind: str, create: bool) -> str:
             except FileExistsError:
                 pass
         try:
-            st = os.lstat(name, dir_fd=rootfd)
+            st = os.stat(name, dir_fd=rootfd, follow_symlinks=False)
         except FileNotFoundError:
             # not created yet and we were told not to create it: nothing can
             # legitimately live inside it, so name the (absent) directory.
