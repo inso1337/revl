@@ -7,7 +7,20 @@ import (
 	stc "github.com/0xdenny218/stc-go"
 )
 
-func drive(t *testing.T) (*stc.Context, map[string]*stc.Fiber) {
+// drive loads the three isolated worker realms plus the Router component and
+// returns a routing proxy over them.
+//
+// item 449 / #596: the Router's hand-written `provide worker { … }` body was
+// dropped (a routes-carrying component that also provides the routed key is now
+// refused — the body would be silently discarded at load). The routed key is
+// therefore NOT registered as a root single-realm service any more; the emitted
+// `realms(...)` routing proxy (`revlRouterRouterWorker`) is the sanctioned
+// realization of the route. The harness constructs that proxy directly — it
+// lives in this same `emitted` package — and exercises the real routed call
+// through it, exactly as the Router's own emitted Apply body does
+// (`worker := newRevlRouterRouterWorker(ctx)`). Loading the Router fiber and
+// awaiting Ready still proves the sanctioned header-only shape loads cleanly.
+func drive(t *testing.T) (*stc.Context, map[string]*stc.Fiber, *revlRouterRouterWorker) {
 	t.Helper()
 	root := stc.New()
 	g := stdctx.Background()
@@ -22,24 +35,20 @@ func drive(t *testing.T) (*stc.Context, map[string]*stc.Fiber) {
 			t.Fatalf("ready %s: %v", f.Name(), err)
 		}
 	}
-	return root, fibers
+	return root, fibers, newRevlRouterRouterWorker(root)
 }
 
-func routerCall(t *testing.T, root *stc.Context, req string) string {
+func routerCall(t *testing.T, router *revlRouterRouterWorker, req string) string {
 	t.Helper()
-	w, err := stc.Service[Worker](root, _keyWorker)
-	if err != nil {
-		t.Fatalf("resolve router: %v", err)
-	}
-	return w.Call(req)
+	return router.Call(req)
 }
 
 func TestGoRouterRoundRobin(t *testing.T) {
-	root, _ := drive(t)
+	root, _, router := drive(t)
 	defer root.Close()
 	got := []string{
-		routerCall(t, root, "a"), routerCall(t, root, "b"), routerCall(t, root, "c"),
-		routerCall(t, root, "d"), routerCall(t, root, "e"), routerCall(t, root, "f"),
+		routerCall(t, router, "a"), routerCall(t, router, "b"), routerCall(t, router, "c"),
+		routerCall(t, router, "d"), routerCall(t, router, "e"), routerCall(t, router, "f"),
 	}
 	want := []string{"w1:a", "w2:b", "w3:c", "w1:d", "w2:e", "w3:f"}
 	for i := range want {
@@ -50,7 +59,7 @@ func TestGoRouterRoundRobin(t *testing.T) {
 }
 
 func TestGoRouterFailover(t *testing.T) {
-	root, fibers := drive(t)
+	root, fibers, router := drive(t)
 	defer root.Close()
 	g := stdctx.Background()
 	fibers["W2"].Dispose()
@@ -60,7 +69,7 @@ func TestGoRouterFailover(t *testing.T) {
 	// six calls now skip the withdrawn w2 — only survivors serve, no fallback
 	// to the router's own root provision (that would be an infinite self-route).
 	for i := 0; i < 6; i++ {
-		r := routerCall(t, root, "x")
+		r := routerCall(t, router, "x")
 		if r == "w2:x" {
 			t.Fatalf("call %d resolved to withdrawn w2: %q", i, r)
 		}
@@ -71,20 +80,21 @@ func TestGoRouterFailover(t *testing.T) {
 }
 
 func TestGoRouterG2SingleProvider(t *testing.T) {
-	root, _ := drive(t)
+	root, _, router := drive(t)
 	defer root.Close()
-	// downstream resolves exactly one provider of the bare key (the Router).
-	w, err := stc.Service[Worker](root, _keyWorker)
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
+	// item 449 / #596 (G2): under the sanctioned router shape the bare key is
+	// realized ONLY through the emitted `realms(...)` proxy — there is no
+	// hand-written provide body, so the routed key is NOT registered as a root
+	// single-realm service (resolving it must fail). The proxy is the single
+	// routing realization downstream sees, and calling it still routes across
+	// the worker realms.
+	if _, err := stc.Service[Worker](root, _keyWorker); err == nil {
+		t.Fatalf("bare key resolved as a root single-realm service; " +
+			"under item-449 the routed key is realized only via the proxy")
 	}
-	// The Router provides the bare key through its own provide impl, which
-	// forwards to the embedded router struct — so downstream sees exactly ONE
-	// provider (G2), and calling it still routes across the worker realms.
-	if _, ok := w.(*Router_worker); !ok {
-		t.Fatalf("bare key resolves to %T, want *Router_worker (the sole provider)", w)
-	}
-	if got := w.Call("g2"); got != "w1:g2" {
-		t.Fatalf("single provider routed to %q, want w1:g2", got)
+	// The sole routing realization is the emitted proxy, which routes the bare
+	// key across the worker realms (first selection is w1 under round_robin).
+	if got := router.Call("g2"); got != "w1:g2" {
+		t.Fatalf("single routing proxy routed to %q, want w1:g2", got)
 	}
 }
