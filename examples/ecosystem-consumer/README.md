@@ -73,6 +73,41 @@ The three files under `candidates/` are worked examples, not decoration:
 | `leaky_tool.rvl` | refused | `requires`s a service nothing in the file provides — an agent proposing a dependency it was never granted |
 | `draft_tool.rvl` | refused, code `T3` | compiles as a checkable draft (a typed hole is legal to write) but is refused by the SAME admission gate `revl run` applies — proof that `admit` is the real admission decision, not `compile_source` alone |
 
+## `compile_gate.py` — the programmatic-compile half of the surface
+
+`ci_gate.py` above uses the ADMIT half of `revl.gate` (a verdict). The promised
+surface also carries `compile_to(source, tier)`, which returns that same verdict
+*plus*, on admission, the emitted target source for a reference backend.
+`compile_gate.py` is the sibling consumer that uses it:
+
+```
+python compile_gate.py candidates/ --tier py --out dist/
+```
+
+Walks `candidates/*.rvl`, compiles each to the chosen `--tier`, and gates the
+EMIT decision on the SAME verdict `ci_gate.py` gates `REGISTER` on: it writes
+real target source under `--out` **only for an admission**, prints `REFUSE
+<code> — <message>` for a refusal, and writes nothing for one. The asymmetric
+contract is identical, one field wider:
+
+- a **refusal** is authoritative — `emit.output` is `None`, there is no target
+  source to write, and nothing is emitted, written, or run for the candidate;
+- an **admission plus emitted `output`** is a compile-time judgment scoped to
+  `gate_version()['frontier']`, **not** a guarantee the emitted program is safe
+  to run unwitnessed — this project stops at "wrote it for a human/operator to
+  review", never executing what it emits;
+- an **unknown `--tier`** is a control verdict (`UNKNOWN_TIER`), fail closed, so
+  a bad tier can never be mistaken for an emission.
+
+`draft_tool.rvl` (the typed-hole draft) is the sharp case: it *compiles* as a
+checkable draft but may never run, so `compile_to` refuses it with the same
+`T3` admission diagnostic `admit` gives and emits nothing — `compile_to` never
+emits target source `admit` would refuse. `tests/test_gate_consumer_compile.py`
+runs this script against a freshly assembled, isolated copy of the packaged
+`revl` (emitters shipped inside it as `revl/backends`, the installed-wheel
+layout), proving the compile surface works as a dependency, not an in-tree
+import.
+
 ## The versioning obligation this project honors
 
 `VerdictCache` in `ci_gate.py` keys every stored verdict on the full

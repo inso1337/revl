@@ -246,6 +246,7 @@ def compile_to(source: str, tier: str) -> "Emit":
     deferred here."""
     from .compiler import compile_source  # noqa: PLC0415
     from .errors import RevlError  # noqa: PLC0415
+    from .holes import refuse_admission  # noqa: PLC0415
 
     if _tier_dir(tier) is None:
         return Emit(Verdict(False, code="UNKNOWN_TIER",
@@ -253,11 +254,23 @@ def compile_to(source: str, tier: str) -> "Emit":
                                      f"(known: {', '.join(_KNOWN_TIERS)})")))
     try:
         ir = compile_source(source)
+        # The SAME admission gate `admit` applies (`refuse_admission`): a draft
+        # with an open hole COMPILES — so the checker can verdict the parts an
+        # author HAS written — but may never run, so there is nothing to lower.
+        # `compile_to` must therefore REFUSE it with the reference admission
+        # diagnostic (T3) and `output = None`, fail closed, matching `admit` and
+        # this function's own contract ("on refusal `output` is None and the
+        # verdict carries the reference refusal"). Emitting stays inside the try
+        # so the backend emitter's own hole backstop (and any other reference
+        # refusal raised while lowering) becomes a fail-closed verdict rather
+        # than an uncaught error escaping this boundary — and `compile_to` never
+        # emits target source `admit` would refuse.
+        refuse_admission(ir)
+        output = _emit_for_tier(ir, tier)
     except RevlError as error:
         return Emit(_verdict_from_error(error))
     except Exception as error:  # noqa: BLE001 — see `_verdict_from_fault`
         return Emit(_verdict_from_fault(error))
-    output = _emit_for_tier(ir, tier)
     return Emit(Verdict(True), output=output)
 
 
