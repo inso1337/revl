@@ -3209,14 +3209,16 @@ class Session:
         """Write a WAL record naming the hit and the miss crossing it re-delivers
         (design laundering point 5: hits are on the record). Best-effort — a
         session with no WAL still counts the hit in `state()` (the `cacheHits`
-        counter), it just has no durable audit line."""
+        counter), it just has no durable audit line. The record names the
+        recorded grant ids the entry's liveness is bound to, so the audit joins
+        the hit to the same authority a miss would have consumed."""
         wal = self._approval_wal()
         if wal is None:
             return
         recorder = getattr(wal, "record_cache_hit", None)
         if callable(recorder):
-            recorder({"key": key, "method": method,
-                      "grantIds": entry.get("grantIds") or []})
+            recorder(key=key, method=method,
+                     grant_ids=entry.get("grantIds") or [])
 
     def _drain_pending_admits(self) -> None:
         """Wire every turn admitted (and queued) during the call that just
