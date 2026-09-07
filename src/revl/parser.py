@@ -646,6 +646,16 @@ class ComponentDecl:
     # declares no boot component is byte-identical through parse, IR and every
     # emitted tier (docs/environment-binding.md).
     boot: bool = False
+    # item 477 (follow-up 1): the DECLARED liveness ceiling for this activation —
+    # the operator-visible silence bound a hung provider is measured against. A
+    # duration literal (`liveness <dur>` in the header, the `cache ... ttl` shape),
+    # stored as milliseconds, `None` when no clause is written. Lowered to the
+    # additive IR key `liveness_ceiling_ms`; refused by an admission G-rule when
+    # declared on an activation that cannot hang (no emission or host-call reach).
+    # None for every component that declares no ceiling, so those stay
+    # byte-identical through parse, IR and every emitter
+    # (docs/design/477-liveness-expiry.md, Follow-up 1).
+    liveness_ms: int | None = None
 
 
 # --- item 426 S1: composition rows (docs/design/426-composition-layers.md) --
@@ -2563,13 +2573,19 @@ class Parser:
         return CacheClause(cls, tuple(invalidated_by), ttl_ms, line)
 
     def _cache_duration(self) -> int:
-        """A `ttl` duration in the clause slot — `<n>[ms|s|m|h]`, bare number
-        seconds. The rvl lexer has no duration token, so `5m` arrives as an `int`
+        """A `ttl` duration in the clause slot — see :meth:`_duration_literal`."""
+        return self._duration_literal(what="a `ttl` duration count (an integer)")
+
+    def _duration_literal(self, what: str) -> int:
+        """A duration literal in a clause slot — `<n>[ms|s|m|h]`, bare number
+        seconds, returned as milliseconds. Shared by the `cache ... ttl` clause
+        and the item-477 `liveness` ceiling so the two duration surfaces cannot
+        drift. The rvl lexer has no duration token, so `5m` arrives as an `int`
         `5` then the `ident` `m`, and `500ms` as `int 500` then `ident ms`. The
         value is funnelled through `policy._parse_ttl` so the source surface and
         the policy-string surface cannot drift (design §`ttl`)."""
         from . import policy  # noqa: PLC0415 - lazy, avoids an import cycle
-        ntok = self.expect("int", what="a `ttl` duration count (an integer)")
+        ntok = self.expect("int", what=what)
         unit = ""
         if self.at("ident") and self.peek().value in ("ms", "s", "m", "h"):
             unit = self.next().value
@@ -2867,6 +2883,23 @@ class Parser:
                     self.next()
                 else:
                     break
+        # item 477 (follow-up 1): an optional `liveness <dur>` header clause — the
+        # declared silence ceiling for this activation. Contextual: recognised only
+        # in this trailing header slot (after requires/provides, before `{`), so
+        # `liveness` used as an ordinary name elsewhere is untouched and the lexer
+        # KEYWORDS set is unchanged. Mirrors the `cache ... ttl` duration surface.
+        liveness_ms: int | None = None
+        if self.at("ident", "liveness"):
+            lline = self.next().line
+            liveness_ms = self._duration_literal(what="a `liveness` ceiling")
+            if liveness_ms <= 0:
+                raise self.err(
+                    lline,
+                    "a `liveness` ceiling must be a positive duration",
+                    hint="the ceiling is the silence a hung provider is measured "
+                         "against; a non-positive ceiling can never expire, so it "
+                         "is a no-op worth refusing — drop it or give a real bound "
+                         "(docs/design/477-liveness-expiry.md)")
         self.expect("{")
         config: list[ConfigField] = []
         body: list = []
@@ -2882,7 +2915,8 @@ class Parser:
                 body.append(self.stmt(in_method=False))
         self.expect("}")
         return ComponentDecl(name, config, requires, provides, body, line,
-                             require_carry=require_carry, boot=boot)
+                             require_carry=require_carry, boot=boot,
+                             liveness_ms=liveness_ms)
 
     # -- item 426 S1: the composition document -----------------------------
 
