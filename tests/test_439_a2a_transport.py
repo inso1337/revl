@@ -251,3 +251,112 @@ def test_on_failure_result_needs_result_str_str(tmp_path):
     assert "on_failure(result)" in message
     assert "`Result[T, E]`" in message
     assert "`ask` returns" in message
+
+
+# ----------------------------------------- the returned value is `Untrusted[T]`
+
+# A consumer of the remote `Agent` that feeds the reply straight into an
+# authority sink — a `Trusted[Str]` shell command. Nothing here knows or cares
+# that `agent` is remote (D-424c.1); the taint qualifier on the synthesized
+# crossing is what makes the difference visible to the checker.
+SINK_CONSUMER = """
+service Agent {
+  emission fn ask(question: Str) -> Str
+}
+service Shell {
+  emission fn go(q: Str) -> Str
+}
+extern emission[shell] fn run_cmd(cmd: Trusted[Str]) -> Str = @py { return "" }
+component ShellSvc requires agent: Agent provides shell: Shell {
+  provide shell {
+    fn go(q) {
+      let answer = emit agent.ask(q)
+      let out = emit run_cmd(answer)
+      return out
+    }
+  }
+}
+"""
+
+TAINT_BASE = """
+composition Net {
+  use "services.rvl"
+  row @shell from "services.rvl" provides shell
+  remote @agent provides agent: Agent
+    at host("agent.example:8443")
+    through a2a
+}
+"""
+
+
+def test_the_synthesized_crossing_returns_untrusted(tmp_path):
+    """Item 424 D-424c.9, slice C3: every value a remote provider returns is
+    `Untrusted[T]`. The synthesized `through a2a` extern declares it, so the
+    checker propagates the taint to every consumer of the key."""
+    text = _synth_source(tmp_path, WITHDRAW)
+    assert "fn remote_agent_ask(question: Str) -> Untrusted[Str]" in text
+    assert "EVERY RETURNED VALUE IS `Untrusted[T]`" in text
+
+
+def test_a_remote_a2a_result_cannot_reach_an_authority_sink(tmp_path):
+    """The C3 exit test on the A2A wire: a client result flowing into an
+    outbound emission is refused (G9) without an `endorse`. A generated client
+    looks exactly like a local provider at every call site, so the taint
+    qualifier is what keeps a remote value from reaching a `Trusted[T]` sink
+    invisibly."""
+    write(tmp_path, services=SINK_CONSUMER, base=TAINT_BASE)
+    with pytest.raises(RevlError) as excinfo:
+        compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+    message = str(excinfo.value)
+    assert "untrusted value (net)" in message
+    assert "G9" in message
+
+
+def test_an_endorse_on_the_flow_path_admits_the_remote_a2a_result(tmp_path):
+    """...and admits with one. An `endorse[net]` granted on the operation and
+    written on the data-flow path is the audited, policy-forbiddable downgrade
+    that lets the vetted remote value reach the sink."""
+    consumer = SINK_CONSUMER.replace(
+        "emission fn go(q: Str) -> Str",
+        "emission endorse[net] fn go(q: Str) -> Str").replace(
+        "emit run_cmd(answer)",
+        'emit run_cmd(endorse[net](answer, reason = "operator vetted"))')
+    write(tmp_path, services=consumer, base=TAINT_BASE)
+    document = compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+    assert document is not None
+
+
+def test_the_result_wire_taints_the_whole_result(tmp_path):
+    """`on_failure(result)` returns `Result[Str, Str]`; the reply object crossed
+    the boundary, so the whole thing is `Untrusted[Result[Str, Str]]` (the
+    fail-closed reading, and the shape a top-level `Untrusted[...]` source
+    registers). The `Err` carries a locally-minted diagnostic, but marking it
+    untrusted only over-fences it — never under-fences the peer's `Ok`."""
+    base = TAINT_BASE.replace("through a2a", "through a2a\n    on_failure(result)")
+    services = """
+service Agent {
+  emission fn ask(question: Str) -> Result[Str, Str]
+}
+service Shell {
+  emission fn go(q: Str) -> Str
+}
+extern emission[shell] fn sink_r(r: Trusted[Result[Str, Str]]) -> Str
+  = @py { return "" }
+component ShellSvc requires agent: Agent provides shell: Shell {
+  provide shell {
+    fn go(q) {
+      let r = emit agent.ask(q)
+      let out = emit sink_r(r)
+      return out
+    }
+  }
+}
+"""
+    write(tmp_path, services=services, base=base)
+    row = next(r for r in resolve(tmp_path).rows if r.label == "agent")
+    text = resolve(tmp_path).sources[row.source]
+    assert ("fn remote_agent_ask(question: Str) -> "
+            "Untrusted[Result[Str, Str]]" in text)
+    with pytest.raises(RevlError) as excinfo:
+        compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+    assert "untrusted value (net)" in str(excinfo.value)
