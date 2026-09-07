@@ -7,14 +7,18 @@ Mapping (DESIGN.md §7, docs/design-v2-realms.md, docs/syntax-2.0.md):
 
 - service     -> `public interface <Name> { <ret> <m>(<params>); }`
 - component   -> `public final class <Name>Plugin implements Plugin { apply(ctx) }`
-- requires    -> `ctx.get(<Svc>.class)` (manifest load order guarantees the
-                 provider is already active)
-- provides    -> `ctx.provide(ServiceKey.of(<Svc>.class), new <Impl>(...))`
+- requires    -> `ctx.get(<Svc>.class, "<key>")` (manifest load order
+                 guarantees the provider is already active). The provision key
+                 is part of the lookup: when two providers share one service
+                 type, the required key selects the right one (the same routing
+                 the go/rust/py tiers do — a require binds the provision named
+                 by its key, not merely the first provider of the class).
+- provides    -> `ctx.provide(ServiceKey.of(<Svc>.class, "<key>"), new <Impl>(...))`
 - effect/undo -> `Context.EffectScope` (`ctx.effect()`) + `fx.track(...)`;
                  pure v1 components keep the byte-identical
                  `Disposables.composite(...)` teardown path
 - isolate     -> `ctx = ctx.isolate(<Svc>.class, <realm>)`
-- intercept   -> `ctx.intercept(ServiceKey.of(<Svc>.class), <metadata>)`
+- intercept   -> `ctx.intercept(ServiceKey.of(<Svc>.class, "<key>"), <metadata>)`
 - types       -> static final record classes / sealed variant interfaces
 - functions   -> `public static` methods on `Components`
 - match       -> Java 21 pattern `switch` expressions (no `default` when the
@@ -5164,8 +5168,8 @@ def _emit_component_stmts(
                    for f in _provider_config_fields(component)]
             )
             out.append(
-                f"{pad}fx.track(ctx.provide(ServiceKey.of({service}.class), "
-                f"new {struct}({ctor_args})));"
+                f"{pad}fx.track(ctx.provide(ServiceKey.of({service}.class, "
+                f"{_string(key)}), new {struct}({ctor_args})));"
             )
         elif kind == "if":
             out.append(f"{pad}if ({_expr(step['cond'], v3_ctx, None, env)}) {{")
@@ -5470,7 +5474,8 @@ def _emit_component_modern(
     for key, metadata in intercept.items():
         service = env.reqs[key]
         out.append(
-            f"        ctx.intercept(ServiceKey.of({service}.class), {_metadata_lit(metadata)});"
+            f"        ctx.intercept(ServiceKey.of({service}.class, {_string(key)}), "
+            f"{_metadata_lit(metadata)});"
         )
     out.append("        Context.EffectScope fx = ctx.effect();")
     if needs_frame:
@@ -5485,7 +5490,7 @@ def _emit_component_modern(
             out.append(f"        {service} {local} = "
                        f"new RevlRouter{cname}{_camel(local)}(ctx);")
             continue
-        out.append(f"        {service} {local} = ctx.get({service}.class);")
+        out.append(f"        {service} {local} = ctx.get({service}.class, {_string(local)});")
     # A8 self-revert: cordis4j's ctx.effect() scope is NOT owned by the
     # fiber until apply returns it, so a failing activation must dispose
     # the accumulated effects itself before the failure routes to the
@@ -5637,7 +5642,7 @@ def _emit_component(
     out.append("    @Override")
     out.append("    public Disposable apply(Context ctx) {")
     for local, service in env.reqs.items():
-        out.append(f"        {service} {local} = ctx.get({service}.class);")
+        out.append(f"        {service} {local} = ctx.get({service}.class, {_string(local)});")
     # A8 self-revert: undos accumulate as the steps land; if a later step
     # throws mid-activation, the accumulated inverses run (reverse order)
     # before the failure routes to the runtime — cordis4j only owns what
@@ -5670,8 +5675,8 @@ def _emit_component(
             # modern path tracks it via fx.track(ctx.provide(...)); dropping
             # it would leave the provision registered after unload.
             out.append(
-                f"            undos.add(ctx.provide(ServiceKey.of({service}.class), "
-                f"new {struct}({ctor_args})));"
+                f"            undos.add(ctx.provide(ServiceKey.of({service}.class, "
+                f"{_string(key)}), new {struct}({ctor_args})));"
             )
             disposers.append(key)
         else:
