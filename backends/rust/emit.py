@@ -87,8 +87,26 @@ _RUST_RESERVED = {
     "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct",
     "super", "trait", "true", "type", "unsafe", "use", "where", "while",
     "async", "await", "dyn",
+    # Reserved-for-future-use keywords (the Rust Reference, "Keywords"): rustc
+    # rejects a binding, fn, type or field named one of these even though no
+    # feature uses it yet, so a valid revl identifier that lands on one is a
+    # LOUD host-compiler failure the frontend and emitter both accept (#552 B1).
+    # `gen` is reserved under edition 2024, which the emitted crate targets.
+    "abstract", "become", "box", "do", "final", "macro", "override", "priv",
+    "typeof", "unsized", "virtual", "try", "yield", "gen",
 }
 _EMITTER_RESERVED = {"ctx", "config", "root", "plugin"}
+
+# Rust prelude / cordis names a user *type* must not shadow: the emitter's own
+# scaffolding spells them as bare tokens (`Vec<..>`, `String`, `Box<dyn ..>`,
+# `Option<..>`, `serde_json::Value`, the `Send` bound), so a user type that
+# emitted `struct String { .. }` or `enum Option { .. }` would shadow the
+# prelude/import the surrounding module relies on and break the whole crate
+# (#552 B2). Reserved only at the type-name position (`role == "type name"`):
+# a field, local or param of the same spelling is fine and is left alone.
+# `Self` is already a keyword in `_RUST_RESERVED`.
+_RUST_TYPE_RESERVED = frozenset(
+    {"Vec", "String", "Box", "Option", "Send", "Value"})
 
 # Method names that collide with Rust's `Drop::drop` destructor must be renamed.
 _METHOD_RENAMES = {"drop": "drop_"}
@@ -1198,7 +1216,7 @@ def _split_generic(inner: str) -> list[str]:
     return parts
 
 
-def _mangle(name: str) -> str:
+def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     """Rename a syntactically-valid identifier that collides with a *Rust*
     reserved word (`fn`, `impl`, `match`, `struct`, `move`, …) so a valid revl
     identifier that happens to be a Rust keyword emits and RUNS instead of
@@ -1235,10 +1253,15 @@ def _mangle(name: str) -> str:
     checker.rvl has a `ctx` field and a `ctx` local). Escaping the user name to
     `ctx_`, which the emitter never emits raw, moves it clear of the scaffolding
     rather than refusing the program, and keeps the reservation: the emitter's
-    internal `ctx` still owns the bare `ctx` token."""
+    internal `ctx` still owns the bare `ctx` token.
+
+    `extra` is an additional, position-specific reserved set folded into the
+    same injective ladder (#552 B2): a type name passes `_RUST_TYPE_RESERVED`
+    so `String` -> `String_` and `String_` -> `String__` stay distinct, while
+    every other position passes the empty set and is unchanged."""
     root = name
     while root:
-        if root in _RUST_RESERVED or root in _EMITTER_RESERVED:
+        if root in _RUST_RESERVED or root in _EMITTER_RESERVED or root in extra:
             return name + "_"
         if not root.endswith("_"):
             break
@@ -1249,7 +1272,11 @@ def _mangle(name: str) -> str:
 def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not _IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
-    return _mangle(name)
+    # A user type must not shadow a Rust prelude / cordis name the emitted
+    # module spells as a bare token (#552 B2). Only the type-name position
+    # reserves them; a field/local/param of the same spelling is left alone.
+    extra = _RUST_TYPE_RESERVED if role == "type name" else frozenset()
+    return _mangle(name, extra)
 
 
 def _snake(name: str) -> str:
@@ -1259,6 +1286,18 @@ def _snake(name: str) -> str:
             out.append("_")
         out.append(ch.lower())
     return "".join(out)
+
+
+def _snake_fn(name: str) -> str:
+    """The module-level plugin function name for a component: `_snake` re-run
+    through `_mangle` so a component whose snake-case form is a Rust keyword
+    (`Loop` -> `loop`, `Type` -> `type`) emits `pub fn loop_()` and is called as
+    `loop_()`, not the `pub fn loop()` rustc rejects (#552 B2). The string
+    LOOKUP key (`plugin_by_name`, `_revl_load`, `_revl_isolate_ctx`) stays the
+    raw `_snake` value — the logical component name — so only the emitted
+    identifier moves, and the `pub fn` definition and every call site pass
+    through here and stay consistent."""
+    return _mangle(_snake(name))
 
 
 def _camel(name: str) -> str:
@@ -3716,7 +3755,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     uses_await = _component_uses_await(component)
     plugin_fn = "cordis::plugin_async::<{0}, _, _>" if uses_await else "cordis::plugin_sync::<{0}, _>"
     closure = "        |ctx, config| async move {" if uses_await else "        |ctx, config| {"
-    out.append(f"pub fn {snake}() -> cordis::PluginHandle {{")
+    out.append(f"pub fn {_snake_fn(name)}() -> cordis::PluginHandle {{")
     out.append(f"    {plugin_fn.format(config_ty)}(")
     out.append(f"        {_string(name)},")
     out.append(f"        cordis::{inject},")
@@ -4015,7 +4054,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     uses_await = _component_uses_await(component)
     plugin_fn = "cordis::plugin_async::<{0}, _, _>" if uses_await else "cordis::plugin_sync::<{0}, _>"
     closure = "        |ctx, config| async move {" if uses_await else "        |ctx, config| {"
-    out.append(f"pub fn {snake}() -> cordis::PluginHandle {{")
+    out.append(f"pub fn {_snake_fn(name)}() -> cordis::PluginHandle {{")
     out.append(f"    {plugin_fn.format(config_ty)}(")
     out.append(f"        {_string(name)},")
     out.append(f"        cordis::{inject},")
@@ -5033,11 +5072,18 @@ class _V3Ctx:
     def constructor(self, name: str, args: list[str]) -> str:
         adt = self.case_adt.get(name)
         if adt is not None:
+            # `case_adt` stores the RAW enum name (type inference at
+            # `_infer_type` reads it back against the raw `types` keys); the
+            # emitted `Enum::Case` prefix must match the DEFINITION, which ran
+            # the enum name through `_ident(.., "type name")`, so mangle here
+            # too — otherwise an enum shadowing a Rust prelude name (or keyword)
+            # emits `Option::Foo` against a `pub enum Option_` (#552 B2).
+            enum = _ident(adt, "type name")
             payload = self.case_payload.get(name)
             if payload is None:
                 if args:
                     raise EmitError(f"`{name}` takes no payload")
-                return f"{adt}::{name}"
+                return f"{enum}::{name}"
             if len(args) != 1:
                 raise EmitError(f"`{name}` takes exactly one payload argument")
             arg = args[0]
@@ -5045,7 +5091,7 @@ class _V3Ctx:
                 # recursive payload -> the variant holds `Box<Payload>` (E0072);
                 # move the constructed payload onto the heap to match.
                 arg = f"Box::new({arg})"
-            return f"{adt}::{name}({arg})"
+            return f"{enum}::{name}({arg})"
         if name == "None":
             if args:
                 raise EmitError("`None` takes no arguments")
@@ -5065,7 +5111,7 @@ class _V3Ctx:
         bind = arm.get("bind")
         adt = self.case_adt.get(pattern)
         if adt is not None:
-            prefix = f"{adt}::{pattern}"
+            prefix = f"{_ident(adt, 'type name')}::{pattern}"
         elif pattern in _V3_BUILTIN_CONSTRUCTORS:
             prefix = pattern
         elif pattern in self.case_adt:
@@ -5135,7 +5181,7 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         if name in ctx.case_adt:
             adt = ctx.case_adt.get(name)
             if adt is not None:
-                return f"{adt}::{mangled}"
+                return f"{_ident(adt, 'type name')}::{mangled}"
             raise EmitError(f"ambiguous ADT case name {name!r}")
         if name in _V3_BUILTIN_CONSTRUCTORS:
             return name
@@ -5625,7 +5671,7 @@ def _v3_spawn(node: dict, ctx: _V3Ctx, rename: dict[str, str]) -> str:
         cfg_expr = f"{cfg_ty} {{ {fields}..Default::default() }}"
     else:
         cfg_expr = "()"
-    plug_fn = _snake(target)
+    plug_fn = _snake_fn(target)
     return (
         "{ let __revl_sctx = " + isolate_chain + "; "
         f"let __revl_fiber = __revl_sctx.plugin({plug_fn}(), {cfg_expr}); "
@@ -6755,7 +6801,19 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
 def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> list[str]:
     ctx = _V3Ctx(types, functions, externs)
     out: list[str] = []
-    used: set[str] = set()
+    # A `#[test] fn <slug>` shares the module namespace with every top-level
+    # `fn` and extern (both emit a bare `fn <name>`), so a test slug equal to a
+    # function or extern name defines that name twice — rustc E0428 (#552 B7).
+    # Seed the taken-name set with those emitted names so a colliding slug is
+    # bumped (`slug_1`) exactly as a slug colliding with an earlier slug is.
+    # Non-colliding programs are byte-identical: the seed only matters when a
+    # slug actually equals one of these names.
+    used: set[str] = {
+        _ident(fn.get("name"), "function name") for fn in functions or []
+    }
+    used |= {
+        _ident(ext.get("name"), "extern name") for ext in externs or []
+    }
     for test in tests:
         if test.get("lifecycle"):
             # lifecycle tests are emitted by _emit_v3_lifecycle_tests — their
@@ -7927,7 +7985,7 @@ def _emit_bridge(ir: dict) -> list[str]:
     out.append("    match name {")
     for component in components:
         snake = _snake(component["name"])
-        out.append(f'        "{snake}" => Some({snake}()),')
+        out.append(f'        "{snake}" => Some({_snake_fn(component["name"])}()),')
     out.append("        _ => None,")
     out.append("    }")
     out.append("}")
@@ -7971,7 +8029,7 @@ def _emit_bridge(ir: dict) -> list[str]:
         out.append(f'            let ctx = _revl_isolate_ctx(ctx, "{snake}");')
         if fields:
             out.append(f'            let _c = config.get("{pascal}").cloned().unwrap_or(serde_json::Value::Null);')
-            out.append(f"            Some(ctx.plugin({snake}(), {pascal}Config {{")
+            out.append(f"            Some(ctx.plugin({_snake_fn(pascal)}(), {pascal}Config {{")
             for field in fields:
                 fname = _ident(field.get("name"), "config field")
                 ftype = _rust_type(field.get("type"))
@@ -7992,7 +8050,7 @@ def _emit_bridge(ir: dict) -> list[str]:
                     out.append(f"                {fname}: {default},")
             out.append("            }))")
         else:
-            out.append(f"            Some(ctx.plugin({snake}(), ()))")
+            out.append(f"            Some(ctx.plugin({_snake_fn(pascal)}(), ()))")
         out.append("        },")
     out.append("        _ => None,")
     out.append("    }")

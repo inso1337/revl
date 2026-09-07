@@ -324,7 +324,31 @@ _JAVA_RESERVED = {
     "strictfp", "super", "switch", "synchronized", "this", "throw", "throws",
     "transient", "try", "void", "volatile", "while", "var", "record", "yield",
 }
-_EMITTER_RESERVED = {"ctx", "config", "root"}
+# Names the emitter's OWN scaffolding spells as bare tokens: a user identifier
+# of the same name is emitted alongside them and collides at javac time even
+# though the frontend and emitter both accept it (#552 B3). `_ident` refuses
+# such a name (a clean emit-time error) instead of letting it reach javac; the
+# same set renames a top-level `fn`/extern of that name in `_fn_name`.
+#
+#   ctx/config/root  the plugin closure's `(ctx, config)` params and `root`
+#   fx/frame/undos   the effect-scope local (`Context.EffectScope fx`), the
+#                    transactional `RevlFrame frame`, and the acquire-step
+#                    `ArrayList<Disposable> undos` — a config field or local of
+#                    the same name shadows the scaffolding (the reported `fx`
+#                    config-field collision)
+#   _revlRoot/_revlLoaded  the lifecycle driver's context and fiber registry
+#   Components       the outer class every top-level `fn` is a static method of;
+#                    a nested user type of the same simple name is a javac error
+#   java.lang names  the unqualified prelude types the emitted module names
+#                    (`String`, `Object`, `Long`, …); a user type of the same
+#                    simple name shadows java.lang across the whole file
+_EMITTER_RESERVED = {
+    "ctx", "config", "root",
+    "fx", "frame", "undos", "_revlRoot", "_revlLoaded", "Components",
+    "String", "Object", "Long", "Double", "Integer", "Float", "Boolean",
+    "Byte", "Character", "Number", "Void", "Math", "System", "Thread",
+    "Runnable", "Error", "Exception",
+}
 
 
 class EmitError(ValueError):

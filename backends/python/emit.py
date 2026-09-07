@@ -185,6 +185,14 @@ _PY_AWAIT_LOCALS: set = set()       # async-typed parameter names of the body be
 _PY_IN_ASYNC: bool = False          # is the body being rendered an `async def`
 _PY_IN_ARROW: bool = False          # is the body being rendered inside an arrow (item 141/264)
 _PY_USES_AS_ASYNC: bool = False     # did any body need the `_revl_as_async` wrapper
+# The document's user variant case names (#552 B5). `None`/`Some` are the Opt
+# built-ins the emitter renders as host None / identity, but a user variant may
+# legitimately declare a case named `None` (`type Tri = Yes | No | None`): its
+# emitted class is `_mangle`d to `None_` and it must be matched with
+# `isinstance(x, None_)` and built as `None_(...)`, never collapsed to Python's
+# `None` singleton. A name is treated as the Opt built-in only when it is NOT
+# one of these user cases.
+_PY_ADT_CASES: set = set()
 
 
 def _py_yields_coroutine(node: Any, requires: Any = None,
@@ -1479,9 +1487,12 @@ class _ComponentEmitter:
             name = expr.get("name")
             # Opt is host-None/value: `Some(x)` is identity, `None` is Python
             # None. (Result Ok/Err are tagged now — built via the `adt` node.)
-            if name == "None":
+            # A user variant case of the same name (#552 B5) is NOT the Opt
+            # built-in: it falls through to `_ident`, which mangles it to its
+            # emitted class name (`None` -> `None_`).
+            if name == "None" and name not in _PY_ADT_CASES:
                 return "None"
-            if name == "Some":
+            if name == "Some" and name not in _PY_ADT_CASES:
                 return "(lambda _v: _v)"
             return _ident(name, f"{where}: variable")
         if kind == "field":
@@ -3062,17 +3073,20 @@ def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
         bind = arm.get("bind")
         # Opt is host-None/value (not a tagged class): Some/None discriminate
         # on None, and Some binds the scrutinee itself. Result/user ADTs are
-        # tagged (isinstance), binding the payload `.value`.
-        if pattern == "None":
+        # tagged (isinstance), binding the payload `.value`. A user variant
+        # case named `None`/`Some` (#552 B5) is a tagged class, NOT the Opt
+        # built-in, so it discriminates with `isinstance` against its emitted
+        # (`_mangle`d) class name — `isinstance(x, None_)`, never `x is None`.
+        if pattern == "None" and pattern not in _PY_ADT_CASES:
             cond = f"{head} is None"
-        elif pattern == "Some":
+        elif pattern == "Some" and pattern not in _PY_ADT_CASES:
             cond = f"{head} is not None"
             if bind:
                 body = bind_payload(bind, body, tmp, node)
         else:
             if bind:
                 body = bind_payload(bind, body, f"{tmp}.value", node)
-            cond = f"isinstance({head}, {pattern})"
+            cond = f"isinstance({head}, {_mangle(pattern)})"
         if rest is None:
             return f"({body} if {cond} else (_ for _ in ()).throw(TypeError('non-exhaustive match')))"
         return f"({body} if {cond} else {rest})"
@@ -3122,9 +3136,11 @@ def _expr(node: dict) -> str:
         return f"{case}({args})"
     if kind == "var":
         name = node["name"]
-        if name == "None":
+        # #552 B5: a user variant case named `None`/`Some` is not the Opt
+        # built-in; it falls through to `_mangle` (its emitted class name).
+        if name == "None" and name not in _PY_ADT_CASES:
             return "None"
-        if name == "Some":
+        if name == "Some" and name not in _PY_ADT_CASES:
             return "(lambda _v: _v)"  # Opt is host-None/value: Some is identity
         # A bare var reference may be a host root (`Map`) or a user local; only
         # the latter can be a Python keyword, and `_mangle` leaves the roots
@@ -4681,6 +4697,15 @@ def emit(ir: dict) -> str:
     # and so join the await-seed; a non-async extern still erases to a blocking
     # `def` and is deliberately absent.
     global _PY_COLORED_FNS, _PY_ASYNC_EXTERNS, _PY_ASYNC_SVC_OPS, _PY_USES_AS_ASYNC
+    global _PY_ADT_CASES
+    # #552 B5: every user variant case name, so the None/Some Opt built-ins are
+    # not applied to a same-named user case at construction or in a match.
+    _PY_ADT_CASES = {
+        case.get("name")
+        for spec in types.values() if spec.get("kind") == "variant"
+        for case in (spec.get("cases") or [])
+        if isinstance(case.get("name"), str)
+    }
     _PY_COLORED_FNS = {fn.get("name") for fn in functions if fn.get("async")}
     _PY_ASYNC_EXTERNS = {ext.get("name") for ext in externs if ext.get("async")}
     _PY_ASYNC_SVC_OPS = {
