@@ -78,6 +78,7 @@ from .distribute import distributability
 from .errors import RevlError
 from .estop import (HALTED_LINE, LATCH_ENV, TIERS_WITH_ESTOP, latch_path,
                     read_latch)
+from . import sandbox_runtime as _sb
 from .sandbox_runtime import resolve_driver as resolve_sandbox_driver
 from .sandbox_runtime import _OCI_ARCH_UNAME, accepted_uname
 
@@ -770,6 +771,255 @@ def mint_sandbox_seam_certs(cert_root: Path, participants, identity_of) -> dict:
     return out
 
 
+# The provider listen port every sandboxed provider binds inside its own
+# namespace (docs/design/411-seam-transport.md, "The decision"): the namespace
+# holds nothing but the relay, so a single fixed port is unambiguous.
+_SANDBOX_PROVIDER_PORT = 9443
+# The relay allocates one listener port per row from this base, deterministically
+# over the sorted seam set, so the table (and the boot summary) are reproducible.
+_RELAY_PORT_BASE = 15000
+
+
+def _unique_sandbox_seams(sandboxes: dict, processes: dict, requires: dict,
+                          provides: dict, owner: dict, backends: dict,
+                          remote_specs: dict, default_deadline) -> list[dict]:
+    """The de-duplicated directed seams that touch a sandboxed process, one per
+    (key, provider, consumer). `sandbox_seam_roles` yields each edge twice (from
+    each end's vantage); this folds them to one canonical row and drops the
+    `remote '<key>'` pseudo-provider (its transport lives in another
+    composition, not this relay). Sorted for determinism."""
+    seen: dict[tuple, dict] = {}
+    for pname in sorted(sandboxes):
+        for e in sandbox_seam_roles(pname, processes, requires, provides, owner,
+                                    backends, remote_specs, default_deadline):
+            if e.get("remote"):
+                continue
+            key = (e["key"], e["provider"], e["consumer"])
+            if key not in seen:
+                seen[key] = e
+    return [seen[k] for k in sorted(seen)]
+
+
+def sandbox_relay_table(placement_id: str, sandboxes: dict, processes: dict,
+                        requires: dict, provides: dict, owner: dict,
+                        backends: dict, remote_specs: dict,
+                        default_deadline) -> dict:
+    """The conductor-owned relay's forwarding table for one placement (item 411
+    T3), derived PURELY from the seam graph so it is reviewable and testable
+    without a daemon. Returns::
+
+        {"rows": [ {id, listen:{port|publish}, target:"name:port", direction},
+                   ... ],
+         "consumer_endpoints": {(consumer, key): {"via": ...}},
+         "networks": {pname: network_name}}
+
+    Each row is one direction of one seam (the three cases in the design):
+
+    * **sandboxed provider, host-side consumer** — the relay PUBLISHES a host
+      loopback port and forwards it to `<provider>:9443` on the provider's
+      network; the consumer dials `127.0.0.1:<host-port>`.
+    * **sandboxed consumer, host-side provider** — the relay listens on the
+      consumer's network and forwards to `host.docker.internal:<provider-port>`;
+      the consumer dials `<relay>:<port>`.
+    * **both sandboxed** — the relay listens on the consumer's network and
+      forwards to `<provider>:9443` on the provider's network.
+
+    Sandboxed endpoints are addressed by the process NAME (a network alias the
+    driver installs), never the random container name."""
+    relay = _sb_relay_name(placement_id)
+    edges = _unique_sandbox_seams(sandboxes, processes, requires, provides,
+                                  owner, backends, remote_specs, default_deadline)
+    networks = {p: _sb_network_name(placement_id, p) for p in sorted(sandboxes)}
+    rows: list[dict] = []
+    consumer_endpoints: dict[tuple, dict] = {}
+    port = _RELAY_PORT_BASE
+    for e in edges:
+        prov, cons, key = e["provider"], e["consumer"], e["key"]
+        prov_sb, cons_sb = prov in sandboxes, cons in sandboxes
+        rid = f"{key}:{prov}->{cons}"
+        if prov_sb and not cons_sb:
+            # host-side consumer dials 127.0.0.1:<published>; relay forwards to
+            # the sandboxed provider by network alias.
+            rows.append({"id": rid, "listen": {"publish": port},
+                         "target": f"{prov}:{_SANDBOX_PROVIDER_PORT}",
+                         "direction": "sandboxed-provider"})
+            consumer_endpoints[(cons, key)] = {
+                "via": "loopback", "host": "127.0.0.1", "port": port}
+        elif cons_sb and not prov_sb:
+            # sandboxed consumer dials <relay>:<port>; relay forwards to the host
+            # provider via host.docker.internal.
+            rows.append({"id": rid, "listen": {"port": port, "network": networks[cons]},
+                         "target": f"host.docker.internal:{port}",
+                         "direction": "sandboxed-consumer"})
+            consumer_endpoints[(cons, key)] = {
+                "via": "relay", "host": relay, "port": port}
+        else:  # both sandboxed
+            rows.append({"id": rid,
+                         "listen": {"port": port, "network": networks[cons]},
+                         "target": f"{prov}:{_SANDBOX_PROVIDER_PORT}",
+                         "direction": "both-sandboxed"})
+            consumer_endpoints[(cons, key)] = {
+                "via": "relay", "host": relay, "port": port}
+        port += 1
+    return {"rows": rows, "consumer_endpoints": consumer_endpoints,
+            "networks": networks, "relay": relay}
+
+
+# The conductor's approval listener port and the relay-row port base for the
+# approval channel (item 411 T5), kept disjoint from the seam-row range so a
+# placement's relay table never collides an approval row with a seam row.
+_APPROVAL_LISTEN_PORT = 16000
+_APPROVAL_RELAY_PORT_BASE = 16001
+
+
+def sandbox_class_c_processes(ir: dict, sandboxes: dict, processes: dict,
+                              provides: dict) -> set[str]:
+    """The sandboxed processes that can RAISE a class-(c) operation (item 246),
+    so only they get an approval row (item 411 T5). A class-(c) crossing is one
+    the operator must approve; a sandboxed process that reaches none needs no
+    channel out. Uses the same `ClassMap` fold the runtime consent path uses
+    (`distill.class_c_capabilities`), over every (key, method) the process
+    serves, and is guarded so a fold that cannot classify never breaks a
+    placement — it simply does not add a row."""
+    try:
+        from .mcp.approval import ClassMap  # noqa: PLC0415 - lazy, avoids cycle
+        cmap = ClassMap(ir)
+    except Exception:  # pragma: no cover - approval surface absent
+        return set()
+    out: set[str] = set()
+    for pname in sorted(sandboxes):
+        for key, iface in (provides.get(pname) or {}).items():
+            methods = _iface_methods(ir, iface)
+            for method in methods:
+                try:
+                    reach = cmap.classify_call(key, method)
+                except Exception:  # pragma: no cover - unclassifiable call
+                    reach = None
+                if reach and reach.get("classC"):
+                    out.add(pname)
+                    break
+            if pname in out:
+                break
+    return out
+
+
+def _iface_methods(ir: dict, iface) -> list[str]:
+    """The method names of a service interface named by a seam's provided type,
+    for the class-(c) reach walk. Best-effort: an interface the IR does not name
+    yields the empty list (no row, never a crash)."""
+    services = (ir or {}).get("services") or {}
+    svc = services.get(iface) if isinstance(services, dict) else None
+    if isinstance(svc, dict):
+        methods = svc.get("methods") or svc.get("emissions") or []
+        return [m if isinstance(m, str) else m.get("name") for m in methods
+                if (isinstance(m, str) or m.get("name"))]
+    return []
+
+
+def sandbox_approval_rows(placement_id: str, class_c_procs, networks: dict) -> dict:
+    """The approval-across-boundary channel's relay rows and served endpoint
+    (item 411 T5). For every sandboxed process that can raise a class-(c)
+    operation, one relay row carries an `approval` key from inside the sandbox
+    to the conductor's own mTLS listener at the host bind address: the request
+    reaches the operator VIA the conductor, never by a direct escape.
+
+    Returns ``{"listen_port", "rows": [...], "endpoints": {pname: {host, port}}}``
+    where `listen_port` is the conductor's approval listener, each row forwards a
+    per-process relay listener to `host.docker.internal:<listen_port>`, and each
+    endpoint is what the sandboxed process's spec dials (`<relay>:<port>`). A
+    process with no class-(c) reach contributes nothing."""
+    relay = _sb_relay_name(placement_id)
+    rows: list[dict] = []
+    endpoints: dict[str, dict] = {}
+    port = _APPROVAL_RELAY_PORT_BASE
+    for pname in sorted(class_c_procs):
+        net = networks.get(pname) or _sb_network_name(placement_id, pname)
+        rows.append({"id": f"approval:{pname}",
+                     "listen": {"port": port, "network": net},
+                     "target": f"host.docker.internal:{_APPROVAL_LISTEN_PORT}",
+                     "direction": "approval"})
+        endpoints[pname] = {"host": relay, "port": port}
+        port += 1
+    return {"listen_port": _APPROVAL_LISTEN_PORT, "rows": rows,
+            "endpoints": endpoints}
+
+
+def _sb_network_name(placement_id: str, pname: str) -> str:
+    return _sb.seam_network_name(placement_id, pname)
+
+
+def _sb_relay_name(placement_id: str) -> str:
+    return _sb.relay_container_name(placement_id)
+
+
+def _new_relay_manager(placement_id: str, image: str):
+    """The conductor-owned relay manager for one placement (item 411 T3). A
+    seam is a factory so a plan-layer test can substitute a manager that
+    resolves no runtime (and so establishes nothing), the same way
+    `resolve_sandbox_driver` is patched — the live relay only runs where a real
+    container runtime does."""
+    return _sb.SeamRelayManager(placement_id, image)
+
+
+def _establish_seam_transport(manager, tmp, relay_plan: dict, approval_plan: dict,
+                              sandboxes: dict, seam_ctx: dict) -> str | None:
+    """Bring up the per-process seam networks and the one conductor-owned relay
+    (item 411 T3), and populate `seam_ctx[pname]` with the seam network and the
+    seam-only canary targets each sandboxed process's preflight needs. Returns a
+    diagnostic on the first step that cannot complete (the caller tears down and
+    refuses), or None once the transport is up. Docker-gated: with no runtime
+    the manager's calls short-circuit and the driver loop refuses at its own
+    docker resolution, so nothing here half-establishes."""
+    docker = manager._resolve_docker()  # noqa: SLF001 - intentional gate read
+    if docker is None:
+        # no runtime: leave seam_ctx empty; the per-process driver.preflight
+        # refuses at docker resolution with its own diagnostic.
+        return None
+    # 1. one --internal network per sandboxed process.
+    for pname in sorted(sandboxes):
+        _net, err = manager.create_network(pname)
+        if err:
+            return err
+    # 2. the derived table (seam rows + approval rows), mounted read-only.
+    table_path = Path(tmp) / "seam_relay_table.json"
+    table_path.write_text(
+        json.dumps({"rows": relay_plan["rows"] + approval_plan["rows"]}),
+        encoding="utf-8")
+    # 3. the host bind address the relay reaches host-side listeners on.
+    bind_host, err = manager.probe_host_bind()
+    if err:
+        return err
+    # 4. start the relay on the default bridge, then attach it to every network.
+    err = manager.start_relay(str(table_path), bind_host)
+    if err:
+        return err
+    for pname in sorted(sandboxes):
+        err = manager.connect_relay(manager.network_for(pname))
+        if err:
+            return err
+    # 5. per-process canary context: the seam targets the process dials (relay
+    #    listeners on its own network) and the isolation target the relay proved
+    #    open from bridge but the sandbox must NOT reach.
+    relay = relay_plan["relay"]
+    iso_port = _RELAY_PORT_BASE
+    iso = manager.relay_bridge_target(iso_port)
+    for pname in sorted(sandboxes):
+        targets: list[tuple[str, int]] = []
+        for (cons, _key), ep in relay_plan["consumer_endpoints"].items():
+            if cons == pname and ep.get("via") == "relay":
+                targets.append((ep["host"], ep["port"]))
+        appr = approval_plan["endpoints"].get(pname)
+        if appr:
+            targets.append((appr["host"], appr["port"]))
+        seam_ctx[pname] = {
+            "seam_network": manager.network_for(pname),
+            "seam_canary_targets": targets,
+            "seam_isolation_target": iso,
+            "seam_relay": relay,
+        }
+    return None
+
+
 def process_tag(pname: str, processes: dict, backends: dict, sandboxes: dict) -> str:
     """The boot-summary tag for one process. A non-sandboxed process is
     byte-identical to the pre-411 tag (`p[backend]=[comps]`); a sandboxed one
@@ -943,6 +1193,54 @@ def _enforcement_lines(pname: str, env: dict, achieved: dict | None) -> list[str
     return [f"    enforcement: rung {rung} has a runtime driver; `revl run "
             f"--placement` establishes the boundary at boot, verifies it with an "
             f"in-sandbox canary, and refuses if it cannot"]
+
+
+def render_seam_transport_summary(sandboxes: dict, relay_plan: dict,
+                                  approval_plan: dict) -> list[str]:
+    """The item 411 T3/T5 boot-summary lines: the relay's forwarding table, the
+    approval channel, and the net posture, stated so no summary can quietly
+    overclaim (design "The net posture, honestly" and the fourth residue).
+
+    Empty when there is no cross-boundary sandbox seam (a seam-free sandbox or a
+    non-sandbox placement is byte-identical to before T3)."""
+    rows = relay_plan.get("rows") or []
+    appr_rows = approval_plan.get("rows") or []
+    if not rows and not appr_rows:
+        return []
+    lines = [f"  sandbox seam transport (item 411 T3): relay-mtls over a "
+             f"conductor-owned relay {relay_plan.get('relay')!r} on per-process "
+             f"--internal networks; the relay forwards ciphertext and holds no key"]
+    for row in rows:
+        listen = row["listen"]
+        where = (f"publish 127.0.0.1:{listen['publish']}" if "publish" in listen
+                 else f"{listen.get('network')}:{listen['port']}")
+        lines.append(f"    relay {row['id']}: {where} -> {row['target']} "
+                     f"({row['direction']})")
+    # the loopback-vs-0700 caveat, said out loud (design, third residue).
+    if rows:
+        lines.append("    note: a sandbox seam is a loopback network seam with "
+                     "cryptographic admission (mTLS + peers + correlation guard), "
+                     "not the 0700-dir reachability a UDS seam has")
+    # the net posture, per sandboxed process — `all` reads as `all`.
+    for pname in sorted(sandboxes):
+        posture = sandboxes[pname].get("net", "none")
+        if posture == "all":
+            lines.append(f"    posture {pname}: net=all — on the default bridge "
+                         f"too; the relay carries the seam but narrows NOTHING")
+        else:
+            lines.append(f"    posture {pname}: net=none — egress is the relay's "
+                         f"listeners on this process's network and nothing else")
+    if appr_rows:
+        lines.append(f"  approval-across-boundary channel (item 411 T5): "
+                     f"{len(appr_rows)} sandboxed process(es) with class-(c) "
+                     f"operations reach the operator via the conductor's approval "
+                     f"listener (port {approval_plan.get('listen_port')}), not a "
+                     f"direct escape")
+        for row in appr_rows:
+            listen = row["listen"]
+            lines.append(f"    approval {row['id']}: {listen.get('network')}:"
+                         f"{listen['port']} -> {row['target']}")
+    return lines
 
 
 def sandbox_audit_view(ir: dict, placement: dict) -> tuple[list[str], str | None]:
@@ -3483,6 +3781,23 @@ def run_placement(files, placement_path: str, once: bool = False,
         except RuntimeError as exc:
             return abort(str(exc))
 
+    # --- sandbox seam transport (item 411 T3): the per-process seam-only
+    # networks and the one conductor-owned relay that carries item-56 TCP+mTLS
+    # across the container boundary. Derived PURELY from the seam graph here (a
+    # reviewable table); the networks/relay are ESTABLISHED by the manager below
+    # only when there is at least one cross-boundary sandbox seam. A placement
+    # with no sandbox seam builds an empty plan and touches none of this
+    # (byte-identical to before T3).
+    placement_id = Path(tmp).name.replace("revl_placement_", "")[:12] or "plc"
+    relay_plan = sandbox_relay_table(
+        placement_id, sandboxes, processes, requires, provides, owner,
+        backends, remote_specs, default_deadline)
+    class_c_procs = (sandbox_class_c_processes(ir, sandboxes, processes, provides)
+                     if sandboxes else set())
+    approval_plan = sandbox_approval_rows(
+        placement_id, class_c_procs, relay_plan["networks"])
+    relay_manager: _sb.SeamRelayManager | None = None
+
     # --- sandbox runtime driver (item 411, Slice 2): ESTABLISH each declared
     # isolation boundary before anything spawns, or refuse the placement.
     #
@@ -3495,6 +3810,26 @@ def run_placement(files, placement_path: str, once: bool = False,
     # worse than a placement that declared no sandbox at all.
     sandbox_drivers: dict = {}
     sandbox_achieved: dict[str, dict] = {}
+
+    # item 411 T3: establish the seam transport BEFORE any sandbox canary runs,
+    # because the seam-only canary connects to the relay's listeners and only
+    # confirms once the relay is up on the process's network. Only when there is
+    # at least one cross-boundary sandbox seam (relay rows); a seam-free sandbox
+    # or a non-sandbox placement skips this entirely. Fail-closed: any step that
+    # cannot complete tears down and refuses, never a sandbox on --network=none
+    # with a seam that silently cannot cross.
+    seam_ctx: dict[str, dict] = {}
+    relay_rows = relay_plan["rows"] + approval_plan["rows"]
+    if relay_rows:
+        relay_image = next((sandboxes[p].get("image") for p in sorted(sandboxes)
+                            if sandboxes[p].get("image")), None)
+        relay_manager = _new_relay_manager(placement_id, str(relay_image))
+        est_err = _establish_seam_transport(
+            relay_manager, tmp, relay_plan, approval_plan, sandboxes, seam_ctx)
+        if est_err:
+            relay_manager.teardown()
+            return abort(f"sandbox seam transport refused (item 411 T3): {est_err}")
+
     for pname in processes:
         if pname not in sandboxes:
             continue
@@ -3532,11 +3867,18 @@ def run_placement(files, placement_path: str, once: bool = False,
                                         default_deadline),
             "files": [str(f) for f in files],
             "cwd": os.getcwd(),
+            # item 411 T3: the per-process seam network and the seam-only canary
+            # targets (empty for a seam-free sandbox — the ordinary net canary
+            # runs then). Established above only when there is a cross-boundary
+            # sandbox seam.
+            **seam_ctx.get(pname, {}),
         }
         achieved, sb_err = driver.preflight(pname, env, ctx)
         if sb_err:
             for started in sandbox_drivers.values():
                 started.teardown()
+            if relay_manager is not None:
+                relay_manager.teardown()
             return abort(f"sandbox refused (item 411): {sb_err}")
         achieved["_env"] = env
         sandbox_drivers[pname] = driver
@@ -3550,9 +3892,8 @@ def run_placement(files, placement_path: str, once: bool = False,
         # claimed-vouched externs, and the net=none egress note), so `net=none`
         # is never readable as a total-egress claim — plus, since Slice 2, the
         # rung actually ACHIEVED and the in-sandbox canary's evidence for it.
-        # Still deferred: the per-rung seam transport, the conductor-served
-        # approval channel, and the wasm-cell / microVM rungs (all three of
-        # which REFUSE rather than degrade above).
+        # Still deferred: the wasm-cell / microVM rungs (which REFUSE rather
+        # than degrade above; microVM is item 411 T6, a separate PR).
         print("  sandbox placement (item 411, Slice 2): isolation ESTABLISHED by "
               "a runtime driver and verified in-sandbox; a rung that cannot be "
               "established refuses the placement", flush=True)
@@ -3560,6 +3901,12 @@ def run_placement(files, placement_path: str, once: bool = False,
         for line in render_sandbox_summary(
                 processes, sandboxes, reach, sandbox_needs,
                 requires, provides, owner, backends, sandbox_achieved):
+            print(line, flush=True)
+        # item 411 T3/T5: the relay's forwarding table and the net posture, so
+        # the transport is auditable rather than assumed, and `net = "all"` plus
+        # a seam reads as `all` and nothing narrower (the design's fourth residue).
+        for line in render_seam_transport_summary(
+                sandboxes, relay_plan, approval_plan):
             print(line, flush=True)
     if "java" in built:
         note = ("real cordis4j (reactive)" if built["java"][0] == "real"
@@ -4119,6 +4466,11 @@ def run_placement(files, placement_path: str, once: bool = False,
         # container holding its granted mounts) behind it.
         for driver in sandbox_drivers.values():
             driver.teardown()
+        # item 411 T3: the relay and every per-process seam network go with the
+        # placement — relay death withdraws every sandbox seam, so no residue
+        # (container, network, or published port) may survive teardown.
+        if relay_manager is not None:
+            relay_manager.teardown()
         for thread in threads:
             thread.join(timeout=2)
         for stale in cleanup:
