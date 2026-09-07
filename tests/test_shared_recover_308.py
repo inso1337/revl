@@ -143,6 +143,24 @@ def test_a_grant_whose_count_reached_zero_owes_no_reclaim(tmp_path):
     assert report["shared"]["reclaims"] == []
 
 
+def test_a_zero_count_grant_fenced_but_not_completed_is_unknown_residue(tmp_path):
+    # the #710 crash window at the reader: a zero crossing whose attempt was
+    # durably fenced (holders == []) but whose `shared-complete` never landed —
+    # the inverse raised, or the process died after the effect but before the
+    # completion write. The empty count must NOT be read as a clean balance; the
+    # unresolved attempt stays outcome-unknown residue, never re-fired.
+    path = str(tmp_path / "shared.wal")
+    _write_wal(path, [_grant([]),
+                      {"record": "shared-reclaim-fence", "handle": "db"}])
+    world = DictWorld()
+    world.seed(_REFERENT)
+    report = recover(path, world=world)
+    rec = report["shared"]["reclaims"][0]
+    assert rec["ok"] is False and rec["outcome"] == "unknown"
+    assert report["shared"]["clean"] is False
+    assert world.present(_REFERENT) is True     # not re-fired (fail-closed)
+
+
 # ---------------------------------------------------------------------------
 # no shared grant — byte-identical report
 # ---------------------------------------------------------------------------

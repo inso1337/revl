@@ -20,6 +20,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -32,6 +34,22 @@ from revl.wal import WAL_VERSION, read_wal  # noqa: E402
 
 _INVERSE = {"receiver": "pool", "method": "close", "args": ["db#1"]}
 _REFERENT = "pool:db#1"  # DictWorld.key(_INVERSE)
+_INVERSE2 = {"receiver": "pool", "method": "close", "args": ["db#2"]}
+_REFERENT2 = "pool:db#2"
+
+
+class _CountingWorld(DictWorld):
+    """A world that records every inverse referent it is asked to apply, so a
+    test can prove an inverse fired EXACTLY the expected number of times across
+    the live path and a later recover over the same durable ledger."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fires: list[str] = []
+
+    def apply_inverse(self, op) -> None:
+        self.fires.append(self.key(op))
+        super().apply_inverse(op)
 
 
 def _new_wal(path):
@@ -301,3 +319,174 @@ def test_a_shared_resource_handle_crossing_a_process_seam_is_refused(tmp_path):
     problem = resource_crossing_refusal(ir, requires, provides, owner, backends)
     assert problem is not None
     assert "PoolSvc" in problem and "Socket" in problem
+
+
+# ---------------------------------------------------------------------------
+# #710: an orderly last release records completion only AFTER the inverse
+# confirms. A raising inverse (or a crash after the effect but before the
+# completion write) must stay unknown residue, never a concealed clean 'done'.
+# ---------------------------------------------------------------------------
+
+
+def test_710_confirmed_orderly_release_fires_once_and_recover_owes_nothing(tmp_path):
+    path = str(tmp_path / "s.wal")
+    _new_wal(path)
+    live = _CountingWorld()
+    live.seed(_REFERENT)
+    book = JournaledSharedGrantBook(path, world=live)
+    book.mint("db", _INVERSE, "A")
+    assert book.release("db", "A") is True         # zero crossing, confirmed
+    assert live.fires == [_REFERENT]               # fired exactly once, live
+    # completion is journaled AFTER the fence and the fire; recover owes nothing
+    kinds = _kinds(path)
+    assert "shared-reclaim-fence" in kinds and "shared-complete" in kinds
+    fresh = _CountingWorld()
+    fresh.seed(_REFERENT)
+    report = recover(path, world=fresh)
+    assert report["shared"]["reclaims"] == []
+    assert fresh.fires == []                        # not executed a second time
+
+
+def test_710_orderly_release_with_a_raising_inverse_is_unknown_not_concealed(tmp_path):
+    path = str(tmp_path / "s.wal")
+    _new_wal(path)
+
+    class _Boom(DictWorld):
+        # the inverse refuses BEFORE any effect (a crash boundary before the
+        # effect is confirmed): completion must not be written.
+        def apply_inverse(self, op):
+            raise RuntimeError("orderly close refused")
+
+    book = JournaledSharedGrantBook(path, world=_Boom())
+    book.mint("db", _INVERSE, "A")
+    with pytest.raises(RuntimeError):
+        book.release("db", "A")                     # zero crossing, inverse raises
+    kinds = _kinds(path)
+    assert "shared-reclaim-fence" in kinds          # the attempt is fenced...
+    assert "shared-complete" not in kinds           # ...but never marked done
+    # recover reads the fence as outcome-unknown residue and re-fires NOTHING.
+    fresh = _CountingWorld()
+    fresh.seed(_REFERENT)
+    report = recover(path, world=fresh)
+    rec = report["shared"]["reclaims"][0]
+    assert rec["ok"] is False and rec["outcome"] == "unknown"
+    assert report["shared"]["clean"] is False
+    assert fresh.fires == []                        # not blindly retried
+
+
+def test_710_crash_after_the_effect_but_before_completion_stays_unknown(tmp_path):
+    path = str(tmp_path / "s.wal")
+    _new_wal(path)
+
+    class _CrashAfterEffect(DictWorld):
+        # the inverse's effect really lands, then the process dies before the
+        # runtime can append `shared-complete` (the crash window the fence
+        # guards). The durable ledger cannot prove the effect confirmed.
+        def apply_inverse(self, op):
+            super().apply_inverse(op)
+            raise SystemExit("process died before the completion write")
+
+    live = _CrashAfterEffect()
+    live.seed(_REFERENT)
+    book = JournaledSharedGrantBook(path, world=live)
+    book.mint("db", _INVERSE, "A")
+    with pytest.raises(SystemExit):
+        book.release("db", "A")
+    assert live.present(_REFERENT) is False         # the effect DID land, live
+    kinds = _kinds(path)
+    assert "shared-reclaim-fence" in kinds and "shared-complete" not in kinds
+    # a fresh recover cannot know the effect confirmed, so it is unknown residue
+    # and is NOT re-fired (fail-closed, no double-close).
+    fresh = _CountingWorld()
+    fresh.seed(_REFERENT)
+    report = recover(path, world=fresh)
+    assert report["shared"]["reclaims"][0]["outcome"] == "unknown"
+    assert fresh.fires == []
+
+
+# ---------------------------------------------------------------------------
+# #709: a successful LIVE reclaim finalizes the durable ledger, so a later
+# recover over the same journal does NOT invoke the inverse a second time.
+# ---------------------------------------------------------------------------
+
+
+def test_709_clean_live_reclaim_then_recover_does_not_fire_twice(tmp_path):
+    path = str(tmp_path / "s.wal")
+    _new_wal(path)
+    live = _CountingWorld()
+    live.seed(_REFERENT)
+    book = JournaledSharedGrantBook(path, world=live)
+    book.mint("db", _INVERSE, "A", now=0.0)
+    probe = DictProbe()
+    probe.kill("A")                                 # the sole holder is gone
+    book.reclaim_crashed(probe=probe, now=1000.0)   # live reclaim fires once
+    assert live.fires == [_REFERENT]
+    assert live.present(_REFERENT) is False
+    # the ledger now names the completion, so recover finds nothing owed.
+    assert "shared-complete" in _kinds(path)
+    crash = _CountingWorld()
+    crash.seed(_REFERENT)                           # a fresh process, referent back
+    report = recover(path, world=crash)
+    assert report["shared"]["reclaims"] == []
+    assert crash.fires == []                         # NOT fired a second time
+    assert crash.present(_REFERENT) is True
+
+
+def test_709_faulted_live_reclaim_retains_unknown_and_recover_does_not_replay(tmp_path):
+    path = str(tmp_path / "s.wal")
+    _new_wal(path)
+
+    class _Boom(DictWorld):
+        def apply_inverse(self, op):
+            raise RuntimeError("remote close refused")
+
+    book = JournaledSharedGrantBook(path, world=_Boom())
+    book.mint("db", _INVERSE, "A", now=0.0)
+    probe = DictProbe()
+    probe.kill("A")
+    report = book.reclaim_crashed(probe=probe, now=1000.0)
+    assert report.clean is False                    # the primitive records residue
+    kinds = _kinds(path)
+    assert "shared-complete" not in kinds            # no false clean completion
+    assert "shared-reclaim-fence" in kinds           # failed/unknown is retained
+    # a later recover reads the fence as unknown and re-fires NOTHING.
+    fresh = _CountingWorld()
+    fresh.seed(_REFERENT)
+    rep = recover(path, world=fresh)
+    rec = rep["shared"]["reclaims"][0]
+    assert rec["ok"] is False and rec["outcome"] == "unknown"
+    assert fresh.fires == []
+    assert fresh.present(_REFERENT) is True
+
+
+def test_709_multihandle_reclaim_settles_each_handle_independently(tmp_path):
+    # one owner holding two handles: the clean handle completes, the faulting
+    # handle stays unknown — closing (or failing to close) one never settles the
+    # other (the #671/#691 per-handle independence, end to end through recover).
+    path = str(tmp_path / "s.wal")
+    _new_wal(path)
+
+    class _BoomTwo(DictWorld):
+        def apply_inverse(self, op):
+            if self.key(op) == _REFERENT2:
+                raise RuntimeError("db#2 close refused")
+            super().apply_inverse(op)
+
+    world = _BoomTwo()
+    world.seed(_REFERENT)
+    world.seed(_REFERENT2)
+    book = JournaledSharedGrantBook(path, world=world)
+    book.mint("db1", _INVERSE, "H", now=0.0)
+    book.mint("db2", _INVERSE2, "H", now=0.0)        # same owner, two handles
+    probe = DictProbe()
+    probe.kill("H")
+    book.reclaim_crashed(probe=probe, now=1000.0)
+    assert world.present(_REFERENT) is False          # db1 closed cleanly, live
+    fresh = DictWorld()
+    fresh.seed(_REFERENT)
+    fresh.seed(_REFERENT2)
+    rep = recover(path, world=fresh)
+    by = {r["handle"]: r for r in rep["shared"]["reclaims"]}
+    assert "db1" not in by                             # completed, owes nothing
+    assert by["db2"]["outcome"] == "unknown"           # faulted, fenced-unknown
+    assert fresh.present(_REFERENT) is True            # db1 not fired again
