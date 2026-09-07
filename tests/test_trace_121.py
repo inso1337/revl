@@ -939,6 +939,13 @@ def _emit_module_driver(generation: int = 0):
     driver.secrets = None
     driver.recorder = None
     driver.wal_path = None
+    # item 541: `_emit_module` now sweeps superseded generations' sys.modules
+    # entries via `_evict_dead_modules`, which reads the live fiber / route-
+    # disposer sets and the per-generation module map. A bare-IR driver has no
+    # live components, so these start empty.
+    driver.fibers = {}
+    driver._route_disposers = {}
+    driver._gen_modules = {}
     return driver
 
 

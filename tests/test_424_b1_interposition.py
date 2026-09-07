@@ -204,6 +204,14 @@ def test_distinct_key_wrapper_observes_every_call():
 
 
 @needs_cordis
+@pytest.mark.xfail(
+    reason="same-key interposition via a routes-carrying provide body is refused "
+    "by G2 (#449) at compile time now, so the driver never reaches the "
+    "load-time discard this pinned; it awaits the B3 through-set rule (#110). "
+    "Mirrors the xfail on test_same_key_routed_wrapper_carries_a_routes_entry "
+    "added in #684. The day the body stops being discarded, drop this marker.",
+    strict=False,
+)
 def test_routed_wrapper_provide_body_is_never_executed():
     """The trap, pinned as an executed fact. The same-key seam carries a
     `routes` entry, so `_Driver._load` takes its `if comp.get("routes")` branch

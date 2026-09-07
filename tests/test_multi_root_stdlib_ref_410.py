@@ -310,51 +310,68 @@ def _install_b_from(install_a, dest):
 
 def test_bundle_roundtrips_stdlib_ref_across_install_paths(tmp_path, monkeypatch):
     from revl.bundle import build_bundle, verify_bundle
-    # bundle on install A
-    install_a = _standin_install(tmp_path, monkeypatch, ts=False)
-    app = _write(tmp_path / "proj" / "app.rvl",
-                 'use "stdlib/mymod.rvl" { shout }\n')
-    out = build_bundle([str(app)], str(tmp_path / "bundle"))
+    # `verify_bundle` plugs the recompiled refs, which APPENDS each install
+    # root to sys.path (append-only, per the item-396 option B deploy
+    # contract) and imports the helper into sys.modules. Those appends are not
+    # torn down by verify, so — like the sibling `test_stdlib_ref_runs_on_py`,
+    # which restores sys.path in its own finally — snapshot and restore here.
+    # Left in place, one of the leaked entries is this checkout's real
+    # `backends/python`, which shadows a later test's stand-in install and made
+    # the plug-time backstop tests (test_stdlib_ref_plug_failclosed_410) resolve
+    # the helper from the wrong root and fail under the cordis runtime.
+    _before_syspath = list(sys.path)
+    _before_mods = set(sys.modules)
+    try:
+        # bundle on install A
+        install_a = _standin_install(tmp_path, monkeypatch, ts=False)
+        app = _write(tmp_path / "proj" / "app.rvl",
+                     'use "stdlib/mymod.rvl" { shout }\n')
+        out = build_bundle([str(app)], str(tmp_path / "bundle"))
 
-    # verify on install B: a DIFFERENT absolute path, identical content + version
-    install_b = _install_b_from(install_a, tmp_path / "install_b")
-    from revl import bundle as _bundle
-    monkeypatch.setattr(_compiler, "stdlib_root", lambda: install_b / "stdlib")
-    monkeypatch.setattr(_bundle, "stdlib_root", lambda: install_b / "stdlib")
-    # verify recompiles through the compiler's search path -> install B, and the
-    # stdlib refs tier re-hashes B's helper against the recorded pin.
-    report = verify_bundle(out)
-    tiers = {c.tier: c for c in report.checks}
-    stdlib_tier = next(c for t, c in tiers.items() if t.startswith("stdlib ref"))
-    assert stdlib_tier.status == "OK", (stdlib_tier.tier, stdlib_tier.detail)
-    # the round-trip signal: the reproducible aggregate (source + IR + emitted)
-    # is OK across the different install path, and no 410-relevant tier
-    # diverged. (An orthogonal `gauntlet`/`attestation` tier verdict of this
-    # minimal, un-attested composition is not a 410 concern.)
-    assert tiers["reproducible"].status == "OK", \
-        [(c.tier, c.status, c.detail) for c in report.checks]
-    assert not any(
-        c.status == "MISMATCH"
-        for c in report.checks
-        if c.tier in ("source", "IR") or c.tier.startswith("emitted")
-        or c.tier.startswith("stdlib ref")), \
-        [(c.tier, c.status) for c in report.checks]
+        # verify on install B: a DIFFERENT absolute path, identical content + version
+        install_b = _install_b_from(install_a, tmp_path / "install_b")
+        from revl import bundle as _bundle
+        monkeypatch.setattr(_compiler, "stdlib_root", lambda: install_b / "stdlib")
+        monkeypatch.setattr(_bundle, "stdlib_root", lambda: install_b / "stdlib")
+        # verify recompiles through the compiler's search path -> install B, and the
+        # stdlib refs tier re-hashes B's helper against the recorded pin.
+        report = verify_bundle(out)
+        tiers = {c.tier: c for c in report.checks}
+        stdlib_tier = next(c for t, c in tiers.items() if t.startswith("stdlib ref"))
+        assert stdlib_tier.status == "OK", (stdlib_tier.tier, stdlib_tier.detail)
+        # the round-trip signal: the reproducible aggregate (source + IR + emitted)
+        # is OK across the different install path, and no 410-relevant tier
+        # diverged. (An orthogonal `gauntlet`/`attestation` tier verdict of this
+        # minimal, un-attested composition is not a 410 concern.)
+        assert tiers["reproducible"].status == "OK", \
+            [(c.tier, c.status, c.detail) for c in report.checks]
+        assert not any(
+            c.status == "MISMATCH"
+            for c in report.checks
+            if c.tier in ("source", "IR") or c.tier.startswith("emitted")
+            or c.tier.startswith("stdlib ref")), \
+            [(c.tier, c.status) for c in report.checks]
 
-    # doctor the helper on B, same version -> stdlib refs MISMATCH naming the file
-    _write(install_b / "runtimes" / "pyhost" / "helper.py",
-           "def shout(x):\n    return x + '!'\n")
-    report2 = verify_bundle(out)
-    stdlib2 = next(c for c in report2.checks if c.tier.startswith("stdlib ref"))
-    assert stdlib2.status == "MISMATCH"
-    assert "helper.py" in stdlib2.tier
+        # doctor the helper on B, same version -> stdlib refs MISMATCH naming the file
+        _write(install_b / "runtimes" / "pyhost" / "helper.py",
+               "def shout(x):\n    return x + '!'\n")
+        report2 = verify_bundle(out)
+        stdlib2 = next(c for c in report2.checks if c.tier.startswith("stdlib ref"))
+        assert stdlib2.status == "MISMATCH"
+        assert "helper.py" in stdlib2.tier
 
-    # missing helper on B -> stdlib refs UNVERIFIED (SKIP) naming the file
-    os.remove(install_b / "runtimes" / "pyhost" / "helper.py")
-    report3 = verify_bundle(out)
-    stdlib3 = next(c for c in report3.checks if c.tier.startswith("stdlib ref"))
-    from revl.bundle import UNVERIFIED
-    assert stdlib3.status == UNVERIFIED  # a SKIP: the install lacks the helper
-    assert "helper.py" in stdlib3.tier
+        # missing helper on B -> stdlib refs UNVERIFIED (SKIP) naming the file
+        os.remove(install_b / "runtimes" / "pyhost" / "helper.py")
+        report3 = verify_bundle(out)
+        stdlib3 = next(c for c in report3.checks if c.tier.startswith("stdlib ref"))
+        from revl.bundle import UNVERIFIED
+        assert stdlib3.status == UNVERIFIED  # a SKIP: the install lacks the helper
+        assert "helper.py" in stdlib3.tier
+    finally:
+        sys.path[:] = _before_syspath
+        for _name in set(sys.modules) - _before_mods:
+            if _name == "runtimes" or _name.startswith("runtimes."):
+                sys.modules.pop(_name, None)
 
 
 _BASE = """

@@ -157,7 +157,12 @@ def test_typescript_lowers_to_revlParseInt():
 
 def test_rust_lowers_to_parse():
     out = str(_emit_with("rust"))
-    assert "(s).parse::<i64>().ok()" in out
+    # `to_int` lowers to Rust's `parse::<i64>()`, but guarded: Rust's parser
+    # accepts a leading `+`, which the spec (no `+`) rejects, so the emitter
+    # binds the receiver and returns None on a `+` prefix before parsing
+    # (cross-tier divergence fix, #646).
+    assert ".parse::<i64>().ok()" in out
+    assert "starts_with('+')" in out
 
 
 def test_java_lowers_to_revlParseInt():
