@@ -192,6 +192,13 @@ def rt():
     spec = importlib.util.spec_from_file_location(
         "revl_runtime_57", ROOT / "backends" / "python" / "runtime.py")
     module = importlib.util.module_from_spec(spec)
+    # runtime.py uses `from __future__ import annotations` and defines
+    # @dataclass record types (WitnessEffect / WitnessSnapshot). On py3.12+,
+    # dataclass field processing resolves string annotations via
+    # sys.modules[cls.__module__], so the module must be registered under its
+    # own name BEFORE exec_module or that lookup dereferences None. Standard
+    # importlib idiom (see importlib docs on running modules from a spec).
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     module.Clock.reset()
     return module
@@ -301,6 +308,9 @@ def test_emitted_python_body_reverts_cleanly():
     real_rt = importlib.util.module_from_spec(
         importlib.util.spec_from_file_location(
             "revl_runtime_57e", ROOT / "backends" / "python" / "runtime.py"))
+    # register before exec: runtime.py's @dataclass records need
+    # sys.modules[cls.__module__] for annotation resolution on py3.12+.
+    sys.modules[real_rt.__name__] = real_rt
     real_rt.__spec__.loader.exec_module(real_rt)
     real_rt.Clock.reset()
 
