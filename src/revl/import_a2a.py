@@ -144,9 +144,17 @@ Not in this slice, and deliberately
     gRPC is a binary transport over HTTP/2 with protobuf framing — not that
     crossing — so it is refused naming the transport. `additionalInterfaces`
     advertising a transport other than the one bound are recorded, not projected.
-  * **Non-text modalities.** A `FilePart` or a `DataPart` has no transcription
-    this slice defines, so a skill whose modes are not all `text/*` is refused
-    naming the skill and the mode.
+  * **Modalities: text and file, not data.** A `text/*` mode is a text `Part`,
+    carried as `Str`. A single binary media type is a `FilePart`, carried as
+    `Bytes` with inline base64 bytes — bound on the `py` backend, and refused on
+    `ts` (the `Uint8Array`/base64 binding under the `tsc --strict` gate is a
+    later slice) rather than shipped as a body the ts tier would not carry. A
+    `DataPart` (structured JSON, `application/json` / `*+json`) has no
+    transcription here: its arbitrary object needs the tagged half of the
+    canonical encoding (`revl export client`, slice C1), so it is refused rather
+    than flattened. A side that mixes text with a file, or advertises two binary
+    types, has no single `Part` the one-crossing `message/send` can carry and is
+    refused naming the skill and the field.
 """
 
 from __future__ import annotations
@@ -201,6 +209,12 @@ _TRANSPORT_METHOD = {_JSONRPC: "`message/send`", _HTTPJSON: "`POST /v1/message:s
 #: The task states A2A 1.0.0 calls terminal. Anything else coming back from a
 #: single `message/send` is a lifecycle this slice does not express.
 _TERMINAL_STATES = ("completed", "failed", "canceled", "rejected")
+
+#: The revl type each projected `Part` modality is carried as (item 439). A
+#: text `Part` is a `Str`; a file `Part` is a `Bytes` (inline base64 bytes). A
+#: `DataPart` (structured JSON) has no entry: it needs the tagged half of the
+#: canonical encoding (slice C1) and is refused in `_Card._modality`.
+_MODALITY_TYPE = {"text": "Str", "file": "Bytes"}
 
 #: A conservative absolute-URL shape. The endpoint is interpolated into a
 #: generated `//` comment AND into a generated host body, so it is validated
@@ -466,32 +480,81 @@ class _Card:
 
     # -- the skills -------------------------------------------------------
 
-    def _modes(self, skill: dict, index: int) -> None:
-        for field in ("inputModes", "outputModes"):
-            declared = skill.get(field)
-            if declared is None:
-                declared = self.doc.get(
-                    "defaultInputModes" if field == "inputModes" else "defaultOutputModes")
-            if declared is None:
-                continue
-            if not isinstance(declared, list):
+    def _modes(self, skill: dict, index: int) -> tuple[str, str]:
+        """Classify a skill's `inputModes`/`outputModes` into the `Part`
+        modality each side crosses, item 439:
+
+          * all `text/*` (or absent) -> `"text"`, a text `Part` carried as `Str`;
+          * exactly one binary media type -> `"file"`, a file `Part` carried as
+            `Bytes` with inline base64 bytes.
+
+        A `DataPart` — a structured-JSON mode (`application/json`, `*+json`) —
+        has no revl spelling here: it needs the tagged half of the canonical
+        encoding (slice C1) and is refused rather than flattened. A side that
+        mixes text with a file, or advertises two different binary types, has no
+        single `Part` the one-crossing `message/send` can carry and is refused
+        naming the skill and the field (the honesty rule the version and
+        transport checks keep). Returns `(in_modality, out_modality)`.
+        """
+        return (self._modality(skill, index, "inputModes"),
+                self._modality(skill, index, "outputModes"))
+
+    def _modality(self, skill: dict, index: int, field: str) -> str:
+        declared = skill.get(field)
+        if declared is None:
+            declared = self.doc.get(
+                "defaultInputModes" if field == "inputModes"
+                else "defaultOutputModes")
+        if declared is None:
+            return "text"
+        if not isinstance(declared, list):
+            self._refuse(f"`{field}` must be a list of media types",
+                         pointer=_pointer("skills", index, field))
+        media: list[str] = []
+        for mode in declared:
+            if not isinstance(mode, str):
                 self._refuse(f"`{field}` must be a list of media types",
                              pointer=_pointer("skills", index, field))
-            for mode in declared:
-                if not isinstance(mode, str) or not mode.split(";")[0].strip().startswith("text/"):
-                    self._refuse(
-                        f"skill {_comment_safe(json.dumps(skill.get('id')))} "
-                        f"declares the non-text modality "
-                        f"{_comment_safe(json.dumps(mode))} in `{field}`",
-                        pointer=_pointer("skills", index, field),
-                        hint="slice 1 of the A2A binding transcribes a skill as "
-                             "text in, text out, because that is the only "
-                             "modality an Agent Card describes well enough to "
-                             "project. A `FilePart` or a `DataPart` has no "
-                             "revl spelling here and is refused rather than "
-                             "flattened into a string")
+            media.append(mode.split(";")[0].strip().lower())
+        if not media or all(m.startswith("text/") for m in media):
+            return "text"
 
-    def _skills(self) -> list[tuple[str, str, dict]]:
+        def _refuse_mode(kind: str, extra: str) -> None:
+            self._refuse(
+                f"skill {_comment_safe(json.dumps(skill.get('id')))} declares "
+                f"{kind} in `{field}`",
+                pointer=_pointer("skills", index, field),
+                hint="item 439: `revl import a2a` projects two `Part` modalities "
+                     "— a `text/*` mode as a text `Part` (`Str`), and a single "
+                     "binary media type as a file `Part` (`Bytes`, inline base64 "
+                     "bytes). " + extra)
+        json_modes = [m for m in media
+                      if m == "application/json" or m.endswith("+json")]
+        if json_modes:
+            _refuse_mode(
+                f"the structured-JSON (DataPart) modality "
+                f"{_comment_safe(json.dumps(json_modes[0]))}",
+                "A `DataPart`'s arbitrary JSON needs the tagged half of the "
+                "canonical encoding (`revl export client`, slice C1) and is "
+                "refused rather than flattened into a string.")
+        binary = sorted({m for m in media if not m.startswith("text/")})
+        if any(m.startswith("text/") for m in media):
+            _refuse_mode(
+                f"both text and the binary modality "
+                f"{_comment_safe(json.dumps(binary[0]))}",
+                "A single `message/send` crosses ONE `Part`, so a side that is "
+                "text AND a file has no single `Part` to become; split the "
+                "skill, or the agent must pick one modality per side.")
+        if len(binary) > 1:
+            _refuse_mode(
+                f"two binary modalities "
+                f"({_comment_safe(', '.join(binary))})",
+                "A single `message/send` crosses ONE file `Part`; two different "
+                "binary types on one side is ambiguous and is refused rather "
+                "than guessed at.")
+        return "file"
+
+    def _skills(self) -> list[tuple[str, str, dict, str, str]]:
         skills = self.doc.get("skills")
         if not isinstance(skills, list) or not skills:
             self._refuse(
@@ -500,7 +563,7 @@ class _Card:
                 hint="a card with no skills has no callable surface to "
                      "generate. There is nothing to import and nothing to "
                      "invent")
-        out: list[tuple[str, str, dict]] = []
+        out: list[tuple[str, str, dict, str, str]] = []
         seen: dict[str, str] = {}
         for index, skill in enumerate(skills):
             if not isinstance(skill, dict):
@@ -534,14 +597,15 @@ class _Card:
                     hint="two skills that fold onto one operation cannot both "
                          "be called; rename one on the agent")
             seen[op] = raw_id
-            self._modes(skill, index)
-            out.append((op, raw_id, skill))
+            in_modality, out_modality = self._modes(skill, index)
+            out.append((op, raw_id, skill, in_modality, out_modality))
         return out
 
 
 # ---------------------------------------------------------------- host bodies
 
-def _ts_body(endpoint: str, skill_id: str, *, follow_redirects: bool) -> str:
+def _ts_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
+             in_modality: str = "text", out_modality: str = "text") -> str:
     """The JSON-RPC 2.0 `message/send` crossing, TypeScript.
 
     Both interpolations are JSON-encoded, and both have already been validated
@@ -638,48 +702,111 @@ crosses once and does not poll`);
     """
 
 
-def _py_body(endpoint: str, skill_id: str, *, follow_redirects: bool) -> str:
-    """The same crossing, Python. Same interpolation discipline.
+def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
+                 rest: bool, in_modality: str, out_modality: str) -> str:
+    """The A2A `message/send` crossing, Python — for both JSON-RPC 2.0 and (when
+    `rest`) HTTP+JSON/REST, and for both `Part` modalities.
+
+    JSON-RPC wraps the message in an envelope and reports an A2A error in
+    `error` under `result`; REST POSTs the bare message to
+    `<endpoint>/v1/message:send` and its reply IS the `Task`/`Message`, an A2A
+    error arriving as a non-2xx status the transport branch already faults on.
+
+    A `text` modality carries the message as a text `Part` (`Str`); a `file`
+    modality carries it as a file `Part` with INLINE base64 bytes (`Bytes`,
+    A2A 1.0.0 `FileWithBytes`) and reads a file reply back the same way — a
+    uri-only file reply (a second crossing this slice does not make) is a fault.
 
     `follow_redirects` is the `--follow-redirects` opt-in and is same-origin
     even when it is on (`revl.crossing_redirect`).
     """
-    url = json.dumps(endpoint)
+    url = json.dumps(_httpjson_endpoint(endpoint) if rest else endpoint)
     sid = json.dumps(skill_id)
     terminal = json.dumps(list(_TERMINAL_STATES))
     policy = py_policy("a2a", follow=follow_redirects)
+    wire = ("HTTP+JSON/REST `POST /v1/message:send`" if rest
+            else "JSON-RPC 2.0 `message/send`")
+
+    if in_modality == "file":
+        send_prep = ('    import base64 as _b64\n'
+                     '    _sent_part = {"kind": "file", "file": '
+                     '{"bytes": _b64.b64encode(message).decode("ascii")}}\n')
+    else:
+        send_prep = '    _sent_part = {"kind": "text", "text": message}\n'
+
+    message_obj = (
+        '{\n'
+        '        "role": "user",\n'
+        '        "messageId": str(_uuid.uuid4()),\n'
+        '        "parts": [_sent_part],\n'
+        f'        "metadata": {{"revl.skill": {sid}}},\n'
+        '    }')
+    if rest:
+        payload = f'{{"message": {message_obj}}}'
+        unwrap = (
+            "        # A2A REST maps an error onto a non-2xx status, which\n"
+            "        # `urlopen` raises as an HTTPError — a FAULT below.\n"
+            f"        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) as _resp:\n"
+            "            _result = _json.loads(_resp.read())\n")
+        error_branch = ""
+    else:
+        payload = ('{\n'
+                   '        "jsonrpc": "2.0",\n'
+                   '        "id": str(_uuid.uuid4()),\n'
+                   '        "method": "message/send",\n'
+                   f'        "params": {{"message": {message_obj}}},\n'
+                   '    }')
+        unwrap = (f"        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) "
+                  "as _resp:\n            _rpc = _json.loads(_resp.read())\n")
+        error_branch = (
+            '    if _rpc.get("error"):\n'
+            '        raise RuntimeError("a2a: JSON-RPC error %s"'
+            ' % _rpc["error"].get("code"))\n'
+            '    _result = _rpc.get("result")\n')
+
+    if out_modality == "file":
+        extract = (
+            '    import base64 as _b64\n'
+            '    _files = [p.get("file") for p in _parts\n'
+            '              if p.get("kind") == "file"'
+            ' and isinstance(p.get("file"), dict)]\n'
+            '    _inline = [f for f in _files if isinstance(f.get("bytes"), str)]\n'
+            '    if not _inline and _files:\n'
+            '        raise RuntimeError("a2a: reply file part carried a uri, not '
+            'inline bytes - this binding does not fetch it")\n'
+            '    _value = _b64.b64decode(_inline[0]["bytes"]) if _inline'
+            ' else b""\n'
+            '    if not _value and _parts:\n'
+            '        raise RuntimeError("a2a: reply carried no inline-bytes file '
+            'part")\n'
+            '    return _value\n')
+    else:
+        extract = (
+            '    _text = "".join(p.get("text", "") for p in _parts\n'
+            '                    if p.get("kind") == "text"'
+            ' and isinstance(p.get("text"), str))\n'
+            '    if not _text and _parts:\n'
+            '        raise RuntimeError("a2a: reply carried only non-text '
+            'parts")\n'
+            '    return _text\n')
+
     return f"""
     import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
-    # A2A {A2A_VERSION}, JSON-RPC 2.0 `message/send`. ONE crossing.
-    _payload = _json.dumps({{
-        "jsonrpc": "2.0",
-        "id": str(_uuid.uuid4()),
-        "method": "message/send",
-        "params": {{"message": {{
-            "role": "user",
-            "messageId": str(_uuid.uuid4()),
-            "parts": [{{"kind": "text", "text": message}}],
-            "metadata": {{"revl.skill": {sid}}},
-        }}}},
-    }}).encode()
+    # A2A {A2A_VERSION}, {wire}. ONE crossing.
+{send_prep}    _payload = _json.dumps({payload}).encode()
     _r = _req.Request({url}, data=_payload,
                       headers={{"content-type": "application/json"}})
 {policy}    try:
         # A crossing that never returns is not a crossing.
-        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) as _resp:
-            _rpc = _json.loads(_resp.read())
-    except _RedirectRefused:
+{unwrap}    except _RedirectRefused:
         # The refusal names the rule. It is NOT a transport failure and must
         # not be flattened into one.
         raise
     except Exception as _exc:
         # A transport failure is a FAULT, never a quietly-empty result.
         raise RuntimeError("a2a: transport failure") from _exc
-    if _rpc.get("error"):
-        raise RuntimeError("a2a: JSON-RPC error %s" % _rpc["error"].get("code"))
-    _result = _rpc.get("result")
-    if not _result:
+{error_branch}    if not _result:
         raise RuntimeError("a2a: response carried no result")
     _kind = _result.get("kind")
     if _kind == "task":
@@ -698,12 +825,15 @@ def _py_body(endpoint: str, skill_id: str, *, follow_redirects: bool) -> str:
         _parts = _result.get("parts") or []
     else:
         raise RuntimeError("a2a: unexpected result kind %r" % (_kind,))
-    _text = "".join(p.get("text", "") for p in _parts
-                    if p.get("kind") == "text" and isinstance(p.get("text"), str))
-    if not _text and _parts:
-        raise RuntimeError("a2a: reply carried only non-text parts")
-    return _text
-    """
+{extract}    """
+
+
+def _py_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
+             in_modality: str = "text", out_modality: str = "text") -> str:
+    """JSON-RPC 2.0 `message/send`, Python. See `_py_a2a_body`."""
+    return _py_a2a_body(endpoint, skill_id, follow_redirects=follow_redirects,
+                        rest=False, in_modality=in_modality,
+                        out_modality=out_modality)
 
 
 def _httpjson_endpoint(endpoint: str) -> str:
@@ -716,7 +846,8 @@ def _httpjson_endpoint(endpoint: str) -> str:
     return endpoint.rstrip("/") + _HTTPJSON_SEND_PATH
 
 
-def _ts_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool) -> str:
+def _ts_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool,
+                  in_modality: str = "text", out_modality: str = "text") -> str:
     """The HTTP+JSON/REST `message:send` crossing, TypeScript.
 
     Same discipline as `_ts_body` — one crossing, redirect-refusing, time-bound,
@@ -801,66 +932,12 @@ crosses once and does not poll`);
     """
 
 
-def _py_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool) -> str:
-    """The same REST crossing, Python. Same interpolation discipline."""
-    rest = _httpjson_endpoint(endpoint)
-    url = json.dumps(rest)
-    sid = json.dumps(skill_id)
-    terminal = json.dumps(list(_TERMINAL_STATES))
-    policy = py_policy("a2a", follow=follow_redirects)
-    return f"""
-    import json as _json, urllib.request as _req, urllib.parse as _urlp
-    import uuid as _uuid
-    # A2A {A2A_VERSION}, HTTP+JSON/REST `POST /v1/message:send`. ONE crossing.
-    _payload = _json.dumps({{
-        "message": {{
-            "role": "user",
-            "messageId": str(_uuid.uuid4()),
-            "parts": [{{"kind": "text", "text": message}}],
-            "metadata": {{"revl.skill": {sid}}},
-        }},
-    }}).encode()
-    _r = _req.Request({url}, data=_payload,
-                      headers={{"content-type": "application/json"}})
-{policy}    try:
-        # A crossing that never returns is not a crossing. A2A REST maps an
-        # error onto a non-2xx status, which `urlopen` raises as an HTTPError —
-        # caught here and made a FAULT, never a quietly-empty result.
-        with _opener.open(_r, timeout={CROSSING_TIMEOUT}) as _resp:
-            _result = _json.loads(_resp.read())
-    except _RedirectRefused:
-        # The refusal names the rule. It is NOT a transport failure and must
-        # not be flattened into one.
-        raise
-    except Exception as _exc:
-        raise RuntimeError("a2a: transport failure") from _exc
-    # The REST reply is the `Task`/`Message` object directly — no JSON-RPC
-    # envelope to unwrap.
-    if not _result:
-        raise RuntimeError("a2a: response carried no result")
-    _kind = _result.get("kind")
-    if _kind == "task":
-        _state = (_result.get("status") or {{}}).get("state")
-        if _state not in {terminal}:
-            # Item 439's open question: a task still in flight is a LIFECYCLE
-            # this slice does not express. Refuse; never poll, never resume.
-            raise RuntimeError(
-                "a2a: task returned non-terminal state %r - this binding "
-                "crosses once and does not poll" % (_state,))
-        if _state != "completed":
-            raise RuntimeError("a2a: task ended %r" % (_state,))
-        _parts = [p for a in (_result.get("artifacts") or [])
-                  for p in (a.get("parts") or [])]
-    elif _kind == "message":
-        _parts = _result.get("parts") or []
-    else:
-        raise RuntimeError("a2a: unexpected result kind %r" % (_kind,))
-    _text = "".join(p.get("text", "") for p in _parts
-                    if p.get("kind") == "text" and isinstance(p.get("text"), str))
-    if not _text and _parts:
-        raise RuntimeError("a2a: reply carried only non-text parts")
-    return _text
-    """
+def _py_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool,
+                  in_modality: str = "text", out_modality: str = "text") -> str:
+    """HTTP+JSON/REST `POST /v1/message:send`, Python. See `_py_a2a_body`."""
+    return _py_a2a_body(endpoint, skill_id, follow_redirects=follow_redirects,
+                        rest=True, in_modality=in_modality,
+                        out_modality=out_modality)
 
 
 #: (backend, transport) -> the host-body builder for that crossing.
@@ -954,7 +1031,30 @@ class _Generator:
                      "yourself; nothing is invented from the card's other "
                      "fields")
 
-    def _operation(self, op: str, skill_id: str, skill: dict) -> tuple[list[str], str, str]:
+    def _operation(self, op: str, skill_id: str, skill: dict,
+                   in_modality: str, out_modality: str) -> tuple[list[str], str, str]:
+        # Item 439: a `text` mode is carried as `Str` (a text `Part`), a `file`
+        # mode as `Bytes` (a file `Part` with inline base64 bytes). The card's
+        # inputModes/outputModes chose the modality; the reason it can differ per
+        # side is that A2A lets a skill take text and answer with a file (say a
+        # renderer) or the reverse.
+        in_type = _MODALITY_TYPE[in_modality]
+        out_type = _MODALITY_TYPE[out_modality]
+        # The `@ts` tier has no blocking `Buffer`/base64 path this slice gates
+        # under `tsc --strict`, so a file `Part` is bound on `@py` only for now
+        # and refused on `--backend ts` naming the skill (the honesty rule: a
+        # modality the emitted body would not actually carry is not shipped under
+        # its label). `revl import a2a --backend py` binds it.
+        if self.backend == "ts" and "file" in (in_modality, out_modality):
+            raise RevlError(
+                self.filename, 0,
+                f"skill {_comment_safe(json.dumps(skill_id))} crosses a file "
+                f"`Part` (`Bytes`), which `revl import a2a --backend ts` does "
+                f"not bind",
+                hint="a file `Part` is base64 bytes and the `@ts` binding of "
+                     "that (a `Uint8Array` under the `tsc --strict` gate) is a "
+                     "later slice. Use `--backend py`, which binds it, or a "
+                     "text-only skill on the ts tier")
         summary = skill.get("name") or skill.get("description")
         lines = [f"  // skill `{_comment_safe(skill_id)}`"
                  + (f" — {_comment_safe(summary)}" if summary else "")]
@@ -964,21 +1064,25 @@ class _Generator:
                          + _comment_safe(", ".join(str(t) for t in tags)))
         lines.append("  // `emission` with NO inverse: a remote effect has no "
                      "local undo (see the header).")
-        lines.append("  // The result is `Untrusted[Str]` — the peer is not "
-                     "this composition's trust domain.")
+        lines.append(f"  // A `{in_type}` message in, an `Untrusted[{out_type}]` "
+                     f"reply out — the peer is not")
+        lines.append("  // this composition's trust domain. A `Bytes` side is an "
+                     "A2A file `Part`.")
         if self.async_kw:
             lines.append("  // `async`: a network round trip SUSPENDS on this "
                          "tier, so callers need an")
             lines.append("  // async context (see the header).")
-        lines.append(f"  emission {self.async_kw}fn {op}(message: Str) -> Untrusted[Str]")
+        lines.append(f"  emission {self.async_kw}fn {op}(message: {in_type}) "
+                     f"-> Untrusted[{out_type}]")
 
         extern = f"a2a_{self.key}_{op}"
         body = _BODIES[(self.backend, self.card.transport)](
             self.card.endpoint, skill_id,
-            follow_redirects=self.follow_redirects)
+            follow_redirects=self.follow_redirects,
+            in_modality=in_modality, out_modality=out_modality)
         extern_decl = (
             f"extern emission[{self.card.net_cap}] {self.async_kw}fn "
-            f"{extern}(message: Str) -> Untrusted[Str]\n"
+            f"{extern}(message: {in_type}) -> Untrusted[{out_type}]\n"
             f"  = @{self.backend} {{{body}}}"
         )
         provide = f"    {self.async_kw}fn {op}(message) = {extern}(message)"
@@ -988,8 +1092,9 @@ class _Generator:
         op_lines: list[str] = []
         externs: list[str] = []
         provides: list[str] = []
-        for op, skill_id, skill in self.card.skills:
-            lines, extern, provide = self._operation(op, skill_id, skill)
+        for op, skill_id, skill, in_modality, out_modality in self.card.skills:
+            lines, extern, provide = self._operation(
+                op, skill_id, skill, in_modality, out_modality)
             op_lines.extend(lines)
             externs.append(extern)
             provides.append(provide)
@@ -1125,10 +1230,12 @@ class _Generator:
             "// fault at the boundary; the generated body refuses to poll, refuses to",
             "// resume, and refuses to guess.",
             "//",
-            "// A skill is transcribed as text in, text out, because that is all an",
-            "// Agent Card describes. It carries no parameter or result schema, so",
-            "// nothing richer is available to transcribe and nothing richer is",
-            "// invented.",
+            "// A skill is transcribed one `Part` in, one `Part` out: a `text/*`",
+            "// mode as `Str`, a single binary media type as `Bytes` (an A2A file",
+            "// `Part`, inline base64). A `DataPart` (structured JSON) needs the",
+            "// canonical tagged encoding (slice C1) and is refused, not flattened;",
+            "// a card carries no parameter or result schema beyond the modes, so",
+            "// nothing richer is available to transcribe and nothing is invented.",
         ]
         if self.async_kw:
             lines += [

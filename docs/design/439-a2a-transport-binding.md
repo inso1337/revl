@@ -139,9 +139,25 @@ what it refuses:
    question and it is still open.
 2. Push notifications and webhook delivery (an inbound callback is a provision,
    not a client call).
-3. Non-text `Part`s (`FilePart`, `DataPart`) and richer skill schemas.
-4. gRPC and HTTP+JSON/REST as `through a2a` sub-transports (the importer already
-   binds JSON-RPC and HTTP+JSON; the row binds only JSON-RPC so far).
+3. ~~Non-text `Part`s (`FilePart`, `DataPart`) and richer skill schemas.~~
+   **`FilePart` LANDED**, both entry points: a `Bytes` argument/return is an A2A
+   file `Part` with INLINE base64 bytes (`FileWithBytes`), on the row's `through
+   a2a`/`through a2a_rest` `@py` wire and on `revl import a2a --backend py` (a
+   single binary media type on a skill's `inputModes`/`outputModes`). Still open:
+   a `DataPart` (arbitrary structured JSON) — it needs the tagged half of the
+   canonical encoding, which is slice C1's (`revl export client`) to build, so it
+   is refused rather than flattened; a file `Part` on the coloured `@ts` tier (the
+   `Uint8Array`/base64 binding under the `tsc --strict` gate); and a file `Part`
+   delivered by `uri` rather than inline bytes (a second crossing to fetch it).
+4. ~~gRPC and HTTP+JSON/REST as `through a2a` sub-transports (the importer already
+   binds JSON-RPC and HTTP+JSON; the row binds only JSON-RPC so far).~~
+   **HTTP+JSON/REST LANDED** as `through a2a_rest`, the second JSON-body transport
+   A2A 1.0.0 defines: the row now speaks both wires the importer does, and the two
+   entry points share `_HTTPJSON_SEND_PATH` and the terminal-state list so they
+   cannot drift. gRPC stays open and is REFUSED under any label on both entry
+   points — it is a binary transport over HTTP/2 with protobuf framing, not the
+   JSON POST either synthesizer emits, so it cannot ship honestly as `a2a`; a real
+   gRPC binding is a separate transport, not a sub-transport of this one.
 5. ~~The `Untrusted[T]` return tainting, slice C3, shared with the canonical
    wire.~~ **LANDED** (this branch), for both wires together — see the scope-limit
    note above and `test_439_a2a_transport.py` / `test_424_remote_row.py`.

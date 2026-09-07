@@ -29,6 +29,7 @@ sibling entry point onto the same protocol).
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -40,6 +41,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl.composition import compile_composition, resolve_file  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 from revl.import_a2a import A2A_VERSION  # noqa: E402
+from revl.synthesize import _py_body_a2a  # noqa: E402
 
 # A text-in / text-out service — the shape `through a2a` binds. Not one word of
 # a consumer of `agent: Agent` changes between a local provider and this remote
@@ -173,7 +175,7 @@ def test_on_failure_result_brings_it_back_in_band(tmp_path):
     base = WITHDRAW.replace("through a2a", "through a2a\n    on_failure(result)")
     text = _synth_source(tmp_path, base, services=AGENT_RESULT)
     assert 'return Err("a2a: transport failure")' in text
-    assert 'return Ok(_text)' in text
+    assert 'return Ok(_value)' in text
     assert 'raise RuntimeError("a2a: transport failure")' not in text
 
 
@@ -205,12 +207,13 @@ service Agent {
         resolve(tmp_path)
     message = str(excinfo.value)
     assert "through a2a" in message
-    assert "exactly one `Str` message parameter" in message
+    assert "exactly one message parameter" in message
 
 
 def test_a_non_str_parameter_is_refused(tmp_path):
-    """The message text is a `Str`. An `Int` parameter has no A2A text `Part`
-    this slice projects."""
+    """The two projected modalities are `Str` (a text `Part`) and `Bytes` (a
+    file `Part`). An `Int` parameter is neither, so it has no A2A `Part` this
+    slice projects and is refused rather than flattened."""
     services = """
 service Agent {
   emission fn ask(count: Int) -> Str
@@ -219,7 +222,8 @@ service Agent {
     write(tmp_path, services=services, base=WITHDRAW)
     with pytest.raises(RevlError) as excinfo:
         resolve(tmp_path)
-    assert "is `Int`, not the `Str`" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "is `Int`, not a `Str` (a text `Part`) or a `Bytes`" in message
 
 
 def test_a_non_str_return_is_refused(tmp_path):
@@ -360,3 +364,224 @@ component ShellSvc requires agent: Agent provides shell: Shell {
     with pytest.raises(RevlError) as excinfo:
         compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
     assert "untrusted value (net)" in str(excinfo.value)
+
+
+# ================================================================= sub-transports
+# Item 439 remaining piece (4): the row bound only JSON-RPC 2.0; `through
+# a2a_rest` binds the second JSON-body transport A2A 1.0.0 defines (HTTP+JSON/
+# REST), the same one `revl import a2a` already reads off a card's
+# `preferredTransport`. Both are a POST of a JSON body a `urllib` host carries;
+# gRPC (binary HTTP/2 + protobuf) is not, and stays refused under any label.
+
+REST = WITHDRAW.replace("through a2a", "through a2a_rest")
+
+
+def test_through_a2a_rest_binds_and_resolves(tmp_path):
+    """`through a2a_rest` resolves, carrying `a2a_rest` as its transport, and
+    synthesizes a provider exactly as the JSON-RPC row does."""
+    write(tmp_path, services=AGENT, base=REST)
+    table = resolve(tmp_path)
+    row, = table.rows
+    assert row.remote.get("transport") == "a2a_rest"
+    (_rel, text), = table.sources.items()
+    assert "component RemoteAgentProvider provides agent: Agent" in text
+
+
+def test_the_rest_wire_posts_to_the_message_send_path(tmp_path):
+    """The one wire difference the importer already carries: REST POSTs the bare
+    message (no JSON-RPC envelope) to `<endpoint>/v1/message:send`, and its reply
+    IS the `Task`/`Message`, so there is no `result`/`error` envelope to unwrap."""
+    text = _synth_source(tmp_path, REST)
+    assert "HTTP+JSON/REST `POST /v1/message:send`" in text
+    assert f"A2A {A2A_VERSION} over HTTP+JSON/REST" in text
+    assert "/v1/message:send" in text
+    # no JSON-RPC envelope on the REST wire
+    assert '"jsonrpc": "2.0"' not in text
+    assert '"method": "message/send"' not in text
+    # still A2A: the text part and the skill metadata reference remain
+    assert '"revl.skill": "ask"' in text
+
+
+def test_the_rest_provider_compiles(tmp_path):
+    write(tmp_path, services=AGENT, base=REST)
+    assert compile_composition(str(tmp_path / "base.rvl"), str(tmp_path)) is not None
+
+
+def test_grpc_is_still_refused_under_any_label(tmp_path):
+    """gRPC is A2A 1.0.0's third transport and is a binary HTTP/2 + protobuf
+    crossing, not the JSON POST this synthesizer emits, so it ships under no
+    label — the honesty rule `check_transport` keeps."""
+    base = WITHDRAW.replace("through a2a", "through grpc")
+    write(tmp_path, services=AGENT, base=base)
+    with pytest.raises(RevlError) as excinfo:
+        resolve(tmp_path)
+    message = str(excinfo.value)
+    assert "grpc" in message
+    assert "binds no transport by that name" in message
+
+
+# ============================================================ non-text `Part`s
+# Item 439 remaining piece (3): a `Str` is a text `Part`, and a `Bytes` is now a
+# file `Part` with inline base64 bytes. A `DataPart` (structured JSON) still has
+# no revl spelling here — it needs the canonical tagged encoding (slice C1) — so
+# it is refused rather than flattened.
+
+AGENT_FILE = """
+service Agent {
+  emission fn render(doc: Bytes) -> Bytes
+}
+"""
+
+
+def test_a_bytes_method_synthesizes_a_file_part(tmp_path):
+    """A `Bytes` parameter is sent as an A2A file `Part` with INLINE base64
+    bytes (`FileWithBytes`); a `Bytes` return is read back the same way. The
+    synthesized crossing still returns `Untrusted[Bytes]` (slice C3)."""
+    text = _synth_source(tmp_path, WITHDRAW, services=AGENT_FILE)
+    assert 'fn remote_agent_render(doc: Bytes) -> Untrusted[Bytes]' in text
+    assert '"kind": "file", "file":' in text
+    assert "b64encode" in text and "b64decode" in text
+    assert '"kind": "text"' not in text
+
+
+def test_a_bytes_file_method_compiles(tmp_path):
+    write(tmp_path, services=AGENT_FILE, base=WITHDRAW)
+    assert compile_composition(str(tmp_path / "base.rvl"), str(tmp_path)) is not None
+
+
+def test_a_datapart_style_type_is_refused(tmp_path):
+    """A record/ADT parameter is a `DataPart`'s structured JSON, which needs the
+    canonical tagged encoding (slice C1) and is refused naming the method rather
+    than flattened onto one text `Part`."""
+    services = """
+type Ask = { question: Str }
+service Agent {
+  emission fn ask(a: Ask) -> Str
+}
+"""
+    write(tmp_path, services=services, base=WITHDRAW)
+    with pytest.raises(RevlError) as excinfo:
+        resolve(tmp_path)
+    message = str(excinfo.value)
+    assert "`Ask`" in message
+    assert "a `Str` (a text `Part`) or a `Bytes`" in message
+
+
+# ---------------------------------------------- the generated crossing, executed
+
+class _Ok:
+    def __init__(self, v):
+        self.v = v
+
+
+class _Err:
+    def __init__(self, e):
+        self.e = e
+
+
+def _run_row_body(reply, *, in_modality="text", out_modality="text",
+                  in_band=False, rest=False, status=200, arg="ping"):
+    """Execute a synthesized `through a2a[_rest]` `@py` body against a stubbed
+    transport, the same technique `test_import_a2a._run_py_body` uses: the body
+    is real code, so the file-part marshalling and the terminal-only refusal are
+    tested directly rather than only greppa."""
+    import io
+    import textwrap
+    import urllib.request
+
+    body = _py_body_a2a("agent.example:8443", "render" if in_modality == "file"
+                        else "ask", in_band, rest=rest, in_modality=in_modality,
+                        out_modality=out_modality)
+    src = "def _crossing(_arg):\n    _args = [_arg]\n" + textwrap.indent(
+        textwrap.dedent(body), "    ")
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    calls = []
+
+    class _Opener:
+        def open(self, request, *a, **k):
+            calls.append(request.data)
+            if status >= 400:
+                raise urllib.request.HTTPError(
+                    request.full_url, status, "err", {}, io.BytesIO(b""))
+            return _Resp(json.dumps(reply).encode())
+
+    ns = {"__name__": "generated", "Ok": _Ok, "Err": _Err}
+    exec(compile(src, "<row-a2a-body>", "exec"), ns)
+    original = urllib.request.build_opener
+    urllib.request.build_opener = lambda *h: _Opener()
+    try:
+        return ns["_crossing"](arg), calls
+    finally:
+        urllib.request.build_opener = original
+
+
+def test_jsonrpc_text_round_trip():
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "message", "parts": [{"kind": "text", "text": "pong"}]}}
+    out, calls = _run_row_body(reply)
+    assert out == "pong"
+    sent = json.loads(calls[0])
+    assert sent["method"] == "message/send"
+    assert sent["params"]["message"]["parts"] == [{"kind": "text", "text": "ping"}]
+    assert sent["params"]["message"]["metadata"]["revl.skill"] == "ask"
+
+
+def test_rest_text_round_trip_sends_no_envelope():
+    reply = {"kind": "message", "parts": [{"kind": "text", "text": "pong"}]}
+    out, calls = _run_row_body(reply, rest=True)
+    assert out == "pong"
+    sent = json.loads(calls[0])
+    # REST posts the bare message, no jsonrpc/method/id envelope
+    assert "jsonrpc" not in sent and "method" not in sent
+    assert sent["message"]["parts"] == [{"kind": "text", "text": "ping"}]
+
+
+def test_file_part_round_trips_base64_bytes():
+    """The load-bearing FilePart test: a `Bytes` argument is base64-encoded into
+    a file `Part` on the wire, and a file `Part` reply is base64-decoded back to
+    `Bytes` — end to end, executed."""
+    import base64
+    payload = b"\x00\x01PDF-ish\xff"
+    b64 = base64.b64encode(b"reply-bytes").decode("ascii")
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "id": "t", "status": {"state": "completed"},
+        "artifacts": [{"parts": [{"kind": "file", "file": {"bytes": b64}}]}]}}
+    out, calls = _run_row_body(reply, in_modality="file", out_modality="file",
+                               arg=payload)
+    assert out == b"reply-bytes"
+    sent = json.loads(calls[0])
+    part = sent["params"]["message"]["parts"][0]
+    assert part["kind"] == "file"
+    assert base64.b64decode(part["file"]["bytes"]) == payload
+
+
+def test_a_uri_only_file_reply_is_a_fault():
+    """A file `Part` that carried only a `uri` (a second crossing this slice does
+    not make) is a fault, never a silently-empty answer."""
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "message", "parts": [{"kind": "file", "file": {"uri": "x"}}]}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_row_body(reply, in_modality="file", out_modality="file", arg=b"x")
+    assert "uri" in str(excinfo.value)
+
+
+def test_a_non_terminal_task_faults_on_the_row_body():
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "id": "t", "status": {"state": "working"}}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_row_body(reply)
+    assert "non-terminal" in str(excinfo.value)
+
+
+def test_on_failure_result_returns_err_on_transport_failure():
+    out, _ = _run_row_body({}, in_band=True, status=503)
+    assert isinstance(out, _Err)
+    assert "transport failure" in out.e
