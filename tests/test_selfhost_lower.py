@@ -2346,3 +2346,127 @@ def test_type_layer_gap_is_a_named_selfhost_divergence(admit, family, name, tag)
         f"slice appears to have landed. Flip this fixture — delete its row "
         f"here, delete it from KNOWN_BYPASSES, re-record the census baseline, "
         f"and fold it into the slice's agreement corpus.")
+
+
+# ---------------------------------------------------------------- ambient / #86
+#
+# Item 186 / issue #86, SLICE 1: ambient (running-manifest) composition
+# admission. `admit_ambient(src, manifest)` admits a component against an
+# ALREADY RUNNING manifest, not a single self-contained text — the reference's
+# `check_and_lower` `ambient` input, which `admit_src` has no analogue for.
+#
+# The manifest is the linker's live provision table, serialised as rows
+# "<component>/<key>/<realm>" joined by ";" (realm "" = shared). Slice 1 covers
+# provision disjointness: a `(key, realm)` the manifest already holds conflicts.
+#
+# There is no reference `admit_ambient` to drive directly, but slice 1 has an
+# exact single-source equivalent that IS the oracle: admitting `X` against a
+# manifest holding `M`'s provisions equals single-source-admitting the text
+# `M ++ X` for the provision-disjointness guarantee, so
+#
+#     admit_ambient(X, manifest_of(M)) == admit_src(M ++ X) == reference(M ++ X)
+#
+# and all three legs are pinned below. This equivalence is exactly what the
+# later handoff/replacement wave breaks (a hot-swap overrides rather than
+# conflicts), which is why replacement is a wave and disjointness is a slice.
+
+
+@pytest.fixture(scope="module")
+def admit_ambient(ns):
+    """The ambient gate: `admit_ambient(src, manifest) -> "" | "<tag>|<msg>"`."""
+    return ns["admit_ambient"]
+
+
+_SVC_D = "service D { fn q(s: Str) -> Int } "
+_PROV_DB = "provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+
+
+@pytest.mark.parametrize("name,src", ACCEPTED_PROGRAMS,
+                         ids=[n for n, _ in ACCEPTED_PROGRAMS])
+def test_empty_manifest_is_single_source(admit, admit_ambient, name, src):
+    """The base invariant: an empty manifest is the empty provision table, so
+    `admit_ambient(src, "")` is `admit_src(src)` byte-for-byte, across the whole
+    accepted corpus."""
+    assert admit_ambient(src, "") == admit(src)
+
+
+@pytest.mark.parametrize("name,src,tag", REJECTED_PROGRAMS,
+                         ids=[n for n, _, _ in REJECTED_PROGRAMS])
+def test_empty_manifest_is_single_source_when_refused(admit, admit_ambient,
+                                                       name, src, tag):
+    """Same invariant on every refused program: a refusal reached with no
+    manifest is forwarded exactly."""
+    assert admit_ambient(src, "") == admit(src)
+
+
+def test_ambient_provision_conflict_shared_realm(admit_ambient):
+    v = admit_ambient(
+        _SVC_D + "component NewStore " + _PROV_DB, "OldStore/db/")
+    assert v == ("G2|provision conflict: key `db` is provided by both "
+                 "OldStore and NewStore (G2)")
+
+
+def test_ambient_provision_conflict_names_the_realm(admit_ambient):
+    src = ('service Kv { fn get(k: Str) -> Str } '
+           'component StoreB provides kv: Kv { isolate kv in realm("tenant_a") '
+           'provide kv { fn get(k) { return k } } }')
+    v = admit_ambient(src, "StoreA/kv/tenant_a")
+    assert v == ("G2|provision conflict: key `kv` in realm `tenant_a` is "
+                 "provided by both StoreA and StoreB (G2)")
+
+
+def test_ambient_provision_in_a_different_realm_composes(admit_ambient):
+    src = ('service Kv { fn get(k: Str) -> Str } '
+           'component StoreB provides kv: Kv { isolate kv in realm("tenant_b") '
+           'provide kv { fn get(k) { return k } } }')
+    assert admit_ambient(src, "StoreA/kv/tenant_a") == ""
+
+
+def test_ambient_disjoint_manifest_key_does_not_conflict(admit_ambient):
+    v = admit_ambient(_SVC_D + "component NewStore " + _PROV_DB,
+                      "OldCache/cache/;OldBus/bus/")
+    assert v == ""
+
+
+def test_ambient_forwards_an_internally_refused_component(admit, admit_ambient):
+    src = ('service Database { emission fn execute(sql: Str) -> Int } '
+           'component P requires db: Database { effect db.execute("x") '
+           'undo db.execute("y") }')
+    # a manifest never launders an internally refused component
+    assert admit_ambient(src, "Other/svc/") == admit(src)
+    assert admit(src).startswith("G4|")
+
+
+@pytest.mark.parametrize("realm", ["", "tenant_a"])
+def test_ambient_equals_single_source_composition(admit, admit_ambient, realm):
+    """The load-bearing differential: ambient admission of `X` against a
+    manifest holding `M` equals single-source admission of `M ++ X`, and the
+    reference agrees with that composed text. `realm=""` exercises the shared
+    realm (conflict), a named realm the per-(key,realm) path."""
+    iso = f' isolate db in realm("{realm}")' if realm else ""
+    prov = ("provides db: D {" + iso +
+            " provide db { fn q(s) { let x = s   return 0 } } }")
+    old = "component OldStore " + prov
+    new = "component NewStore " + prov
+    manifest = f"OldStore/db/{realm}"
+
+    ambient_src = _SVC_D + new
+    composed = _SVC_D + old + " " + new
+
+    got = admit_ambient(ambient_src, manifest)
+    # leg 1: ambient == selfhost single-source of the composed text
+    assert got == admit(composed)
+    # leg 2: the composed text's G2 verdict is what the reference reports too
+    ref_tag, _ = _ref(composed)
+    assert ref_tag == "G2"
+    assert got.startswith("G2|")
+
+
+def test_ambient_manifest_wire_tolerates_trailing_and_empty_rows(admit_ambient):
+    """A trailing or doubled ";" yields no phantom provision — the wire parser
+    skips empty rows, so these all read as the single OldStore/db provision."""
+    src = _SVC_D + "component NewStore " + _PROV_DB
+    for manifest in ("OldStore/db/;", ";OldStore/db/", "OldStore/db/;;"):
+        v = admit_ambient(src, manifest)
+        assert v == ("G2|provision conflict: key `db` is provided by both "
+                     "OldStore and NewStore (G2)"), manifest
