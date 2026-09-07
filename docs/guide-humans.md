@@ -291,6 +291,7 @@ below; the exhaustive per-command flag reference is
 | `revl estop` | the operator's emergency halt: stop dispatching crossings now, unwind nothing, and report what was left stranded | [commands-reference.md](commands-reference.md#revl-estop) |
 | `revl branch --wal FILE` | session branch lineage over durable WALs: the branch tree, and the fork partition of a recorded tail (`--at SEQ`) | [commands-reference.md](commands-reference.md#revl-branch) |
 | `revl compare LEFT.wal RIGHT.wal` | what two sessions did after a shared fork point, and what durable logs cannot yet say | [commands-reference.md](commands-reference.md#revl-compare) |
+| `revl replay WAL` | replay-mode readiness over a durable WAL: per mode, whether its model decisions carry enough, and what a live executor still needs (`--mode`, `--json`) | [commands-reference.md](commands-reference.md#revl-replay) |
 | `revl why COMPONENT --trace FILE` | explain a recorded lifecycle transition's cause chain; `--check FILES` runs the withdraw oracle | [why-runtime.md](why-runtime.md) |
 | `revl trace FILE` | the causal trace of a recorded run, hop by hop (`--component`, `--model`, `--otel`) | [why-traces.md](why-traces.md) |
 | `revl metrics --trace FILE` | capability-aware runtime metrics over a `run --trace` JSONL: emissions by capability, failures by G-rule, average lifecycle duration | [revl-metrics.md](revl-metrics.md) |
