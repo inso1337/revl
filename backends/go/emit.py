@@ -1645,6 +1645,35 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
                 out.append("%s\treturn nil" % pad)
             out.append("%s})" % pad)
             out.append("%s_ = %s" % (pad, bind))
+        elif s == "if":
+            # issue #548: control flow over the method's value computation. The
+            # arms are pure and their inner steps are ordinary method steps, so
+            # they recurse through this same renderer — byte-for-byte the
+            # fn-grammar `_go_v3_stmt` shape.
+            out.append("%sif %s {" % (pad, _expr(step["cond"], env)))
+            _emit_method_body(step.get("then") or [], env, out, indent + 1, ret_surface)
+            if step.get("else"):
+                out.append("%s} else {" % pad)
+                _emit_method_body(step["else"], env, out, indent + 1, ret_surface)
+            out.append("%s}" % pad)
+        elif s == "while":
+            out.append("%sfor %s {" % (pad, _expr(step["cond"], env)))
+            _emit_method_body(step.get("body") or [], env, out, indent + 1, ret_surface)
+            out.append("%s}" % pad)
+        elif s == "for":
+            bind = _safe_local(step["bind"])
+            it_node = step.get("iterable")
+            it_t = _comp_infer(it_node, env)
+            if isinstance(it_t, str) and it_t.startswith("List[") and it_t.endswith("]"):
+                env.var_types[step["bind"]] = it_t[5:-1]
+            out.append("%sfor _, %s := range %s {" % (pad, bind, _expr(it_node, env)))
+            out.append("%s\t_ = %s" % (pad, bind))
+            _emit_method_body(step.get("body") or [], env, out, indent + 1, ret_surface)
+            out.append("%s}" % pad)
+        elif s == "break":
+            out.append("%sbreak" % pad)
+        elif s == "continue":
+            out.append("%scontinue" % pad)
         else:
             raise EmitError("unsupported method step: %r" % (s,))
 

@@ -3249,8 +3249,20 @@ def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
     ):
         return _expr(steps[0]["expr"], env, rename)
 
+    return " ".join(_rust_render_pure_stmts(steps, env, dict(rename),
+                                             method.get("name")))
+
+
+def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
+                            method_name: str | None = None) -> list[str]:
+    """Render a PURE provide-method step list (issue #548) as Rust statement
+    strings: bindings, assignments, `return`, and the control-flow forms whose
+    bodies are themselves pure. Shared by the pure-method fast path and the
+    effectful `_method_body_lines` (a top-level `if`/`while`/`for` may sit
+    beside `emit`/`effect` steps, its arms still pure). Rust blocks are
+    expression-blocks, so each form is a statement here just as in the fn
+    grammar."""
     parts: list[str] = []
-    scope = dict(rename)
     for step in steps:
         kind = step.get("step")
         if kind == "let":
@@ -3265,12 +3277,43 @@ def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
             expr = step.get("expr")
             parts.append("return;" if expr is None
                          else f"return {_expr(expr, env, scope)};")
+        elif kind == "if":
+            cond = _expr(step["cond"], env, scope)
+            then = " ".join(_rust_render_pure_stmts(
+                step.get("then") or [], env, dict(scope), method_name))
+            s = f"if {cond} {{ {then} }}"
+            if step.get("else"):
+                els = " ".join(_rust_render_pure_stmts(
+                    step["else"], env, dict(scope), method_name))
+                s += f" else {{ {els} }}"
+            parts.append(s)
+        elif kind == "while":
+            cond = _expr(step["cond"], env, scope)
+            body = " ".join(_rust_render_pure_stmts(
+                step.get("body") or [], env, dict(scope), method_name))
+            parts.append(f"while {cond} {{ {body} }}")
+        elif kind == "for":
+            bind = _ident(step["bind"], "loop binding")
+            inner = dict(scope)
+            inner.pop(bind, None)
+            # `.iter().cloned()` yields owned `T` without moving the iterable (a
+            # param/`self` field may be used again) and keeps the binding a
+            # value so the pure body's arithmetic needs no deref. A `List[T]`
+            # element is always `Clone` on this tier.
+            iterable = _expr(step["iterable"], env, scope)
+            body = " ".join(_rust_render_pure_stmts(
+                step.get("body") or [], env, inner, method_name))
+            parts.append(f"for {bind} in {iterable}.iter().cloned() {{ {body} }}")
+        elif kind == "break":
+            parts.append("break;")
+        elif kind == "continue":
+            parts.append("continue;")
         else:
             raise EmitError(
-                f"{env.name}.{method.get('name')}: a pure method body admits "
-                f"bindings and a return in the Rust backend, not {kind!r}"
+                f"{env.name}.{method_name}: a pure method body admits bindings, "
+                f"control flow and a return in the Rust backend, not {kind!r}"
             )
-    return " ".join(parts)
+    return parts
 
 
 def _method_body(env: _Env, method: dict) -> str:
@@ -3622,6 +3665,15 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             )
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
+        elif kind in ("if", "while", "for", "break", "continue"):
+            # issue #548: a top-level `if`/`while`/`for` may sit beside the
+            # effect/emit steps of an effectful method (e.g. a guard that
+            # `return`s early, then an `emit`). Its arms are pure, so the shared
+            # pure renderer produces them; a Rust expression-block statement is
+            # whitespace-insensitive, so the single-line form is valid at `pad`.
+            for line in _rust_render_pure_stmts([step], env, dict(rename),
+                                                method.get("name")):
+                out.append(f"{pad}{line}")
         else:
             raise EmitError(f"unsupported method body step in Rust backend: {kind!r}")
 

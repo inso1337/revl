@@ -1257,6 +1257,39 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
                 raise EmitError(
                     "await steps are not allowed inside sync provide-method bodies (A1)")
             lines.append(f"{indent}await {_expr(step['expr'], ctx)}")
+        elif kind == "if":
+            # issue #548: control flow over the method's value computation. The
+            # arms are pure (registration refused at lowering) and their inner
+            # steps are ordinary method steps, so they recurse through this same
+            # renderer — byte-for-byte the fn-grammar `_v3_stmt` shape.
+            lines.append(f"{indent}if ({_expr(step['cond'], ctx)}) {{")
+            lines.extend(_method_body(step.get("then") or [], ctx, indent + "  ",
+                                      method_is_async, frame_var, provide_name,
+                                      method_name))
+            if step.get("else"):
+                lines.append(f"{indent}}} else {{")
+                lines.extend(_method_body(step["else"], ctx, indent + "  ",
+                                          method_is_async, frame_var,
+                                          provide_name, method_name))
+            lines.append(f"{indent}}}")
+        elif kind == "while":
+            lines.append(f"{indent}while ({_expr(step['cond'], ctx)}) {{")
+            lines.extend(_method_body(step.get("body") or [], ctx, indent + "  ",
+                                      method_is_async, frame_var, provide_name,
+                                      method_name))
+            lines.append(f"{indent}}}")
+        elif kind == "for":
+            bind = scope.bind(step["bind"])
+            lines.append(
+                f"{indent}for (const {bind} of {_expr(step['iterable'], ctx)}) {{")
+            lines.extend(_method_body(step.get("body") or [], ctx, indent + "  ",
+                                      method_is_async, frame_var, provide_name,
+                                      method_name))
+            lines.append(f"{indent}}}")
+        elif kind == "break":
+            lines.append(f"{indent}break")
+        elif kind == "continue":
+            lines.append(f"{indent}continue")
         elif kind == "provide":
             raise EmitError("provide steps are not allowed inside method bodies")
         else:
