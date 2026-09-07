@@ -7,20 +7,21 @@ recalled ones, so the day either changes something says so:
 * the SANCTIONED pattern — a distinct-key wrapper — actually observes a call on
   the real runtime (examples/interpose_observe.rvl), at the cost of re-keying
   the inner provider in its own source; and
-* the tempting SAME-key shape (an item-162 one-element route) compiles, admits,
-  passes G4 — and its provide body, which is the whole interception, is
-  silently discarded by the reference driver, because a `routes`-carrying
-  component is realized as a `_Router` proxy and never plugged as a fiber
-  (`src/revl/run.py`, the `if comp.get("routes"): self._install_router(...)`
-  guard in `_load`). That is the `routes` hole B1 records so slice B2 does not
-  inherit it.
+* the tempting SAME-key shape (an item-162 one-element route) is admitted ONLY
+  in its sanctioned form — a `realms(...)` route that carries NO redundant
+  `provide <routed-key>` body. Adding that body back is refused by G2 at compile
+  (item 449): a `routes`-carrying component is realized as a `_Router` proxy and
+  never plugged as a fiber (`src/revl/run.py`, the `if comp.get("routes"):
+  self._install_router(...)` guard in `_load`), so the body — which would be the
+  whole interception — could never run. G2 refuses it outright rather than
+  discard it silently at load. That is the `routes` hole B1 records so slice B2
+  does not inherit it.
 
 Both proofs need execution, so they run on the backend's own venv — the one
 with cordis-py installed — and skip with a reason otherwise, never a feint at
 passing.
 """
 
-import asyncio
 import os
 import subprocess
 import sys
@@ -83,12 +84,40 @@ def test_the_observation_is_really_checked(tmp_path):
 # the `routes` hole: the same-key shape's provide body is never run
 # ==========================================================================
 
-# The same-key interposition of §2.2: the inner provider isolates `db` in
-# realm("inner"); the seam requires `db` in that realm and provides `db` in the
-# parent realm via a one-element route (`isolate db in realms("inner")`). Its
-# provide body would emit `audit.record(q)` on every call — that IS the
-# interception. The driver never runs it.
-SAME_KEY = """
+# The same-key interposition of §2.2, in its two shapes. Both isolate `db` in
+# realm("inner") on the inner provider and route `db` across realms("inner") on
+# the seam (item 162's one-element multi-realm bind). They differ in one thing,
+# and that difference is the whole point of these two tests:
+#
+#   * SANCTIONED_SAME_KEY carries NO redundant `provide db` body on the routed
+#     key — the header `provides db: Db` plus the route is enough. This is the
+#     shape that compiles and admits.
+#   * BODY_CARRYING_SAME_KEY adds a hand-written `provide db { … }` body back on
+#     the routed key. That body would be the interception (it emits
+#     `audit.record(q)` on every call). G2 refuses it at compile, so it can
+#     never run.
+#
+# They are deliberately distinct fixtures: the compiles-and-admits test needs
+# the no-body shape to succeed, and the body-refused test needs the body to be
+# present so there is something for G2 to refuse. One shared fixture cannot
+# serve both — migrating it to satisfy one test breaks the other.
+
+SANCTIONED_SAME_KEY = """
+service Db {
+  emission[wire] fn execute(q: Str) -> Str
+}
+extern emission fn wire(q: Str) -> Str = @py { return "row" }
+
+component Inner provides db: Db {
+  isolate db in realm("inner")
+  provide db { fn execute(q) = emit wire(q) }
+}
+component Seam requires db: Db provides db: Db {
+  isolate db in realms("inner")
+}
+"""
+
+BODY_CARRYING_SAME_KEY = """
 service Db {
   emission[wire, audit, db] fn execute(q: Str) -> Str
 }
@@ -123,74 +152,39 @@ component Seam requires db: Db, audit: Audit provides db: Db {
 """
 
 
-def _build_driver(ir):
-    """A `_Driver` on the real cordis-py backend, wired exactly as
-    `run_command` wires it — the same helper test_router_runtime.py uses."""
-    from revl._paths import backends_root  # noqa: PLC0415
-    from revl.run import _Driver  # noqa: PLC0415
-
-    backend_dir = backends_root() / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
-    import emit  # noqa: PLC0415
-    import runtime as runtime_mod  # noqa: PLC0415
-    from cordis import Context  # noqa: PLC0415
-    from cordis.fiber import FiberState  # noqa: PLC0415
-
-    return _Driver(ir, {}, emit, runtime_mod, Context, FiberState)
-
-
 def test_same_key_route_compiles_and_admits():
-    """The same-key shape is not a compile error: it compiles and the `routes`
-    entry lands on the seam's IR (item 162's one-element multi-realm bind).
-    This runs on any interpreter — no runtime needed to see the IR."""
+    """The sanctioned same-key shape — a `realms(...)` route with NO redundant
+    `provide <routed-key>` body — is not a compile error: it compiles and the
+    `routes` entry lands on the seam's IR (item 162's one-element multi-realm
+    bind). This runs on any interpreter — no runtime needed to see the IR."""
     from revl import compile_source  # noqa: PLC0415
 
-    ir = compile_source(SAME_KEY, "same_key.rvl")
+    ir = compile_source(SANCTIONED_SAME_KEY, "same_key.rvl")
     by_name = {c["name"]: c for c in ir["components"]}
     assert by_name["Seam"].get("routes") == {"db": {"realms": ["inner"],
                                                     "strategy": None}}
 
 
-@pytest.mark.skipif(
-    not CORDIS_PY.exists(),
-    reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)")
 def test_a_routes_carrying_provide_body_is_never_executed():
-    """The `routes` hole, pinned. A component carrying `routes` is realized as
-    a `_Router` proxy by `src/revl/run.py` (the `if comp.get("routes"):
-    self._install_router(...)` guard in `_load`) and never plugged as a fiber,
-    so its provide body is discarded. The consumer's `db.execute` reaches the
-    inner provider directly (returns "row"), and the seam's `audit.record` —
-    the whole interception — never fires (`audit.seen() == 0`).
+    """The `routes` hole, closed. A seam that routes `db` across `realms(...)`
+    AND carries a hand-written `provide db { … }` body on that routed key is
+    refused by G2 at compile (item 449). The body — which would be the whole
+    interception, emitting `audit.record(q)` on every call — can never run,
+    because the program never admits: a `routes`-carrying component is realized
+    as a `_Router` proxy and never plugged as a fiber (`src/revl/run.py`, the
+    `if comp.get("routes"): self._install_router(...)` guard in `_load`), so the
+    body would be silently discarded at load — and G2 refuses it outright rather
+    than let that happen.
 
-    When this behaviour changes (a seam that runs its body), this test flips
-    and forces the change to be acknowledged — §2.5's "the implementation must
-    not ride `routes`"."""
+    This runs on any interpreter — the refusal is a compile fact, no runtime
+    needed. When this behaviour changes (a seam that runs its body), the refusal
+    flips and forces the change to be acknowledged — §2.5's "the implementation
+    must not ride `routes`"."""
     from revl import compile_source  # noqa: PLC0415
-    from revl.run import _Router  # noqa: PLC0415
+    from revl.errors import RevlErrors  # noqa: PLC0415
 
-    ir = compile_source(SAME_KEY, "same_key.rvl")
-
-    async def scenario():
-        driver = _build_driver(ir)
-        module = driver._emit_module(ir)
-        await driver._load(ir, module)
-
-        # G2: the consumer resolves `db` to exactly one provider — but it is
-        # the router proxy, not the seam's fiber.
-        db = driver.root.get("db")
-        assert isinstance(db, _Router)
-
-        # the call reaches the inner provider directly; the return is the
-        # inner's, unmediated.
-        assert db.execute("select 1") == "row"
-
-        # the interception never happened: the seam's provide body (the
-        # audit.record emit) was silently discarded.
-        audit = driver.root.get("audit")
-        assert audit.seen() == 0
-
-        await driver._teardown()
-        assert driver.root.reflect.store == {}
-
-    asyncio.run(scenario())
+    with pytest.raises(RevlErrors) as excinfo:
+        compile_source(BODY_CARRYING_SAME_KEY, "same_key.rvl")
+    message = str(excinfo.value)
+    assert "`provide db` in Seam is silently discarded" in message
+    assert "realms(" in message
