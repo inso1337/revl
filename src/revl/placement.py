@@ -1189,7 +1189,8 @@ def _enforcement_lines(pname: str, env: dict, achieved: dict | None) -> list[str
     if resolve_sandbox_driver(rung) is None:
         return [f"    enforcement: NONE — rung {rung} has no runtime driver in this "
                 f"build, so `revl run --placement` REFUSES this placement rather "
-                f"than running {pname} unconfined (Slice 2 implements `container`)"]
+                f"than running {pname} unconfined (every ladder rung — wasm-cell, "
+                f"container, microvm — now resolves a driver)"]
     return [f"    enforcement: rung {rung} has a runtime driver; `revl run "
             f"--placement` establishes the boundary at boot, verifies it with an "
             f"in-sandbox canary, and refuses if it cannot"]
@@ -3939,11 +3940,11 @@ def run_placement(files, placement_path: str, once: bool = False,
         if driver is None:
             return abort(
                 f"process {pname!r} declares the {env['isolation']!r} isolation "
-                f"rung, which has no runtime driver in this build (item 411 "
-                f"Slice 2 implements `container`). The boundary cannot be "
-                f"established, and a declared isolation is never downgraded to an "
-                f"unconfined process — the placement refuses. Use the `container` "
-                f"rung, or take the process out of the sandbox.")
+                f"rung, which has no runtime driver in this build. The boundary "
+                f"cannot be established, and a declared isolation is never "
+                f"downgraded to an unconfined process — the placement refuses. "
+                f"Every ladder rung (wasm-cell, container, microvm) resolves a "
+                f"driver, so this names an unknown rung; use one of those.")
         spec = specs[pname]
         # item 411 T2: the driver mounts this process's OWN spec file, not the
         # whole placement directory, so the file has to exist before the boot
@@ -4005,8 +4006,11 @@ def run_placement(files, placement_path: str, once: bool = False,
         # claimed-vouched externs, and the net=none egress note), so `net=none`
         # is never readable as a total-egress claim — plus, since Slice 2, the
         # rung actually ACHIEVED and the in-sandbox canary's evidence for it.
-        # Still deferred: the wasm-cell / microVM rungs (which REFUSE rather
-        # than degrade above; microVM is item 411 T6, a separate PR).
+        # Every ladder rung now has a driver above: wasm-cell verifies the cell
+        # substrate and microVM (item 411 T6) verifies the KVM boundary, each
+        # then REFUSING its remaining component-hosting step rather than degrade,
+        # never a weaker rung substituted. The microVM live boot's verification
+        # on a KVM-capable lane is the last step to close its rung.
         print("  sandbox placement (item 411, Slice 2): isolation ESTABLISHED by "
               "a runtime driver and verified in-sandbox; a rung that cannot be "
               "established refuses the placement", flush=True)
