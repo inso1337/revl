@@ -242,6 +242,105 @@ def _word_tests(root: Path, token: str) -> set[str]:
     return out
 
 
+def _test_importers(root: Path, target_stem: str) -> set[str]:
+    """Frontend test files that import the test module `target_stem` as a sibling.
+
+    Tests in this repo import ONE ANOTHER: five gate tests
+    `import test_selfhost_lower as oracle`, test_274_navigable_slice2 imports
+    test_evidence_policy, and eight modules `import test_command`. Editing a
+    shared test module can therefore red an importer that never itself changed,
+    so a modified test file must also select the tests that import it. Matched
+    against the same-directory sibling-import forms these files actually use
+    (`import X`, `import X as y`, `from X import ...`), anchored so a prefix
+    sibling (`test_command_helpers`) is not a false hit.
+    """
+    stem = re.escape(target_stem)
+    pat = re.compile(
+        rf"^[ \t]*(?:from[ \t]+{stem}[ \t]+import[ \t]"
+        rf"|import[ \t]+{stem}(?:[ \t]+as[ \t]+\w+)?[ \t]*(?:#.*)?$)",
+        re.MULTILINE,
+    )
+    out: set[str] = set()
+    for p in _test_files(root):
+        if p.stem == target_stem:
+            continue
+        if pat.search(_read(p)):
+            out.add(_node(p))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Self-host `use "..."` graph (selfhost/*.rvl compose by textual import).      #
+# --------------------------------------------------------------------------- #
+_USE_TARGET_RE = re.compile(r'\buse\s+"([^"]+\.rvl)"')
+
+
+def _selfhost_use_graph(root: Path):
+    """Parse the `use "..."` edges of every selfhost/*.rvl file.
+
+    Returns (sh_deps, std_deps):
+      sh_deps[stem]  = set of OTHER selfhost stems `stem` directly `use`s
+      std_deps[stem] = set of stdlib module stems `stem` directly `use`s
+
+    The self-host compiler is revl source that composes purely by textual
+    `use "./x.rvl"` / `use "../stdlib/x.rvl"` imports — there is no package
+    resolver — so a lexical scan IS the whole dependency graph.
+    """
+    d = root / "selfhost"
+    sh_deps: dict[str, set[str]] = {}
+    std_deps: dict[str, set[str]] = {}
+    if not d.is_dir():
+        return sh_deps, std_deps
+    for p in sorted(d.glob("*.rvl")):
+        stem = p.stem
+        sh_deps.setdefault(stem, set())
+        std_deps.setdefault(stem, set())
+        for target in _USE_TARGET_RE.findall(_read(p)):
+            norm = target.replace("\\", "/")
+            name = Path(norm).stem
+            if "/stdlib/" in norm or norm.startswith("stdlib/"):
+                std_deps[stem].add(name)
+            else:
+                sh_deps[stem].add(name)
+    return sh_deps, std_deps
+
+
+def _selfhost_dependents(sh_deps: dict[str, set[str]], stems) -> set[str]:
+    """`stems` plus every selfhost file that transitively `use`s one of them.
+
+    A change to lexer.rvl changes what parser.rvl / lower.rvl / checker.rvl
+    compile to, and a change to lower.rvl / an emitter changes what compile.rvl
+    produces, so those files' oracles are affected too. This is reverse-
+    reachability over the `use` graph: the full set of selfhost files whose
+    oracle could move when one of `stems` changes.
+    """
+    rev: dict[str, set[str]] = {}
+    for a, ds in sh_deps.items():
+        for dep in ds:
+            rev.setdefault(dep, set()).add(a)
+    seen = set(stems)
+    stack = list(stems)
+    while stack:
+        x = stack.pop()
+        for u in rev.get(x, ()):
+            if u not in seen:
+                seen.add(u)
+                stack.append(u)
+    return seen
+
+
+def _selfhost_oracles(root: Path, stems) -> set[str]:
+    """Oracle test node-ids for a set of selfhost stems, plus the always-on
+    line-coverage gate when any oracle is selected. An unmapped stem contributes
+    nothing here; the caller decides whether that escalates to FULL."""
+    out: set[str] = set()
+    for stem in stems:
+        out.update(SELFHOST_ORACLE_TESTS.get(stem, ()))
+    if out:
+        out.update(SELFHOST_ALWAYS)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Compile-reachability of src/revl (fail-safe core detection).                 #
 # --------------------------------------------------------------------------- #
@@ -355,10 +454,27 @@ def select(changed, root) -> dict:
         if f.startswith("stdlib/") and f.endswith(".rvl"):
             mod = Path(f).stem
             hits = _stdlib_tests(root, mod)
-            if not hits:
+            # A stdlib module is ALSO `use`d by the self-host compiler sources
+            # (selfhost/*.rvl are compiled inside the self-host oracle tests);
+            # nothing under tests/ names those `use` imports, so scan the graph
+            # and pull in the oracle of every selfhost file that reaches this
+            # module — directly, or transitively through another selfhost file
+            # (e.g. stdlib/value.rvl -> emit_py.rvl -> compile.rvl's oracle).
+            # Before this the oracles were missed and a stdlib edit that broke
+            # only the self-host emitters shipped green.
+            sh_deps, std_deps = _selfhost_use_graph(root)
+            users = {s for s, mods in std_deps.items() if mod in mods}
+            oracle_hits = _selfhost_oracles(
+                root, _selfhost_dependents(sh_deps, users)
+            )
+            if not hits and not oracle_hits:
                 return _full(f"stdlib/{mod}.rvl has no referencing test -> full")
             pytest_nodes |= hits
-            reasons.append(f"stdlib/{mod}")
+            pytest_nodes |= oracle_hits
+            reasons.append(
+                f"stdlib/{mod}"
+                + (" (+ self-host oracles)" if oracle_hits else "")
+            )
             continue
         if f.startswith("stdlib/"):
             return _full(f"non-module stdlib change {f} -> full")
@@ -369,12 +485,23 @@ def select(changed, root) -> dict:
         # rather than the FULL gate the hook was timing out on (issue #431).
         if f.startswith("selfhost/") and f.endswith(".rvl"):
             stem = Path(f).stem
-            oracle = SELFHOST_ORACLE_TESTS.get(stem)
-            if oracle is None:
+            if SELFHOST_ORACLE_TESTS.get(stem) is None:
                 return _full(f"selfhost/{stem}.rvl has no oracle mapping -> full")
-            pytest_nodes.update(oracle)
-            pytest_nodes.update(SELFHOST_ALWAYS)
-            reasons.append(f"selfhost/{stem} (self-host oracle)")
+            # A self-host file is `use`d by other self-host files (checker/parser/
+            # lower `use` lexer; compile `use`s lower + the emitters), so a change
+            # to it also moves those DEPENDENTS' compiled output — select their
+            # oracles too, not just this file's. Reverse-reachability over the
+            # `use` graph; before this a lexer.rvl edit ran only the lexer oracle
+            # while silently changing parser/lower/checker output.
+            sh_deps, _ = _selfhost_use_graph(root)
+            dependents = _selfhost_dependents(sh_deps, {stem})
+            pytest_nodes |= _selfhost_oracles(root, dependents)
+            extra = sorted(dependents - {stem})
+            reasons.append(
+                f"selfhost/{stem} (self-host oracle"
+                + (f" + dependents {' '.join(extra)}" if extra else "")
+                + ")"
+            )
             continue
         if f.startswith("selfhost/"):
             return _full(f"non-source selfhost change {f} -> full")
@@ -445,22 +572,38 @@ def select(changed, root) -> dict:
         # --- tests/test_*.py (modified — add/delete handled by caller) ------ #
         if f.startswith("tests/") and Path(f).name.startswith("test_") and f.endswith(".py"):
             pytest_nodes.add(f)
+            # Tests here import one another (module docstring), so a modified
+            # test file must also run the tests that import it — otherwise an
+            # importer that never changed can red on the edit and the narrow
+            # selection misses it.
+            importers = _test_importers(root, Path(f).stem)
+            pytest_nodes |= importers
             # docs/guide-humans.md states this module's test count, generated
             # from its AST, so editing it can stale a doc block (issue #255).
             if f == "tests/test_mcp.py":
                 gates.add("docs")
-            reasons.append(f"{f} (self)")
+            reasons.append(
+                f"{f} (self"
+                + (f" + importers {' '.join(sorted(importers))}" if importers else "")
+                + ")"
+            )
             continue
 
         # --- generated docs / matrix --------------------------------------- #
         if f.startswith("docs/") or f.endswith(".md"):
-            # Two pre-merge steps a doc can break: the generated conformance
-            # matrix (conformance --check-readme) and the source-derived doc
-            # blocks (docgen --check, issue #255). DOC-STATUS's inventory is a
-            # function of every docs/*.md, so ANY doc edit can stale it.
+            # THREE pre-merge steps a doc can break. First, the compiled
+            # snippets: tests/test_doc_examples.py sweeps README.md + docs/**.md
+            # and compiles every ```revl block, so any .md edit must re-run it.
+            # Before this rule a .md change matched no pytest node and selected
+            # ZERO tests, so a rotted doc example landed green. Second, the
+            # generated conformance matrix (conformance --check-readme). Third,
+            # the source-derived doc blocks (docgen --check, issue #255);
+            # DOC-STATUS's inventory is a function of every docs/*.md, so ANY
+            # doc edit can stale it.
             gates.add("conformance")
             gates.add("docs")
-            reasons.append(f"{f} (generated-matrix + docgen check)")
+            pytest_nodes.add("tests/test_doc_examples.py")
+            reasons.append(f"{f} (doc examples + generated-matrix + docgen check)")
             continue
 
         # --- bench/ measurement harnesses ---------------------------------- #
