@@ -28,7 +28,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from revl import attest, deploy  # noqa: E402
+from revl import deploy  # noqa: E402
 
 
 SOURCE = """\

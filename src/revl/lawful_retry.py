@@ -53,7 +53,7 @@ lawful ones to the machinery built to carry them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Mapping, Optional, Sequence
 
