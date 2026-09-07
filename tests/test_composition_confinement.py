@@ -317,6 +317,16 @@ component Logger provides metrics: Metrics {
 }
 """
 
+# A clean layer component that REQUIRES an existing capability (`db`) and
+# provides a new one (`report`): its `requires db` is a new wiring crossing.
+_READER = """
+use "services.rvl" { }
+service Report { fn get() -> Str }
+component Reader requires db: Db provides report: Report {
+  provide report { fn get() = "r" }
+}
+"""
+
 _BASE_TMPL = """
 composition Demo {
   use "services.rvl"
@@ -465,11 +475,18 @@ layer Tune for Demo {
     assert "BLIND SPOTS" in authority_panel.render(res)
 
 
-def test_a_trust_host_code_row_prevents_clean_with_an_unchanged_token_set(tmp_path):
+def test_a_trust_host_code_row_prevents_clean_with_an_unchanged_config_set(tmp_path):
     """426 exit test 16, second half. A row admitted under `--trust-host-code`
-    forfeits `clean` however quiet the tokens are (§8.5 conjunct 3): trust basis
-    is CLAIMED and the token set is UNCHANGED (the layer adds a clean row and
-    changes no config), yet the panel is not clean."""
+    forfeits `clean` however quiet the CONFIG tokens are (§8.5 conjunct 3): trust
+    basis is CLAIMED and no config field changed, yet the panel is not clean.
+
+    The added row also carries a `metrics` provision the base did not, which is a
+    capability WIDENING (§8.5 conjunct 1, the re-keyed crossing token set): the
+    panel flags it as a wiring token whether or not the row is trusted, so the
+    plain (untrusted) panel is NOT clean either — adding a capability-bearing row
+    is never a non-event. Trusting the row is the ADDITIONAL forfeit conjunct 3
+    contributes, on top of the wiring widening, and it also flips the basis to
+    CLAIMED and lists the row under UNCHECKED HOST CODE."""
     doc = _panel_project(
         tmp_path, stack=("obs",), components={},
         obs="""
@@ -483,17 +500,88 @@ layer Obs for Demo {
            if authority_panel._trust_of(cand)[r.label] == "non-first-party"]
     assert nfp, "the added row is non-first-party"
 
-    # with no trust flag the added clean row leaves the panel clean (no tokens).
+    # no trust flag: no CONFIG token changed, basis MEASURED, no CLAIMED row.
     plain = authority_panel.panel(base, cand)
     assert plain["tokens"] == [] and plain["trust_basis"].startswith("MEASURED")
-    assert plain["clean"]
+    assert plain["claimed"] == []
+    # but the added `metrics` provision is a capability widening, so NOT clean.
+    assert not plain["clean"]
+    assert any(w["kind"] == "provides" and w["label"] == "metrics"
+               for w in plain["wiring"])
 
-    # trusting it flips the basis to CLAIMED and forfeits clean, tokens unchanged.
+    # trusting it flips the basis to CLAIMED and adds conjunct 3's forfeit; the
+    # config token set is still empty.
     trusted = authority_panel.panel(base, cand, trust_host_code=set(nfp))
     assert trusted["trust_basis"] == "CLAIMED"
     assert trusted["tokens"] == []
     assert not trusted["clean"]
     assert nfp[0] in trusted["claimed"]
+
+
+# --------------------------------------------------------------------------- #
+# The panel compares the WIRING surface (capabilities and crossings), not only
+# config: a layer that changes what a composition provides or what it reaches,
+# without touching a config field, is never reported `clean` (§8.5 conjunct 1,
+# the re-keyed crossing token set across all kinds; §8.7 WIRING / ROWS blocks).
+# --------------------------------------------------------------------------- #
+
+def test_a_capability_added_by_a_layer_is_not_reported_clean(tmp_path):
+    """A stack layer that adds a row providing a NEW capability (`metrics`) and
+    changes NO config field forfeits `clean`: the added provision is a wiring
+    widening, keyed by row label, and appears as a `provides:` token."""
+    doc = _panel_project(
+        tmp_path, stack=("cap",), components={},
+        cap="""
+layer Cap for Demo {
+  add row @logger from "../mlog.rvl" provides metrics
+}
+""")
+    (tmp_path / "mlog.rvl").write_text(_CLEAN_LOGGER)
+    base, cand = _tables(doc, tmp_path)
+    res = authority_panel.panel(base, cand)
+    assert res["tokens"] == [], "no config field changed"
+    assert not res["clean"], "an added capability must forfeit clean"
+    caps = [w for w in res["wiring"]
+            if w["kind"] == "provides" and w["label"] == "logger"]
+    assert caps, res["wiring"]
+    assert caps[0]["token"] == "provides:@logger:metrics"
+    # and it is spelled out in the rendered panel.
+    assert "provides:@logger:metrics" in authority_panel.render(res)
+
+
+def test_a_crossing_added_by_a_layer_is_not_reported_clean(tmp_path):
+    """A stack layer that adds a row which REQUIRES an existing capability (`db`)
+    — a new crossing/wiring edge — and changes NO config field forfeits `clean`:
+    the new `requires` edge appears as a `requires:` token keyed by row label."""
+    doc = _panel_project(
+        tmp_path, stack=("cross",), components={},
+        cross="""
+layer Cross for Demo {
+  add row @reader from "../reader.rvl" provides report
+}
+""")
+    (tmp_path / "reader.rvl").write_text(_READER)
+    base, cand = _tables(doc, tmp_path)
+    res = authority_panel.panel(base, cand)
+    assert res["tokens"] == [], "no config field changed"
+    assert not res["clean"], "a new crossing must forfeit clean"
+    reqs = [w for w in res["wiring"]
+            if w["kind"] == "requires" and w["label"] == "reader"]
+    assert reqs, res["wiring"]
+    assert reqs[0]["token"] == "requires:@reader:db"
+    assert "requires:@reader:db" in authority_panel.render(res)
+
+
+def test_a_layerless_composition_stays_clean_on_the_wiring_surface(tmp_path):
+    """The wiring comparison does not manufacture drift: a composition with no
+    layers folds to a candidate identical to its base, so no wiring token is
+    produced and the panel is clean (guarding against a false-NOT-clean)."""
+    doc = _panel_project(tmp_path)
+    base, cand = _tables(doc, tmp_path)
+    res = authority_panel.panel(base, cand)
+    assert res["wiring"] == []
+    assert res["tokens"] == []
+    assert res["clean"]
 
 
 # --------------------------------------------------------------------------- #

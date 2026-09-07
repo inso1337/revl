@@ -19,6 +19,16 @@ Two structural rules come before any content (§8.2): the panel opens with a
 TRUST BASIS line, and every token is keyed by ROW LABEL, not component name, so
 a component rename reads as a non-event and not a full authority turnover.
 
+Config is only the SIXTH crossing kind (§8.4). The other five are the WIRING
+surface (§8.5 conjunct 1, §8.7 WIRING/ROWS): a layer can change a composition's
+authority without touching a config field — by adding a row, widening what a
+label PROVIDES (a capability), or opening a new `requires`/`granted` crossing.
+So the panel also compares the re-keyed wiring surface of base against
+candidate (`_wiring_of` / `_wiring_delta`); any widening there is a token and
+forfeits `clean`, exactly as a config token does. Removals are narrowings and
+never block (§8.7). Without this the panel would report `clean` on a layer that
+adds a whole capability-bearing row as long as no config value moved.
+
 The headline is FAIL-CLOSED (§8.5): the panel never prints `clean` unless every
 conjunct holds, and conjunct 5 — an unclassifiable config field is treated as
 authority-bearing — states the direction: incompleteness costs noise, never
@@ -88,6 +98,88 @@ def _trust_of(table) -> dict[str, str]:
     return {row.label: row_trust(row) for row in table.rows}
 
 
+def _wiring_of(table) -> dict[str, dict]:
+    """label -> the row's re-keyed WIRING surface (§8.2, §8.7 WIRING/ROWS).
+
+    Three header-only projections that carry authority independently of config:
+
+      * `provides` — the `(key, realm)` capabilities the row hands the
+        composition (asserted claims plus the header claims §1.4 admits), i.e.
+        what this label makes reachable to everything that `requires` it;
+      * `requires` — the capability keys the row consumes, i.e. the crossings
+        (wiring edges) this label opens into the rest of the composition;
+      * `granted` — the services a CONFINED row may compose against (§9.3
+        Part 2), `None` when the clause is unwritten.
+
+    Keyed by BARE label, never by component name, so a component rename is a
+    non-event (§8.2, exit test 2) and only a real change to what a label
+    provides, requires or is granted reads as a widening.
+    """
+    return {
+        row.label: {
+            "provides": {(k, r) for (k, r) in {*row.claims, *row.extra_claims}},
+            "requires": frozenset(row.requires),
+            "granted": None if row.granted is None else frozenset(row.granted),
+        }
+        for row in table.rows
+    }
+
+
+def _cap_token(kind: str, label: str, key: str, realm: str | None = None) -> str:
+    tail = key if realm is None else f"{key}@{realm}"
+    return f"{kind}:@{label}:{tail}"
+
+
+def _wiring_delta(base_wiring: dict, cand_wiring: dict
+                  ) -> tuple[list[dict], list[str]]:
+    """`(widenings, narrowings)` between two `_wiring_of` maps.
+
+    A capability, crossing or grant the candidate has and the base did not is a
+    WIDENING and produces a token — the direction that adds authority. An added
+    row is folded in the same pass: its base entry is empty, so every provision
+    it brings and every crossing it opens becomes a token, which is why adding a
+    row is never a non-event. Removals are NARROWINGS: they never block `clean`
+    (§8.7, "removed (narrowing, never blocks)") and are reported as notes only.
+    """
+    empty = {"provides": set(), "requires": frozenset(), "granted": None}
+    widenings: list[dict] = []
+    narrowings: list[str] = []
+
+    for label in cand_wiring:
+        cur = cand_wiring[label]
+        prior = base_wiring.get(label, empty)
+        added_row = label not in base_wiring
+
+        for key, realm in sorted(cur["provides"] - prior["provides"]):
+            widenings.append({
+                "kind": "provides", "label": label, "key": key, "realm": realm,
+                "added_row": added_row,
+                "token": _cap_token("provides", label, key, realm)})
+        for key in sorted(cur["requires"] - prior["requires"]):
+            widenings.append({
+                "kind": "requires", "label": label, "key": key, "realm": None,
+                "added_row": added_row,
+                "token": _cap_token("requires", label, key)})
+        new_grants = (cur["granted"] or frozenset()) - \
+            (prior["granted"] or frozenset())
+        for svc in sorted(new_grants):
+            widenings.append({
+                "kind": "grant", "label": label, "key": svc, "realm": None,
+                "added_row": added_row,
+                "token": _cap_token("grant", label, svc)})
+
+        for key, realm in sorted(prior["provides"] - cur["provides"]):
+            narrowings.append(_cap_token("provides", label, key, realm))
+        for key in sorted(prior["requires"] - cur["requires"]):
+            narrowings.append(_cap_token("requires", label, key))
+
+    for label in base_wiring:
+        if label not in cand_wiring:
+            narrowings.append(f"row:@{label}")
+
+    return widenings, narrowings
+
+
 def panel(base, candidate, *, trust_host_code=False) -> dict:
     """Compute the authority panel comparing `base` to the folded `candidate`.
 
@@ -127,6 +219,13 @@ def panel(base, candidate, *, trust_host_code=False) -> dict:
             if unclass:
                 unclassifiable.append(f"@{label}.{field}")
 
+    # §8.5 conjunct 1 / §8.7 WIRING & ROWS: the config token is only the SIXTH
+    # crossing kind. A layer can change a composition's authority without
+    # touching any config field — by adding a row, widening what a label
+    # provides (a capability), or opening a new `requires`/`granted` crossing.
+    # Compare the re-keyed wiring surface so none of those reads as clean.
+    wiring, narrowings = _wiring_delta(_wiring_of(base), _wiring_of(candidate))
+
     # §8.8: the rows admitted under `--trust-host-code`. Only a non-first-party
     # row can be trusted this way; trusting a first-party row is a no-op.
     claimed: list[str] = [
@@ -141,13 +240,17 @@ def panel(base, candidate, *, trust_host_code=False) -> dict:
         trust_basis = "MEASURED, first-party bodies trusted by premise"
 
     # §8.5 the fail-closed headline. `clean` requires: no config token changed,
+    # no wiring widening (a capability/crossing/grant the base did not have),
     # no unclassifiable field, and no --trust-host-code row (conjunct 3).
-    clean = (not tokens) and (not unclassifiable) and (not claimed)
+    clean = (not tokens) and (not wiring) and (not unclassifiable) \
+        and (not claimed)
 
     return {
         "composition": candidate.name,
         "trust_basis": trust_basis,
         "tokens": tokens,
+        "wiring": wiring,
+        "narrowings": narrowings,
         "unclassifiable": unclassifiable,
         "claimed": claimed,
         "clean": clean,
@@ -200,6 +303,23 @@ def render(result: dict) -> str:
         lines.append("  = no config or crossing tokens changed")
 
     lines.append("")
+    lines.append("WIRING       capabilities and crossings")
+    if result["wiring"]:
+        _detail = {
+            "provides": "new capability provided",
+            "requires": "new crossing required",
+            "grant": "new grant",
+        }
+        for w in result["wiring"]:
+            note = _detail[w["kind"]] + (" (row added)" if w["added_row"] else "")
+            lines.append(f"  + {w['token']}")
+            lines.append(f"      @{w['label']}: {note}")
+    else:
+        lines.append("  = no capability, crossing or grant widened")
+    for narrow in result["narrowings"]:
+        lines.append(f"  - {narrow}  removed (narrowing, never blocks)")
+
+    lines.append("")
     lines.append("BLIND SPOTS  what this panel does NOT measure")
     for spot in _BLIND_SPOTS:
         lines.append(f"  * {spot}")
@@ -216,6 +336,8 @@ def render(result: dict) -> str:
         why = []
         if result["tokens"]:
             why.append(f"{len(result['tokens'])} config token(s)")
+        if result["wiring"]:
+            why.append(f"{len(result['wiring'])} wiring widening(s)")
         if result["claimed"]:
             why.append(f"{len(result['claimed'])} --trust-host-code row(s)")
         if result["unclassifiable"]:
