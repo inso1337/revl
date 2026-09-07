@@ -25,6 +25,7 @@ from revl.federation import (  # noqa: E402
     CONTRACT_KIND,
     check,
     consumer_surface,
+    render,
 )
 from revl.lower import _service_compatible, _service_from_ir  # noqa: E402
 from revl.parser import ServiceDecl  # noqa: E402
@@ -206,6 +207,130 @@ component C provides c: Clock { provide c { fn now() = 0 } }
     assert result["satisfied"] is False
     broken = next(c for c in result["breaks"] if c["service"] == "Store")
     assert broken["kind"] == "service-removed" and broken["method"] is None
+
+
+# --------------------------- item 296: satisfied-via-adapter pin (slice 3)
+#
+# A MAJOR drift breaks the direct §5 pin, but the same difference may be closed
+# by a SAFE adapter the consumer deploys at its boundary. `check` probes the
+# LANDED `adapt.bridge_plan` and records the verdict; it never flips
+# `satisfied` (proposed-not-silent, §3).
+
+def _bridgeable_provider() -> str:
+    """B adds an absence-shaped `options: Opt[Str]` parameter to `get`. The
+    consumer's shipped `get(key)` call no longer type-checks (a direct break),
+    but a B1 default (`Opt` -> `None`) bridges it with NO opt-in."""
+    provider = _provider(
+        "  fn get(key: Str, options: Opt[Str]) -> Str\n"
+        "  emission fn write(key: Str, value: Str)")
+    return provider.replace("fn get(key) = store.get(key)",
+                            "fn get(key, options) = store.get(key)")
+
+
+def test_a_breaking_drift_is_recorded_satisfied_via_adapter():
+    result = _check(_bridgeable_provider())
+    # the DIRECT pin is still broken — an added required param invalidates the
+    # consumer's shipped call site, and `satisfied` stays False.
+    assert result["satisfied"] is False
+    assert any(c["method"] == "get" for c in result["breaks"])
+    # ... but a safe adapter closes it, and the pin records exactly that.
+    assert result["verdict"] == "satisfied-via-adapter"
+    assert result["unbridgeable"] == []
+    bridged = {e["service"]: e for e in result["bridged"]}
+    assert set(bridged) == {"Store"}
+    store = bridged["Store"]
+    # the plan is auditable: the extra parameter is defaulted (B1), and there
+    # is no outcome merge to weaken (a clean, opt-in-free bridge).
+    assert store["merges"] == []
+    get = next(m for m in store["methods"] if m["method"] == "get")
+    options = next(s for s in get["steps"] if s["position"] == "options")
+    assert options["transformation"] == "B1"
+    # the proposed adapter source is rendered for the author to commit.
+    assert "component StoreAdapter" in store["source"]
+
+
+def test_an_unbridgeable_break_stays_broken():
+    # B removes `get` entirely: no candidate method to adapt -> method-missing.
+    provider = _provider("  emission fn write(key: Str, value: Str)")
+    provider = provider.replace("    fn get(key) = store.get(key)\n", "")
+    result = _check(provider)
+    assert result["satisfied"] is False
+    assert result["verdict"] == "broken"
+    assert result["bridged"] == []
+    refused = next(e for e in result["unbridgeable"] if e["service"] == "Store")
+    assert any(r["clause"] == "method-missing" for r in refused["refusals"])
+
+
+def test_a_removed_service_has_no_adapter():
+    # B drops `Store` altogether: an adapter bridges a shape difference, it
+    # cannot supply a provider that is gone.
+    provider = """
+service Clock { fn now() -> Int }
+component C provides c: Clock { provide c { fn now() = 0 } }
+"""
+    result = _check(provider)
+    assert result["verdict"] == "broken"
+    refused = next(e for e in result["unbridgeable"] if e["service"] == "Store")
+    assert "reason" in refused and "cannot" in refused["reason"]
+
+
+# A consumer requiring `get -> Opt[Str]`; a provider drifting to
+# `-> Result[Str, Error]` (opaque error record) breaks the pin and is
+# bridgeable only with an explicit outcome-merge opt-in (§2.1 S4c / E2).
+CONSUMER_OPT = """
+service Store {
+  fn get(key: Str) -> Opt[Str]
+  emission fn write(key: Str, value: Str)
+}
+component App requires s: Store {
+  emit s.write("k", "v")
+}
+"""
+
+
+def _result_provider() -> str:
+    provider = "type Error = { code: Str }\n" + _provider(
+        "  fn get(key: Str) -> Result[Str, Error]\n"
+        "  emission fn write(key: Str, value: Str)")
+    return provider.replace("fn get(key) = store.get(key)",
+                            "fn get(key) = Ok(store.get(key))")
+
+
+def test_an_opt_in_only_bridge_is_not_auto_admitted():
+    # Folding the candidate's `Result` into the consumer's `Opt` merges an
+    # `Err` with a legitimate `None`. The pin does NOT invent that waiver (§3):
+    # with no `D`, the bridge is refused and the contract stays broken.
+    surface = _surface(CONSUMER_OPT)
+    result = check(surface, compile_source(_result_provider()))
+    assert result["satisfied"] is False
+    assert result["verdict"] == "broken"
+    refused = next(e for e in result["unbridgeable"] if e["service"] == "Store")
+    assert any(r["clause"] == "outcome-merge" for r in refused["refusals"])
+
+
+def test_an_opt_in_bridge_is_recorded_when_the_author_supplies_it():
+    # The SAME pair, now with the author's total-waiver opt-in threaded through
+    # to `bridge_plan`: the pin records it satisfied-via-adapter and names the
+    # merge shape, so the deploy story stays honest about what was merged.
+    surface = _surface(CONSUMER_OPT)
+    result = check(surface, compile_source(_result_provider()),
+                   adapt_opt_ins={"Store": {"get":
+                                            {"return": {"merge": "total"}}}})
+    assert result["satisfied"] is False
+    assert result["verdict"] == "satisfied-via-adapter"
+    store = next(e for e in result["bridged"] if e["service"] == "Store")
+    assert store["merges"] == ["merge-total"]
+    assert "Err(_) => None" in store["source"]
+
+
+def test_render_names_the_adapter_proposal():
+    text = render(_check(_bridgeable_provider()), "team-A", "provider-B")
+    # the direct pin is broken (existing contract text preserved) ...
+    assert "contract BROKEN" in text
+    # ... and the safe-adapter proposal is surfaced, proposed not automatic.
+    assert "safe adapter available" in text
+    assert "PROPOSED" in text
+    assert "[adapter] Store" in text
 
 
 # ----------------------------------- the contract verdict IS the real predicate
