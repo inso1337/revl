@@ -172,3 +172,73 @@ def test_non_reserved_underscore_names_are_untouched():
     assert "export function g(value_: string)" in out
     assert "const out_ = value_" in out
     assert "value__" not in out and "out__" not in out
+
+
+def test_reserved_word_config_field_keeps_one_raw_key(tmp_path=None):
+    """GHSA-mrqv-535q-jw3x A4: a `config` field named a JS reserved word
+    (`static`, `delete`) is a legal revl field, but the emitter keyed the
+    `applyConfigDefaults` spec by the RAW name while reading it back through the
+    `_mangle`d `config.static_`, so the value lived under `static` and the read
+    saw `undefined` — a supplied value (a security flag among them) was silently
+    dropped. The spec key, the `<Comp>Config` interface property, and the read
+    now share ONE raw key (a quoted key / bracket read for a reserved word)."""
+    out = _emit(
+        "service Sink { fn write(line: Str) -> Int }\n"
+        "component Guard requires sink: Sink {\n"
+        "  config { static: Str = \"on\", delete: Int = 0, level: Int = 1 }\n"
+        "  effect sink.write(config.static) undo sink.write(\"bye\")\n"
+        "  if (config.delete < config.level) { fail \"blocked\" }\n"
+        "}\n"
+    )
+    # Interface: raw key, quoted for the reserved words, bare for `level`.
+    assert '"static"?: string' in out
+    assert '"delete"?: bigint' in out
+    assert "  level?: bigint" in out
+    # Spec: the SAME raw keys.
+    assert '"static": { default: "on" }' in out
+    assert '"delete": { default: 0n }' in out
+    assert "level: { default: 1n }" in out
+    # Read: bracket access on the same key for a reserved word, dot for `level`.
+    assert 'config["static"]' in out
+    assert 'config["delete"]' in out
+    assert "config.level" in out
+    # The mangled read that dropped the value must be gone.
+    assert "config.static_" not in out
+    assert "config.delete_" not in out
+
+
+def test_dangerous_provision_key_is_refused():
+    """GHSA-mrqv-535q-jw3x A5: a provision key the JS runtime / cordis treats
+    specially (`then`, an `Object.prototype` member, a `_`-prefixed internal)
+    installs but never resolves, so every consumer call throws. The emitter
+    refuses it — the same policy as a `CONTEXT_MEMBERS` collision — because a
+    compile error beats a provider that loads and then fails on use."""
+    import pytest
+    m = _load()
+    for key in ("then", "constructor", "prototype", "__proto__",
+                "hasOwnProperty", "toString", "_internal"):
+        src = (
+            "service Api { fn handle(k: Str) -> Str }\n"
+            f"component Svc provides {key}: Api {{\n"
+            f"  provide {key} {{ fn handle(k) = k }}\n"
+            "}\n"
+        )
+        # The #553 cluster-C header guard (`_reject_service_key`, landed on
+        # main) refuses these keys for both provide and require with a
+        # host-safety message; that guard subsumes this A5 provision refusal.
+        with pytest.raises(
+                m.EmitError,
+                match="reserved name|Context member|not host-safe"):
+            m.emit(compile_source(src))
+
+
+def test_ordinary_provision_key_still_emits():
+    """A provision key that is neither a Context member nor a runtime-reserved
+    name emits unchanged — the refusal is targeted, not a blanket."""
+    out = _emit(
+        "service Api { fn handle(k: Str) -> Str }\n"
+        "component Svc provides handler: Api {\n"
+        "  provide handler { fn handle(k) = k }\n"
+        "}\n"
+    )
+    assert 'ctx.provide("handler"' in out

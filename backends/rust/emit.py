@@ -111,6 +111,23 @@ _RUST_TYPE_RESERVED = frozenset(
 # Method names that collide with Rust's `Drop::drop` destructor must be renamed.
 _METHOD_RENAMES = {"drop": "drop_"}
 
+# Method names that resolve on the SMART POINTER the emitter wraps a service in
+# instead of on the user's trait object. A required service is held as
+# `Arc<Box<dyn Sv>>` and called `recv.<method>(..)`; under Rust method
+# resolution the receiver type `Arc<Box<dyn Sv>>` is tried before auto-deref
+# reaches `dyn Sv`, so a method whose name is one `Arc<T>`/`Box<T>` implements
+# UNCONDITIONALLY binds to the smart-pointer method and the user body NEVER runs
+# — silently for a no-arg unit method (`recv.clone()` becomes `Arc::clone`, its
+# result discarded), loudly (a type error) otherwise. `Arc<T>` implements
+# `Clone`/`Deref`/`AsRef`/`Borrow` for any `T: ?Sized`, and the inner `Box<T>`
+# adds `DerefMut`/`AsMut`/`BorrowMut`; those receiver-method names are the ones
+# that shadow. Rename them onto the same injective `_`-ladder as
+# `_METHOD_RENAMES` so the trait declaration, every call site, and the bridge
+# dispatch agree and the user method is always the one dispatched.
+_RUST_SMART_PTR_METHODS = frozenset({
+    "clone", "deref", "deref_mut", "as_ref", "as_mut", "borrow", "borrow_mut",
+})
+
 
 def _mname(name: str) -> str:
     """The Rust method name for a revl method, injectively.
@@ -119,13 +136,18 @@ def _mname(name: str) -> str:
     revl method name `drop_` to `drop_`, so a component declaring both emitted
     one Rust method twice and the second silently won. Same ladder rule as
     `_mangle`: find the first root reachable by dropping trailing `_` that the
-    table renames, then re-append the `_`s that were dropped, so `drop` ->
-    `drop_` and `drop_` -> `drop__` stay distinct. A name with no renamed root
-    is returned unchanged."""
+    table renames (or that shadows a smart-pointer method), then re-append the
+    `_`s that were dropped, so `drop` -> `drop_` and `drop_` -> `drop__` (and
+    `clone` -> `clone_`, `clone_` -> `clone__`) stay distinct. A name with no
+    renamed root is returned unchanged. Every rename appends exactly one `_` to
+    the ORIGINAL name, so the ladder is injective and no renamed name is itself
+    a smart-pointer method or an existing renamed name."""
     root = name
     while root:
         if root in _METHOD_RENAMES:
             return _METHOD_RENAMES[root] + "_" * (len(name) - len(root))
+        if root in _RUST_SMART_PTR_METHODS:
+            return name + "_"
         if not root.endswith("_"):
             break
         root = root[:-1]
@@ -1912,7 +1934,14 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
         _ident(sname, "service")
         out.append(f"pub trait {sname}: Send + Sync {{")
         for mname, method in (service.get("methods") or {}).items():
-            _ident(mname, "method")
+            # The trait DECLARATION must carry the SAME `_mname` rename the impl
+            # blocks, bridge proxy/dispatch, and every call site use (line ~3696,
+            # ~8015, ~5478): a method named `drop`/`clone`/`as_ref`/… is renamed
+            # so it does not collide with the `Drop` destructor or the smart
+            # pointer the emitter wraps a service in, and the trait method the
+            # impls satisfy has to spell the renamed name too or the impl fails
+            # to name a trait member (and the user method is never dispatched).
+            emitted_mname = _ident(_mname(mname), "method")
             params = ", ".join(
                 f"{_ident(p.get('name'), 'parameter')}: {_rust_type(p.get('type'), types)}"
                 for p in method.get("params") or []
@@ -1923,7 +1952,7 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
             if method.get("idempotent"):
                 out.append("    /// idempotent: safe to re-deliver — the runtime "
                            "may auto-retry a transient failure (item 44)")
-            out.append(f"    fn {mname}(&self, {params}) -> {ret};")
+            out.append(f"    fn {emitted_mname}(&self, {params}) -> {ret};")
         out.append("}")
         out.append("")
     return out

@@ -1,0 +1,29 @@
+// A required service whose method names collide with the inherent/trait methods
+// of the smart pointer the emitter wraps a service in (`Arc<Box<dyn Sv>>`):
+// `clone` and `as_ref` are implemented UNCONDITIONALLY by `Arc<T>`, so a call
+// `cache.clone()` / `cache.as_ref()` bound to the smart-pointer method and the
+// user body never ran — silently for the no-arg unit `clone` whose result is
+// discarded (GHSA-mrqv-535q-jw3x A2). `_mname` renames such methods (`clone` ->
+// `clone_`, `as_ref` -> `as_ref_`) at the trait declaration, the provider/proxy
+// impls, the bridge dispatch, and every call site, so the user method is always
+// the one dispatched.
+fn seed() -> Str { return "k" }
+
+service Cache {
+  emission fn clone()
+  fn as_ref() -> Str
+}
+
+service Api {
+  emission fn handle(k: Str) -> Str
+}
+
+component Svc requires cache: Cache provides api: Api {
+  provide api {
+    fn handle(k) {
+      let r = cache.as_ref()
+      emit cache.clone()
+      return r
+    }
+  }
+}

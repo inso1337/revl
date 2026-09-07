@@ -1,0 +1,20 @@
+// A component whose `config` block declares fields whose names are JS reserved
+// words (`static`, `delete`) alongside an ordinary one (`level`). A reserved
+// word is a legal revl config field, so the emitted spec key, the `<Comp>Config`
+// interface property, and the `config.<field>` read must all agree on the RAW
+// key (a quoted key / bracket read for the reserved word). Mangling only the
+// read once made `config.static_` read `undefined` while the value lived under
+// `static`, silently dropping the supplied value (GHSA-mrqv-535q-jw3x A4).
+service Sink {
+  fn write(line: Str) -> Int
+}
+
+component Guard requires sink: Sink {
+  config { static: Str = "on", delete: Int = 0, level: Int = 1 }
+
+  effect sink.write(config.static) undo sink.write("bye")
+
+  if (config.delete < config.level) {
+    fail "blocked"
+  }
+}
