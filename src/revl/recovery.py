@@ -563,6 +563,8 @@ def _append_discharge(wal_path: str, seqs: list) -> None:
     append discipline the WAL writer uses."""
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
+    from .wal import seal_torn_tail  # noqa: PLC0415 — tier-agnostic core
+    seal_torn_tail(wal_path)
     with open(wal_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"record": "discharge", "discharged": list(seqs)},
                                 sort_keys=True) + "\n")
@@ -583,6 +585,8 @@ def _append_replay_fence(wal_path: str, seq: int) -> None:
     unknown'."""
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
+    from .wal import seal_torn_tail  # noqa: PLC0415 — tier-agnostic core
+    seal_torn_tail(wal_path)
     with open(wal_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"record": "replay-fence", "seq": seq},
                                 sort_keys=True) + "\n")
@@ -610,6 +614,8 @@ def _append_reissue_fence(wal_path: str, seq: int, register: Optional[str]) -> N
     descriptor it can no longer resolve."""
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
+    from .wal import seal_torn_tail  # noqa: PLC0415 — tier-agnostic core
+    seal_torn_tail(wal_path)
     record = {"record": "reissue-fence", "seq": seq}
     if register:
         record["register"] = register

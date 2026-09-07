@@ -2249,6 +2249,8 @@ def _fsync_append(path: str, record: dict) -> None:
     """Append one durable record, fsync'd — the same discipline the WAL writer
     and `recovery._append_discharge` use. Appending fires nothing, so it is safe
     on any path."""
+    from .wal import seal_torn_tail  # noqa: PLC0415 — tier-agnostic core
+    seal_torn_tail(path)  # a torn tail must never merge with this record (#535)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
         handle.flush()
