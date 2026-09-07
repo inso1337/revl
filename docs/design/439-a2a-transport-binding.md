@@ -143,7 +143,11 @@ what it refuses:
    **`FilePart` LANDED**, both entry points: a `Bytes` argument/return is an A2A
    file `Part` with INLINE base64 bytes (`FileWithBytes`), on the row's `through
    a2a`/`through a2a_rest` `@py` wire and on `revl import a2a --backend py` (a
-   single binary media type on a skill's `inputModes`/`outputModes`). Still open:
+   single binary media type on a skill's `inputModes`/`outputModes`). On the
+   importer, the input side's declared media type now rides the sent part's
+   `FileWithBytes.mimeType` rather than being dropped, so the peer is told the
+   media type its own card declared it expects (the reply's media type stays the
+   peer's to state and is not asserted). Still open:
    a `DataPart` (arbitrary structured JSON) — it needs the tagged half of the
    canonical encoding, which is slice C1's (`revl export client`) to build, so it
    is refused rather than flattened; a file `Part` on the coloured `@ts` tier (the

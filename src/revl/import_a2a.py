@@ -480,7 +480,7 @@ class _Card:
 
     # -- the skills -------------------------------------------------------
 
-    def _modes(self, skill: dict, index: int) -> tuple[str, str]:
+    def _modes(self, skill: dict, index: int) -> tuple[str, str | None, str, str | None]:
         """Classify a skill's `inputModes`/`outputModes` into the `Part`
         modality each side crosses, item 439:
 
@@ -494,19 +494,27 @@ class _Card:
         mixes text with a file, or advertises two different binary types, has no
         single `Part` the one-crossing `message/send` can carry and is refused
         naming the skill and the field (the honesty rule the version and
-        transport checks keep). Returns `(in_modality, out_modality)`.
-        """
-        return (self._modality(skill, index, "inputModes"),
-                self._modality(skill, index, "outputModes"))
+        transport checks keep).
 
-    def _modality(self, skill: dict, index: int, field: str) -> str:
+        Returns `(in_modality, in_media, out_modality, out_media)`, where the
+        `*_media` member is the single binary media type of a `"file"` side
+        (`None` for a `"text"` side). The INPUT media type is carried onto the
+        A2A `FileWithBytes.mimeType` of the message the crossing sends, so the
+        peer is told the media type its own card declared; the output media type
+        is the peer's to state on its reply and is not asserted here.
+        """
+        in_mod, in_media = self._modality(skill, index, "inputModes")
+        out_mod, out_media = self._modality(skill, index, "outputModes")
+        return in_mod, in_media, out_mod, out_media
+
+    def _modality(self, skill: dict, index: int, field: str) -> tuple[str, str | None]:
         declared = skill.get(field)
         if declared is None:
             declared = self.doc.get(
                 "defaultInputModes" if field == "inputModes"
                 else "defaultOutputModes")
         if declared is None:
-            return "text"
+            return "text", None
         if not isinstance(declared, list):
             self._refuse(f"`{field}` must be a list of media types",
                          pointer=_pointer("skills", index, field))
@@ -517,7 +525,7 @@ class _Card:
                              pointer=_pointer("skills", index, field))
             media.append(mode.split(";")[0].strip().lower())
         if not media or all(m.startswith("text/") for m in media):
-            return "text"
+            return "text", None
 
         def _refuse_mode(kind: str, extra: str) -> None:
             self._refuse(
@@ -552,9 +560,9 @@ class _Card:
                 "A single `message/send` crosses ONE file `Part`; two different "
                 "binary types on one side is ambiguous and is refused rather "
                 "than guessed at.")
-        return "file"
+        return "file", binary[0]
 
-    def _skills(self) -> list[tuple[str, str, dict, str, str]]:
+    def _skills(self) -> list[tuple[str, str, dict, str, str, str | None]]:
         skills = self.doc.get("skills")
         if not isinstance(skills, list) or not skills:
             self._refuse(
@@ -563,7 +571,7 @@ class _Card:
                 hint="a card with no skills has no callable surface to "
                      "generate. There is nothing to import and nothing to "
                      "invent")
-        out: list[tuple[str, str, dict, str, str]] = []
+        out: list[tuple[str, str, dict, str, str, str | None]] = []
         seen: dict[str, str] = {}
         for index, skill in enumerate(skills):
             if not isinstance(skill, dict):
@@ -597,15 +605,16 @@ class _Card:
                     hint="two skills that fold onto one operation cannot both "
                          "be called; rename one on the agent")
             seen[op] = raw_id
-            in_modality, out_modality = self._modes(skill, index)
-            out.append((op, raw_id, skill, in_modality, out_modality))
+            in_modality, in_media, out_modality, out_media = self._modes(skill, index)
+            out.append((op, raw_id, skill, in_modality, out_modality, in_media))
         return out
 
 
 # ---------------------------------------------------------------- host bodies
 
 def _ts_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
-             in_modality: str = "text", out_modality: str = "text") -> str:
+             in_modality: str = "text", out_modality: str = "text",
+             in_media: str | None = None) -> str:
     """The JSON-RPC 2.0 `message/send` crossing, TypeScript.
 
     Both interpolations are JSON-encoded, and both have already been validated
@@ -703,7 +712,8 @@ crosses once and does not poll`);
 
 
 def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
-                 rest: bool, in_modality: str, out_modality: str) -> str:
+                 rest: bool, in_modality: str, out_modality: str,
+                 in_media: str | None = None) -> str:
     """The A2A `message/send` crossing, Python — for both JSON-RPC 2.0 and (when
     `rest`) HTTP+JSON/REST, and for both `Part` modalities.
 
@@ -728,9 +738,16 @@ def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
             else "JSON-RPC 2.0 `message/send`")
 
     if in_modality == "file":
+        # A2A 1.0.0 `FileWithBytes` carries an optional `mimeType`. The card's
+        # own `inputModes` named the single binary media type this side sends,
+        # so it is stated back on the part rather than dropped — the peer is
+        # told the media type it declared it expects. The value is a validated
+        # media token folded in `_modality` (`type/subtype`, lowercased) and is
+        # JSON-encoded here like every other card-derived literal.
+        mime = f'"mimeType": {json.dumps(in_media)}, ' if in_media else ""
         send_prep = ('    import base64 as _b64\n'
-                     '    _sent_part = {"kind": "file", "file": '
-                     '{"bytes": _b64.b64encode(message).decode("ascii")}}\n')
+                     '    _sent_part = {"kind": "file", "file": {' + mime +
+                     '"bytes": _b64.b64encode(message).decode("ascii")}}\n')
     else:
         send_prep = '    _sent_part = {"kind": "text", "text": message}\n'
 
@@ -829,11 +846,12 @@ def _py_a2a_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
 
 
 def _py_body(endpoint: str, skill_id: str, *, follow_redirects: bool,
-             in_modality: str = "text", out_modality: str = "text") -> str:
+             in_modality: str = "text", out_modality: str = "text",
+             in_media: str | None = None) -> str:
     """JSON-RPC 2.0 `message/send`, Python. See `_py_a2a_body`."""
     return _py_a2a_body(endpoint, skill_id, follow_redirects=follow_redirects,
                         rest=False, in_modality=in_modality,
-                        out_modality=out_modality)
+                        out_modality=out_modality, in_media=in_media)
 
 
 def _httpjson_endpoint(endpoint: str) -> str:
@@ -847,7 +865,8 @@ def _httpjson_endpoint(endpoint: str) -> str:
 
 
 def _ts_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool,
-                  in_modality: str = "text", out_modality: str = "text") -> str:
+                  in_modality: str = "text", out_modality: str = "text",
+                  in_media: str | None = None) -> str:
     """The HTTP+JSON/REST `message:send` crossing, TypeScript.
 
     Same discipline as `_ts_body` — one crossing, redirect-refusing, time-bound,
@@ -933,11 +952,12 @@ crosses once and does not poll`);
 
 
 def _py_body_rest(endpoint: str, skill_id: str, *, follow_redirects: bool,
-                  in_modality: str = "text", out_modality: str = "text") -> str:
+                  in_modality: str = "text", out_modality: str = "text",
+                  in_media: str | None = None) -> str:
     """HTTP+JSON/REST `POST /v1/message:send`, Python. See `_py_a2a_body`."""
     return _py_a2a_body(endpoint, skill_id, follow_redirects=follow_redirects,
                         rest=True, in_modality=in_modality,
-                        out_modality=out_modality)
+                        out_modality=out_modality, in_media=in_media)
 
 
 #: (backend, transport) -> the host-body builder for that crossing.
@@ -1032,7 +1052,8 @@ class _Generator:
                      "fields")
 
     def _operation(self, op: str, skill_id: str, skill: dict,
-                   in_modality: str, out_modality: str) -> tuple[list[str], str, str]:
+                   in_modality: str, out_modality: str,
+                   in_media: str | None = None) -> tuple[list[str], str, str]:
         # Item 439: a `text` mode is carried as `Str` (a text `Part`), a `file`
         # mode as `Bytes` (a file `Part` with inline base64 bytes). The card's
         # inputModes/outputModes chose the modality; the reason it can differ per
@@ -1079,7 +1100,8 @@ class _Generator:
         body = _BODIES[(self.backend, self.card.transport)](
             self.card.endpoint, skill_id,
             follow_redirects=self.follow_redirects,
-            in_modality=in_modality, out_modality=out_modality)
+            in_modality=in_modality, out_modality=out_modality,
+            in_media=in_media)
         extern_decl = (
             f"extern emission[{self.card.net_cap}] {self.async_kw}fn "
             f"{extern}(message: {in_type}) -> Untrusted[{out_type}]\n"
@@ -1092,9 +1114,9 @@ class _Generator:
         op_lines: list[str] = []
         externs: list[str] = []
         provides: list[str] = []
-        for op, skill_id, skill, in_modality, out_modality in self.card.skills:
+        for op, skill_id, skill, in_modality, out_modality, in_media in self.card.skills:
             lines, extern, provide = self._operation(
-                op, skill_id, skill, in_modality, out_modality)
+                op, skill_id, skill, in_modality, out_modality, in_media)
             op_lines.extend(lines)
             externs.append(extern)
             provides.append(provide)

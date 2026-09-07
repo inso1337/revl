@@ -650,6 +650,39 @@ def test_a_file_modality_round_trips_base64_bytes_on_py():
     part = sent["params"]["message"]["parts"][0]
     assert part["kind"] == "file"
     assert base64.b64decode(part["file"]["bytes"]) == b"\x00PDF\xff"
+    # A2A 1.0.0 `FileWithBytes.mimeType`: the card's own `inputModes` named the
+    # binary media type this side sends, so it is stated back on the part rather
+    # than dropped — the peer is told the media type it declared it expects.
+    assert part["file"]["mimeType"] == "application/pdf"
+
+
+def test_a_file_send_carries_the_declared_input_media_type():
+    """The mimeType comes from the INPUT side's declared media type, is derived
+    from the card (not the output side), and rides the REST wire the same way as
+    JSON-RPC. A text side sends no `file` part and therefore no mimeType."""
+    import base64
+    doc = _card(preferredTransport="HTTP+JSON")
+    # A skill that takes an image and answers with text: the send is a file part
+    # tagged with the INPUT media type; the reply is read as text.
+    doc["skills"][0]["inputModes"] = ["image/png"]
+    doc["skills"][0]["outputModes"] = ["text/plain"]
+    source = import_a2a(doc, filename="card.json", backend="py")
+    reply = {"kind": "message", "parts": [{"kind": "text", "text": "seen"}]}
+    out, calls = _run_py_body(reply, backend_source=source, arg=b"\x89PNG")
+    assert out == "seen"
+    part = json.loads(calls[0])["message"]["parts"][0]
+    assert part["kind"] == "file"
+    assert part["file"]["mimeType"] == "image/png"
+    assert base64.b64decode(part["file"]["bytes"]) == b"\x89PNG"
+
+
+def test_a_text_send_carries_no_mime_type():
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "message", "parts": [{"kind": "text", "text": "ok"}]}}
+    _text, calls = _run_py_body(reply)
+    part = json.loads(calls[0])["params"]["message"]["parts"][0]
+    assert part == {"kind": "text", "text": "ping"}
+    assert "mimeType" not in part
 
 
 def test_the_crossing_sends_no_credential():
