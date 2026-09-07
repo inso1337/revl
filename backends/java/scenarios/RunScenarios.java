@@ -40,7 +40,7 @@ public final class RunScenarios {
     private static Context freshContext() {
         LOG.clear();
         Context ctx = new Context();
-        ctx.provide(ServiceKey.of(revl.Components.Probe.class), new Rec());
+        ctx.provide(ServiceKey.of(revl.Components.Probe.class, "probe"), new Rec());
         return ctx;
     }
 

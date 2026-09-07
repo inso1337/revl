@@ -46,7 +46,7 @@ public final class RunRealScenarios {
     private static Context freshRoot() {
         LOG.clear();
         Context root = Contexts.create();
-        root.provide(ServiceKey.of(revl.Components.Probe.class), new Rec());
+        root.provide(ServiceKey.of(revl.Components.Probe.class, "probe"), new Rec());
         return root;
     }
 
@@ -77,8 +77,8 @@ public final class RunRealScenarios {
         // withdrawal BEFORE the provider's own effects revert.
         root = freshRoot();
         java.util.Set<ServiceKey<?>> deps = java.util.Set.of(
-            ServiceKey.of(revl.Components.Kv.class),
-            ServiceKey.of(revl.Components.Probe.class));
+            ServiceKey.of(revl.Components.Kv.class, "kv"),
+            ServiceKey.of(revl.Components.Probe.class, "probe"));
         final Context injectRoot = root;
         Disposable consumer = root.inject(deps,
             ctx -> new revl.Components.KvConsumerPlugin().apply(ctx));

@@ -10,8 +10,8 @@ one Java source file (service interfaces + plugin classes).
 |---|---|
 | `service` | `public interface <Name> { <ret> <m>(<params>); }` |
 | `component` | `public final class <Name>Plugin implements Plugin { apply(ctx) }` |
-| `requires` | `ctx.get(<Svc>.class)` |
-| `provides` | `ctx.provide(ServiceKey.of(<Svc>.class), new <Impl>(…))` |
+| `requires` | `ctx.get(<Svc>.class, "<key>")` (routes by provision key, so two providers of one service type do not collide) |
+| `provides` | `ctx.provide(ServiceKey.of(<Svc>.class, "<key>"), new <Impl>(…))` |
 | `effect E undo U` | `Disposables.of(() -> <undo>)`, combined via `Disposables.composite(…)` / `Context.EffectScope` |
 | `emit` | plain call |
 | `format` | `String.format(…)` |

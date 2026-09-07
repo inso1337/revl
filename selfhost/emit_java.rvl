@@ -2459,7 +2459,8 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
     }
     if (kind == "provide") {
       let svc = value_str(value_field(step, "service"))
-      let struct = `${cname}${camel(value_str(value_field(step, "name")))}`
+      let pkey = value_str(value_field(step, "name"))
+      let struct = `${cname}${camel(pkey)}`
       var cargs = ["ctx", "fx"]
       if (needs_frame) { cargs = cargs.push("frame") }
       for (l of req_locals) { cargs = cargs.push(l) }
@@ -2467,7 +2468,7 @@ fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], 
       for (f of provider_config_fields(comp)) {
         cargs = cargs.push(mangle(value_str(value_field(f, "name"))))
       }
-      lines = lines.push(pad.concat(`fx.track(ctx.provide(ServiceKey.of(${svc}.class), new ${struct}(${cargs.join(", ")})));`))
+      lines = lines.push(pad.concat(`fx.track(ctx.provide(ServiceKey.of(${svc}.class, ${json_dumps(pkey)}), new ${struct}(${cargs.join(", ")})));`))
     }
     if (kind == "if") {
       let cr = render_expr(value_field(step, "cond"), ctx, c)
@@ -2962,7 +2963,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   if (!value_is_null(intercept_m)) {
     for (key of value_keys(intercept_m)) {
       let srvn = value_str(value_field(reqs_m, key))
-      out = out.push(`        ctx.intercept(ServiceKey.of(${srvn}.class), ${metadata_lit(value_field(intercept_m, key))});`)
+      out = out.push(`        ctx.intercept(ServiceKey.of(${srvn}.class, ${json_dumps(key)}), ${metadata_lit(value_field(intercept_m, key))});`)
     }
   }
   out = out.push("        Context.EffectScope fx = ctx.effect();")
@@ -2972,7 +2973,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   if (needs_frame) { out = out.push("        RevlFrame frame = new RevlFrame();") }
   for (local of req_locals) {
     let srvn = value_str(value_field(reqs_m, local))
-    out = out.push(`        ${srvn} ${local} = ctx.get(${srvn}.class);`)
+    out = out.push(`        ${srvn} ${local} = ctx.get(${srvn}.class, ${json_dumps(local)});`)
   }
   out = out.push("        try {")
   // The activation body (item 238): `let-effect`/`effect`/`emit`/`if`/`fail`/
@@ -3013,7 +3014,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
 // `_emit_component` (SIMPLE legacy path only): a provider `public static final
 // class <Comp><Camel(key)> implements <Svc>` per provision (an empty ctor, one
 // inline method per op), then the `<Comp>Plugin` whose `apply` registers each
-// provision (`ctx.provide(ServiceKey.of(<Svc>.class), new <struct>())`) onto a
+// provision (`ctx.provide(ServiceKey.of(<Svc>.class, "<key>"), new <struct>())`) onto a
 // LIFO undo list (`_emit_plugin_ctors` no-config form + the A8 self-revert catch).
 // A non-simple component takes the modern path when supported (item 225), else a
 // loud DEFER marker.
@@ -3065,7 +3066,7 @@ fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: Lis
     let key = value_str(value_field(step, "name"))
     let srv = value_str(value_field(step, "service"))
     let struct = `${cname}${camel(key)}`
-    out = out.push(`            undos.add(ctx.provide(ServiceKey.of(${srv}.class), new ${struct}()));`)
+    out = out.push(`            undos.add(ctx.provide(ServiceKey.of(${srv}.class, ${json_dumps(key)}), new ${struct}()));`)
   }
   if (body.length() > 0) {
     out = out.push("            java.util.Collections.reverse(undos);")

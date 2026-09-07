@@ -54,3 +54,64 @@ javac-compiled or run here (no JRE).
 NOT built or run: no Java Runtime in this environment. The emitter side is
 proven by `backends/java/test_router_emit.py` (pure-Python assertions) and the
 byte-identity goldens; the runtime side awaits a JRE + the upstream PR.
+
+---
+
+# cordis4j fork — provision-key routing for `provide` / `get`
+
+Upstream: `github.com/1na-ko/cordis4j`. The same environment constraint holds:
+no reachable runtime, no JRE, so this too is a PR spec plus a reference
+implementation in the javac stubs.
+
+## The primitive
+
+A service key carries a PROVISION KEY name in addition to the service type:
+
+- `ServiceKey.of(Class<T> type, String name)` and `ServiceKey.name()`, with
+  `equals`/`hashCode` over `(type, name)`. `of(type)` keeps meaning the default
+  provision (name `""`).
+- `<T> T Context.get(Class<T> type, String name)` resolves the provider
+  registered under `name`, with the same realm/root fallback the type-only
+  `get` uses. `provide(ServiceKey)` stores under `(type, name)`, so two
+  providers of one type coexist rather than the second overwriting the first.
+
+The type-only `get(Class<T>)` still answers "is there a provider of this type"
+(the liveness/residue read the lifecycle driver uses, and a spawn instance
+reading its own single provision); it returns the default provision if present
+else any, and never silently prefers a registration order.
+
+## Why upstream needs it
+
+Registering both providers under the bare class made a composition with two
+providers of one service type resolve every consumer to whichever provider
+registered last, regardless of the key the consumer named. The other tiers
+(go `stc.Key`, rust `ctx.provide("key", ..)` / `ctx.require::<..>("key")`, the
+python driver, wasm) route by the provision key already; the Java emitter now
+passes the key through `ServiceKey.of(<Svc>.class, "<key>")` and
+`ctx.get(<Svc>.class, "<key>")`, so the runtime has to carry it.
+
+## Reference implementation (delivered here)
+
+`backends/java/stubs/io/cordis4j/core/ServiceKey.java` gains the `name` field,
+the `of(Class, String)` factory, `name()`, and value equality.
+`backends/java/stubs/io/cordis4j/core/Context.java` stores each realm's
+providers as `type -> (key -> impl)` and adds the keyed `get`. This is the
+concrete shape the upstream PR should take. Additive for every existing
+program: a single unnamed provision keeps resolving exactly as before.
+
+## PR spec (upstream `github.com/1na-ko/cordis4j`)
+
+- Title: `feat: keyed ServiceKey — route provide/get by provision key`
+- Add `ServiceKey.of(Class<T>, String name)` + `name()` with `(type, name)`
+  equality; add `Context.get(Class<T>, String name)`; store providers keyed by
+  `(type, name)` per realm, matching the reference in the stubs.
+- Additive: an unnamed provision (`ServiceKey.of(type)` / `get(type)`) resolves
+  exactly as before, so every non-keyed program is unchanged.
+- Rationale: lets a consumer bind the provision it names when several providers
+  share one service type, matching the go/rust/python/wasm tiers.
+
+## Build / test status HERE
+
+NOT built or run: no Java Runtime in this environment. The emitter side is
+proven by `backends/java/test_emit_java.py` (pure-Python assertions) and the
+byte-identity goldens; the runtime side awaits a JRE + the upstream PR.

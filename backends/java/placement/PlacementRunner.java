@@ -116,7 +116,7 @@ public final class PlacementRunner {
             BridgeClient client = new BridgeClient(socket);
             Object proxy = Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[]{iface},
                     new ForwardingHandler(client, key));
-            Disposable undo = provide(ctx, iface, proxy);
+            Disposable undo = provide(ctx, key, iface, proxy);
             fibers.add(() -> { undo.dispose(); client.close(); });
             log("proxy", key, "-> " + socket);
         }
@@ -213,7 +213,7 @@ public final class PlacementRunner {
             }
         }
         Class<?> iface = Class.forName((String) ifaces.get(key));
-        Object service = ctx.get((Class) iface);
+        Object service = ctx.get((Class) iface, key);
         Method m = findMethod(iface, method, args.size());
         return m.invoke(service, coerceArgs(m, args));
     }
@@ -238,8 +238,8 @@ public final class PlacementRunner {
     // --- reflection helpers -------------------------------------------------
 
     @SuppressWarnings("unchecked")
-    static Disposable provide(Context ctx, Class<?> iface, Object impl) throws Exception {
-        Object key = ServiceKey.class.getMethod("of", Class.class).invoke(null, iface);
+    static Disposable provide(Context ctx, String name, Class<?> iface, Object impl) throws Exception {
+        Object key = ServiceKey.class.getMethod("of", Class.class, String.class).invoke(null, iface, name);
         return (Disposable) Context.class.getMethod("provide", ServiceKey.class, Object.class).invoke(ctx, key, impl);
     }
 
@@ -511,7 +511,7 @@ public final class PlacementRunner {
                         String key = (String) req.get("key");
                         Class<?> iface = served.get(key);
                         if (iface == null) throw new RuntimeException("key " + key + " not exported");
-                        Object service = ctx.get((Class) iface);
+                        Object service = ctx.get((Class) iface, key);
                         args = (List<Object>) req.getOrDefault("args", List.of());
                         Method m = findMethod(iface, (String) req.get("method"), args.size());
                         Object result = m.invoke(service, coerceArgs(m, args));

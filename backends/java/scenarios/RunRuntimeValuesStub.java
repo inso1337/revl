@@ -23,7 +23,7 @@ public final class RunRuntimeValuesStub {
 
         // --- method-time compensation ordering on the stub EffectScope ----
         Context ctx = new Context();
-        ctx.provide(ServiceKey.of(revl.Components.Probe.class), new Rec());
+        ctx.provide(ServiceKey.of(revl.Components.Probe.class, "probe"), new Rec());
         Disposable comp = new revl.Components.CPlugin().apply(ctx);
         revl.Components.N n = ctx.get(revl.Components.N.class);
         n.ping("a");
