@@ -28,12 +28,22 @@ from .._paths import backends_root
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..taint import REDACTED_SECRET
+from ..typecheck import compatible
 from .approval import ApprovalRequired
 from .approval import _args_digest as _cache_args_digest
 
 
 class SessionError(RuntimeError):
-    """The session cannot do what was asked (no runtime, nothing loaded…)."""
+    """The session cannot do what was asked (no runtime, nothing loaded…).
+
+    An optional `code` carries a machine-readable classification (e.g.
+    ``STATE_UNDISCLOSED``, item 334) for a caller that must branch on the
+    refusal rather than parse its prose; it defaults to None so every existing
+    single-string raise is unchanged."""
+
+    def __init__(self, *args: object, code: str | None = None) -> None:
+        super().__init__(*args)
+        self.code = code
 
 
 @dataclasses.dataclass(frozen=True)
@@ -981,7 +991,19 @@ class Session:
           is *rejected*: the whole swap rolls back with the original state
           intact, rather than silently dropping it (Q3/Q4).
         * ``"respawn"`` — today's teardown semantics: instances die with the
-          old composition and the successor starts them cold. No migration.
+          old composition and the successor starts them cold. No migration, and
+          (F4) NO provider hand-off capture either — a cold start carries nothing
+          across, so a rollback through `respawn` cannot launder the generation
+          it rolls back FROM into the one it rolls back TO.
+        * ``"declared"`` — the item-334 disclosure policy `Gate.propose` uses for
+          an AGENT-authored successor. Operator (gen N) state crosses the trust
+          boundary onto the untrusted successor ONLY through a `handoff` declared
+          AND §5-type-compatible on BOTH sides (the item-53 accept-vs-export gate,
+          run here because propose's standalone compile never threaded the running
+          manifest). The undeclared/untyped item-10 instance channel is NOT
+          crossed: a live instance the successor would inherit refuses BEFORE
+          teardown with STATE_UNDISCLOSED, gen N untouched, rather than being
+          silently migrated by candidate-written template name + host class alone.
 
         Composition-level (static) state is unaffected either way; this only
         reconciles the dynamic instance layer the static swap never saw."""
@@ -1004,18 +1026,38 @@ class Session:
         # running composition untouched.
         self._check_cache_applicability(ir, new_map)
         old_ir = self.ir
+        # item 334 disclosure gate (`migrate="declared"`, the propose path): an
+        # AGENT-authored successor crosses the trust boundary, so gen N's live
+        # OPERATOR state must not carry onto it through any channel that is not
+        # explicitly declared AND §5-typed on both sides. The item-53 accept-vs-
+        # export type gate is manifest-threaded (compiler.py `handoffs` ambient)
+        # and never runs on propose's STANDALONE decision compile, so run the
+        # disclosure gate HERE, before any teardown — a refusal leaves gen N
+        # untouched (STATE_UNDISCLOSED), never silently carried. Fail-closed.
+        if migrate == "declared":
+            self._enforce_declared_disclosure(old_ir, ir)
         # capture BEFORE teardown — while the old instances are still live and
         # their state still exists (Q2). Empty unless something spawned, so a
-        # non-instance swap is byte-identical to before.
+        # non-instance swap is byte-identical to before. The item-10 instance
+        # channel has no declared type contract at any door, so it is NOT crossed
+        # under `declared` (the disclosure gate above already refused a live
+        # instance the agent successor would inherit); only `generational`
+        # (operator->operator) reconciles it.
         pre = (self._capture_instances(old_ir, ir)
                if migrate == "generational" else {})
         # item 53: capture each stateful *provider's* live state (its
         # effect-created world) before teardown too, so a component that
-        # declared a `handoff` starts its successor warm. Admission has already
-        # proved the exported/accepted shapes are §5-compatible; this threads
-        # the value. Empty unless a running provider declared a hand-off, so a
-        # stateless swap is byte-identical to before.
-        handoff_pre = self._capture_provider_state(old_ir)
+        # declared a `handoff` starts its successor warm. Admission (or, under
+        # `declared`, the disclosure gate above) has already proved the
+        # exported/accepted shapes are §5-compatible; this threads the value.
+        # Empty unless a running provider declared a hand-off, so a stateless
+        # swap is byte-identical to before. NOT captured under `respawn` (F4):
+        # `respawn` is cold-start teardown (rollback routes through it), so
+        # capturing there carried the SUCCESSOR generation's writes back onto the
+        # predecessor's code — an agent generation's state laundered into the
+        # operator code it rolled back to.
+        handoff_pre = (self._capture_provider_state(old_ir)
+                       if migrate != "respawn" else {})
         # item 334 (EDGE 1): the keys gen N ACTUALLY served, captured before
         # teardown while its providers are still live. The health gate below
         # holds the successor to these — see `_assert_successor_activated`.
@@ -1125,6 +1167,82 @@ class Session:
         if handoff is not None:
             state["handoff"] = handoff
         return state
+
+    # -- item 334 trust-boundary disclosure gate (F1-F5) -------------------
+
+    def _enforce_declared_disclosure(self, old_ir: dict, new_ir: dict) -> None:
+        """Refuse, BEFORE any teardown, an agent-authored successor that would
+        inherit undisclosed operator (gen N) state across the trust boundary
+        (roadmap item 334). Two channels carry live state across a swap:
+
+        * The item-10 live-INSTANCE channel (F2/F3). It correlates old↔new
+          purely by candidate-written template NAME and host CLASS, with no
+          declared §5 type contract at any door — so an agent successor that
+          re-declares a template with live instances would inherit the running
+          operator instance's state (an ungranted resource's product crossing by
+          name into a `granted=[]` candidate). There is no way to DISCLOSE such a
+          crossing, so a live instance whose template the successor re-declares
+          refuses here rather than migrating. Quiesce it, or use a trusted
+          operator swap.
+        * The item-53 provider HAND-OFF channel (F1). It IS two-sided-declared
+          (a `handoff` on both the predecessor and the successor), but propose's
+          decision compile runs STANDALONE (no `manifest=`), so the accept-vs-
+          export §5 gate (`admission._admit_handoff_replacement`, threaded off
+          the running `handoffs` ambient) never runs — a `Map[Str,Int]` acceptor
+          over an operator `Map[Str,Str]` export was admitted and migrated. Run
+          that gate here, against the running exported shapes. A key the
+          successor does not accept starts cold (no crossing); an accepted key
+          whose declared type cannot hold the exported state refuses.
+
+        Fail-closed: any refusal is raised as STATE_UNDISCLOSED before gen N is
+        touched, so the running composition keeps serving unchanged."""
+        runtime = self._driver.runtime
+        old_templates = (old_ir.get("manifest") or {}).get("templates") or []
+        new_templates = set((new_ir.get("manifest") or {}).get("templates") or [])
+        for name in old_templates:
+            if name in new_templates and runtime.live_instances(name):
+                raise SessionError(
+                    f"propose refused: template {name!r} has live instance state "
+                    f"and the successor re-declares it. The item-10 instance "
+                    f"channel correlates old and new by template name and host "
+                    f"class alone — both candidate-written, with no declared §5 "
+                    f"type contract — so an agent-authored successor cannot "
+                    f"inherit a running instance's operator state across the "
+                    f"trust boundary. Quiesce the instances (or use a trusted "
+                    f"operator swap) before self-extending. Nothing was swapped; "
+                    f"gen N is intact and still serving.",
+                    code="STATE_UNDISCLOSED")
+        running = self._declared_handoffs(old_ir)
+        accepts = self._declared_handoffs(new_ir)
+        for key, exported in running.items():
+            accepted = accepts.get(key)
+            if accepted is None:
+                continue  # the successor opts out of this key — starts cold
+            if not compatible(accepted, exported):
+                raise SessionError(
+                    f"propose refused: the successor's `handoff` on {key!r} "
+                    f"accepts `{accepted}`, but the running provider exports "
+                    f"`{exported}` — the declared hand-off types are not §5-"
+                    f"compatible, so operator state cannot cross onto the "
+                    f"agent-authored successor (the item-53 accept-vs-export gate "
+                    f"propose's standalone compile never ran). Nothing was "
+                    f"swapped; gen N is intact.",
+                    code="STATE_UNDISCLOSED")
+
+    @staticmethod
+    def _declared_handoffs(ir: dict) -> dict:
+        """`{provided key: declared handoff type}` for every non-template
+        component in `ir` that declares a `handoff`. Read statically off the IR
+        (no live fibers), so it is safe to call before teardown."""
+        templates = set((ir.get("manifest") or {}).get("templates") or [])
+        out: dict = {}
+        for comp in ir.get("components") or []:
+            if comp.get("name") in templates:
+                continue
+            h = comp.get("handoff")
+            if isinstance(h, dict) and h.get("key"):
+                out[h["key"]] = h.get("type")
+        return out
 
     # -- live-instance state migration (roadmap item 10) -------------------
 
@@ -1343,9 +1461,19 @@ class Session:
         provider's activation frame — captured while the old provider is still
         live and its world still exists, before teardown drops it. Keyed by
         provided key (not component name) so the successor's provider, which may
-        be a differently-named component, is correlated by *what it provides*."""
+        be a differently-named component, is correlated by *what it provides*.
+
+        A TEMPLATE component is skipped (F5): a template's live state is the
+        item-10 per-INSTANCE concern (`_capture_instances`), not a composition-
+        level provider hand-off. Capturing it here read the template component's
+        own (instance-less) activation frame and reported a zero-resource
+        provider hand-off — a spurious, misleading crossing record."""
+        templates = set(((old_ir or {}).get("manifest") or {}).get("templates")
+                        or [])
         pre: dict = {}
         for comp in (old_ir or {}).get("components") or []:
+            if comp.get("name") in templates:
+                continue
             handoff = comp.get("handoff")
             if not isinstance(handoff, dict) or not handoff.get("key"):
                 continue
@@ -1385,6 +1513,22 @@ class Session:
             comp = new_by_key.get(key)
             if comp is None:
                 continue  # successor does not accept this key's state — cold
+            # F1 defence in depth: the accept-vs-export §5 type gate. Admission
+            # runs it when a manifest is threaded, and the `declared` disclosure
+            # gate runs it before teardown, but a swap reached by any other path
+            # (or a manifest-less admission) must still refuse a declared type
+            # that cannot hold the exported state rather than laundering it —
+            # e.g. an operator `Map[Str,Str]` re-typed as a successor
+            # `Map[Str,Int]`, whose host class is the same `Map` so the vector
+            # check below passes it through.
+            accepted = (comp.get("handoff") or {}).get("type")
+            exported = info.get("type")
+            if not compatible(accepted, exported):
+                raise runtime.StateIncompatible(
+                    f"provider of {key!r}: the successor accepts state "
+                    f"`{accepted}`, but the running provider exported "
+                    f"`{exported}` — the declared hand-off types are not §5-"
+                    f"compatible, so the state cannot migrate")
             captured = info["captured"]
             fiber = self._driver.fibers.get(comp["name"])
             resources = self._frame_resources(fiber)
