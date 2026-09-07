@@ -51,8 +51,8 @@ roadmap-check-all:
 # workflow and asserts the gate catches it; `--strict` also fails a job with no
 # block at any level. Both run in the `lint` job and in tools/pre_pr.sh.
 workflow-permissions:
-	uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --self-test
-	uv run --no-project --with pyyaml python3 tools/check_workflow_permissions.py --strict
+	uv run --no-project --with pyyaml==6.0.2 python3 tools/check_workflow_permissions.py --self-test
+	uv run --no-project --with pyyaml==6.0.2 python3 tools/check_workflow_permissions.py --strict
 
 # issue #292: each fail-silent `revl_*` runtime seam (read through a getattr
 # string literal in backends/python/replay.py and src/revl/run.py) is defined
