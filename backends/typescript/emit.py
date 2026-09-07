@@ -2502,7 +2502,12 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
     if method == "indexOf":
         return f"revlIndexOf({target}, {args[0]})"
     if method == "split":
-        return f"{target}.split({args[0]})"
+        # docs/stdlib-2.0.md §split: an empty separator splits by CODE POINT.
+        # Native `String.prototype.split("")` walks UTF-16 code UNITS, so an
+        # astral scalar (a surrogate pair) came out as two pieces — the #549
+        # divergence against py/go/rust/wasm. `revlSplit` routes the empty-sep
+        # case through `Array.from`, which iterates code points.
+        return f"revlSplit({target}, {args[0]})"
     if method == "join":
         return f"{target}.join({args[0]})"
     if method == "repeat":
@@ -3420,9 +3425,23 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_INT_ARITH_HELPER, ""])
     if _uses_str_methods(ir):
         out.extend([_REVL_STR_HELPER, ""])
+    if _uses_split(ir):
+        out.extend([_REVL_SPLIT_HELPER, ""])
     if _uses_parse_int(ir):
         out.extend([_REVL_PARSE_INT_HELPER, ""])
     return out
+
+
+def _uses_split(node) -> bool:
+    """Does this IR call `Str.split` — the only builtin routed through
+    `revlSplit` (the empty-separator code-point path, #549)?"""
+    if isinstance(node, dict):
+        if node.get("kind") == "builtin" and node.get("method") == "split":
+            return True
+        return any(_uses_split(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_uses_split(v) for v in node)
+    return False
 
 
 def _uses_bounded_int32(node) -> bool:
@@ -3584,6 +3603,17 @@ _STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "codepoint_at",
 # with an optional leading `-`, `undefined` (the tier's Opt None) otherwise.
 # The regex gates before BigInt so a bad spelling never throws; the range
 # check then enforces the i64 bound, because `BigInt` is unbounded.
+# docs/stdlib-2.0.md §split: `"abc".split("")` is the 1-char strings and an
+# empty separator splits by CODE POINT, so an astral scalar is ONE piece.
+# `String.prototype.split("")` walks UTF-16 code units (two for a surrogate
+# pair) — the #549 divergence — so the empty-sep case goes through
+# `Array.from`, which iterates Unicode scalars exactly as py `list(s)`, go
+# `utf8.DecodeRuneInString` and the wasm helper do.
+_REVL_SPLIT_HELPER = """function revlSplit(s: string, sep: string): string[] {
+  return sep === "" ? Array.from(s) : s.split(sep)
+}"""
+
+
 _REVL_PARSE_INT_HELPER = """function revlParseInt(s: string): bigint | undefined {
   if (!/^-?\\d+$/.test(s)) return undefined
   const n = BigInt(s)

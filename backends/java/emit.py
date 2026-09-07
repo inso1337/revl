@@ -1049,7 +1049,15 @@ def _v3_builtin(method: object, target: str, args: list[str],
     if method == "to_int32":
         return f"Math.toIntExact({target})"
     if method == "div_trunc":
-        return f"(({target}) / ({args[0]}))"
+        # `div_trunc` truncates toward zero (Java `/` already does), but the
+        # true quotient of `Int.MIN / -1` is 2^63 — one past Int.MAX — so it
+        # must TRAP like every other Int overflow (docs/arithmetic.md, and the
+        # reference py/go/rust/wasm all fault here). Plain `/` WRAPS back to
+        # Int.MIN with no trap — the #549 java divergence. `Math.divideExact`
+        # truncates identically and throws ArithmeticException on that one
+        # overflow (and on a zero divisor), matching the `Math.*Exact` family
+        # already used for `+`/`-`/`*`/unary minus.
+        return f"Math.divideExact({target}, {args[0]})"
     if method == "div_floor":
         return f"Math.floorDiv({target}, {args[0]})"
     if method == "div_euclid":
@@ -1156,7 +1164,11 @@ def _stdlib_helper_source() -> list[str]:
         "// regex), limit -1 (trailing empties kept), \"\" -> 1-char strings.",
         "private static java.util.List<String> revlSplit(String s, String sep) {",
         "    if (sep.isEmpty()) {",
-        "        return s.chars().mapToObj(c -> String.valueOf((char) c)).toList();",
+        "        // docs/stdlib-2.0.md §split: an empty separator splits by CODE",
+        "        // POINT, so an astral scalar is ONE piece. `s.chars()` walks",
+        "        // UTF-16 code UNITS (two for a surrogate pair) — the #549",
+        "        // divergence; `s.codePoints()` walks Unicode scalars.",
+        "        return s.codePoints().mapToObj(Character::toString).toList();",
         "    }",
         "    return java.util.List.of(s.split(java.util.regex.Pattern.quote(sep), -1));",
         "}",
