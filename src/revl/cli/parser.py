@@ -1334,6 +1334,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="also pack the bundle into ONE self-contained file (e.g. "
              "app.revlbundle1) beside the --out directory; `revl verify FILE` "
              "checks it exactly as the directory (item 305)")
+    bundle_cmd.add_argument(
+        "--force", action="store_true",
+        help="overwrite a non-empty --out directory; without it, bundling "
+             "refuses to clobber an existing non-empty directory (guards "
+             "against deleting unrelated files)")
     bundle_cmd.add_argument("--json", action="store_true",
                             help="print the bundle path and its runtime-manifest as JSON")
 
