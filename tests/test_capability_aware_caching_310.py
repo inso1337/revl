@@ -311,6 +311,37 @@ def test_cache_capability_hit_skips_consumption(tmp_path):
 
 
 @needs_cordis
+def test_a_seam_hit_writes_a_cache_hit_wal_record(tmp_path):
+    """Design 310 laundering point 5 / design 462 finding 1: every hit is on the
+    record. Before the `record_cache_hit` writer existed, `_record_cache_hit`
+    resolved it with `getattr(..., None)` and silently wrote nothing — the
+    `cacheHits` counter moved but the durable audit line the seam slice claimed
+    did not exist. The hit's record names the seam it re-delivers and the
+    recorded grant its liveness is bound to, so an audit joins the hit to the
+    same authority a miss would have consumed."""
+    from revl.wal import read_wal
+    ir = compile_source(_CAP_SRC, "c.rvl")
+    s = _session("auto")
+    s.load(copy.deepcopy(ir), record=True)
+    assert s.recorder.wal is not None, "the policy session opened no WAL"
+    grant = s.mint_standing_grant(capability="read_db", uses=5)
+    sink = str(tmp_path / "hitrec.log")
+    s.call("users", "get", [sink, "1"])                       # miss
+    assert s.call("users", "get", [sink, "1"]).get("cacheHit") is True  # hit
+    records = read_wal(s.recorder.wal.path)["records"]
+    hits = [r for r in records if r.get("record") == "cache-hit"]
+    assert len(hits) == 1, records
+    assert hits[0]["key"] == "users" and hits[0]["method"] == "get"
+    # the record binds the hit to the entry's authority: the recorded grant id
+    # the miss consumed, so a miss (spend) and a hit (no spend) read against the
+    # same grant. A hit that named no authority would be exactly the laundering
+    # the record exists to make auditable.
+    assert hits[0]["grantIds"], hits[0]
+    consumed = [r for r in records if r.get("record") == "approval-consumed"]
+    assert len(consumed) == 1, "the hit consumed nothing; only the miss spent"
+
+
+@needs_cordis
 def test_a_hit_does_not_launder_authority(tmp_path):
     from revl.mcp.approval import ApprovalRequired
     ir = compile_source(_CAP_SRC, "c.rvl")
