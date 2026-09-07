@@ -379,21 +379,37 @@ Two limits, both refusals rather than approximations:
 ### The transport (`through`)
 
 `through <wire>` names the transport a row crosses (D-424c.1's sketch writes
-`through billing_wire`). The synthesizer speaks exactly one wire, the canonical
-envelope above, and it is selected by OMITTING `through`. No named transport is
-bound yet, so a named one is refused naming the transport and the row:
+`through billing_wire`). The synthesizer speaks the canonical envelope above
+(selected by OMITTING `through`) and one NAMED wire, `through a2a` (roadmap item
+439). Any OTHER named transport is refused naming the transport and the row:
 
 ```text
-remote row `@billing` names transport `a2a` with `through`, but the
+remote row `@billing` names transport `grpc` with `through`, but the
 synthesizer binds no transport by that name
 ```
 
 This is the same honesty the version, redirect and modality checks keep, on the
 transport axis: a named wire the generated body would not actually speak must
-not ship as the default one wearing its label. `through a2a` is roadmap item
-439's A2A 1.0.0 binding; it joins the bound set only once item 439's
-load-bearing question is decided — does an A2A Task map to one emission, to a
-stream (item 130), or to a session (item 250)? — and refuses until then.
+not ship as the default one wearing its label. `through a2a` is honoured because
+the body genuinely speaks it; `through grpc`, say, is refused because gRPC is a
+binary HTTP/2 transport, not the JSON POST this synthesizer emits.
+
+#### `through a2a`: A2A 1.0.0's `message/send`
+
+`through a2a` MAPS the canonical seam envelope onto A2A 1.0.0's `message/send`
+at the boundary (`docs/design/439-a2a-transport-binding.md`): the one `Str`
+argument becomes the message's single text `Part`, the method name rides as the
+`revl.skill` metadata reference, and the reply text is read from a TERMINAL
+`Task`/`Message`. It binds the text-in / text-out subset — a method of shape
+`emission fn op(message: Str) -> Str` (or `-> Result[Str, Str]` under
+`on_failure(result)`) — and only the crossing where the task reaches a terminal
+state in one round trip. A non-terminal reply faults; item 439's load-bearing
+question (does an A2A Task map to one emission, to a stream (item 130), or to a
+session (item 250)?) is left open, neither answered nor pre-empted. The peer is
+a CLAIM, not a checked composition: every A2A provider is item 329's
+untrusted-author case by construction, and the version is claimed exactly as
+"A2A 1.0.0", never bare "A2A". This is the same subset `revl import a2a` binds,
+from the other entry point onto the protocol.
 
 ### Values are not tainted yet
 
