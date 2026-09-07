@@ -274,7 +274,7 @@
       "uncovered_statements": 3017
     },
     "java": {
-      "statements": 2551,
+      "statements": 2555,
       "uncovered": {
         "backends/java/emit.py::<module>: The __main__ CLI entry is not invoked by the emit(ir) API oracle.": {
           "<module>": 1
@@ -337,10 +337,10 @@
           "_emit_checked_div_helpers": 1
         },
         "backends/java/emit.py::_emit_component: Residual requirement/bind fields and constructor assignments, config fields, ctx.get and let-effect/effect/emit branches are the nonsimple legacy effect/bind path, excluded by component_simple_ok. The final unsupported-step raise is refusal. Empty and provide-only legacy components are now covered.": {
-          "_emit_component": 17
+          "_emit_component": 18
         },
         "backends/java/emit.py::_emit_component_modern: Missing branches reject invalid isolate/intercept keys, bind a routed requirement and emit the router class. Frontend validates placement keys; routers remain an explicit boundary, not general realm exclusion. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
-          "_emit_component_modern": 6
+          "_emit_component_modern": 7
         },
         "backends/java/emit.py::_emit_component_stmts: Residual setup delegation and nonhost/witnessed or Map.compare_and_set let-effect acquisition are excluded by the host-only binding/setup gate. Body return raises (methods only); unknown body steps delegate to deferred setup lowering.": {
           "_emit_component_stmts": 15
@@ -598,7 +598,7 @@
           "emit": 2
         }
       },
-      "uncovered_statements": 914
+      "uncovered_statements": 916
     },
     "py": {
       "statements": 2358,
@@ -777,7 +777,7 @@
       "uncovered_statements": 632
     },
     "rust": {
-      "statements": 3396,
+      "statements": 3398,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and stream refusal. Those require the live plugin/frame runtime that the self-host component slice explicitly marks DEFER.": {
           "_emit_step": 108,
@@ -799,8 +799,8 @@
           "_split_result": 12
         },
         "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls.": {
-          "_emit_component": 4,
-          "_emit_component_new": 26,
+          "_emit_component": 5,
+          "_emit_component_new": 27,
           "_emit_components": 8,
           "_emit_req_bindings": 2,
           "_provide_let_type": 1
@@ -962,7 +962,7 @@
           "_stream_host_rust": 8
         }
       },
-      "uncovered_statements": 1265
+      "uncovered_statements": 1267
     },
     "ts": {
       "statements": 2043,
