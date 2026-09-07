@@ -240,23 +240,32 @@ def _run_mcp(args) -> int:
 
 
 def _run_serve(args) -> int:
-    """`revl serve --mcp FILES` — serve a composition's OWN provided operations
-    as MCP tools (the fourth quadrant of the bridge, docs/mcp-bridge.md).
+    """`revl serve {--mcp,--http} FILES` — serve a composition's OWN provided
+    operations (the fourth quadrant of the bridge, docs/mcp-bridge.md).
+
+    Two transports over ONE projection. `--mcp` puts the provided operations on
+    the MCP stdio wire; `--http` puts the SAME operations on HTTP, each as
+    `POST /<composition>/<key>/<op>` over the canonical value encoding
+    (docs/interop-bridge.md) — the server face `revl export client` pairs with
+    (item 424 gap (c), D-424c.6). The transport decides nothing: the operation
+    set, the checked emission hints and the wire shape are all the compiler's.
 
     Placement note: this boots one composition and stands it up, so it shares
     `revl run`'s admission-and-config preflight (compile -> refuse holes ->
     load config -> refuse a missing required field) rather than living under
-    `revl mcp serve`, whose tool set is the fixed compiler surface. `--mcp`
-    names the transport, leaving room for other serve frontends later.
+    `revl mcp serve`, whose tool set is the fixed compiler surface.
     """
     from ..run import (  # noqa: PLC0415
         _env_contract_problem, _load_config, _load_env, _merge_env,
         _required_config_problem,
     )
 
-    if not getattr(args, "mcp", False):
+    mcp = bool(getattr(args, "mcp", False))
+    http = bool(getattr(args, "http", False))
+    if not (mcp or http):
         print("error: `revl serve` needs a transport — pass --mcp to serve over "
-              "the MCP stdio protocol", file=sys.stderr)
+              "the MCP stdio protocol, or --http to serve over HTTP",
+              file=sys.stderr)
         return 2
 
     from ..holes import refuse_admission  # noqa: PLC0415
@@ -297,10 +306,14 @@ def _run_serve(args) -> int:
         print(f"error: {problem}", file=sys.stderr)
         return 1
 
-    from ..mcp.composed import serve_composition  # noqa: PLC0415
     from ..mcp.session import SessionError  # noqa: PLC0415
 
     try:
+        if http:
+            from ..mcp.http_face import serve_http  # noqa: PLC0415
+            return serve_http(ir, config, composition=args.composition,
+                              host=args.host, port=args.port)
+        from ..mcp.composed import serve_composition  # noqa: PLC0415
         return serve_composition(ir, config, composition=args.composition)
     except SessionError as error:
         print(f"error: {error}", file=sys.stderr)

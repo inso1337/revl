@@ -540,6 +540,32 @@ server's tool set is fixed, but this boots a *specific* composition, which is a
 the transport, leaving room for other serve frontends. It shares `run`'s
 preflight, not `mcp serve`'s protocol.
 
+### `--http`: the same projection, over HTTP
+
+`--http` is that second frontend (item 424 gap (c), slice C1, D-424c.6). It is
+the same booted composition and the same `tools_from_ir` projection, put on HTTP
+instead of stdio: each provided operation is `POST /<composition>/<key>/<op>`,
+and the request and response bodies are the canonical value encoding the four
+bridges already speak ([interop-bridge.md](interop-bridge.md)).
+
+```bash
+revl serve --http --port 8080 examples/user_cache.rvl
+# GET  /                          -> the manifest (operations, hints, frontier)
+# POST /revl/cache/get   ["k9"]   -> {"ok": true, "value": ...}
+```
+
+The reply shape is the placement bridge's own, `{"ok": true, "value":
+<encoded>}`, so a value marshals the same bytes here as over the placement seam,
+and a `revl export client` TS client (whose types *are* that encoding) reads it
+back without a second marshalling spec. The generated `httpTransport` factory
+targets exactly this route shape. `GET /` carries the compiler-derived
+`readOnly`/`emission` hint on every operation and the gate FRONTIER (item 338)
+the face was projected under. This face is the SERVER side of a seam and holds
+no gate over anything it in turn reaches: it is LOCAL contract only, makes no
+safety claim about a callee (D-424c.8, no verified-remote badge), and binds
+loopback by default. `--http` shares the identical compile/admit/config
+preflight as `--mcp`; only the transport differs.
+
 ### Import + serve close the loop
 
 A tool imported *from* a foreign MCP server (§2) lands as `emission` unless it
