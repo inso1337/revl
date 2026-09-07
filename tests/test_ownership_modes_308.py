@@ -45,6 +45,26 @@ def _admit(src: str) -> None:
     compile_source(src, "t.rvl")
 
 
+def _effect_steps(src: str) -> list:
+    """The lowered `let-effect`/`effect` steps of a compiled program, so a test
+    can assert what mode the IR carries."""
+    doc = compile_source(src, "t.rvl")
+    steps: list = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            if o.get("step") in ("let-effect", "effect"):
+                steps.append(o)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for x in o:
+                walk(x)
+
+    walk(doc)
+    return steps
+
+
 # ---------------------------------------------------------------------------
 # R0 — acquire returns are nominal opaque handle types
 # ---------------------------------------------------------------------------
@@ -476,36 +496,143 @@ def test_f10_is_report_only_and_refuses_nothing():
 
 
 # ---------------------------------------------------------------------------
-# Slice 3a (issue #96) — `shared` / `transfer` ownership modes are RESERVED
+# Slice 3a (issue #96) — `transfer` stays RESERVED; `shared` is now ADMITTED
 # ---------------------------------------------------------------------------
 #
 # The roadmap deferred SHARED + TRANSFER to a later tier "[contextual keywords
-# reserved]", but the markers were never actually reserved: `effect shared …` /
-# `effect transfer …` fell through to a generic "expected a statement" parse
-# error. Slice 3a reserves both markers at the acquire-binding position with a
-# clear refusal. The modes themselves are NOT implemented here.
+# reserved]". Slice 3a reserved both markers at the acquire-binding position;
+# the shared slice (S1, issue #96) FLIPS `shared` from reserved-refusal to
+# admission (see the "Slice 3b — shared" section below), while `transfer` stays
+# reserved (it moves the bracket across a realm/process seam and needs the WAL
+# to move processes — not a v1 afterthought).
 
 
-@pytest.mark.parametrize("mode", ["shared", "transfer"])
-def test_slice3a_ownership_mode_marker_is_reserved(mode):
+def test_slice3a_transfer_marker_is_still_reserved():
     msg = _refuse(
         _BASE
-        + f"component C {{ let s = effect {mode} open_sock() undo close_sock(s) }}\n"
+        + "component C { let s = effect transfer open_sock() undo close_sock(s) }\n"
     )
-    assert f"`{mode}` ownership mode is reserved for a later tier" in msg
+    assert "`transfer` ownership mode is reserved for a later tier" in msg
     assert "not implemented in v1" in msg
-    # the specific later-tier homes are named, not a generic parse error
-    assert "item 294 leases" in msg
-    assert "realm transfer" in msg
+    # the reason is named, not a generic parse error
+    assert "moves the bracket" in msg
     assert "expected a statement" not in msg
 
 
 @pytest.mark.parametrize("mode", ["shared", "transfer"])
 def test_slice3a_marker_is_contextual_binding_name_still_admits(mode):
     """`shared` / `transfer` are CONTEXTUAL keywords: only the marker position
-    (`effect <mode> <ident…>`) is reserved. A plain acquire with no marker still
+    (`effect <mode> <ident…>`) is special. A plain acquire with no marker still
     admits, so the reservation adds no new grammar."""
     _admit(
         _BASE
         + "component C { let s = effect open_sock() undo close_sock(s) }\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Slice 3b (issue #96) — `shared`: the compile-time admission + guards
+# ---------------------------------------------------------------------------
+#
+# The reserved marker flips to admission. `shared` is admitted ONLY at an
+# acquire binding that yields a resource handle; the acquiring frame is holder
+# #1 (an owner of its own handle for its own frame, so the O1 own-undo exemption
+# and the B1 owner carve-out apply). The runtime consequence — the declared
+# inverse bound to the count's zero crossing, the crash reclaim — lives in
+# `revl.liveness_confirm` (the primitive, #631) and `revl.recovery` (the
+# `shared-reclaim-fence`); these tests pin the FRONTEND wiring.
+
+
+def test_shared_admitted_at_acquire_binding():
+    # the slice-3a reserved-refusal is gone: `effect shared` now compiles
+    _admit(
+        _BASE
+        + "component C { let s = effect shared open_sock() undo close_sock(s) }\n"
+    )
+
+
+def test_shared_marker_carried_on_the_lowered_step():
+    # the mode reaches the IR so the emitters and the recover/audit surfaces
+    # can see it; a plain (owned) acquire carries no `mode` key, so a non-shared
+    # program's IR is byte-identical to before.
+    steps = _effect_steps(
+        _BASE
+        + "component C { let s = effect shared open_sock() undo close_sock(s) }\n"
+    )
+    assert steps and steps[0].get("mode") == "shared"
+
+    owned = _effect_steps(
+        _BASE
+        + "component C { let s = effect open_sock() undo close_sock(s) }\n"
+    )
+    assert owned and "mode" not in owned[0]
+
+
+def test_shared_only_at_an_acquire_binding_unbound_refused():
+    # a shared handle is a COUNTED holder, so the acquiring frame must NAME it;
+    # `effect shared …` with no binding is refused (the marker is admitted only
+    # at an acquire BINDING).
+    msg = _refuse(
+        _BASE
+        + "component C { effect shared open_sock() undo close_sock(result) }\n"
+    )
+    assert "must be bound" in msg and "COUNTED holder" in msg
+
+
+def test_shared_on_a_non_resource_acquire_refused():
+    # a `shared` marker on an acquire that yields no handle (a lock-style
+    # `-> Unit`) has nothing to count and is refused (there is no shared
+    # teardown for a value with no resource identity).
+    msg = _refuse(
+        "extern pure fn unlock() = @py { return None }\n"
+        "extern acquire fn lock() -> Unit undo unlock() = @py { return None }\n"
+        "component C { let s = effect shared lock() undo unlock() }\n"
+    )
+    assert "requires a resource handle" in msg
+
+
+def test_shared_acquiring_frame_is_owner_holds_and_lends_admits():
+    # holder #1 (the acquiring frame) is an OWNER of its own handle: it may hold
+    # it in its own activation state and lend it per provide call, exactly the
+    # owned-mode pool pattern.
+    _admit(
+        _BASE + "service S { fn get() -> Sock }\n"
+        "component P provides s: S {\n"
+        "  let sock = effect shared open_sock() undo close_sock(sock)\n"
+        "  provide s { fn get() { return sock } }\n"
+        "}\n")
+
+
+def test_shared_own_undo_exemption_admits():
+    # the acquiring binding's own `undo` naming its own inverse is admitted for
+    # `shared` exactly as for `owned` — that undo IS the bracket being created,
+    # not a hand-close.
+    _admit(
+        _BASE
+        + "component C { let s = effect shared open_sock() undo close_sock(s) }\n"
+    )
+
+
+def test_shared_hand_close_refused_use_after_release_at_compile_time():
+    # revl has no explicit-release surface, so the ONLY release of a shared
+    # handle is teardown at the zero crossing. A body-position hand-call of the
+    # declared inverse — the shape that would manufacture a use-after-release —
+    # is refused by O1 for a shared handle just as for an owned one.
+    msg = _refuse(
+        _BASE + "service S { fn ping() -> Int }\n"
+        "component P provides s: S {\n"
+        "  let sock = effect shared open_sock() undo close_sock(sock)\n"
+        "  provide s { fn ping() { let x = close_sock(sock)  return 1 } }\n"
+        "}\n")
+    assert "declared inverse" in msg
+
+
+def test_shared_borrower_close_refused():
+    # a borrower that receives a (shared) handle and hand-closes it is refused:
+    # a holder never runs the inverse directly; the count's zero crossing does.
+    msg = _refuse(
+        _BASE + "service S { fn shut(c: Sock) -> Int }\n"
+        "component P provides s: S {\n"
+        "  provide s { fn shut(c) { let x = close_sock(c)  return 1 } }\n"
+        "}\n")
+    assert "declared inverse" in msg and "O1" in msg

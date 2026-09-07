@@ -9976,8 +9976,34 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # own-undo exemption); B1 clause 5 still refuses a BORROW smuggled
             # into that undo.
             _taint308, _ = _resource_ctx(env.types)
-            if resource_in(acquired_type, _taint308):
+            _is_resource_308 = bool(resource_in(acquired_type, _taint308))
+            if _is_resource_308:
                 _owned_handles(env).add(safe)
+            # item 308 (issue #96), S1: `let h = effect shared <acquire> …` marks
+            # an N-holder handle. The acquiring frame is holder #1 — an OWNER of
+            # its own handle for its own frame, so the O1 own-undo exemption and
+            # the B1 owner carve-out below apply exactly as for `owned` (a shared
+            # handle stored in the acquirer's OWN activation state tears down with
+            # its frame). What differs is the RUNTIME: the declared inverse is
+            # bound to the count's zero crossing (SharedGrantBook / liveness_confirm
+            # .py), not fired per-frame; and a crash re-fires it once via `revl
+            # recover`'s `shared-reclaim-fence` (recovery.py). The mode is carried
+            # on the step so the emitters and the recover/audit surfaces see it.
+            # A `shared` marker on a NON-resource acquire is meaningless (nothing
+            # to count), so it is refused rather than silently recorded.
+            if getattr(stmt, "mode", "owned") == "shared":
+                if not _is_resource_308:
+                    raise RevlError(
+                        filename, stmt.line,
+                        f"`effect shared` requires a resource handle, but "
+                        f"`{stmt.bind}` binds a non-handle value (its acquire "
+                        f"returns no nominal opaque handle to count holders of)",
+                        hint="a shared handle is torn down when its last holder "
+                             "releases; a value with no resource identity has no "
+                             "teardown to share. Drop `shared`, or return an "
+                             "opaque handle type from the acquire (item 308, R0/S1)",
+                        code="G7", category="ownership")
+                step["mode"] = "shared"
             if step.get("undo") is not None:
                 _o1_check(step["undo"], env, filename, stmt.line,
                           position="undo", exempt_handle=safe)
