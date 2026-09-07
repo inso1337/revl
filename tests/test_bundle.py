@@ -56,6 +56,23 @@ component PgCache requires db: Database provides cache: Cache {
 component Front requires cache: Cache { }
 """
 
+# A genuinely MULTI-MODULE program: `MAIN` imports a pure helper from `LIB`
+# through a `use`, so the two must travel as distinct files (a concatenation
+# would leave the `use` unresolved). It is `BASE`'s PgCache with its SQL string
+# built by the imported helper, so the composition is the same admissible shape,
+# split across two modules. Every backend inlines both modules into ONE emitted
+# file, which is what a one-file bundle then carries.
+LIB_MODULE = 'pub fn insert_sql(key: Str) -> Str { return `INSERT ${key}` }\n'
+MAIN_MODULE = (
+    'use "lib.rvl" { insert_sql }\n'
+    "service Database { emission fn execute(sql: Str) -> Int }\n"
+    "service Cache { emission[db] fn put(key: Str, value: Str) }\n"
+    "component PgCache requires db: Database provides cache: Cache {\n"
+    "  provide cache { fn put(key, value) { emit db.execute(insert_sql(key)) } }\n"
+    "}\n"
+    "component Front requires cache: Cache { }\n"
+)
+
 # a draft: it compiles, but admission refuses it (an open hole).
 DRAFT = (
     "service Cache { fn get(key: Str) -> Str }\n"
@@ -444,6 +461,94 @@ def test_cli_one_file_flag_writes_and_verifies(tmp_path, monkeypatch, capsys):
     out = tmp_path / "cli.revlbundle"
     packed = tmp_path / ("cli" + B.ONEFILE_SUFFIX)
     assert main(["bundle", src, "--out", str(out), "--one-file", str(packed)]) == 0
+    assert packed.is_file()
+    assert main(["verify", str(packed)]) == 0
+
+
+# ------------------------------------------- multi-module one-file bundle + run
+
+def _write_multi_module(tmp_path: Path) -> list[str]:
+    """Write the two-module program to disk and return the source paths, `lib`
+    before `main` (both are roots the bundle compiles and carries by basename, so
+    `main`'s `use "lib.rvl"` resolves from the bundle's own `source/` at verify)."""
+    lib = _write(tmp_path, "lib.rvl", LIB_MODULE)
+    main = _write(tmp_path, "main.rvl", MAIN_MODULE)
+    return [lib, main]
+
+
+def test_multi_module_bundle_carries_both_modules_and_verifies(tmp_path):
+    """A multi-module program (`main.rvl` imports a helper from `lib.rvl`) bundles
+    and verifies GREEN, including the gauntlet tier. This is the case a naive
+    text-concatenation of the sources graded as `rejected` — the `use` could not
+    resolve in the concatenated blob — so it pins that the gauntlet grades the
+    real multi-module composition, not a glued-together single source."""
+    sources = _write_multi_module(tmp_path)
+    out = tmp_path / "multi.revlbundle"
+    B.build_bundle(sources, str(out), env=dict(KEY))
+    # both modules travel as distinct files in the bundle's source tree
+    assert {p.name for p in (out / "source").iterdir()} == {"lib.rvl", "main.rvl"}
+    report = B.verify_bundle(str(out), env=dict(KEY))
+    assert report.ok, [c.detail for c in report.mismatches]
+    assert _tier(report, "gauntlet").status == B.OK
+
+
+def test_multi_module_one_file_bundles_inlines_all_modules_and_runs(tmp_path):
+    """The task the one-file mode is for: a MULTI-MODULE program packed into ONE
+    self-contained file whose emitted artifact inlines every module, and which
+    RUNS.
+
+    The bundle is packed to one file, which verifies exactly as the directory
+    does; unpacked, its emitted Python is a SINGLE self-contained module that
+    inlines both the imported helper and the components; and executing that one
+    file runs the inlined helper (a plain top-level function, so no cordis
+    runtime is needed to prove the emitted single file is real, runnable code)."""
+    sources = _write_multi_module(tmp_path)
+    out = tmp_path / "multi.revlbundle"
+    B.build_bundle(sources, str(out), env=dict(KEY))
+
+    packed = tmp_path / ("multi" + B.ONEFILE_SUFFIX)
+    B.pack_bundle(str(out), str(packed))
+    assert B.verify_bundle(str(packed), env=dict(KEY)).ok
+
+    # unpack the one-file bundle and read its single emitted Python artifact
+    restored = tmp_path / "restored.revlbundle"
+    B.unpack_bundle(str(packed), str(restored))
+    emitted_py = restored / "emitted" / "python" / "components.py"
+    src = emitted_py.read_text(encoding="utf-8")
+    # ONE file, both modules inlined: the imported helper AND the components
+    assert "def insert_sql(" in src         # lib.rvl's pure helper
+    assert "PgCache" in src and "Front" in src  # main.rvl's components
+
+    # run it: exec the self-contained single file (a tiny `runtime` stub stands
+    # in for the cordis import the module makes; the inlined helper itself is
+    # plain Python and needs no runtime), then call the inlined helper.
+    import types
+    stub = types.ModuleType("runtime")
+    stub.Frame = type("Frame", (), {"__init__": lambda self, *a, **k: None})
+    saved = sys.modules.get("runtime")
+    sys.modules["runtime"] = stub
+    try:
+        ns: dict = {}
+        exec(compile(src, str(emitted_py), "exec"), ns)  # noqa: S102, our own emitted file
+    finally:
+        if saved is not None:
+            sys.modules["runtime"] = saved
+        else:
+            sys.modules.pop("runtime", None)
+    assert ns["insert_sql"]("users") == "INSERT users"
+    assert set(ns["SERVICES"]) == {"Database", "Cache"}
+
+
+def test_cli_multi_module_one_file_flag_writes_and_verifies(tmp_path, monkeypatch):
+    """End to end through the CLI: `revl bundle lib.rvl main.rvl --out DIR
+    --one-file FILE` packs a multi-module program into one file, and
+    `revl verify FILE` exits 0."""
+    monkeypatch.setenv("REVL_ATTEST_KEY", KEY["REVL_ATTEST_KEY"])
+    lib_path, main_path = _write_multi_module(tmp_path)
+    out = tmp_path / "cli-multi.revlbundle"
+    packed = tmp_path / ("cli-multi" + B.ONEFILE_SUFFIX)
+    assert main(["bundle", lib_path, main_path, "--out", str(out),
+                 "--one-file", str(packed)]) == 0
     assert packed.is_file()
     assert main(["verify", str(packed)]) == 0
 
