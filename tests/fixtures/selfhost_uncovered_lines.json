@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 4193,
+      "statements": 4223,
       "uncovered": {
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
@@ -62,7 +62,7 @@
           "_witnessed_result_types": 5
         },
         "Component/method expression renderer and tuple-return convention, reached from _emit_component_step/_emit_method_body, not the pure _go_v3_expr renderer. This includes legacy name/fn/format literals and component Opt/Result spreading; the selfhost module port excludes that live ABI, not the corresponding pure literals or user ADTs.": {
-          "_comp_builtin": 57,
+          "_comp_builtin": 59,
           "_comp_checked_div_expr": 9,
           "_comp_infer": 60,
           "_construction_case": 15,
@@ -83,7 +83,7 @@
           "_v3_record_type_for_fields": 10
         },
         "General Str/List/Map stdlib helper rendering and return-type lookup remain deferred by the Go oracle; arithmetic conversions use separate covered paths. Methods such as length/concat/push/set and checked division demand omitted stdlib/Opt/Result scaffold.": {
-          "_go_v3_builtin": 68,
+          "_go_v3_builtin": 71,
           "_v3_builtin_ret_type": 34
         },
         "Host Map acquisition/CAS type discovery scans component and provide-method bodies for insert values. This is the host-component Map ABI, not the pure Map value renderer; no component acquisition is accepted by emit_go.rvl.": {
@@ -261,7 +261,7 @@
           "_emit_component": 85,
           "_emit_component_step": 145,
           "_emit_host_stubs": 12,
-          "_emit_method_body": 56,
+          "_emit_method_body": 81,
           "_emit_provide_impl": 37,
           "_emit_services": 16,
           "_host_runtime": 10,
@@ -271,10 +271,10 @@
           "_needs_sync": 1
         }
       },
-      "uncovered_statements": 3017
+      "uncovered_statements": 3047
     },
     "java": {
-      "statements": 2555,
+      "statements": 2583,
       "uncovered": {
         "backends/java/emit.py::<module>: The __main__ CLI entry is not invoked by the emit(ir) API oracle.": {
           "<module>": 1
@@ -480,8 +480,8 @@
         "backends/java/emit.py::_method_body: Residual empty/multistep effectful-body traps and nonvoid bare-return refusal are outside the simple legacy method gate; a value expression discarded by a void method requires the nonsimple legacy effect/call path. Void bare returns and scalar/name returns are covered.": {
           "_method_body": 4
         },
-        "backends/java/emit.py::_method_body_lines: Remaining method branches are witnessed or Map-CAS let-effect, local let/assign and arrow binding, all explicitly excluded by method_step_supported. Await/provide/unknown steps raise and cannot produce successful reference output.": {
-          "_method_body_lines": 34
+        "backends/java/emit.py::_method_body_lines.render: the provide-method step renderer reached from _method_body_lines. Its residual arms are the method steps excluded by method_step_supported (witnessed acquisition, Map-CAS let-effect, deferred/await, local let/assign and arrow binding, nested provide and unknown steps that raise) together with the issue #548 method-level control flow (if/while/for/break/continue). No byte-agreement corpus document drives a provide method through those branches, so they are reference-measured only; services_method_effects.rvl and witnessed.rvl pin the supported unbound and compensated forms.": {
+          "_method_body_lines.render": 54
         },
         "backends/java/emit.py::_name_uses: Recursive parameter-use counting is only called by _inline_arrow for pinning multiply-used arguments; local-arrow beta reduction is explicitly deferred.": {
           "_name_uses": 4
@@ -544,7 +544,7 @@
           "_uses_checked_div.walk": 1
         },
         "backends/java/emit.py::_uses_float_interp.walk: Residual found short-circuit and true assignment require Float-to-Str interpolation, explicitly deferred and reproduced by floats.rvl. Float arithmetic nodes alone do not satisfy this condition.": {
-          "_uses_float_interp.walk": 3
+          "_uses_float_interp.walk": 5
         },
         "backends/java/emit.py::_uses_instance_get.walk: Traversal and true detection only run on spawn/instance-get components after their feature gate; spawn/instances are explicitly deferred.": {
           "_uses_instance_get.walk": 8
@@ -562,7 +562,7 @@
           "_uses_stdlib": 5
         },
         "backends/java/emit.py::_v3_builtin: List/string operation dispatch and invalid-method refusal are behind kind=builtin, explicitly deferred; strict runtime_values.rvl exercises missing push helper and control.rvl the related length/arrow family.": {
-          "_v3_builtin": 57
+          "_v3_builtin": 59
         },
         "backends/java/emit.py::_v3_call: Residual inline-arrow/field/apply dispatch belongs to deferred first-class/local functions. User-case/None compatibility call branches are lowered to adt/var by lower.py, and wrong constructor arities refuse. Raw named-call fallback is not canonical free-fn (kind=fn) or req (target/method) IR.": {
           "_v3_call": 19
@@ -598,10 +598,10 @@
           "emit": 2
         }
       },
-      "uncovered_statements": 916
+      "uncovered_statements": 940
     },
     "py": {
-      "statements": 2358,
+      "statements": 2395,
       "uncovered": {
         "Activation residuals: Map.cas conditional undo belongs to component host runtime; non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). Deferred/approval/await/stream paths belong to the named runtime boundaries. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms.": {
           "_ComponentEmitter._body_step": 17
@@ -728,7 +728,7 @@
           "_ComponentEmitter._method": 2
         },
         "Method residuals: assign emits the same name/value form as the covered let path (port combines them); bound acquisition uses spawn/host runtime, with the witnessed bind specifically frontend-rejected; Map.cas undo checks the acquired boolean; deferred/await use retained runtime paths. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration.": {
-          "_ComponentEmitter._method_step": 26
+          "_ComponentEmitter._method_step": 28
         },
         "Module emit residuals: non-dict/version/empty-document/duplicate-component errors; idempotent map and commutative/async/idempotent service metadata; inspect/ref cache; asyncio timer/lifecycle imports; test/fault trailers; async-arrow adapter; router runtime source. Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions.": {
           "emit": 33
@@ -749,7 +749,7 @@
           "_ComponentEmitter.emit": 9
         },
         "Reviewed Map.has branch plus unknown-method rejection: _render_builtin renders key in map exactly like selfhost render_builtin; existing map corpus uses lookup/set/size/keys/remove but not has. Unknown builtin names are frontend-invalid and produce an explicit port marker. This is not a deferred supported map operation.": {
-          "_render_builtin": 2
+          "_render_builtin": 3
         },
         "Reviewed eager-substitution residuals: _inline_eager_vars returns empty for non-dict children and descends optfield/optcall targets or match scrutinees. Both sources implement the same recursion; inline.rvl covers strict/list/record/index/field/unary/short-circuit argument positions, while opt/match functions may exceed the 24-node template bound before this helper is queried. No broader optimization claim is inferred from coverage.": {
           "_inline_eager_vars": 3
@@ -772,12 +772,19 @@
         },
         "Witness lookup non-dict guard: after a witnessed table exists, _witnessed_extern returns None for a malformed/non-dict acquire. Legal effect acquires are expression dictionaries. witnessed.rvl covers matching and nonmatching fn lookups; the port's final missing-name return is equivalent.": {
           "_ComponentEmitter._witnessed_extern": 1
+        },
+        "backends/python/emit.py::_ComponentEmitter._method_control: issue #548 provide-method control flow (if/while/for/break/continue over a method's value computation) and its nested block step emitter. No byte-agreement corpus document contains method-level control flow, so no corpus document calls the helper; the fn-grammar if/while/for it mirrors is covered through the module _fn_stmt path.": {
+          "_ComponentEmitter._method_control": 19,
+          "_ComponentEmitter._method_control.block": 6
+        },
+        "backends/python/emit.py::_scan_uses: issue #540 folds the preamble _uses_* gates into one IR traversal. One predicate arm (a bounded-arith or builtin case such as a unary Int32 negation or a div_euclid/div_floor receiver) is triggered by no corpus document's IR, so it stays unexecuted while the traversal itself is covered; the emitted preamble is byte-for-byte the former gates.": {
+          "_scan_uses": 1
         }
       },
-      "uncovered_statements": 632
+      "uncovered_statements": 661
     },
     "rust": {
-      "statements": 3398,
+      "statements": 3447,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and stream refusal. Those require the live plugin/frame runtime that the self-host component slice explicitly marks DEFER.": {
           "_emit_step": 108,
@@ -815,7 +822,7 @@
           "_revl_record_preamble": 2,
           "_revl_teardown_preamble": 1,
           "_revl_timer_preamble": 1,
-          "_uses_float_interp.walk": 3
+          "_uses_float_interp.walk": 5
         },
         "Explicit invalid/deferred-input guards: accepted frontend IR contains no unresolved holes or ownerless deferred approvals; these walkers and refusal branches make such direct or stale IR fail loudly instead of generating Rust.": {
           "_refuse_deferred_emissions": 10,
@@ -859,10 +866,10 @@
         },
         "Pure-v3 expression and statement residuals: explicit refusals remain for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulator optimization, recursive collection persistence, Float interpolation, and malformed operators/nodes. Covered cases include all ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns, and supported builtins.": {
           "_emit_v3_functions": 8,
-          "_v3_builtin": 29,
+          "_v3_builtin": 30,
           "_v3_empty_vec_elem_types": 66,
           "_v3_empty_vec_elem_types.collect": 1,
-          "_v3_infer_type": 15,
+          "_v3_infer_type": 10,
           "_v3_inplace_persistent": 12,
           "_v3_interp": 3,
           "_v3_is_float": 4,
@@ -944,14 +951,19 @@
           "_is_map_cas": 1,
           "_method_bodies_have_compensation": 2,
           "_method_bodies_have_witnessed": 2,
-          "_method_body_lines": 37,
+          "_method_body_lines": 40,
           "_method_body_pure_new": 1,
-          "_pure_method_statements": 1,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
         "`_render_expr` residuals, in two families no mirrored-corpus document reaches. (1) The refusal/fallback arms for host/format/optional/update/spawn expressions, Map and positional-string/mutating collection builtins, destructuring, empty-Vec accumulators, Float interpolation and malformed nodes; the corpus covers the ordinary scalar/list/record/ADT expressions, widening, calls, conditional receivers, bare returns and supported builtins. (2) item 333: the `method == \"length\"` and `method == \"slice\"` branches that serve those builtins through a threaded `&[char]` view (`{view}.len()` and `{view}.iter().skip(a).take(b-a)` instead of `revl_length`'s `chars().count()` and `revl_slice`'s `chars().skip` front walks). Reaching them needs a bare-parameter positional `slice`/index that SEEDS the view (`_STR_VIEW_SEED_BUILTINS` -> `_str_params_indexed` -> `_compute_char_views`), and the self-host port deliberately DEFERS that whole positional char-view family: `selfhost/emit_rust.rvl` threads no `&[char]` param, emits `revl_length()` for length and has no string `slice` builtin at all (it renders `<<UNSUPPORTED-BUILTIN:slice>>`). Because the line-coverage corpus IS the byte-agreement corpus (`tests/test_selfhost_emit_rust.py::CORPUS`), a seeding document would force the port to diverge, so it cannot be added until that family is ported. The seeding machinery itself is already recorded under the string-view-alternatives reason (`_compute_char_views`, `_char_view_args`, `_str_params_indexed.walk`).": {
-          "_render_expr": 63
+          "_render_expr": 64
+        },
+        "backends/rust/emit.py::_rust_render_pure_stmts: issue #548 renders a pure provide-method step list (bindings, assignment, return, and if/while/for/break/continue whose arms are themselves pure). No byte-agreement corpus document drives a provide method through control flow, so these statement forms are reference-measured only; the identical fn-grammar shapes are covered.": {
+          "_rust_render_pure_stmts": 24
+        },
+        "backends/rust/emit.py::_v3_strip_index_clone: item 437d read-only clone elision for a List index read. The bare index place (xs[i].clone() to xs[i]) is covered; the residual is the field-off-index shape (xs[i].f.clone() to xs[i].f) in a read-only slot, reached by no corpus document.": {
+          "_v3_strip_index_clone": 1
         },
         "item 421 F6 (the rust half): the declared-`Secret[T]` runtime secret registry. `_declares_secret` scans the IR for a surviving `Secret[T]` marking (service param `secret`, extern `secret_return`, config-field `secret`) to gate `_SECRET_MODE`; `_emit_secret_registry` is the redaction preamble emitted into the crate once under that mode; `_secret_config_fields`/`_secret_config_mark` register a `Secret[T]` config field at the head of the plugin closure (`revl_mark_secret(&config.<f>)`, the register-at-load shape the go tier uses); `_secret_method_params` registers a `Secret[T]` provide-method parameter at the method head; `_stream_host_rust` funnels the host-trace choke point `revl_stream_record` through `revl_redact_text`. No rust corpus document declares a `Secret[T]`, so the positive branches never run, and selfhost/emit_rust.rvl does not port secret redaction (item-429(d)): a corpus document reaching them would flip the byte-agreement oracle red rather than close this gap.": {
           "_declares_secret": 4,
@@ -962,10 +974,10 @@
           "_stream_host_rust": 8
         }
       },
-      "uncovered_statements": 1267
+      "uncovered_statements": 1293
     },
     "ts": {
-      "statements": 2043,
+      "statements": 2121,
       "uncovered": {
         "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), emits sync/async timer scheduling and in-flight tracking, dispatches the item-130 `stream-iter` step (roadmap #81), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards and fail are covered; witnessed transactions, timers and the ts reactive-tier stream steps are declared port boundaries": {
           "_component_step": 44
@@ -993,14 +1005,10 @@
           "_refuse_holes.walk": 1,
           "_refuse_missing_host_root": 1
         },
-        "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) — now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered": {
+        "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) \u2014 now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered": {
           "_expr": 41,
           "_fn_call": 2,
           "_ts_builtin": 1
-        },
-        "ts reactive tier (item 130, roadmap #81): `_stream_head` renders the `merge(a, b)` fan-in and its recursive nesting, and `_stream_iter` emits the `every ... in` async-iteration loop (the while/next/isClosed shape) and refuses the `on ... as` typed-event handler by name. The reference now lowers these against runtime.ts's Stream, but the self-host emitter selfhost/emit_ts.rvl has not yet mirrored the stream tier and no self-host corpus document subscribes a stream, so both are reference-only until the self-host stream port and a stream corpus fixture land": {
-          "_stream_head": 4,
-          "_stream_iter": 13
         },
         "Extern host-ref ABI boundary: `_emit_ts_ref_runtime` emits path/cache helpers; `_emit_ts_ref_thunk` emits lazy sync/async import, cache, symbol/type checks and calls; `_mark` wraps secret results; `_ts_extern_config_scaffold` installs extern config. `root=stdlib` and ref/config extern documents reproduce this family; the port intentionally refuses rather than fabricating it": {
           "_emit_ts_ref_runtime": 1,
@@ -1042,7 +1050,7 @@
           "_ts_inplace_write": 3
         },
         "Provide-method residuals: `_method_body` retains witnessed acquisition, generic non-call compensation snapshots, empty-list `any[]` fallback, nested-provide rejection and unknown-step rejection. Mutable/immutable locals, returns, await, Map CAS and call compensation are covered; witnessed transactions remain the named boundary": {
-          "_method_body": 17
+          "_method_body": 37
         },
         "Standalone transport only: `<module>` calls `_main`; `_main` parses `--runtime`, stdin/file JSON, usage and missing-argument errors, then writes `emit`. The oracle imports and calls `emit` directly, so these statements do not represent an emitter branch": {
           "<module>": 1,
@@ -1080,14 +1088,21 @@
         "`do` expression boundary: `_v3_do_expr` requires component/method context, permits only let statements, computes empty-list annotations, renders mutable/immutable bindings and an async-or-sync IIFE tail. The port has no frame-aware `do` arm and records `kind=do` unported": {
           "_v3_do_expr": 22
         },
+        "backends/typescript/emit.py::_reject_service_key: refuses a provide/require key that would collide with a cordis Context member, an inherited JS prototype member, or the reserved _-prefixed namespace (a loud host-safety error over a silent wrong resolution). Every corpus key is host-safe, so _is_reserved_service_key returns early and the refusal body with its per-case messages never runs.": {
+          "_reject_service_key": 8
+        },
+        "ts reactive tier (item 130, roadmap #81): `_stream_head` renders the `merge(a, b)` fan-in and its recursive nesting, and `_stream_iter` emits the `every ... in` async-iteration loop (the while/next/isClosed shape) and refuses the `on ... as` typed-event handler by name. The reference now lowers these against runtime.ts's Stream, but the self-host emitter selfhost/emit_ts.rvl has not yet mirrored the stream tier and no self-host corpus document subscribes a stream, so both are reference-only until the self-host stream port and a stream corpus fixture land": {
+          "_stream_head": 4,
+          "_stream_iter": 13
+        },
         "v1/v2 live-component routing is selected before the v3 emitter mirrored by `selfhost/emit_ts.rvl`; the remaining statements are the legacy runtime branch": {
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 449
+      "uncovered_statements": 517
     },
     "wasm": {
-      "statements": 2693,
+      "statements": 2758,
       "uncovered": {
         "Command-line JSON input, output directory creation and WAT-file writing are not entered by the in-process emit(ir) oracle.": {
           "<module>": 12
@@ -1281,7 +1296,7 @@
           "_ComponentEmitter._op_spec": 13,
           "_ComponentEmitter._open_function": 13,
           "_ComponentEmitter._plan": 27,
-          "_ComponentEmitter._provide": 90,
+          "_ComponentEmitter._provide": 155,
           "_ComponentEmitter._provide_prefix": 1,
           "_ComponentEmitter._realm_sections": 15,
           "_ComponentEmitter._register_witnessed_calls": 10,
@@ -1312,7 +1327,7 @@
           "_assert_realm_label": 2
         }
       },
-      "uncovered_statements": 1396
+      "uncovered_statements": 1461
     }
   },
   "selfhost": {
@@ -1403,7 +1418,7 @@
       "uncovered_statements": 84
     },
     "java": {
-      "statements": 2033,
+      "statements": 2034,
       "uncovered": {
         "selfhost/emit_java.rvl::bind_type: The empty Map surface branch cannot occur: component_map_values always supplies at least Str. Remaining record/list/scalar inference requires nonhost let-effect, explicitly excluded by body_step_supported.": {
           "bind_type": 27
@@ -1697,7 +1712,7 @@
       "uncovered_statements": 95
     },
     "rust": {
-      "statements": 1966,
+      "statements": 1978,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "component_uses_await": 1,
@@ -1751,7 +1766,7 @@
           "borrow_str_arg": 1,
           "by_value_arg": 2,
           "collect_fn_value_refs": 2,
-          "is_atomic": 4,
+          "is_atomic": 3,
           "list_param_escapes": 3,
           "mentions_name": 1,
           "owned_borrowed_tail": 1,
@@ -1782,6 +1797,9 @@
           "split_fn_params": 1,
           "split_fn_ret": 2,
           "v3_infer_type": 3
+        },
+        "selfhost/emit_rust.rvl::strip_index_clone: the self-host mirror of the reference _v3_strip_index_clone (item 437d) read-only clone elision. As on the reference tier the bare index place is covered and the residual is the field-off-index shape reached by no corpus document.": {
+          "strip_index_clone": 1
         }
       },
       "uncovered_statements": 142
