@@ -5020,6 +5020,451 @@ fn too_deep_msg() -> Str {
   return `expression nesting is deeper than the parser's limit of ${nesting_limit().to_str()} levels`
 }
 
+// ================================================ config-is-data (item 378, G4)
+//
+// A config value is injected as STATIC DATA at plug/spawn/load time, so a config
+// field's declared type must be built, transitively, out of data — never an
+// arrow type (a live callable) nor a `service` (a capability). The reference
+// decides this in `typecheck.check_config_field_is_data`, RAISED from
+// `_validate_declared_types` ahead of every collected diagnostic, so a violation
+// rides ALONE and is the earliest fail-fast. This ports that walk so the gate
+// issues the same "<field> … reaches …; a config field must be static data" G4
+// the reference does — over BOTH a component's `config { … }` and an extern's.
+// The allowlist mirrors the reference exactly: scalars and `Opt`/`List`/`Map`/
+// `Result` of data are fine, a declared record/ADT is resolved and its component
+// types walked, a declared alias is followed to its RHS, and any head that is
+// not PROVABLY data (an arrow, a service, `Any`/`Value`/`Never`, or an
+// unresolvable nominal) is refused — so a new denotable type cannot reopen the
+// hole merely by not being on a list.
+
+type CfgCaseD = { cname: Str, payload: Str }
+type CfgTy    = { name: Str, kind: Str, fields: List[Bind], cases: List[CfgCaseD],
+                  params: List[Str], rhs: Str }
+type CfgFld   = { fname: Str, fty: Str, line: Int }
+type CfgOwner = { owner: Str, flds: List[CfgFld] }
+type CfgAcc   = { comps: List[CfgOwner], exts: List[CfgOwner] }
+
+fn cfg_data_scalar(h: Str) -> Bool {
+  return h == "Int" || h == "Int32" || h == "Float" || h == "Str"
+      || h == "Bool" || h == "Bytes" || h == "Unit"
+}
+
+fn cfg_data_container(h: Str) -> Bool {
+  return h == "Opt" || h == "List" || h == "Map" || h == "Result"
+}
+
+// The erased/dynamic and bottom types — each a `compatible` wildcard in at least
+// one direction, so admitting one would hand the body a value of any runtime
+// shape, a callable included.
+fn cfg_data_erased(h: Str) -> Bool {
+  return h == "Any" || h == "Value" || h == "Never"
+}
+
+// The reference's `_config_data_error` wording, verbatim.
+fn cfg_data_msg(fname: Str, owner: Str, root: Str, offender: Str) -> Str {
+  return tagged("G4", "config field `".concat(fname).concat("` of ").concat(owner)
+    .concat(" has type `").concat(root).concat("`, which reaches ").concat(offender)
+    .concat("; a config field must be static data"))
+}
+
+fn cfg_ty_none() -> CfgTy {
+  return { name: "", kind: "", fields: [], cases: [], params: [], rhs: "" }
+}
+
+fn cfg_lookup(ds: List[CfgTy], h: Str) -> CfgTy {
+  var i = 0
+  while (i < ds.length()) {
+    if (ds[i].name == h) { return ds[i] }
+    i += 1
+  }
+  return cfg_ty_none()
+}
+
+// The fields of a structural record spelling `{a: T, b: U}` (item 71), so a
+// smuggled arrow field inside an inline record type is caught.
+fn cfg_struct_fields(t: Str) -> List[Bind] {
+  if (t.length() < 2 || t.charAt(0) != "{") { return [] }
+  let parts = split_top_commas(t.slice(1, t.length() - 1))
+  var out: List[Bind] = []
+  var i = 0
+  while (i < parts.length()) {
+    let p = parts[i]
+    let ci = p.indexOf(":")
+    if (ci != 0 - 1) {
+      out = out.push({ name: ty_trim(p.slice(0, ci)),
+                       ty: ty_trim(p.slice(ci + 1, p.length())) })
+    }
+    i += 1
+  }
+  return out
+}
+
+// The reference's `_is_type_expression`: is this "case name" an alias RHS (a
+// type to walk) rather than a nullary tag (data, walked into nothing)?
+fn cfg_is_type_expr(name: Str, decls: List[CfgTy], tparams: List[Str]) -> Bool {
+  if (name == "") { return false }
+  if (name.startsWith("{")) { return true }
+  let p = ty_parse(name)
+  if (p.args.length() > 0) { return true }
+  if (p.head == "->") { return true }
+  if (cfg_data_scalar(p.head) || cfg_data_container(p.head)
+      || cfg_data_erased(p.head)) { return true }
+  if (contains(tparams, p.head)) { return true }
+  return cfg_lookup(decls, p.head).name != ""
+}
+
+// The walk itself (`_walk_config_type`). "" = the field is data; otherwise the
+// G4 refusal for the FIRST offending head reached. `root` stays the field's own
+// declared spelling through every recursion, so the message names it, not the
+// nested type actually carrying the offender.
+fn cfg_walk(fname: Str, owner: Str, tyname: Str, root: Str, svcs: List[Str],
+            decls: List[CfgTy], visited: List[Str], tparams: List[Str]) -> Str {
+  let tn = ty_trim(tyname)
+  if (tn == "") { return "" }
+  if (tn.startsWith("{")) {
+    let flds = cfg_struct_fields(tn)
+    var i = 0
+    while (i < flds.length()) {
+      let r = cfg_walk(fname, owner, flds[i].ty, root, svcs, decls, visited, tparams)
+      if (r != "") { return r }
+      i += 1
+    }
+    return ""
+  }
+  let p = ty_parse(tn)
+  if (p.head == "->") {
+    return cfg_data_msg(fname, owner, root, "an arrow (function) type")
+  }
+  if (contains(svcs, p.head)) {
+    return cfg_data_msg(fname, owner, root,
+      "the service `".concat(p.head).concat("`"))
+  }
+  // A type parameter of the record/ADT/alias currently being resolved carries
+  // nothing itself; its binding is the type argument at the use site.
+  if (contains(tparams, p.head)) { return "" }
+  if (cfg_data_container(p.head) || cfg_data_scalar(p.head)) {
+    var i = 0
+    while (i < p.args.length()) {
+      let r = cfg_walk(fname, owner, p.args[i], root, svcs, decls, visited, tparams)
+      if (r != "") { return r }
+      i += 1
+    }
+    return ""
+  }
+  let d = cfg_lookup(decls, p.head)
+  if (d.name == "") {
+    let offender = cfg_data_erased(p.head)
+      ? "the erased type `".concat(p.head).concat("`")
+      : "the opaque type `".concat(p.head).concat("`")
+    return cfg_data_msg(fname, owner, root, offender)
+  }
+  // A declared alias `type X = RHS`: follow it (the reference inlines aliases
+  // before this walk, so following the RHS reaches the same decision).
+  if (d.kind == "alias") {
+    let r = cfg_walk(fname, owner, d.rhs, root, svcs, decls, visited, d.params)
+    if (r != "") { return r }
+    var i = 0
+    while (i < p.args.length()) {
+      let r2 = cfg_walk(fname, owner, p.args[i], root, svcs, decls, visited, tparams)
+      if (r2 != "") { return r2 }
+      i += 1
+    }
+    return ""
+  }
+  // A nominal record/ADT: resolve it and walk its component types, guarding a
+  // recursive type (`type Tree = Node(Tree)`) with the visited set.
+  if (!contains(visited, p.head)) {
+    let v2 = visited.push(p.head)
+    let tp2 = d.params
+    if (d.kind == "record") {
+      var i = 0
+      while (i < d.fields.length()) {
+        let r = cfg_walk(fname, owner, d.fields[i].ty, root, svcs, decls, v2, tp2)
+        if (r != "") { return r }
+        i += 1
+      }
+    } else {
+      var i = 0
+      while (i < d.cases.length()) {
+        let c = d.cases[i]
+        if (c.payload != "") {
+          let r = cfg_walk(fname, owner, c.payload, root, svcs, decls, v2, tp2)
+          if (r != "") { return r }
+        } else {
+          if (cfg_is_type_expr(c.cname, decls, tp2)) {
+            let r = cfg_walk(fname, owner, c.cname, root, svcs, decls, v2, tp2)
+            if (r != "") { return r }
+          }
+        }
+        i += 1
+      }
+    }
+  }
+  // A user generic head carries data in its type arguments too; walk them with
+  // the OUTER type-parameter scope (they are written at this use site).
+  var i = 0
+  while (i < p.args.length()) {
+    let r = cfg_walk(fname, owner, p.args[i], root, svcs, decls, visited, tparams)
+    if (r != "") { return r }
+    i += 1
+  }
+  return ""
+}
+
+// ---- collecting the declared type table and the config owners off the tokens
+
+fn cfg_tparams(ts: List[Token], i: Int) -> List[Str] {
+  var out: List[Str] = []
+  var j = i + 1
+  while (j < ts.length() && !atk(ts, j, "]")) {
+    if (atk(ts, j, "ident")) { out = out.push(tkc(ts, j).text) }
+    j += 1
+  }
+  return out
+}
+
+fn cfg_rec_fields(ts: List[Token], lo: Int, hi: Int) -> List[Bind] {
+  var k = lo
+  var out: List[Bind] = []
+  while (k < hi && !atk(ts, k, "}")) {
+    if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
+      let nm = tkc(ts, k).text
+      let tr = type_at(ts, k + 2)
+      out = out.push({ name: nm, ty: taint_strip(tr.ty) })
+      k = tr.i
+      if (atk(ts, k, ",")) { k += 1 }
+    } else { k += 1 }
+  }
+  return out
+}
+
+fn cfg_var_cases(ts: List[Token], lo: Int, hi: Int) -> List[CfgCaseD] {
+  var k = lo
+  var out: List[CfgCaseD] = []
+  while (k < hi) {
+    if (atk(ts, k, "ident")) {
+      let nm = tkc(ts, k).text
+      var payload = ""
+      var nk = k + 1
+      if (atk(ts, k + 1, "(")) {
+        let tr = type_at(ts, k + 2)
+        payload = taint_strip(tr.ty)
+        nk = tr.i
+        if (atk(ts, nk, ")")) { nk += 1 }
+      }
+      out = out.push({ cname: nm, payload: payload })
+      k = nk
+    } else { k += 1 }
+  }
+  return out
+}
+
+// A variant RHS, as opposed to a bare type alias. Unlike `is_variant_rhs` (the
+// IR path), a leading `(` must NOT count: `type H = (Str) -> Str` is a FUNCTION
+// alias, not a variant, and a bracketed generic `type Rows = List[Row]` is an
+// alias too. The unambiguous variant signals are a top-level `|` alternation and
+// a single tagged constructor `Ctor(...)` (an Upper-cased ident directly before
+// a `(`).
+fn cfg_is_variant_rhs(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var k = lo
+  var depth = 0
+  while (k < hi) {
+    let t = tkc(ts, k)
+    if (t.kind == "[" || t.kind == "(" || t.kind == "{") { depth += 1 }
+    else {
+      if (t.kind == "]" || t.kind == ")" || t.kind == "}") { depth -= 1 }
+      else { if (depth == 0 && t.kind == "|") { return true } }
+    }
+    k += 1
+  }
+  return atk(ts, lo, "ident") && is_upper_name(tkc(ts, lo).text)
+      && atk(ts, lo + 1, "(")
+}
+
+type CfgTyR = { t: CfgTy, i: Int }
+
+// The index where a `type` declaration's RHS ends: the next TOP-LEVEL
+// declaration at brace/bracket/paren depth 0, or end of stream — the same span
+// `type_ctors` uses, so a whole file written on one line still delimits each
+// declaration (a `line_end` bound would swallow the rest of such a file).
+fn cfg_decl_end(ts: List[Token], j: Int) -> Int {
+  var k = j
+  var depth = 0
+  while (k < ts.length() && !atk(ts, k, "eof")) {
+    let t = tkc(ts, k)
+    if (t.kind == "{" || t.kind == "[" || t.kind == "(") { depth += 1 }
+    else {
+      if (t.kind == "}" || t.kind == "]" || t.kind == ")") { depth -= 1 }
+      else { if (depth == 0 && at_top_decl(ts, k)) { return k } }
+    }
+    k += 1
+  }
+  return k
+}
+
+fn cfg_one_type(ts: List[Token], i: Int) -> CfgTyR {
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  var params: List[Str] = []
+  if (atk(ts, j, "[")) { params = cfg_tparams(ts, j)  j = skip_brackets(ts, j) }
+  if (!atk(ts, j, "=")) { return { t: cfg_ty_none(), i: skip_line(ts, i) } }
+  j += 1
+  let rhsEnd = cfg_decl_end(ts, j)
+  if (atk(ts, j, "{")) {
+    let bend = close_brace(ts, j)
+    if (bend == 0 - 1) { return { t: cfg_ty_none(), i: rhsEnd } }
+    let flds = cfg_rec_fields(ts, j + 1, bend - 1)
+    // The reference treats an empty field table as a variant.
+    if (flds.length() == 0) {
+      return { t: { name: nm, kind: "variant", fields: [], cases: [],
+                    params: params, rhs: "" }, i: bend }
+    }
+    return { t: { name: nm, kind: "record", fields: flds, cases: [],
+                  params: params, rhs: "" }, i: bend }
+  }
+  if (cfg_is_variant_rhs(ts, j, rhsEnd)) {
+    return { t: { name: nm, kind: "variant", fields: [],
+                  cases: cfg_var_cases(ts, j, rhsEnd), params: params, rhs: "" },
+             i: rhsEnd }
+  }
+  let tr = type_at(ts, j)
+  return { t: { name: nm, kind: "alias", fields: [], cases: [], params: params,
+                rhs: taint_strip(tr.ty) }, i: rhsEnd }
+}
+
+fn cfg_collect_types(ts: List[Token]) -> List[CfgTy] {
+  var out: List[CfgTy] = []
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atw(ts, i, "type")) {
+      let r = cfg_one_type(ts, i)
+      if (r.t.name != "") { out = out.push(r.t) }
+      i = r.i > i ? r.i : skip_line(ts, i)
+    } else { i += 1 }
+  }
+  return out
+}
+
+// The config fields declared in the token span [lo, hi) — the block's
+// `<name>: <Type> [= <literal>]` rows, each with the type qualifier-stripped
+// (exactly as the reference stores `cfg.type`) and the field's own line.
+fn cfg_fields_in(ts: List[Token], lo: Int, hi: Int) -> List[CfgFld] {
+  var j = lo
+  while (j < hi && !(atw(ts, j, "config") && atk(ts, j + 1, "{"))) { j += 1 }
+  if (j >= hi) { return [] }
+  let ce = close_brace(ts, j + 1)
+  let cend = ce == 0 - 1 ? hi : ce - 1
+  var k = j + 2
+  var out: List[CfgFld] = []
+  while (k < cend) {
+    if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
+      let nm = tkc(ts, k).text
+      let tr = type_at(ts, k + 2)
+      let dfl = ir_config_default(ts, tr.i)
+      out = out.push({ fname: nm, fty: taint_strip(tr.ty), line: tkc(ts, k).line })
+      k = dfl.i
+    } else { k += 1 }
+  }
+  return out
+}
+
+fn cfg_comp_owner(ts: List[Token], i: Int) -> CfgOwner {
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  while (atw(ts, j, "requires") || atw(ts, j, "provides")) {
+    var k = j + 1
+    while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
+           && !atw(ts, k, "requires") && !atw(ts, k, "provides")) { k += 1 }
+    j = k
+  }
+  let end = close_brace(ts, j)
+  let lo = j + 1
+  let hi = end == 0 - 1 ? j + 1 : end - 1
+  return { owner: "component `".concat(nm).concat("`"),
+           flds: cfg_fields_in(ts, lo, hi) }
+}
+
+fn cfg_extern_owner(ts: List[Token], i: Int, endi: Int) -> CfgOwner {
+  var j = i + 1
+  while (atw(ts, j, "emission") || atw(ts, j, "acquire") || atw(ts, j, "pure")
+         || atw(ts, j, "async")) { j += 1 }
+  let nm = atw(ts, j, "fn") ? tkc(ts, j + 1).text : ""
+  return { owner: "extern `".concat(nm).concat("`"),
+           flds: cfg_fields_in(ts, i, endi) }
+}
+
+fn cfg_owners_walk(ts: List[Token], i: Int, a: CfgAcc) -> CfgAcc {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return a }
+  let t = tkc(ts, i)
+  if (at_boot(ts, i)) { return cfg_owners_walk(ts, i + 1, a) }
+  if (t.kind != "kw") { return cfg_owners_walk(ts, skip_line(ts, i), a) }
+  if (t.text == "use") { return cfg_owners_walk(ts, skip_line(ts, i), a) }
+  if (t.text == "test") {
+    if (atk(ts, i + 1, "{")) {
+      let e = close_brace(ts, i + 1)
+      if (e != 0 - 1) { return cfg_owners_walk(ts, e, a) }
+    }
+    return cfg_owners_walk(ts, skip_line(ts, i), a)
+  }
+  if (t.text == "type") { return cfg_owners_walk(ts, cfg_one_type(ts, i).i, a) }
+  if (t.text == "extern") {
+    let step = p_extern(ts, i, empty_prog())
+    let own = cfg_extern_owner(ts, i, step.i)
+    let a2 = own.flds.length() > 0
+      ? { comps: a.comps, exts: a.exts.push(own) } : a
+    return cfg_owners_walk(ts, step.i > i ? step.i : skip_line(ts, i), a2)
+  }
+  if (t.text == "fn") {
+    return cfg_owners_walk(ts, p_fn(ts, i, empty_prog()).i, a)
+  }
+  if (t.text == "service") {
+    return cfg_owners_walk(ts, p_service(ts, i, empty_prog()).i, a)
+  }
+  if (t.text == "component") {
+    let own = cfg_comp_owner(ts, i)
+    let a2 = own.flds.length() > 0
+      ? { comps: a.comps.push(own), exts: a.exts } : a
+    return cfg_owners_walk(ts, p_component(ts, i, empty_prog()).i, a2)
+  }
+  return cfg_owners_walk(ts, skip_line(ts, i), a)
+}
+
+fn cfg_owner_concat(xs: List[CfgOwner], ys: List[CfgOwner]) -> List[CfgOwner] {
+  var out = xs
+  var i = 0
+  while (i < ys.length()) { out = out.push(ys[i])  i += 1 }
+  return out
+}
+
+fn cfg_svc_names(svcs: List[SvcD]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < svcs.length()) { out = out.push(svcs[i].name)  i += 1 }
+  return out
+}
+
+// The config-is-data verdict for a whole program: components first, then
+// externs (the reference's `_check_config` order), the FIRST offending field.
+fn config_data_refusal(ts: List[Token], pg: Prog) -> Verd {
+  let svcs = cfg_svc_names(pg.svcs)
+  let decls = cfg_collect_types(ts)
+  let acc = cfg_owners_walk(ts, 0, { comps: [], exts: [] })
+  let owners = cfg_owner_concat(acc.comps, acc.exts)
+  var oi = 0
+  while (oi < owners.length()) {
+    let o = owners[oi]
+    var fi = 0
+    while (fi < o.flds.length()) {
+      let f = o.flds[fi]
+      let r = cfg_walk(f.fname, o.owner, f.fty, f.fty, svcs, decls, [], [])
+      if (r != "") { return mk_verd(r, f.line) }
+      fi += 1
+    }
+    oi += 1
+  }
+  return no_verd()
+}
+
 // item 419c: every recoverable refusal, in the reference's PIPELINE order, each
 // carrying its anchor line. The append order IS the stable-sort tie-break the
 // reference uses on an equal line, so `pick_min` (min by `(line, seq)`, `seq`
@@ -5043,8 +5488,12 @@ fn collect_nonlink(ts: List[Token], pg: Prog) -> NoLink {
   // ---- the FAIL-FAST phases (the reference RAISES these before its collect-all
   // `errors` sink exists): a program that trips one produces that single
   // diagnostic and never reaches the component loop, so the gate returns it
-  // alone. Order mirrors `check_and_lower`: cache-purity, host-acquire in a
-  // reachable fn, then the module-fn A1 twins, all ahead of the component loop.
+  // alone. Order mirrors `check_and_lower`: config-is-data (raised in
+  // `_validate_declared_types`, the earliest of all), then cache-purity,
+  // host-acquire in a reachable fn, then the module-fn A1 twins, all ahead of
+  // the component loop.
+  let cfgv = config_data_refusal(ts, pg)
+  if (cfgv.v != "") { return { done: true, refs: [cfgv] } }
   let cachev = check_cache_fns(pg.fns)
   if (cachev.v != "") { return { done: true, refs: [cachev] } }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
@@ -8420,6 +8869,49 @@ test "plain provider reaching an emission is refused (G4), exact wording" {
 
 test "unmarked emission is refused (G4)" {
   assert admit_src("""service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute("x") undo db.execute("y") }""") == "G4|call to emission `db.execute` must be marked `emit` (G4)"
+}
+
+// ---- config-is-data (item 378, G4): byte-exact parity with the reference's
+// typecheck.check_config_field_is_data over a component's and an extern's config.
+
+test "config field of an opaque type is refused (G4), exact wording" {
+  assert admit_src("component y{config{l:t}}")
+    == "G4|config field `l` of component `y` has type `t`, which reaches the opaque type `t`; a config field must be static data"
+}
+
+test "config field of an arrow type is refused (G4)" {
+  assert admit_src("service S { fn g() -> Str } component C provides s: S { config { h: (Str) -> Str } provide s { fn g() = \"x\" } }")
+    == "G4|config field `h` of component `C` has type `(Str) -> Str`, which reaches an arrow (function) type; a config field must be static data"
+}
+
+test "config field naming a service is refused (G4)" {
+  assert admit_src("service S { fn g() -> Str } component C provides s: S { config { dep: S } provide s { fn g() = \"x\" } }")
+    == "G4|config field `dep` of component `C` has type `S`, which reaches the service `S`; a config field must be static data"
+}
+
+test "config field of an erased type is refused (G4)" {
+  assert admit_src("service S { fn g() -> Str } component C provides s: S { config { v: Any } provide s { fn g() = \"x\" } }")
+    == "G4|config field `v` of component `C` has type `Any`, which reaches the erased type `Any`; a config field must be static data"
+}
+
+test "config field of a container reaching an arrow is refused (G4)" {
+  assert admit_src("service S { fn g() -> Str } component C provides s: S { config { xs: List[(Str) -> Str] } provide s { fn g() = \"x\" } }")
+    == "G4|config field `xs` of component `C` has type `List[(Str) -> Str]`, which reaches an arrow (function) type; a config field must be static data"
+}
+
+test "config field of a declared record reaching an arrow is refused (G4)" {
+  assert admit_src("service S { fn g() -> Str } type R = { h: (Str) -> Str } component C provides s: S { config { r: R } provide s { fn g() = \"x\" } }")
+    == "G4|config field `r` of component `C` has type `R`, which reaches an arrow (function) type; a config field must be static data"
+}
+
+test "an extern config field of an arrow type is refused (G4)" {
+  assert admit_src("extern pure fn thing(x: Str) -> Str config { handler: (Str) -> Str } = @py { return x }")
+    == "G4|config field `handler` of extern `thing` has type `(Str) -> Str`, which reaches an arrow (function) type; a config field must be static data"
+}
+
+test "config fields built out of data admit" {
+  assert admit_src("service S { fn g() -> Str } type R = { a: Int, b: Str } component C provides s: S { config { xs: List[Str], m: Map[Str, Int], r: R, k: Secret[Str] } provide s { fn g() = \"x\" } }")
+    == ""
 }
 
 test "admit_tag exposes the bare guarantee" {
