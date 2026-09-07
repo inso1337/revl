@@ -320,8 +320,8 @@ def _deferred_register_kwargs(ext: dict, args: list) -> str:
 # `assert`'s operand dump to `repr(...)`, the `Int` bound to `int(...)`, and the
 # list/dict/bool/min/max value forms to their namesakes; the always-or-gated
 # preamble helpers and emitted classes reach for `isinstance`/`type`/`hash`/
-# `getattr`/`callable`/`object`/`bytes`/`tuple`/`set`/`reversed`/`range`/`ord`/
-# `hasattr` and the exception roots the same bare way.
+# `getattr`/`globals`/`callable`/`object`/`bytes`/`tuple`/`set`/`reversed`/
+# `range`/`ord`/`hasattr` and the exception roots the same bare way.
 #
 # Each of these is an unqualified module-global reference in the emitted module,
 # so a user identifier of the same name that reaches module scope (a top-level
@@ -343,9 +343,10 @@ def _deferred_register_kwargs(ext: dict, args: list) -> str:
 # a narrower guard.
 _EMITTED_BUILTINS = frozenset({
     "AttributeError", "Exception", "OverflowError", "RuntimeError", "TypeError",
-    "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "hasattr",
-    "hash", "int", "isinstance", "len", "list", "max", "min", "object", "ord",
-    "range", "repr", "reversed", "set", "sorted", "str", "tuple", "type",
+    "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "globals",
+    "hasattr", "hash", "int", "isinstance", "len", "list", "max", "min",
+    "object", "ord", "range", "repr", "reversed", "set", "sorted", "str",
+    "tuple", "type",
 })
 
 
