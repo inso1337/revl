@@ -275,13 +275,13 @@ pub extern pure fn json_try_parse(s: Str) -> Result[Any, Str]
   }
   = @go {
     //revl:import encoding/json
-    // `Result[Any, Str]` lowers to the sealed interface `RevlResult[any,
-    // string]`, built by the `RevlOk`/`RevlErr` case structs. A decode error
-    // routes into the Err channel rather than being swallowed to nil as
-    // json_parse's @go body does.
+    // `Result[Any, Str]` lowers to the two-value struct `RevlResult[any,
+    // string]` (item 434 (d)): `Ok` discriminates, `OkV` carries the Ok payload
+    // and `ErrV` the Err payload. A decode error routes into the Err channel
+    // rather than being swallowed to nil as json_parse's @go body does.
     var v any
     if err := json.Unmarshal([]byte(s), &v); err != nil {
-        return RevlErr[any, string]{Value: err.Error()}
+        return RevlResult[any, string]{ErrV: err.Error()}
     }
-    return RevlOk[any, string]{Value: v}
+    return RevlResult[any, string]{OkV: v, Ok: true}
   }
