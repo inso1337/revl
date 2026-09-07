@@ -56,6 +56,46 @@ from pathlib import Path
 WAL_VERSION = 1
 
 
+class WorldDurabilityError(OSError):
+    """The boundary-state world file was atomically swapped into place but its
+    durable publication could not be CONFIRMED — a temp-file ``fsync``, the
+    ``os.replace``, or the containing-directory ``fsync`` failed. Raised instead
+    of returning so a caller never reads a normal return as durable success
+    (issue #627). It is an ``OSError`` because the underlying fault always is."""
+
+
+def _fsync_parent_dir(path: Path) -> bool:
+    """Durably publish a just-completed ``os.replace`` by ``fsync``-ing the
+    directory that holds ``path``.
+
+    ``os.replace`` swaps the file content atomically, but the rename is itself a
+    change to the *containing directory* — until that directory is fsynced a
+    machine crash can lose the new directory entry and leave the OLD file, so a
+    successful ``os.replace`` alone is process-crash atomic, not durable across a
+    power loss. On POSIX this fsyncs the directory and returns ``True`` (durable
+    publication confirmed); a real sync failure there is raised as
+    :class:`WorldDurabilityError`, never swallowed. On a platform without
+    directory-fsync semantics (notably non-POSIX) it makes no false claim: it
+    returns ``False`` — PUBLISHED but durability-unknown — rather than implying a
+    guarantee the platform cannot give (issue #627)."""
+    if os.name != "posix":
+        return False
+    try:
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+    except OSError as exc:
+        raise WorldDurabilityError(
+            f"could not open the directory publishing {path.name} to fsync it: "
+            f"{exc}") from exc
+    try:
+        os.fsync(dir_fd)
+    except (OSError, ValueError) as exc:
+        raise WorldDurabilityError(
+            f"could not fsync the directory publishing {path.name}: {exc}") from exc
+    finally:
+        os.close(dir_fd)
+    return True
+
+
 def _seal_torn_tail(path: str) -> None:
     """Truncate a never-acknowledged partial trailing write so this participant's
     WAL ends at a clean record boundary before it is appended to (issue #535).
@@ -125,17 +165,32 @@ class _Participant:
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def _write_world(self, world: dict) -> None:
-        """Atomically replace the boundary-state world file (R-C9, issue #538).
+    def _write_world(self, world: dict) -> bool:
+        """Atomically replace the boundary-state world file AND durably publish
+        it (R-C9, issue #538; durability contract, issue #627).
 
         A plain truncate-then-write (``write_text``) leaves a half-written — or
         empty — world file if this process is killed mid-write, and the recovery
         path (this process on restart, or ``recovery.py`` reading the mount)
         then reads that torn file as lost boundary state. Write the payload to a
-        sibling temp file, fsync it, and ``os.replace`` it over the target: the
-        rename is atomic on POSIX, so a reader always sees either the whole old
-        file or the whole new one, never a torn one. The write-behind world file
-        now gets the same crash-atomicity the WAL append already fsyncs for."""
+        sibling temp file, fsync it, ``os.replace`` it over the target, then
+        fsync the containing directory: the rename is atomic on POSIX, so a
+        reader always sees either the whole old file or the whole new one, never
+        a torn one, and the directory fsync makes the new entry survive a power
+        loss rather than only a process crash.
+
+        **Durability contract.** This promises DURABLE PUBLICATION, not merely
+        process-crash atomicity. On a normal return of ``True`` the new content
+        has been atomically swapped in and its publication confirmed durable
+        (temp file fsynced, then the containing directory fsynced). Returning
+        ``False`` means the content is atomically PUBLISHED but its durability is
+        UNKNOWN because the platform has no directory-fsync semantics (non-POSIX)
+        — reported honestly so a caller never mistakes it for confirmed durable.
+        A sync/replace fault is never swallowed: it raises
+        :class:`WorldDurabilityError` (issue #627 — the prior code caught the
+        temp-file ``fsync`` failure and continued, returning as if durable, and
+        never fsynced the parent directory), leaving the previous generation's
+        file whole and no temp residue behind."""
         path = Path(self.world_path)
         payload = json.dumps(world, sort_keys=True, indent=1) + "\n"
         fd, tmp = tempfile.mkstemp(dir=str(path.parent),
@@ -144,10 +199,15 @@ class _Participant:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(payload)
                 handle.flush()
+                # A swallowed fsync here would let us return as if the bytes were
+                # durable when the kernel may never persist them (issue #627):
+                # surface it, do not continue.
                 try:
                     os.fsync(handle.fileno())
-                except (OSError, ValueError):  # pragma: no cover — e.g. a tmpfs
-                    pass
+                except (OSError, ValueError) as exc:
+                    raise WorldDurabilityError(
+                        f"could not fsync the new {path.name} temp file: "
+                        f"{exc}") from exc
             os.replace(tmp, path)
         except BaseException:
             # never leave the sibling temp file behind on any failure
@@ -156,6 +216,12 @@ class _Participant:
             except OSError:  # pragma: no cover — already gone
                 pass
             raise
+        # The atomic swap is done and the temp file is gone; durably PUBLISH the
+        # rename. A failure here surfaces (WorldDurabilityError) — the content is
+        # in place but its durability is not confirmed, so we must not report
+        # success — while a non-POSIX platform returns False (published,
+        # durability-unknown) rather than implying a guarantee it cannot make.
+        return _fsync_parent_dir(path)
 
     def _referent(self, effect: dict) -> str:
         return f"{self.identity}:{effect['name']}"
