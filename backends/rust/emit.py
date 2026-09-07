@@ -497,6 +497,14 @@ def _borrow_str_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     name = _arg_ref_name(arg_node)
     if name is not None and name in ctx.borrowed_params:
         return rendered
+    # item 437d: a `List` index read (or a field off one) handed to a borrowed
+    # `&str` slot only needs a borrow of the element place — `&xs[i]` — not the
+    # clone the index read took purely so the `&` had something to point at.
+    # Read-only: item 282 only borrows a param the callee cannot mutate or let
+    # escape, so the element place stays live for the call.
+    place = _v3_strip_index_clone(arg_node, rendered)
+    if place is not None:
+        rendered = place
     if isinstance(arg_node, dict) and arg_node.get("kind") in _ATOMIC_KINDS:
         return f"&{rendered}"
     return f"&({rendered})"
@@ -507,6 +515,12 @@ def _borrow_list_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     name = _arg_ref_name(arg_node)
     if name is not None and name in ctx.borrowed_list_params:
         return rendered
+    # item 437d: same as `_borrow_str_arg` — a `List` index read in a borrowed
+    # `&[T]` slot borrows the element place (`&xs[i]`, a `&Vec<T>` coercing to
+    # `&[T]`) instead of cloning it.
+    place = _v3_strip_index_clone(arg_node, rendered)
+    if place is not None:
+        rendered = place
     if isinstance(arg_node, dict) and arg_node.get("kind") in _ATOMIC_KINDS:
         return f"&{rendered}"
     return f"&({rendered})"
@@ -5763,18 +5777,33 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         if method not in _BORROW_ARG_BUILTINS:
             args = [
                 _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, args)]
-        elif method == "indexOf" and arg_nodes:
-            # A List `revl_index_of` needle is `&T` (`&String` for `List[Str]`),
-            # not `&str`. Item 282 may have borrowed a read-only `Str` param to
-            # `&str` (safe for the *string* indexOf), but as a List needle that
-            # renders `&&str` (E0308), so a borrowed `&str` arg is materialised to
-            # an owned `String` here (`&s.to_string()` -> `&String`).
-            recv_ty = _v3_infer_type(target_node, ctx)
-            a0 = arg_nodes[0]
-            if (isinstance(recv_ty, str) and recv_ty.startswith("List[")
-                    and isinstance(a0, dict) and a0.get("kind") in ("var", "name", "req")
-                    and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
-                args[0] = f"{args[0]}.to_string()"
+        else:
+            # item 437d: these builtins take their argument BY REFERENCE
+            # (`_v3_builtin` writes `&arg`, or `&key` for the Map probes), so an
+            # index-read argument only needs a borrow — strip the element
+            # `.clone()` the read added and let the `&` borrow the `Vec` place,
+            # exactly as the receiver, the `==`/`!=` operand and the
+            # interpolation-operand slots already do. Read-only in every case:
+            # the helper-trait parameter (`&str`) and the Map key (`&K`) are
+            # `&`-slots, so the borrowed element outlives the call.
+            args = [
+                _v3_strip_index_clone(a, r) or r
+                for a, r in zip(arg_nodes, args)]
+            if method == "indexOf" and arg_nodes:
+                # A List `revl_index_of` needle is `&T` (`&String` for
+                # `List[Str]`), not `&str`. Item 282 may have borrowed a
+                # read-only `Str` param to `&str` (safe for the *string*
+                # indexOf), but as a List needle that renders `&&str` (E0308),
+                # so a borrowed `&str` arg is materialised to an owned `String`
+                # here (`&s.to_string()` -> `&String`). An index read is not a
+                # borrowed param, so it stripped above and never reaches here —
+                # the two rewrites are disjoint.
+                recv_ty = _v3_infer_type(target_node, ctx)
+                a0 = arg_nodes[0]
+                if (isinstance(recv_ty, str) and recv_ty.startswith("List[")
+                        and isinstance(a0, dict) and a0.get("kind") in ("var", "name", "req")
+                        and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
+                    args[0] = f"{args[0]}.to_string()"
         view_ident = _var_ident(target_node)
         if view_ident in ctx.char_view_vars:
             view = ctx.char_view_vars[view_ident][0]

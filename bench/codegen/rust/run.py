@@ -178,6 +178,16 @@ BENCHES = {
         "args": ["raw.clone()"],
         "iters": 5,
     },
+    "arg_index": {
+        "doc": "`hay.startsWith(xs[i])` — a `List` index read in a `&str` builtin ARGUMENT (item 437d)",
+        "setup": (
+            'let input: Vec<String> = (0..15000)\n'
+            '        .map(|i| if i % 5 == 0 { String::from("prefix") } else { format!("v{}", i) })\n'
+            "        .collect();"
+        ),
+        "args": ["input.clone()"],
+        "iters": 5,
+    },
     "const_list": {
         "doc": "a constant List[Str] rebuilt on every call (selfhost lexer `keywords()`)",
         "setup": (
