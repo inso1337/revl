@@ -126,6 +126,39 @@ def test_no_platform_adds_no_run_flag():
     assert "--platform" not in _sb.container_flags(_ENV_NONE, name="c", mounts=[])
 
 
+def test_wrap_threads_the_declared_platform_into_the_launch_argv():
+    """The launch path — not just `container_flags` — must carry `--platform`.
+
+    `container_flags` deriving the flag is one thing; `wrap` is what actually
+    builds the `docker run` argv the runner is spawned with, and it reads the
+    envelope back out of `achieved["_env"]` (placement injects it there). A
+    dropped `--platform` here would silently run a foreign-arch component on the
+    host arch — the exact silent downgrade the mixed-arch bridge exists to make
+    impossible — so the launch argv is pinned directly."""
+    achieved = {
+        "_env": {"isolation": "container", "image": _IMAGE_TAG,
+                 "fs": [], "net": "none", "platform": "linux/arm64"},
+        "image": _IMAGE_TAG, "mounts": [], "workdir": "/w", "pythonpath": None,
+    }
+    argv, err = _sb.ContainerDriver().wrap(
+        "p", [sys.executable, "-m", "revl._process_runner", "/spec"], None, achieved)
+    assert err is None
+    assert "--platform" in argv
+    assert argv[argv.index("--platform") + 1] == "linux/arm64"
+    # and the image's own python3 replaces the conductor's interpreter path
+    assert "python3" in argv and sys.executable not in argv
+
+
+def test_wrap_adds_no_platform_when_the_envelope_declares_none():
+    achieved = {
+        "_env": {"isolation": "container", "image": _IMAGE_TAG,
+                 "fs": [], "net": "none"},
+        "image": _IMAGE_TAG, "mounts": [], "workdir": "/w", "pythonpath": None,
+    }
+    argv, err = _sb.ContainerDriver().wrap("p", [sys.executable], None, achieved)
+    assert err is None and "--platform" not in argv
+
+
 def test_accepted_uname_maps_known_arches_and_rejects_the_rest():
     assert "aarch64" in _sb.accepted_uname("linux/arm64")
     assert _sb.accepted_uname("linux/amd64") == ("x86_64",)
@@ -557,6 +590,45 @@ def test_the_boundary_is_established_and_the_canary_confirms_it(runner_image, tm
     assert achieved["host_mounts"], "driver-added mounts must be reported"
 
 
+# A platform that is foreign to BOTH x86-64 and aarch64 runners, so the boundary
+# can only come up THROUGH emulation (qemu/binfmt) — a `linux/386` or `arm64`
+# probe could run natively on some runner and prove nothing about the bridge.
+# `busybox` is a tiny multi-arch image that carries an s390x manifest, and the
+# canary needs nothing but a POSIX `sh` + `uname`, so this costs one <5MB pull.
+_FOREIGN_PLATFORM = "linux/s390x"
+_FOREIGN_UNAME = "s390x"
+
+
+@_needs_docker
+def test_a_foreign_arch_boundary_is_confirmed_by_uname_under_emulation():
+    """The RUNTIME half of the mixed-arch bridge (item 411): `_evaluate`'s arch
+    confirmation is unit-tested against mocked reports, but nothing proved a
+    foreign-arch container actually boots and reports its own `uname -m` from
+    inside. Here the driver's real `container_flags` (with `--platform`) and its
+    real boot canary run against a foreign-arch image; the boundary comes up
+    only if the runtime supplies emulation, and the canary's ARCH line is read
+    from inside it — turning "we passed --platform" into "the boundary reports
+    the requested arch". Needs qemu/binfmt on the runner (the `sandbox-container`
+    CI job registers it); a runner with the gate set but no emulation FAILS here
+    with the arch it did run as, never silently passes as the host arch."""
+    env = {"isolation": "container", "image": "busybox:latest",
+           "net": "all", "platform": _FOREIGN_PLATFORM}
+    flags = _sb.container_flags(env, name="revl-sandbox-411-archprobe",
+                                mounts=[], interactive=False)
+    proc = _docker("run", *flags, "busybox:latest", "sh", "-c",
+                   _sb._canary_script("all"))
+    assert "CANARY=done" in proc.stdout, (
+        f"the foreign-arch boot canary did not run: is qemu/binfmt registered "
+        f"for {_FOREIGN_PLATFORM} on this runner?\n{proc.stdout}\n{proc.stderr}")
+    arch = dict(
+        ln.split("=", 1) for ln in proc.stdout.splitlines() if "=" in ln
+    ).get("ARCH")
+    assert arch == _FOREIGN_UNAME, (
+        f"the container ran as {arch!r}, not {_FOREIGN_UNAME!r}: the runtime "
+        f"applied no emulation for {_FOREIGN_PLATFORM}, so the boundary did not "
+        f"come up under the requested arch.\n{proc.stdout}\n{proc.stderr}")
+
+
 @_needs_docker
 def test_an_unresolvable_image_refuses_instead_of_launching(tmp_path):
     env = {"isolation": "container", "fs": [], "net": "none",
@@ -656,6 +728,7 @@ def test_the_gate_is_read_bare_so_ci_must_set_it():
     # applied to nothing is the same silence by another route.
     for gated in (test_the_boundary_is_established_and_the_canary_confirms_it,
                   test_a_component_really_boots_inside_the_container,
+                  test_a_foreign_arch_boundary_is_confirmed_by_uname_under_emulation,
                   test_an_unresolvable_image_refuses_instead_of_launching):
         assert _needs_docker.mark in gated.pytestmark, gated.__name__
 
