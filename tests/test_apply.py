@@ -154,6 +154,34 @@ def test_step_verification_predicates():
     assert verify_step(dispose, {"absent": True, "providedKeys": ["k"]}) is not None
 
 
+def test_rollback_does_not_report_a_failed_reboot_as_a_done_restore():
+    """R-C12 (issue #538): a rollback re-loads a torn-down component, but must
+    NOT report the restore as done unless the component actually came back up
+    ACTIVE. The re-load can leave the fiber FAILED (or absent), or the body can
+    raise on the way back, without the previous generation being live again —
+    reporting a clean `{"undo": "restore"}` regardless told the operator a
+    restore happened when it did not. This pins the decision `_rollback_apply`
+    makes off the observed fiber state (a live-composition e2e is gated on
+    cordis; the state->entry mapping is the honest core and runs anywhere)."""
+    from revl.mcp.session import Session
+
+    # a component that genuinely came back up: the clean restore, unchanged.
+    assert Session._restore_entry("Front", "ACTIVE") == {
+        "undo": "restore", "name": "Front"}
+
+    # a component that failed to boot on the way back: an INCOMPLETE restore
+    # carrying the observed state — never a bare "restore".
+    failed = Session._restore_entry("Front", "FAILED")
+    assert failed == {"undo": "restore", "name": "Front",
+                      "restored": False, "state": "FAILED"}
+
+    # one that never came back at all, and one whose body raised on re-boot:
+    assert Session._restore_entry("Front", None)["restored"] is False
+    raised = Session._restore_entry("Front", "error: RuntimeError: boom")
+    assert raised["restored"] is False
+    assert raised["state"] == "error: RuntimeError: boom"
+
+
 # =============================================================== live: the engine
 
 needs_runtime = pytest.mark.skipif(

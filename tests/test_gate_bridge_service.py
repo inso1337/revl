@@ -236,6 +236,76 @@ def test_the_gate_object_never_raises_across_the_boundary():
 
 
 # --------------------------------------------------------------------------
+# 3b. R-C5 (issue #538): a request larger than the readline cap must not close
+#     the seam. The server framed requests with asyncio.StreamReader.readline(),
+#     whose 64KiB line limit raises ValueError on a longer line and — uncaught —
+#     tears the whole connection down. A big argument must round-trip and the
+#     connection must stay usable, its framing not desynced.
+# --------------------------------------------------------------------------
+
+class _KeyedCtx:
+    """A ctx that serves one object under one key (`serve`'s minimal contract)."""
+
+    def __init__(self, key, service):
+        self._key, self._service = key, service
+
+    def get(self, key):
+        return self._service if key == self._key else None
+
+
+class _BlobService:
+    """Two value-typed ops whose ARGUMENT can be arbitrarily large; the RETURN
+    stays small so the client's own readline is never the thing under test."""
+
+    def size(self, blob):
+        return len(blob)
+
+    def head(self, blob, n):
+        return blob[:n]
+
+
+def test_a_request_larger_than_64kib_round_trips_and_keeps_the_seam():
+    """The proving exit for R-C5: a 256 KiB argument (four times the 64 KiB
+    readline cap) crosses the seam and comes back, AND a second request on the
+    SAME connection still frames correctly — proof the fix delivers the whole
+    frame rather than raising, and does not leave the parser mid-line."""
+    bridge = _bridge()
+    directory = tempfile.mkdtemp(prefix="revl_bridge_bigarg_")
+    sock = str(Path(directory) / "blob.sock")
+    big = "x" * (256 * 1024)
+
+    async def scenario():
+        server = await bridge.serve(
+            _KeyedCtx("blob", _BlobService()), {"blob": ["size", "head"]}, sock)
+        # a generous client limit: the REQUEST direction (client -> server) is
+        # what R-C5 is about, but the reply reader should not be the bottleneck.
+        reader, writer = await asyncio.open_unix_connection(sock, limit=1 << 20)
+
+        async def rpc(request):
+            writer.write((json.dumps(request) + "\n").encode())
+            await writer.drain()
+            return json.loads(await reader.readline())
+
+        big_reply = await rpc({"key": "blob", "method": "size", "args": [big]})
+        # the connection is still healthy and its framing is aligned
+        next_reply = await rpc({"key": "blob", "method": "head",
+                                "args": [big, 3]})
+        writer.close()
+        server.close()
+        await server.wait_closed()
+        return big_reply, next_reply
+
+    try:
+        big_reply, next_reply = asyncio.run(scenario())
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    assert big_reply["ok"] is True, big_reply       # the seam did NOT close
+    assert big_reply["value"] == len(big)
+    assert next_reply["ok"] is True, next_reply      # framing did not desync
+    assert next_reply["value"] == "xxx"
+
+
+# --------------------------------------------------------------------------
 # 4. placement wiring: the node consumer gets a proxy for `gate`, the py
 #    provider serves it — asserted on the specs the conductor writes, with the
 #    real ts emit run (so the filter is exercised end to end), Popen mocked.

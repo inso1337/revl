@@ -1695,6 +1695,24 @@ class Session:
                     "providedKeys": self._provided_keys()}
         raise SessionError(f"unknown apply operation {op['op']!r}")
 
+    @staticmethod
+    def _restore_entry(name: str, state: str | None) -> dict:
+        """The rollback-ledger entry for a component the rollback re-loaded.
+
+        R-C12 (issue #538): a rollback that re-loads a torn-down component must
+        NOT report the restore as done unless the component actually came back
+        up. The re-load (`_plug`) can leave the fiber `FAILED` — or the body can
+        raise on the way back — without the previous generation being live
+        again; reporting `{"undo": "restore"}` regardless told the operator a
+        restore happened when it did not. A component that came up `ACTIVE` is
+        reported exactly as before (a clean restore); anything else is reported
+        as an INCOMPLETE restore carrying the observed state, so a failed
+        re-boot reads as the residue it is."""
+        if state == "ACTIVE":
+            return {"undo": "restore", "name": name}
+        return {"undo": "restore", "name": name,
+                "restored": False, "state": state}
+
     def _rollback_apply(self, applied: list[dict], running_module,
                         running_ir: dict) -> list[dict]:
         """Undo the applied prefix, last-in-first-out, by derived inverses: a
@@ -1711,8 +1729,19 @@ class Session:
                     self._run(driver._flush())
                 rolled.append({"undo": "dispose", "name": name})
             else:  # dispose -> re-load the component that was torn down
-                self._run(self._plug(name, running_module))
-                rolled.append({"undo": "restore", "name": name})
+                # R-C12: observe whether the re-load actually brought the
+                # component back up. A body that raises on re-boot is a failed
+                # restore (residue), not a rollback crash, so it is caught and
+                # reported through `_restore_entry` like a FAILED fiber.
+                state: str | None = None
+                try:
+                    self._run(self._plug(name, running_module))
+                    fiber = driver.fibers.get(name)
+                    state = (driver.FiberState(fiber.state).name
+                             if fiber is not None else None)
+                except Exception as exc:  # noqa: BLE001 — failed re-boot is residue
+                    state = f"error: {type(exc).__name__}: {exc}"
+                rolled.append(self._restore_entry(name, state))
         driver.ir = self.ir = running_ir
         self._run(driver._flush())
         return rolled

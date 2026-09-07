@@ -1591,3 +1591,113 @@ def test_an_unreadable_decision_record_fails_closed(tmp_path):
                    for r in [json.loads(line)
                              for line in Path(wal).read_text(encoding="utf-8").splitlines()
                              if line.strip()])
+
+
+# --- R-C8: a REAL participant WAL is readable by recover/settle_stranded ----
+#
+# The tests above hand-write a WAL in `recovery.py`'s own schema. R-C8 (issue
+# #538) is that the WAL a real `_deploy_participant` process ACTUALLY writes
+# used an `effect`/`inverse` schema recover could not read: recover's
+# `_referent_key` calls `World.key(inverse["op"])`, which did `op.get(...)` and
+# raised `AttributeError` on the old `{"op": "remove", ...}` string form — so a
+# genuinely stranded participant's own WAL tracebacked the very tool meant to
+# settle it. These tests drive the real participant to produce the WAL, then
+# settle it, proving the schemas now agree.
+
+
+def _stranded_participant_wal(tmp_path, identity="db",
+                              effects=("row1", "row2")):
+    """Drive a real `_deploy_participant._Participant` to apply its effects and
+    then STOP before `activation-complete` — the on-disk shape a crash mid
+    activation leaves. Returns its WAL path."""
+    from revl import _deploy_participant as dp  # noqa: PLC0415
+
+    wal = tmp_path / f"{identity}.wal"
+    part = dp._Participant({
+        "identity": identity,
+        "world": str(tmp_path / f"{identity}.world.json"),
+        "wal": str(wal),
+        "effects": [{"name": name, "reversible": True} for name in effects],
+    })
+    for effect in part.effects:
+        part._apply_one(effect)   # writes real `effect` records, no completion
+    return str(wal)
+
+
+def test_a_real_participant_wal_rolls_back_cleanly(tmp_path):
+    """No durable decision -> roll back. recover must READ the real participant
+    WAL (not traceback) and re-issue each reconstructible boundary inverse LIFO,
+    leaving no residue."""
+    wal = _stranded_participant_wal(tmp_path)
+    missing = str(tmp_path / "no-decision.jsonl")
+
+    verdict = deploy.settle_stranded(wal, missing)
+
+    assert verdict["verdict"] == "rolled-back"
+    assert verdict["federationDecision"] == "none"
+    # both reconstructible inverses actually replayed, and nothing is left out
+    assert len(verdict["ran"]) == 2
+    assert verdict["residue"]["clean"] is True
+    assert verdict["residue"]["worldRemaining"] == []
+
+
+def test_a_real_participant_wal_reads_through_recover_directly(tmp_path):
+    """The same WAL read straight through `recovery.recover` — the readability
+    itself is the regression guard: the old schema raised `AttributeError`
+    here."""
+    from revl import recovery  # noqa: PLC0415
+
+    wal = _stranded_participant_wal(tmp_path, identity="edge", effects=("c1",))
+    report = recovery.recover(wal)
+    assert report["verdict"] == "rolled-back"
+    assert len(report["ran"]) == 1
+    assert report["residue"]["clean"] is True
+
+
+def test_a_real_participant_wal_rolls_forward_when_committed(tmp_path):
+    """A durable `commit-approved` decision -> roll forward. settle_stranded
+    hands recover the marker and recover rolls the missing discharge forward,
+    replaying NO inverse — over the real participant WAL."""
+    wal = _stranded_participant_wal(tmp_path)
+    decision = str(tmp_path / "decision.jsonl")
+    deploy.write_commit_approval(decision, federation_id="fed", generation=1,
+                                 participants=["db"])
+
+    verdict = deploy.settle_stranded(wal, decision)
+
+    assert verdict["verdict"] == "rolled-forward"
+    assert verdict["federationDecision"] == deploy.FEDERATION_APPROVED
+
+
+# --- R-C9: the write-behind world file is replaced ATOMICALLY ---------------
+
+
+def test_participant_world_write_is_atomic(tmp_path, monkeypatch):
+    """R-C9 (issue #538): the write-behind boundary-state file is replaced
+    atomically. A plain truncate-then-write left a half-written or empty world
+    file when the process died mid-write; the recovery path then read that torn
+    file as lost state. A failed write must leave the PREVIOUS contents intact
+    and no temp residue behind."""
+    from revl import _deploy_participant as dp  # noqa: PLC0415
+
+    world = tmp_path / "db.world.json"
+    part = dp._Participant({"identity": "db", "world": str(world),
+                            "wal": str(tmp_path / "db.wal"), "effects": []})
+
+    # a first, whole write
+    part._write_world({"db:row1": True})
+    assert json.loads(world.read_text(encoding="utf-8")) == {"db:row1": True}
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+    # now make the atomic swap itself fail, mid-write
+    def _boom(src, dst):
+        raise OSError("simulated crash during rename")
+
+    monkeypatch.setattr(dp.os, "replace", _boom)
+    with pytest.raises(OSError):
+        part._write_world({"db:row2": True})
+
+    # the previous generation's world survived whole — not truncated, not empty
+    assert json.loads(world.read_text(encoding="utf-8")) == {"db:row1": True}
+    # and the failed write left no sibling temp file behind
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
