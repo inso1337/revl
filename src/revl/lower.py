@@ -6289,6 +6289,28 @@ def _find_all_loop_steps(node):
             yield from _find_all_loop_steps(item)
 
 
+def _iter_component_activation_loops(steps):
+    """Every `while`/`for` step in a component's ACTIVATION/setup position —
+    i.e. anywhere in the component body EXCEPT a provide-method body, where
+    issue #548 now admits loops. The parser refuses activation-body loops, so
+    this is the whole-IR safety net for that invariant (the pre-#548 guard used
+    `_find_loop_step`, which refused the first loop anywhere in the component;
+    #548's rewrite dropped the activation-body refusal entirely by only
+    descending into loop bodies looking for registering steps)."""
+    for step in steps or []:
+        kind = step.get("step")
+        if kind in _LOOP_STEP_KINDS:
+            yield step
+            yield from _iter_component_activation_loops(step.get("body") or [])
+        elif kind == "if":
+            yield from _iter_component_activation_loops(step.get("then") or [])
+            yield from _iter_component_activation_loops(step.get("else") or [])
+        elif kind == "provide":
+            # A provide-method body is not activation position — loops there are
+            # legal (#548) and are checked below for registering steps instead.
+            continue
+
+
 def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
     doc = "docs/design/379-break-continue.md"
     fn_bodies: list[list] = [fn.get("body") or [] for fn in ir.get("functions") or []]
@@ -6318,6 +6340,19 @@ def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
     # control flow at lowering; this is the whole-IR safety net that makes the
     # invariant true on every tier.
     for component in ir.get("components") or []:
+        # A loop in the component's own activation/setup body (any position
+        # except a provide-method body) is still refused outright — #548
+        # admitted loops only in provide-method bodies. The parser already
+        # refuses them at parse time; this is the whole-IR safety net that keeps
+        # the invariant true even for IR built directly.
+        for loop in _iter_component_activation_loops(component.get("body") or []):
+            raise RevlError(
+                filename, loop.get("line", 0),
+                "a `while`/`for` loop may not appear in a component activation "
+                "body",
+                hint="iteration lives in the fn statement grammar or a provide "
+                     f"method; lift the loop into a module `fn` and call it ({doc})",
+            )
         for loop in _find_all_loop_steps(component):
             for step in _iter_all_fn_steps(loop.get("body") or []):
                 kind = step.get("step")
