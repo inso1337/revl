@@ -22,13 +22,23 @@ import os
 #: The ambient latch path, equivalent to `--estop-latch FILE`.
 LATCH_ENV = "REVL_ESTOP_LATCH"
 
-#: The tiers whose runtime checks the latch at every boundary-crossing seam.
-#: A component on any OTHER tier keeps its cooperative teardown and has no
-#: E-Stop: the only halt available for it is a SIGKILL, which unwinds nothing
-#: and leaves its residue UNKNOWN. That is honest and visible rather than a
-#: silently degraded halt, and `_estop_halt_report` names every such component
-#: individually (docs/design/443-estop.md, "Per-tier status").
-TIERS_WITH_ESTOP = frozenset({"py"})
+#: The tiers whose runtime checks the latch at every boundary-crossing seam and
+#: can name its in-flight inventory when the button is hit.
+#:
+#: `py` was the reference tier (item 443). `node` joins it here (issue #122,
+#: docs/design/443-estop-ts-tier.md): its crossing seams refuse a new crossing
+#: the instant the latch is armed (`backends/typescript/bridge.ts`), the
+#: placement runner watches the latch even while idle and names what was in
+#: flight (`backends/typescript/placement_runner.ts`), and the latch reader is
+#: the byte-for-byte twin of `read_latch` below (`backends/typescript/estop.ts`).
+#:
+#: A component on any OTHER tier (`rust`, `go`, `java`, `wasm`) keeps its
+#: cooperative teardown and has no E-Stop: the only halt available for it is a
+#: SIGKILL, which unwinds nothing and leaves its residue UNKNOWN. That is honest
+#: and visible rather than a silently degraded halt, and `_estop_halt_report`
+#: names every such component individually (docs/design/443-estop.md,
+#: "Per-tier status").
+TIERS_WITH_ESTOP = frozenset({"py", "node"})
 
 #: What the py runner prints when the latch trips: its own in-flight
 #: inventory, on one line, so the conductor can merge it into the halt report

@@ -58,15 +58,19 @@ component Edge requires work: Work provides control: Control {
 }
 """
 
-# One py process and one node process: the mixed-tier placement is the whole
+# One py process and one rust process: the mixed-tier placement is the whole
 # point, because the two halves of the halt are different and the report has to
-# say which one each component got.
+# say which one each component got. `rust` is the SEAMLESS half here — it keeps
+# its cooperative teardown and has no E-Stop, so the halt can only SIGKILL it and
+# report its residue UNKNOWN. (`node` used to fill this role; it now HONORS the
+# latch — issue #122, `test_estop_ts_tier_443.py` — so the no-seam path needs a
+# tier that is still seamless, and rust is one.)
 PLACEMENT = """
 [processes.provider]
 components = ["HotWorker"]
 
 [processes.edge]
-backend = "node"
+backend = "rust"
 components = ["Edge"]
 """
 
@@ -75,6 +79,20 @@ PY_ONLY = """
 components = ["HotWorker"]
 
 [processes.edge]
+components = ["Edge"]
+"""
+
+# A py provider and a NODE edge. `node` now honors the latch (issue #122): the
+# conductor hands it the latch in its spec, its runtime refuses new crossings at
+# its own seams (`backends/typescript/bridge.ts`) and its runner names what was
+# in flight (`backends/typescript/placement_runner.ts`), so under a halt it is
+# reported HALTED with an inventory rather than SIGKILLed as no-seam.
+PLACEMENT_NODE = """
+[processes.provider]
+components = ["HotWorker"]
+
+[processes.edge]
+backend = "node"
 components = ["Edge"]
 """
 
@@ -222,9 +240,13 @@ def _run(tmp_path, monkeypatch, *, latch: str | None, placement: str = PLACEMENT
 
     monkeypatch.setattr(_placement, "_cordis_py_installed", lambda: True)
     monkeypatch.setattr(_placement, "_preflight", lambda *a, **k: None)
-    # the node BUILD is not what is under test here; the halt is
+    # the per-tier BUILD is not what is under test here; the halt is. Stub both
+    # the node emit and the rust build so the seamless-tier child (rust) spawns
+    # through the same stubbed-Popen path as the py one.
     monkeypatch.setattr(_placement, "_emit_ts_module",
                         lambda ir, tmp: str(Path(tmp) / "mod.ts"))
+    monkeypatch.setattr(_placement, "_build_rust",
+                        lambda ir, tmp: str(Path(tmp) / "rust-runner"))
     monkeypatch.setattr(_placement.subprocess, "Popen", fake_popen)
     # a LIVE placement: the conductor parks in its REPL, as it does for a real
     # operator, so the halt has to interrupt it rather than be polled for
@@ -311,12 +333,12 @@ def test_an_estop_halts_a_live_placement_and_names_every_component(
     # 5. EVERY component is named, with its process and tier
     assert "components left UN-TORN-DOWN" in err
     assert "HotWorker" in err and "process provider" in err and "tier py" in err
-    assert "Edge" in err and "process edge" in err and "tier node" in err
+    assert "Edge" in err and "process edge" in err and "tier rust" in err
 
     # 6. the tier with no seam is named as exactly that, not folded in
     assert "NO E-Stop seam" in err
     edge_line = [ln for ln in err.splitlines() if "NO E-Stop seam" in ln][0]
-    assert "node" in edge_line
+    assert "rust" in edge_line
     assert "UNKNOWN" in edge_line
 
     # 7. the honoring child's own inventory is merged in BY NAME: the entry
@@ -348,6 +370,47 @@ def test_the_halt_kills_the_seamless_tier_and_never_stops_it_gracefully(
     assert procs["edge"].terminated is False
     # the py child halted itself and died where it stood; it needed no kill
     assert procs["provider"].terminated is False
+
+
+def test_a_node_child_honors_the_latch_and_is_reported_halted_not_no_seam(
+        tmp_path, monkeypatch, capsys):
+    """issue #122: `node` is no longer a seamless tier. Under a placement halt a
+    node child is handed the latch, halts at its own seams, names its in-flight
+    inventory and is reported HALTED — the same verdict a py child gets, NOT the
+    `NO E-Stop seam` / residue-UNKNOWN a kill-only tier gets. This is the
+    conductor half of the ts-tier E-Stop (`backends/typescript/*`); the runner
+    half is pinned by `backends/typescript/tests/estop_runner.test.ts`."""
+    latch = str(tmp_path / "halt.estop")
+    rc, procs, elapsed = _run(tmp_path, monkeypatch, latch=latch,
+                              placement=PLACEMENT_NODE, live=8.0)
+    err = capsys.readouterr().err
+
+    # prompt, and never clean
+    assert elapsed < 5.0
+    assert rc != 0
+    assert "E-STOP ENGAGED" in err
+
+    # 1. the node child was handed the latch in its SPEC — it can only honor a
+    #    latch it was told where to find (item 411: it may not inherit the env).
+    assert procs["edge"].spec.get("estopLatch") == latch
+
+    # 2. it HALTED at its own seams. It was never asked to unwind, and it is not
+    #    reported as a seamless tier that could only be shot.
+    assert procs["edge"].terminated is False, \
+        "the E-Stop asked the node child to unwind — that is the graceful path"
+    assert "NO E-Stop seam" not in err
+    edge_lines = [ln for ln in err.splitlines() if "process edge" in ln]
+    assert edge_lines, "the node edge was not named in the report"
+    assert any("tier node" in ln for ln in edge_lines)
+
+    # 3. its inventory was merged in, not counted as UNKNOWN silence.
+    assert "HALTED at its own crossing seams" in err
+    assert "without naming an inventory" not in err
+
+    # 4. the py provider still honors it too — both halves of the mixed placement
+    #    are now latch-honoring, and neither earned a DOWN.
+    assert procs["provider"].terminated is False
+    assert "DOWN" not in capsys.readouterr().out
 
 
 def test_a_py_child_that_names_no_inventory_is_reported_unknown(

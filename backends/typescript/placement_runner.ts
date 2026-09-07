@@ -16,11 +16,20 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { Context } from 'cordis'
 
-import { makeProxy, serve } from './bridge.ts'
+import { inFlightCrossings, makeProxy, serve } from './bridge.ts'
+import { estopHaltLine, LATCH_ENV, latchPath, readLatch } from './estop.ts'
 import { assertNoResidue, fiberStateName, snapshotRuntime } from './runtime.ts'
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const name: string = spec.name
+
+// item 443 / issue #122: the conductor hands a latch-honoring child its latch in
+// the SPEC (a sandboxed child, item 411, need not inherit the conductor's
+// environment). Publish it to the ambient variable the crossing seams already
+// read (`bridge.ts::estopEngaged` -> `estop.ts::latchPath`), so the accept and
+// dispatch seams and the idle watcher below all consult one latch. Absent — the
+// unarmed default — this is a no-op and the process is byte-identical to before.
+if (spec.estopLatch) process.env[LATCH_ENV] = String(spec.estopLatch)
 
 // item 396 option B: a `@ts ref` thunk resolves its host module at call time
 // through `globalThis.__REVL_REF_ROOT__` joined with the recorded relative path
@@ -263,6 +272,25 @@ async function teardown(): Promise<void> {
 process.on('SIGTERM', teardown)
 process.on('SIGINT', teardown)
 
+// item 443 / issue #122 — the idle-process watcher. The crossing seams refuse
+// LAZILY, at the next crossing (bridge.ts slices 1 & 2), which is right for a
+// busy process and useless for an idle one: a process parked on `keepAlive`
+// crosses nothing and would sit through the emergency. This closes that gap —
+// the ts twin of the py runner's `estop_from_latch` watcher. On the button it
+// names its in-flight inventory on ONE line (the conductor merges it by the
+// `HALTED` prefix, no second channel) and dies WHERE IT STANDS: no teardown, no
+// inverse, no `DOWN`. `process.exit` runs no SIGTERM handler, so `teardown`
+// never fires — which is the whole point of the halt verdict, not a teardown.
+let estopHalted = false
+function haltOnLatch(): void {
+  if (estopHalted) return
+  const record = readLatch(latchPath())
+  if (record === null) return // no latch, or armed but not yet written
+  estopHalted = true
+  console.log(estopHaltLine(name, inFlightCrossings(), record))
+  process.exit(0)
+}
+
 console.log(`[${name}] UP`)
 
 if (once) {
@@ -270,4 +298,7 @@ if (once) {
 } else {
   const keepAlive = setInterval(() => {}, 1 << 30) // hold the event loop
   void keepAlive
+  // Poll only when a latch is configured (armed at boot or handed in the spec);
+  // an unarmed placement installs no watcher and reads no file.
+  if (latchPath()) setInterval(haltOnLatch, 50)
 }

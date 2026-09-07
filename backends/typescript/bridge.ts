@@ -30,6 +30,37 @@ import { redactText } from './runtime.ts'
 // child does that (`estopEngaged` reads the same latch the py runtime and the
 // conductor read). See `estop.ts` and docs/design/443-estop.md.
 import { estopEngaged } from './estop.ts'
+import type { Crossing } from './estop.ts'
+
+// item 443 / issue #122 — the in-flight crossing inventory. A crossing still
+// executing when an operator arms the latch is AMBIGUOUS (item 440): its
+// at-most-once attempt may or may not have landed. The accept seam records each
+// crossing while its handler runs and clears it on return, so the placement
+// runner can name exactly what was in flight when the button was hit
+// (`placement_runner.ts`, `estop.ts::estopInventory`) instead of reporting this
+// process's residue as UNKNOWN. Cleared in a `finally`, so a handler that throws
+// still leaves the registry clean. The cost is one Map write/delete per served
+// crossing and nothing at all on the refusal path, which never reaches here.
+let _crossingSeq = 0
+const _inFlight = new Map<number, Crossing>()
+
+/** Record a crossing that is about to execute; returns its handle. */
+export function beginCrossing(key: string, method: string, direction: Crossing['direction']): number {
+  const seq = ++_crossingSeq
+  _inFlight.set(seq, { seq, key, method, direction })
+  return seq
+}
+
+/** Clear a crossing recorded by `beginCrossing` once it has returned. */
+export function endCrossing(seq: number): void {
+  _inFlight.delete(seq)
+}
+
+/** The crossings executing right now — the honest in-flight inventory an
+ *  E-Stop names (`estop.ts::estopInventory`). */
+export function inFlightCrossings(): Crossing[] {
+  return [..._inFlight.values()]
+}
 
 // --- seam endpoints: a local UDS (default) or a network TCP + mTLS seam -------
 //
@@ -669,9 +700,18 @@ export async function serve(
                 error: `method ${req.method} is not exported for key ${req.key} (exported: ${listed})`,
               }
             } else {
-              let result = service[req.method](...(req.args ?? []))
-              if (result && typeof result.then === 'function') result = await result
-              reply = { ok: true, value: encodeValue(result ?? null) }
+              // item 443 / issue #122: this crossing is now IN FLIGHT on this
+              // process. Record it around the handler so a latch armed while it
+              // runs finds it in the inventory (the ambiguous tier, item 440);
+              // the `finally` clears it whether the handler returns or throws.
+              const seq = beginCrossing(req.key, req.method, 'accept')
+              try {
+                let result = service[req.method](...(req.args ?? []))
+                if (result && typeof result.then === 'function') result = await result
+                reply = { ok: true, value: encodeValue(result ?? null) }
+              } finally {
+                endCrossing(seq)
+              }
             }
           }
         } catch (error) {

@@ -98,3 +98,68 @@ function unreadable(): LatchRecord {
 export function estopEngaged(path: string | null = latchPath()): boolean {
   return readLatch(path) !== null
 }
+
+/** One boundary crossing that is still executing, as the accept seam records it
+ *  (`bridge.ts::inFlightCrossings`). A crossing in this set when the button is
+ *  hit is the ambiguous one: its at-most-once attempt may or may not have
+ *  landed (item 440). */
+export interface Crossing {
+  seq: number
+  key: string
+  method: string
+  direction: 'accept' | 'dispatch'
+}
+
+/** The halt inventory this process prints when the latch trips its seams, in
+ *  the merged residue schema the conductor's report reads
+ *  (`src/revl/placement.py::_estop_halt_report`), byte-compatible with the shape
+ *  the py runner emits (`backends/python/runtime.py`).
+ *
+ *  A crossing still executing when the operator armed the latch is AMBIGUOUS —
+ *  its at-most-once attempt may or may not have landed (item 440) — which is the
+ *  designed outcome of an operator halt, not an edge case. This tier keeps no
+ *  witnessed-inverse ledger, so `stranded` is empty and HONESTLY so: the halt
+ *  reports what it can name (the crossings in flight) rather than inventing a
+ *  book it does not keep, and the conductor never reads that empty list as
+ *  `nothing was owed` because the tier still reports the ambiguous crossings it
+ *  had. */
+export function estopInventory(
+  process: string,
+  crossings: Crossing[],
+  record: LatchRecord | null,
+): Record<string, unknown> {
+  const inFlight = crossings.map((crossing) => ({
+    kind: 'estop-ambiguous',
+    state: 'unresolved',
+    component: crossing.key,
+    method: crossing.method,
+    seq: crossing.seq,
+    entry: 'crossing',
+    direction: crossing.direction,
+    attemptedFlag: true,
+    outcome: 'unknown',
+  }))
+  return {
+    process,
+    verdict: 'halted',
+    reason: record?.reason ?? 'operator halt',
+    operator: record?.operator ?? 'unknown',
+    activations: [],
+    inFlight,
+    stranded: [],
+    resumable: false,
+  }
+}
+
+/** The single line a latch-honoring child prints when the button is hit:
+ *  `[name] HALTED {inventory}`. The conductor parses it off stdout by the
+ *  `HALTED_LINE` prefix (`src/revl/placement.py::pump`) and merges the inventory
+ *  into the halt report without a second channel — the exact contract the py
+ *  runner already meets. */
+export function estopHaltLine(
+  process: string,
+  crossings: Crossing[],
+  record: LatchRecord | null,
+): string {
+  return `[${process}] ${HALTED_LINE} ${JSON.stringify(estopInventory(process, crossings, record))}`
+}
