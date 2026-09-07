@@ -127,8 +127,8 @@ public final class RealPlacementRunner {
             Class<?> iface = Class.forName((String) ifaces.get(key));
             Object proxy = Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[]{iface},
                     new ForwardingHandler(new BridgeClient(socket), key));
-            bindings.put(key, provide(root, iface, proxy));
-            deps.add(serviceKey(iface));
+            bindings.put(key, provide(root, key, iface, proxy));
+            deps.add(serviceKey(key, iface));
             startMonitor(key, socket, events);
             log("proxy", key, "-> " + socket + " (reactive)");
         }
@@ -289,7 +289,7 @@ public final class RealPlacementRunner {
                 }
             }
             Class<?> iface = Class.forName((String) ifaces.get(key));
-            Object service = ctx.get((Class) iface);
+            Object service = ctx.get((Class) iface, key);
             Method m = findMethod(iface, method, args.size());
             Object value = m.invoke(service, coerceArgs(m, args));
             log("probe", expr, "=> " + render(value));
@@ -325,12 +325,12 @@ public final class RealPlacementRunner {
     // --- reflection helpers -------------------------------------------------
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    static Disposable provide(Context root, Class<?> iface, Object impl) {
-        return root.provide((ServiceKey) serviceKey(iface), impl);
+    static Disposable provide(Context root, String name, Class<?> iface, Object impl) {
+        return root.provide((ServiceKey) serviceKey(name, iface), impl);
     }
 
-    static ServiceKey<?> serviceKey(Class<?> iface) {
-        return ServiceKey.of(iface);
+    static ServiceKey<?> serviceKey(String name, Class<?> iface) {
+        return ServiceKey.of(iface, name);
     }
 
     static Object instantiate(Class<?> cls, Map<String, Object> config) throws Exception {

@@ -926,12 +926,17 @@ jobs:
       # when the wire underneath it is adversarial: truncated, reordered,
       # duplicated, bounced (reconnect-storm soak), or partitioned mid-envelope.
       # Each shape must produce the DECLARED refusal or recovery, never a crash
-      # or a silent frame-layer dedup. It is pure python plus a real UDS socket,
-      # so it runs fast and needs none of the six toolchains this job
-      # provisions; it lives in the `conformance` job because this is the seam
-      # and tier semantics gate, the natural home the issue names, rather than
-      # only riding the broad `frontend` sweep. It is sequenced here so the F8
-      # network seam (#421 / #107 T3) lands build-to-test against this corpus.
+      # or a silent frame-layer dedup. The reconnect-storm is now pinned on BOTH
+      # transports: the local UDS seam AND — since item 411 T3 (#621) landed the
+      # seam transport — the real TCP + mutual-TLS network seam reached through
+      # the T3 relay, which completes the TCK the issue specified. It is pure
+      # python plus a real UDS socket and a loopback mTLS seam (the network
+      # section mints throwaway certs with the `openssl` CLI, present on
+      # ubuntu-latest, and skips where it is absent), so it runs fast and needs
+      # none of the six toolchains this job provisions; it lives in the
+      # `conformance` job because this is the seam and tier semantics gate, the
+      # natural home the issue names, rather than only riding the broad
+      # `frontend` sweep.
       - run: pytest tests/test_hostile_wire_tck.py -q
       # The matrix's THIRD question (issue #244). Everything above stops at
       # compile/typecheck depth, so it certifies that a construct emits and
