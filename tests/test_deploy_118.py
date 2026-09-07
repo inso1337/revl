@@ -449,6 +449,51 @@ def test_conformance_cert_binding_is_rehashed(staged):
     assert receipt["link"] == deploy.LINK_EVIDENCE
 
 
+def test_a_receiver_may_require_conformance_evidence_to_exist(staged):
+    """The conformance facet's `unbound-means-unchecked` shape (roadmap 428 F4,
+    filed STILL OPEN): a bundle built without the six-tier suite binds no
+    `conformance/<backend>` facet, so the re-hash check has nothing to bite on
+    and the missing runtime-target evidence is silently unchecked. Off by
+    default an honestly degraded build still admits (the same honest-degrade the
+    gauntlet facet gets); a receiver that demands the evidence refuses the chain
+    that carries none."""
+    bundle, att = staged
+    # a plain `revl bundle` stages no conformance cert, so the facet is absent
+    assert deploy.conformance_facet("python") not in att["evidence_bindings"]
+    # off by default: unbound stays unchecked, the bundle admits
+    assert deploy.admit(bundle, trust=_trust(),
+                        attestation=att)["verdict"] == deploy.ACCEPT
+    receipt = deploy.admit(bundle, trust=_trust(require_conformance=True),
+                           attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    assert receipt["link"] == deploy.LINK_EVIDENCE
+    assert "requires item-306 conformance evidence" in receipt["reason"]
+
+
+def test_require_conformance_admits_when_the_cert_is_bound(staged):
+    """`require_conformance` demands the facet be PRESENT, not that a fresh cert
+    be produced: a chain that binds `conformance/<backend>` (re-hashed here)
+    satisfies the requirement and the bundle admits."""
+    bundle, _att = staged
+    cert_dir = bundle / "conformance"
+    cert_dir.mkdir()
+    (cert_dir / "python.json").write_text(
+        '{"tier": "python", "pass": true}\n', encoding="utf-8")
+    att = deploy.make_deploy_attestation(bundle, SIGNER_KEY, signer="ci")
+    assert deploy.conformance_facet("python") in att["evidence_bindings"]
+    assert deploy.admit(bundle, trust=_trust(require_conformance=True),
+                        attestation=att)["verdict"] == deploy.ACCEPT
+    # and a require_conformance receiver whose backend the chain did NOT attest
+    # (a cert bound for another backend only) still refuses on its own backend
+    other = deploy.TrustStore(keys={attest.key_id(SIGNER_KEY): SIGNER_KEY},
+                              backend="typescript", require_conformance=True)
+    receipt = deploy.admit(bundle, trust=other, attestation=att)
+    assert receipt["verdict"] == deploy.REFUSE
+    # refuses at `backend` first — there is no typescript artifact at all here —
+    # which is the earlier chain link, so the guarantee is unbroken either way
+    assert receipt["link"] in (deploy.LINK_BACKEND, deploy.LINK_EVIDENCE)
+
+
 # ------------------------------------------- the gauntlet VERDICT (428 F8)
 #
 # The facet was hashed and never read, so `admit` accepted a bundle carrying

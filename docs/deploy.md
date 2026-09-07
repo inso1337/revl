@@ -90,7 +90,28 @@ A refusal always names one chain link:
 | `artifact-bytes` | the staged artifact does not hash to the bound digest |
 | `policy` | the staged `policy.json` is not the bound facet, or does not project the admitted IR |
 | `capability-ceiling` | the staged composition reaches a capability outside the ceiling, or its surface cannot be measured |
-| `evidence-stale` | the attestation is past the receiver's TTL, or a bound cert differs |
+| `evidence-stale` | the attestation is past the receiver's TTL, a bound cert differs, or evidence the receiver requires is absent |
+
+### Requiring evidence, not just checking what is present
+
+A bound facet is re-hashed; an absent one is, by default, simply unchecked, so a
+bundle built where a piece of evidence was unavailable still admits (`build_bundle`
+degrades honestly and stages no dossier or cert). That silence is the hazard a
+receiver that WANTS the evidence has no way to notice — the `unbound-means-unchecked`
+shape. Two `TrustStore` flags close it, each fail-closed:
+
+- `require_gauntlet=True` refuses a chain that binds no item-31 `gauntlet` facet.
+- `require_conformance=True` refuses a chain that binds no item-306
+  `conformance/<backend>` facet for the receiver's own backend — the chain's
+  runtime-target link (§1). Its own signature is not re-verified: Slice 1 trusts
+  the cert transitively through the bound hash, and interpreting the cert's
+  per-tier verdict is deferred with the backend-name reconciliation it needs (a
+  cert names its tiers `py`/`ts`, a deploy backend is `python`).
+
+```python
+trust = deploy.TrustStore(keys={key_id: verify_key}, backend="python",
+                          require_gauntlet=True, require_conformance=True)
+```
 
 ### The ceiling is measured off the IR, not off `policy.json`
 
