@@ -11,6 +11,10 @@
 # the full consumer-facing security contract this classifier implies: a
 # refusal is authoritative and fail-closed; an admission is a compile-time
 # judgment scoped to `gate_version().frontier`, never a runtime sandbox.
+#
+# `revl.fs` is a second such narrow, separately versioned host surface
+# (`WRITE_RECEIPT_API_VERSION`): a guarded native write returning a receipt with
+# an expected-before check (issue #523), documented in docs/witnessed-fs.md.
 [project]
 name = "revl"
 version = "2.0.0"

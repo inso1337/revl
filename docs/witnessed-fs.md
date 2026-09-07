@@ -348,6 +348,61 @@ test_fs_observation.py` pins all of this, including a live py-vs-ts diff of one
 case corpus run through the real emitted bodies on both tiers, and an end-to-end
 consumer that reaches the jail on py and on ts importing nothing.
 
+## Guarded native writes: receipts and expected-before checks (`revl.fs`, issue #523)
+
+The witnessed catalog above overwrites unconditionally: `write` truncates the
+target whatever its current state, and the `WriteWitness` records where the
+preimage went, not which inode the write landed on. A consumer (revl-harness)
+that guards reversible writes against external drift needs two things the host
+cannot add from outside, because anything it checks by name before the native
+open is re-derived from the name and a same-UID writer can swap the target in
+between: an *expected-before* content guard evaluated on the held descriptor, and
+a *receipt* whose identity is captured from that original descriptor.
+
+`revl.fs` is the supported, opt-in Python surface for exactly that. It exports
+`WRITE_RECEIPT_API_VERSION = 1` and:
+
+```python
+from revl import fs
+
+fs.write(path, data: str, *, expect=<prior_digest | fs.ABSENT | None>) -> fs.WriteReceipt
+# WriteReceipt(path, prev_digest, new_digest, replaced)
+```
+
+`expect=` is checked on the descriptor `open_confined_write` verified, **before**
+the snapshot and before the truncate, so a refusal never mutates the target —
+there is no partial write:
+
+- `fs.ABSENT` — refuse (`EEXPECT`) if the target already exists; the existing
+  file is not overwritten.
+- a `"sha256:..."` digest (a prior receipt's `new_digest`) — refuse (`EEXPECT`)
+  unless the target currently exists and its content still hashes to it. A
+  drifted or absent target leaves nothing changed.
+- `None` — no guard.
+
+`WriteReceipt.prev_digest` is the original content's digest read through the held
+fd (or `None` for a created target), `new_digest` is the bytes just written, and
+`replaced` distinguishes an overwrite from a create. Feeding one call's
+`new_digest` back as the next call's `expect=` makes the second write conditional
+on nothing having changed in between (a compare-before-mutation, **not** an atomic
+CAS: a same-UID writer racing the final check and syscall stays outside the
+guarantee, exactly as `confirm_landed` documents for the post-write race).
+
+This is a thin shim over the confined-write machinery
+(`backends/python/revl_fs_workspace.py`: `open_confined_write`,
+`original_receipt`, `expect_existing`, `write_through`, `confirm_landed`,
+`discard_write`). Every mutation still routes through the workspace boundary, so
+confinement is retained: a write outside the root is `ConfinementError`
+(`EOUTSIDE`), an unconfigured root is `EWORKSPACE`, and a lost race is `ERACE`
+rather than a false success. Nothing here is wired into the witnessed
+`stdlib/fs.rvl` `@py` bodies, so legacy execution is byte-identical for a caller
+that does not use this surface (issue #523 requirement 7).
+`tests/test_fs_public_write_api.py` pins the receipt fields, the three `expect=`
+modes (match writes, mismatch/absent refuses with no partial write), the digest
+round-trip, and the confinement refusals; the underlying identity-vs-content
+distinction (a same-bytes inode swap cannot forge the original receipt) is pinned
+in `tests/test_fs_write_receipts.py`.
+
 ## Honest caveats
 
 These are load-bearing limits, documented so the reversibility claim is not

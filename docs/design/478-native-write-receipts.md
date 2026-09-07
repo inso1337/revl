@@ -10,11 +10,22 @@ reference to "this item" below means issue #523.
 Design plus a first opt-in slice. The public `stdlib/fs.rvl` surface is
 deliberately NOT changed here: issue #523 asks that public API names be chosen
 only after the contract is mapped onto the in-flight roots/cleanup (#500) and
-witness/verdict (#498) work. What ships alongside this note is the smallest
+witness/verdict (#498) work. What shipped alongside this note is the smallest
 tractable, opt-in, not-yet-wired guard-module piece
 (`backends/python/revl_fs_workspace.py`: `original_receipt`, `expect_existing`,
 `RECEIPT_FIELDS`, and the identity fields on `WriteHandle`), with unit coverage
 in `tests/test_fs_write_receipts.py`.
+
+**Update (#500 and #498 both merged): the public surface is now chosen.** With
+the integration base settled, the stable public API is `revl.fs`
+(`src/revl/fs.py`, `WRITE_RECEIPT_API_VERSION = 1`):
+`fs.write(path, data, *, expect=<prior_digest | fs.ABSENT | None>) ->
+fs.WriteReceipt(path, prev_digest, new_digest, replaced)`. It is a thin Python
+shim over the machinery below — it reuses `original_receipt` / `expect_existing`
+rather than reinventing them — and is documented in
+[../witnessed-fs.md](../witnessed-fs.md) with coverage in
+`tests/test_fs_public_write_api.py`. The witnessed `stdlib/fs.rvl` bodies are
+still untouched, so requirement 7 (legacy execution byte-identical) holds.
 
 Companion docs:
 [243-witnessed-externs.md](243-witnessed-externs.md),
@@ -112,11 +123,16 @@ parallel subsystem. The mapping:
    `open_confined_new` that creates with a single `O_CREAT|O_EXCL` and never
    retries into overwrite (requirement 3), distinguishing namespace mutation
    from content mutation.
-3. **Public opt-in witnessed variant + witness fields.** With names chosen after
-   coordinating the mapping above: a `write`-family variant that takes an
-   explicit expectation and emits a receipt on the `WriteWitness`, versioned so
-   an unsupported reader refuses it (requirement 7). Wire the new entry points
-   into `PATH_FAMILIES` and the family scan; mirror on the ts tier.
+3. **Public opt-in surface + receipt fields. (SHIPPED as `revl.fs`.)** With the
+   name chosen after coordinating the mapping above:
+   `revl.fs.write(path, data, *, expect=...) -> WriteReceipt`, versioned by
+   `WRITE_RECEIPT_API_VERSION` so an unsupported reader refuses a receipt it does
+   not understand (requirement 7). Shipped as a Python shim over the guard module
+   (`original_receipt` / `expect_existing` / `write_through` / `confirm_landed`),
+   which keeps confinement intact without touching the witnessed `stdlib/fs.rvl`
+   bodies. A future witnessed-op variant that emits the receipt onto the
+   `WriteWitness` itself — wiring the entry points into `PATH_FAMILIES` and the
+   family scan, and mirroring on the ts tier — remains available on top of this.
 4. **Bounds and partial-call reporting.** Size/write-count/handle bounds
    (requirement 6) and distinct-failure-vs-uncertainty reporting across a
    multi-write call (requirement 5). No automatic compensation or retry.
