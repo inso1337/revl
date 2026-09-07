@@ -168,6 +168,16 @@ BENCHES = {
         "args": ["xs.clone()", "probe.clone()"],
         "iters": 5,
     },
+    "field_index": {
+        "doc": "`xs[i].field` read in a read-only `==` — clone of the whole element per field read (item 437d)",
+        "setup": (
+            'let raw: Vec<String> = (0..15000)\n'
+            '        .map(|i| if i % 5 == 0 { String::from("key") } else { format!("v{}", i) })\n'
+            "        .collect();"
+        ),
+        "args": ["raw.clone()"],
+        "iters": 5,
+    },
     "const_list": {
         "doc": "a constant List[Str] rebuilt on every call (selfhost lexer `keywords()`)",
         "setup": (
