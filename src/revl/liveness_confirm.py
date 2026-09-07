@@ -501,11 +501,22 @@ class SharedGrantBook:
                 f"holder `{holder_id}` does not hold shared handle `{handle}` "
                 f"(item 308 S1)")
         grant.holders.discard(holder_id)
-        self._liveness.release(holder_id, now=now)
+        # Only let the holder go from the liveness registry once it no longer
+        # participates in ANY grant. Liveness identity is per holder (per
+        # process), shared across every handle the holder owns, so releasing one
+        # handle must not mark the holder released while it still holds another —
+        # that would block the remaining handle's normal crash reclaim.
+        if not self._holds_any(holder_id):
+            self._liveness.release(holder_id, now=now)
         if grant.holders or grant.fired:
             return None
         grant.fired = True  # zero crossing, orderly path
         return grant.inverse
+
+    def _holds_any(self, holder_id: str) -> bool:
+        """Does ``holder_id`` still hold at least one (un-torn-down) grant?"""
+        return any(holder_id in grant.holders
+                   for grant in self._grants.values())
 
     def reclaim_crashed(self, *, probe: LivenessProbe,
                         now: float | None = None) -> ReclaimReport:
@@ -515,45 +526,73 @@ class SharedGrantBook:
 
         A grant still holding one or more live holders after the dead ones are
         removed is NOT torn down — a surviving holder still owns it, and the
-        orderly path will run the inverse when that holder releases."""
+        orderly path will run the inverse when that holder releases.
+
+        Each zero-crossing handle runs its OWN declared inverse, independently
+        and exactly once (fenced by the grant). A holder that owns several
+        handles settles each one on its own: closing one handle — or failing to
+        close it — neither skips nor settles any other handle the same holder
+        owned. The holder's per-process liveness fence still fires at most once
+        no matter how many of its handles cross zero."""
         now = time.time() if now is None else now
-        # Arm anything past ttl, then map each grant's zero-crossing inverse to
-        # the (single) confirmed-gone holder that will run it, so the registry's
-        # exactly-once fence covers the shared close too.
         self._liveness.arm_expired(now)
-        inverses: dict[str, Inverse] = {}
-        crossing_holder: dict[str, str] = {}
+
+        def confirmed_gone(h: str) -> bool:
+            holder = self._liveness.holder(h)
+            return (holder is not None and holder.state == _ARMED
+                    and not probe.alive(h))
+
+        # Fire each zero-crossing handle's own inverse here, per grant, fenced by
+        # `grant.fired`. Firing per handle (each in its own frame) is what keeps
+        # a holder's several handles independent: the registry reclaim below only
+        # settles the holder's per-process liveness, and it fires a no-op close
+        # since the real close already ran here.
         noop: Inverse = lambda: None
+        gone: dict[str, Inverse] = {}
+        handle_faults: list[dict] = []
         for grant in self._grants.values():
             if grant.fired:
                 continue
-            dead = [h for h in grant.holders
-                    if self._liveness.holder(h) is not None
-                    and self._liveness.holder(h).state == _ARMED
-                    and not probe.alive(h)]
-            live_left = [h for h in grant.holders if h not in dead]
+            dead = sorted(h for h in grant.holders if confirmed_gone(h))
             if not dead:
                 continue
-            # every confirmed-gone holder is reclaimed (removed from the count),
-            # but the COUNT — not each holder — owns the single declared inverse.
-            # So at most one dead holder (the zero-crossing carrier, only when no
-            # live holder remains) runs the real close; the rest reclaim with a
-            # no-op. A dead holder in a grant a live holder still owns is removed
-            # from the count with no close, and the grant is left standing.
+            # every confirmed-gone holder is reclaimed from this grant's count;
+            # its per-process liveness fence still fires at most once.
             for h in dead:
-                inverses[h] = noop
-            if not live_left:
-                carrier = sorted(dead)[0]
-                inverses[carrier] = grant.inverse
-                crossing_holder[grant.handle] = carrier
-        report = self._liveness.reclaim(inverses, probe=probe, now=now)
-        # reflect the fired zero crossings back onto the grants and drop the
-        # holders the reclaim consumed.
-        for handle, carrier in crossing_holder.items():
-            grant = self._grants[handle]
-            if carrier in report.fired or carrier in [f["holder"]
-                                                       for f in report.faults]:
-                grant.fired = True
+                gone[h] = noop
+            if [h for h in grant.holders if h not in dead]:
+                # a live holder still owns the handle: drop the dead holders from
+                # the count but leave the grant standing (no close).
+                continue
+            # zero crossing with no live holder left: this handle owns its close.
+            carrier = dead[0]
+            grant.fired = True  # per-handle fence: orderly or reclaim, once
+            try:
+                grant.inverse()
+            except Exception as error:  # noqa: BLE001 — recorded as residue
+                handle_faults.append({
+                    "holder": carrier,
+                    "handle": grant.handle,
+                    "kind": "reclaim-fault",
+                    "detail": (f"the reclaim inverse for shared handle "
+                               f"`{grant.handle}` (carried by gone holder "
+                               f"`{carrier}`) raised: {error}")})
+
+        # Settle every confirmed-gone holder through the registry's exactly-once
+        # reclaim fence (a no-op close — the handle's real inverse already fired
+        # above). This yields the per-holder fired/pinned accounting and the
+        # event trace, and fences a holder so a re-run reclaims it no second time.
+        report = self._liveness.reclaim(gone, probe=probe, now=now)
+
+        # A handle whose own inverse raised is owed residue: move its carrier out
+        # of the clean-fired set and record the per-handle fault, so a holder's
+        # clean per-process reclaim never papers over a handle that did not close.
+        if handle_faults:
+            faulted = {f["holder"] for f in handle_faults}
+            report.fired = [h for h in report.fired if h not in faulted]
+            report.faults.extend(handle_faults)
+
+        # drop the holders the reclaim consumed from every grant's count.
         for grant in self._grants.values():
             grant.holders = {h for h in grant.holders
                              if self._liveness.holder(h) is None
