@@ -5364,6 +5364,15 @@ def _emit_component_modern(
     out: list[str] = []
 
     for key, service in env.provides.items():
+        # item 449/#596: a routed provided key is realized ONLY through the
+        # emitted `realms(...)` routing class (`RevlRouter<Comp><Key>`), not a
+        # component provider class. Its `provides <key>` header carries no body
+        # (a routes-carrying provide body is refused at load — G2), so there is
+        # no method to override; emitting `class … implements <Svc>` with no
+        # `call` is not abstract and javac rejects it. The go tier drops it
+        # naturally (it emits provider classes from body `provide` steps).
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"public static final class {struct} implements {service} {{")
@@ -5570,6 +5579,15 @@ def _emit_component(
     out: list[str] = []
 
     for key, service in env.provides.items():
+        # item 449/#596: a routed provided key is realized ONLY through the
+        # emitted `realms(...)` routing class (`RevlRouter<Comp><Key>`), not a
+        # component provider class. Its `provides <key>` header carries no body
+        # (a routes-carrying provide body is refused at load — G2), so there is
+        # no method to override; emitting `class … implements <Svc>` with no
+        # `call` is not abstract and javac rejects it. The go tier drops it
+        # naturally (it emits provider classes from body `provide` steps).
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"public static final class {struct} implements {service} {{")

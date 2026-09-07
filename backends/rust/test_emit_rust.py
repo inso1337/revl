@@ -118,17 +118,18 @@ _ROUTER_TEST_MODULE = """
 #[cfg(test)]
 mod _revl_router_scenario {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
-    fn probe(sink: Arc<Mutex<Vec<String>>>, n: usize) -> cordis::PluginHandle {
-        cordis::plugin_sync::<(), _>("Probe", cordis::Inject::new(["worker"]), move |ctx, _cfg| {
-            let svc = ctx.require::<Box<dyn Worker>>("worker")?;
-            let mut out = sink.lock().unwrap();
-            for i in 0..n { out.push(svc.call(format!("{}", i))); }
-            Ok(cordis::PluginOutput::none())
-        })
-    }
-
+    // item 449 / #596: the Router's hand-written `provide worker { … }` body was
+    // dropped (a routes-carrying component that also provides the routed key is
+    // now refused — the body would be silently discarded at load). The routed
+    // key is therefore NOT registered as a root single-realm service any more;
+    // the emitted `realms(...)` routing proxy (`RevlRouterRouterWorker`) is the
+    // sanctioned realization of the route. The harness constructs that proxy
+    // directly — it lives in this same crate — and exercises the real routed
+    // call through it, exactly as the Router's own emitted plugin body does
+    // (`let worker = RevlRouterRouterWorker::_revl_new(ctx.clone());`). Loading
+    // the Router fiber and awaiting Ready still proves the header-only shape
+    // loads cleanly. Mirror of backends/go/scenarios/router_test.go.fixture.
     fn load(root: &cordis::Context, name: &str) -> cordis::Fiber {
         let f = _revl_load(root, name, &serde_json::Value::Null).unwrap();
         f.wait().unwrap();
@@ -143,24 +144,28 @@ mod _revl_router_scenario {
         let _w3 = load(&root, "w3");
         let _router = load(&root, "router");
 
-        // the emitted Router body fans out round-robin across w1,w2,w3
-        let sink = Arc::new(Mutex::new(Vec::new()));
-        let p = root.plugin(probe(sink.clone(), 6), ());
-        p.wait().unwrap();
-        assert_eq!(*sink.lock().unwrap(),
-            vec!["w1:0","w2:1","w3:2","w1:3","w2:4","w3:5"]);
-        p.dispose().ok();
+        // the sole routing realization is the emitted `realms(...)` proxy; the
+        // routed key is NOT a root single-realm service (G2 — no provide body).
+        assert!(root.get::<Box<dyn Worker>>("worker").unwrap().is_none(),
+            "bare routed key resolved as a root single-realm service; under \
+             item-449 it is realized only through the emitted proxy");
+
+        let router = RevlRouterRouterWorker::_revl_new(root.clone());
+
+        // the emitted routing proxy fans out round-robin across w1,w2,w3
+        let got: Vec<String> = ["0", "1", "2", "3", "4", "5"]
+            .iter().map(|s| router.call((*s).to_string())).collect();
+        assert_eq!(got, vec!["w1:0", "w2:1", "w3:2", "w1:3", "w2:4", "w3:5"]);
 
         // withdraw w2 -> its realm resolves to a non-ACTIVE handle and drops
-        // out; the next calls go to the survivors (reactive failover)
+        // out; the next calls go to the survivors (reactive failover), never
+        // falling back to the router's own root provision (there is none).
         w2.dispose().ok();
-        let sink2 = Arc::new(Mutex::new(Vec::new()));
-        let p2 = root.plugin(probe(sink2.clone(), 6), ());
-        p2.wait().unwrap();
-        let got = sink2.lock().unwrap().clone();
-        assert!(got.iter().all(|r| r.starts_with("w1:") || r.starts_with("w3:")), "{:?}", got);
-        assert!(!got.iter().any(|r| r.starts_with("w2:")), "{:?}", got);
-        p2.dispose().ok();
+        for _ in 0..6 {
+            let r = router.call("x".to_string());
+            assert!(r != "w2:x", "call resolved to withdrawn w2: {:?}", r);
+            assert!(r == "w1:x" || r == "w3:x", "unexpected: {:?}", r);
+        }
     }
 }
 """

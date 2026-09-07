@@ -3673,6 +3673,15 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     map_values = _component_map_values(env)
 
     for key, service in env.provides.items():
+        # item 449/#596: a routed provided key is realized ONLY through the
+        # emitted `realms(...)` routing proxy (`_emit_router_struct` below), not
+        # a component provider fiber. Its `provides <key>` header clause carries
+        # no body (a routes-carrying provide body is refused at load — G2), so
+        # there is no method to implement; emitting an empty `impl <Svc> for …`
+        # would not compile. The go tier drops it naturally (it emits provide
+        # impls from body `provide` steps, of which a routed key has none).
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
@@ -4002,6 +4011,15 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     map_values = _component_map_values(env)
 
     for key, service in env.provides.items():
+        # item 449/#596: a routed provided key is realized ONLY through the
+        # emitted `realms(...)` routing proxy (`_emit_router_struct` below), not
+        # a component provider fiber. Its `provides <key>` header clause carries
+        # no body (a routes-carrying provide body is refused at load — G2), so
+        # there is no method to implement; emitting an empty `impl <Svc> for …`
+        # would not compile. The go tier drops it naturally (it emits provide
+        # impls from body `provide` steps, of which a routed key has none).
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
