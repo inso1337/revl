@@ -32,18 +32,68 @@ const EXEMPT = new Map([
       'variant members.',
   ],
   [
-    'examples/rejections/v2_semicolon_separator.rvl',
-    'revl has no `;` statement separator; the reference lexer/parser rejects ' +
-      '`;` at the source character. Statements are newline-separated, so there ' +
-      'is no `;` token in the grammar and a stray `;` is an ERROR here, matching ' +
-      "the reference's own refusal.",
-  ],
-  [
     'examples/rejections/v2_provide_emission_fn.rvl',
     'a provide-method carries no purity modifier: it is a plain `fn`, and ' +
       'emission-ness is inherited from the service (G4). The reference parser ' +
       'rejects `emission fn` inside `provide` at parse time (expected fn, found ' +
       "emission), so the grammar's provide_method (plain `fn`) errors here too.",
+  ],
+  [
+    'examples/rejections/lifecycle_no_swap.rvl',
+    'revl has no `swap` statement: the reference parser rejects `swap A -> B` ' +
+      'at parse time ("there is no `swap` statement", parser.py). A hot-swap is ' +
+      'driven by the harness re-admitting an edited source against the running ' +
+      'system, not by an in-language statement, so the grammar carries no ' +
+      '`swap` node and the bare word is an ERROR here — matching the refusal.',
+  ],
+  // The `foreign_*` corpus: constructs from other languages the reference
+  // parser refuses AT PARSE TIME by name (item 384, `_reject_foreign_keyword`
+  // and the shape guards). They are genuinely-foreign SYNTAX, not context-
+  // sensitive semantic rejections, so an LR grammar has no rule to match them
+  // and its ERROR mirrors the reference's own parse-time refusal.
+  [
+    'examples/rejections/foreign_def.rvl',
+    'revl has no `def` — functions are `fn` (reference rejects `def` at parse).',
+  ],
+  [
+    'examples/rejections/foreign_lambda.rvl',
+    'revl has no `lambda` — closures are `=>` arrows (parse-time refusal).',
+  ],
+  [
+    'examples/rejections/foreign_elif.rvl',
+    'revl has no `elif` — it is `else if` (reference rejects `elif` at parse).',
+  ],
+  [
+    'examples/rejections/foreign_for_in.rvl',
+    'revl iterates with `for (x of xs)`, not `for x in xs` (parse-time refusal).',
+  ],
+  [
+    'examples/rejections/foreign_cstyle_for.rvl',
+    'revl has no C-style `for (init; cond; step)` loop (parse-time refusal).',
+  ],
+  [
+    'examples/rejections/foreign_increment.rvl',
+    'revl has no `++` increment operator (reference rejects it at parse).',
+  ],
+  [
+    'examples/rejections/foreign_kwargs.rvl',
+    'revl has no keyword arguments `f(name=v)` (parse-time refusal).',
+  ],
+  [
+    'examples/rejections/foreign_python_ternary.rvl',
+    'revl has no Python `a if c else b` ternary — it is `c ? a : b` (parse-time).',
+  ],
+  [
+    'examples/rejections/foreign_slice.rvl',
+    'revl has no slice syntax `xs[a:b]` (reference rejects it at parse).',
+  ],
+  [
+    'examples/rejections/foreign_string_dict.rvl',
+    'revl records use identifier keys, not string keys `{"k": v}` (parse-time).',
+  ],
+  [
+    'examples/rejections/foreign_tuple.rvl',
+    'revl has no tuples `(a, b)` (reference rejects the tuple form at parse).',
   ],
 ]);
 
