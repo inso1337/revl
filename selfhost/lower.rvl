@@ -4434,11 +4434,21 @@ fn collect_routes(comps: List[CompD], ci: Int, provs: List[Prov3],
 // the G3 refusals — in the reference's order (BOOT is decided ahead of these,
 // by `admit_src`). A cycle is capped at one per composition (the reference caps
 // at one per strongly-connected set), anchored at the cycle's entry component.
-fn link_refusals(pg: Prog) -> List[Verd] {
+//
+// `seed` (item 186 slice 2) is the ALREADY-RUNNING manifest's provision table,
+// pre-loaded into the per-(key, realm) provider table before the incoming
+// components are scanned. The single-source path passes `[]`; `admit_ambient`
+// passes the manifest's live provisions, so the SAME link decides both G2
+// disjointness AND multi-realm ROUTE resolution against the running manifest —
+// a routed realm provided only by the manifest resolves through `g2.provs`
+// (which now carries the seed) instead of dangling. G3 edges see the manifest's
+// providers too, but the wire carries no requirements, so a cycle that closes
+// THROUGH the manifest is still out of scope (see docs/design note).
+fn link_refusals(pg: Prog, seed: List[Prov3]) -> List[Verd] {
   // spawn templates are runtime instances, not static composition members — they
   // take no place in the G2/G3 table or loadOrder (decision 5/6).
   let live = non_template_comps(pg.comps, spawn_templates(pg.comps))
-  let g2 = collect_g2(live, 0, [], [])
+  let g2 = collect_g2(live, 0, seed, [])
   var refs = g2.refs
   // the multi-realm bind verification (item 162) runs between G2 and the edges,
   // exactly where the reference runs it: the dual EXISTENCE check on the
@@ -5007,7 +5017,17 @@ fn too_deep_msg() -> Str {
 // carrying its anchor line. The append order IS the stable-sort tie-break the
 // reference uses on an equal line, so `pick_min` (min by `(line, seq)`, `seq`
 // the index here) reproduces the reference's `diagnostics[0]`.
-fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
+// item 186: the refusals INTERNAL to the incoming text — everything the
+// single-source gate collects EXCEPT the G2/ROUTE/G3 link. The link depends on
+// the composition (and is reshaped by an ambient running manifest), so it is
+// split out: `collect_refusals` appends the in-text link, `admit_ambient`
+// appends the manifest-seeded link. `done` marks a FAIL-FAST refusal
+// (cache-purity, reachable-fn host acquire, a module-fn A1 twin): the reference
+// RAISES it before its collect-all `errors` sink exists, so it rides ALONE and
+// the link never runs — identically on the single-source and ambient paths.
+type NoLink = { done: Bool, refs: List[Verd] }
+
+fn collect_nonlink(ts: List[Token], pg: Prog) -> NoLink {
   // the ADT constructors the program declares join the callable universe a bare
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
@@ -5019,16 +5039,16 @@ fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
   // alone. Order mirrors `check_and_lower`: cache-purity, host-acquire in a
   // reachable fn, then the module-fn A1 twins, all ahead of the component loop.
   let cachev = check_cache_fns(pg.fns)
-  if (cachev.v != "") { return [cachev] }
+  if (cachev.v != "") { return { done: true, refs: [cachev] } }
   // G4: a host acquire verb in a `fn` body a component reaches. Decided over
   // the whole program before any body is gated, exactly where `check_and_lower`
   // places `_refuse_host_acquire_in_component_reachable_fn`.
   let acq = check_reachable_fn_acquire(pg)
-  if (acq.v != "") { return [acq] }
+  if (acq.v != "") { return { done: true, refs: [acq] } }
   // the module-fn A1 twins (first-class async value, leaky pure arrow), the
   // first refusing fn in declaration order.
   let mf = first_module_fn(pg.fns, 0, base)
-  if (mf.v != "") { return [mf] }
+  if (mf.v != "") { return { done: true, refs: [mf] } }
   // ---- the COLLECTED sink (the reference's `errors`): the component loop, the
   // spawn post-passes, the boot count, and the link, each recovering at its own
   // unit so `admit_src` can order every refusal by `(line, seq)`.
@@ -5073,8 +5093,15 @@ fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
         .concat(join_comma(boots, 0, ""))),
       comp_line(pg.comps, boots[1], 0)))
   }
-  // the G2/ROUTE/G3 link collects the rest, in that order.
-  return append_verds(refs, link_refusals(pg))
+  return { done: false, refs: refs }
+}
+
+fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
+  let nl = collect_nonlink(ts, pg)
+  if (nl.done) { return nl.refs }
+  // the G2/ROUTE/G3 link collects the rest, in that order (empty seed: a single
+  // source composes only against its own text).
+  return append_verds(nl.refs, link_refusals(pg, []))
 }
 
 pub fn admit_src(src: Str) -> Str {
@@ -5143,23 +5170,36 @@ pub fn admit_tag(src: Str) -> Str {
 
 // ================================================== ambient / running-manifest
 //
-// item 186 / issue #86, SLICE 1 — provision disjointness against an ALREADY
-// RUNNING manifest. `admit_src(src)` decides one program text; the reference's
-// `check_and_lower` carries a second input, `ambient`, that `admit_src` has no
-// analogue for — the running composition a component is joining is not in the
-// incoming text, so there is nothing in one program to compare it against. This
-// is a DIFFERENT admission entry point (hot-swap / state-migration, not "does
-// this one program admit"), and it needs its own signature:
+// item 186 / issue #86 — admission against an ALREADY RUNNING manifest.
+// `admit_src(src)` decides one program text; the reference's `check_and_lower`
+// carries a second input, `ambient`, that `admit_src` has no analogue for — the
+// running composition a component is joining is not in the incoming text, so
+// there is nothing in one program to compare it against. This is a DIFFERENT
+// admission entry point (hot-swap / state-migration, not "does this one program
+// admit"), and it needs its own signature:
 //
 //   admit_ambient(src, manifest) -> the same "<TAG>|<message>" | "" wire.
 //
-// The FULL surface behind `ambient` (service replacement, `handoff` STATE
-// replacement, a differential oracle that builds a running manifest on BOTH
-// sides) is a wave, not a slice (roadmap item 186). Slice 1 lands the one piece
-// that is self-contained today: a component that provides a `(key, realm)` the
-// manifest already provides is a G2 conflict — the cross-manifest analogue of
-// the in-text G2 `_link`/`collect_g2` already computes among one text's
-// components. See docs/design/186-ambient-admission.md.
+// Both LANDED slices reshape the link (G2/ROUTE) against the manifest's live
+// provision table, byte-identical to `admit_src(manifest_text ++ src)`:
+//   * SLICE 1 — provision disjointness: a component providing a `(key, realm)`
+//     the manifest already provides is a G2 conflict, the cross-manifest
+//     analogue of the in-text G2 `_link`/`collect_g2` computes among one text's
+//     components.
+//   * SLICE 2 — multi-realm ROUTE validation (item 162) against ambient realms:
+//     a `realms(...)` route whose target realm is provided ONLY by the running
+//     manifest RESOLVES rather than dangling; a realm provided by neither still
+//     refuses ROUTE. This is why `admit_ambient` recomputes the link seeded (via
+//     `collect_nonlink` + `link_refusals(pg, seed)`) rather than forwarding the
+//     self-verdict wholesale — a self ROUTE refusal is composition-dependent,
+//     not internal, and the manifest can satisfy it.
+//
+// The FULL surface still behind `ambient` (service REPLACEMENT / `handoff` STATE
+// replacement that OVERRIDES a manifest provision rather than conflicting, G3
+// acyclicity across the manifest boundary — the wire carries provisions, not
+// requirements — and a reference-side ambient oracle that builds a running
+// manifest on BOTH sides) is a wave, not a slice (roadmap item 186). See
+// docs/design/186-ambient-admission.md.
 //
 // The manifest is the linker's already-live provision table, serialised as rows
 // "<component>/<key>/<realm>" joined by ";" (realm "" = the shared realm), e.g.
@@ -5195,27 +5235,45 @@ fn parse_manifest(m: Str) -> List[Prov3] {
   return parse_manifest_rows(m, [])
 }
 
-// Admit `src` against a running `manifest`. An ambient composition never
-// launders an internally refused component, so a non-empty single-source
-// verdict is forwarded unchanged — this is the seam a later wave relaxes for
-// handoff / state-migration, where a replacement legitimately overrides what the
-// manifest already holds. Otherwise seed the G2 table with the manifest's
-// live provisions and scan the incoming components' provision keys against it:
-// a `(key, realm)` the manifest already provides conflicts, reported against the
-// incoming component (the SECOND provider) with `_link`'s exact G2 wording.
+// Admit `src` against a running `manifest`. The INTERNAL refusals (a component
+// that refuses on its own text, a module-fn twin, a spawn/boot violation) are
+// collected exactly as the single-source path collects them — an ambient
+// composition never launders an internally refused component. The LINK (G2
+// provision disjointness + multi-realm ROUTE validation) is recomputed with the
+// manifest's live provisions seeded into the provider table, so the manifest
+// both introduces conflicts (slice 1) and satisfies routes (slice 2), and every
+// refusal — internal or ambient-link — is ordered by `(line, seq)`, exactly
+// what `admit_src(manifest_text ++ src)` reports.
 pub fn admit_ambient(src: Str, manifest: Str) -> Str {
-  let self_v = admit_src(src)
-  if (self_v != "") { return self_v }
+  // parse / foreign-construct / nesting refusals abort before any composition
+  // reasoning, exactly as `admit_src`: a running manifest cannot rescue a text
+  // that does not parse, so these ride alone with no line.
   let ts = lex_src(src)
+  let fgn = foreign_scan_ts(ts)
+  if (fgn != "") { return tagged("FOREIGN", fgn) }
+  if (nesting_depth(ts) > nesting_limit()) { return tagged("BAD", too_deep_msg()) }
   let pg = parse_prog_ts(ts)
-  // spawn templates are runtime instances, not static composition members — they
-  // take no place in the G2 table (decision 5/6), exactly as `link_refusals`
-  // excludes them from the in-text scan. Seed the surviving live components'
-  // provision scan with the running manifest's provisions.
-  let live = non_template_comps(pg.comps, spawn_templates(pg.comps))
-  let seed = parse_manifest(manifest)
-  let r = collect_g2(live, 0, seed, [])
-  return pick_min(r.refs)
+  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  // the INTERNAL refusals (per-component G1/G4/A1/PRELUDE, module fn, spawn,
+  // boot) are properties of the incoming text ALONE — an ambient composition
+  // never launders an internally refused component — so collect them exactly as
+  // the single-source path does. A FAIL-FAST internal refusal rides alone, no
+  // link (the seam a later handoff / state-migration wave relaxes, where a
+  // replacement legitimately overrides what the manifest already holds).
+  let nl = collect_nonlink(ts, pg)
+  if (nl.done) { return pick_min(nl.refs) }
+  // the LINK is the half the running manifest reshapes. Seed the per-(key,
+  // realm) provider table with the manifest's live provisions and run the SAME
+  // G2/ROUTE/G3 scan the single-source path runs, so:
+  //   * slice 1 — a provision the manifest already holds is a G2 conflict,
+  //     reported against the incoming (SECOND) provider;
+  //   * slice 2 — a `realms(...)` route whose target realm is provided ONLY by
+  //     the manifest RESOLVES (`find_provider` reads the seeded table) instead
+  //     of dangling as a ROUTE refusal, while a realm provided by NEITHER still
+  //     refuses ROUTE, byte-identical to `admit_src(manifest_text ++ src)`.
+  // Ordered against the internal refusals by `(line, seq)`, so an ambient link
+  // refusal competes with an internal one exactly as in the composed text.
+  return pick_min(append_verds(nl.refs, link_refusals(pg, parse_manifest(manifest))))
 }
 
 // ============================================================ interchange IR
@@ -8444,6 +8502,76 @@ test "an internally refused component is forwarded unchanged, whatever the manif
 test "a disjoint manifest key never conflicts with the incoming component" {
   let v = admit_ambient("service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }", "OldCache/cache/")
   assert v == ""
+}
+
+// ---- slice 2: multi-realm ROUTE validation against ambient realms (item 186)
+//
+// A `realms(...)` route in the incoming component targets realms whose providers
+// live in the ALREADY RUNNING manifest, not the incoming text. Before slice 2
+// the self-check refused such a route (its legs dangle in the text alone) and
+// forwarded that refusal; now the seeded link resolves each leg through the
+// manifest's per-(key, realm) providers — byte-identical to single-source
+// admitting the manifest components ++ the incoming text.
+
+test "a route whose realms are all provided by the manifest admits (ambient ROUTE)" {
+  // Router routes kv across r1+r2; NEITHER realm has a provider in the incoming
+  // text — both live in the manifest. Old behavior: forwarded a dangling-leg
+  // ROUTE refusal. New: resolves through the seeded table.
+  let v = admit_ambient("""service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1", "r2") strategy(round_robin)
+  provide api { fn go(k) { return kv.get(k) } }
+}""", "StoreA/kv/r1;StoreB/kv/r2")
+  assert v == ""
+}
+
+test "the ambient route slice equals single-source of the manifest components ++ src" {
+  let stores = """component StoreA provides kv: Kv {
+  isolate kv in realm("r1")
+  provide kv { fn get(k) { return k } }
+}
+component StoreB provides kv: Kv {
+  isolate kv in realm("r2")
+  provide kv { fn get(k) { return k } }
+}
+"""
+  let svc = """service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+"""
+  let router = """component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1", "r2") strategy(round_robin)
+  provide api { fn go(k) { return kv.get(k) } }
+}"""
+  assert admit_ambient(svc.concat(router), "StoreA/kv/r1;StoreB/kv/r2")
+    == admit_src(svc.concat(stores).concat(router))
+}
+
+test "a routed realm provided by NEITHER text nor manifest still refuses (ambient ROUTE)" {
+  // r1 is in the manifest, r9 is nowhere: the surviving leg still dangles.
+  let v = admit_ambient("""service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component Router requires kv: Kv provides api: Api {
+  isolate kv in realms("r1", "r9")
+  provide api { fn go(k) { return kv.get(k) } }
+}""", "StoreA/kv/r1")
+  assert v == "ROUTE|multi-realm bind of `kv` in Router names realm `r9`, but no component provides `kv` in realm `r9` (item 162: every routed realm needs a provider)"
+}
+
+// ---- slice 2 (diagnostic ordering): an ambient-link refusal is ordered against
+// an internal refusal by `(line, seq)`, exactly as in the composed text. The old
+// code forwarded the internal refusal wholesale and never computed the link, so
+// an earlier-line manifest G2 could not win.
+
+test "an earlier-line ambient G2 conflict outranks a later internal refusal" {
+  // Comp Early (line 2) provides db, conflicting with the manifest -> G2 at
+  // line 2. Comp Late (line 3) uses an undeclared bare value -> G1 at line 3.
+  // pick_min by line picks the G2, matching admit_src(manifest_comp ++ src).
+  let src = """service D { fn q(s: Str) -> Int }
+component Early provides db: D { provide db { fn q(s) { let x = s   return 0 } } }
+component Late provides ap: D { provide ap { fn q(s) { let x = nope   return 0 } } }"""
+  let v = admit_ambient(src, "OldStore/db/")
+  assert v == "G2|provision conflict: key `db` is provided by both OldStore and Early (G2)"
 }
 
 test "undeclared bare value in a method is refused (G1)" {

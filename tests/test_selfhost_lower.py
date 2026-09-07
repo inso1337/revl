@@ -2470,3 +2470,108 @@ def test_ambient_manifest_wire_tolerates_trailing_and_empty_rows(admit_ambient):
         v = admit_ambient(src, manifest)
         assert v == ("G2|provision conflict: key `db` is provided by both "
                      "OldStore and NewStore (G2)"), manifest
+
+
+# ------------------------------------------------------------ item 186 SLICE 2
+#
+# Multi-realm ROUTE validation (item 162) against AMBIENT realms. A `realms(...)`
+# route in the incoming component targets realms whose providers live only in
+# the RUNNING manifest, not in the incoming text. Before slice 2 the self-check
+# refused such a route — its legs dangle in the text alone — and forwarded that
+# refusal; a route refusal is composition-dependent, not internal, so slice 2
+# recomputes the whole G2/ROUTE/G3 link seeded with the manifest's provisions.
+#
+# The oracle is the same M ++ X equivalence slice 1 uses: admitting a router `X`
+# against a manifest holding the store components' provisions equals
+# single-source admitting the store text ++ `X`, and the reference agrees:
+#
+#     admit_ambient(Router, manifest_of(StoreA, StoreB))
+#         == admit_src(StoreA ++ StoreB ++ Router) == reference(...)
+
+_ROUTE_SVCS = (
+    "service Kv { fn get(k: Str) -> Str }\n"
+    "service Api { fn go(k: Str) -> Str }\n"
+)
+_STORES = (
+    'component StoreA provides kv: Kv {\n'
+    '  isolate kv in realm("r1")\n'
+    '  provide kv { fn get(k) { return k } }\n'
+    '}\n'
+    'component StoreB provides kv: Kv {\n'
+    '  isolate kv in realm("r2")\n'
+    '  provide kv { fn get(k) { return k } }\n'
+    '}\n'
+)
+_ROUTER = (
+    'component Router requires kv: Kv provides api: Api {\n'
+    '  isolate kv in realms("r1", "r2") strategy(round_robin)\n'
+    '  provide api { fn go(k) { return kv.get(k) } }\n'
+    '}'
+)
+
+
+def test_ambient_route_realms_all_provided_by_manifest_admits(admit_ambient):
+    """Router routes kv across r1+r2; NEITHER realm has a provider in the
+    incoming text — both are held by the running manifest. The seeded link
+    resolves each leg instead of forwarding a dangling-leg ROUTE refusal."""
+    assert admit_ambient(_ROUTE_SVCS + _ROUTER, "StoreA/kv/r1;StoreB/kv/r2") == ""
+
+
+def test_ambient_route_equals_single_source_and_reference(admit, admit_ambient):
+    ambient_src = _ROUTE_SVCS + _ROUTER
+    composed = _ROUTE_SVCS + _STORES + _ROUTER
+    got = admit_ambient(ambient_src, "StoreA/kv/r1;StoreB/kv/r2")
+    # leg 1: ambient == selfhost single-source of the composed text
+    assert got == admit(composed) == ""
+    # leg 2: the reference agrees the composed text admits
+    assert _ref(composed) == ("", "")
+
+
+def test_ambient_route_dangling_realm_still_refuses(admit, admit_ambient):
+    """r1 is in the manifest, r9 is nowhere: the surviving leg still dangles, so
+    the ROUTE refusal stands — byte-identical to the composed single source."""
+    router = (
+        'component Router requires kv: Kv provides api: Api {\n'
+        '  isolate kv in realms("r1", "r9")\n'
+        '  provide api { fn go(k) { return kv.get(k) } }\n'
+        '}'
+    )
+    store_a = (
+        'component StoreA provides kv: Kv {\n'
+        '  isolate kv in realm("r1")\n'
+        '  provide kv { fn get(k) { return k } }\n'
+        '}\n'
+    )
+    ambient_src = _ROUTE_SVCS + router
+    composed = _ROUTE_SVCS + store_a + router
+    got = admit_ambient(ambient_src, "StoreA/kv/r1")
+    assert got == (
+        "ROUTE|multi-realm bind of `kv` in Router names realm `r9`, but no "
+        "component provides `kv` in realm `r9` (item 162: every routed realm "
+        "needs a provider)")
+    assert got == admit(composed)
+    ref_tag, _ = _ref(composed)
+    assert ref_tag == "ROUTE"
+
+
+def test_ambient_link_refusal_ordered_against_internal_refusal(admit,
+                                                               admit_ambient):
+    """Diagnostic ordering: an ambient G2 conflict at an EARLIER line outranks a
+    LATER internal refusal. The old code forwarded the internal refusal and never
+    computed the link; slice 2 merges the seeded link with the internal refusals
+    and reports the minimum by (line, seq) — exactly admit_src(manifest ++ src)."""
+    early = ("component Early provides db: D "
+             "{ provide db { fn q(s) { let x = s   return 0 } } }")
+    late = ("component Late provides ap: D "
+            "{ provide ap { fn q(s) { let x = nope   return 0 } } }")
+    src = "service D { fn q(s: Str) -> Int }\n" + early + "\n" + late
+    composed = ("service D { fn q(s: Str) -> Int }\n"
+                "component OldStore provides db: D "
+                "{ provide db { fn q(s) { let x = s   return 0 } } }\n"
+                + early + "\n" + late)
+    got = admit_ambient(src, "OldStore/db/")
+    assert got == ("G2|provision conflict: key `db` is provided by both "
+                   "OldStore and Early (G2)")
+    assert got == admit(composed)
+    ref_tag, _ = _ref(composed)
+    assert ref_tag == "G2"
