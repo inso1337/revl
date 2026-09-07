@@ -809,10 +809,295 @@ class ContainerDriver:
             self._containers.clear()
 
 
-def resolve_driver(rung: str) -> ContainerDriver | None:
+# --------------------------------------------------------------------------
+# the wasm-cell rung driver
+# --------------------------------------------------------------------------
+#
+# The weakest rung of the ladder, and the one that is NOT an OS boundary: the
+# cell is a wasm instance living inside an ordinary py placement process, so its
+# confinement is a generated import set, not a `--network=none` / `--read-only`
+# envelope. The 411 design says so plainly — the `fs`/`net` keys bind nothing a
+# wasm instance could use, which is why a non-default value under `wasm-cell` is
+# already refused at plan time (`placement._normalize_sandbox_table`), the `*`
+# opaque reach is refused (`placement._sandbox_capability_gate`), and a @py/@ts
+# host body cannot enter a cell at all (the wasm emitter is the oracle). None of
+# that is this driver's job; by the time a process reaches here its manifest has
+# already been judged cell-eligible.
+#
+# What IS this driver's job, and what is not
+# ------------------------------------------
+# Same three responsibilities as `ContainerDriver`: establish the boundary,
+# CONFIRM it from inside, and tear it down — under the same "refuse, never
+# degrade" law. Two things make the shape different from the container rung:
+#
+#   * The substrate is out-of-conductor. The cordis-wasm runtime (item 335) and
+#     its `wasmtime` bindings live in their own checkout with their own venv;
+#     the conductor's interpreter does not carry `wasmtime`. So the cell is
+#     established and probed through that venv's interpreter, exactly as
+#     `run_wasm` boots a whole wasm composition — and the availability gate is
+#     the same `run_wasm.wasm_runtime_reason()` the wasm TIER already uses, so
+#     this rung introduces no new environment switch (item 445) and skips
+#     wherever the wasm tier already skips.
+#   * Hosting a PLACEMENT COMPONENT inside the cell — instantiating its emitted
+#     wasm module with imports generated from the grant (the seam proxies plus
+#     the granted host functions), so the "seam crossing" is import
+#     satisfaction — is the py runner's cell mode, item 411 Stage 4. That code
+#     is not built in this slice: `_process_runner` has no cell path. Until it
+#     lands, this driver ESTABLISHES and VERIFIES the cell substrate (the launch
+#     + health half) but REFUSES to boot a component in it, because a cell that
+#     silently fell back to an ordinary in-process body would be the exact
+#     silent downgrade the whole module exists to forbid — worse here than
+#     elsewhere, since an in-process body shares the conductor's address space.
+#     The refusal names Stage 4 as the one remaining step and points at the
+#     container rung, the same way the container rung's own cross-boundary seam
+#     refuses per-precondition pending T3.
+#
+# The in-cell health canary
+# --------------------------
+# The wasm analog of the container boot canary, and just as ACTIVE. It boots two
+# probe modules inside a fresh cell and reads what the instantiator reports, not
+# what was asked for:
+#
+#   IMPORTS=<n>          the empty module's import count (0 == zero ambient authority)
+#   AMBIENT=blocked:<e>  a module DECLARING a host import fails to instantiate
+#                        against an EMPTY import set — the cell's defining
+#                        property (item 289: an ungranted reach is a missing
+#                        import at instantiation, never a call-time surprise)
+#   AMBIENT=linked       that module instantiated anyway -> the cell grants
+#                        ambient authority -> the boundary did not take -> refuse
+#   WTVERSION=<v>        the wasmtime version that established the cell
+#
+# The AMBIENT clause is the point: a passive "the module has no imports" reading
+# proves nothing, the same way an interface list proved nothing for the
+# container's net probe. What distinguishes a cell from an ordinary instance is
+# that an UNGRANTED import cannot be satisfied, so the canary tries to
+# instantiate one and demands the failure. A cell that links it is refused like
+# any boundary that did not take.
+_CELL_PROBE_PY = r"""
+import sys
+try:
+    import wasmtime
+except Exception as exc:  # noqa: BLE001
+    print("WTIMPORT=absent:%s" % (type(exc).__name__,)); print("CELL=done"); sys.exit(0)
+eng = wasmtime.Engine()
+store = wasmtime.Store(eng)
+empty = wasmtime.Module(eng, "(module)")
+wasmtime.Instance(store, empty, [])
+print("IMPORTS=%d" % (len(empty.imports),))
+needs_host = wasmtime.Module(eng, '(module (import "revl:host" "ambient" (func)))')
+try:
+    wasmtime.Instance(store, needs_host, [])
+    print("AMBIENT=linked")
+except Exception as exc:  # noqa: BLE001 - a link/trap failure is the confinement
+    print("AMBIENT=blocked:%s" % (type(exc).__name__,))
+print("WTVERSION=%s" % (getattr(wasmtime, "__version__", "?"),))
+print("CELL=done")
+"""
+
+# The cell canary imports nothing but wasmtime and boots two tiny modules, so it
+# either answers at once or the substrate is not usable.
+_CELL_TIMEOUT = 60.0
+
+
+def evaluate_cell(pname: str, report: dict) -> tuple[list[str], str | None]:
+    """Judge one in-cell canary report against what a cell must be, PURELY.
+
+    Every clause is a refusal when it cannot be CONFIRMED, not merely when it is
+    contradicted — an unconfirmed cell and a broken one are the same thing to a
+    composition about to trust a body inside the conductor's own process. Kept
+    free of any runtime call so the whole judgment is testable with synthetic
+    reports wherever the substrate is absent, exactly as `ContainerDriver.
+    _evaluate` is."""
+    if report.get("WTIMPORT", "").startswith("absent"):
+        return [], (
+            f"process {pname!r}: the wasm-cell substrate interpreter could not "
+            f"import `wasmtime` ({report['WTIMPORT']}). The cell is a wasm "
+            f"instance under wasmtime; without the bindings the boundary cannot "
+            f"be established, and an unestablished boundary is refused, never "
+            f"downgraded to an ordinary in-process body.")
+    if "CELL" not in report:
+        return [], (
+            f"process {pname!r}: the in-cell boot canary did not complete. An "
+            f"unverified cell is refused rather than trusted.")
+    imports = report.get("IMPORTS")
+    if imports != "0":
+        return [], (
+            f"process {pname!r}: the empty cell module reports {imports!r} "
+            f"import(s) rather than 0. A cell must grant zero ambient authority, "
+            f"so a boundary that starts with any is refused.")
+    ambient = report.get("AMBIENT", "unreported")
+    if ambient == "linked":
+        return [], (
+            f"process {pname!r}: a module declaring an ungranted host import was "
+            f"instantiated inside the cell anyway, so the cell satisfies ambient "
+            f"authority. The cell's defining confinement — an ungranted reach is "
+            f"a missing import at instantiation (item 289) — did not hold, and an "
+            f"unconfirmed boundary is refused exactly like a broken one.")
+    if not ambient.startswith("blocked:"):
+        return [], (
+            f"process {pname!r}: the in-cell ambient-authority probe reports "
+            f"{ambient!r} rather than a link failure. The cell's confinement is "
+            f"unconfirmed, and an unconfirmed boundary is refused.")
+    version = report.get("WTVERSION", "?")
+    return [
+        f"empty cell instantiates with 0 imports (zero ambient authority), "
+        f"confirmed in-cell under wasmtime {version}",
+        f"an ungranted host import fails at instantiation "
+        f"({ambient.split(':', 1)[1]}), confirmed in-cell — item 289's chain",
+    ], None
+
+
+class WasmCellDriver:
+    """The `wasm-cell` rung: establish + in-cell canary + teardown.
+
+    One instance per placement run. It establishes the cell substrate through
+    the cordis-wasm venv's interpreter and verifies the cell's confinement from
+    inside, then REFUSES to host a placement component (the py runner's cell mode
+    is item 411 Stage 4, not built) rather than boot it unconfined.
+
+    `runtime_reason` and `probe` are injectable so the whole driver is testable
+    at the plan layer with the substrate absent; both default to the real
+    cordis-wasm interpreter path the wasm tier uses.
+    """
+
+    rung = "wasm-cell"
+    name = "wasmtime"
+
+    def __init__(self, runtime_reason=None, probe=None) -> None:
+        self._runtime_reason = runtime_reason
+        self._probe = probe
+        self._cells: dict[str, str] = {}
+
+    # -- preflight ---------------------------------------------------------
+    def preflight(self, pname: str, env: dict, ctx: dict) -> tuple[dict | None, str | None]:
+        """Establish the cell substrate and prove its confinement from inside,
+        then refuse the launch naming the one unbuilt step. Returns
+        `(None, diagnostic)` in this slice on every path — a refusal — because a
+        confirmed cell substrate is not yet a hosted component, and a cell that
+        cannot host is refused rather than downgraded."""
+        backend = ctx.get("backend", "py")
+        if backend != "py":
+            return None, (
+                f"process {pname!r} is placed in a `wasm-cell` sandbox on the "
+                f"{backend!r} backend, but a cell is hosted inside a py placement "
+                f"process (the isolation is wasm; the tier is py). Move the "
+                f"process to the `py` tier, or take it out of the sandbox.")
+        # Defensive: the cell takes no OS envelope, and a non-default fs/net was
+        # already refused where it entered. If one reached here the plan layer is
+        # out of step with this driver, which is a refusal, not a silent accept.
+        if env.get("fs") or env.get("net", "none") != "none":
+            return None, (
+                f"process {pname!r}: a `wasm-cell` grants nothing through an "
+                f"fs/net OS envelope (its confinement is a generated import set), "
+                f"but this process reached the driver with a non-default fs/net. "
+                f"The placement refuses rather than pretend to enforce it.")
+
+        reason = self._resolve_runtime_reason()
+        if reason is not None:
+            return None, (
+                f"process {pname!r} declares the `wasm-cell` isolation rung, but "
+                f"the wasm substrate is not available: {reason}. The cell is a "
+                f"wasm instance under wasmtime, so it cannot be established here, "
+                f"and a declared isolation is never downgraded to an unconfined "
+                f"process — the placement refuses. Provide the cordis-wasm "
+                f"runtime (the same one the wasm tier needs), use the `container` "
+                f"rung, or take the process out of the sandbox.")
+
+        report, probe_err = self._run_probe(pname)
+        if probe_err:
+            return None, probe_err
+        evidence, err = evaluate_cell(pname, report)
+        if err:
+            return None, err
+
+        # The substrate is real and confirmed. What is missing is the py runner's
+        # cell mode (item 411 Stage 4): instantiating THIS component's emitted
+        # wasm module with the import set generated from its grant. Refuse naming
+        # it, and carry the verified-substrate evidence so the progress is
+        # auditable rather than swallowed by the refusal.
+        established = "".join(f"\n  - {line}" for line in evidence)
+        return None, (
+            f"process {pname!r}: the `wasm-cell` substrate is established and "
+            f"verified in-cell:{established}\n"
+            f"But hosting a placement component inside the cell needs the py "
+            f"runner's cell mode — instantiating the component's emitted wasm "
+            f"module with the seam-forwarding import set generated from its grant "
+            f"— which is item 411 Stage 4 and not built in this slice "
+            f"(`_process_runner` has no cell path yet). Until it lands, the "
+            f"wasm-cell rung refuses rather than booting {pname!r} as an ordinary "
+            f"in-process body that nothing confines. Use the `container` rung, "
+            f"which establishes an OS boundary today, or take the process out of "
+            f"the sandbox.")
+
+    def _resolve_runtime_reason(self) -> str | None:
+        if self._runtime_reason is not None:
+            return self._runtime_reason()
+        from .run_wasm import wasm_runtime_reason  # noqa: PLC0415 - lazy, avoids a cycle
+        return wasm_runtime_reason()
+
+    def _cordis_python(self) -> str | None:
+        from .run_wasm import _cordis_wasm_python  # noqa: PLC0415
+        return _cordis_wasm_python()
+
+    def _run_probe(self, pname: str) -> tuple[dict, str | None]:
+        """Boot the in-cell canary through the substrate interpreter and parse
+        its report — or a diagnostic when it could not run at all."""
+        if self._probe is not None:
+            return self._probe(pname)
+        python = self._cordis_python()
+        if python is None:  # pragma: no cover - runtime_reason already refused this
+            return {}, (f"process {pname!r}: no cordis-wasm interpreter to boot "
+                        f"the in-cell canary.")
+        rc, out, err = _run([python, "-c", _CELL_PROBE_PY], timeout=_CELL_TIMEOUT)
+        if rc != 0 or "CELL=done" not in out:
+            return {}, (
+                f"process {pname!r}: the in-cell boot canary did not run under "
+                f"the wasm substrate ({_tail(err) or _tail(out)}). An unverified "
+                f"cell is refused rather than trusted.")
+        report: dict = {}
+        for line in out.splitlines():
+            key, _, value = line.partition("=")
+            if key:
+                report[key] = value
+        return report, None
+
+    # -- launch ------------------------------------------------------------
+    def wrap(self, pname: str, cmd: list, proc_env: dict | None,
+             achieved: dict) -> tuple[list, dict | None]:  # pragma: no cover
+        """Unreachable in this slice: `preflight` refuses every wasm-cell
+        placement before a command is ever built, so a wrapped launch cannot be
+        reached. Kept to satisfy the driver contract, and to fail LOUDLY rather
+        than pass a command through unconfined if the refusal above is ever
+        weakened without landing the runner's cell mode."""
+        raise AssertionError(
+            f"wasm-cell launch reached for {pname!r} without the py runner's "
+            f"cell mode (item 411 Stage 4); preflight must have refused. Booting "
+            f"the component here would run it unconfined in-process.")
+
+    # -- teardown ----------------------------------------------------------
+    def teardown(self, pname: str | None = None) -> None:
+        """Best-effort. A cell is an in-instance under a short-lived probe
+        interpreter with no host resource to reclaim in this slice; teardown
+        drops the driver's own bookkeeping so a conductor killed mid-run leaves
+        nothing dangling. When Stage 4 lands the hosting instance's dispose goes
+        here, mirroring `ContainerDriver.teardown`'s belt."""
+        if pname is not None:
+            self._cells.pop(pname, None)
+        else:
+            self._cells.clear()
+
+
+def resolve_driver(rung: str) -> ContainerDriver | WasmCellDriver | None:
     """The runtime driver for one isolation rung, or None when the rung has no
     driver yet. The caller REFUSES on None: a declared isolation with no driver
-    must never fall through to an unconfined process."""
+    must never fall through to an unconfined process.
+
+    Two rungs have drivers now — `container` (the OS boundary) and `wasm-cell`
+    (the in-process cell substrate). `microvm` remains the one driverless rung
+    (it needs a hypervisor / `/dev/kvm`), so it still resolves to None and
+    refuses."""
     if rung == ContainerDriver.rung:
         return ContainerDriver()
+    if rung == WasmCellDriver.rung:
+        return WasmCellDriver()
     return None
