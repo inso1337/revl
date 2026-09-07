@@ -758,38 +758,47 @@ def enforce_document(document: dict, profile: AdmissionProfile | None) -> None:
 
 
 def enforce_document_per_root(document: dict,
-                              owner_profiles: dict) -> None:
+                              owners: dict) -> None:
     """The granted-allowlist half, PER ROOT (roadmap item 426 S4).
 
-    `owner_profiles` maps each admitted component's name to the profile of the
-    ROOT that declared it. A component whose owner has no granted allowlist
-    (`None` — first-party / unrestricted) is not checked; every other component's
-    reaches are bounded by ITS OWN root's granted set.
+    `owners` maps each admitted component's name to `(root, profile)`: the
+    canonical source ROOT that declared it (an opaque, hashable owner key — the
+    compiler passes the root module's abspath) and that root's admission
+    profile. A component whose owner profile has no granted allowlist (`None` —
+    first-party / unrestricted) is not checked; every other component's reaches
+    are bounded by ITS OWN root's granted set.
 
-    Components are grouped by owning root profile so the internal-wiring
-    exemption (`check_allowlist`'s "binds to the candidate's OWN provision")
-    counts only the sibling components under the SAME profile as "own": a
-    non-first-party row reaching a service that a root under a DIFFERENT profile
-    provides is an outward reach and must be granted. The `manifest` in the
-    document view is left whole, so binding-target resolution still sees the
-    entire resulting composition — only the set of components being checked, and
-    the set counted as "own", is narrowed to the root. Grouping (rather than one
-    call per component) keeps a first-party turn
-    that legitimately splits into several own components inside one exemption
-    scope, matching the pre-split whole-turn semantics for a uniform root."""
-    if not owner_profiles:
+    Components are grouped by owning ROOT — NOT by the profile object — so the
+    internal-wiring exemption (`check_allowlist`'s "binds to the candidate's OWN
+    provision") counts only the sibling components declared by the SAME root as
+    "own": a row reaching a service that a DIFFERENT root provides is an outward
+    reach and must be granted, even when the two roots share one immutable
+    `AdmissionProfile` object (#643 — keying on `id(profile)` merged such roots
+    into one bucket and leaked one root's provision into another's exemption
+    scope; the decision must not depend on Python object reuse). The `manifest`
+    in the document view is left whole, so binding-target resolution still sees
+    the entire resulting composition — only the set of components being checked,
+    and the set counted as "own", is narrowed to the root. Grouping by root
+    (rather than one call per component) keeps a turn that legitimately splits
+    into several own components under one root inside one exemption scope,
+    matching the pre-split whole-turn semantics for a uniform root."""
+    if not owners:
         return
-    # group component names by (owning root profile), preserving the components'
-    # order in the document so refusals are deterministic.
-    by_profile: dict[int, tuple[AdmissionProfile, list]] = {}
+    # group component names by owning ROOT, preserving the components' order in
+    # the document so refusals are deterministic. Each root maps to exactly one
+    # profile, so the bucket carries that root's profile alongside its rows.
+    by_root: dict[object, tuple[AdmissionProfile, list]] = {}
     components = document.get("components") or []
     for comp in components:
-        profile = owner_profiles.get(comp.get("name"))
+        owner = owners.get(comp.get("name"))
+        if owner is None:
+            continue
+        root, profile = owner
         if profile is None or profile.granted is None:
             continue
-        bucket = by_profile.setdefault(id(profile), (profile, []))
+        bucket = by_root.setdefault(root, (profile, []))
         bucket[1].append(comp)
-    for profile, comps in by_profile.values():
+    for profile, comps in by_root.values():
         view = dict(document)
         view["components"] = comps
         check_allowlist(view, profile)
