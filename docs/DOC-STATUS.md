@@ -109,7 +109,7 @@ was corrected by hand and had drifted back within a day.
 | crash-recovery.md | needs-work | 44 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
-| deploy.md | needs-work | 3 |  |
+| deploy.md | needs-work | 5 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 76 |  |
 | design-v2-realms.md | needs-work | 17 |  |
@@ -197,5 +197,5 @@ was corrected by hand and had drifted back within a day.
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
 | wit-bridge.md | needs-work | 41 |  |
-| witnessed-fs.md | needs-work | 0 |  |
+| witnessed-fs.md | needs-work | 5 |  |
 <!-- docgen:doc-status end -->
