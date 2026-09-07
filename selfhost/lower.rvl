@@ -3762,11 +3762,18 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
       if (a.msg != "") {
         return mk_verd(tagged(a.tag, a.msg), body_line(pm.body, mcx, comp.line))
       }
-      // `await` outside a component body (lower.py's method-lowering AwaitStmt
-      // check): an await in a SYNC provide method has no in-flight window; an
-      // async method (or an activation body) may await. Fires during body
-      // lowering, before the G4/A1 provider verdicts.
-      if (decl.name != "" && !decl.isAsync && has_await(pm.body, 0)) {
+      // `await` outside a component body (parser.py's `await` statement check,
+      // which fires on the METHOD's own `async fn` modifier — `in_method and
+      // not in_async_method` — before any lowering or service resolution): an
+      // await in a SYNC provide method has no in-flight window; an async method
+      // (or an activation body) may await. Keyed on the method's own modifier,
+      // NOT the resolved service op, so a method that provides an UNDECLARED
+      // service (`decl.name == ""`) is still refused, exactly as the reference
+      // parser refuses it regardless of whether the service resolves. Signature
+      // parity above has already made `pm.isAsync == decl.isAsync` for every
+      // resolved decl, so this is equivalent to `!decl.isAsync` when the service
+      // is known and adds the unresolved-service surface the decl gate dropped.
+      if (!pm.isAsync && has_await(pm.body, 0)) {
         return mk_verd(tagged("A1", "`await` is only allowed in a component body"),
                        comp.line)
       }
