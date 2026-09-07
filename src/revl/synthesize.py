@@ -554,7 +554,21 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
 
         sig = ", ".join(f"{n}: {t}" for n, t in method.params)
         names = [n for n, _ in method.params]
-        arrow = f" -> {returns}" if returns else ""
+        # D-424c.9, slice C3: every value a remote provider hands back is
+        # `Untrusted[T]`, UNCONDITIONALLY. A peer is not this composition's trust
+        # domain (item 337 treats each tier boundary as its own admission domain),
+        # and a generated provider is the one construct that could quietly become
+        # the largest hole in taint (item 249) because it looks exactly like a
+        # local provider at every call site. Spelling the crossing's return
+        # `Untrusted[...]` registers the extern as a taint SOURCE at origin `net`
+        # (taint.py stamps it off the declared capability scope and strips the
+        # qualifier before base typing, so the provide body, the service contract
+        # and the emitted IR stay byte-identical). The qualifier wraps the WHOLE
+        # return — the `Ok` payload of an `on_failure(result)` method included —
+        # so nothing a peer says reaches an outbound emission without a visible
+        # `endorse`. This is the fail-closed join D-424c.9 names, not a computed
+        # one: the value is `Untrusted` whether or not any argument was.
+        arrow = f" -> Untrusted[{returns}]" if returns else ""
         extern = f"remote_{label}_{op}"
         # ONE extern per method, all of them carrying the SAME capability
         # token. D-424c.2 sketches one extern per SERVICE; that shape needs an
@@ -722,11 +736,18 @@ def _remote_header(service, label, key, host, capability, on_failure,
         ]
     lines += [
         "//",
-        "// Values are NOT tainted here. Item 424 D-424c.9 requires every value a",
-        "// remote provider returns to be `Untrusted[T]`, and that is slice C3,",
-        "// not this one. Until it lands, a value that crossed this boundary is",
-        "// indistinguishable at a call site from a local one — which is exactly",
-        "// the hole D-424c.9 exists to close. Treat it as such.",
+        "// EVERY VALUE THIS PROVIDER RETURNS IS `Untrusted[T]` (D-424c.9, slice",
+        "//   C3). The crossings below declare an `Untrusted[...]` return, so a",
+        "//   value that came off this peer is a taint SOURCE at origin `net`: it",
+        "//   is distinguishable at every call site from a local one, and it",
+        "//   cannot reach an outbound emission (a shell command, another net",
+        "//   crossing, a disclosure sink) without a declared, auditable `endorse`",
+        "//   (item 249). A peer is not this composition's trust domain, and the",
+        "//   taint is UNCONDITIONAL — the fail-closed join, never the computed",
+        "//   one — because a client is the construct most able to launder taint",
+        "//   invisibly. The qualifier is stripped before base typing, so the",
+        "//   service contract and the emitted IR are byte-identical to a local",
+        "//   provider's; only the taint lattice sees it.",
     ]
     return "\n".join(lines)
 

@@ -1,4 +1,4 @@
-"""The `remote` row: item 424 gap (c), slice C2.
+"""The `remote` row: item 424 gap (c), slices C2 and C3.
 
 `docs/design/424-dsh-language-gaps.md` §3.2 (D-424c.1 through D-424c.4) and
 §3.3, which names the exit test this file executes:
@@ -22,6 +22,12 @@ service's return types, carried into the IR and the manifest, and the generated
 body raises a fault rather than returning a quietly-empty result. Wiring that
 fault into the withdrawal cascade is the runtime half, and `test_on_failure_*`
 below pins the declaration so the day the runtime lands, something says so.
+
+Slice C3 lands here too, in two halves. D-424c.10 (the reach bound folded from
+the host alone, and the refusal of an address carrying userinfo) is under "the
+address and the reach". D-424c.9 (every value a remote provider returns is
+`Untrusted[T]`, unconditionally, so a peer's value cannot reach an outbound
+emission without a declared `endorse`) is under "the taint" at the end.
 """
 
 from __future__ import annotations
@@ -512,3 +518,142 @@ def test_synthesize_provider_refuses_an_unknown_kind():
     with pytest.raises(ValueError) as excinfo:
         synthesize_provider(program.services[0], "seam", {})
     assert "'remote'" in str(excinfo.value)
+
+
+# ---------------------------------------------------- the taint (D-424c.9, C3)
+#
+# §3.3, slice C3, first exit clause: "A client result flowing into an outbound
+# emission is refused without an `endorse` and admits with one." A peer is not
+# this composition's trust domain (item 337), so every value a remote provider
+# hands back is `Untrusted[T]`, UNCONDITIONALLY (the fail-closed join, never the
+# computed one). The reach half of C3 (D-424c.10, the host-only reach bound and
+# the userinfo refusal) is under "the address and the reach" above.
+
+# A shell sink and a consumer that funnels a remote result into it. The consumer
+# does not know its provider is remote — the taint is what the boundary adds, not
+# anything the consumer wrote.
+TAINT_SERVICES = """
+service Billing { emission fn fetch(id: Str) -> Str }
+extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }
+"""
+
+
+def _taint_consumer(op_decl: str, body: str) -> str:
+    return """
+service Ops { %s }
+component Consumer requires billing: Billing provides ops: Ops {
+  provide ops {
+    fn go(id) {
+%s
+    }
+  }
+}
+""" % (op_decl, body)
+
+
+def test_every_returned_value_is_untrusted_in_the_synthesized_source(tmp_path):
+    """The crossing declares an `Untrusted[...]` return for every method that
+    returns a value, and NONE for a method that returns nothing — there is no
+    value to taint on a `Unit` crossing, and `Untrusted[]` is not a type."""
+    write(tmp_path, services=BILLING, base="""
+composition Shop {
+  use "services.rvl"
+  remote @billing provides billing: Billing at host("billing.internal:8443")
+}
+""")
+    table = resolve(tmp_path)
+    row, = table.rows
+    text = table.sources[row.source]
+    # `charge -> Bool` is tainted; `refund` returns nothing and stays bare.
+    assert "fn remote_billing_charge(account: Str, amount: Int) -> Untrusted[Bool]" in text
+    assert "fn remote_billing_refund(account: Str, amount: Int)\n" in text
+    assert "-> Untrusted[Unit]" not in text and "Untrusted[]" not in text
+    # The header states the rule rather than the stale "values are NOT tainted".
+    assert "EVERY VALUE THIS PROVIDER RETURNS IS `Untrusted[T]`" in text
+
+
+def test_on_failure_result_taints_the_whole_result(tmp_path):
+    """The qualifier wraps the WHOLE return, the `Ok` payload of an
+    `on_failure(result)` method included, so a peer's success value is no more
+    trusted than its failure. `top_qualifier` sees `Untrusted` and registers the
+    crossing as a source (taint.py); a qualifier buried inside the `Result` would
+    not."""
+    write(tmp_path, ledger=LEDGER, base="""
+composition F {
+  use "ledger.rvl"
+  remote @ledger provides ledger: Ledger
+    at host("ledger.internal:8443") on_failure(result)
+}
+""")
+    table = resolve(tmp_path)
+    row, = table.rows
+    text = table.sources[row.source]
+    assert "-> Untrusted[Result[Str, Str]]" in text
+
+
+def test_a_remote_result_flowing_outbound_is_refused_without_endorse(tmp_path):
+    """The headline exit clause. The consumer's source is unchanged from the
+    local case; the refusal is the boundary's taint, at the `run` shell sink."""
+    write(tmp_path, services=TAINT_SERVICES,
+          consumer=_taint_consumer(
+              "emission[billing, run] fn go(id: Str)",
+              "      let r = emit billing.fetch(id)\n"
+              "      emit run(r)"),
+          base="""
+composition Shop {
+  use "services.rvl"
+  row @c from "consumer.rvl" provides ops
+  remote @billing provides billing: Billing at host("billing.internal:8443")
+}
+""")
+    with pytest.raises(RevlError) as excinfo:
+        compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+    message = str(excinfo.value)
+    assert "untrusted value (net)" in message
+    assert "`run`" in message
+
+
+def test_a_declared_endorse_lets_the_remote_result_pass(tmp_path):
+    """The other half: the same flow admits with a declared, auditable `endorse`
+    on the value's origin (item 249). Endorsement is the ONLY downgrade, and it
+    is a visible act — the point of the taint is that it cannot be silent."""
+    write(tmp_path, services=TAINT_SERVICES,
+          consumer=_taint_consumer(
+              "emission[billing, run] endorse[net] fn go(id: Str)",
+              "      let r = emit billing.fetch(id)\n"
+              "      let s = endorse[net](r, reason = \"operator-reviewed\")\n"
+              "      emit run(s)"),
+          base="""
+composition Shop {
+  use "services.rvl"
+  row @c from "consumer.rvl" provides ops
+  remote @billing provides billing: Billing at host("billing.internal:8443")
+}
+""")
+    # Must not raise: the endorse is declared, so the downgrade is admitted.
+    compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+
+
+def test_the_consumer_source_is_byte_identical_to_the_local_case(tmp_path):
+    """D-424c.1 meets D-424c.9: the taint is a property of the BOUNDARY, not of
+    the consumer. The consumer that emits a remote result outbound is refused,
+    but a LOCAL provider of the same key admits the identical consumer — the one
+    word that differs is the composition row, never a line the consumer wrote."""
+    consumer = _taint_consumer(
+        "emission[billing, run] fn go(id: Str)",
+        "      let r = emit billing.fetch(id)\n      emit run(r)")
+    local = """
+component LocalBilling provides billing: Billing {
+  provide billing { fn fetch(id) = "row" }
+}
+"""
+    write(tmp_path, services=TAINT_SERVICES, consumer=consumer, local=local,
+          base="""
+composition Shop {
+  use "services.rvl"
+  row @c from "consumer.rvl" provides ops
+  row @b from "local.rvl" provides billing
+}
+""")
+    # A local provider returns a clean value, so the identical consumer admits.
+    compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))

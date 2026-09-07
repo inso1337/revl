@@ -411,13 +411,22 @@ untrusted-author case by construction, and the version is claimed exactly as
 "A2A 1.0.0", never bare "A2A". This is the same subset `revl import a2a` binds,
 from the other entry point onto the protocol.
 
-### Values are not tainted yet
+### Every returned value is `Untrusted[T]` (slice C3)
 
-Item 424 D-424c.9 requires every value a remote provider returns to be
-`Untrusted[T]`, and that is slice C3, not this one. Until it lands, a value that
-crossed this boundary is indistinguishable at a call site from a local one —
-which is exactly the hole D-424c.9 exists to close. The generated header says so
-in the artifact itself.
+Item 424 D-424c.9: every value a remote provider returns is `Untrusted[T]`,
+UNCONDITIONALLY. The synthesized crossings declare an `Untrusted[...]` return, so
+a value that came off the peer is a taint SOURCE at origin `net` (item 249): it
+is distinguishable at every call site from a local one, and it cannot reach an
+outbound emission — a shell command, another net crossing, a disclosure sink —
+without a declared, auditable `endorse`. A peer is not this composition's trust
+domain (item 337 treats each tier boundary as its own admission domain), and the
+taint is the fail-closed join and not the computed one: the value is `Untrusted`
+whether or not any argument was, because a generated provider is the construct
+most able to launder taint invisibly — it looks exactly like a local provider at
+every call site. The qualifier is stripped before base typing, so the provide
+body, the service contract and the emitted IR stay byte-identical to a local
+provider's; only the taint lattice sees it. The reach half of C3 (D-424c.10, the
+host-only reach bound) landed with C2.
 
 ### The one thing `remote` costs the lexer: nothing
 
