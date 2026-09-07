@@ -32,7 +32,7 @@ public final class RunRuntimeValues {
 
         // --- method-time compensation ordering on a real EffectScope ------
         Context root = Contexts.create();
-        root.provide(ServiceKey.of(revl.Components.Probe.class), new Rec());
+        root.provide(ServiceKey.of(revl.Components.Probe.class, "probe"), new Rec());
         Disposable comp = root.plugin(new revl.Components.CPlugin());
         revl.Components.N n = root.get(revl.Components.N.class);
         n.ping("a");

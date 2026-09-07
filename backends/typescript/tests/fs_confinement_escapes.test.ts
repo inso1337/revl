@@ -10,8 +10,8 @@
 // jail, so none of them is a hypothetical.
 //
 // These drive the host module's entry points DIRECTLY rather than a compiled
-// artifact. That is deliberate: an inverse is a capability-free `pure` extern,
-// and `revl recover` reconstructs one from a WAL witness with no revl source
+// artifact. That is deliberate: an inverse carries no capability token, and
+// `revl recover` reconstructs one from a WAL witness with no revl source
 // involved, so the witness a test hands `fsRestore`/`fsUnrm` is exactly the
 // attacker's reach. `ts_witnessed_fs.test.ts` covers the composed path.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'

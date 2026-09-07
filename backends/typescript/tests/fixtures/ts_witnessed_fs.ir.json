@@ -315,8 +315,91 @@
   },
   "externs": [
     {
-      "name": "restore",
+      "name": "resolve_within",
       "class": "pure",
+      "params": [
+        {
+          "name": "path",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Str, FsError]",
+      "bodies": {
+        "py": "\n    import revl_fs_workspace as _ws\n    try:\n        target = _ws.resolve_within(path)\n    except _ws.FsOpError as e:\n        # total by construction (item 422 F6): the guard raises `FsOpError` or\n        # nothing, and `ConfinementError` is a subclass, so one `except` covers\n        # EWORKSPACE / EOUTSIDE / EINVAL and the declared Result is the whole\n        # result.\n        return Err(e.as_error())\n    return Ok(target)\n"
+      },
+      "refs": {
+        "ts": {
+          "symbol": "fsResolveWithin",
+          "path": "backends/typescript/revl_fs_ts.ts",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
+          "root": "stdlib"
+        }
+      }
+    },
+    {
+      "name": "lexists",
+      "class": "pure",
+      "params": [
+        {
+          "name": "path",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Bool, FsError]",
+      "bodies": {
+        "py": "\n    import revl_fs_workspace as _ws\n    try:\n        target = _ws.resolve_within(path)\n        found = _ws.lexists_confined(target)\n    except _ws.FsOpError as e:\n        return Err(e.as_error())\n    return Ok(found)\n"
+      },
+      "refs": {
+        "ts": {
+          "symbol": "fsLexists",
+          "path": "backends/typescript/revl_fs_ts.ts",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
+          "root": "stdlib"
+        }
+      }
+    },
+    {
+      "name": "is_dir",
+      "class": "pure",
+      "params": [
+        {
+          "name": "path",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Bool, FsError]",
+      "bodies": {
+        "py": "\n    import revl_fs_workspace as _ws\n    try:\n        target = _ws.resolve_within(path)\n        found = _ws.is_dir_confined(target)\n    except _ws.FsOpError as e:\n        return Err(e.as_error())\n    return Ok(found)\n"
+      },
+      "refs": {
+        "ts": {
+          "symbol": "fsIsDir",
+          "path": "backends/typescript/revl_fs_ts.ts",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
+          "root": "stdlib"
+        }
+      }
+    },
+    {
+      "name": "settled",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "py": "\n    return None\n"
+      },
+      "refs": {
+        "ts": {
+          "symbol": "fsSettled",
+          "path": "backends/typescript/revl_fs_ts.ts",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
+          "root": "stdlib"
+        }
+      }
+    },
+    {
+      "name": "restore",
+      "class": "acquire",
       "params": [
         {
           "name": "w",
@@ -331,14 +414,22 @@
         "ts": {
           "symbol": "fsRestore",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
           "root": "stdlib"
         }
+      },
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "settled"
+        },
+        "args": []
       }
     },
     {
       "name": "unrm",
-      "class": "pure",
+      "class": "acquire",
       "params": [
         {
           "name": "w",
@@ -353,14 +444,22 @@
         "ts": {
           "symbol": "fsUnrm",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
           "root": "stdlib"
         }
+      },
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "settled"
+        },
+        "args": []
       }
     },
     {
       "name": "unmove",
-      "class": "pure",
+      "class": "acquire",
       "params": [
         {
           "name": "w",
@@ -375,14 +474,22 @@
         "ts": {
           "symbol": "fsUnmove",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
           "root": "stdlib"
         }
+      },
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "settled"
+        },
+        "args": []
       }
     },
     {
       "name": "rmdir_if_empty",
-      "class": "pure",
+      "class": "acquire",
       "params": [
         {
           "name": "w",
@@ -397,9 +504,17 @@
         "ts": {
           "symbol": "fsRmdirIfEmpty",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
           "root": "stdlib"
         }
+      },
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "settled"
+        },
+        "args": []
       }
     },
     {
@@ -423,7 +538,7 @@
         "ts": {
           "symbol": "fsWrite",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
           "root": "stdlib"
         }
       },
@@ -465,7 +580,7 @@
         "ts": {
           "symbol": "fsRm",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
           "root": "stdlib"
         }
       },
@@ -511,7 +626,7 @@
         "ts": {
           "symbol": "fsMove",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
           "root": "stdlib"
         }
       },
@@ -553,7 +668,7 @@
         "ts": {
           "symbol": "fsMkdir",
           "path": "backends/typescript/revl_fs_ts.ts",
-          "sha256": "4823ee2d2a837ac85c1aa0da0a7474273fd002a33ee3aed12a3d7effb7abc92b",
+          "sha256": "d13be699687fb0f0ace20f764b0856a1d672f43b55f1778b89dcf23be6d9f0ea",
           "root": "stdlib"
         }
       },
