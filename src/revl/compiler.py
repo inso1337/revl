@@ -21,7 +21,7 @@ from .hostfile import program_has_body_file as _program_has_body_file
 from .hostfile import resolve_body_files as _resolve_body_files
 from .hostref import program_has_ref as _program_has_ref
 from .hostref import resolve_refs as _resolve_refs
-from .lower import IR_TOPLEVEL_FIELDS, check_and_lower
+from .lower import IR_SCHEMA_REVISIONS, IR_TOPLEVEL_FIELDS, check_and_lower
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
 from .typecheck import format_type, parse_type
 
@@ -621,6 +621,39 @@ def _refuse_unknown_ir_fields(manifest: dict, filename: str) -> None:
               "recompile it with this frontend, or upgrade the frontend"))
 
 
+def _refuse_unknown_schema_revision(manifest: dict, filename: str) -> None:
+    """Refuse a staged IR document stamped with a schema revision this frontend
+    does not know, naming the offending revision (roadmap item 479).
+
+    The companion of `_refuse_unknown_ir_fields`: that refuses an unknown field
+    *name*, this refuses a known field (`ir_version`) carrying an unrecognized
+    *revision*. A document at a revision outside `IR_SCHEMA_REVISIONS` was
+    emitted by a newer/forked frontend or a drifted gate crate; best-effort
+    decoding it under the wrong revision is exactly how a crate/frontend skew
+    goes undetected. Fail closed at the boundary, naming the revision.
+
+    A bare manifest may legitimately omit `ir_version` (an unversioned
+    `manifest`+`services` handoff, or the `plan` reassembly whose revision is
+    `None` when neither side carried one); those pass — only a *present*,
+    unrecognized revision is refused.
+    """
+    if "ir_version" not in manifest:
+        return
+    revision = manifest["ir_version"]
+    if revision is None or revision in IR_SCHEMA_REVISIONS:
+        return
+    known = ", ".join(str(rev) for rev in sorted(IR_SCHEMA_REVISIONS))
+    raise RevlError(
+        filename, 0,
+        f"staged IR declares unknown schema revision `ir_version` {revision!r}; "
+        f"this frontend refuses an IR document at a revision it does not know "
+        f"rather than decoding it under the wrong one (known revisions: "
+        f"{known})",
+        hint=("a revision outside the known set means the document was emitted "
+              "by a newer or forked frontend, or a drifted gate — recompile it "
+              "with this frontend, or upgrade the frontend"))
+
+
 def compile_files(paths: list[str], manifest: dict | None = None,
                   replacing: tuple[str, ...] = (),
                   sources: dict[str, str] | None = None,
@@ -793,9 +826,12 @@ def compile_files(paths: list[str], manifest: dict | None = None,
 
     ambient = None
     if manifest is not None:
-        # item 479: refuse an unknown top-level field at the IR boundary BY NAME
-        # before reading any member, rather than silently ignoring it.
+        # item 479: refuse an unknown top-level field, then an unrecognized
+        # schema revision, at the IR boundary BY NAME before reading any member,
+        # rather than silently ignoring it or decoding under the wrong revision.
         _refuse_unknown_ir_fields(manifest, paths[0] if paths else "<manifest>")
+        _refuse_unknown_schema_revision(
+            manifest, paths[0] if paths else "<manifest>")
         running = manifest.get("manifest", manifest)
         dropped = set(replacing) | {comp.name for comp in merged.components}
         ambient = {
