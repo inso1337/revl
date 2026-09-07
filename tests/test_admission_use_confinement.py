@@ -4,10 +4,11 @@ The MCP transport refuses an absolute or upward-traversing `use` path in
 source that arrived over the wire (roadmap 425 F2, `mcp.server._jail_refusal`).
 The same source reaches the compiler through doors that have no transport in
 front of them: `Session.admit` (item 330, and the in-language `admit` crossing
-behind it), `Gate.propose` (item 334), and `compile_under_authoring` called as
-a library. Each compiled under the untrusted-author profile and followed the
-`use` to disk, so the refusal handed back as the verdict disclosed whether the
-path exists and what its first token is.
+behind it), `Gate.propose` (item 334), `compile_under_authoring` called as a
+library, and `gate_service.admit`/`admit_structured` (item 144, the `Gate.admit`
+operation reached over the interop bridge). Each admits source whose author is
+untrusted, so each admits under the untrusted-author profile; a `use` resolved
+to disk would have disclosed whether the path exists and what its first token is.
 
 The confinement now lives in the compile itself, keyed on `profile.untrusted`,
 which is the one fact every door already states. These tests hold it at each
@@ -261,6 +262,68 @@ def test_gate_service_admits_the_submitted_text_not_the_on_disk_file(
         json.dumps({"ondisk.rvl": "component Bogus { }\n"}), ""))
     assert verdict["ok"] is True, verdict
     assert verdict["admitted"] == ["Bogus"]
+
+
+# ---------------------------------------- the cross-tier bridge gate
+#
+# `gate_service.admit` / `admit_structured` (item 144, the `Gate.admit`
+# operation reached over the interop bridge) admit a candidate handed in as
+# JSON. That candidate is source that arrived from another tier, so — like
+# `Session.admit` behind the in-process crossing — it is admitted under the
+# untrusted-author profile, and its `use` imports resolve from the supplied
+# in-memory sources rather than the admitting process's filesystem. The
+# module docstring's "reads no disk" is what makes the extern `pure`, and the
+# confinement is what makes it true for a `use` the candidate wrote. The
+# refusal is handed back as the verdict's `diagnostic` (the gate never raises
+# across the seam), so these hold the shape on the value the consumer reads.
+
+_BRIDGE_PROBES = ["/etc/passwd", "../../../../../etc/passwd", "../outside.rvl"]
+
+
+@pytest.mark.parametrize("gate", ["admit", "admit_structured"])
+def test_a_bridge_gate_confines_an_absolute_use_in_its_verdict(gate, secret):
+    fn = getattr(gate_service, gate)
+    for path in [str(secret), *_BRIDGE_PROBES]:
+        verdict = json.loads(fn(json.dumps(
+            {"cand.rvl": _TURN.format(path=path)}), ""))
+        assert verdict["ok"] is False, (gate, path, verdict)
+        diag = verdict["diagnostic"]
+        assert _RULE in diag, (gate, path, diag)
+        # the file's content and the two oracle messages never come back
+        assert "SECRET_TOKEN" not in diag, (gate, path)
+        assert "cannot find imported module" not in diag, (gate, path)
+        assert "expected a top-level declaration" not in diag, (gate, path)
+
+
+def test_the_bridge_refusal_is_not_an_existence_oracle(secret, monkeypatch):
+    """The verdict is byte-identical modulo the path whether or not the named
+    file exists, and nothing on disk is consulted on the way to it."""
+    present = str(secret)
+    absent = str(secret.parent / "definitely-not-here.txt")
+
+    def _boom(*a, **k):
+        raise AssertionError("the loader touched the filesystem under confinement")
+
+    monkeypatch.setattr(_compiler, "parse_file", _boom)
+    monkeypatch.setattr(_compiler._ModuleLoader, "_exists", _boom)
+
+    def _diag(path):
+        return json.loads(gate_service.admit(
+            json.dumps({"cand.rvl": _TURN.format(path=path)}), ""))["diagnostic"]
+
+    assert _diag(present).replace(present, "X") == _diag(absent).replace(absent, "X")
+
+
+def test_the_bridge_still_admits_a_clean_candidate():
+    """The confinement is on the escaping `use` path only: a candidate that
+    provides a new key admits, and the verdict is `ok`."""
+    verdict = json.loads(gate_service.admit(json.dumps({
+        "/x/extra.rvl":
+            "service Thing { fn ping() -> Int }\n"
+            "component Extra provides other: Thing "
+            "{ provide other { fn ping() = 3 } }\n"}), ""))
+    assert verdict["ok"] is True, verdict
+    assert verdict["admitted"] == ["Extra"]
 
 
 # ------------------------------------------ the live per-turn door

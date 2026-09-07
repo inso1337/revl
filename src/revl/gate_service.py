@@ -23,6 +23,15 @@ process seam. A gate marked `emission` (as truc's in-process one is) would be
 address-space-bound and could not be a bridge service; that the compile is
 genuinely effect-free is what makes Path A possible.
 
+The candidate arrives from another tier, so it is admitted under the
+untrusted-author profile (`AdmissionProfile.untrusted_author`), the same profile
+`Session.admit` applies to source that crosses the in-process admission door:
+its `use` imports resolve out of the supplied in-memory `sources` (and the
+installed search path), never the admitting process's filesystem. That is what
+keeps the "reads no disk" claim above true of a `use` the candidate wrote — a
+`use "<path>"` followed to disk would make the compile a filesystem read, and
+the diagnostic returned to the consumer a report of what is on the host.
+
 The JSON contract (values only, so it crosses the wire by copy):
 
   admit(sources_json, manifest_json) -> verdict_json
@@ -49,6 +58,7 @@ def admit(sources_json: str, manifest_json: str) -> str:
     docstring). Never raises across the boundary: a compiler refusal (G2/G3/G4)
     is returned as ``ok: false`` with the diagnostic, so the seam stays total.
     """
+    from revl.admit_profile import AdmissionProfile  # noqa: PLC0415
     from revl.compiler import compile_files  # noqa: PLC0415 — the gate, in-process
     from revl.errors import RevlError  # noqa: PLC0415
 
@@ -56,7 +66,8 @@ def admit(sources_json: str, manifest_json: str) -> str:
     running = json.loads(manifest_json) if manifest_json else None
     paths = list(sources.keys())
     try:
-        ir = compile_files(paths, manifest=running, sources=sources)
+        ir = compile_files(paths, manifest=running, sources=sources,
+                           profile=AdmissionProfile.untrusted_author(()))
     except RevlError as error:
         return json.dumps({
             "ok": False,
@@ -99,6 +110,7 @@ def admit_structured(sources_json: str, manifest_json: str) -> str:
     offending subject, the call path (the why-trace steps) and the mapped fix
     all cross to the generator without prose-parsing. Never raises across the
     boundary — a refusal is a value, so the seam stays total."""
+    from revl.admit_profile import AdmissionProfile  # noqa: PLC0415
     from revl.compiler import compile_files  # noqa: PLC0415 — the gate, in-process
     from revl.errors import RevlError  # noqa: PLC0415
     from revl import diagnostics  # noqa: PLC0415
@@ -107,7 +119,8 @@ def admit_structured(sources_json: str, manifest_json: str) -> str:
     running = json.loads(manifest_json) if manifest_json else None
     paths = list(sources.keys())
     try:
-        ir = compile_files(paths, manifest=running, sources=sources)
+        ir = compile_files(paths, manifest=running, sources=sources,
+                           profile=AdmissionProfile.untrusted_author(()))
     except RevlError as error:
         record = diagnostics.classify(error)
         code = record.get("code")
