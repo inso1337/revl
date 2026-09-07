@@ -162,7 +162,32 @@ def write(path, data: str, *, expect: Expectation = None) -> WriteReceipt:
         )
 
     real = _runtime.resolve_within(str(path))
-    handle = _runtime.open_confined_write(real)
+
+    # A positive content expectation requires the target to ALREADY exist, so it
+    # is opened existing-only (create=False). Opening create-capable and then
+    # refusing on `handle.created` was a fail-open (issue #626): the target inode
+    # was transiently created before the guard refused it, leaving observable
+    # filesystem events and a process-death window in which an empty file could
+    # survive. Existing-only means a missing target is refused before any inode
+    # exists. `ABSENT` and `None` still open create-capable — an absent-required
+    # or unconditional write legitimately creates the target.
+    positive_digest = isinstance(expect, str)
+    try:
+        handle = _runtime.open_confined_write(real, create=not positive_digest)
+    except FsOpError as exc:
+        if positive_digest and exc.code == "ENOENT":
+            # The target does not exist (missing leaf, or a missing parent), so
+            # the recorded content cannot be present. Refuse with EEXPECT and
+            # nothing created — the existing-only open never made an inode.
+            raise FsOpError(
+                "EEXPECT",
+                "expect=<digest> requires the recorded content to still be "
+                "present, but the target does not exist; the write is refused "
+                "and nothing was created",
+                real,
+            ) from None
+        raise
+
     committed = False
     try:
         # Facts from the ORIGINAL held descriptor, captured before any content
@@ -180,17 +205,10 @@ def write(path, data: str, *, expect: Expectation = None) -> WriteReceipt:
                     "left unchanged",
                     handle.real,
                 )
-        elif isinstance(expect, str):
-            # A previously-absent target can never satisfy a positive content
-            # expectation; refuse rather than create-then-check.
-            if handle.created:
-                raise FsOpError(
-                    "EEXPECT",
-                    "expect=<digest> requires the recorded content to still be "
-                    "present, but the target did not exist; the write is refused "
-                    "and nothing was created",
-                    handle.real,
-                )
+        elif positive_digest:
+            # The target was opened existing-only, so it exists here; compare
+            # the recorded content against the held descriptor before any
+            # mutation. A drifted target is refused (EEXPECT), byte-unchanged.
             _runtime.expect_existing(handle, {"digest": expect})
         # expect is None: no guard.
 
