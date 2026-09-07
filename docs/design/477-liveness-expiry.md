@@ -125,21 +125,62 @@ producer's firing path runs with the fiber-settle boundary stubbed (the boundary
 cordis owns); a `@needs_cordis` end-to-end boots it on the real driver in CI.
 
 Silence DETECTION — a running heartbeat that measures `silent_ms` and calls the
-producer on its own — is deliberately not in this slice. The producer is driven
-with an observed silence (the operator-facing "what happens when this provider
-hangs past its ceiling" tool, and what the reconcile follow-up will call);
-wiring a background liveness monitor into the reactive loop is its own piece.
+producer on its own — was deliberately not in the slice above. It is now WIRED
+(issue #622).
 
-## Follow-up 2: reconcileLivenessFromWorld on restart
+## Production silence detection — LANDED (issue #622)
 
-The larger piece. On restart the in-memory expected-liveness map is stale: it
-describes the world the crashed process believed in, not the one that is now
-running. `reconcileLivenessFromWorld` rebuilds the expected liveness from the
-durable world (the WAL and the residue records the E-Stop already writes, item
-443) rather than trusting the stale map, so a provider that went silent while
-the supervisor was down is not silently re-adopted as live. This touches the
-restart path, the WAL schema and the formal accounting, and is comparable in
-size to the E-Stop itself. It stays design only until it is scoped on its own.
+`run._LivenessMonitor` is the OWNED observer. It enrols every declared-ceiling
+provider the composition can be watched for, times each against an injectable
+clock (`time.monotonic` in production, a hand-advanced clock under test), and
+when a provider makes no sign of life for longer than its declared ceiling it
+invokes `_perform_liveness_expiry` with a `silent_ms` IT computes — no test
+supplies the duration. The driver arms it BEFORE `_load` so its background poll
+interleaves with each `_drive_activation` await and can time a provider that
+never reaches ACTIVE; `_dispose_all` cancels and AWAITS the poll task, so a
+cancelled or unloaded generation leaves no independent watcher behind (a bare
+asyncio task on the reactive loop, never an OS timer or a thread).
+
+The honest scope is stated, not over-promised. The observer bounds ACTIVATION
+silence: a provider that reaches ACTIVE has answered (its ACTIVE transition ends
+the watch), a provider merely waiting on an unmet peer require is not charged its
+silence (that hang is the peer's), and steady-state per-call silence is out of
+scope (it needs a per-call progress signal the runtime does not emit). Two shapes
+are REFUSED rather than watched with a clock that would lie about them
+(`_liveness_observability`): a multi-realm `routes` bind (its liveness spans
+realms this process does not drive — a **shared-clock** case), and an activation
+that can hang on a cross into a required service (a **blocking** wait on a peer,
+not this provider's own silence). `tests/test_622_liveness_monitor.py` pins the
+classifier, the enrolment/refusal split, the compute-its-own-duration expiry, the
+healthy/unrelated/waiting non-expiry, and the no-watcher-left settle.
+
+## Follow-up 2: reconcileLivenessFromWorld on restart — LANDED (issue #624)
+
+On restart the in-memory expected-liveness map is stale: it describes the world
+the crashed process believed in, not the one now running.
+`reconcile.reconcile_liveness_from_world` (the design's `reconcileLivenessFromWorld`)
+rebuilds only the EXPECTED liveness of the restarting composition's
+declared-ceiling providers from durable world evidence — the tier-agnostic WAL
+(`wal.read_wal`), the E-Stop latch (`estop.read_latch`, item 443) and a durable
+causal trace (`why_runtime`) — rather than trusting the stale map. It is pure and
+side-effect free: it reads the world and returns a verdict, withdrawing nothing
+and adopting nothing.
+
+The one rule: it never re-adopts a provider as freshly live and never touches an
+owner it does not manage. The strongest thing durable evidence yields about a
+managed provider is a NEGATIVE or an UNKNOWN — `expired` (a durable trace attests
+a `LIVENESS_EXPIRED` withdrawal), `halted` (an armed E-Stop latch), or
+`unresolved` (everything else: valid, stale, partial and contradictory state all
+collapse here and must be re-observed by the #622 observer once the generation
+re-activates). There is deliberately no `live` verdict: "the crashed process
+recorded activation-complete" means it BELIEVED the generation live, a belief
+stale the instant the process died, so it yields `unresolved`. A version-
+unsupported or mid-file-corrupt WAL FAILS CLOSED (every managed provider
+`unresolved`, the integrity error as the reason) rather than reading a possibly-
+forged world; a component named in residue but not managed here is reported
+under `foreign` and left alone. `tests/test_624_liveness_reconcile.py` exercises
+the valid/stale/partial/unreadable crash cases, the expired/halted negatives and
+the no-cleanup-of-foreign-owners rule.
 
 ## Relates to
 

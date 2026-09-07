@@ -706,6 +706,281 @@ class _Router:
 
 
 # --------------------------------------------------------------------------
+# the production silence observer (item 477 follow-up 1, issue #622)
+# --------------------------------------------------------------------------
+#
+# #477 landed the DECLARED ceiling, the `LIVENESS_EXPIRED` vocabulary and the
+# runtime PRODUCER (`_Driver._perform_liveness_expiry`) — but drove the producer
+# with a silence duration a test supplied, explicitly deferring DETECTION. This
+# is that deferred slice: an OWNED observer that measures the silence itself and
+# invokes the producer under the declared ceiling with no test in the loop.
+#
+# The honest scope, stated up front rather than promised as a universal
+# watchdog: the observer bounds ACTIVATION silence — a provider stuck
+# mid-activation (acquiring a host resource, crossing an emission) that never
+# reaches ACTIVE. Once a provider settles ACTIVE it has answered and the
+# activation ceiling is spent; steady-state per-call silence would need a
+# per-call progress signal the runtime does not yet emit and is deliberately
+# NOT claimed here. And two shapes are REFUSED outright rather than watched with
+# a clock that would lie about them (`_liveness_observability`).
+
+
+def _hangable_crossing_kinds(body) -> set[str]:
+    """The KINDS of hangable crossing an activation body reaches: ``"host"`` (an
+    `emit`, or an `effect`/`let-effect` acquiring a host resource) and/or
+    ``"req"`` (an `effect`/`let-effect` crossing into a required service).
+
+    Mirrors the walk `lower._activation_can_hang` uses for the admission G-rule
+    — `provide` method bodies are PRUNED (they run per call, not at the
+    activation transition) — but keeps the two kinds apart, because the observer
+    treats them differently: a HOST hang is observable as silence against the
+    wall clock; a REQ hang is a wait on a peer provider and is refused (below).
+    """
+    kinds: set[str] = set()
+    if isinstance(body, dict):
+        step = body.get("step")
+        if step == "provide":
+            return kinds  # pruned: per-call, not the activation transition
+        if step == "emit":
+            kinds.add("host")
+        elif step in ("effect", "let-effect"):
+            acquire = body.get("acquire") or {}
+            if acquire.get("kind") == "host":
+                kinds.add("host")
+            elif acquire.get("kind") == "call":
+                receiver = (acquire.get("target") or {}).get("kind")
+                kinds.add("req" if receiver == "req" else "host")
+        for value in body.values():
+            kinds |= _hangable_crossing_kinds(value)
+    elif isinstance(body, list):
+        for item in body:
+            kinds |= _hangable_crossing_kinds(item)
+    return kinds
+
+
+def _liveness_observability(comp: dict) -> tuple[str, str]:
+    """Classify whether the production observer can honestly measure a declared
+    ceiling for `comp`. Returns ``(status, reason)`` where status is one of:
+
+      * ``"observable"`` — the activation can hang ONLY on host boundaries
+        (`emit`/`effect host`), whose silence the local wall clock measures.
+        The observer enrolls it.
+      * ``"shared-clock"`` — the component carries a multi-realm `routes` bind
+        (item 162): its liveness is spread across realm handles this process
+        does not drive, so a LOCAL clock would fabricate silence for a provider
+        another realm is keeping alive. REFUSED, reported, never watched.
+      * ``"blocking"`` — the activation can hang on a cross into a REQUIRED
+        service (a `req` receiver). A hang there is a wait on a peer provider,
+        not this provider's own silence; expiring the caller would misattribute
+        a hang that belongs to the callee (and the peer, if itself watched, is
+        the one that expires). REFUSED rather than charged to the wrong owner.
+
+    A component with no hangable crossing never reaches here — the admission
+    G-rule already refused a ceiling on it. The refusals are the "define or
+    refuse unsupported blocking/shared-clock cases" half of issue #622: the
+    observer says what it cannot watch instead of promising a watchdog it does
+    not have."""
+    if comp.get("routes"):
+        return ("shared-clock",
+                "declares a multi-realm `routes` bind (item 162); its liveness "
+                "spans realms this process does not drive, so a local clock "
+                "cannot honestly measure its silence")
+    kinds = _hangable_crossing_kinds(comp.get("body") or [])
+    if "req" in kinds:
+        return ("blocking",
+                "its activation can hang on a cross into a required service; a "
+                "hang there is a wait on a peer provider, not this provider's "
+                "own silence, so charging the expiry here would misattribute it")
+    if "host" in kinds:
+        return ("observable", "activation hangs only on host boundaries")
+    # defensive: a ceiling with no detectable hangable crossing (the G-rule
+    # should have refused it) — treat as unobservable rather than guess.
+    return ("blocking",
+            "no host-boundary crossing found to measure silence against")
+
+
+class _LivenessMonitor:
+    """The OWNED production silence observer for one live generation (#622).
+
+    It watches every component that declared a liveness ceiling AND that
+    `_liveness_observability` classifies ``observable``; the refused
+    (``shared-clock`` / ``blocking``) components are recorded in
+    :attr:`refused` and never polled. For each enrolled component it holds the
+    monotonic reading of the last SIGN OF LIFE (its most recent fiber
+    transition); a component whose activation makes no move for longer than its
+    ceiling is stuck, and the monitor invokes the producer
+    (`_Driver._perform_liveness_expiry`) with a silence IT computed — no test in
+    the loop.
+
+    The clock is injectable (`clock`, seconds) so the whole detection is
+    deterministic under test: advance the fake clock, call :meth:`poll`, and the
+    monitor derives ``silent_ms`` itself. In production a background task
+    (:meth:`start`) polls on the reactive loop at `interval`; :meth:`stop`
+    cancels and AWAITS that task, so a cancelled or unloaded generation leaves no
+    independent watcher behind (a bare `asyncio` task on the same loop, never an
+    OS timer or a thread).
+    """
+
+    #: A move to one of these states ENDS the watch: ACTIVE (the provider
+    #: answered — the activation ceiling is spent), or DISPOSED/FAILED (it went
+    #: down some other way — not an expiry to fabricate). A move to PENDING is
+    #: NOT terminal — it is a waypoint through activation, so it resets the
+    #: silence clock like any other sign of life rather than ending the watch.
+    _DROP = ("ACTIVE", "DISPOSED", "FAILED")
+
+    def __init__(self, driver, *, clock=time.monotonic, interval: float = 0.25):
+        self._driver = driver
+        self._clock = clock
+        self._interval = interval
+        self._by_name = {c["name"]: c for c in _components(driver.ir or {})}
+        self._ceilings: dict[str, int] = {}     # enrolled component -> ceiling ms
+        self._progress: dict[str, float] = {}    # enrolled -> last sign of life (s)
+        self._firing: set[str] = set()           # expiry in flight (no re-entry)
+        self.refused: list[dict] = []             # honestly-unwatchable, with reason
+        self._task = None
+        self._enroll()
+
+    # -- enrolment ---------------------------------------------------------
+
+    def _enroll(self) -> None:
+        """Enrol every declared-ceiling provider the composition can be watched
+        for, from the IR — NOT from the live fibers, because the observer is
+        armed BEFORE `_load` drives activation, so it can time a provider that
+        never reaches ACTIVE. The silence clock starts now (load start)."""
+        now = self._clock()
+        for comp in _components(self._driver.ir or {}):
+            ceiling = comp.get("liveness_ceiling_ms")
+            if ceiling is None:
+                continue  # no ceiling: not a liveness-managed provider
+            name = comp["name"]
+            status, reason = _liveness_observability(comp)
+            if status != "observable":
+                self.refused.append({"component": name, "ceilingMs": ceiling,
+                                     "status": status, "reason": reason})
+                continue
+            self._ceilings[name] = ceiling
+            self._progress[name] = now
+
+    @property
+    def watching(self) -> set[str]:
+        """The components the observer is actively timing for silence."""
+        return set(self._ceilings)
+
+    def _state(self, fiber) -> str:
+        try:
+            return self._driver.FiberState(fiber.state).name
+        except Exception:  # noqa: BLE001 — a fake/absent fiber reads as unknown
+            return "?"
+
+    def _requirements_met(self, name: str) -> bool:
+        """Whether `name`'s own required injections are all resolved. A provider
+        still waiting on a peer is NOT silent on its own account — its silence is
+        the peer's, and expiring it would misattribute a hang that belongs
+        upstream. So a ceiling-bearing provider is expired only once its own
+        requirements are met (issue #622 — do not expire an unrelated owner)."""
+        requires = set((self._by_name.get(name) or {}).get("requires") or {})
+        if not requires:
+            return True
+        try:
+            resolved = self._driver.resolved_keys()
+        except Exception:  # noqa: BLE001 — no runtime view: fail safe, don't expire
+            return False
+        return requires <= set(resolved)
+
+    # -- progress signal ---------------------------------------------------
+
+    def note_transition(self, name: str, new_state: str) -> None:
+        """A sign of life: `name`'s fiber transitioned. A move to ACTIVE means it
+        answered, and to DISPOSED/FAILED that it went away — both END the watch.
+        Any other move (a PENDING waypoint) is progress that resets its silence
+        clock. Called from `_Driver._on_fiber` for every transition."""
+        if name not in self._ceilings:
+            return
+        if new_state in self._DROP:
+            self._ceilings.pop(name, None)
+            self._progress.pop(name, None)
+            return
+        self._progress[name] = self._clock()
+
+    # -- detection ---------------------------------------------------------
+
+    async def poll(self) -> list[str]:
+        """Expire every enrolled component silent past its ceiling. Returns the
+        components expired on this pass. The producer is consulted with a
+        ``silent_ms`` the monitor computed from its own clock; the producer's own
+        defensive gate (`why_runtime.liveness_expired`) is the final word, so a
+        clock skew that under-shoots the ceiling still fabricates nothing."""
+        now = self._clock()
+        expired: list[str] = []
+        for name, ceiling in list(self._ceilings.items()):
+            if name in self._firing:
+                continue
+            started = self._progress.get(name)
+            if started is None:
+                continue
+            silent_ms = int((now - started) * 1000)
+            if not why_runtime.liveness_expired(ceiling, silent_ms):
+                continue
+            fiber = self._driver.fibers.get(name)
+            if fiber is not None and self._state(fiber) in ("DISPOSED", "FAILED"):
+                # it already went down by another path — not our expiry to make.
+                self._ceilings.pop(name, None)
+                self._progress.pop(name, None)
+                continue
+            if not self._requirements_met(name):
+                # waiting on a peer provider, not its own silence — leave it
+                # enrolled (its deps may yet resolve) but never charge it here.
+                continue
+            self._firing.add(name)
+            try:
+                report = await self._driver._perform_liveness_expiry(name, silent_ms)
+            finally:
+                self._firing.discard(name)
+            self._ceilings.pop(name, None)
+            self._progress.pop(name, None)
+            if report is not None:
+                expired.append(name)
+        return expired
+
+    # -- background task lifecycle ----------------------------------------
+
+    def start(self) -> None:
+        """Arm the background poller on the running loop. A no-op when nothing is
+        enrolled (a generation with no observable ceiling starts NO task, so an
+        ordinary run is byte-identical), and idempotent."""
+        if self._task is not None or not self._ceilings:
+            return
+        self._task = asyncio.ensure_future(self._run())
+
+    async def _run(self) -> None:
+        try:
+            while self._ceilings:
+                await asyncio.sleep(self._interval)
+                await self.poll()
+        except asyncio.CancelledError:  # stop() cancelled us — settle quietly
+            raise
+
+    async def stop(self) -> None:
+        """Cancel and AWAIT the background task so no independent watcher is left
+        behind (issue #622 acceptance). Idempotent; safe with no task armed."""
+        task, self._task = self._task, None
+        self._ceilings.clear()
+        self._progress.clear()
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+
+    def summary(self) -> dict:
+        """What the observer covers, for the operator log at load."""
+        return {"watching": sorted(self._ceilings),
+                "refused": list(self.refused)}
+
+
+# --------------------------------------------------------------------------
 # the runtime driver (py tier)
 # --------------------------------------------------------------------------
 
@@ -786,6 +1061,14 @@ class _Driver:
         self._observing: dict | None = None
         self._settled: list[tuple] = []
 
+        # item 477 follow-up 1 (#622): the OWNED production silence observer for
+        # the live generation. Created and armed at the end of `_load`, stopped
+        # (task cancelled and awaited) by `_dispose_all`, so it never outlives
+        # the generation it watches. `None` until a generation is loaded, and it
+        # arms NO background task for a composition with no observable ceiling,
+        # so an ordinary run is byte-identical.
+        self._monitor: _LivenessMonitor | None = None
+
         # item 443: arm the operator E-Stop latch this run watches, so
         # `revl estop --latch FILE` from another terminal halts it immediately —
         # no unwind, an honest in-flight inventory instead
@@ -837,6 +1120,12 @@ class _Driver:
             # own attribute (fiber.py); a non-FAILED settle carries none.
             err = getattr(fiber, "_error", None) if new == "FAILED" else None
             self._settled.append((fiber.name, frm, new, err))
+        # feed the production silence observer (#622): a transition is a sign of
+        # life (or the answer/teardown that ends the watch). Kept AFTER the
+        # observation-window capture above so it never perturbs the withdrawal
+        # oracle's view.
+        if self._monitor is not None:
+            self._monitor.note_transition(fiber.name, new)
 
     # -- causal trace ------------------------------------------------------
 
@@ -1131,6 +1420,10 @@ class _Driver:
     async def _load(self, ir: dict, module: types.ModuleType) -> None:
         by_name = {c["name"]: c for c in _components(ir)}
         load_causes = why_runtime.load_causes(ir) if self.tracing else {}
+        # arm the production silence observer BEFORE driving activation (#622),
+        # so its background poll can interleave with each `_drive_activation`
+        # await and time a provider that never reaches ACTIVE.
+        self._arm_liveness_monitor()
         for name in _load_order(ir):
             comp = by_name[name]
             requires = ", ".join(comp.get("requires") or {}) or "-"
@@ -1172,6 +1465,25 @@ class _Driver:
                              f"PENDING -> {self.FiberState(fiber.state).name}",
                              load_causes.get(name, why_runtime.cause_boot()))
         await self._flush()
+
+    def _arm_liveness_monitor(self) -> None:
+        """Create and start the production silence observer for the generation
+        being loaded (#622). Enrolled from the IR (before activation), so a
+        provider that never reaches ACTIVE can be timed; a provider that answers
+        within its ceiling drops out on its ACTIVE transition. Only a component
+        with an OBSERVABLE declared ceiling arms a background poll, so a run with
+        no such ceiling is byte-identical (no task, no new output)."""
+        self._monitor = _LivenessMonitor(self)
+        watched = sorted(self._monitor.watching)
+        for row in self._monitor.refused:
+            self._log("liveness", row["component"],
+                      f"ceiling {row['ceilingMs']}ms NOT watched "
+                      f"({row['status']}): {row['reason']}")
+        if watched:
+            self._log("liveness", "observer",
+                      f"watching activation silence for {', '.join(watched)} "
+                      f"under their declared ceilings")
+        self._monitor.start()
 
     async def _drive_activation(self, name: str, comp: dict, fiber,
                                 requires: str) -> None:
@@ -1314,6 +1626,12 @@ class _Driver:
                       f"{', '.join(realms)}) strategy({strategy or 'round_robin'})")
 
     async def _dispose_all(self, ir: dict) -> None:
+        # stop the production silence observer FIRST (#622): a generation being
+        # torn down or swapped must leave no independent watcher behind, and the
+        # observer must not race the disposals below with an expiry of its own.
+        if self._monitor is not None:
+            monitor, self._monitor = self._monitor, None
+            await monitor.stop()
         order = list(reversed(_load_order(ir)))  # consumers before providers
         # item 628: pre-seed the settlement ledger (if a teardown armed one) with
         # every original component as `owned` (enumerated, not yet reached), so a
@@ -1478,6 +1796,18 @@ class _Driver:
             self._record(why_runtime.WITHDRAW, name, f"{frm} -> {to}", cause)
 
         return why_runtime.oracle(self.ir, component, why_runtime.Trace(self._events))
+
+    def reconcile_liveness_from_world(self, *, latch_path: str | None = None,
+                                      trace_path: str | None = None) -> dict:
+        """Rebuild the expected liveness of this composition's declared-ceiling
+        providers from THIS driver's durable world (its WAL, plus an optional
+        E-Stop latch and durable trace) — the item 477 follow-up 2 restart
+        slice (#624). Reads the world and returns a conservative verdict; it
+        withdraws nothing and re-adopts nothing (see :mod:`revl.reconcile`)."""
+        from . import reconcile  # noqa: PLC0415 — lazy; keeps the frontend pure
+        return reconcile.reconcile_liveness_from_world(
+            self.ir, wal_path=self.wal_path, latch_path=latch_path,
+            trace_path=trace_path)
 
     # -- REPL --------------------------------------------------------------
 
