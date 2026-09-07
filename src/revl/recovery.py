@@ -475,12 +475,26 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
     reading as falsely CLEAN."""
     records = wal["records"]
     effects = [r for r in records if r.get("record") == "effect"]
-    complete = next((r for r in records
-                     if r.get("record") == "activation-complete"), {})
-    marker_idx = next((i for i, r in enumerate(records)
-                       if r.get("record") == "activation-complete"), len(records))
-    run_complete = any(r.get("record") == "run-complete" for r in records)
-    steady = [r for r in records[marker_idx + 1:] if r.get("record") == "effect"]
+    # issue #642: one WAL file can carry MORE THAN ONE run when a later
+    # invocation reuses the same `--wal` path (the recorder resumes the seq
+    # space and appends onto the prior run's records — issue #536). The run to
+    # recover is the LATEST one, so its activation marker is the LAST
+    # `activation-complete`, and the crossings it left in steady state are the
+    # effects AFTER that marker. Scoping to the last marker (not the first) is
+    # what keeps an earlier run's records out of this run's steady set; on a
+    # single-run WAL the first and last marker are the same record, so every
+    # pre-#642 report is byte-identical.
+    marker_idx = next((i for i in range(len(records) - 1, -1, -1)
+                       if records[i].get("record") == "activation-complete"),
+                      len(records))
+    complete = records[marker_idx] if marker_idx < len(records) else {}
+    tail = records[marker_idx + 1:]
+    # A `run-complete` settles a run ONLY within its own interval. A stale
+    # marker from an EARLIER run (before this run's activation marker) must
+    # never account for this run's crossings, or a historical clean shutdown
+    # would mask a later run's crash residue and report a false CLEAN (#642).
+    run_complete = any(r.get("record") == "run-complete" for r in tail)
+    steady = [r for r in tail if r.get("record") == "effect"]
     # a clean shutdown (`run-complete`) accounts for the whole run; only a
     # steady-state crash (marker absent) turns post-activation crossings into
     # residue.
@@ -575,9 +589,24 @@ def _append_admit_record(wal_path: str, record: dict) -> None:
     second recover pass reads the same classification with no special-casing —
     the same discipline `_append_discharge` uses. The record carries no seq: it
     names a fact about an existing `admit-decided`, it is not a new ordered
-    event."""
+    event.
+
+    Like every other WAL appender (`_append_discharge`, `_append_replay_fence`,
+    `_append_reissue_fence`), it SEALS a never-acknowledged torn trailing write
+    FIRST (issue #641, the #535/#563 seal discipline). Forward admission
+    recovery runs against a WAL a `kill -9` mid-write may have left with a torn
+    final line; appending a terminal `admit-finalized`/`admit-abandoned`
+    straight onto that tail merges the two into one unparseable line. The reader
+    tolerates it as a torn LAST line and silently drops it — the finalization is
+    then not durably readable — and a second terminal append leaves the merged
+    line mid-file, which the item 413 gate refuses forever. Sealing truncates
+    the torn tail to its last clean newline boundary so the terminal record
+    lands on its own line, survives reopening and stays readable after later
+    appends; a completed, newline-terminated record is never touched."""
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
+    from .wal import seal_torn_tail  # noqa: PLC0415 — tier-agnostic core
+    seal_torn_tail(wal_path)
     with open(wal_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
         handle.flush()
