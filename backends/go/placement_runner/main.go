@@ -33,6 +33,7 @@ import (
 
 	"revl.goplacement/bridge"
 	"revl.goplacement/emitted"
+	"revl.goplacement/estop"
 )
 
 type proxyInfo struct {
@@ -65,6 +66,12 @@ type spec struct {
 	// loop with the boot -> LIFO teardown -> no-residue-proof -> exit
 	// round-trip, the same driver contract the rust/java/wasm tiers run.
 	Once bool `json:"once"`
+	// EstopLatch (item 443, issue #122): the operator E-Stop latch the conductor
+	// hands a honoring child in its spec (`src/revl/placement.py`). A sandboxed
+	// child (item 411) need not inherit the conductor's environment, so the latch
+	// travels in the spec and the runner publishes it to the ambient variable the
+	// seams already read. Empty when the placement was never armed.
+	EstopLatch string `json:"estopLatch"`
 }
 
 type labeledFiber struct {
@@ -94,6 +101,16 @@ func main() {
 	log := func(channel, subject, detail string) {
 		fmt.Printf("[%s] %-6s| %-16s| %s\n", name, channel, subject,
 			strings.TrimRight(detail, " "))
+	}
+
+	// item 443 / issue #122: publish the spec latch to the ambient variable the
+	// crossing seams (`bridge.Client.Call`, `bridge.serveConn`) and the idle
+	// watcher below all read. Done BEFORE any proxy dials or any key is served,
+	// so a latch already armed at boot is honored from the first crossing. A
+	// placement that was never armed carries no latch and this is a no-op, so an
+	// unarmed run is byte-identical to the pre-443 runner.
+	if s.EstopLatch != "" {
+		os.Setenv(estop.LatchEnv, s.EstopLatch)
 	}
 
 	root := stc.New()
@@ -204,6 +221,30 @@ func main() {
 	go func() { io.Copy(io.Discard, os.Stdin); stop <- struct{}{} }()
 
 	fmt.Printf("[%s] UP\n", name)
+
+	// 5a. item 443 / issue #122 — the idle watcher. The seams refuse lazily, at
+	//     the NEXT crossing, which is useless for a process parked in the select
+	//     below waiting to be stopped: it crosses nothing and would sit through
+	//     the emergency. So the runner polls the latch and, on the button, prints
+	//     its in-flight inventory on one `[name] HALTED {json}` line (the
+	//     conductor merges it by prefix — `src/revl/placement.py::pump` — with no
+	//     second channel) and calls `os.Exit`, which runs NO teardown: no LIFO
+	//     unwind, no inverse, no no-residue proof, no `DOWN`. That is the whole
+	//     point of the halt (docs/design/443-estop.md). The go twin of the py
+	//     runner's `estop_from_latch` and the ts runner's `haltOnLatch`. Started
+	//     only when the placement is armed, so an unarmed run spawns no watcher.
+	if s.EstopLatch != "" {
+		go func() {
+			for {
+				if record := estop.ReadLatch(estop.LatchPath("", "", true)); record != nil {
+					fmt.Println(estop.EstopHaltLine(name, estop.InFlightCrossings(), record))
+					os.Stdout.Sync()
+					os.Exit(0)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}()
+	}
 
 	// 5b. once mode: the round-trip ends here — boot, then straight to LIFO
 	//     teardown + the no-residue proof. Otherwise hold until the conductor

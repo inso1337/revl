@@ -15,6 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 mod components;
+mod estop;
 
 fn args_of(probe: &J) -> Vec<J> {
     probe["args"].as_array().cloned().unwrap_or_default()
@@ -43,7 +44,34 @@ fn handle_conn(stream: UnixStream, ctx: &cordis::Context) {
         let key = req["key"].as_str().unwrap_or("");
         let method = req["method"].as_str().unwrap_or("");
         let args = req["args"].as_array().cloned().unwrap_or_default();
-        let value = components::_revl_invoke(ctx, key, method, &args);
+        // item 443 / issue #122 — the ACCEPT side of the E-Stop seam. Once an
+        // operator arms the latch this process REFUSES a new crossing before the
+        // service method runs: nothing new crosses the boundary. The reply is an
+        // error, not a value, and (unlike a cooperative teardown) no inverse is
+        // replayed and nothing is discharged — the caller's attempt lands in
+        // item 440's ambiguous tier, the designed outcome of a halt
+        // (docs/design/443-estop.md).
+        if estop::estop_engaged() {
+            let reply = serde_json::json!({
+                "ok": false,
+                "error": format!(
+                    "revl E-Stop engaged: this process is HALTED and refuses new \
+                     crossings (key {key}, method {method}) — docs/design/443-estop.md"),
+            });
+            let mut out = serde_json::to_string(&reply).unwrap_or_else(|_| "{\"ok\":false}".into());
+            out.push('\n');
+            if writer.write_all(out.as_bytes()).is_err() {
+                break;
+            }
+            continue;
+        }
+        // Record the crossing as in flight WHILE its handler runs: a crossing
+        // still executing when the latch trips is the AMBIGUOUS one the halt
+        // inventory names (item 440). The guard clears it on any exit.
+        let value = {
+            let _guard = estop::CrossingGuard::new(key, method, "accept");
+            components::_revl_invoke(ctx, key, method, &args)
+        };
         let reply = serde_json::json!({ "ok": true, "value": value });
         let mut out = serde_json::to_string(&reply).unwrap_or_else(|_| "{\"ok\":false}".into());
         out.push('\n');
@@ -122,6 +150,18 @@ fn main() {
     let log = |channel: &str, subject: &str, detail: &str| {
         println!("[{name}] {channel:<6}| {subject:<16}| {detail}");
     };
+
+    // item 443 / issue #122: publish the spec latch to the ambient variable the
+    // accept seam (`handle_conn`) and the idle watcher below both read. Done
+    // BEFORE any key is served, so a latch already armed at boot is honored from
+    // the first crossing. A placement that was never armed carries no latch and
+    // this is a no-op, so an unarmed run is byte-identical to the pre-443 runner.
+    // A sandboxed child (item 411) need not inherit the conductor's environment,
+    // which is why the latch travels in the spec rather than only the env.
+    let estop_latch = spec["estopLatch"].as_str().unwrap_or("").to_string();
+    if !estop_latch.is_empty() {
+        std::env::set_var(estop::LATCH_ENV, &estop_latch);
+    }
 
     let once = spec["once"].as_bool().unwrap_or(false);
     let root = cordis::Context::new();
@@ -218,6 +258,32 @@ fn main() {
     }
 
     println!("[{name}] UP");
+
+    // item 443 / issue #122 — the idle watcher. The accept seam refuses lazily,
+    // at the NEXT crossing, which is useless for a process parked waiting to be
+    // stopped: it crosses nothing and would sit through the emergency. So the
+    // runner polls the latch and, on the button, prints its in-flight inventory
+    // on one `[name] HALTED {json}` line (the conductor merges it by prefix —
+    // `src/revl/placement.py::pump` — with no second channel) and calls
+    // `std::process::exit`, which runs NO teardown: no LIFO unwind, no inverse,
+    // no no-residue proof, no `DOWN`. That is the whole point of the halt
+    // (docs/design/443-estop.md). The rust twin of the py runner's
+    // `estop_from_latch` and the ts runner's `haltOnLatch`. Spawned only when the
+    // placement is armed, so an unarmed run spawns no watcher.
+    if !estop_latch.is_empty() {
+        let watch_name = name.clone();
+        std::thread::spawn(move || loop {
+            if let Some(record) = estop::read_latch(estop::latch_path(None, None, true).as_deref()) {
+                let line = estop::estop_halt_line(
+                    &watch_name, &estop::in_flight_crossings(), &Some(record));
+                println!("{line}");
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
+                std::process::exit(0);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        });
+    }
 
     // 5. hold until stdin closes (graceful stop) or a provider dies; a dead
     //    provider withdraws its proxy so the consumer deactivates reactively.
