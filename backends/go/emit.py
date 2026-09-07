@@ -3844,11 +3844,17 @@ def _go_v3_type(t, types: dict) -> str:
     t = str(t).strip()
     if t in _V3_PRIM:
         return _V3_PRIM[t]
-    if t == "Any":
+    if t == "Any" or t == "any":
         # revl's `Any` wildcard — a value whose static type only the runtime
         # knows (docs/stdlib-json.md) — erases to Go's `any` (interface{}),
         # the mirror of rust's `cordis::Value`. A JSON document decoded with
-        # `encoding/json` into an `any` is exactly this shape.
+        # `encoding/json` into an `any` is exactly this shape. The lowercase
+        # `"any"` spelling is the emitter's own placeholder for an unpinned
+        # Opt/Result type parameter (`Ok(1)` with no expected type pins the
+        # err side to `any`); it is the Go type `any`, so it must round-trip
+        # to `any` here and NOT fall through to `_v3_ident`, which — since
+        # #680 added `any` to `_GO_RESERVED` to escape a USER identifier named
+        # `any` — would mangle it to the undefined `any_`.
         return "any"
     fn = _v3_split_fn_type(t)
     if fn is not None:
