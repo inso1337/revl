@@ -255,6 +255,10 @@ def test_concurrency_exactly_one_true_on_the_reference_runtime():
     spec = importlib.util.spec_from_file_location(
         "revl_py_runtime_iia", ROOT / "backends" / "python" / "runtime.py")
     runtime = importlib.util.module_from_spec(spec)
+    # runtime.py's @dataclass records resolve string annotations
+    # (from __future__ import annotations) via sys.modules[cls.__module__] on
+    # py3.12+; register the module under its name before exec_module.
+    sys.modules[spec.name] = runtime
     spec.loader.exec_module(runtime)
 
     m = runtime.Map.new()
