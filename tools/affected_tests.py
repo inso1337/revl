@@ -86,6 +86,7 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_inprocess_gate_rust.py",
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
+    "tests/test_rescore_no_self_score.py",
     # These self-host emit oracles read real bench corpus programs
     # (bench/results/... and bench/codegen/...) as additional emit witnesses,
     # so a bench change must re-run them.
