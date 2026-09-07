@@ -616,7 +616,11 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   if (method == "to_int32") { return { text: `revlI32(Number(${target}))`, counter: counter } }
   if (method == "concat") { return { text: `${target}.concat(${args[0]})`, counter: counter } }
   if (method == "indexOf") { return { text: `revlIndexOf(${target}, ${args[0]})`, counter: counter } }
-  if (method == "split") { return { text: `${target}.split(${args[0]})`, counter: counter } }
+  // docs/stdlib-2.0.md §split: an empty separator splits by CODE POINT. Native
+  // `String.prototype.split("")` walks UTF-16 code UNITS, so an astral scalar
+  // came out as two pieces — the #549 divergence against py/go/rust/wasm.
+  // `revlSplit` routes the empty-sep case through `Array.from` (code points).
+  if (method == "split") { return { text: `revlSplit(${target}, ${args[0]})`, counter: counter } }
   if (method == "join") { return { text: `${target}.join(${args[0]})`, counter: counter } }
   if (method == "repeat") {
     let r = int_as_number(arg_nodes[0], counter, acx)
@@ -2837,6 +2841,20 @@ fn revl_parse_int_helper() -> Str {
   return o.join(newline())
 }
 
+// docs/stdlib-2.0.md §split: `"abc".split("")` is the 1-char strings and an
+// empty separator splits by CODE POINT, so an astral scalar is ONE piece.
+// `String.prototype.split("")` walks UTF-16 code units (two for a surrogate
+// pair) — the #549 divergence — so the empty-sep case goes through
+// `Array.from`, which iterates Unicode scalars exactly as py `list(s)`, go
+// `utf8.DecodeRuneInString` and the wasm helper do. Mirrors `_REVL_SPLIT_HELPER`.
+fn revl_split_helper() -> Str {
+  var o = []
+  o = o.push("function revlSplit(s: string, sep: string): string[] {")
+  o = o.push(`  return sep === "" ? Array.from(s) : s.split(sep)`)
+  o = o.push("}")
+  return o.join(newline())
+}
+
 // ---------------------------------------------------- IR-wide `_uses_*` gates
 // `_uses_spawn`: true iff any COMPONENT body carries a `spawn` acquisition node,
 // so the module imports the `spawn` runtime helper (docs/design-v2-instances.md
@@ -3057,6 +3075,16 @@ fn uses_parse_int(n: Any) -> Bool {
   return false
 }
 
+// `_uses_split`: does this IR call `Str.split` — the only builtin routed
+// through `revlSplit` (the empty-separator code-point path, #549)?
+fn uses_split(n: Any) -> Bool {
+  if (node_kind(n) == "builtin" && node_method(n) == "split") { return true }
+  for (c of value_children(n)) {
+    if (uses_split(c)) { return true }
+  }
+  return false
+}
+
 // `_revl_helpers`: the helper functions this document actually needs, in
 // dependency order (revlI64 before the named integer operations that call it).
 fn revl_helpers(ir: Any) -> List[Str] {
@@ -3067,6 +3095,7 @@ fn revl_helpers(ir: Any) -> List[Str] {
   if (uses_bounded_int32(ir)) { out = out.push(revl_i32_helper()); out = out.push("") }
   if (uses_int_arith(ir)) { out = out.push(revl_int_arith_helper()); out = out.push("") }
   if (uses_str_methods(ir)) { out = out.push(revl_str_helper()); out = out.push("") }
+  if (uses_split(ir)) { out = out.push(revl_split_helper()); out = out.push("") }
   if (uses_parse_int(ir)) { out = out.push(revl_parse_int_helper()); out = out.push("") }
   return out
 }

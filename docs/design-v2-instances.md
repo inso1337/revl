@@ -623,17 +623,25 @@ placement slice reads to key on an instance rather than only on a template
 component. Static tests: `tests/test_instances_frontend.py`, the
 "named instances surfaced in the manifest" section.
 
-**Remaining (the horizon, unscheduled — gated on the architect scheduling
-it):** the next moves each need a cross-tier fan-out or a placement-file format
-decision, so they are recorded, not taken here:
+**Landed (slice 3 — the placement-file spelling + plan-time gate):** a
+`[processes.<p>]` block assigns *components* (`components = [...]`); a named
+instance is now assignable by ADDRESS with `instances = ["Spawner/name", ...]`.
+`named_instance_placement_diagnostic(processes, ir)` in `src/revl/placement.py`
+validates each address as a pure read against `manifest["named_instances"]`
+(slice 2's index): a malformed (`Spawner/name`-shaped), unknown, or
+double-placed address is one diagnostic before anything spawns, wired into
+`run_placement` next to the 119/363 gates and `capability_realm_diagnostic`.
+The boot summary reports the recorded placements (`placed_named_instances`).
+Additive: a placement with no `instances` key validates trivially and is
+byte-identical. It makes **no location claim the runtime honours yet** — the
+instance still lands in its spawner's process; the placement is RECORDED and
+gated, the honour deferred (the item-411 Slice-1 discipline). Static tests:
+`tests/test_instances_frontend.py`, the "placement-file spelling" section.
 
-- **Placement-file spelling.** A `[processes.<p>]` block assigns *components*
-  today (`components = [...]`). Assigning a *named instance* wants an address
-  form — the natural spelling is `instances = ["Spawner/name", ...]`, validated
-  as a pure read against `manifest["named_instances"]` (an unknown address is
-  one diagnostic before anything spawns, next to the 119/363 gates and
-  `capability_realm_diagnostic`). The spelling is a surface-area decision the
-  architect owns, so it is proposed, not landed.
+**Remaining (the horizon, unscheduled — gated on the architect scheduling
+it):** the next moves each need a cross-tier fan-out, so they are recorded, not
+taken here:
+
 - **Runtime honour + fan-out.** Actually landing a named instance in process P
   (rather than the spawning process) is the cross-tier port — reference tier
   first, then the other five — under the standing constraint that no tier's

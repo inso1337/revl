@@ -1105,16 +1105,40 @@ def test_go_emits_the_iteration_form_as_a_blocking_next_loop():
     assert code.index("o := _revlStreamItem1.(string)") < code.index("sink.Write(o)")
 
 
-def test_rust_still_refuses_the_iteration_form_by_name():
-    """rust lowers the Slice 1/3 protocol but not the iteration form. A refusal
-    that named nothing — or worse, a subscription emitted with its body silently
-    dropped — is the outcome the honest EmitError exists to prevent."""
+def test_rust_emits_the_iteration_form_as_a_blocking_next_loop():
+    """The rust tier lowers `every … in` (Slice 4) as a plain `loop` over the
+    cancel-select `next` the Slice 1/3 protocol already ships — no new runtime,
+    the SAME shape the go tier lowers. The three properties that carry the
+    guarantee are each a line: a `Faulted` is the `Err` that `map_err(…)?`
+    propagates (it fails the activation, reverting the prefix with the
+    subscription bracket on it — never caught); a `Closed` terminal ENDS the
+    loop before the body (it is a terminal, not an item); the item enters the
+    body only after both, on the same LIFO-teardown-reachable bracket."""
+    emit = _tier_emit("rust")
+    code = emit.emit(compile_source(_ITER, "s.rvl"))
+    assert "loop {" in code
+    # `next` on the subscription, with the Faulted terminal propagated uncaught
+    assert ("match sub.next().map_err(|e| cordis::CordisError::with_message("
+            "cordis::ErrorCode::Plugin, e))? {") in code
+    # a Closed terminal ends the loop and never enters the body
+    assert "StreamNext::Closed => break," in code
+    assert code.index("StreamNext::Closed => break,") < code.index("sink.write(o)")
+    # the item binds and the body runs it
+    assert "StreamNext::Item(o) => {" in code
+    assert code.index("StreamNext::Item(o) => {") < code.index("sink.write(o)")
+
+
+def test_rust_still_refuses_the_typed_event_handler_by_name():
+    """rust lowers the plain `every … in` (Slice 4) but not the `on … as` typed
+    event handler (Slice 5): its schema-and-dedup contract gate is the py
+    reference tier's. The refusal must name the event form, not fall through to
+    an `unsupported component step` or silently drop the contract."""
     emit = _tier_emit("rust")
     with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(compile_source(_ITER, "s.rvl"))
+        emit.emit(compile_source(_EVENT, "s.rvl"))
     msg = str(excinfo.value)
     assert "unsupported component step" not in msg
-    assert "`every … in`" in msg and "backend py" in msg
+    assert "`on … as` typed-event handler" in msg and "backend py" in msg
 
 
 @pytest.mark.parametrize("tier", ["java", "typescript", "wasm"])

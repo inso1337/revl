@@ -3644,7 +3644,6 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     )
     name = component["name"]
     cname = _ident(name, "component")
-    snake = _snake(name)
     isolate = component.get("isolate") or {}
     intercept = component.get("intercept") or {}
     has_effectful = _component_has_effectful_methods(component)
@@ -3673,6 +3672,16 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     map_values = _component_map_values(env)
 
     for key, service in env.provides.items():
+        # item 449 (G2): a routed provided key is realized by its router struct
+        # (emitted below from `env.routes`), never by a hand-written provide
+        # body — a body on the routed key is now refused at compile. So the
+        # sanctioned router shape carries no `provide <key>` step, and emitting
+        # a standalone provider struct here would produce an empty `impl <Svc>`
+        # (no methods) that does not compile. Skip it; the router struct is the
+        # provider. Mirrors the go tier, which only emits from body provide
+        # steps and so never synthesized this struct.
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
@@ -3992,7 +4001,6 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     )
     name = component["name"]
     cname = _ident(name, "component")
-    snake = _snake(name)
     out: list[str] = []
 
     config_ty = _emit_config_struct(component, out)
@@ -4002,6 +4010,12 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     map_values = _component_map_values(env)
 
     for key, service in env.provides.items():
+        # item 449 (G2): a routed provided key is realized by its router struct
+        # (emitted below from `env.routes`), never a hand-written provide body,
+        # which is now refused at compile. Emitting a standalone provider struct
+        # here would yield an empty `impl <Svc>` that does not compile; skip it.
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
@@ -4503,23 +4517,65 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         out.append(f"{pad}let {key}_box: Box<dyn {service}> = Box::new({struct} {{ {fields} }});")
         out.append(f"{pad}ctx.provide({_string(key)}, {key}_box)?;")
     elif kind == "stream-iter":
-        # item 130 Slice 4: `every <x> in <sub> { … }`. This tier lowers the
-        # Slice 1/3 protocol (subscribe / next / close and the `merge` fan-in) on
-        # the blocking cancel-select, but not the ITERATION form, whose per-item
-        # bind and effectful body per item this emitter's activation-body walk
-        # has no scope for. Refuse by name rather than emit a subscription whose
-        # body silently never runs — the same call
-        # `_refuse_unlowered_stream_surface` makes for the Slice 2 surface.
-        # Slice 5's `on … as` typed-event handler lowers to this SAME step (an
-        # event is a stream item with a contract), so it is refused here too —
-        # and named for the form the author actually wrote.
-        form = ("`on … as` typed-event handler" if step.get("event")
-                else "`every … in` stream iteration form")
-        raise EmitError(
-            f"the {form} is not lowered on the rust "
-            "tier; this tier lowers subscribe / next / close and `merge` "
-            "(item 130 Slices 1 and 3) while the iteration form runs on the py "
-            "reference tier (Slices 4 and 5) — try `--backend py`")
+        # item 130 Slice 4: `every <x> in <sub> { … }` on this blocking tier is
+        # a plain `loop` over the cancel-channel `next`, the SAME shape the go
+        # tier lowers (design §4.6, the go/rust rows). It adds NO runtime
+        # primitive: `next` is the Slice 1/3 protocol this tier already ships,
+        # returning `Result<StreamNext, String>`. Each turn:
+        #
+        #   * `next` parks in the item/terminal/cancel race. A `Closed` terminal
+        #     — an orderly provider close, OR the owner's own teardown tripping
+        #     the cancel signal — is an ordinary value that ENDS the loop. It is
+        #     not an item and never enters the body (running the effectful
+        #     callback on a terminal would be the silent-data invention §1
+        #     forbids);
+        #   * a `Faulted` terminal is `Err(reason)`; `map_err(…)?` propagates it
+        #     — it is NOT caught. The activation fails, so the accumulated prefix
+        #     reverts LIFO with the subscription bracket on it and the stream
+        #     closes. That is "a failed handler does not leave a subscription
+        #     active" (A8, §4.7), delivered by not catching anything, exactly as
+        #     the Slice 3 `await sub.next()` step above does.
+        #
+        # The core guarantee (§0) rides the `subscribe` bracket ABOVE the loop
+        # exactly as Slices 1/3 proved it: unloading the owner trips the cancel
+        # signal, the parked `next` resolves as `Closed`, the loop breaks, and
+        # `close` runs on the same LIFO disposer stack — teardown never waits on
+        # the provider (§9 Part A). Nested acquisitions in the body are refused
+        # by the frontend (§4.7), so the body is emissions only, each rendered
+        # through the same `_emit_step` path a top-level step takes.
+        #
+        # Slice 5's `on … as` typed-event handler lowers to this SAME step with
+        # an additive `event` contract (schema + a bounded dedup window). That
+        # contract gate is not lowered on this tier yet — it runs on the py
+        # reference tier — so refuse it by name; the plain `every … in` below IS
+        # lowered here.
+        if step.get("event") is not None:
+            raise EmitError(
+                "the `on … as` typed-event handler is not lowered on the rust "
+                "tier; its schema-and-dedup contract gate runs on the py "
+                "reference tier (item 130 Slice 5) while the plain `every … in` "
+                "iteration form lowers here — try `--backend py`")
+        subject = _expr(step.get("subject"), env)
+        bind = _ident(step["bind"], "binding")
+        body = step.get("body") or []
+        if not body:  # pragma: no cover — the parser rejects an empty body
+            raise EmitError("an `every … in` body is empty")
+        out.append(f"{pad}loop {{")
+        out.append(
+            f"{pad}    match {subject}.next().map_err(|e| "
+            f"cordis::CordisError::with_message(cordis::ErrorCode::Plugin, e))? {{")
+        # a `Closed` terminal ends the loop before the body — it is a terminal,
+        # not an item (mirrors the go tier's `IsStreamClosed(..) { break }`).
+        out.append(f"{pad}        StreamNext::Closed => break,")
+        out.append(f"{pad}        StreamNext::Item({bind}) => {{")
+        # a body that does not read the item must not trip an unused-binding
+        # lint on this tier; the go tier makes the same discard (`_ = o`).
+        out.append(f"{pad}            let _ = &{bind};")
+        for nested in body:
+            _emit_step(nested, env, out, indent + 3)
+        out.append(f"{pad}        }}")
+        out.append(f"{pad}    }}")
+        out.append(f"{pad}}}")
     else:
         raise EmitError(f"unsupported component step in Rust backend: {kind!r}")
 
@@ -5888,7 +5944,15 @@ def _v3_builtin(method: str, target: str, args: list[str],
     # values, so `.ok()` is exactly the tier's `Opt[Int]`.
     if method == "to_int":
         if recv == "Str":
-            return f"{{ ({target}).parse::<i64>().ok() }}"
+            # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): the ASCII
+            # digits with an optional leading `-`, NO leading `+`. Rust's
+            # `str::parse::<i64>` accepts a leading `+` and answered `Some(7)`
+            # for `"+7"` — the #549 divergence against py/ts/go/wasm, which all
+            # answer `None`. Guard the `+` explicitly; every other spelling
+            # rust rejects (empty/partial/out-of-range) already matches.
+            return (f'{{ let _s = ({target}); '
+                    f"if _s.starts_with('+') {{ None }} "
+                    f"else {{ _s.parse::<i64>().ok() }} }}")
         return f"(({target}) as i64)"
     if method == "to_int32":
         return f'(i32::try_from({target}).expect("revl: Int32 overflow"))'
