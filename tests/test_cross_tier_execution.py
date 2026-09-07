@@ -714,33 +714,22 @@ DIVERGENCES = {
     # rust/wasm/ts already trapped. Asserted positively below
     # (test_div_int_min_traps + the checked-Err and per-tier emit checks).
     #
-    # ---- issue #549: stdlib cross-tier divergences, pinned not fixed ----
+    # ---- issue #549: stdlib cross-tier divergences still pinned, not fixed ----
     # Each entry below asserts the INTENDED (majority/reference) behaviour, so
     # the tier that diverges is exactly the tier whose status is "fail" here
     # (or, for a value the reference rejects, the diverging tier is the one that
     # answers "pass"). The per-tier map records what every tier does TODAY,
-    # empirically measured on py/ts/go/rust/java. Closing any of these for real
-    # is a per-tier emitter change (docs/contract-errata.md) — the point of the
-    # pin is that the divergence can no longer drift or grow silently. The
-    # marker after each name says which tier(s) diverge from the reference.
+    # empirically measured on py/ts/go/rust/java. These three remain because
+    # each turns on a SPEC decision this repo has not made — whether a negative
+    # index/slice bound faults or is end-relative (docs/stdlib-2.0.md leaves
+    # negatives underspecified), and whether the frontend should accept a mixed
+    # `Str + Int` at all — not on an emitter that merely disagrees with a
+    # settled reference. The point of the pin is that the divergence can no
+    # longer drift or grow silently. The three #549 divergences with an
+    # unambiguous documented reference (`split("")`, `to_int` on `"+7"`,
+    # `div_trunc(Int.MIN, -1)`) are now FIXED and asserted to AGREE in
+    # AGREED_549 below. The marker after each name says which tier(s) diverge.
     #
-    # `split("")` on an astral scalar. Reference: `""`-split walks CODE POINTS,
-    # so a single U+1F600 is ONE element. ts and java split by UTF-16 code
-    # UNITS, seeing the surrogate pair as two — DIVERGE (ts, java).
-    "split('') counts code points, not UTF-16 units": (
-        'pub fn units() -> Int { return "\U0001F600".split("").length() }\n'
-        'test "an astral scalar is one code point" { assert units() == 1 }\n',
-        {"py": "pass", "ts": "fail", "go": "pass", "rust": "pass", "java": "fail"},
-    ),
-    # `Str.to_int()` on a `+`-prefixed number. Reference: the parse is
-    # sign-optional with a bare `-` only, so `"+7"` is NOT an integer and
-    # `to_int()` is `None`. rust's `str::parse::<i64>()` accepts a leading `+`
-    # and returns `Some(7)` — DIVERGES (rust).
-    "'+7'.to_int() is None (no leading plus)": (
-        'pub fn parsed() -> Bool { return "+7".to_int() == None }\n'
-        'test "a leading + is not an integer" { assert parsed() }\n',
-        {"py": "pass", "ts": "pass", "go": "pass", "rust": "fail", "java": "pass"},
-    ),
     # A negative list index. Reference: an out-of-range index FAULTS — there is
     # no wrap. python's `xs[-1]` silently reads the LAST element instead, so the
     # assertion of the wrapped value passes on py alone and every other tier
@@ -769,17 +758,43 @@ DIVERGENCES = {
         'test "Str + Int renders the int" { assert s() == "n=3" }\n',
         {"py": "fail", "ts": "pass", "go": "fail", "rust": "pass", "java": "pass"},
     ),
-    # `div_trunc(Int.MIN, -1)`. The true quotient is 2^63, one past Int.MAX, so
-    # the reference behaviour is an overflow TRAP (py/go/rust/ts all fault). java
-    # computes `Long.MIN_VALUE / -1L`, which wraps back to `Int.MIN` with no
-    # trap — DIVERGES (java). NOTE: the "closed" note above claims java traps
-    # this via `Math.divideExact`; that holds for the `/` operator but NOT for
-    # the named `div_trunc`, which #549 caught still wrapping.
-    "div_trunc(Int.MIN, -1) traps everywhere but java": (
+}
+
+
+# ---- issue #549: divergences FIXED so every tier now agrees ----
+# The three #549 divergences whose reference is unambiguous in the docs are
+# fixed in the emitters and asserted to agree here. Where the reference is a
+# VALUE the verdict is "pass" on every tier; where it is an overflow TRAP the
+# verdict is "fail" (a fault) on every tier — agreement either way. Any tier
+# that drifts back reds this the same way the pins above red a regression.
+#
+#   - `split("")` walks CODE POINTS (docs/stdlib-2.0.md §split): an astral
+#     scalar is ONE piece. ts now routes the empty-separator case through
+#     `Array.from` and java through `String.codePoints()`; both used to split
+#     by UTF-16 code units (two for a surrogate pair).
+#   - `"+7".to_int()` is `None` (docs §Str.to_int: "no plus sign"). rust's
+#     `str::parse::<i64>` accepted the leading `+` and answered `Some(7)`; the
+#     emitter now guards `starts_with('+')`.
+#   - `div_trunc(Int.MIN, -1)` overflows (quotient 2^63) and TRAPS on every
+#     tier. java's plain `/` wrapped back to `Int.MIN`; it now uses
+#     `Math.divideExact`, which throws like the `Math.*Exact` family already
+#     used for `+`/`-`/`*`.
+AGREED_549 = {
+    "split('') counts code points, not UTF-16 units": (
+        'pub fn units() -> Int { return "\U0001F600".split("").length() }\n'
+        'test "an astral scalar is one code point" { assert units() == 1 }\n',
+        "pass",
+    ),
+    "'+7'.to_int() is None (no leading plus)": (
+        'pub fn parsed() -> Bool { return "+7".to_int() == None }\n'
+        'test "a leading + is not an integer" { assert parsed() }\n',
+        "pass",
+    ),
+    "div_trunc(Int.MIN, -1) traps everywhere": (
         'pub fn dt(a: Int, b: Int) -> Int { return a.div_trunc(b) }\n'
         'pub fn imin() -> Int { return 0 - 9223372036854775807 - 1 }\n'
         'test "Int.MIN div_trunc -1 traps" { assert dt(imin(), 0 - 1) == imin() }\n',
-        {"py": "fail", "ts": "fail", "go": "fail", "rust": "fail", "java": "pass"},
+        "fail",
     ),
 }
 
@@ -797,6 +812,10 @@ DIVERGENCES = {
 #   - `Str < Str` above the BMP: java does not compile `<` on String at all and
 #     ts compares by UTF-16 unit; `test_str_ordering_agrees_everywhere` already
 #     covers the ASCII case where all tiers agree.
+# FIXED (asserted to AGREE in AGREED_549 above): `split("")` on an astral
+# scalar (ts/java split by UTF-16 units, now code points), `"+7".to_int()`
+# (rust accepted the leading `+`, now `None`), and `div_trunc(Int.MIN, -1)`
+# (java wrapped, now traps like every other tier).
 # FIXED (not pinned): `List[Int].join(sep)` crashed the py runtime while ts
 # coerced; it is now a compile error on every tier (typecheck.builtin_check
 # pins `join`'s receiver to `List[Str]`, matching docs/stdlib-2.0.md).
@@ -835,13 +854,49 @@ def test_pinned_divergence_has_not_drifted_rust(name: str):
                     reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
 @pytest.mark.parametrize("name", sorted(DIVERGENCES))
 def test_pinned_divergence_has_not_drifted_java(name: str):
-    # java carries two of the #549 divergences (`split('')` by UTF-16 units and
-    # the `div_trunc(Int.MIN, -1)` wrap), so it gets its own slow pin alongside
-    # rust — `test_pinned_divergence_has_not_drifted` only walks FAST_TIERS.
+    # The #549 java divergences (`split('')` by UTF-16 units and the
+    # `div_trunc(Int.MIN, -1)` wrap) are now FIXED — see AGREED_549 and its own
+    # slow java guard below. The pins that remain are the underspecified ones,
+    # walked here because `test_pinned_divergence_has_not_drifted` only covers
+    # FAST_TIERS.
     source, pinned = DIVERGENCES[name]
     observed = _observed("java", source)
     assert observed == pinned["java"], (
         f"java now {observed}es {name!r}, pinned as {pinned['java']}")
+
+
+@pytest.mark.parametrize("name", sorted(AGREED_549))
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_549_divergence_now_agrees(tier: str, name: str):
+    """The #549 divergences with a settled documented reference, fixed in the
+    emitters so every tier gives the SAME verdict — a value all tiers compute
+    ("pass") or an overflow trap all tiers take ("fail")."""
+    source, verdict = AGREED_549[name]
+    observed = _observed(tier, source)
+    assert observed == verdict, (
+        f"{tier} now {observed}es {name!r}; #549 fixed it to {verdict} on "
+        "every tier. A drift here is a real regression, not a pin to loosen."
+    )
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("name", sorted(AGREED_549))
+def test_549_divergence_now_agrees_rust(name: str):
+    source, verdict = AGREED_549[name]
+    observed = _observed("rust", source)
+    assert observed == verdict, (
+        f"rust now {observed}es {name!r}; #549 fixed it to {verdict}")
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("name", sorted(AGREED_549))
+def test_549_divergence_now_agrees_java(name: str):
+    source, verdict = AGREED_549[name]
+    observed = _observed("java", source)
+    assert observed == verdict, (
+        f"java now {observed}es {name!r}; #549 fixed it to {verdict}")
 
 
 def test_str_ordering_agrees_everywhere():
@@ -1060,7 +1115,9 @@ def test_typescript_guards_the_divisor():
 def test_checked_division_lowers_on_every_tier():
     """The total forms produce a Result value on each tier through that
     tier's Result representation: tagged objects on TS, std Result on rust,
-    RevlResult on java, RevlOk/RevlErr on go, tagged cells on wasm."""
+    RevlResult on java, the non-boxing RevlResult[T,E] struct on go (item 434
+    (d), #502: the Ok/Err arms construct the same struct with OkV+Ok / ErrV
+    rather than distinct RevlOk/RevlErr types), tagged cells on wasm."""
     for helper in ("revlCheckedDivTrunc", "revlCheckedDivFloor",
                    "revlCheckedDivEuclid", "revlCheckedMod"):
         assert f"function {helper}" in _emit("typescript", CHECKED_DIVISION), helper
@@ -1069,7 +1126,8 @@ def test_checked_division_lowers_on_every_tier():
     java = _emit("java", CHECKED_DIVISION)
     assert "revlCheckedDivTrunc" in java and "RevlResult<Long, String>" in java
     go = _emit("go", CHECKED_DIVISION)
-    assert "RevlOk[int64, string]" in go and "RevlErr[int64, string]" in go
+    assert "RevlResult[int64, string]{OkV:" in go and ", Ok: true}" in go
+    assert 'RevlResult[int64, string]{ErrV: "revl: division by zero"}' in go
     wasm = _emit("wasm", CHECKED_DIVISION)
     wat = wasm["functions"] if isinstance(wasm, dict) else wasm
     assert "(i64.eqz" in wat and "revl: division by zero" in wat
@@ -1799,3 +1857,65 @@ def test_float_interpolation_wasm_exponent_is_fenced(name: str):
     if status == "skip":
         pytest.skip(f"wasm: {message}")
     assert status == "pass", f"wasm renders the Float differently: {message}"
+
+
+# ---------------------------------- static guards on the canonical Float renderer
+#
+# The executed probes above prove the VALUE is canonical on each tier, but they
+# only run where the tier's toolchain exists: `test_float_interpolation_is_
+# canonical` needs node/go, the `*_slow` variants need cargo/javac behind
+# `REVL_CROSS_TIER_SLOW` (set nowhere in this repo), and wasm needs wasmtime. So
+# the exact regression the equality wave already learned to fear — an emitter
+# quietly reverting a Float render to its host default (`str(x)` -> "3.0",
+# `fmt.Sprintf("%v")`, `format!("{}")` -> "-0"/"1000...", `String.valueOf` ->
+# "1.0E21") — would sail through the toolchain-free `frontend` job untouched,
+# because nothing there reads the emitted Float lowering. These guards do: they
+# run under plain `_emit` (no toolchain), one per tier, and pin that the render
+# routes through the shared canonical renderer that the executed probes confirm
+# is byte-correct. This is the same "one static guard per lowering per tier"
+# line of defence the structural-equality defect ended up with (contract-errata
+# "Semantic divergences": Float -> Str rendering), for the sibling divergence.
+#
+# ts is the exception on purpose: its `${x}` template interpolation IS the
+# ECMAScript `Number::toString` this whole decision canonicalizes on, so the
+# emitter needs no helper at all — and emitting one would signal that someone
+# mistook the JS prior for a thing to reimplement. Its guard asserts the native
+# template and the ABSENCE of a helper.
+_FLOAT_RENDERER_CALLSITES = {
+    # backend dir -> (call the render routes through, helper that must travel)
+    "python": ("_revl_ftoa(", "def _revl_ftoa("),
+    "go": ("revlFtoa(", "func revlFtoa("),
+    "rust": ("revl_ftoa(", "fn revl_ftoa("),
+    "java": ("revlFtoa(", "String revlFtoa("),
+}
+
+
+@pytest.mark.parametrize("backend", sorted(_FLOAT_RENDERER_CALLSITES))
+def test_float_interpolation_routes_through_canonical_renderer(backend: str):
+    """Toolchain-free guard: a `${aFloat}` template must lower through the
+    shared canonical `Float -> Str` renderer (ECMAScript `Number::toString`,
+    docs/strings.md), NOT the host's default float formatting, and the helper
+    must travel with the module. Runs in `frontend`, where the executed float
+    probes do not."""
+    source, _note = FLOAT_INTERP_PROBES["large magnitude uses exponent"]
+    callsite, helper = _FLOAT_RENDERER_CALLSITES[backend]
+    emitted = _emit(backend, source)
+    assert callsite in emitted, (
+        f"{backend}: `${{aFloat}}` must render through the canonical "
+        f"Float renderer ({callsite}...), not the host default (docs/strings.md)")
+    assert helper in emitted, (
+        f"{backend}: the canonical Float renderer must travel with the module")
+
+
+def test_typescript_float_interpolation_is_the_native_template():
+    """ts needs no renderer: its `${x}` template already spells the canonical
+    ECMAScript `Number::toString` form (docs/strings.md), which is why this
+    whole decision took the JS prior as canon. The guard pins the native
+    template and the absence of a reimplemented helper — a helper here would
+    mean someone mistook the primitive for something to rebuild."""
+    source, _note = FLOAT_INTERP_PROBES["large magnitude uses exponent"]
+    emitted = _emit("typescript", source)
+    assert "`${" in emitted, (
+        "ts must interpolate the Float with a native template literal")
+    assert "ftoa" not in emitted.lower(), (
+        "ts must NOT carry a Float renderer: `${x}` already is the canon")

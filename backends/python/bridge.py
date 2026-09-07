@@ -171,6 +171,13 @@ class Endpoint:
     host: str | None = None
     port: int | None = None
     tls: TlsConfig | None = None
+    # item 411 T3: the address a network provider BINDS its listener on, when it
+    # must differ from `host` (the address a consumer DIALS). A sandboxed
+    # provider binds `0.0.0.0` inside its namespace (which holds only the relay)
+    # while consumers dial it through the relay; a host-side provider serving a
+    # sandbox binds the conductor-probed host bind address. None keeps the
+    # pre-T3 behaviour: bind == dial == `host`.
+    bind: str | None = None
 
     @property
     def is_network(self) -> bool:
@@ -198,6 +205,7 @@ class Endpoint:
         if spec.get("host") is not None:
             tls = spec.get("tls")
             return cls(host=spec["host"], port=int(spec["port"]),
+                       bind=spec.get("bind"),
                        tls=TlsConfig.from_spec(tls) if tls is not None else None)
         return cls(path=spec.get("socket") or spec.get("path"))
 
@@ -671,7 +679,12 @@ async def serve(ctx, exports, endpoint, module=None, correlation=None, peers=Non
                 "TLS identity — a network provider must present a per-process "
                 "certificate (mTLS); refusing to listen in the clear "
                 "(docs/network-placement.md)")
-        return await asyncio.start_server(handle, host=ep.host, port=ep.port,
+        # item 411 T3: bind where the listener LIVES (`bind`), which can differ
+        # from the address consumers DIAL (`host`) — a sandboxed provider binds
+        # 0.0.0.0 inside its namespace and is reached through the relay. The
+        # dial-time hostname check (mTLS SNI) is unaffected; only the bind moves.
+        return await asyncio.start_server(handle, host=(ep.bind or ep.host),
+                                          port=ep.port,
                                           ssl=ep.tls.server_context())
     return await asyncio.start_unix_server(handle, path=ep.path)
 
