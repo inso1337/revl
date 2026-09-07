@@ -1235,7 +1235,10 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
     return { text: ident(value_str(value_field(node, "id"))), counter: counter }
   }
   if (kind == "config") {
-    return { text: "config.".concat(ident(value_str(value_field(node, "field")))), counter: counter }
+    // Read through the RAW key (bracket form for a JS reserved word), matching
+    // the key the spec and the `<Comp>Config` interface carry: a `_mangle`d
+    // `config.static_` read `undefined` while the value lived under `static`.
+    return { text: member("config", value_str(value_field(node, "field")), false), counter: counter }
   }
   if (kind == "req") {
     // Committed-view access: resolved through the fiber's snapshot (R3).
@@ -2417,7 +2420,9 @@ fn config_interface(comp: Any) -> List[Str] {
   let raw_name = value_str(value_field(comp, "name"))
   var out = [`export interface ${raw_name}Config {`]
   for (field of fields) {
-    let fname = ident(value_str(value_field(field, "name")))
+    // Raw key (quoted for a reserved word), NOT `_mangle`d — the property the
+    // interface declares must be the key the runtime stores and the read names.
+    let fname = prop_key(value_str(value_field(field, "name")))
     let ty = config_ts_type(value_str(value_field(field, "type")))
     let dflt = value_field(field, "default")
     if (value_is_null(dflt)) {
@@ -2488,7 +2493,9 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
     out = out.push(`  ${apply_kw}(ctx: Context, ${config_param}) {`)
     var spec_parts = []
     for (field of fields) {
-      let fname = value_str(value_field(field, "name"))
+      // Same `prop_key` the interface and the read use, so the spec key, the
+      // interface property and the `config.<field>` read name one identifier.
+      let fname = prop_key(value_str(value_field(field, "name")))
       let dflt = value_field(field, "default")
       // item 256 Slice 3 / 421 F6 (ported per item 429(d), the ts end): a field
       // declared `Secret[T]` is stamped so the runtime keeps its value out of

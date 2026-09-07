@@ -1360,6 +1360,58 @@ def test_service_call_direct_arg_clones_reused_value():
     assert "self.log.write(line.clone())" in src
 
 
+_SMART_PTR_SRC = (
+    "service Cache {\n"
+    "  emission fn clone()\n"
+    "  fn as_ref() -> Str\n"
+    "}\n"
+    "service Api { emission fn handle(k: Str) -> Str }\n"
+    "component Svc requires cache: Cache provides api: Api {\n"
+    "  provide api {\n"
+    "    fn handle(k) {\n"
+    "      let r = cache.as_ref()\n"
+    "      emit cache.clone()\n"
+    "      return r\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+def test_smart_pointer_method_names_are_renamed_off_the_receiver():
+    """GHSA-mrqv-535q-jw3x A2: a required service is held as `Arc<Box<dyn Sv>>`,
+    and `Arc<T>` implements `clone`/`as_ref` unconditionally, so `cache.clone()`
+    bound to `Arc::clone` (result discarded) and the user body never ran. `_mname`
+    renames the method everywhere — trait declaration, provider/proxy impls,
+    bridge dispatch, and call sites — so the user method is dispatched."""
+    src = emit.emit(compile_source(_SMART_PTR_SRC))
+    # Trait declaration, call sites, proxy impl, and dispatch all use the rename.
+    assert "fn clone_(&self, ) -> ();" in src
+    assert "fn as_ref_(&self, ) -> String;" in src
+    assert "self.cache.as_ref_()" in src
+    assert "let _ = self.cache.clone_();" in src
+    assert "svc.clone_();" in src
+    assert "svc.as_ref_()" in src
+    # The user method is NEVER left calling the smart-pointer method on the
+    # `Arc<Box<dyn Cache>>` receiver.
+    assert "self.cache.clone();" not in src
+    assert "self.cache.as_ref();" not in src
+    # The JSON-RPC WIRE key stays the raw method name (proxy send == dispatch
+    # match arm), so the two ends of the bridge still agree.
+    assert '"clone", vec![]' in src
+    assert '"clone" =>' in src
+
+
+@needs_cargo
+def test_cargo_check_smart_pointer_method_names(tmp_path):
+    """The rename makes the emitted crate compile: before it, the trait declared
+    `fn clone` while the impls/dispatch named `clone_` (E0599), and the `clone`
+    call returned an `Arc`, not the method's unit — so `cargo check` is a real
+    gate that the user method is the one wired up."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(_SMART_PTR_SRC)))
+    assert result.returncode == 0, result.stderr
+
+
 @needs_cargo
 def test_cargo_check_service_call_arg_reuse(tmp_path):
     """Real cargo gate for item 101: both the record-nested and the direct

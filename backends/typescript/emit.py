@@ -92,6 +92,25 @@ CONTEXT_MEMBERS = {
     "get", "set", "provide", "accessor", "mixin", "baseUrl",
 }
 
+# Provision keys the JS runtime or cordis treats specially, so a provider
+# registered under one LOADS but never resolves by that key — the provider looks
+# installed and every consumer call throws (or reads the prototype instead).
+# `then` makes the provision a thenable, so `await`-ing the context or the
+# provision hijacks Promise resolution; every member of `Object.prototype`
+# (`constructor`, `hasOwnProperty`, `toString`, …) and `__proto__`/`prototype`
+# is INHERITED on every object, so a `key in obj` / `obj[key]` lookup
+# "succeeds" against the prototype rather than the provision; and cordis
+# reserves the `_`-prefixed namespace for its own internals. These are refused
+# at emit — the same policy as `CONTEXT_MEMBERS` — because a compile error is
+# strictly better than a provider that installs and then fails on use.
+DANGEROUS_PROVISION_KEYS = {
+    "then", "prototype", "constructor", "__proto__",
+    "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable",
+    "toString", "toLocaleString", "valueOf",
+    "__defineGetter__", "__defineSetter__",
+    "__lookupGetter__", "__lookupSetter__",
+}
+
 
 def _split_ts_types(inner: str) -> list[str]:
     """Split a type argument list on commas outside `[...]` / `(...)`."""
@@ -775,7 +794,17 @@ def _expr(node: object, ctx: "_Ctx") -> str:
                     f"reference to undeclared config field {field!r} in component "
                     f"{scope.component.get('name')!r}"
                 )
-            return f"config.{_ident(field, 'config field')}"
+            # The runtime `config` object is keyed by the RAW field name — that
+            # is the key the `applyConfigDefaults` spec and the `<Comp>Config`
+            # interface carry (`_config_interface` / the spec below both go
+            # through `_prop_key`). A JS reserved word (`static`, `delete`, `in`,
+            # …) is a legal revl config field but, if `_mangle`d only here, this
+            # read named `config.static_` while the value lived under `static`,
+            # so the field always read `undefined` and a supplied value — a
+            # security flag among them — was silently dropped. Reading through
+            # `_member` uses the SAME raw key (bracket form for a reserved word),
+            # so the read reaches the value that was actually stored.
+            return _member("config", field, "config field")
         if kind == "req":
             name = node.get("name")
             if name not in scope.requires:
@@ -1893,6 +1922,15 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                 f"provision key {name!r} collides with a cordis Context "
                 f"member — `ctx.{name}` already exists. Rename the key."
             )
+        if name in DANGEROUS_PROVISION_KEYS or (
+                isinstance(name, str) and name.startswith("_")):
+            raise EmitError(
+                f"provision key {name!r} collides with a JS runtime / cordis "
+                f"reserved name (a thenable trap, an Object.prototype member, "
+                f"or the `_`-prefixed internal namespace): a provider under this "
+                f"key would install but never resolve, so every consumer call "
+                f"throws. Rename the key."
+            )
         # R5: the withdrawal inverse is the runtime's own (ctx.provide is
         # revertible); yielding the wrapper slots it into this body
         # effect's LIFO sequence.
@@ -1994,7 +2032,12 @@ def _config_interface(component: dict) -> list[str]:
     name = component["name"]
     lines = [f"export interface {name}Config {{"]
     for field in fields:
-        fname = _ident(field.get("name"), "config field")
+        # The interface property must be keyed by the RAW field name (a reserved
+        # word as a quoted key), NOT `_mangle`d: the value the runtime stores and
+        # the `config.<field>` read both use the raw key (`_prop_key`/`_member`),
+        # so a mangled `static_?: T` here declared a property that neither the
+        # supplied config nor the read ever names.
+        fname = _prop_key(field.get("name"), "config field")
         ts_type = TYPE_MAP.get(field.get("type"), "any")
         if field.get("default") is not None:
             rendered = _comment_text(json.dumps(field["default"]))
@@ -2090,7 +2133,11 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
         lines.append(f"  {apply_kw}(ctx: Context, {config_param}) {{")
         spec_parts = []
         for field in fields:
-            fname = field["name"]
+            # Keyed through `_prop_key` — the SAME sanitizer the interface and
+            # the `config.<field>` read use — so the spec key, the interface
+            # property, and the read all name one identifier. A reserved word
+            # becomes a quoted key here too; a non-reserved field is unchanged.
+            fname = _prop_key(field["name"], "config field")
             # item 256 Slice 3 / 421 F6: a field declared `Secret[T]` is stamped
             # so the runtime keeps its value out of the `<Component>.config`
             # trace line while still handing the real value to the component.
