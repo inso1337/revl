@@ -145,6 +145,51 @@ itself `cross_domain=True` under `hmac-sha256` is **refused outright** with the
 reason naming the Ed25519 upgrade. Shipping cross-domain deploy on HMAC would
 make `signer-untrusted` a fiction; refusing says so instead.
 
+### The load-measured COMMIT receipt, and the comparison that gates COMMIT
+
+`admit` is PREPARE: it verifies the chain and **loads nothing**. Between it and
+the moment the runtime executes the bytes there is a TOCTOU window — PREPARE
+proved bytes, COMMIT loads bytes, and nothing yet forced the loaded bytes to
+equal the verified ones, nor forced the conductor to check (design R2). Two
+functions close it, and they split the guarantee honestly.
+
+```python
+# on the receiver, at the instant of COMMIT-load:
+commit = deploy.commit_receipt("staged.revlbundle", backend="python",
+                               host_key=host_signing_key)
+# on the conductor, before the seam comes up:
+ok, why = deploy.compare_commit_receipt(admission_receipt, commit,
+                                         host_key=host_verify_key)
+```
+
+`commit_receipt` re-derives the IR hash and the artifact digest **afresh, from
+the bytes on disk at COMMIT-load time** — the same two re-derivations `admit`
+and `repin` run, but performed now rather than echoed from the admission
+receipt, because an echo would prove nothing about what COMMIT actually loaded.
+It signs the measurement with the host's own key (its item-55 mTLS identity on a
+network seam, an HMAC key inside Slice 1's single trust domain), so a later audit
+can attribute a lie about what was loaded, not merely notice one. It fails
+**closed**: an unreadable staged IR or a missing/undigestible `emitted/<backend>/`
+raises rather than yielding a receipt over bytes that could not be measured.
+
+`compare_commit_receipt` is the conductor's **hard** COMMIT gate. It verifies the
+COMMIT receipt's own signature first — a receipt it cannot pin to the host's key
+is `unattributable` and refused rather than compared — then compares the
+load-measured `artifact_hash` and `composition_hash` against the **signed**
+admission binding and refuses on mismatch, naming which link diverged. So:
+
+- an **honest-but-buggy** receiver that loads the wrong bytes by accident is
+  **detectable**: the fresh measurement disagrees with the admitted binding and
+  the conductor sees it at COMMIT, not only at PREPARE's verify;
+- a **malicious** receiver that signs one hash and loads another is only
+  **attributable / non-repudiable** — the lie has an owner, but catching it needs
+  hardware the host cannot forge, which is out of scope.
+
+The COMMITTED receipt shares a kind and a signing key with the ACCEPT admission
+receipt but never a verdict, so neither can stand in for the other: an admission
+that loaded nothing must not read as a load, and a load-time measurement must not
+read as an admission of a chain it never checked.
+
 ## 2. Effect correlation on every seam crossing
 
 Every call crossing a seam can carry a `Correlation` envelope:
@@ -453,9 +498,12 @@ guarantees.
   `unresolved` naming the
   target for a human. A deploy that cannot promise teardown must not be the thing
   that quietly discovers it. The refusal also names the control plane that is
-  absent: no bundle staging, no remote `deploy-admit` runner, no load-measured
-  signed COMMIT receipt for the conductor to compare, and no pinned SSH host key
-  (design R2/R4/R5). Without that pin, impersonating the target costs sitting on
+  absent: no bundle staging, no remote `deploy-admit` runner, and no pinned SSH
+  host key (design R4/R5). The load-measured signed COMMIT receipt and the
+  conductor's comparison of it (design R2) now exist as library surface —
+  `commit_receipt` and `compare_commit_receipt` (§1) — but nothing yet drives
+  them across an SSH COMMIT round-trip; that wiring is part of the machine
+  boundary. Without the host-key pin, impersonating the target costs sitting on
   the network path rather than owning the machine.
 
 ### A participant behind a container boundary
@@ -481,10 +529,12 @@ conductor's own kernel.
 
 ## Not landed yet
 
-* **cross-machine orchestration**: the `machine` boundary above, with all of
-  bundle staging, a remote `deploy-admit` runner, a load-measured signed COMMIT
-  receipt the conductor compares, and a pinned SSH host key
-  (`network-placement.md` still lists orchestration as a non-goal);
+* **cross-machine orchestration**: the `machine` boundary above, with bundle
+  staging, a remote `deploy-admit` runner, a pinned SSH host key, and the SSH
+  round-trip that drives the load-measured COMMIT receipt (`commit_receipt` /
+  `compare_commit_receipt` are landed as library surface, §1; the round-trip
+  that calls them across the seam is not) (`network-placement.md` still lists
+  orchestration as a non-goal);
 * a **replicated WAL** and a quorum-durable federation decision;
 * a **partition-safe distributed commit coordinator**;
 * a **seam-carrying container target**, blocked on the per-rung seam transport
