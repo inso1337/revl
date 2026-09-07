@@ -617,6 +617,9 @@ _ALL_HOST_KEYWORDS: frozenset[str] = frozenset({
     "as", "crate", "extern", "false", "fn", "impl", "in", "let", "loop",
     "match", "mod", "move", "mut", "pub", "ref", "self", "Self", "struct",
     "trait", "true", "unsafe", "use", "where", "async", "await", "dyn",
+    # rust reserved-for-future keywords (#552 B1); `abstract`/`do`/`final`/
+    # `try`/`yield` are already listed under java, `typeof` under ts.
+    "become", "box", "gen", "macro", "override", "priv", "unsized", "virtual",
     # ts (JS_RESERVED)
     "debugger", "delete", "export", "function", "null", "throw", "typeof",
     "with",
