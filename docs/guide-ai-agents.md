@@ -327,9 +327,9 @@ diagnostic tells you the rewrite, not just the rule. See
 [docs/mcp-bridge.md](mcp-bridge.md) for the shapes.
 
 MCP is your interface, but a human editing the same sources gets the same
-checker through a language server. `revl lsp` speaks LSP over stdio (the
-absolute-interpreter fallback is `python -P -m revl.lsp`, again with the
-`-P`): diagnostics from the checker, hover from the diagnostic
+checker through a language server. `python -P -m revl.lsp` speaks LSP over
+stdio (it is a module entry point, not a `revl lsp` subcommand, run with the
+`-P` safety bit): diagnostics from the checker, hover from the diagnostic
 explanations, and go-to-definition from the resolver (`src/revl/lsp/`).
 Same admission gate, a different transport.
 

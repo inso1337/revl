@@ -240,8 +240,19 @@ exponent case), which points here.
   sequence of Unicode scalar values (code points). A Python `str` already is
   one, so this is enforced (a lone surrogate is rejected) rather than
   converted; the real fix is that every backend now escapes *from code points*.
-- **python.** Reference for the unit. `Float → Str` renders through
-  `_revl_ftoa` (the canonical ES form) rather than `str(float)`.
+- **python.** Reference for the unit. A `Float` renders through `_revl_ftoa`
+  (the canonical ES form) rather than `str(float)` **only where the emitter can
+  prove the interpolated expression is a `Float` from the node alone**: a
+  `Float` literal, a `/`, a `Float`-annotated arithmetic node, or a unary minus
+  of one (`_is_float_expr`). The emitter carries no type environment, so a
+  `Float` reached only through a `let`/`var` binding is *not* proven at the
+  interpolation site and still falls back to `str()`. That is a real remaining
+  gap, not a closed one: a `Float` bound as `let x: Float = 3.0` and then
+  interpolated as `${x}` emits `str(x)` and renders **`3.0`** on py, where ts
+  (which interpolates natively) renders `3`.
+  Closing it needs the interpolation site to carry the checker's type the way
+  `arithmetic.md`'s `"widen"` marker does. go, rust and java share the same
+  syntactic-proof limitation.
 - **go.** Literals emit valid UTF-8 escapes (`\uXXXX` for BMP, `\UXXXXXXXX`
   for astral) instead of the lone-surrogate `\uXXXX` `json.dumps` produced;
   the method helpers were already `[]rune`-based. `Float` interpolates through
