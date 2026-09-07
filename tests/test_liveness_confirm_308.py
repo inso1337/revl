@@ -264,7 +264,7 @@ def test_shared_crash_with_surviving_holder_pins_the_handle():
     probe = DictProbe()
     probe.kill("A")            # A gone, B still alive (B keeps beating)
     book.beat("B", now=90.0)   # B is demonstrably alive
-    report = book.reclaim_crashed(probe=probe, now=100.0)
+    book.reclaim_crashed(probe=probe, now=100.0)
     assert closed == []               # B still owns it => no teardown
     assert book.grant("db").fired is False
     # B still holds the handle and can hand it off / release later
