@@ -256,7 +256,8 @@ def _referent_key(record: dict, world: World) -> Optional[str]:
 
 def recover(wal_path: str, *, world: Optional[World] = None,
             session=None, snapshot: Optional[dict] = None,
-            reissue: Optional[str] = None) -> dict:
+            reissue: Optional[str] = None,
+            forward_admissions: bool = False) -> dict:
     """Read the WAL at ``wal_path`` and prove a way back.
 
     Returns a stated verdict (``rolled-forward`` or ``rolled-back``) with a
@@ -302,20 +303,32 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     approved = next((r for r in records
                      if r.get("record") == "commit-approved"), None)
     if wal["complete"]:
-        return _with_lineage(
-            _roll_forward(wal, session=session, snapshot=snapshot), records)
-    if approved is not None:
+        report = _roll_forward(wal, session=session, snapshot=snapshot)
+    elif approved is not None:
         # item 245, Decision 3, the approved-to-discharged window: a crash after
         # `commit-approved` and before `activation-complete` is a COMMITTED
         # session. The durable approval, not the discharge record, is the commit
         # proof; recover replays no inverse and rolls the missing discharge
         # forward. This dominates the discharge-set skip for a session-owned WAL.
-        return _with_lineage(
-            _roll_forward_window(wal_path, wal, approved,
-                                 world=world or DictWorld(),
-                                 reissue=reissue), records)
-    return _with_lineage(
-        _roll_back(wal, world=world or DictWorld(), wal_path=wal_path), records)
+        report = _roll_forward_window(wal_path, wal, approved,
+                                      world=world or DictWorld(),
+                                      reissue=reissue)
+    else:
+        report = _roll_back(wal, world=world or DictWorld(), wal_path=wal_path)
+
+    # design 460 §5: the forward-recovery scan runs in BOTH branches — an
+    # admission can be owed under either verdict, because the session's activation
+    # may have completed long before the turn was admitted. It runs AFTER the base
+    # is restored (in `_roll_forward`) / the inverse replay (in `_roll_back`), so a
+    # finalize never runs over a world an inverse is about to change. The scan is a
+    # no-op for a WAL with no `admit-decided`, so a session that never admitted has
+    # a byte-identical report.
+    admissions = recover_forward_admissions(
+        wal, session=session, snapshot=snapshot,
+        forward=forward_admissions, wal_path=wal_path)
+    if admissions:
+        report["admissions"] = admissions
+    return _with_lineage(report, records)
 
 
 def _with_lineage(report: dict, records: list) -> dict:
@@ -463,6 +476,166 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
         },
         "guarantee": _guarantee(),
     }
+
+
+def _append_admit_record(wal_path: str, record: dict) -> None:
+    """Append one `admit-finalized`/`admit-abandoned` forward-recovery record to
+    the WAL, fsync'd (design 460 §5). Appending fires nothing, so it is safe and a
+    second recover pass reads the same classification with no special-casing —
+    the same discipline `_append_discharge` uses. The record carries no seq: it
+    names a fact about an existing `admit-decided`, it is not a new ordered
+    event."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    with open(wal_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
+
+
+def recover_forward_admissions(wal: dict, *, session=None,
+                               snapshot: Optional[dict] = None,
+                               forward: bool = False,
+                               wal_path: Optional[str] = None) -> list:
+    """`recoverForwardCommit` (design 460 §5): scan the WAL's `admit-*` records
+    and classify every un-finalized two-phase admission, finalizing forward the
+    ones the evidence proves advanced.
+
+    Runs in BOTH recovery branches — an admission can be owed under either the
+    roll-forward or the roll-back verdict, because the session's activation may
+    have completed long before the turn was admitted. `revl recover` calls it
+    after `persist.resume` has restored the base (so the content CAS has a
+    restored generation to compare against). Returns one report per un-finalized
+    decision; with `forward` false it changes nothing (the report-only mode,
+    matching `revl estop --report`), with `forward` true it appends
+    `admit-finalized` for an advanced decision whose surface still matches and
+    `admit-abandoned {stale}` for one whose surface drifted.
+
+    The classification, per §5:
+
+      * `owed` — nothing after `decided` (no `applied`, no journal). The runtime
+        did not advance; the recorded turn is re-admittable through the gate, which
+        re-asks any ticket (the spends are already consumed, fail-closed). Reported;
+        never silently re-run.
+      * `advanced` — `admit-applied` is present. The runtime advanced past the
+        decision. CAS the recorded `expected` surface against the base+turn
+        recomputed from the restored generation; on match, finalize forward.
+      * `stale` — advanced, but the content CAS failed: the base's manifest or the
+        merged class-map digest moved. Write `admit-abandoned {stale}`, report the
+        digest that moved, finalize nothing. A decision never finalizes onto a
+        surface it did not see.
+      * `ambiguous` — an `estop-ambiguous` record sits after `decided` (a fenced
+        crossing in flight at the cut, §4/§6). Report the one record; refuse to
+        finalize; the operator reconciles it exactly as an `estop-ambiguous`.
+
+    NOTE (design 460 §4, not yet landed): the journal-served re-apply that a
+    fresh-process `advanced` finalize needs — replug the turn in journal-served
+    mode so a completed fenced crossing is served from the journal and dispatches
+    zero times — is the py-runtime plug seam left for a follow-up. This function
+    delivers the durable classification, the content CAS and the forward finalize
+    over the stage records; it does NOT itself re-run a turn's activation body."""
+    records = wal.get("records") or []
+    decided = [r for r in records if r.get("record") == "admit-decided"]
+    if not decided:
+        return []
+
+    def _for(kind: str, did: str) -> bool:
+        return any(r.get("record") == kind and r.get("decisionId") == did
+                   for r in records)
+
+    reports: list = []
+    for d in sorted(decided, key=lambda r: r.get("seq", 0)):
+        did = d.get("decisionId")
+        if _for("admit-finalized", did):
+            continue  # a fully committed decision: the scan is a no-op over it.
+        if _for("admit-abandoned", did):
+            continue  # already settled (plug-failed / estop / a prior stale).
+
+        # an estop-ambiguous record after this decision's seq is the §4 in-flight
+        # fenced row: report and refuse to finalize.
+        decided_seq = d.get("seq", 0)
+        ambiguous = [r for r in records
+                     if r.get("record") == "estop-ambiguous"
+                     and r.get("seq", -1) > decided_seq]
+        applied = _for("admit-applied", did)
+
+        if ambiguous:
+            reports.append({
+                "decisionId": did, "classification": "ambiguous",
+                "decision": ("a fenced crossing was in flight at the cut "
+                             "(estop-ambiguous under this decision); forward "
+                             "recovery refuses to finalize and leaves the one "
+                             "record for the operator, exactly as an E-Stop halt."),
+                "estopAmbiguous": [r.get("seq") for r in ambiguous],
+                "finalized": False})
+            continue
+
+        if not applied:
+            reports.append({
+                "decisionId": did, "classification": "owed",
+                "decision": ("the runtime did not advance past the decision (no "
+                             "`admit-applied`). The recorded turn is re-admittable "
+                             "through the gate, which re-asks any ticket — the "
+                             "spends this decision committed are already consumed "
+                             "(fail-closed). Reported; not silently re-run."),
+                "turn": d.get("turn"), "spends": d.get("spends") or [],
+                "finalized": False})
+            continue
+
+        # advanced: the content CAS on the recorded `expected` surface.
+        expected = d.get("expected") or {}
+        classification = "advanced"
+        cas_detail = None
+        if session is not None:
+            try:
+                live = session._forward_surface_for_turn(d.get("turn") or {})
+            except Exception as error:  # noqa: BLE001 — a refusing checker, §2.1
+                classification = "stale"
+                cas_detail = str(error)
+            else:
+                drifted = [k for k in ("baseManifestHash", "classMapDigest")
+                           if expected.get(k) is not None
+                           and live.get(k) != expected.get(k)]
+                if drifted:
+                    classification = "stale"
+                    cas_detail = ", ".join(
+                        f"{k}: {expected.get(k)} -> {live.get(k)}"
+                        for k in drifted)
+
+        if classification == "stale":
+            if forward and wal_path is not None:
+                _append_admit_record(wal_path, {
+                    "record": "admit-abandoned", "decisionId": did,
+                    "reason": "stale"})
+            reports.append({
+                "decisionId": did, "classification": "stale",
+                "decision": ("the runtime advanced, but the surface the decision "
+                             "was checked against moved (content CAS failed); the "
+                             "decision is abandoned and finalizes nothing. The "
+                             "landed effects are left to the normal roll-back/"
+                             "roll-forward verdict."),
+                "drift": cas_detail,
+                "finalized": False,
+                "abandoned": bool(forward and wal_path is not None)})
+            continue
+
+        # advanced and the surface still matches: finalize forward.
+        if forward and wal_path is not None:
+            _append_admit_record(wal_path, {
+                "record": "admit-finalized", "decisionId": did,
+                "observed": {"forwardRecovered": True}})
+        reports.append({
+            "decisionId": did, "classification": "advanced",
+            "decision": ("the runtime advanced past the decision and the surface "
+                         "still matches (content CAS passed); the decision is "
+                         "finalized forward rather than left ambiguous — its "
+                         "effects landed and its approvals were spent, so a "
+                         "dropped admission would be the lie the world contradicts."),
+            "finalized": bool(forward and wal_path is not None)})
+    return reports
 
 
 def _append_discharge(wal_path: str, seqs: list) -> None:
@@ -1337,6 +1510,18 @@ def render(report: dict) -> str:
             if entry.get("replay") == "read":
                 lines.append(f"  read     {entry['label']:<22} re-dispatched freely "
                              f"— the inverse changes nothing (item 440)")
+    # design 460 §5: one line per un-finalized two-phase admission, in either
+    # verdict. Present only when the WAL carried an admission the scan classified,
+    # so a session that never admitted renders byte-identically.
+    for entry in report.get("admissions") or []:
+        did = (entry.get("decisionId") or "")[:19]
+        tag = {"owed": "OWED", "advanced": "advanced", "stale": "STALE",
+               "ambiguous": "AMBIGUOUS"}.get(entry.get("classification"),
+                                             entry.get("classification"))
+        fin = " finalized" if entry.get("finalized") else ""
+        fin = " abandoned" if entry.get("abandoned") else fin
+        lines.append(f"  admission {tag:<9} {did}...{fin} — "
+                     f"{entry.get('decision', '')}")
     residue = report["residue"]
     lines += ["", f"residue proof [{'CLEAN' if residue['clean'] else 'RESIDUE'}]:",
               f"  {residue['proof']}"]

@@ -551,7 +551,8 @@ def _run_recover(args) -> int:
 
     try:
         report = recover(args.wal, session=session, snapshot=snapshot,
-                         reissue=reissue)
+                         reissue=reissue,
+                         forward_admissions=getattr(args, "forward", False))
     except (RecoveryError, WALIntegrityError, OSError) as error:
         # A corrupt or unreadable WAL is a diagnostic, not a traceback: recover
         # is the tool an operator reaches for AFTER a crash, so a mid-file

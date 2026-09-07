@@ -2111,6 +2111,83 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_admit_decided(self, *, decision_id: str, turn: dict,
+                             expected: dict, spends: list, components: list,
+                             keys: list) -> dict:
+        """Append the `admit-decided` stage record (design 460 §2, §2.1): the
+        durable `CommitDecisionRecord` a fresh process re-derives an admission
+        from. Written AFTER every pre-plug gate cleared and the spends were
+        committed and BEFORE the plug, so a decision on disk always has its
+        authority (`approval-consumed`) behind it (§2, the fail-closed order).
+
+        `turn` is the per-turn source verbatim in a re-admittable bundle
+        (`{"sources", "granted", "modules"}`), never the compiled IR: a restart
+        re-runs the checker and the untrusted-author profile, so a turn the
+        current checker now refuses fails loudly instead of resuming on stale
+        authority (§2.1). `expected` is the two-halved surface CAS target
+        (`{generation, surfaceEpoch, baseManifestHash, classMapDigest}`).
+        `spends` names the `approval-consumed` records this decision committed, so
+        the audit join gains a `decided` hop. Consumes a seq: it is an ordered
+        event on the session's single seq space, ahead of every crossing the
+        turn's activation body journals."""
+        record = {
+            "record": "admit-decided", "seq": self._seq,
+            "decisionId": decision_id, "turn": turn, "expected": expected,
+            "spends": list(spends), "components": list(components),
+            "keys": list(keys),
+        }
+        self._seq += 1
+        self._write(record)
+        return record
+
+    def record_admit_applied(self, *, decision_id: str, generation: int,
+                             surface_epoch: int) -> dict:
+        """Append the `admit-applied` stage record (design 460 §2): the plug
+        settled and the turn was adopted into the live composition. Carries the
+        `decisionId` and the `{generation, surfaceEpoch}` observed when it was
+        written, so forward recovery can tell an advanced decision from an owed
+        one. Consumes a seq — it lands strictly after every crossing the
+        activation body journalled and before `admit-finalized`."""
+        record = {
+            "record": "admit-applied", "seq": self._seq,
+            "decisionId": decision_id,
+            "observed": {"generation": generation, "surfaceEpoch": surface_epoch},
+        }
+        self._seq += 1
+        self._write(record)
+        return record
+
+    def record_admit_finalized(self, *, decision_id: str, generation: int,
+                               surface_epoch: int) -> dict:
+        """Append the `admit-finalized` stage record (design 460 §2): the
+        per-generation indexes were installed, so the surface the class map
+        describes matches what is live. Its presence is the terminal proof a
+        decision fully committed; forward recovery skips a decision that carries
+        it. Consumes a seq — the last of the three on this admission."""
+        record = {
+            "record": "admit-finalized", "seq": self._seq,
+            "decisionId": decision_id,
+            "observed": {"generation": generation, "surfaceEpoch": surface_epoch},
+        }
+        self._seq += 1
+        self._write(record)
+        return record
+
+    def record_admit_abandoned(self, *, decision_id: str, reason: str) -> dict:
+        """Append the `admit-abandoned` terminal record (design 460 §2): a
+        decision that will never reach `applied` — a plug that raised
+        (`plug-failed`), a latch at the plug seam (`estop`), or a surface that
+        drifted under it (`stale`). It is a terminal record, not a stage: forward
+        recovery treats a decision it closes as settled and finalizes nothing over
+        it. Consumes a seq so it orders after the `decided` it closes."""
+        record = {
+            "record": "admit-abandoned", "seq": self._seq,
+            "decisionId": decision_id, "reason": reason,
+        }
+        self._seq += 1
+        self._write(record)
+        return record
+
     def record_approval_revoked(self, request_id: str) -> dict:
         """Append the ``approval-revoked`` record when an operator retires a
         session-scoped standing grant EARLY (roadmap item 379), before its TTL or
