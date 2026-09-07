@@ -2943,11 +2943,24 @@ class Session:
         # the per-generation indexes go live with the widened surface, atomically
         # and in the same order `load` and `swap` install them, so no call is ever
         # decided against a map that predates the keys it is deciding about.
-        self._class_map = self._build_class_map(self.ir)
-        # design 460 §3: wiring a turn REBUILDS the class map but does NOT move
-        # `_generation` (426 §5.2 keeps an `add` layer generation-stable), so the
-        # surface epoch is the only counter that catches a turn's surface change.
-        # This is precisely the gap the epoch exists to close.
+        #
+        # #541 (P-4): reuse the `new_map` built above rather than deriving a
+        # second `ClassMap` from `self.ir` — the two are identical. `ClassMap` is
+        # a pure function of the ir it is handed, `new_map = ClassMap(merged)`,
+        # and the adopted `self.ir` now describes exactly the composition
+        # `_merged_turn_ir` did (base components + turn, base services with the
+        # turn's added by `setdefault`, base externs — the untrusted-author
+        # profile forbids the turn declaring its own; manifest = the turn's).
+        # Nothing between building `new_map` and here mutates it: the activation
+        # and cache-applicability gates only read it. Skipping the rebuild removes
+        # the second full-composition class-map walk per turn (the dominant term
+        # in the per-turn admit cost), with a byte-identical live map.
+        self._class_map = new_map
+        # design 460 §3: wiring a turn INSTALLS a new class map (the merged
+        # `new_map` above) but does NOT move `_generation` (426 §5.2 keeps an
+        # `add` layer generation-stable), so the surface epoch is the only counter
+        # that catches a turn's surface change. This is precisely the gap the
+        # epoch exists to close.
         self._surface_epoch += 1
         self._install_auto_approve_rules()
         self._install_cache_index(self.ir)

@@ -747,6 +747,16 @@ class _Driver:
         self.routers: dict[tuple, _Router] = {}
         self._route_disposers: dict[str, list] = {}
         self.generation = 0
+        # item 541 (#541): every `_emit_module` registers a `revl_run_gen{N}`
+        # entry in `sys.modules` (the emitted record dataclasses need it at
+        # class-creation time). Nothing ever removed it, so a long-lived
+        # session — swap/reload, or a run of admit+abort/commit turns — pinned
+        # one whole emitted module (source, code objects, class dicts) per
+        # generation for the life of the PROCESS (201 modules / tens of MB after
+        # 200 admits). This maps each live generation's module name to the set
+        # of component names it defined, so a generation whose components are
+        # all disposed can have its `sys.modules` entry reclaimed.
+        self._gen_modules: dict[str, frozenset] = {}
         self.emitted: tuple = ("", "")  # (filename, source) of the last emit
         # crash-recovery WAL (roadmap item 47): --wal implies recording, since
         # the accumulator it persists is what recording captures.
@@ -1007,7 +1017,39 @@ class _Driver:
 
     # -- emit + load -------------------------------------------------------
 
+    def _evict_dead_modules(self) -> None:
+        """Reclaim `sys.modules` entries for emitted generations whose
+        components are all gone (item 541 / #541).
+
+        A generation's module is registered in `sys.modules` only so
+        `dataclasses` can resolve an emitted record type's fields at
+        class-creation time (see `_emit_module`). Once every component that
+        module defined has been disposed — no live fiber, no router provision —
+        nothing that outlives the generation reads the entry, yet leaving it in
+        place keeps the entire emitted module reachable for the process
+        lifetime. Sweeping here bounds `sys.modules` growth: a superseded
+        generation (a swap/reload predecessor, or an admitted turn dropped on
+        abort/commit) is freed the moment its successor is emitted or its
+        composition is torn down.
+
+        This is a pure memory reclaim and cannot change behaviour: the emitted
+        classes and their instances bound their references at exec time and
+        never re-resolve through `sys.modules`, and each generation's module is
+        self-contained (one never imports another), so evicting one leaves
+        every other live generation intact."""
+        live = set(self.fibers) | set(self._route_disposers)
+        for name in list(self._gen_modules):
+            if not (self._gen_modules[name] & live):
+                del self._gen_modules[name]
+                sys.modules.pop(name, None)
+
     def _emit_module(self, ir: dict) -> types.ModuleType:
+        # item 541: a generation supersedes the ones already disposed (a
+        # swap/reload runs `_dispose_all` before re-emitting; an aborted/
+        # committed turn disposed its fibers). Reclaim their modules now, before
+        # the successor claims its own `sys.modules` slot, so the table does not
+        # grow one dead entry per generation.
+        self._evict_dead_modules()
         self.generation += 1
         # item 416d: reset the per-run trace state at the ONE place a generation
         # begins. `revl_reset_run_trace_state`'s contract has always read
@@ -1040,6 +1082,11 @@ class _Driver:
         # register before exec: emitted record types are @dataclass, and
         # dataclasses resolves fields via sys.modules[cls.__module__]
         sys.modules[module.__name__] = module
+        # item 541: track the module against the components it defines, so
+        # `_evict_dead_modules` can drop its `sys.modules` entry once they are
+        # all disposed.
+        self._gen_modules[module.__name__] = frozenset(
+            c["name"] for c in _components(ir))
         exec(compile(source, filename, "exec"), module.__dict__)
         # item 379 / option (b) of docs/design/378-sync-extern-service-reach.md:
         # install the resolved config for each document-global config extern into
@@ -1286,6 +1333,11 @@ class _Driver:
                 )
             await self._flush()
         await self._flush()
+        # item 541: components just disposed here may have been the last live
+        # users of one or more generation modules (a swap/reload predecessor, a
+        # committed/aborted turn, or the whole composition at teardown) — reclaim
+        # their `sys.modules` entries now.
+        self._evict_dead_modules()
 
     # -- withdrawal + the prediction-vs-actuality oracle -------------------
 
