@@ -124,10 +124,12 @@
 mod selfhost;
 
 mod frontier;
+pub mod ir;
 pub mod session;
 pub mod symbols;
 
 pub use frontier::{FRONTIER_ID, MAX_SOURCE_BYTES};
+pub use ir::{check_ir_boundary, IrRefusal, KNOWN_IR_FIELDS, KNOWN_IR_REVISIONS};
 
 /// The semver of the GATE SURFACE itself (`gate_version().api`). Bumped by
 /// surface changes only, independent of the language version. Kept in lockstep
