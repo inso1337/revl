@@ -404,7 +404,19 @@ class ProposeResult:
       the forbidden-grant rule fired (`code` `FORBIDDEN_GRANT`), or the
       self-extension compile refused it (`code`/`message` the reference
       compiler's why-trace, verbatim — including the `G9` realm-placement
-      refusal, item 334 slice 2). The running composition is UNTOUCHED.
+      refusal, item 334 slice 2). The running composition is UNTOUCHED. When the
+      refusal came from the compile (the candidate itself is repairable — a new
+      `extern`, a transitive host-extern reach, an ungranted service, a realm
+      placement), `rejection` carries the MACHINE-READABLE why-trace: the same
+      `diagnostics.classify` record `gate_service.admit_structured` emits (the
+      violated G-rule `code`, the offending `subject`/`component`, the call-path
+      `steps`, and the mapped one-line `fix`). This is the item-334 <-> item-148
+      seam: a self-extension loop hands `rejection` straight to
+      `evolve.rejection_payload` and generates a next attempt WITHOUT parsing the
+      human `message`. `rejection` is `None` for the refusals a REGENERATED
+      candidate could not repair — the forbidden-grant rule (it enforces a
+      security deferral, not a candidate defect) and a halt (`revl recover`, not
+      a better candidate).
     * `admitted` True, `swapped` False, `reverted` True — the candidate admitted
       but FAILED TO ACTIVATE (its activation raised/left a fiber FAILED, or a
       requirement was unmet -> PENDING, or a declared provide never resolved).
@@ -426,13 +438,14 @@ class ProposeResult:
       because silently dropping the state would be residue."""
 
     __slots__ = ("admitted", "swapped", "reverted", "code", "message", "keys",
-                 "state", "migration")
+                 "state", "migration", "rejection")
 
     def __init__(self, admitted: bool, *, swapped: bool = False,
                  reverted: bool = False, code: str | None = None,
                  message: str | None = None, keys: tuple[str, ...] = (),
                  state: dict | None = None,
-                 migration: dict | None = None) -> None:
+                 migration: dict | None = None,
+                 rejection: dict | None = None) -> None:
         self.admitted = bool(admitted)
         self.swapped = bool(swapped)
         self.reverted = bool(reverted)
@@ -441,12 +454,13 @@ class ProposeResult:
         self.keys = tuple(keys)
         self.state = state
         self.migration = migration
+        self.rejection = rejection
 
     def as_dict(self) -> dict:
         return {"admitted": self.admitted, "swapped": self.swapped,
                 "reverted": self.reverted, "code": self.code,
                 "message": self.message, "keys": list(self.keys),
-                "migration": self.migration}
+                "migration": self.migration, "rejection": self.rejection}
 
 
 # The service names that reach the decider — the admit/swap/owner-state control
@@ -483,6 +497,27 @@ _DECIDER_SERVICES = frozenset({"Admission", "AdmitGate"})
 # free the slot on its own, so the single-gate invariant tracks the gate that is
 # actually LIVE, not merely the last one ever constructed.
 _ACTIVE_GATE: "weakref.ref[Gate] | None" = None
+
+
+def _propose_rejection(error: Exception) -> dict | None:
+    """The machine-readable why-trace for a `propose` COMPILE refusal (item 334
+    slice: the proposal's refusal as data). Reuses `diagnostics.classify` +
+    `explain` exactly as `gate_service.admit_structured` does, so the violated
+    G-rule, the offending subject, the why-trace steps and the mapped `fix` all
+    reach a self-extension loop's proposer without prose-parsing — the payload
+    `evolve.rejection_payload` consumes. Total: a non-`RevlError` (never expected
+    on this path) yields `None` rather than raising over the refusal boundary."""
+    from .errors import RevlError  # noqa: PLC0415
+    if not isinstance(error, RevlError):
+        return None
+    from . import diagnostics  # noqa: PLC0415
+    record = diagnostics.classify(error)
+    code = record.get("code")
+    if code and "fix" not in record:
+        explained = diagnostics.explain(code)
+        if explained.get("ok") and explained.get("fix"):
+            record["fix"] = explained["fix"]
+    return record
 
 
 def _live_gate() -> "Gate | None":
@@ -741,8 +776,13 @@ class Gate:
                            modules=dict(providers) if providers else None,
                            profile=profile)
         except RevlError as error:
+            # The DECISION refused the candidate. Return the why-trace as
+            # DATA, not only prose: `rejection` is the structured payload a
+            # self-extension loop hands to its proposer to regenerate (item
+            # 334 <-> item 148). The running composition is untouched.
             return ProposeResult(False, code=getattr(error, "code", None),
-                                 message=str(error))
+                                 message=str(error),
+                                 rejection=_propose_rejection(error))
 
         # 2. Build the SELF-CONTAINED composition for the TRANSITION (the agent
         #    source validated above, plus the trusted granted providers), then
@@ -751,7 +791,8 @@ class Gate:
             ir = self._compile_candidate_composition(source, providers)
         except RevlError as error:
             return ProposeResult(False, code=getattr(error, "code", None),
-                                 message=str(error))
+                                 message=str(error),
+                                 rejection=_propose_rejection(error))
 
         try:
             state = self._invoke_with_approval(self._session.swap, ir)
