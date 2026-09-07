@@ -34,6 +34,14 @@
 // need not bump. The stamp is a monotonic counter, NOT semver: it only has to
 // increase, so "newer than expected" and "older than expected" are both
 // distinguishable from "in sync".
+//
+// ------------------------------------------------------------------- bump log
+//   1 -> introduced with the stamp (item 389).
+//   3 -> catches up two public stdlib additions that landed without a bump:
+//        the confined shell/fs host-surface accessors on `stdlib/fs.rvl`
+//        (`is_dir`, `lexists`, `resolve_within`) and `plan_op_name` on
+//        `stdlib/shell.rvl`. One increment per public-API change, so two
+//        un-stamped additions move the counter by two.
 pub fn stdlib_version() -> Str {
-  return "1"
+  return "3"
 }

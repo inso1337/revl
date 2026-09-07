@@ -69,6 +69,25 @@ pub extern emission fn host_commit_rm(project_dir: Str, plan: Str) -> Str
 pub extern emission fn host_write_assembly(project_dir: Str, manifest: Str) -> Str
   = @py { from revl.truc._host import write_assembly; return write_assembly(project_dir, manifest) }
 
+// ---- composition layers: apply / stack check (emission; slice S6) ----
+
+// Resolve the entry composition's declared layer stack, HEADER-ONLY, and
+// report a collision before anything is admitted (426 §8). Returns a planner
+// `Report` {code, message, sources, commit}; `sources` is always "" (a check
+// writes nothing). Semantics are revl.composition's — truc owns only which
+// document, its vendored trucs and the pin (decision 7).
+pub extern emission fn host_stack_check(project_dir: Str) -> Str
+  = @py { from revl.truc._host import stack_check; return stack_check(project_dir) }
+
+// Resolve the entry composition's layer stack and ADMIT it through the gate
+// (426 §8/S6): the mandatory truc.lock pin and the vendored-dir jail fire at
+// resolution, the untrusted-author confinement profile at admission.
+// `trust_host_code` lifts the profile off host-body-shipping layers (§8.8). On
+// a clean admit `sources` carries the applied manifest to write; on refusal it
+// is "" (all-or-nothing).
+pub extern emission fn host_apply(project_dir: Str, trust_host_code: Bool) -> Str
+  = @py { from revl.truc._host import apply; return apply(project_dir, trust_host_code) }
+
 pub extern emission fn host_print(text: Str)
   = @py { from revl.truc._host import printout; printout(text) }
 

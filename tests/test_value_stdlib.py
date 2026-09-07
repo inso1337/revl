@@ -282,3 +282,29 @@ def test_py_tier_value_keys_is_total(consumer_ir):
     assert ns["t_keys_of_scalar_empty"]() == 0
     assert ns["t_keys_of_list_empty"]() == 0
     assert ns["t_keys_of_null_empty"]() == 0
+
+
+# --------------------------------------- inherited-key read regression (ts)
+
+def test_ts_readers_consult_own_keys_only():
+    """`value_field` / `value_opt` / `value_has` must read OWN keys only on the
+    ts tier — `Object.prototype.hasOwnProperty.call(v, name)`, never a bare
+    `name in v` or a direct `v[name]`. The `in` operator (and an unguarded
+    read) walks the prototype chain, so `constructor` / `toString` / `__proto__`
+    would read back as members a parsed JSON object never carried, diverging
+    from the py `dict.get`. Sibling of the json_parse `__proto__` finding (#319).
+
+    Pinned at the source level so node is not required; the read model is the
+    py `dict.get`, already exercised by the py-tier suites above."""
+    ir = compile_files([str(STDLIB)])
+    bodies = {e["name"]: e["bodies"]["ts"] for e in ir["externs"]}
+    for name in ("value_field", "value_opt", "value_has"):
+        ts = bodies[name]
+        assert "hasOwnProperty" in ts, \
+            f"{name} @ts must read own keys only (hasOwnProperty), not the " \
+            "prototype chain"
+        # the prototype-walking membership test must not be how a field is found
+        # (the old `value_field` guard `&& (name in v)`); backtick prose in the
+        # body comments is not this operative form.
+        assert "(name in v)" not in ts, \
+            f"{name} @ts must not use the prototype-walking `(name in v)`"

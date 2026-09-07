@@ -3249,8 +3249,20 @@ def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
     ):
         return _expr(steps[0]["expr"], env, rename)
 
+    return " ".join(_rust_render_pure_stmts(steps, env, dict(rename),
+                                             method.get("name")))
+
+
+def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
+                            method_name: str | None = None) -> list[str]:
+    """Render a PURE provide-method step list (issue #548) as Rust statement
+    strings: bindings, assignments, `return`, and the control-flow forms whose
+    bodies are themselves pure. Shared by the pure-method fast path and the
+    effectful `_method_body_lines` (a top-level `if`/`while`/`for` may sit
+    beside `emit`/`effect` steps, its arms still pure). Rust blocks are
+    expression-blocks, so each form is a statement here just as in the fn
+    grammar."""
     parts: list[str] = []
-    scope = dict(rename)
     for step in steps:
         kind = step.get("step")
         if kind == "let":
@@ -3265,12 +3277,43 @@ def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
             expr = step.get("expr")
             parts.append("return;" if expr is None
                          else f"return {_expr(expr, env, scope)};")
+        elif kind == "if":
+            cond = _expr(step["cond"], env, scope)
+            then = " ".join(_rust_render_pure_stmts(
+                step.get("then") or [], env, dict(scope), method_name))
+            s = f"if {cond} {{ {then} }}"
+            if step.get("else"):
+                els = " ".join(_rust_render_pure_stmts(
+                    step["else"], env, dict(scope), method_name))
+                s += f" else {{ {els} }}"
+            parts.append(s)
+        elif kind == "while":
+            cond = _expr(step["cond"], env, scope)
+            body = " ".join(_rust_render_pure_stmts(
+                step.get("body") or [], env, dict(scope), method_name))
+            parts.append(f"while {cond} {{ {body} }}")
+        elif kind == "for":
+            bind = _ident(step["bind"], "loop binding")
+            inner = dict(scope)
+            inner.pop(bind, None)
+            # `.iter().cloned()` yields owned `T` without moving the iterable (a
+            # param/`self` field may be used again) and keeps the binding a
+            # value so the pure body's arithmetic needs no deref. A `List[T]`
+            # element is always `Clone` on this tier.
+            iterable = _expr(step["iterable"], env, scope)
+            body = " ".join(_rust_render_pure_stmts(
+                step.get("body") or [], env, inner, method_name))
+            parts.append(f"for {bind} in {iterable}.iter().cloned() {{ {body} }}")
+        elif kind == "break":
+            parts.append("break;")
+        elif kind == "continue":
+            parts.append("continue;")
         else:
             raise EmitError(
-                f"{env.name}.{method.get('name')}: a pure method body admits "
-                f"bindings and a return in the Rust backend, not {kind!r}"
+                f"{env.name}.{method_name}: a pure method body admits bindings, "
+                f"control flow and a return in the Rust backend, not {kind!r}"
             )
-    return " ".join(parts)
+    return parts
 
 
 def _method_body(env: _Env, method: dict) -> str:
@@ -3622,6 +3665,15 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             )
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
+        elif kind in ("if", "while", "for", "break", "continue"):
+            # issue #548: a top-level `if`/`while`/`for` may sit beside the
+            # effect/emit steps of an effectful method (e.g. a guard that
+            # `return`s early, then an `emit`). Its arms are pure, so the shared
+            # pure renderer produces them; a Rust expression-block statement is
+            # whitespace-insensitive, so the single-line form is valid at `pad`.
+            for line in _rust_render_pure_stmts([step], env, dict(rename),
+                                                method.get("name")):
+                out.append(f"{pad}{line}")
         else:
             raise EmitError(f"unsupported method body step in Rust backend: {kind!r}")
 
@@ -3644,7 +3696,6 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     )
     name = component["name"]
     cname = _ident(name, "component")
-    snake = _snake(name)
     isolate = component.get("isolate") or {}
     intercept = component.get("intercept") or {}
     has_effectful = _component_has_effectful_methods(component)
@@ -3673,6 +3724,16 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     map_values = _component_map_values(env)
 
     for key, service in env.provides.items():
+        # item 449 (G2): a routed provided key is realized by its router struct
+        # (emitted below from `env.routes`), never by a hand-written provide
+        # body — a body on the routed key is now refused at compile. So the
+        # sanctioned router shape carries no `provide <key>` step, and emitting
+        # a standalone provider struct here would produce an empty `impl <Svc>`
+        # (no methods) that does not compile. Skip it; the router struct is the
+        # provider. Mirrors the go tier, which only emits from body provide
+        # steps and so never synthesized this struct.
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
@@ -3992,7 +4053,6 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     )
     name = component["name"]
     cname = _ident(name, "component")
-    snake = _snake(name)
     out: list[str] = []
 
     config_ty = _emit_config_struct(component, out)
@@ -4002,6 +4062,12 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     map_values = _component_map_values(env)
 
     for key, service in env.provides.items():
+        # item 449 (G2): a routed provided key is realized by its router struct
+        # (emitted below from `env.routes`), never a hand-written provide body,
+        # which is now refused at compile. Emitting a standalone provider struct
+        # here would yield an empty `impl <Svc>` that does not compile; skip it.
+        if key in env.routes:
+            continue
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
@@ -5960,8 +6026,13 @@ def _v3_builtin(method: str, target: str, args: list[str],
         return _v3_checked_div(method, target, args[0])
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): i64::to_string
     # is exact decimal over the whole range, Int.MIN included, and String is
-    # this tier's Str.
+    # this tier's Str. A Float receiver (review item 12) renders through
+    # revl_ftoa, the canonical ECMAScript Number::toString a `${aFloat}`
+    # interpolation uses, so `x.to_str()` and `${x}` agree byte-for-byte
+    # (f64::to_string prints Rust's `3`/`3.5`, which diverges from the tiers).
     if method == "to_str":
+        if recv == "Float":
+            return f"revl_ftoa({target})"
         return f"({target}).to_string()"
     # Single-character ASCII classification (item 233, docs/stdlib-2.0.md
     # §Str.is_alnum), mirroring the python backend's native forms
@@ -7732,8 +7803,9 @@ def _uses_stdlib(ir: dict) -> bool:
 
 
 def _uses_float_interp(ir: dict) -> bool:
-    """True when any `${…}` template interpolates a provably-`Float`
-    expression, so the canonical Float renderer is emitted only then."""
+    """True when the canonical Float renderer (revl_ftoa) is needed: any `${…}`
+    template interpolates a provably-`Float` expression, or a `Float.to_str()`
+    builtin renders one (review item 12) — emitted only then either way."""
     found = False
 
     def walk(node) -> None:
@@ -7747,6 +7819,10 @@ def _uses_float_interp(ir: dict) -> bool:
                             and part[0] == "expr" and _v3_is_float(part[1])):
                         found = True
                         return
+            if (node.get("kind") == "builtin" and node.get("method") == "to_str"
+                    and node.get("recv") == "Float"):
+                found = True
+                return
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):

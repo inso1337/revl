@@ -3340,7 +3340,7 @@ fn check_component(comp: CompD, cx: Ctx) -> Verd {
             if (a.msg != "") {
                 return mk_verd(tagged(&a.tag, &a.msg), body_line(&pm.body, mcx.clone(), comp.line));
             }
-            if (((decl.name != "") && (!decl.isAsync)) && has_await(&pm.body, 0i64)) {
+            if ((!pm.isAsync) && has_await(&pm.body, 0i64)) {
                 return mk_verd(tagged("A1", "`await` is only allowed in a component body"), comp.line);
             }
             if (decl.name != "") {

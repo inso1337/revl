@@ -34,11 +34,24 @@ BACKEND = ROOT / "backends" / "python"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-import pytest  # noqa: E402
 
 import replay  # noqa: E402
 from revl import wal as wal_core  # noqa: E402
+from revl.__main__ import main  # noqa: E402
 from revl.recovery import recover, recover_forward_admissions  # noqa: E402
+
+
+class _RestoredSessionStub:
+    """A minimal stand-in for the restored Session forward recovery needs to run
+    the content CAS against (design 460 §3): it returns a surface so the CAS on an
+    `admit-decided` with no recorded `expected` digests passes vacuously and the
+    decision classifies ADVANCED. Issue #476's review made a restored session
+    MANDATORY before a forward finalize — the no-session path no longer finalizes
+    — so these WAL-seal tests supply one to reach the terminal-append path they
+    exercise, without dragging in the compiler."""
+
+    def _forward_surface_for_turn(self, _turn):
+        return {"baseManifestHash": None, "classMapDigest": None}
 
 
 # --------------------------------------------------------------------------- #
@@ -73,9 +86,12 @@ def test_forward_admission_finalize_survives_a_torn_tail(tmp_path):
 
     wal = wal_core.read_wal(path)
     assert wal["torn"] is True  # the reader saw the torn trailing write
-    # no session: `admit-applied` present with no CAS makes this ADVANCED, so
-    # forward recovery appends `admit-finalized`.
-    reports = recover_forward_admissions(wal, forward=True, wal_path=path)
+    # a restored session makes the CAS pass (the decided record carries no
+    # `expected` digests, so nothing drifts) — the decision is ADVANCED and
+    # forward recovery appends `admit-finalized` (issue #476 review: the finalize
+    # requires a restored session, so a stub supplies one).
+    reports = recover_forward_admissions(wal, session=_RestoredSessionStub(),
+                                         forward=True, wal_path=path)
     assert len(reports) == 1
     assert reports[0]["classification"] == "advanced"
     assert reports[0]["finalized"] is True
@@ -105,6 +121,7 @@ def test_second_forward_pass_over_a_torn_tail_stays_readable_and_idempotent(tmp_
     _write_advanced_prefix_then_torn(path)
 
     first = recover_forward_admissions(wal_core.read_wal(path),
+                                       session=_RestoredSessionStub(),
                                        forward=True, wal_path=path)
     assert first[0]["finalized"] is True
 
@@ -190,6 +207,69 @@ def test_a_second_run_that_also_shuts_down_cleanly_reads_clean(tmp_path):
     wal.close()
 
     report = recover(path)
+    assert report["verdict"] == "rolled-forward"
+    assert report["residue"]["clean"] is True
+    assert report["steadyState"]["outstanding"] == []
+
+
+# --------------------------------------------------------------------------- #
+# #642 — end to end: the reused-WAL residue must drive the CLI VERDICT and exit
+# status, not just the in-process `recover()` dict. `revl recover --wal FILE`
+# exits 0 only when the residue is clean (`src/revl/cli/change.py::_run_recover`),
+# so the exact issue-#642 failure — a historical `run-complete` masking a later
+# run's steady crash — is the difference between a false `EXIT 0 / CLEAN` and the
+# honest `EXIT 1 / RESIDUE` an operator relies on after a crash. #642's own
+# "Regression coverage" asks precisely for this CLI-result assertion.
+# --------------------------------------------------------------------------- #
+
+def test_cli_recover_over_reused_wal_surfaces_later_run_residue_nonzero(
+        tmp_path, capsys):
+    """Issue #642, driven through `revl recover --wal` (`main()`), not only the
+    library. Run 1 completed cleanly and Run 2 (same WAL) crashed in steady
+    state: the CLI must exit NON-ZERO and name Run 2's crossing as residue,
+    never a false clean/exit-0 hidden behind Run 1's `run-complete`."""
+    path = str(tmp_path / "reused-cli.wal")
+    _run_one_clean(path)
+    _run_two_crashes(path)
+
+    rc = main(["recover", "--wal", path, "--json"])
+    out = capsys.readouterr().out
+
+    # fail-closed: honest residue means a non-zero exit for the operator.
+    assert rc == 1
+    report = json.loads(out)
+    assert report["verdict"] == "rolled-forward"
+    assert report["residue"]["clean"] is False
+    outstanding = report["steadyState"]["outstanding"]
+    assert len(outstanding) == 1
+    assert outstanding[0]["kind"] == "steady-state-residue"
+    # it is RUN 2's crossing that drives the verdict, not run 1's completed one.
+    referent = outstanding[0].get("referent") or ""
+    assert "run2-event" in referent
+    assert "run1-event" not in referent
+
+
+def test_cli_recover_over_reused_wal_all_clean_exits_zero(tmp_path, capsys):
+    """The scoping counterpart at the CLI boundary: when BOTH runs shut down
+    cleanly, the reused WAL is genuinely settled and `revl recover` exits 0 with
+    a CLEAN verdict. Proves the fix is per-run scoping, not a blanket 'a reused
+    WAL always fails' — the completed intervals keep their correct clean exit."""
+    path = str(tmp_path / "reused-cli-clean.wal")
+    _run_one_clean(path)
+    # run 2 also shuts down cleanly (its own `run-complete`).
+    wal = replay.WriteAheadLog(path, ir={}, generation=2).open()
+    wal.commit_activation(["Svc"])
+    tl = replay.Timeline("Svc")
+    tl.record_emission("bus", "send", ("run2-event",), "Bus", ("<f>", 2))
+    wal.append_timeline(tl)
+    wal.commit_run()
+    wal.close()
+
+    rc = main(["recover", "--wal", path, "--json"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    report = json.loads(out)
     assert report["verdict"] == "rolled-forward"
     assert report["residue"]["clean"] is True
     assert report["steadyState"]["outstanding"] == []

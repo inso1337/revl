@@ -171,15 +171,21 @@ def test_the_module_exposes_no_write_primitive():
     """The absence IS the item 422 F1 finding, and the downstream consumer
     explicitly does not want them back. An `unrm`-shaped or `replace`-shaped
     export here would be that finding with a new name. The catalog's four
-    mutations are witnessed and revertible; nothing else may mutate."""
+    mutations are witnessed and revertible; the four inverses that mutate on
+    reversal are `acquire` (effect-position-bound, not free pure primitives);
+    the only `pure` externs are the observers and the `settled` no-op that the
+    `acquire` inverses name as their terminal `undo`. Nothing else may mutate."""
     ir = compile_files([str(_FS_RVL)])
     mutating = {e["name"] for e in ir["externs"] if e["class"] == "witnessed"}
     assert mutating == {"write", "rm", "move", "mkdir"}
-    inverses = {e["name"] for e in ir["externs"]
-                if e["class"] == "pure"} - set(_OBSERVERS)
+    inverses = {e["name"] for e in ir["externs"] if e["class"] == "acquire"}
     assert inverses == {"restore", "unrm", "unmove", "rmdir_if_empty"}, \
+        "the mutating fs inverses must be `acquire` (a `pure` inverse would be " \
+        "callable as a free primitive — item 422 F1 / the classification fix)"
+    pure = {e["name"] for e in ir["externs"] if e["class"] == "pure"}
+    assert pure == set(_OBSERVERS) | {"settled"}, \
         "a new `pure` extern appeared on stdlib/fs.rvl; if it mutates, it is " \
-        "item 422 F1 again"
+        "item 422 F1 again — a `pure` extern here must only LOOK, never mutate"
 
 
 def test_each_observer_refs_its_own_entry_point_in_the_shipped_host():

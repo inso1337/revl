@@ -450,14 +450,32 @@ def test_a_row_must_assert_what_it_claims(tmp_path):
 
 
 def test_a_layer_clause_is_not_grammar_yet(tmp_path):
-    """`open`, `reach`, `place` and `variant` are S2/S5 surface. Until they are
-    built, writing one is a parse error rather than a silently ignored clause —
-    the fail-closed direction."""
-    for clause in ("open { max_steps }", "reach { pg_connect: host(\"x\") }",
-                   "place @db on process \"provider\""):
+    """`place` and `variant` are still S-future surface. Until they are built,
+    writing one is a parse error rather than a silently ignored clause — the
+    fail-closed direction. `open` and `reach` are 426 S5 and now DO parse (see
+    below)."""
+    for clause in ("place @db on process \"provider\"",
+                   "variant \"voice\" { }"):
         with pytest.raises(RevlError):
             Parser(f'composition Demo {{\n  row @db from "db.rvl" provides db '
                    f'{clause}\n}}\n', "base.rvl").parse()
+
+
+def test_open_and_reach_are_grammar(tmp_path):
+    """426 S5, §8.6/§8.3: `open { field, ... }` and `reach { field: host(...) }`
+    parse onto the row. They are checked against the component's declared config
+    at RESOLUTION (a field the component does not declare is a refusal there),
+    not at parse."""
+    prog = Parser(
+        'composition Demo {\n'
+        '  row @db from "db.rvl" provides db\n'
+        '    config { url: "x" }\n'
+        '    open   { url, pool }\n'
+        '    reach  { url: host("primary.internal:5432") }\n'
+        '}\n', "base.rvl").parse()
+    row = prog.compositions[0].rows[0]
+    assert row.open == [("url", 4), ("pool", 4)]
+    assert row.reach == [("url", "primary.internal:5432", 5)]
 
 
 def test_composition_is_a_contextual_keyword():
