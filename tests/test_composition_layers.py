@@ -858,3 +858,95 @@ def test_cli_full_flag_admits_the_whole_composition(tmp_path, capsys):
 
     assert "ADMITTED" in full_out and "ADMITTED" in incr_out
     assert _load_order(full_out) == _load_order(incr_out)
+
+
+# ------------------------- replace vs the inherited reach bound (426 §8.3/§8.6)
+
+REACH_BASE = """
+composition Demo {
+  use "services.rvl"
+  row @db from "sqlite.rvl" provides db
+    config { url: "sqlite://prod.internal:5432" }
+    reach  { url: host("prod.internal:5432") }
+%s}
+"""
+
+
+def _reach_project(tmp_path: Path, layer_body: str) -> Path:
+    """A base whose `@db` row bounds `url`'s reach to `prod.internal`, with one
+    stack layer that `replace`s `@db`. `layer_body` is the layer's op block."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    (tmp_path / "sqlite.rvl").write_text(SQLITE)
+    (tmp_path / "postgres.rvl").write_text(POSTGRES)
+    (tmp_path / "layers").mkdir(exist_ok=True)
+    (tmp_path / "layers" / "swap.rvl").write_text(layer_body)
+    doc = tmp_path / "base.rvl"
+    doc.write_text(REACH_BASE % '  stack "layers/swap.rvl"\n')
+    return doc
+
+
+def test_a_replacement_may_not_widen_the_inherited_reach_bound(tmp_path):
+    """426 §8.3/§8.6, soundness: the base composition bounds `@db`'s `url` reach
+    to `prod.internal`. A stack `replace` that declares its OWN, WIDER reach
+    (and a config value that escapes to it) must be REFUSED, not admitted — a
+    replacement inherits the base bound and may narrow it, never widen or
+    redirect it. Before the clamp, the replacement's own reach silently
+    replaced the base's, so the escaping value was wrongly admitted."""
+    doc = _reach_project(tmp_path, """
+layer Swap for Demo {
+  replace key("db") with row @db from "../postgres.rvl" provides db
+    config { url: "postgres://attacker.example:5432/app" }
+    reach  { url: host("attacker.example:5432") }
+}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    message = str(caught.value)
+    assert "widens the bound the base composition declared" in message
+    assert 'host("prod.internal:5432")' in message
+    assert 'host("attacker.example:5432")' in message
+
+
+def test_a_replacement_that_declares_no_reach_inherits_the_base_bound(tmp_path):
+    """The plain carry-forward still holds: a replacement declaring no `reach`
+    of its own inherits the base's, and a config value within it admits."""
+    doc = _reach_project(tmp_path, """
+layer Swap for Demo {
+  replace key("db") with row @db from "../postgres.rvl" provides db
+    config { url: "postgres://prod.internal:5432/app" }
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[0].reach == {"url": "prod.internal:5432"}
+    assert table.rows[0].config == {"url": "postgres://prod.internal:5432/app"}
+
+
+def test_a_replacement_cannot_drop_the_base_bound_by_re_declaring_reach(tmp_path):
+    """A replacement that declares an empty `reach` (or one omitting the bounded
+    field) cannot thereby shed the base bound: the inherited bound is carried
+    and re-checked, so a config value that escapes it is still refused."""
+    doc = _reach_project(tmp_path, """
+layer Swap for Demo {
+  replace key("db") with row @db from "../postgres.rvl" provides db
+    config { url: "postgres://attacker.example:5432/app" }
+    reach  { }
+}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "outside the reach declared for it" in str(caught.value)
+
+
+def test_a_replacement_re_declaring_the_same_reach_bound_admits(tmp_path):
+    """Narrowing to the SAME authority the base declared is fine: a replacement
+    may restate the inherited bound and configure a value within it."""
+    doc = _reach_project(tmp_path, """
+layer Swap for Demo {
+  replace key("db") with row @db from "../postgres.rvl" provides db
+    config { url: "postgres://prod.internal:5432/app" }
+    reach  { url: host("prod.internal:5432") }
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[0].reach == {"url": "prod.internal:5432"}
