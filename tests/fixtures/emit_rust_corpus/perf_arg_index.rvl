@@ -1,0 +1,68 @@
+// item 437d, the `&str` builtin ARGUMENT that is itself a `List` index read —
+// the remaining slot of the finding. The receiver, the `==`/`!=` operand and
+// the interpolation operand already borrow a `List` index read; a read passed
+// to a `&str` helper ARGUMENT (`hay.startsWith(xs[i])`) still cloned the whole
+// element out of the persistent list just to take a reference to it and drop it.
+// Every one of these builtins (`concat`/`indexOf`/`startsWith`/`endsWith`/
+// `split`/`join`) takes its argument BY REFERENCE, so the element place borrows
+// (`&(xs)[..]`) and no clone is needed. Without a fixture reaching the shape the
+// reference emitter could be optimised and `selfhost/emit_rust.rvl` left behind
+// with the oracle staying green (the item-429 trap), so this pins both tiers.
+//
+// Everything stays in the covered subset: index, `List[Str]`, and the read-only
+// string-arg builtins. No stdlib `len` property, which the self-host port does
+// not emit.
+
+// A `List[Str]` index read in a `&str` ARGUMENT slot — the prefix/suffix probes
+// borrow `(xs[i])` in place instead of cloning the whole element.
+fn count_prefixed(hay: Str, xs: List[Str]) -> Int {
+  var n = 0
+  var i = 0
+  let len = xs.length()
+  while (i < len) {
+    if (hay.startsWith(xs[i])) { n = n + 1 }
+    if (hay.endsWith(xs[i])) { n = n + 2 }
+    i = i + 1
+  }
+  return n
+}
+
+// The Str `indexOf` needle argument is `&str` too, so a `List` index read there
+// borrows the element place rather than cloning it.
+fn find_any(hay: Str, xs: List[Str]) -> Int {
+  var n = 0
+  var i = 0
+  let len = xs.length()
+  while (i < len) {
+    if (hay.indexOf(xs[i]) >= 0) { n = n + 1 }
+    i = i + 1
+  }
+  return n
+}
+
+// `concat`'s argument is `&str` as well; the index read borrows.
+fn joined(hay: Str, xs: List[Str], i: Int) -> Str {
+  return hay.concat(xs[i])
+}
+
+// A free-function `&str` parameter (item 282's read-only borrow) is the SAME
+// `&`-slot: `reads_only` never mutates or escapes its argument, so the call
+// borrows the element place (`&xs[0]`) instead of cloning it.
+fn reads_only(s: Str) -> Int {
+  return s.length()
+}
+
+fn calls_reads_only(xs: List[Str]) -> Int {
+  return reads_only(xs[0])
+}
+
+// OWNED argument positions still clone the element: `keep` returns its argument,
+// so the parameter is an owned `String` and the by-value call keeps
+// `(xs[0]).clone()` — the contrast that shows only the `&`-slots strip.
+fn keep(s: Str) -> Str {
+  return s
+}
+
+fn calls_keep(xs: List[Str]) -> Str {
+  return keep(xs[0])
+}

@@ -1,0 +1,23 @@
+// A `&str` builtin ARGUMENT that is itself a `List` index read — the remaining
+// item-437d slot. The receiver and the `==`/`!=` operand already borrow a
+// `List` index read; a read passed to a `&str` helper ARGUMENT
+// (`hay.startsWith(needles[i])`) still cloned the whole element out of the
+// persistent list every call, just to take a reference to it and drop it. The
+// helper parameter is `&str`, so the element place borrows and no clone is
+// needed. The needle list is built once and read in a hot loop, so the per-read
+// argument clone is what this measures, not the one-time build.
+pub fn arg_index(needles: List[Str]) -> Int {
+  let hay = "prefix-match-target-suffix"
+  var hits = 0
+  var pass = 0
+  let n = needles.length()
+  while (pass < 20) {
+    var i = 0
+    while (i < n) {
+      if (hay.startsWith(needles[i])) { hits = hits + 1 }
+      i = i + 1
+    }
+    pass = pass + 1
+  }
+  return hits
+}
