@@ -28,12 +28,22 @@ from .._paths import backends_root
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..taint import REDACTED_SECRET
+from ..typecheck import compatible
 from .approval import ApprovalRequired
 from .approval import _args_digest as _cache_args_digest
 
 
 class SessionError(RuntimeError):
-    """The session cannot do what was asked (no runtime, nothing loaded…)."""
+    """The session cannot do what was asked (no runtime, nothing loaded…).
+
+    An optional `code` carries a machine-readable classification (e.g.
+    ``STATE_UNDISCLOSED``, item 334) for a caller that must branch on the
+    refusal rather than parse its prose; it defaults to None so every existing
+    single-string raise is unchanged."""
+
+    def __init__(self, *args: object, code: str | None = None) -> None:
+        super().__init__(*args)
+        self.code = code
 
 
 @dataclasses.dataclass(frozen=True)
@@ -482,6 +492,21 @@ class Session:
         # Process-local: a fresh process has an empty set and re-materializes the
         # turn through forward recovery (§5), never from this map.
         self._applied_decisions: dict[str, tuple] = {}
+        # design 460 §4: the journal-served plug seam. When forward recovery
+        # re-applies an ADVANCED decision (§5), it re-plugs the turn in
+        # journal-served mode: at each fenced crossing the runtime asks
+        # `serve_fenced_crossing`, and a crossing already recorded complete under
+        # this decision is SERVED from the journal (returned, dispatched zero
+        # times) instead of re-run — the whole point of §4, "no double-run of a
+        # fenced extern" (§8). `_journal_served` maps a decision's fenced ordinals
+        # to their recorded outcomes; the counters track the seam's position and
+        # how many crossings actually dispatched (zero when everything was served,
+        # the non-vacuity witness the §7 Slice-3 exit test asserts). Empty and
+        # inert outside a re-apply, so a normal plug is untouched.
+        self._journal_served: dict = {}
+        self._journal_served_decision: str | None = None
+        self._journal_served_ordinal = 0
+        self._fenced_dispatch_count = 0
         # item 250 (session branching): once a session is FORKED, it is FROZEN —
         # retired at the fork step k, non-callable, so the shared rewound
         # workspace has exactly one live owner, the branch (Decision 4). `_frozen`
@@ -509,6 +534,12 @@ class Session:
         # resolved after it settles so a later `aclose` reads the same result
         # (idempotent), and cleared by `load` when a fresh composition boots.
         self._teardown_future: asyncio.Future | None = None
+        # item 628: the settled result of the retained attempt above, cached so
+        # `teardown_disposition` can report the unresolved ownership WITHOUT
+        # re-awaiting the future, and `rearm_teardown`/`strand_teardown` can read
+        # what is still owed. None until an attempt settles; cleared with the
+        # future by `load`, a re-arm, or a strand.
+        self._teardown_settlement: dict | None = None
 
     # -- plumbing ----------------------------------------------------------
 
@@ -547,6 +578,7 @@ class Session:
         # is stale; drop it so a later `aclose` tears down THIS composition
         # rather than replaying the old settlement.
         self._teardown_future = None
+        self._teardown_settlement = None
         # booting is admission: a draft with open obligations is checkable but
         # not runnable, and the refusal belongs here rather than in the Python
         # emitter's lap (docs/holes.md)
@@ -974,7 +1006,19 @@ class Session:
           is *rejected*: the whole swap rolls back with the original state
           intact, rather than silently dropping it (Q3/Q4).
         * ``"respawn"`` — today's teardown semantics: instances die with the
-          old composition and the successor starts them cold. No migration.
+          old composition and the successor starts them cold. No migration, and
+          (F4) NO provider hand-off capture either — a cold start carries nothing
+          across, so a rollback through `respawn` cannot launder the generation
+          it rolls back FROM into the one it rolls back TO.
+        * ``"declared"`` — the item-334 disclosure policy `Gate.propose` uses for
+          an AGENT-authored successor. Operator (gen N) state crosses the trust
+          boundary onto the untrusted successor ONLY through a `handoff` declared
+          AND §5-type-compatible on BOTH sides (the item-53 accept-vs-export gate,
+          run here because propose's standalone compile never threaded the running
+          manifest). The undeclared/untyped item-10 instance channel is NOT
+          crossed: a live instance the successor would inherit refuses BEFORE
+          teardown with STATE_UNDISCLOSED, gen N untouched, rather than being
+          silently migrated by candidate-written template name + host class alone.
 
         Composition-level (static) state is unaffected either way; this only
         reconciles the dynamic instance layer the static swap never saw."""
@@ -997,18 +1041,38 @@ class Session:
         # running composition untouched.
         self._check_cache_applicability(ir, new_map)
         old_ir = self.ir
+        # item 334 disclosure gate (`migrate="declared"`, the propose path): an
+        # AGENT-authored successor crosses the trust boundary, so gen N's live
+        # OPERATOR state must not carry onto it through any channel that is not
+        # explicitly declared AND §5-typed on both sides. The item-53 accept-vs-
+        # export type gate is manifest-threaded (compiler.py `handoffs` ambient)
+        # and never runs on propose's STANDALONE decision compile, so run the
+        # disclosure gate HERE, before any teardown — a refusal leaves gen N
+        # untouched (STATE_UNDISCLOSED), never silently carried. Fail-closed.
+        if migrate == "declared":
+            self._enforce_declared_disclosure(old_ir, ir)
         # capture BEFORE teardown — while the old instances are still live and
         # their state still exists (Q2). Empty unless something spawned, so a
-        # non-instance swap is byte-identical to before.
+        # non-instance swap is byte-identical to before. The item-10 instance
+        # channel has no declared type contract at any door, so it is NOT crossed
+        # under `declared` (the disclosure gate above already refused a live
+        # instance the agent successor would inherit); only `generational`
+        # (operator->operator) reconciles it.
         pre = (self._capture_instances(old_ir, ir)
                if migrate == "generational" else {})
         # item 53: capture each stateful *provider's* live state (its
         # effect-created world) before teardown too, so a component that
-        # declared a `handoff` starts its successor warm. Admission has already
-        # proved the exported/accepted shapes are §5-compatible; this threads
-        # the value. Empty unless a running provider declared a hand-off, so a
-        # stateless swap is byte-identical to before.
-        handoff_pre = self._capture_provider_state(old_ir)
+        # declared a `handoff` starts its successor warm. Admission (or, under
+        # `declared`, the disclosure gate above) has already proved the
+        # exported/accepted shapes are §5-compatible; this threads the value.
+        # Empty unless a running provider declared a hand-off, so a stateless
+        # swap is byte-identical to before. NOT captured under `respawn` (F4):
+        # `respawn` is cold-start teardown (rollback routes through it), so
+        # capturing there carried the SUCCESSOR generation's writes back onto the
+        # predecessor's code — an agent generation's state laundered into the
+        # operator code it rolled back to.
+        handoff_pre = (self._capture_provider_state(old_ir)
+                       if migrate != "respawn" else {})
         # item 334 (EDGE 1): the keys gen N ACTUALLY served, captured before
         # teardown while its providers are still live. The health gate below
         # holds the successor to these — see `_assert_successor_activated`.
@@ -1118,6 +1182,82 @@ class Session:
         if handoff is not None:
             state["handoff"] = handoff
         return state
+
+    # -- item 334 trust-boundary disclosure gate (F1-F5) -------------------
+
+    def _enforce_declared_disclosure(self, old_ir: dict, new_ir: dict) -> None:
+        """Refuse, BEFORE any teardown, an agent-authored successor that would
+        inherit undisclosed operator (gen N) state across the trust boundary
+        (roadmap item 334). Two channels carry live state across a swap:
+
+        * The item-10 live-INSTANCE channel (F2/F3). It correlates old↔new
+          purely by candidate-written template NAME and host CLASS, with no
+          declared §5 type contract at any door — so an agent successor that
+          re-declares a template with live instances would inherit the running
+          operator instance's state (an ungranted resource's product crossing by
+          name into a `granted=[]` candidate). There is no way to DISCLOSE such a
+          crossing, so a live instance whose template the successor re-declares
+          refuses here rather than migrating. Quiesce it, or use a trusted
+          operator swap.
+        * The item-53 provider HAND-OFF channel (F1). It IS two-sided-declared
+          (a `handoff` on both the predecessor and the successor), but propose's
+          decision compile runs STANDALONE (no `manifest=`), so the accept-vs-
+          export §5 gate (`admission._admit_handoff_replacement`, threaded off
+          the running `handoffs` ambient) never runs — a `Map[Str,Int]` acceptor
+          over an operator `Map[Str,Str]` export was admitted and migrated. Run
+          that gate here, against the running exported shapes. A key the
+          successor does not accept starts cold (no crossing); an accepted key
+          whose declared type cannot hold the exported state refuses.
+
+        Fail-closed: any refusal is raised as STATE_UNDISCLOSED before gen N is
+        touched, so the running composition keeps serving unchanged."""
+        runtime = self._driver.runtime
+        old_templates = (old_ir.get("manifest") or {}).get("templates") or []
+        new_templates = set((new_ir.get("manifest") or {}).get("templates") or [])
+        for name in old_templates:
+            if name in new_templates and runtime.live_instances(name):
+                raise SessionError(
+                    f"propose refused: template {name!r} has live instance state "
+                    f"and the successor re-declares it. The item-10 instance "
+                    f"channel correlates old and new by template name and host "
+                    f"class alone — both candidate-written, with no declared §5 "
+                    f"type contract — so an agent-authored successor cannot "
+                    f"inherit a running instance's operator state across the "
+                    f"trust boundary. Quiesce the instances (or use a trusted "
+                    f"operator swap) before self-extending. Nothing was swapped; "
+                    f"gen N is intact and still serving.",
+                    code="STATE_UNDISCLOSED")
+        running = self._declared_handoffs(old_ir)
+        accepts = self._declared_handoffs(new_ir)
+        for key, exported in running.items():
+            accepted = accepts.get(key)
+            if accepted is None:
+                continue  # the successor opts out of this key — starts cold
+            if not compatible(accepted, exported):
+                raise SessionError(
+                    f"propose refused: the successor's `handoff` on {key!r} "
+                    f"accepts `{accepted}`, but the running provider exports "
+                    f"`{exported}` — the declared hand-off types are not §5-"
+                    f"compatible, so operator state cannot cross onto the "
+                    f"agent-authored successor (the item-53 accept-vs-export gate "
+                    f"propose's standalone compile never ran). Nothing was "
+                    f"swapped; gen N is intact.",
+                    code="STATE_UNDISCLOSED")
+
+    @staticmethod
+    def _declared_handoffs(ir: dict) -> dict:
+        """`{provided key: declared handoff type}` for every non-template
+        component in `ir` that declares a `handoff`. Read statically off the IR
+        (no live fibers), so it is safe to call before teardown."""
+        templates = set((ir.get("manifest") or {}).get("templates") or [])
+        out: dict = {}
+        for comp in ir.get("components") or []:
+            if comp.get("name") in templates:
+                continue
+            h = comp.get("handoff")
+            if isinstance(h, dict) and h.get("key"):
+                out[h["key"]] = h.get("type")
+        return out
 
     # -- live-instance state migration (roadmap item 10) -------------------
 
@@ -1336,9 +1476,19 @@ class Session:
         provider's activation frame — captured while the old provider is still
         live and its world still exists, before teardown drops it. Keyed by
         provided key (not component name) so the successor's provider, which may
-        be a differently-named component, is correlated by *what it provides*."""
+        be a differently-named component, is correlated by *what it provides*.
+
+        A TEMPLATE component is skipped (F5): a template's live state is the
+        item-10 per-INSTANCE concern (`_capture_instances`), not a composition-
+        level provider hand-off. Capturing it here read the template component's
+        own (instance-less) activation frame and reported a zero-resource
+        provider hand-off — a spurious, misleading crossing record."""
+        templates = set(((old_ir or {}).get("manifest") or {}).get("templates")
+                        or [])
         pre: dict = {}
         for comp in (old_ir or {}).get("components") or []:
+            if comp.get("name") in templates:
+                continue
             handoff = comp.get("handoff")
             if not isinstance(handoff, dict) or not handoff.get("key"):
                 continue
@@ -1378,6 +1528,22 @@ class Session:
             comp = new_by_key.get(key)
             if comp is None:
                 continue  # successor does not accept this key's state — cold
+            # F1 defence in depth: the accept-vs-export §5 type gate. Admission
+            # runs it when a manifest is threaded, and the `declared` disclosure
+            # gate runs it before teardown, but a swap reached by any other path
+            # (or a manifest-less admission) must still refuse a declared type
+            # that cannot hold the exported state rather than laundering it —
+            # e.g. an operator `Map[Str,Str]` re-typed as a successor
+            # `Map[Str,Int]`, whose host class is the same `Map` so the vector
+            # check below passes it through.
+            accepted = (comp.get("handoff") or {}).get("type")
+            exported = info.get("type")
+            if not compatible(accepted, exported):
+                raise runtime.StateIncompatible(
+                    f"provider of {key!r}: the successor accepts state "
+                    f"`{accepted}`, but the running provider exported "
+                    f"`{exported}` — the declared hand-off types are not §5-"
+                    f"compatible, so the state cannot migrate")
             captured = info["captured"]
             fiber = self._driver.fibers.get(comp["name"])
             resources = self._frame_resources(fiber)
@@ -1952,55 +2118,211 @@ class Session:
         neither stops nor freezes an unrelated one.
         """
         # Join a retained attempt (in-flight, or already-settled → idempotent).
-        # No `await` between this read and the assignment below, so on a single
-        # loop two callers cannot both miss it and both start a teardown.
+        # No `await` between this read and the assignment in `_arm_teardown`, so
+        # on a single loop two callers cannot both miss it and both start a
+        # teardown.
         existing = self._teardown_future
         if existing is not None:
             return await asyncio.shield(existing)
-
-        # Pre-effect guards: refuse BEFORE any terminal effect begins, stating
-        # the missing ownership contract, so the host keeps its resources.
+        # Pre-effect guards: refuse BEFORE any terminal effect begins.
         self._refuse_if_halted("aclose")           # item 443: dead, use recover
-        driver = self._require()                   # nothing loaded / frozen
-        running = asyncio.get_running_loop()
-        if self._loop is running:
-            # The session's runtime work is bound to the very loop this
-            # coroutine runs on. Offloading its `run_until_complete` to a thread
-            # would double-drive one loop; disposing inline would need a nested
-            # loop. Neither is a supported ownership shape — refuse before any
-            # inverse or terminal effect, exactly as scenario 6 requires, rather
-            # than discovering it after teardown has started.
-            raise SessionError(
-                "`aclose` cannot tear down a session whose runtime loop is the "
-                "caller's own running loop: the owned-resource settlement "
-                "contract needs the session to own a loop distinct from the "
-                "host's. Load the session on its own loop (the default), or use "
-                "the synchronous `unload` from outside the running loop.")
+        self._require()                            # nothing loaded / frozen
 
-        fut = asyncio.ensure_future(self._teardown_offloaded(driver, running))
-        self._teardown_future = fut
-        return await asyncio.shield(fut)
-
-    async def _teardown_offloaded(self, driver, host_loop) -> dict:
-        """The retained close attempt (item 524): settle the verdict, drive the
-        owned disposal on the session's own loop from a worker thread, then
-        report. Runs exactly once per attempt; joined, never duplicated."""
+        # Implicit terminal commit (or in-process abort) — the async twin of
+        # `unload`, unchanged by items 625/628. The prepare below sets the
+        # verdict from the in-process abort bit; the finalize discharges (commit)
+        # or replays the escrow (abort) exactly as `unload` does.
         owner = self._owner
         aborting = owner is not None and any(
             getattr(f, "_aborting", False) for f in owner._registry)
-        if owner is not None:
-            owner._verdict = "abort" if aborting else "commit"
-            if aborting:
-                owner._queue = []   # a close that reverts drops the queue
+
+        def _prepare() -> None:
+            if owner is not None:
+                owner._verdict = "abort" if aborting else "commit"
+                if aborting:
+                    owner._queue = []   # a close that reverts drops the queue
+
+        def _finalize() -> dict:
+            if owner is not None and not aborting:
+                owner.finalize_commit()             # consolidated commit proof
+            elif owner is not None:
+                for entry in owner._escrow:          # aborting: replay the escrow
+                    entry.frame.abort()
+                owner.finalize_abort()
+            return {"unloaded": True}
+
+        return await self._arm_teardown(
+            "aclose", verdict=("abort" if aborting else "commit"),
+            aborting=aborting, prepare=_prepare, finalize=_finalize,
+            shared_loop_hint=(
+                "Load the session on its own loop (the default), or use the "
+                "synchronous `unload` from outside the running loop."))
+
+    async def aabort(self) -> dict:
+        """Awaitable AUDITED abort (item 625) — the async twin of `abort`,
+        callable from the OWNING running event loop. Marks every live frame
+        aborting and drops the deferral queue BEFORE any teardown (the pre-effect
+        prepare, on the host loop), offloads the inverse replay to the session's
+        own loop on a worker thread, then writes the `aborted` completion record
+        and closes the WAL. The implicit-commit default of `aclose` is untouched:
+        this is the explicit, WAL-marked verdict path. It reuses the one retained
+        attempt, so a cancelled/duplicate caller joins rather than re-aborting."""
+        existing = self._teardown_future
+        if existing is not None:
+            return await asyncio.shield(existing)
+        self._refuse_if_halted("aabort")
+        self._require()
+        owner = self._owner
+        if owner is None:
+            raise SessionError("no session owner is registered — nothing to abort")
+        dropped = {"n": 0}
+
+        def _prepare() -> None:
+            dropped["n"] = len(owner._queue)
+            owner.begin_abort()   # mark frames aborting + drop queue (zero cost)
+
+        def _finalize() -> dict:
+            result = owner.finalize_abort()   # `aborted` record (+ escrow Phase 2)
+            self._close_wal()
+            return {"aborted": True, "replayed": result["replayed"],
+                    "droppedDeferred": dropped["n"]}
+
+        return await self._arm_teardown(
+            "aabort", verdict="abort", aborting=True,
+            prepare=_prepare, finalize=_finalize)
+
+    async def acommit_confirm(self, manifest_hash: str) -> dict:
+        """Awaitable AUDITED commit-confirm (item 625) — the async twin of
+        `commit_confirm`. Recomputes the manifest hash and REFUSES a stale/changed
+        review token BEFORE any terminal effect (the host may re-enumerate with
+        `commit()`); on a match it writes `commit-approved` and flushes the queue
+        FIFO on the host loop, offloads the frame discharge to the session's own
+        loop, then writes the ONE discharge record and `activation-complete`. The
+        durable order — `commit-approved`, `flushed`*, `discharge`,
+        `activation-complete` — is byte-identical to the synchronous path."""
+        existing = self._teardown_future
+        if existing is not None:
+            return await asyncio.shield(existing)
+        self._refuse_if_halted("acommit_confirm")
+        driver = self._require()
+        owner = self._owner
+        if owner is None:
+            raise SessionError("no session owner is registered — nothing to commit")
+        # Refuse the shared-loop shape BEFORE `approve` writes any WAL record, so
+        # an unsupported ownership shape costs zero terminal effect.
+        self._require_distinct_loop("acommit_confirm")
+        # Pre-effect guard: `approve` recomputes the hash and RAISES before it
+        # writes `commit-approved`, so a stale token refuses with zero terminal
+        # effect and no retained attempt — the host stays loaded and may
+        # re-enumerate. This runs on the host loop (pure bookkeeping + WAL).
+        try:
+            flush = owner.approve(manifest_hash)   # commit-approved + flush FIFO
+        except driver.runtime.SessionCommitError as exc:
+            return {"committed": False, "refused": True, "reason": str(exc),
+                    "manifest": owner.manifest()}
+        prompts = dict(owner.prompts)
+
+        def _finalize() -> dict:
+            discharged = owner.finalize_commit()   # one discharge record
+            self._commit_wal(driver)               # activation-complete + close
+            return {"committed": True, "flushed": flush["fired"],
+                    "flushResidue": flush["flushResidue"],
+                    "discharged": discharged, "prompts": prompts}
+
+        return await self._arm_teardown(
+            "acommit_confirm", verdict="commit", aborting=False,
+            prepare=None, finalize=_finalize)
+
+    async def aconfirm_verdict(self, token: str) -> dict:
+        """Awaitable exact-state review-confirm (item 625) — the async twin of
+        `confirm_verdict`. Recomputes the abort review token against the CURRENT
+        state and REFUSES a drifted/stale token BEFORE any terminal effect (the
+        host must look again). On an exact match it enacts the audited abort via
+        `aabort`, so the offload seam and one-retained-attempt semantics hold."""
+        self._require()
+        self._refuse_if_halted("aconfirm_verdict")
+        owner = self._owner
+        if owner is None:
+            raise SessionError("no session owner is registered — nothing to abort")
+        prefix = "revl-verdict:"
+        rest = token[len(prefix):] if token.startswith(prefix) else ""
+        verdict, _, _core = rest.partition(":")
+        if verdict != "abort":
+            raise SessionError(
+                f"unrecognized verdict token {token!r} — obtain one from "
+                "`prepare_verdict('abort')` (item 483/625)")
+        current = owner.verdict_review_token(self._generation, verdict)
+        if token != current:
+            snapshot = owner.witness_snapshot(self._generation)
+            return {"confirmed": False, "refused": True,
+                    "reason": "stale verdict token — the session generation or "
+                              "an outstanding witness identity/revision changed "
+                              "since the review, so the confirm is refused "
+                              "(item 483/625)",
+                    "review": {"token": current,
+                               "snapshot": snapshot.to_dict()}}
+        return await self.aabort()
+
+    async def _arm_teardown(self, verb: str, *, verdict: str, aborting: bool,
+                            prepare, finalize,
+                            shared_loop_hint: str | None = None) -> dict:
+        """The shared awaitable-teardown seam behind `aclose`/`aabort`/
+        `acommit_confirm` (items 524/625/628).
+
+        Refuses the shared-loop shape BEFORE any terminal effect, runs the
+        verb's pre-effect `prepare` on the host loop, then retains ONE offloaded
+        attempt (shielded, joined by duplicate/re-entrant callers) that drives the
+        owned disposal on the session's own loop from a worker thread and settles
+        with `finalize`. The caller has already joined an existing attempt and
+        run its own pre-approve guard where applicable."""
+        running = self._require_distinct_loop(verb, shared_loop_hint)
+        if prepare is not None:
+            prepare()
+        fut = asyncio.ensure_future(
+            self._teardown_offloaded(self._require(), running, verdict=verdict,
+                                     aborting=aborting, finalize=finalize))
+        self._teardown_future = fut
+        return await asyncio.shield(fut)
+
+    def _require_distinct_loop(self, verb: str,
+                               hint: str | None = None):
+        """Refuse the shared-loop ownership shape BEFORE any terminal effect
+        (items 524/625 scenario 6), returning the caller's running loop.
+
+        The session's runtime work is bound to its own loop; if that IS the
+        caller's running loop, offloading its `run_until_complete` to a thread
+        would double-drive one loop and disposing inline would need a nested one.
+        Neither is a supported ownership shape — refuse so the host keeps its
+        resources rather than discovering it after teardown has started."""
+        running = asyncio.get_running_loop()
+        if self._loop is running:
+            raise SessionError(
+                f"`{verb}` cannot tear down a session whose runtime loop is the "
+                "caller's own running loop: the owned-resource settlement "
+                "contract needs the session to own a loop distinct from the "
+                f"host's. {hint or ''}".rstrip())
+        return running
+
+    async def _teardown_offloaded(self, driver, host_loop, *, verdict: str,
+                                  aborting: bool, finalize) -> dict:
+        """The retained teardown attempt (items 524/628): drive the owned
+        disposal on the session's own loop from a worker thread WITH a settlement
+        ledger, then settle with the verb's `finalize`. Runs exactly once per
+        attempt; joined, never duplicated."""
+        owner = self._owner
 
         # Distinguish invocation / return / failure / cancellation of the owned
         # disposers. The worker thread NEVER re-raises: a caught cleanup fault
         # must not read back as a verified success, so it is recorded and the
-        # settlement below withholds `settled`/`releaseOwnership`.
+        # settlement below withholds `settled`/`releaseOwnership`. The ledger
+        # (item 628) captures each ORIGINAL disposer's outcome so a failure names
+        # the exact resource rather than losing it to the pre-`await` pop.
         disposal = {"invoked": True, "returned": False,
                     "failed": None, "cancelled": False}
+        ledger: list = []
 
         def _drive() -> None:
+            driver._settlement_ledger = ledger
             try:
                 self._loop.run_until_complete(driver._dispose_all(self.ir))
                 disposal["returned"] = True
@@ -2008,26 +2330,44 @@ class Session:
                 disposal["cancelled"] = True
             except BaseException as exc:  # noqa: BLE001 — honest failure surface
                 disposal["failed"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                driver._settlement_ledger = None
 
         await host_loop.run_in_executor(None, _drive)
-        return self._settlement(driver, owner, aborting, disposal)
+        result = self._settlement(driver, owner, aborting, disposal, ledger,
+                                  verdict=verdict, finalize=finalize)
+        self._teardown_settlement = result
+        return result
 
-    def _settlement(self, driver, owner, aborting: bool,
-                    disposal: dict) -> dict:
-        """Build the item-524 settlement from a finished disposal attempt. Runs
-        on the host loop (pure Python); only reached once the offloaded disposal
-        has returned control."""
-        verdict = "abort" if aborting else "commit"
+    def _settlement(self, driver, owner, aborting: bool, disposal: dict,
+                    ledger: list, *, verdict: str, finalize) -> dict:
+        """Build the item-524/625/628 settlement from a finished disposal
+        attempt. Runs on the host loop (pure Python); only reached once the
+        offloaded disposal has returned control.
+
+        The settlement ties authoritative release to the ORIGINAL provisions/
+        disposers (the ledger), not to post-disposal structural counters, and
+        RETAINS the composition (no `_reset`) whenever anything is unresolved so
+        the host can inspect what remains owned before deciding."""
+        resources = [dict(r) for r in ledger]
+        # what the ledger says is still owned: reached-but-failed, reached-but-
+        # unreturned (a cancelled disposer), or never-reached (unattempted).
+        owned = sorted(r["component"] for r in resources
+                       if r["outcome"] in ("owned", "attempted", "failed"))
+
         if not disposal["returned"]:
             # Native cleanup did not complete: expose the unresolved/failure
             # state, DO NOT finalize the verdict, DO NOT reset — the host keeps
             # its pools/root reservations. A retained-but-failed attempt stays
             # readable; the composition is still loaded for the host to inspect,
-            # strand, or reconcile deliberately.
+            # strand, or re-arm deliberately. When the aggregate disposal was
+            # replaced wholesale (no ledger recorded), fall back to the live
+            # `fibers` for a best-effort inventory.
             return {
                 "closed": False,
                 "requestedVerdict": verdict,
                 "disposal": dict(disposal),
+                "resources": resources,
                 "nativeCleanupComplete": False,
                 "settled": False,
                 "releaseOwnership": False,
@@ -2035,38 +2375,130 @@ class Session:
                     "reason": ("disposal cancelled" if disposal["cancelled"]
                                else "disposal failed"),
                     "error": disposal["failed"],
+                    "ownedResources": owned or sorted(driver.fibers),
                     "liveComponents": sorted(driver.fibers),
                 },
             }
 
-        # Native cleanup returned: finalize the verdict exactly as `unload` does.
-        if owner is not None and not aborting:
-            owner.finalize_commit()             # consolidated commit proof
-        elif owner is not None:
-            for entry in owner._escrow:          # aborting: replay the escrow
-                entry.frame.abort()
-            owner.finalize_abort()
+        # Native cleanup returned: finalize the verdict (the verb's terminal
+        # record), then run the R4 residue checks and the per-resource ledger.
+        extra = finalize() or {}
         residue = self._surface_compensation_residue(owner)
         report = self._teardown_report(driver)
-        settled = bool(report["noResidue"])
-        self._reset()
+        failed = [r["component"] for r in resources if r["outcome"] == "failed"]
+        unattempted = [r["component"] for r in resources
+                       if r["outcome"] in ("owned", "attempted")]
+        r4_clean = bool(report["noResidue"])
+        # `settled` is PHYSICAL settlement: the aggregate returned, every original
+        # disposer that was reached returned, and R4 passes. A logged fault on a
+        # single original resource withholds it even though the aggregate returned.
+        settled = r4_clean and not failed and not unattempted
+        # Release ownership ONLY on a provably clean settlement: any owed
+        # compensation residue, failed R4 check, or unreturned original resource
+        # keeps the flag false, so the host retains rather than releases on
+        # ambiguity. `closed`/`settled` alone never imply safe release (item 628).
+        release = settled and not residue
         unresolved_checks = {k: v for k, v in report["checks"].items() if not v}
-        return {
+        result = {
             "closed": True,
             "requestedVerdict": verdict,
             "disposal": dict(disposal),
+            "resources": resources,
             "nativeCleanupComplete": True,
             "settled": settled,
-            # Release ownership only on a provably clean settlement; any owed
-            # compensation residue or failed R4 check keeps the flag false so
-            # the host retains rather than releases on ambiguity.
-            "releaseOwnership": settled and not residue,
-            "unresolved": {"compensationResidue": residue,
-                           "checks": unresolved_checks},
-            "unloaded": True,
+            "releaseOwnership": release,
+            "unresolved": {
+                "compensationResidue": residue,
+                "checks": unresolved_checks,
+                "ownedResources": sorted(set(failed) | set(unattempted)),
+            },
             "compensationResidue": residue,
             **report,
+            **extra,
         }
+        if release:
+            # Provably clean: drop the composition so `loaded` is False and the
+            # driver/owner are released, exactly as the synchronous verbs do.
+            self._reset()
+        # else: RETAIN — the composition stays loaded and the retained attempt
+        # stays cached so `teardown_disposition` can read the unresolved ownership
+        # and the host can `rearm_teardown` (re-attempt) or `strand_teardown`.
+        return result
+
+    # -- item 628: inspect + explicit failure-disposition of a retained attempt
+
+    def teardown_disposition(self) -> dict:
+        """Read the retained awaitable-teardown attempt's disposition WITHOUT any
+        effect (item 628), so an async consumer can determine whether original
+        roots/pools remain owned rather than reconstructing ownership from post-
+        disposal structural counters.
+
+        ``attempt`` is ``none`` (never armed), ``in-flight`` (still running),
+        ``released`` (settled clean, ownership dropped), or ``unresolved``
+        (settled with something still owed); ``settlement`` is the cached result
+        (with its per-resource ``resources`` ledger and ``unresolved`` ownership)
+        once the attempt has finished."""
+        fut = self._teardown_future
+        if fut is None:
+            return {"attempt": "none", "settlement": None}
+        if not fut.done():
+            return {"attempt": "in-flight", "settlement": None}
+        settlement = self._teardown_settlement
+        released = bool((settlement or {}).get("releaseOwnership"))
+        return {"attempt": "released" if released else "unresolved",
+                "settlement": settlement}
+
+    def rearm_teardown(self) -> dict:
+        """Explicit re-arm of a FINISHED-but-unresolved teardown attempt so a
+        fresh `aclose`/`aabort`/`acommit_confirm` may RE-ATTEMPT the owned
+        disposal (item 628). This is the deliberate, host-driven re-attempt the
+        design defers to an explicit re-arm: there is NO automatic retry and NO
+        detached-task adoption. Refuses an in-flight attempt, a cleanly released
+        one (nothing owed), or the absence of any attempt."""
+        fut = self._teardown_future
+        if fut is None:
+            raise SessionError(
+                "no retained teardown attempt to re-arm (item 628)")
+        if not fut.done():
+            raise SessionError(
+                "the retained teardown attempt is still in flight — await it "
+                "before re-arming (item 628)")
+        settlement = self._teardown_settlement or {}
+        if settlement.get("releaseOwnership"):
+            raise SessionError(
+                "the retained teardown released ownership cleanly — there is "
+                "nothing to re-arm (item 628)")
+        prior = self._teardown_settlement
+        self._teardown_future = None
+        self._teardown_settlement = None
+        return {"rearmed": True, "priorSettlement": prior}
+
+    def strand_teardown(self) -> dict:
+        """Explicit TERMINAL failure-disposition of a retained-but-unresolved
+        teardown attempt (item 628): ACCEPT the unresolved ownership as STRANDED
+        — owed, not released, held until the process exits or `revl recover`
+        runs — drop the composition, and clear the attempt. No detached-task
+        adoption, no retry; the host has decided to stop trying. Refuses an
+        in-flight attempt or a cleanly released one."""
+        fut = self._teardown_future
+        if fut is None:
+            raise SessionError(
+                "no retained teardown attempt to strand (item 628)")
+        if not fut.done():
+            raise SessionError(
+                "the retained teardown attempt is still in flight — await it "
+                "before stranding (item 628)")
+        settlement = self._teardown_settlement or {}
+        if settlement.get("releaseOwnership"):
+            raise SessionError(
+                "the retained teardown released ownership cleanly — there is "
+                "nothing to strand (item 628)")
+        unresolved = settlement.get("unresolved")
+        if self._driver is not None:
+            self._reset()   # drop the Python composition; native roots stay owed
+        self._teardown_future = None
+        self._teardown_settlement = None
+        return {"stranded": True, "unresolved": unresolved}
 
     # -- the session commit protocol (roadmap item 245) --------------------
 
@@ -2177,6 +2609,23 @@ class Session:
         snapshot = owner.witness_snapshot(self._generation)
         token = owner.verdict_review_token(self._generation, verdict)
         outstanding = [e for e in snapshot.effects if e.status != "settled"]
+        # issue #623: an accurate call-outcome inventory over the enumerated
+        # effects, tallied from the receipts/outcomes the guarded witnessed
+        # writes bound onto their witnesses — never a parallel reconstruction.
+        # success / failed / unknown / unattempted are distinguished; a legacy
+        # witnessed effect that bound no outcome is counted separately as
+        # `unrecorded` rather than being force-fit into one of the four.
+        outcomes = {k: 0 for k in
+                    ("success", "failed", "unknown", "unattempted")}
+        unrecorded = 0
+        receipts_bound = 0
+        for e in snapshot.effects:
+            if e.outcome in outcomes:
+                outcomes[e.outcome] += 1
+            else:
+                unrecorded += 1
+            if e.receipt is not None:
+                receipts_bound += 1
         summary = {
             "verdict": verdict,
             "session": snapshot.session,
@@ -2186,6 +2635,10 @@ class Session:
             "escrowed": sum(1 for e in outstanding if e.status == "escrowed"),
             "droppedDeferred": len(owner._queue),
             "effects": [e.to_dict() for e in snapshot.effects],
+            # issue #623: bound original-receipt provenance + partial-call
+            # inventory, consumed from the effects rather than rebuilt.
+            "receiptsBound": receipts_bound,
+            "outcomes": dict(outcomes, unrecorded=unrecorded),
         }
         return VerdictReview(verdict=verdict, token=token, summary=summary,
                              snapshot=snapshot)
@@ -2264,9 +2717,39 @@ class Session:
             return {"halted": False, "residue": [], "clean": True}
         residue = driver.runtime.estop_residue()
         return {"halted": True, **halt, "residue": residue,
+                # design 460 §6.3: the halt report lists the two-phase admissions
+                # it stranded mid-commit by `decisionId`, so an operator halt names
+                # the same decisions `revl recover` will classify — one ambiguity
+                # vocabulary across the halt report and the forward-recovery scan.
+                "unfinalizedDecisions": self._unfinalized_decisions(),
                 # an E-Stop is NEVER clean. R4 is a property of the abort path;
                 # the halt violates it by design and says so.
                 "clean": False}
+
+    def _unfinalized_decisions(self) -> list:
+        """The `decisionId`s this session's WAL carries an `admit-decided` for with
+        no terminal `admit-finalized`/`admit-abandoned` behind them (design 460
+        §6.3): the two-phase admissions a halt strands mid-commit — a decision
+        after `decided`, its plug settled or in flight, that never reached a
+        terminal stage. `estop_report` lists them so the halt report and `revl
+        recover` name the SAME decisions. In `admit-decided` order; a decision
+        settled by a later `finalized`/`abandoned` (a plug that raised under the
+        halt writes `abandoned {estop}`) is excluded. Empty, never an error, when no
+        WAL is readable — the halt report degrades rather than crashing."""
+        records = self._wal_ledger_records()
+        settled = {r.get("decisionId") for r in records
+                   if r.get("record") in ("admit-finalized", "admit-abandoned")}
+        seen: set = set()
+        out: list = []
+        for r in records:
+            if r.get("record") != "admit-decided":
+                continue
+            did = r.get("decisionId")
+            if did in settled or did in seen:
+                continue
+            seen.add(did)
+            out.append(did)
+        return out
 
     @property
     def halted(self) -> bool:
@@ -2887,10 +3370,12 @@ class Session:
         `admit-decided` after the pre-plug gates cleared and the spends were
         committed and BEFORE the plug, `admit-applied` after the plug settled and
         the turn was adopted, `admit-finalized` after the per-generation indexes
-        were installed. A plug that raises writes `admit-abandoned {plug-failed}`
-        and disposes the turn's already-plugged fibers, so the crash window between
-        "gate decided" and "composition live" is a settled decision on disk rather
-        than an ambiguous one a restart has to guess at. `bundle` is the
+        were installed. A plug that raises disposes the turn's already-plugged
+        fibers and, once that cleanup resolves, writes `admit-abandoned
+        {plug-failed}`, so the crash window between "gate decided" and
+        "composition live" is a settled decision on disk rather than an ambiguous
+        one a restart has to guess at; if a fiber cannot be disposed the decision
+        is left owed rather than falsely settled (issue #644). `bundle` is the
         re-admittable turn source the `admit-decided` record carries (§2.1); a
         `_wire_turn` reached without one (a legacy internal call) writes no records
         and keeps today's in-process-only atomicity.
@@ -3000,20 +3485,68 @@ class Session:
         #
         # design 460 §2: the plug is the window between STAGE 1 and STAGE 2. A
         # failure here — a plug that raises, or the E-Stop's plug-seam refusal —
-        # disposes the turn's already-plugged fibers and closes the decision with
-        # `admit-abandoned {plug-failed}`, so a halt during admission is a settled
-        # decision and never an owed one. Nothing is adopted, so the running
-        # composition is untouched exactly as the pre-plug gates' refusal leaves it.
+        # disposes the turn's already-plugged fibers through the supported
+        # `fiber.dispose()` path and, ONLY once that cleanup fully resolves,
+        # closes the decision with `admit-abandoned {plug-failed}`, so a halt
+        # during admission is a settled decision and never an owed one. If a fiber
+        # cannot be disposed the decision is left owed (no terminal record) with
+        # the leak made explicit, so recovery does not skip a still-live fiber
+        # (issue #644). Nothing is adopted, so the running composition is untouched
+        # exactly as the pre-plug gates' refusal leaves it.
         runtime_mod.set_session_owner(self._owner)
+        # design 460 §4: open the decision window over the plug so every crossing
+        # the turn's activation body journals is tagged with this `decisionId`
+        # and, for a fenced crossing, an `ordinal` — the coordinates a fresh
+        # process serves a completed fenced crossing by, so it never re-dispatches
+        # one on forward recovery. Closed in the `finally` whether the plug
+        # settles or raises; a WAL-less session opens no window (nothing to tag).
+        if wal is not None and decision_id is not None:
+            wal.begin_decision(decision_id)
         try:
             self._run(_plug())
-        except BaseException:
-            self._dispose_turn_fibers(turn_names)
-            if wal is not None and decision_id is not None:
+        except BaseException as admit_err:
+            retained = self._dispose_turn_fibers(turn_names)
+            if wal is not None and decision_id is not None and not retained:
+                # cleanup resolved: every plugged fiber was torn down, so the
+                # terminal `admit-abandoned` is honest — a halt during admission
+                # is a settled decision, never an owed one.
+                #
+                # design 460 §6.1: the E-Stop's plug-seam refusal (`_estop_check`
+                # at the runtime `plug` seam) raises `EstopHalted`. It closes the
+                # decision with `admit-abandoned {estop}` rather than `plug-failed`,
+                # so a halt DURING admission carries the E-Stop's own reason — the
+                # shared ambiguity vocabulary of §6 — and never an owed one on the
+                # next `revl recover`. Every other plug failure stays `plug-failed`.
+                estop_halt = getattr(runtime_mod, "EstopHalted", ())
+                reason = ("estop" if isinstance(admit_err, estop_halt)
+                          else "plug-failed")
                 wal.record_admit_abandoned(decision_id=decision_id,
-                                           reason="plug-failed")
+                                           reason=reason)
+            elif retained:
+                # design 460 §2 / issue #644: cleanup is UNRESOLVED — one or more
+                # of the turn's plugged fibers could not be torn down and stay in
+                # `driver.fibers`, still holding live provisions/effects. Writing
+                # `admit-abandoned` here would settle the decision terminally, and
+                # forward recovery SKIPS a terminal decision (recovery.py §5), so
+                # those live fibers would never be reached again. Leave the
+                # decision OWED (its `admit-decided` stands, no terminal record) so
+                # recovery still reports it, keep the fibers inspectable, and make
+                # the cleanup failure explicit on the preserved admission error
+                # rather than masking it behind a false settlement.
+                note = ("revl: admission failed AND cleanup is unresolved — "
+                        f"{len(retained)} turn fiber(s) retained undisposed in "
+                        f"driver.fibers ({', '.join(sorted(retained))}); "
+                        "admit-abandoned was NOT recorded, so the decision stays "
+                        "owed and forward recovery does not skip the still-live "
+                        "fibers (issue #644)")
+                try:
+                    admit_err.add_note(note)
+                except AttributeError:  # pragma: no cover — revl targets py3.11+
+                    driver._log("admit", "cleanup-unresolved", note)
             raise
         finally:
+            if wal is not None and decision_id is not None:
+                wal.end_decision()
             runtime_mod.clear_session_owner()
 
         # adopt the turn into the live composition: `turn_doc["manifest"]`
@@ -3088,7 +3621,7 @@ class Session:
             self._applied_decisions[content_key] = result
         return result
 
-    def _dispose_turn_fibers(self, turn_names: set) -> None:
+    def _dispose_turn_fibers(self, turn_names: set) -> set:
         """Dispose the fibers a failed turn plug left in `driver.fibers` (design
         460 §2, the `plug-failed` path), through the SUPPORTED runtime disposal
         path — `await fiber.dispose()` then a flush, exactly as
@@ -3099,10 +3632,12 @@ class Session:
         turn is never adopted into the IR, so ordinary IR-ordered disposal can
         never reach them (issue #644).
 
-        `_wire_turn` calls this BEFORE `record_admit_abandoned`, so the terminal
-        settlement is written only once the fibers it abandons are actually torn
-        down — the WAL never claims a decision is abandoned while its fibers are
-        still leaking.
+        Returns the set of names whose disposal did NOT resolve — the fibers left
+        (deliberately) in `driver.fibers` because their own `dispose()` raised.
+        `_wire_turn` reads this to keep the WAL honest: it records the terminal
+        `admit-abandoned` only when this set comes back empty, so a decision is
+        never settled while its fibers are still leaking. An empty return means
+        every turn fiber was torn down and the terminal settlement is safe.
 
         Consumers before providers: `driver.fibers` is insertion-ordered and the
         turn's fibers were stored in plug (load) order, so tearing them down in
@@ -3112,10 +3647,11 @@ class Session:
         Best-effort and never raising — the caller is already unwinding a plug
         failure and must re-raise the original error, not a teardown one. A fiber
         whose own `dispose()` raises is LEFT in `driver.fibers` so its ownership
-        stays inspectable rather than being silently dropped undisposed."""
+        stays inspectable rather than being silently dropped undisposed, and its
+        name is returned so the caller can withhold terminal settlement."""
         driver = self._driver
         if driver is None:
-            return
+            return set()
 
         async def _teardown(fiber) -> None:
             await fiber.dispose()
@@ -3124,6 +3660,7 @@ class Session:
         # reverse plug (load) order over the driver's own insertion order, kept
         # to the names this turn owns: consumers come down before the providers
         # they reached, the direction `_dispose_all` tears a live composition in.
+        retained: set = set()
         ordered = [n for n in reversed(list(driver.fibers)) if n in turn_names]
         for name in ordered:
             fiber = driver.fibers.get(name)
@@ -3134,8 +3671,15 @@ class Session:
             except BaseException:  # noqa: BLE001 — unwinding a plug failure
                 # a fiber that could not be torn down stays in `driver.fibers`,
                 # inspectable, rather than being dropped as if it were disposed.
+                # Report it so `_wire_turn` withholds the terminal settlement
+                # while this ownership is still live (issue #644).
+                driver._log("admit", "dispose-failed",
+                            f"{name}: retained undisposed in driver.fibers "
+                            "for inspection (cleanup unresolved)")
+                retained.add(name)
                 continue
             driver.fibers.pop(name, None)
+        return retained
 
     def _turn_content_key(self, bundle: dict) -> str:
         """The in-process applied-set key for a turn (design 460 §4): a digest of
@@ -5294,6 +5838,63 @@ class Session:
         return {"baseManifestHash": self._base_manifest_hash(),
                 "classMapDigest": self._class_map_digest(
                     class_map=self._build_class_map(merged))}
+
+    # -- design 460 §4: the journal-served plug seam ------------------------ #
+
+    def begin_journal_served(self, decision_id: str, served: dict) -> None:
+        """Enter journal-served mode for a forward re-apply of `decision_id`
+        (design 460 §4). `served` maps this decision's fenced-crossing ordinals to
+        the outcomes the journal recorded on completion; while the mode is open,
+        `serve_fenced_crossing` returns a recorded outcome for a completed fenced
+        crossing rather than letting it dispatch. Forward recovery
+        (`recover_forward_admissions`) opens this around the re-plug of an
+        ADVANCED decision whose fenced crossings all completed, so a fresh process
+        re-materializes the turn's provisions without re-running a fenced extern.
+        Resets the seam position and the dispatch witness."""
+        self._journal_served = dict(served)
+        self._journal_served_decision = decision_id
+        self._journal_served_ordinal = 0
+        self._fenced_dispatch_count = 0
+
+    def end_journal_served(self) -> None:
+        """Leave journal-served mode (design 460 §4). Idempotent, so a re-apply's
+        `finally` can call it unconditionally. Leaves `_fenced_dispatch_count`
+        intact for the caller to read the seam's verdict (zero == everything was
+        served, nothing re-dispatched)."""
+        self._journal_served = {}
+        self._journal_served_decision = None
+        self._journal_served_ordinal = 0
+
+    def serve_fenced_crossing(self, receiver: str, method: str) -> tuple:
+        """The §4 fenced-crossing seam, consulted at each fenced boundary crossing
+        while a turn is re-plugged in journal-served mode. Returns
+        `(served, outcome)`:
+
+          * `served` True — this crossing is recorded COMPLETE in the journal for
+            the decision being re-applied; `outcome` is the recorded return. The
+            caller MUST NOT dispatch: the fenced extern already ran once, and the
+            journal is the only evidence a fresh process has of it (§4 fenced row,
+            "serve the recorded outcome, do not dispatch"). Dispatches zero times.
+          * `served` False — no completed record for this crossing's ordinal, so
+            it is running for the FIRST time on this base and the caller dispatches
+            it normally. Counted in `_fenced_dispatch_count`, the non-vacuity
+            witness: with the seam disabled a completed fenced crossing would fall
+            here and re-dispatch, which the §7 exit test fails on.
+
+        Outside journal-served mode every crossing is a first run (`served`
+        False), so a live plug is unaffected. Ordinals are consumed in body order,
+        matching the order `record_fenced_crossing_begin` assigned them at
+        record time, so the re-plug and the recording line up crossing for
+        crossing."""
+        if self._journal_served_decision is None:
+            self._fenced_dispatch_count += 1
+            return (False, None)
+        ordinal = self._journal_served_ordinal
+        self._journal_served_ordinal += 1
+        if ordinal in self._journal_served:
+            return (True, self._journal_served[ordinal])
+        self._fenced_dispatch_count += 1
+        return (False, None)
 
     def _surface_digests(self) -> dict:
         """The across-restart content form of the surface CAS key, recomputed from

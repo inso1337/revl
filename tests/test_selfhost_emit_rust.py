@@ -208,6 +208,13 @@ CORPUS = [
     # `let` from an extern's declared return (`tag(p)` where the reference emits
     # `tag(p.clone())`). An oracle catches divergence, not absence.
     "externs.rvl",
+    # GHSA-mrqv-535q-jw3x A2 — a required-service method whose name is one the
+    # smart pointer `Arc<Box<dyn Sv>>` implements (`clone`, `as_ref`, …) is
+    # renamed by `_mname` (`clone` -> `clone_`) at the trait declaration, the
+    # provider/proxy impls, the bridge dispatch, and the call sites, so the user
+    # method is dispatched instead of the smart-pointer method. Byte-identical
+    # across the reference and the self-host emitter.
+    "smart_ptr_methods.rvl",
 ]
 
 

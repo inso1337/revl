@@ -291,22 +291,47 @@ Activation is unchanged and stays whole-generation: item 426 ships incremental
 ADMISSION and inherits whole-generation ACTIVATION. Per-key re-resolution plus a
 partial dispose in dependency order is a separate project (design §5.2).
 
-## What is not here yet
+## The authority panel (S5)
 
-| next | what it adds | what it waits on |
-|---|---|---|
-| confinement | non-first-party rows compiled under the untrusted-author profile, and the per-root profile split in `compile_files` | roadmap 425 F1's decision |
-| the authority panel | crossing tokens re-keyed by row label, a `config:` token carrying a value digest, a fail-closed headline, a printed blind-spots block | confinement, and roadmap 428 F3 |
-| distribution | a layer is a truc, the `[trucs]` origin namespace becomes real, the pin becomes mandatory | roadmap 428 F3 |
+`revl composition FILE --panel` prints the approval surface for applying layers
+(design §8), in `revl.authority_panel`:
 
-Until distribution lands, **layers are files in a directory**: `stack` and `site`
-name paths, and the origin of a layer's rows is still read off where the document
-lives, never written by the document.
+- a **TRUST BASIS** line — `MEASURED, first-party bodies trusted by premise`
+  ordinarily, `CLAIMED` the moment any row is admitted under `--trust-host-code`;
+- crossing tokens **re-keyed by row label** (a component rename is a non-event,
+  not a full authority turnover), including a sixth kind
+  `config:<row-label>:<field>:<digest8>` for an authority-bearing config change.
+  The digest, not the value, goes in the token, so a later change to the same
+  field produces a DIFFERENT token and re-prompts;
+- a **fail-closed headline**: never `clean` unless the token set is unchanged,
+  no field is unclassifiable, and no `--trust-host-code` row is in play. An
+  unclassifiable config field (a string with no `reach` bound) is treated as
+  authority-bearing — incompleteness costs noise, never silence;
+- an always-printed **BLIND SPOTS** block.
 
-`open` (which fields a stack layer may configure) and `reach` (the
-composition-level authority bound) are still not grammar, and writing one is a
-parse error rather than a silently ignored clause. They arrive with the authority
-panel, which is the slice that gives them meaning.
+`--trust-host-code` admits a stack layer's host bodies as reviewed first-party
+code. It changes the panel's SHAPE (CLAIMED, an UNCHECKED HOST CODE block) and
+forfeits `clean`. Confinement in the admit path is opt-in via
+`admit_composition(confine=True)`, which builds the per-root profile map from
+each row's trust class.
+
+## Distribution: the pin and the vendored-dir jail (S6, composition side)
+
+Per decision 7, distribution is truc's and semantics are the composition's. The
+composition side of S6 is enforced at resolution:
+
+- **the pin is mandatory** — a composition that references a truc vendored under
+  `trucs/<name>/` is refused unless `truc.lock` carries a non-blank `sourceHash`
+  for it (the 428 F3 gate at resolution; a blank pin is no pin);
+- **the vendored-dir jail** — a stack layer's `from` path must resolve inside
+  its own truc's vendored directory, or the layer is refused; it cannot launder
+  another truc's or the project's own sources as its own row (§4.1);
+- **resolution is reproducible** — the row table is byte-identical across
+  machines given the same composition, lock and vendored sources, whatever a
+  registry index on the machine contains.
+
+The `truc apply` and `truc stack check` distribution VERBS (truc's CLI surface)
+are not built here.
 
 Activation is unchanged: applying a layer that only ADDS rows is a pure
 extension, and anything with a `remove` or a `replace` in it is a new generation.

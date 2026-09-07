@@ -111,6 +111,23 @@ _RUST_TYPE_RESERVED = frozenset(
 # Method names that collide with Rust's `Drop::drop` destructor must be renamed.
 _METHOD_RENAMES = {"drop": "drop_"}
 
+# Method names that resolve on the SMART POINTER the emitter wraps a service in
+# instead of on the user's trait object. A required service is held as
+# `Arc<Box<dyn Sv>>` and called `recv.<method>(..)`; under Rust method
+# resolution the receiver type `Arc<Box<dyn Sv>>` is tried before auto-deref
+# reaches `dyn Sv`, so a method whose name is one `Arc<T>`/`Box<T>` implements
+# UNCONDITIONALLY binds to the smart-pointer method and the user body NEVER runs
+# — silently for a no-arg unit method (`recv.clone()` becomes `Arc::clone`, its
+# result discarded), loudly (a type error) otherwise. `Arc<T>` implements
+# `Clone`/`Deref`/`AsRef`/`Borrow` for any `T: ?Sized`, and the inner `Box<T>`
+# adds `DerefMut`/`AsMut`/`BorrowMut`; those receiver-method names are the ones
+# that shadow. Rename them onto the same injective `_`-ladder as
+# `_METHOD_RENAMES` so the trait declaration, every call site, and the bridge
+# dispatch agree and the user method is always the one dispatched.
+_RUST_SMART_PTR_METHODS = frozenset({
+    "clone", "deref", "deref_mut", "as_ref", "as_mut", "borrow", "borrow_mut",
+})
+
 
 def _mname(name: str) -> str:
     """The Rust method name for a revl method, injectively.
@@ -119,13 +136,18 @@ def _mname(name: str) -> str:
     revl method name `drop_` to `drop_`, so a component declaring both emitted
     one Rust method twice and the second silently won. Same ladder rule as
     `_mangle`: find the first root reachable by dropping trailing `_` that the
-    table renames, then re-append the `_`s that were dropped, so `drop` ->
-    `drop_` and `drop_` -> `drop__` stay distinct. A name with no renamed root
-    is returned unchanged."""
+    table renames (or that shadows a smart-pointer method), then re-append the
+    `_`s that were dropped, so `drop` -> `drop_` and `drop_` -> `drop__` (and
+    `clone` -> `clone_`, `clone_` -> `clone__`) stay distinct. A name with no
+    renamed root is returned unchanged. Every rename appends exactly one `_` to
+    the ORIGINAL name, so the ladder is injective and no renamed name is itself
+    a smart-pointer method or an existing renamed name."""
     root = name
     while root:
         if root in _METHOD_RENAMES:
             return _METHOD_RENAMES[root] + "_" * (len(name) - len(root))
+        if root in _RUST_SMART_PTR_METHODS:
+            return name + "_"
         if not root.endswith("_"):
             break
         root = root[:-1]
@@ -1912,7 +1934,14 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
         _ident(sname, "service")
         out.append(f"pub trait {sname}: Send + Sync {{")
         for mname, method in (service.get("methods") or {}).items():
-            _ident(mname, "method")
+            # The trait DECLARATION must carry the SAME `_mname` rename the impl
+            # blocks, bridge proxy/dispatch, and every call site use (line ~3696,
+            # ~8015, ~5478): a method named `drop`/`clone`/`as_ref`/… is renamed
+            # so it does not collide with the `Drop` destructor or the smart
+            # pointer the emitter wraps a service in, and the trait method the
+            # impls satisfy has to spell the renamed name too or the impl fails
+            # to name a trait member (and the user method is never dispatched).
+            emitted_mname = _ident(_mname(mname), "method")
             params = ", ".join(
                 f"{_ident(p.get('name'), 'parameter')}: {_rust_type(p.get('type'), types)}"
                 for p in method.get("params") or []
@@ -1923,7 +1952,7 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
             if method.get("idempotent"):
                 out.append("    /// idempotent: safe to re-deliver — the runtime "
                            "may auto-retry a transient failure (item 44)")
-            out.append(f"    fn {mname}(&self, {params}) -> {ret};")
+            out.append(f"    fn {emitted_mname}(&self, {params}) -> {ret};")
         out.append("}")
         out.append("")
     return out
@@ -3249,8 +3278,20 @@ def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
     ):
         return _expr(steps[0]["expr"], env, rename)
 
+    return " ".join(_rust_render_pure_stmts(steps, env, dict(rename),
+                                             method.get("name")))
+
+
+def _rust_render_pure_stmts(steps: list, env: _Env, scope: dict,
+                            method_name: str | None = None) -> list[str]:
+    """Render a PURE provide-method step list (issue #548) as Rust statement
+    strings: bindings, assignments, `return`, and the control-flow forms whose
+    bodies are themselves pure. Shared by the pure-method fast path and the
+    effectful `_method_body_lines` (a top-level `if`/`while`/`for` may sit
+    beside `emit`/`effect` steps, its arms still pure). Rust blocks are
+    expression-blocks, so each form is a statement here just as in the fn
+    grammar."""
     parts: list[str] = []
-    scope = dict(rename)
     for step in steps:
         kind = step.get("step")
         if kind == "let":
@@ -3265,12 +3306,43 @@ def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
             expr = step.get("expr")
             parts.append("return;" if expr is None
                          else f"return {_expr(expr, env, scope)};")
+        elif kind == "if":
+            cond = _expr(step["cond"], env, scope)
+            then = " ".join(_rust_render_pure_stmts(
+                step.get("then") or [], env, dict(scope), method_name))
+            s = f"if {cond} {{ {then} }}"
+            if step.get("else"):
+                els = " ".join(_rust_render_pure_stmts(
+                    step["else"], env, dict(scope), method_name))
+                s += f" else {{ {els} }}"
+            parts.append(s)
+        elif kind == "while":
+            cond = _expr(step["cond"], env, scope)
+            body = " ".join(_rust_render_pure_stmts(
+                step.get("body") or [], env, dict(scope), method_name))
+            parts.append(f"while {cond} {{ {body} }}")
+        elif kind == "for":
+            bind = _ident(step["bind"], "loop binding")
+            inner = dict(scope)
+            inner.pop(bind, None)
+            # `.iter().cloned()` yields owned `T` without moving the iterable (a
+            # param/`self` field may be used again) and keeps the binding a
+            # value so the pure body's arithmetic needs no deref. A `List[T]`
+            # element is always `Clone` on this tier.
+            iterable = _expr(step["iterable"], env, scope)
+            body = " ".join(_rust_render_pure_stmts(
+                step.get("body") or [], env, inner, method_name))
+            parts.append(f"for {bind} in {iterable}.iter().cloned() {{ {body} }}")
+        elif kind == "break":
+            parts.append("break;")
+        elif kind == "continue":
+            parts.append("continue;")
         else:
             raise EmitError(
-                f"{env.name}.{method.get('name')}: a pure method body admits "
-                f"bindings and a return in the Rust backend, not {kind!r}"
+                f"{env.name}.{method_name}: a pure method body admits bindings, "
+                f"control flow and a return in the Rust backend, not {kind!r}"
             )
-    return " ".join(parts)
+    return parts
 
 
 def _method_body(env: _Env, method: dict) -> str:
@@ -3622,6 +3694,15 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             )
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
+        elif kind in ("if", "while", "for", "break", "continue"):
+            # issue #548: a top-level `if`/`while`/`for` may sit beside the
+            # effect/emit steps of an effectful method (e.g. a guard that
+            # `return`s early, then an `emit`). Its arms are pure, so the shared
+            # pure renderer produces them; a Rust expression-block statement is
+            # whitespace-insensitive, so the single-line form is valid at `pad`.
+            for line in _rust_render_pure_stmts([step], env, dict(rename),
+                                                method.get("name")):
+                out.append(f"{pad}{line}")
         else:
             raise EmitError(f"unsupported method body step in Rust backend: {kind!r}")
 
@@ -6000,8 +6081,13 @@ def _v3_builtin(method: str, target: str, args: list[str],
         return _v3_checked_div(method, target, args[0])
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): i64::to_string
     # is exact decimal over the whole range, Int.MIN included, and String is
-    # this tier's Str.
+    # this tier's Str. A Float receiver (review item 12) renders through
+    # revl_ftoa, the canonical ECMAScript Number::toString a `${aFloat}`
+    # interpolation uses, so `x.to_str()` and `${x}` agree byte-for-byte
+    # (f64::to_string prints Rust's `3`/`3.5`, which diverges from the tiers).
     if method == "to_str":
+        if recv == "Float":
+            return f"revl_ftoa({target})"
         return f"({target}).to_string()"
     # Single-character ASCII classification (item 233, docs/stdlib-2.0.md
     # §Str.is_alnum), mirroring the python backend's native forms
@@ -7778,8 +7864,9 @@ def _uses_stdlib(ir: dict) -> bool:
 
 
 def _uses_float_interp(ir: dict) -> bool:
-    """True when any `${…}` template interpolates a provably-`Float`
-    expression, so the canonical Float renderer is emitted only then."""
+    """True when the canonical Float renderer (revl_ftoa) is needed: any `${…}`
+    template interpolates a provably-`Float` expression, or a `Float.to_str()`
+    builtin renders one (review item 12) — emitted only then either way."""
     found = False
 
     def walk(node) -> None:
@@ -7793,6 +7880,10 @@ def _uses_float_interp(ir: dict) -> bool:
                             and part[0] == "expr" and _v3_is_float(part[1])):
                         found = True
                         return
+            if (node.get("kind") == "builtin" and node.get("method") == "to_str"
+                    and node.get("recv") == "Float"):
+                found = True
+                return
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):

@@ -1080,6 +1080,85 @@ fn a_frontier_gap_reads_as_not_admitted_on_the_wire() {
     assert!(verdict.to_json().contains("\"admitted\":false"));
 }
 
+// The front end is recursive descent, so nesting costs stack. The byte bound
+// above does not cover the SHAPE: a source can sit far under MAX_SOURCE_BYTES
+// and still nest thousands of levels deep. The self-host bounds the nesting
+// (`selfhost/parser.rvl`'s `nesting_limit`, measured ahead of any descent in
+// `lower.rvl`'s `nesting_depth`), so a deep source is a clean refusal that
+// names the bound — never a stack-exhaustion abort, which no `catch_unwind`
+// could turn back into a verdict. These pin that: over-deep is refused, well
+// under the byte bound, for both the expression ladder (nested `(...)`) and
+// the statement descent (nested `if` blocks).
+
+fn is_nesting_refusal(v: &Verdict) -> bool {
+    match v {
+        Verdict::Refused { code, message } => {
+            code == "BAD" && message.contains("nesting is deeper than the parser's limit")
+        }
+        _ => false,
+    }
+}
+
+#[test]
+fn a_deeply_nested_expression_is_refused_not_aborted() {
+    let depth = 5_000;
+    let src = format!(
+        "fn f() -> Int {{ return {}0{} }}",
+        "(".repeat(depth),
+        ")".repeat(depth),
+    );
+    // The point of the case: deep, yet a small fraction of the byte bound.
+    assert!(src.len() < MAX_SOURCE_BYTES / 10);
+    let verdict = admit(&src);
+    assert!(
+        is_nesting_refusal(&verdict),
+        "a source this deep must be a clean nesting refusal, not {:?}",
+        verdict,
+    );
+    assert!(verdict.is_refused());
+    assert_ne!(verdict, Verdict::NoObjection);
+}
+
+#[test]
+fn a_deeply_nested_statement_block_is_refused_not_aborted() {
+    let depth = 5_000;
+    let mut src = String::from("fn f() -> Int {\n");
+    for _ in 0..depth {
+        src.push_str("if (true) {\n");
+    }
+    src.push_str("return 0\n");
+    for _ in 0..depth {
+        src.push_str("}\n");
+    }
+    src.push_str("return 0\n}\n");
+    assert!(src.len() < MAX_SOURCE_BYTES);
+    let verdict = admit(&src);
+    assert!(
+        is_nesting_refusal(&verdict),
+        "a block nest this deep must be a clean nesting refusal, not {:?}",
+        verdict,
+    );
+    assert!(verdict.is_refused());
+}
+
+#[test]
+fn a_moderately_nested_source_is_not_refused_for_depth() {
+    // Non-vacuity in the other direction: a nesting well within the bound must
+    // not trip the depth refusal, so the bound is a ceiling and not a wall.
+    let depth = 20;
+    let src = format!(
+        "fn f() -> Int {{ return {}0{} }}",
+        "(".repeat(depth),
+        ")".repeat(depth),
+    );
+    let verdict = admit(&src);
+    assert!(
+        !is_nesting_refusal(&verdict),
+        "a shallow nesting must not be refused for depth, got {:?}",
+        verdict,
+    );
+}
+
 #[test]
 fn compile_to_refuses_on_both_tiers() {
     for tier in [Tier::Py, Tier::Rust] {

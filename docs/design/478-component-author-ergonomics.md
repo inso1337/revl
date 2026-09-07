@@ -53,7 +53,14 @@ land it without a design decision that touches the effect calculus.
 ### Group 1 — surface bugs (bounded, do these next)
 
 1. **Template scope in block match arms (review item 8).** DONE, this note.
-   The template of the group: a walk that misses one node kind.
+   The template of the group: a walk that misses one node kind. LATER: the same
+   wall had a **component-path twin** — a `${...}` template in a *provide-method*
+   match arm lowered through the env-only `_lower_expr`, so the arm binding was
+   invisible and ``Ident(w) => `word:${w}` `` refused with "`w` is not a
+   declared requirement". Fixed in the realistic-components slice (#548): the
+   component `Interp` case now lowers its expression parts in the current
+   lexical scope, exactly as the fn-body lowerer does. Pinned by
+   `tests/test_548_realistic_components.py` (the token-describer component).
 
 2. **Untyped arrow params in provide scope (review item, roadmap 77 ticked,
    gap untracked).** Item 77 landed arrow-parameter annotations
@@ -87,7 +94,16 @@ land it without a design decision that touches the effect calculus.
    arithmetic but cannot render or convert back. Same shape as Str: a table row
    family plus six bodies plus a self-host row. `to_str` is the single highest
    value one (a Float that cannot print is the sharpest wall) and can go first
-   alone.
+   alone. **`abs` LANDED** already (it type-checks and emits on every Float
+   tier). **`to_str` LANDED** in the realistic-components slice (#548): the
+   `to_str` builtin gained a `Float` receiver row that emits each tier's
+   canonical ECMAScript Number::toString — the very `ftoa` a `${aFloat}`
+   interpolation already used (`_revl_ftoa`/`revlFtoa`/`revl_ftoa`; go's
+   component tier matches its `%v` float interp via
+   `strconv.FormatFloat(x, 'g', -1, 64)`). So `x.to_str()` and `${x}` agree.
+   Pinned by `tests/test_548_realistic_components.py` (the statistics
+   component). REMAINDER: `to_int`/`floor`/`round`/`min`/`max`/`pow` (each needs
+   a rounding/overflow contract fixed cross-tier — deferred, no clean spec yet).
 
 7. **Opt/Result methods (review item 13).** `map`/`unwrap_or`/`ok_or` and
    friends. Function-value callbacks like the List methods, so it inherits
@@ -100,19 +116,33 @@ These change the provide/activation grammar, the lowering, all six emitters,
 the self-host port, and the gate crates. Each deserves its own design note and
 its own PR series. Listed in the review's own priority order.
 
-8. **`if` statement in provide-method bodies (review item 2).** The parser's
-   own "expected a statement" diagnostic lists `if` among the accepted forms,
-   then the `in_method` guard refuses it and points at the pure `if`
-   expression instead. Closing the gap means a conditional-effect statement in
-   a method body, which is a real extension of the effect grammar (what does a
-   half-emitting conditional mean for teardown), not a parser tweak. Highest
-   author value of the whole issue; highest cost too.
+8. **`if` statement in provide-method bodies (review item 2).** LANDED for the
+   PURE case (issue #548 control-flow slice). The parser now admits an `if`
+   STATEMENT in a method body (`parser._method_if`), the checker/lowering emit
+   the same `if` IR step a module `fn` does (`lower._lower_control_stmt`), and
+   all six tiers render it by mirroring their own fn-grammar renderer. The
+   teardown question the note flagged is sidestepped by a deliberate bound: the
+   arms are PURE. A teardown-registering step (`effect`/`emit`/`let-effect`/
+   `await`) inside a branch is refused at lowering, so no conditional ever
+   half-registers and the activation frame still owns every inverse, registered
+   at the method's top level. A guard-then-emit method (a top-level `if` that
+   `return`s early, then a top-level `emit`) is the realistic shape this
+   admits. REMAINDER: a conditional/looped teardown-registering step needs the
+   teardown contract amended and stays deferred to its own note.
 
-9. **`while`/`for` in provide-method bodies (review item 1).** Sanctioned
-   recursion is the current answer and it dies on rust/java/wasm and hits a
-   ~1000-frame limit on py. A bounded loop form in method bodies is the fix,
-   and it is the largest single effort in the issue: iteration boundaries,
-   teardown accumulation across iterations, and six emitters.
+9. **`while`/`for` in provide-method bodies (review item 1).** LANDED for the
+   PURE case alongside item 8. `while`/`for` STATEMENTS now compute values in a
+   method body (`parser._method_while`/`_method_for`), with `break`/`continue`
+   inside a method loop. The frame-neutrality invariant is unchanged in
+   substance: a registering step still may not sit inside a loop body
+   (`lower._validate_no_loop_scoped_registration` now enforces it over method
+   loops instead of refusing method loops outright), so sanctioned recursion is
+   no longer the only answer and the rust/java/wasm death and the ~1000-frame py
+   limit are gone. Five tiers (py/ts/go/java/rust) carry method-body `for`;
+   wasm carries `if`/`while`/`break`/`continue`, and a method-body `for (x of
+   xs)` on wasm is the TRACKED REMAINDER (the List-cursor apparatus is fn-only;
+   the refusal redirects to a `while`+index count). REMAINDER: registering steps
+   inside a loop (teardown across iterations), and wasm method-body `for`.
 
 10. **Expression-bodied top-level fns (review item 3).** `fn f(x) = expr` works
     in a provide method but not at module top level, so an author writing a

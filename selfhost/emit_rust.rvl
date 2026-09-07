@@ -402,14 +402,22 @@ extern pure fn camel(name: Str) -> Str
     out
   }
 
-// `_mname`: the one method rename this tier carries — `drop` collides with
-// Rust's `Drop::drop` destructor (`_METHOD_RENAMES = {"drop": "drop_"}`).
-// INJECTIVE like `mangle`: a method actually named `drop_` must not land on the
-// renamed `drop`, so the `drop`/`drop_`/`drop__` ladder shifts up a rung.
+// `_mname`: the method renames this tier carries. `drop` collides with Rust's
+// `Drop::drop` destructor (`_METHOD_RENAMES = {"drop": "drop_"}`); `clone`,
+// `deref`, `deref_mut`, `as_ref`, `as_mut`, `borrow`, `borrow_mut` collide with
+// the inherent/trait methods `Arc<T>`/`Box<T>` implement unconditionally, so a
+// required-service method of that name binds to the smart pointer the emitter
+// wraps the service in (`Arc<Box<dyn Sv>>`) and the user body never runs
+// (`_RUST_SMART_PTR_METHODS`). INJECTIVE like `mangle`: a method actually named
+// `drop_`/`clone_`/… must not land on the renamed root, so each `<name>`/
+// `<name>_`/`<name>__` ladder shifts up a rung (append exactly one `_`).
 fn mname(n: Str) -> Str {
   var root = n
   while (root.length() > 0) {
-    if (root == "drop") { return n.concat("_") }
+    if (root == "drop"
+        || root == "clone" || root == "deref" || root == "deref_mut"
+        || root == "as_ref" || root == "as_mut"
+        || root == "borrow" || root == "borrow_mut") { return n.concat("_") }
     if (root.charAt(root.length() - 1) != "_") { return n }
     root = root.slice(0, root.length() - 1)
   }
@@ -1960,6 +1968,9 @@ fn emit_v3_externs(externs: List[Any], tnames: Map[Str, Str]) -> List[Str] {
 // `_emit_service_traits`: each `service` -> a `pub trait S: Send + Sync` with one
 // `&self` method per op. Param names are `_ident`ed (mangle); a param/return
 // type lowers through `rust_type_t`; a `()` return when the op declares none.
+// The method name carries the SAME `mname` rename the impls, bridge, and call
+// sites use (`drop`/`clone`/`as_ref`/…), so the declared trait member matches
+// what the impls satisfy and the user method is the one dispatched.
 fn emit_service_traits(services: Any, tnames: Map[Str, Str]) -> List[Str] {
   var out = []
   for (sname of value_keys(services)) {
@@ -1981,7 +1992,7 @@ fn emit_service_traits(services: Any, tnames: Map[Str, Str]) -> List[Str] {
       if (value_bool(value_field(method, "idempotent"))) {
         out = out.push("    /// idempotent: safe to re-deliver — the runtime may auto-retry a transient failure (item 44)")
       }
-      out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret};`)
+      out = out.push(`    fn ${mangle(mname(mn))}(&self, ${ps.join(", ")}) -> ${ret};`)
     }
     out = out.push("}")
     out = out.push("")

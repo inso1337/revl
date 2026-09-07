@@ -497,13 +497,24 @@ def test_edge2_post_swap_call_fault_reverts_residue_free(gate_factory, artifact)
 
 # =========================================================================== #
 # Live-state migration across a proposed swap (roadmap item 334, the deferred
-# follow-on). Slice 1 exercised only stateless swaps; a self-extension loop
-# records under a policy (`Gate(record=True)`), and the generational swap must
-# carry a running composition's LIVE state — spawned template instances (item
-# 10) and a provider that declared a `handoff` (item 53) — onto the successor,
-# or reject-and-revert when the successor cannot hold it. These are pure-revl
-# candidates (no externs, no host code), so they admit under the profile with
-# an empty `granted` set and no `providers`.
+# follow-on) AND its trust-boundary DISCLOSURE gate. Slice 1 exercised only
+# stateless swaps; a self-extension loop records under a policy
+# (`Gate(record=True)`). A proposed swap crosses gen N's live OPERATOR state
+# onto an AGENT-authored successor, so `propose` uses the `migrate="declared"`
+# policy: state crosses ONLY through a channel declared AND §5-typed on both
+# sides.
+#
+#   * a provider `handoff` (item 53) IS such a channel — declared on both sides
+#     and gated by the accept-vs-export §5 relation — so a type-COMPATIBLE
+#     hand-off carries across, and a type-INCOMPATIBLE one is refused (the gate
+#     propose's standalone compile never ran; see the F1 test below).
+#   * the item-10 live-INSTANCE channel is NOT: it correlates by candidate-
+#     written template name + host class with no type contract at any door, so
+#     an agent successor cannot inherit an operator instance's state at all — it
+#     refuses before teardown (`STATE_UNDISCLOSED`, the tests above).
+#
+# These are pure-revl candidates (no externs, no host code), so they admit under
+# the profile with an empty `granted` set and no `providers`.
 # =========================================================================== #
 
 # A stateful spawnable template `Worker` (its migratable state is a `Map`) plus
@@ -568,15 +579,46 @@ def _handoff_source(version: int) -> str:
     )
 
 
+# The F1 candidate: an AGENT successor that declares `handoff cache: Map[Str,
+# Int]` over the running operator's `handoff cache: Map[Str, Str]` export. Its
+# `get` returns `Opt[Int]`. Migrating the operator's Str map onto it would
+# launder the operator's string `v1` into the agent's Int-typed store; the §5
+# accept-vs-export gate (never run on propose's standalone compile) must refuse
+# it before the state can cross.
+def _handoff_int_acceptor(version: int) -> str:
+    return (
+        "service Store {\n"
+        "  fn get(k: Str) -> Opt[Int]\n"
+        "  fn put(k: Str, v: Int)\n"
+        "  fn version() -> Int\n"
+        "}\n"
+        "component Cache provides cache: Store {\n"
+        "  handoff cache: Map[Str, Int]\n"
+        "  let m = effect Map.new() undo m.drop()\n"
+        "  provide cache {\n"
+        "    fn get(k) = m.get(k)\n"
+        "    fn put(k, v) { effect m.insert(k, v) undo m.remove(k) }\n"
+        f"    fn version() = {version}\n"
+        "  }\n"
+        "}\n"
+    )
+
+
 @needs_cordis
-def test_generational_migration_preserves_live_instance_state_across_propose(
+def test_propose_refuses_to_inherit_live_instance_state_across_trust_boundary(
         gate_factory):
-    """A proposed swap of a template with a LIVE instance carries the instance's
-    state onto the successor generationally: the successor's code is running
-    (`ver` bumps) AND the migrated data survives. Under `record=True` (a
-    self-extension loop always records), the capture reads the instance frame
-    through the recording context wrapper — the interaction the migration
-    follow-on had to fix, or the state is silently dropped."""
+    """The item-334 trust-boundary disclosure gate (F2/F3). A proposed
+    (AGENT-authored) successor that re-declares a template with a LIVE instance
+    would inherit the running OPERATOR instance's state — the item-10 channel
+    correlates old<->new by template name + host class alone, both candidate-
+    written, with NO declared §5 type contract at any door. So `propose` REFUSES
+    it before any teardown (`STATE_UNDISCLOSED`), rather than migrating operator
+    state onto agent code by a name the candidate controls. Gen N is untouched.
+
+    This is the security fix, and it is why an operator `swap` (operator ->
+    operator, `migrate="generational"`, tested in test_instance_migration.py)
+    still migrates instance state while `propose` does not: the difference is the
+    trust boundary the successor's author sits across, not the mechanism."""
     gate = gate_factory(record=True)
     gate.load(_instances_source(1))
     assert gate.call("admin", "ver", [])["result"] == 1
@@ -584,36 +626,39 @@ def test_generational_migration_preserves_live_instance_state_across_propose(
     assert gate.call("admin", "read", ["alice"])["result"] == "42"
 
     result = gate.propose(_instances_source(2), granted=[])
-    assert result.admitted and result.swapped, result.message
+    # refused BEFORE teardown: not admitted-and-swapped, not a revert.
+    assert not result.admitted and not result.swapped
+    assert not result.reverted
+    assert result.code == "STATE_UNDISCLOSED", result.message
+    assert result.migration is None
+    # the repair is the candidate's own declared surface, not a blind regenerate,
+    # so no reference why-trace is attached.
+    assert result.rejection is None
 
-    # the successor's CODE is live ...
-    assert gate.call("admin", "ver", [])["result"] == 2
-    # ... and the live instance's STATE migrated onto it (not restarted cold).
+    # gen N is untouched — its CODE (ver == 1) and its operator instance STATE
+    # (alice -> 42) both still serving. The agent successor never went live and
+    # never received the operator's data.
+    assert gate.call("admin", "ver", [])["result"] == 1
     assert gate.call("admin", "read", ["alice"])["result"] == "42", (
-        "the live instance's state was dropped across the proposed swap — the "
-        "generational migration did not carry it (record-mode capture)")
-    # the reconciliation is surfaced as a first-class field, honest about what
-    # moved: one instance carrying one resource.
-    assert result.migration is not None
-    assert result.migration["templates"]["Worker"] == {
-        "instances": 1, "migrated": True, "resources": 1}
+        "gen N's live instance state must be intact — the refused proposal must "
+        "not have torn anything down")
 
 
 @needs_cordis
-def test_incompatible_instance_migration_reverts_to_gen_N(gate_factory):
-    """A proposed successor that cannot HOLD the live instance's state (it
-    acquires a second resource, so the state-compat gate rejects the migration)
-    reverts to gen N rather than dropping the state: `SWAP_REVERTED`, and gen N
-    keeps serving with its instance state intact. Dropping it would be residue."""
+def test_propose_instance_refusal_does_not_depend_on_state_shape(gate_factory):
+    """The disclosure refusal is a property of the trust boundary, not of whether
+    the successor's instance state happens to be shape-compatible. Even a
+    successor whose Worker acquires a DIFFERENT resource vector is refused at the
+    SAME door (`STATE_UNDISCLOSED`, before teardown) — the gate never reaches the
+    old state-compat comparison, because the item-10 channel is not one an
+    agent-authored successor may cross at all. Gen N keeps serving."""
     gate = gate_factory(record=True)
     gate.load(_instances_source(1))
     gate.call("admin", "seed", ["bob", "7"])
 
-    # the successor's Worker holds TWO Maps — a 2-resource vector the 1-resource
-    # predecessor state cannot migrate onto.
     result = gate.propose(_instances_source(2, resources=2), granted=[])
-    assert result.admitted and not result.swapped
-    assert result.reverted and result.code == "SWAP_REVERTED", result.message
+    assert not result.admitted and not result.swapped
+    assert result.code == "STATE_UNDISCLOSED", result.message
     assert result.migration is None
 
     # gen N is intact and still serving, its instance state preserved.
@@ -640,6 +685,38 @@ def test_provider_handoff_state_migrates_across_propose(gate_factory):
     assert result.migration is not None
     assert result.migration["handoff"]["cache"]["migrated"] is True
     assert result.migration["handoff"]["cache"]["resources"] == 1
+
+
+@needs_cordis
+def test_propose_refuses_type_incompatible_handoff_inheritance(gate_factory):
+    """F1: the item-53 accept-vs-export §5 type gate is manifest-threaded
+    (compiler.py `handoffs` ambient) and never runs on propose's STANDALONE
+    decision compile, so a successor that declared `handoff cache: Map[Str, Int]`
+    over a running operator `handoff cache: Map[Str, Str]` export was admitted
+    and MIGRATED — the operator's string `v1` laundered into the agent's
+    Int-typed store, and a later `Opt[Int]` `get` returned a Str. The disclosure
+    gate now runs that §5 relation BEFORE teardown and refuses
+    (`STATE_UNDISCLOSED`); gen N (Str) keeps serving with its state intact, and
+    the agent successor never receives the operator value.
+
+    Contrast test_provider_handoff_state_migrates_across_propose: a type-
+    COMPATIBLE hand-off (Str -> Str) still crosses. The gate refuses the unsound
+    crossing, not every crossing — disclosure, not prohibition."""
+    gate = gate_factory(record=True)
+    gate.load(_handoff_source(1))
+    gate.call("cache", "put", ["k", "v1"])
+    assert gate.call("cache", "get", ["k"])["result"] == "v1"
+
+    result = gate.propose(_handoff_int_acceptor(2), granted=[])
+    # refused before teardown by the §5 accept-vs-export gate.
+    assert not result.admitted and not result.swapped, result.message
+    assert result.code == "STATE_UNDISCLOSED", result.message
+    assert result.migration is None
+
+    # gen N (the operator's Str cache) is intact and still serving; none of the
+    # operator's state crossed onto the refused agent successor.
+    assert gate.call("cache", "version", [])["result"] == 1
+    assert gate.call("cache", "get", ["k"])["result"] == "v1"
 
 
 @needs_cordis

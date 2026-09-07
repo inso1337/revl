@@ -72,9 +72,17 @@ What T3 adds, and what is still NOT in this slice
   conductor rather than by a direct escape. The plan-layer wiring (the relay
   row, the served key, the boot-summary count) lands here; see `placement.py`
   `sandbox_approval_rows`.
-* The `wasm-cell` and `microvm` rungs (`resolve_driver` returns None, and the
-  caller refuses). `microvm` (T6) needs `/dev/kvm` and is a separate PR.
 * Non-`py` backends inside a container.
+
+Since this header was first written, the `wasm-cell` rung (the in-process cell
+substrate) and the `microvm` rung (the KVM guest, item 411 T6) have both landed
+their drivers below. Neither downgrades: `wasm-cell` verifies the cell substrate
+and refuses the unbuilt component-hosting step, and `microvm` gates on `/dev/kvm`
+via `microvm_runtime_reason` — refusing with a named gap wherever the accelerator
+is absent (every host in reach today), and where KVM is present booting a VM and
+confirming the boundary from inside before refusing the same unbuilt hosting
+step. Verifying that live microVM boot on a KVM-capable lane is the last
+requirement to close item 411's microVM rung.
 """
 
 from __future__ import annotations
@@ -82,6 +90,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -238,7 +247,12 @@ def seam_canary_script(seam_targets, isolation_target,
              .replace("__ISO__", repr([isolation_target[0], int(isolation_target[1])]
                                       if isolation_target else []))
              .replace("__DNS__", repr(list(dns_names))))
-    return _CANARY_SH.replace("__EGRESS__", f'python3 -c "{probe}"')
+    # The probe is a full Python program carrying double-quoted string literals
+    # (e.g. print("SEAM=closed:...")). Interpolating it into a `python3 -c "..."`
+    # double-quoted word lets those inner quotes terminate the shell argument and
+    # exposes the following text (parentheses, %s) as shell syntax, so the emitted
+    # `sh -c` program fails to parse. Transport it as one shell-quoted argument.
+    return _CANARY_SH.replace("__EGRESS__", f"python3 -c {shlex.quote(probe)}")
 
 
 def _run(argv: list[str], *, timeout: float = _DOCKER_TIMEOUT) -> tuple[int, str, str]:
@@ -1419,17 +1433,472 @@ class WasmCellDriver:
             self._cells.clear()
 
 
-def resolve_driver(rung: str) -> ContainerDriver | WasmCellDriver | None:
-    """The runtime driver for one isolation rung, or None when the rung has no
-    driver yet. The caller REFUSES on None: a declared isolation with no driver
-    must never fall through to an unconfined process.
+# --------------------------------------------------------------------------
+# the microVM rung driver (item 411 T6)
+# --------------------------------------------------------------------------
+#
+# The strongest rung of the ladder: the confined body runs under its OWN kernel
+# inside a hardware-accelerated virtual machine, not merely in a namespace on the
+# host kernel the way the container rung does. That is the whole security
+# difference — a container escape is a shared-kernel bug, a microVM escape is a
+# hypervisor bug — and it is why the design names this rung for "code you assume
+# is actively escaping" and multi-tenant isolation.
+#
+# What this driver establishes, and what is still a named follow-on
+# -----------------------------------------------------------------
+# Same three responsibilities as `ContainerDriver`: establish the boundary,
+# CONFIRM it from inside with a boot canary, tear it down — under the same
+# "refuse, never degrade" law. Two things shape it differently:
+#
+#   * The accelerator is not portable. A microVM is a KVM guest, so it needs
+#     `/dev/kvm`; the design (and this module's header, the 430/445 lesson) is
+#     blunt that neither the CI runners nor a developer laptop reliably has it.
+#     So the availability gate is `microvm_runtime_reason()`, the sibling of the
+#     wasm tier's `run_wasm.wasm_runtime_reason()` and the container rung's
+#     `docker version` probe: when it names a reason, the rung REFUSES with that
+#     reason (the clean named gap the design says this rung stays until a
+#     KVM-capable lane verifies it), never a container silently substituted and
+#     never a slow full-emulation TCG guest passed off as the declared boundary.
+#   * A microVM has no image registry to pull a guest from and no shared
+#     filesystem by default (411 design). Its guest kernel and root image are
+#     the runner's to provide (`REVL_MICROVM_KERNEL` / `REVL_MICROVM_ROOTFS`),
+#     fs grants cross as virtio-9p shares, and the seam crosses the VM's virtio
+#     NIC as item-56 TCP+mTLS over a HOST-side relay (T6 reuses the T3 table and
+#     canary; the relay's host mode is `revl.seam_relay`).
+#
+# The live boundary this driver boots — a KVM microVM whose in-guest canary
+# confirms the arch, the read-only root, the net posture and the 9p mounts from
+# inside — is COMPLETE in code here but has never been EXECUTED, because nothing
+# in reach carries `/dev/kvm`. Verifying that boot on a KVM-capable lane is the
+# last requirement to close item 411's microVM rung (the CI job
+# `sandbox-microvm`, gated on a self-hosted KVM runner). Hosting the placement
+# COMPONENT inside the confirmed VM — the in-guest py runner over a 9p root and
+# the host-mode seam relay — is the step after that, so until it lands this
+# driver, like `WasmCellDriver`, VERIFIES the boundary and then REFUSES to boot
+# the component in it rather than downgrade, carrying the in-VM evidence so the
+# progress is auditable rather than swallowed by the refusal.
 
-    Two rungs have drivers now — `container` (the OS boundary) and `wasm-cell`
-    (the in-process cell substrate). `microvm` remains the one driverless rung
-    (it needs a hypervisor / `/dev/kvm`), so it still resolves to None and
-    refuses."""
+# A VM boot, even a microVM's, is slower than a container start; give the canary
+# room before a hang becomes a refusal.
+_MICROVM_TIMEOUT = 180.0
+_KVM_DEVICE = "/dev/kvm"
+
+
+def _microvm_monitor(override: str | None = None) -> tuple[str, str] | None:
+    """`(kind, path)` for the VM monitor, or None when none resolves.
+
+    `qemu-system-<host arch>` with the `microvm` machine type is the one
+    concrete monitor wired here: it is CLI-driven (a reviewable argv, no
+    out-of-band API socket or JSON config), it carries virtio-9p in-tree for the
+    fs-grant shares, and `accel=kvm` is the same accelerator the reason gate
+    proved. `REVL_MICROVM_MONITOR` overrides the path — a firecracker or
+    cloud-hypervisor monitor is a legitimate follow-on and rides that override
+    once its config form is wired."""
+    if override:
+        path = shutil.which(override) or (override if os.path.exists(override) else None)
+        return ("qemu", path) if path else None
+    try:
+        machine = os.uname().machine
+    except AttributeError:  # pragma: no cover - non-POSIX host
+        return None
+    qemu = {"x86_64": "qemu-system-x86_64",
+            "aarch64": "qemu-system-aarch64",
+            "arm64": "qemu-system-aarch64"}.get(machine)
+    if not qemu:
+        return None
+    path = shutil.which(qemu)
+    return ("qemu", path) if path else None
+
+
+def microvm_runtime_reason(kvm_device: str = _KVM_DEVICE,
+                           environ: dict | None = None) -> str | None:
+    """None when a microVM can actually be booted here, else WHY it cannot.
+
+    The availability gate for the strongest rung, and the direct sibling of
+    `run_wasm.wasm_runtime_reason`. Three things must hold, checked in order so
+    the diagnostic names ONE fix rather than a list; the first missing one is
+    the reason, and any reason is a refusal (never a downgrade):
+
+      1. `/dev/kvm` is present and this process can open it read-write. Without
+         the accelerator a "microVM" is a full-emulation TCG guest, a DIFFERENT
+         and weaker boundary than the one the manifest declared, so the rung
+         refuses rather than boot a weaker VM under the same word. microVMs are
+         Linux + `/dev/kvm` only, by nature (411 seam-transport design, T6).
+      2. a VM monitor resolves (`_microvm_monitor`).
+      3. the guest kernel and root image are configured and present. A microVM
+         has no image registry to pull from the way the container rung does, so
+         the boot assets are the runner's to provide; their absence is a refusal
+         that NAMES them, exactly as a missing container image is.
+    """
+    env = environ if environ is not None else os.environ
+    if not os.path.exists(kvm_device):
+        return (f"{kvm_device} is not present, so no hardware-accelerated VM can "
+                f"boot here. A microVM is a KVM guest; without the accelerator "
+                f"the rung would fall back to full software emulation, which is a "
+                f"weaker boundary than the one declared, so it refuses rather "
+                f"than substitute it. The microVM rung is Linux + /dev/kvm only "
+                f"(by nature, not omission); use the `container` rung on a host "
+                f"without KVM, or take the process out of the sandbox.")
+    if not os.access(kvm_device, os.R_OK | os.W_OK):
+        return (f"{kvm_device} exists but is not readable+writable by this user, "
+                f"so the hypervisor cannot open the accelerator. Add the user to "
+                f"the `kvm` group (or grant access to the device), then re-run.")
+    monitor = _microvm_monitor(env.get("REVL_MICROVM_MONITOR"))
+    if monitor is None:
+        return ("no VM monitor resolved: looked for a host-arch `qemu-system-*` "
+                "with the `microvm` machine type on PATH, and REVL_MICROVM_MONITOR "
+                "is unset. Install qemu, or set REVL_MICROVM_MONITOR to a monitor "
+                "path.")
+    kernel = env.get("REVL_MICROVM_KERNEL")
+    rootfs = env.get("REVL_MICROVM_ROOTFS")
+    unset = [n for n, v in (("REVL_MICROVM_KERNEL", kernel),
+                            ("REVL_MICROVM_ROOTFS", rootfs)) if not v]
+    if unset:
+        return (f"the microVM boot assets are not configured ({', '.join(unset)} "
+                f"unset). Unlike the container rung there is no image registry to "
+                f"pull a guest from, so the guest kernel and root image are the "
+                f"runner's to provide; point these at a kernel and a rootfs that "
+                f"carry `sh` + `python3` (and 9p for fs grants).")
+    for label, value in (("kernel", kernel), ("rootfs", rootfs)):
+        if not os.path.exists(value):
+            return (f"the microVM {label} configured at {value!r} does not exist.")
+    return None
+
+
+# The control-dir 9p tag: the driver writes the canary (and, at launch, the
+# runner's control table) into a host directory shared into the guest under this
+# tag, and the guest init mounts it and runs `canary.sh`, writing its report to
+# the serial console the driver captures. This is the rootfs contract the
+# runner-provided guest honours; it is the microVM analog of the container rung
+# handing the canary as `sh -c <script>`.
+_MICROVM_CTL_TAG = "revl-ctl"
+_MICROVM_CTL_MNT = "/revl-ctl"
+
+
+def microvm_mount_tag(index: int) -> str:
+    """The 9p mount tag for the Nth fs-grant share. Deterministic and distinct
+    from the control tag so the guest's mount table is unambiguous."""
+    return f"revl-fs-{index}"
+
+
+def microvm_vm_argv(monitor: str, *, kernel: str, rootfs: str, ctl_dir: str,
+                    mounts: list[tuple[str, str]], memory_mib: int = 256,
+                    net: str = "none") -> list[str]:
+    """The exact `qemu-system` argv a microVM boot is started with, PURE.
+
+    The microVM analog of `container_flags`: no monitor is invoked, so this is
+    the half of the driver that is reviewable as a whole and testable without
+    `/dev/kvm`. Every confinement property the rung claims is visible here —
+
+      * `accel=kvm` (the reason gate proved the accelerator; a boot that could
+        not get it fails loudly rather than emulating), a fresh guest kernel,
+        and a READ-ONLY virtio root drive;
+      * `net = "none"` derives NO `-netdev` at all, which is the T3 posture by
+        construction (the guest has no NIC, so no route and no egress — the
+        in-guest canary confirms it the same way the container rung does);
+      * each fs grant crosses as its own virtio-9p share, read-only unless the
+        grant is `rw`, mounted in-guest at its identity path;
+      * the control dir carrying the canary is one more read-only 9p share;
+      * the serial console is captured (`-serial stdio`, `-display none`) so the
+        canary's report reaches the driver, and `-no-reboot` turns a guest panic
+        into an exit rather than a boot loop.
+
+    A `net = "all"` boot adds a user-mode NIC; the driver's own reason gate and
+    the plan layer have already established there is no host allowlist to honour
+    (the envelope is `none`/`all`)."""
+    argv = [monitor, "-machine", "microvm,accel=kvm", "-cpu", "host",
+            "-m", f"{memory_mib}M", "-no-reboot", "-display", "none",
+            "-kernel", kernel,
+            "-drive", f"file={rootfs},format=raw,if=virtio,readonly=on"]
+    # the control share: canary in, report out over the serial console.
+    argv += ["-fsdev",
+             f"local,id=ctl,path={ctl_dir},security_model=none,readonly=on",
+             "-device",
+             f"virtio-9p-device,fsdev=ctl,mount_tag={_MICROVM_CTL_TAG}"]
+    for i, (path, mode) in enumerate(mounts):
+        ro = ",readonly=on" if mode != "rw" else ""
+        argv += ["-fsdev",
+                 f"local,id=fs{i},path={path},security_model=none{ro}",
+                 "-device",
+                 f"virtio-9p-device,fsdev=fs{i},mount_tag={microvm_mount_tag(i)}"]
+    if net == "all":
+        argv += ["-netdev", "user,id=net0", "-device", "virtio-net-device,netdev=net0"]
+    # net == "none": no -netdev, so the guest has no NIC at all.
+    # the guest init mounts the control share and runs the canary, streaming its
+    # report to ttyS0, which is this stdio serial line.
+    cmdline = (f"console=ttyS0 root=/dev/vda ro "
+               f"revl.ctl_tag={_MICROVM_CTL_TAG} revl.ctl_mnt={_MICROVM_CTL_MNT}")
+    argv += ["-append", cmdline, "-serial", "stdio"]
+    return argv
+
+
+def evaluate_microvm(pname: str, env: dict, mounts: list[tuple[str, str]],
+                     report: dict) -> tuple[list[str], str | None]:
+    """Judge one in-VM boot canary report against the envelope it claims to
+    enforce, PURELY — kept free of any monitor call so the whole judgment is
+    testable with synthetic reports wherever `/dev/kvm` is absent, exactly as
+    `evaluate_cell` is.
+
+    The guest runs the SAME POSIX-`sh` canary the container rung does (the
+    design's "reuses the T3 canary"), so the report shape is identical and every
+    clause is a refusal when it cannot be CONFIRMED, not merely when it is
+    contradicted."""
+    if "CANARY" not in report:
+        return [], (
+            f"process {pname!r}: the in-VM boot canary did not complete inside "
+            f"the microVM. An unverified boundary is refused rather than trusted.")
+    if report.get("PY") != "yes":
+        return [], (
+            f"process {pname!r}: the microVM guest image has no `python3`. The "
+            f"rung runs the py runner inside the guest and verifies the envelope "
+            f"with a probe that needs it, so a guest without one cannot be "
+            f"confirmed and is refused rather than trusted.")
+    lines: list[str] = []
+    if env.get("net", "none") == "none":
+        routes = report.get("ROUTES", "?")
+        egress = report.get("EGRESS", "unreported")
+        if routes != "0":
+            return [], (
+                f"process {pname!r}: the sandbox asked for net = \"none\", but the "
+                f"in-VM canary sees {routes} route(s) inside the guest. The microVM "
+                f"was given a NIC it should not have; the boundary is not the one "
+                f"declared and is refused, never silently downgraded.")
+        if not egress.startswith("blocked:"):
+            return [], (
+                f"process {pname!r}: the sandbox asked for net = \"none\", but the "
+                f"in-VM egress probe reports {egress!r} rather than an immediate "
+                f"refusal. The guest's network confinement is unconfirmed, and an "
+                f"unconfirmed boundary is refused exactly like a broken one.")
+        lines.append(f"net=none confirmed in-VM: no route in the guest, an outbound "
+                     f"connect fails at once (errno {egress.split(':', 1)[1]})")
+    else:
+        lines.append("net=all: egress permitted by the envelope (nothing confined)")
+
+    if report.get("ROOTFS", "unknown") != "ro":
+        return [], (
+            f"process {pname!r}: the in-VM canary wrote to the guest root "
+            f"filesystem (ROOTFS={report.get('ROOTFS', 'unknown')}), so the "
+            f"read-only virtio root did not take. The boundary is not the one the "
+            f"placement asked for and is refused.")
+    lines.append("guest root filesystem read-only, confirmed in-VM")
+
+    mount_opts: dict = report.get("MOUNTS") or {}
+    for i, (path, mode) in enumerate(mounts):
+        opts = mount_opts.get(path)
+        if opts is None:
+            return [], (
+                f"process {pname!r}: the in-VM canary does not see the 9p share "
+                f"for {path!r} inside the guest (tag {microvm_mount_tag(i)}). The "
+                f"envelope the process would run under is not the one declared, so "
+                f"the placement refuses.")
+        seen = "rw" if opts.split(",")[0] == "rw" else "ro"
+        if seen != mode:
+            return [], (
+                f"process {pname!r}: the mount {path!r} is {seen} inside the guest "
+                f"but the envelope declares {mode}. The envelope did not take, so "
+                f"the placement refuses.")
+        lines.append(f"mount {path} {mode}, confirmed in-VM (9p)")
+
+    platform = env.get("platform")
+    if platform:
+        want = accepted_uname(platform) or ()
+        seen = report.get("ARCH", "unknown")
+        if seen not in want:
+            return [], (
+                f"process {pname!r}: the sandbox asked for platform {platform!r}, "
+                f"but the in-VM canary reports `uname -m` = {seen!r} inside the "
+                f"guest (expected one of {', '.join(want) or '?'}). A microVM boots "
+                f"under one kernel/arch; a mismatch means the guest is not the "
+                f"declared arch, and an unconfirmed platform is refused.")
+        lines.append(f"platform {platform} confirmed in-VM (uname -m = {seen})")
+    return lines, None
+
+
+class MicroVMDriver:
+    """The `microvm` rung: establish + in-VM health canary + teardown.
+
+    One instance per placement run. It gates on `/dev/kvm` and a monitor via
+    `microvm_runtime_reason` (refusing with the named gap wherever the
+    accelerator is absent — the state on every host in reach today), and where
+    KVM IS present it boots a microVM and CONFIRMS the boundary from inside with
+    the boot canary. Hosting the placement component inside the confirmed VM (the
+    in-guest py runner over a 9p root, the host-mode seam relay) is the step
+    after the live boot is verified on a KVM lane, so — like `WasmCellDriver` —
+    it verifies the boundary and then REFUSES to boot the component rather than
+    downgrade, carrying the in-VM evidence.
+
+    `runtime_reason`, `monitor` and `probe` are injectable so the whole driver
+    is testable at the plan layer with `/dev/kvm` absent; all default to the
+    real KVM path.
+    """
+
+    rung = "microvm"
+    name = "qemu-microvm"
+
+    def __init__(self, runtime_reason=None, monitor=None, probe=None) -> None:
+        self._runtime_reason = runtime_reason
+        self._monitor = monitor
+        self._probe = probe
+        self._vms: dict[str, str] = {}
+
+    # -- preflight ---------------------------------------------------------
+    def preflight(self, pname: str, env: dict, ctx: dict) -> tuple[dict | None, str | None]:
+        """Establish that this process CAN be confined in a microVM and prove the
+        boundary from inside it, then refuse the component launch naming the one
+        step the live boot has yet to reach. Returns `(None, diagnostic)` on
+        every path in this slice — a refusal — because a confirmed VM boundary is
+        not yet a hosted component, and a VM that cannot host is refused rather
+        than downgraded."""
+        backend = ctx.get("backend", "py")
+        if backend != "py":
+            return None, (
+                f"process {pname!r} is placed in a `microvm` sandbox on the "
+                f"{backend!r} backend, but the microVM rung runs the `py` runner "
+                f"inside the guest in this slice (the other tiers need their own "
+                f"in-guest runner form). Move the process to the `py` tier, or "
+                f"take it out of the sandbox.")
+        # item 411 T1/T6: a cross-boundary seam builds the relay-mtls transport
+        # descriptor; its plan-layer preconditions (item-56 role, item-54
+        # deadline) refuse HERE naming each unmet one, exactly as the container
+        # rung does — the design's "the item-56 per-role tier rule carries over".
+        seams = ctx.get("seams") or []
+        if seams:
+            desc = seam_transport_descriptor(pname, seams)
+            if desc["unmet"]:
+                bullets = "".join(f"\n  - {u}" for u in desc["unmet"])
+                return None, (
+                    f"process {pname!r} is placed in a `microvm` sandbox with "
+                    f"cross-boundary seam(s); the {desc['transport']} transport "
+                    f"cannot be admitted until every precondition is met. "
+                    f"Unmet:{bullets}\n"
+                    f"Place {pname!r}'s component(s) with the process they talk "
+                    f"to, run them unsandboxed, or fix each precondition above.")
+
+        reason = self._resolve_runtime_reason()
+        if reason is not None:
+            return None, (
+                f"process {pname!r} declares the `microvm` isolation rung, but a "
+                f"microVM cannot be booted here: {reason} A declared isolation is "
+                f"never downgraded to a container or to an unconfined process — "
+                f"the placement refuses.")
+
+        report, probe_err = self._run_probe(pname, env, ctx)
+        if probe_err:
+            return None, probe_err
+        mounts = seam_dir_mounts(ctx) + envelope_mounts(env)
+        evidence, err = evaluate_microvm(pname, env, mounts, report)
+        if err:
+            return None, err
+
+        # The VM boundary is real and confirmed from inside. What is missing is
+        # hosting THIS component in it: the in-guest py runner over the 9p root
+        # and the host-mode seam relay (T6). Refuse naming it, and carry the
+        # verified-boundary evidence so the progress is auditable rather than
+        # swallowed by the refusal, mirroring `WasmCellDriver.preflight`.
+        established = "".join(f"\n  - {line}" for line in evidence)
+        return None, (
+            f"process {pname!r}: the `microvm` boundary is established and verified "
+            f"in-VM:{established}\n"
+            f"But hosting a placement component inside the guest needs the in-guest "
+            f"py runner over the 9p root and the host-mode seam relay (item 411 "
+            f"T6, the step after the live boot is verified on a KVM lane), which "
+            f"is not built in this slice. Until it lands, the microVM rung refuses "
+            f"rather than booting {pname!r} unconfined. Use the `container` rung, "
+            f"which hosts a py component today, or take the process out of the "
+            f"sandbox.")
+
+    def _resolve_runtime_reason(self) -> str | None:
+        if self._runtime_reason is not None:
+            return self._runtime_reason()
+        return microvm_runtime_reason()
+
+    def _resolve_monitor(self) -> str | None:
+        if self._monitor is not None:
+            return self._monitor
+        resolved = _microvm_monitor(os.environ.get("REVL_MICROVM_MONITOR"))
+        return resolved[1] if resolved else None
+
+    def _run_probe(self, pname: str, env: dict, ctx: dict) -> tuple[dict, str | None]:
+        """Boot the in-VM canary under the monitor and parse its serial report —
+        or a diagnostic when it could not run at all. The canary is the same
+        POSIX-`sh` one-shot the container rung uses, written into a control-dir
+        9p share the guest init mounts and runs (`_MICROVM_CTL_TAG`)."""
+        if self._probe is not None:
+            return self._probe(pname, env, ctx)
+        monitor = self._resolve_monitor()
+        if monitor is None:  # pragma: no cover - runtime_reason already refused this
+            return {}, (f"process {pname!r}: no VM monitor to boot the in-VM canary.")
+        environ = os.environ
+        ctl_dir = Path(ctx.get("seam_dir") or ".") / f"revl-microvm-{pname}"
+        try:
+            ctl_dir.mkdir(parents=True, exist_ok=True)
+            (ctl_dir / "canary.sh").write_text(
+                _canary_script(env.get("net", "none")), encoding="utf-8")
+        except OSError as exc:  # pragma: no cover - a broken placement dir
+            return {}, (f"process {pname!r}: could not stage the microVM canary "
+                        f"({exc}).")
+        mounts = seam_dir_mounts(ctx) + envelope_mounts(env)
+        argv = microvm_vm_argv(
+            monitor, kernel=environ["REVL_MICROVM_KERNEL"],
+            rootfs=environ["REVL_MICROVM_ROOTFS"], ctl_dir=str(ctl_dir),
+            mounts=mounts, net=env.get("net", "none"))
+        rc, out, err = _run(argv, timeout=_MICROVM_TIMEOUT)
+        if rc != 0 or "CANARY=done" not in out:
+            return {}, (
+                f"process {pname!r}: the in-VM boot canary did not run under the "
+                f"microVM monitor ({_tail(err) or _tail(out)}). The canary is a "
+                f"POSIX `sh` one-shot reading /proc from inside the guest; a guest "
+                f"that cannot run it cannot be verified, and an unverified boundary "
+                f"is refused rather than trusted.")
+        report: dict = {"MOUNTS": {}}
+        for line in out.splitlines():
+            key, _, value = line.partition("=")
+            if key == "MOUNT":
+                mp, _, opts = value.partition(" ")
+                report["MOUNTS"][mp] = opts
+            elif key:
+                report[key] = value
+        return report, None
+
+    # -- launch ------------------------------------------------------------
+    def wrap(self, pname: str, cmd: list, proc_env: dict | None,
+             achieved: dict) -> tuple[list, dict | None]:  # pragma: no cover
+        """Unreachable in this slice: `preflight` refuses every microVM placement
+        before a command is ever built. Kept to satisfy the driver contract and
+        to fail LOUDLY rather than pass a command through unconfined if the
+        refusal above is ever weakened without landing the in-guest runner."""
+        raise AssertionError(
+            f"microVM launch reached for {pname!r} without the in-guest py runner "
+            f"(item 411 T6); preflight must have refused. Booting the component "
+            f"here would run it without the confinement the rung promises.")
+
+    # -- teardown ----------------------------------------------------------
+    def teardown(self, pname: str | None = None) -> None:
+        """Best-effort. The canary VM is a transient `-no-reboot` monitor child
+        that exits on its own; teardown drops the driver's bookkeeping so a
+        conductor killed mid-run leaves nothing tracked. When the in-guest runner
+        lands, the long-lived monitor child's kill goes here, mirroring
+        `ContainerDriver.teardown`'s belt."""
+        if pname is not None:
+            self._vms.pop(pname, None)
+        else:
+            self._vms.clear()
+
+
+def resolve_driver(rung: str) -> ContainerDriver | WasmCellDriver | MicroVMDriver | None:
+    """The runtime driver for one isolation rung, or None when the rung has no
+    driver at all. The caller REFUSES on None: a declared isolation with no
+    driver must never fall through to an unconfined process.
+
+    Every rung on the ladder now resolves to a driver — `container` (the OS
+    boundary), `wasm-cell` (the in-process cell substrate) and `microvm` (the
+    KVM guest). None of them ever downgrades: a rung whose boundary cannot be
+    established here refuses with the named gap (the microVM rung on any host
+    without `/dev/kvm`, which is every host in reach today)."""
     if rung == ContainerDriver.rung:
         return ContainerDriver()
     if rung == WasmCellDriver.rung:
         return WasmCellDriver()
+    if rung == MicroVMDriver.rung:
+        return MicroVMDriver()
     return None

@@ -357,7 +357,7 @@ def test_null_intercept_metadata_activates_on_jvm(reference, tmp_path):
 public final class Harness {
     public static void main(String[] args) {
         io.cordis4j.core.Context ctx = new io.cordis4j.core.Context();
-        ctx.provide(io.cordis4j.core.ServiceKey.of(Components.Sink.class),
+        ctx.provide(io.cordis4j.core.ServiceKey.of(Components.Sink.class, "sink"),
                 message -> {});
         new Components.MetadataPlugin().apply(ctx).dispose();
         System.out.println("ok");

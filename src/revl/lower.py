@@ -62,6 +62,7 @@ from .typecheck import (
 )
 from .taint import (
     extract_and_normalize,
+    fold_ambient_composition,
     check_taint,
     splice_declassifiers,
     strip_qualifiers,
@@ -5861,12 +5862,15 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             node: dict = {"kind": "builtin", "method": method,
                           "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
                           "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
-            if method == "to_int":
+            if method in ("to_int", "to_str"):
                 # `to_int` is spelled for two receiver families (Int32 widen,
                 # Str parse) — the backends must dispatch on the receiver's
                 # static type, which the IR node would otherwise not carry
                 # (the same reason `un` annotates Int negation). Annotate it,
-                # exactly as the checker selected the row.
+                # exactly as the checker selected the row. `to_str` rides the
+                # same annotation so the tiers can tell a Float receiver (which
+                # renders through the canonical `ftoa`, byte-identical to a
+                # `${aFloat}` interpolation) from an Int one.
                 node["recv"] = infer_ast(expr.callee.target, type_env, types, None)
             return node
         # A call argument that widens Int -> Float is marked on the argument
@@ -6270,6 +6274,21 @@ def _find_loop_step(node):
     return None
 
 
+def _find_all_loop_steps(node):
+    """Every `while`/`for` step in a subtree (issue #548 relaxed the old
+    single-hit `_find_loop_step`: a component may now legitimately carry loops,
+    in its provide-method bodies, so the invariant checks each one rather than
+    refusing the first)."""
+    if isinstance(node, dict):
+        if node.get("step") in _LOOP_STEP_KINDS:
+            yield node
+        for value in node.values():
+            yield from _find_all_loop_steps(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _find_all_loop_steps(item)
+
+
 def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
     doc = "docs/design/379-break-continue.md"
     fn_bodies: list[list] = [fn.get("body") or [] for fn in ir.get("functions") or []]
@@ -6290,16 +6309,28 @@ def _validate_no_loop_scoped_registration(ir: dict, filename: str) -> None:
                          "and registration never meet; an item that wants them to "
                          f"must first amend the teardown contract ({doc})",
                 )
+    # issue #548: a `while`/`for` loop is now valid in a provide-METHOD body
+    # (the parser still admits none in an activation/setup body). The
+    # frame-neutrality invariant is unchanged in substance — a teardown-
+    # registering step still may not sit inside a loop body — so it is enforced
+    # here the SAME way as over fn bodies, rather than by refusing loops
+    # outright. `_lower_control_stmt` already refuses registration inside method
+    # control flow at lowering; this is the whole-IR safety net that makes the
+    # invariant true on every tier.
     for component in ir.get("components") or []:
-        loop = _find_loop_step(component)
-        if loop is not None:
-            raise RevlError(
-                filename, loop.get("line", 0),
-                "a `while`/`for` loop may not appear in a component activation "
-                "or provide-method body",
-                hint="iteration lives in the fn statement grammar; lift the loop "
-                     f"into a module `fn` and call it ({doc})",
-            )
+        for loop in _find_all_loop_steps(component):
+            for step in _iter_all_fn_steps(loop.get("body") or []):
+                kind = step.get("step")
+                if kind in _REGISTERING_STEP_KINDS:
+                    raise RevlError(
+                        filename, step.get("line", 0),
+                        f"a `{kind}` step registers teardown and may not appear "
+                        f"inside a `while`/`for` body",
+                        hint="`break`/`continue` are frame-neutral only because "
+                             "loops and registration never meet; keep the effect/"
+                             "emit at the provide method's top level "
+                             f"(issue #548, {doc})",
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -6512,6 +6543,17 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         name: _service_from_ir(name, spec)
         for name, spec in (ambient.get("services") or {}).items()
     }
+
+    # Fold the AMBIENT composition's service operations into the taint model so a
+    # crossing's derived sink/source class survives the manifest/composition
+    # boundary. A per-turn source admitted against a running manifest reaches the
+    # composition only through its ambient services, whose provider bodies are not
+    # in the turn's program; without this the flow walk sees no sink and no source
+    # and `emit sh.exec(emit fs.read(p))` launders untrusted data into a shell sink
+    # even under `taint_strict`. No-op with `taint_strict` off, so a trusted
+    # load/swap against a running manifest is byte-identical.
+    fold_ambient_composition(taint_model, ambient_services,
+                             taint_strict=taint_strict)
 
     services: dict[str, ServiceDecl] = {}
     for svc in program.services:
@@ -7314,7 +7356,27 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             raise null_error(filename, line)
         return {"kind": "lit", "value": _literal_value(expr.value, filename, line)}
     if isinstance(expr, Interp):
-        return _lower_expr(expr, env, mode=getattr(env, "_expr_mode", "setup"))
+        # A `${...}` template in a component/method body. Each interpolated
+        # expression must lower in the CURRENT lexical `scope`, not through the
+        # env-only `_lower_expr` — otherwise a name bound locally here (a
+        # match-arm payload, `Word(w) => `word:${w}``) is invisible to the
+        # template and misresolves as a component requirement (`w` is not a
+        # declared requirement). This is the component-path twin of the fn-body
+        # template-scope fix (#570, review item 8): the fn-body lowerer already
+        # walks template parts in scope (`_lower_pure_expr`); the component path
+        # deferred to `_lower_expr(env)` and lost the arm binding. Build the
+        # same `format` node `_lower_expr` builds, but lower the expr parts in
+        # `scope`.
+        template: list[str] = []
+        fmt_args: list = []
+        for part_kind, value in expr.parts:
+            if part_kind == "text":
+                template.append(value.replace("$", "$$"))  # A4: literal dollars
+            else:
+                template.append(f"${len(fmt_args)}")
+                fmt_args.append(_lower_component_pure_expr(
+                    value, env, scope, callables, pure_only))
+        return {"kind": "format", "template": "".join(template), "args": fmt_args}
     if isinstance(expr, ExprVar):
         name = expr.name
         if name in scope:
@@ -7503,8 +7565,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                               "target": _lower_component_pure_expr(expr.callee.target, env, scope,
                                                                    callables, pure_only),
                               "args": args}
-                if method == "to_int":
-                    # receiver-family dispatch (`recv`), as in a fn body
+                if method in ("to_int", "to_str"):
+                    # receiver-family dispatch (`recv`), as in a fn body — the
+                    # tiers read it to tell a Float `to_str` (canonical `ftoa`)
+                    # from an Int one, and a Str/Int32 `to_int` apart.
                     node["recv"] = infer_ir({"kind": "name", "id": scope[root]},
                                             env.type_env, env.types, env.services)
                 return node
@@ -7566,7 +7630,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                                 f"argument(s), {len(args)} given")
             node: dict = {"kind": "builtin", "method": method, "target": target,
                           "args": args}
-            if method == "to_int":
+            if method in ("to_int", "to_str"):
                 # receiver-family dispatch (`recv`), as in a fn body
                 node["recv"] = infer_ast(expr.callee.target, env.type_env,
                                          env.types, None)
@@ -9460,6 +9524,21 @@ def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
             _ownership_check_expr(st.get("value"), env, filename, line, seam=True)
         elif stp in ("return", "await"):
             _ownership_check_expr(st.get("expr"), env, filename, line, seam=True)
+        elif stp in ("if", "while", "for"):
+            # issue #548: control-flow arms hold pure value computation; descend
+            # so a borrowed/owned handle used in a conditional or loop body is
+            # judged exactly as at the method's top level. The arms register no
+            # teardown (that is refused at lowering), so `method_owned` needs no
+            # per-branch merge.
+            if stp == "for":
+                _ownership_check_expr(st.get("iterable"), env, filename, line,
+                                      seam=True)
+            else:
+                _ownership_check_expr(st.get("cond"), env, filename, line,
+                                      seam=True)
+            _ownership_walk_method(st.get("then") or [], env, filename, line)
+            _ownership_walk_method(st.get("else") or [], env, filename, line)
+            _ownership_walk_method(st.get("body") or [], env, filename, line)
     _f9_instance_scope_scan(steps, env, filename, line)
 
 
@@ -9964,8 +10043,34 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             # own-undo exemption); B1 clause 5 still refuses a BORROW smuggled
             # into that undo.
             _taint308, _ = _resource_ctx(env.types)
-            if resource_in(acquired_type, _taint308):
+            _is_resource_308 = bool(resource_in(acquired_type, _taint308))
+            if _is_resource_308:
                 _owned_handles(env).add(safe)
+            # item 308 (issue #96), S1: `let h = effect shared <acquire> …` marks
+            # an N-holder handle. The acquiring frame is holder #1 — an OWNER of
+            # its own handle for its own frame, so the O1 own-undo exemption and
+            # the B1 owner carve-out below apply exactly as for `owned` (a shared
+            # handle stored in the acquirer's OWN activation state tears down with
+            # its frame). What differs is the RUNTIME: the declared inverse is
+            # bound to the count's zero crossing (SharedGrantBook / liveness_confirm
+            # .py), not fired per-frame; and a crash re-fires it once via `revl
+            # recover`'s `shared-reclaim-fence` (recovery.py). The mode is carried
+            # on the step so the emitters and the recover/audit surfaces see it.
+            # A `shared` marker on a NON-resource acquire is meaningless (nothing
+            # to count), so it is refused rather than silently recorded.
+            if getattr(stmt, "mode", "owned") == "shared":
+                if not _is_resource_308:
+                    raise RevlError(
+                        filename, stmt.line,
+                        f"`effect shared` requires a resource handle, but "
+                        f"`{stmt.bind}` binds a non-handle value (its acquire "
+                        f"returns no nominal opaque handle to count holders of)",
+                        hint="a shared handle is torn down when its last holder "
+                             "releases; a value with no resource identity has no "
+                             "teardown to share. Drop `shared`, or return an "
+                             "opaque handle type from the acquire (item 308, R0/S1)",
+                        code="G7", category="ownership")
+                step["mode"] = "shared"
             if step.get("undo") is not None:
                 _o1_check(step["undo"], env, filename, stmt.line,
                           position="undo", exempt_handle=safe)
@@ -10488,6 +10593,203 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             return infer_ir(node, env.type_env, env.types, env.services,
                             filename, line)
 
+        # --- issue #548: control flow in a provide-method body --------------
+        # `if`/`while`/`for` STATEMENTS whose arms compute VALUES (the review's
+        # top two walls). The shape reuses the exact `if`/`while`/`for` IR the fn
+        # grammar emits (`_lower_pure_stmt`), so every tier's fn-body renderer is
+        # the reference for the method-body one. Two facts keep it bounded:
+        #
+        #   * the arms are PURE. A teardown-registering step (`effect`/`emit`/
+        #     `let-effect`/`await`/timer/approval) inside a branch is refused
+        #     (`_lower_control_stmt`), so the half-emitting-conditional and
+        #     loop-teardown questions (design note §Group 3) stay out of scope —
+        #     the activation frame still owns every inverse, registered at the
+        #     method's top level exactly as before.
+        #   * VISIBILITY is block-scoped (a branch's `let` does not leak past it,
+        #     and disjoint sibling branches may reuse a source name) while the
+        #     EMITTED safe name stays unique for the whole method (`used_safe`),
+        #     so python's function-scope aliasing cannot make two branches share
+        #     a slot.
+        used_safe: set[str] = set()
+
+        def _alloc_safe(name: str) -> str:
+            safe = _safe_name(
+                name,
+                set(env.params.values()) | set(method_locals.values())
+                | set(env.locals.values()) | used_safe)
+            used_safe.add(safe)
+            return safe
+
+        def _do_let(ms, out) -> None:
+            _check_rebind(ms.name, ms.line)
+            safe = _alloc_safe(ms.name)
+            value = _lower_expr(ms.value, env, mode="setup")
+            swept = _sweep(value, ms.line)
+            method_locals[ms.name] = safe
+            env.params[ms.name] = safe
+            _note_provision_alias(safe, value, env)
+            if isinstance(ms.value, ExprArrow):
+                env.local_arrows[ms.name] = ms.value
+            if ms.type is not None:
+                check_type_wellformed(filename, ms.line, ms.type)
+                env.type_env[safe] = ms.type
+                _pin_empty_literal(ms.type, value)
+            elif swept is not None:
+                env.type_env[safe] = swept
+            out.append({"step": "let", "name": safe, "value": value,
+                        "mutable": bool(ms.mutable)})
+
+        def _do_assign(ms, out) -> None:
+            if ms.name not in method_locals:
+                _reject_foreign_name(ms.name, filename, ms.line)  # item 384
+                raise RevlError(filename, ms.line,
+                                f"`{ms.name}` is not declared in `{method.name}`",
+                                hint="declare it with `let` (single-assignment) or "
+                                     "`var` (mutable)")
+            assigned = _lower_expr(ms.value, env, mode="setup")
+            _sweep(assigned, ms.line)  # item 404
+            out.append({"step": "assign", "name": method_locals[ms.name],
+                        "value": assigned})
+
+        def _do_return(ms, out) -> None:
+            if ms.expr is None:
+                if decl.returns:
+                    raise RevlError(
+                        filename, ms.line,
+                        f"`{method.name}` returns `{decl.returns}` but this "
+                        "`return` carries no value")
+                out.append({"step": "return", "expr": None})
+                return
+            pin_hole(ms.expr, decl.returns, filename, f"`{method.name}` returns")
+            lowered_return = _lower_expr(ms.expr, env, mode="setup")
+            _taint308, _ = _resource_ctx(env.types)
+            _ret_res = (resource_in(decl.returns, _taint308)
+                        or _node_resource(lowered_return, env, _taint308))
+            if _ret_res and not _b1_return_admitted(lowered_return, env, _taint308):
+                raise RevlError(
+                    filename, ms.line,
+                    _b1_message("return", "borrowed", _ret_res),
+                    hint=_b1_hint("return"), code="G7", category="ownership",
+                    navigate=_b1_navigate(env, "return", "borrowed", _ret_res))
+            actual = _sweep(lowered_return, ms.line)
+            if decl.returns:
+                check_ir(lowered_return, decl.returns, env.type_env,
+                         env.types, env.services, filename, ms.line,
+                         f"`{method.name}` returns")
+                lowered_return = _inject_opt(decl.returns, actual, lowered_return)
+            out.append({"step": "return", "expr": lowered_return})
+
+        def _lower_scoped_block(stmts, out) -> None:
+            """Lower a control-flow arm/body: bindings are visible only within
+            it (visibility snapshot/restore), while `used_safe` keeps emitted
+            names unique method-wide."""
+            saved_params = env.params
+            saved_tenv = env.type_env
+            saved_locals = dict(method_locals)
+            env.params = dict(saved_params)
+            env.type_env = dict(saved_tenv)
+            try:
+                inner_returned = False
+                for s in stmts:
+                    if inner_returned:
+                        raise RevlError(filename, s.line,
+                                        "unreachable statement after `return`")
+                    _lower_control_stmt(s, out)
+                    if isinstance(s, ReturnStmt):
+                        inner_returned = True
+            finally:
+                env.params = saved_params
+                env.type_env = saved_tenv
+                method_locals.clear()
+                method_locals.update(saved_locals)
+
+        def _lower_control_stmt(ms, out) -> None:
+            if isinstance(ms, LetStmt):
+                _do_let(ms, out)
+            elif isinstance(ms, AssignStmt):
+                _do_assign(ms, out)
+            elif isinstance(ms, ReturnStmt):
+                _do_return(ms, out)
+            elif isinstance(ms, IfStmt):
+                cond = _lower_expr(ms.cond, env, mode="setup")
+                cond_t = _sweep(cond, ms.line)
+                if cond_t is not None and cond_t != "Bool":
+                    raise mismatch(filename, ms.line, "`if` condition", "Bool", cond_t)
+                then_body: list = []
+                _lower_scoped_block(ms.then, then_body)
+                else_body = None
+                if ms.otherwise is not None:
+                    else_body = []
+                    _lower_scoped_block(ms.otherwise, else_body)
+                out.append({"step": "if", "cond": cond,
+                            "then": then_body, "else": else_body})
+            elif isinstance(ms, WhileStmt):
+                cond = _lower_expr(ms.cond, env, mode="setup")
+                cond_t = _sweep(cond, ms.line)
+                if cond_t is not None and cond_t != "Bool":
+                    raise mismatch(filename, ms.line, "`while` condition", "Bool", cond_t)
+                loop_body: list = []
+                _lower_scoped_block(ms.body, loop_body)
+                out.append({"step": "while", "cond": cond, "body": loop_body})
+            elif isinstance(ms, ForStmt):
+                iter_node = _lower_expr(ms.iterable, env, mode="setup")
+                iter_t = _sweep(iter_node, ms.line)
+                if iter_t is not None and parse_type(iter_t)[0] != "List":
+                    raise RevlError(
+                        filename, ms.line,
+                        f"`for ... of` iterates a `List[...]`, got "
+                        f"`{render_type(iter_t)}`")
+                _check_rebind(ms.bind, ms.line)
+                saved_params = env.params
+                saved_tenv = env.type_env
+                saved_locals = dict(method_locals)
+                env.params = dict(saved_params)
+                env.type_env = dict(saved_tenv)
+                try:
+                    safe = _alloc_safe(ms.bind)
+                    method_locals[ms.bind] = safe
+                    env.params[ms.bind] = safe
+                    elem = _type_arg(iter_t, "List") if iter_t is not None else None
+                    if elem is not None:
+                        env.type_env[safe] = elem
+                    loop_body = []
+                    inner_returned = False
+                    for s in ms.body:
+                        if inner_returned:
+                            raise RevlError(filename, s.line,
+                                            "unreachable statement after `return`")
+                        _lower_control_stmt(s, loop_body)
+                        if isinstance(s, ReturnStmt):
+                            inner_returned = True
+                finally:
+                    env.params = saved_params
+                    env.type_env = saved_tenv
+                    method_locals.clear()
+                    method_locals.update(saved_locals)
+                out.append({"step": "for", "bind": safe,
+                            "iterable": iter_node, "body": loop_body})
+            elif isinstance(ms, BreakStmt):
+                out.append({"step": "break", "line": ms.line})
+            elif isinstance(ms, ContinueStmt):
+                out.append({"step": "continue", "line": ms.line})
+            elif isinstance(ms, (LetEffect, EffectStmt, EmitStmt, AwaitStmt,
+                                 LetApprovalStmt, TimerStmt)):
+                raise RevlError(
+                    filename, ms.line,
+                    "a teardown-registering step (`effect`/`emit`/`let-effect`/"
+                    "`await`) is not allowed inside a provide-method `if`/`while`/"
+                    "`for` body",
+                    hint="the activation frame owns every inverse and registers "
+                         "it at the method's top level; a conditional or looped "
+                         "acquisition would need the teardown contract amended "
+                         "(issue #548, docs/design/478-component-author-"
+                         "ergonomics.md §Group 3). Keep the effect/emit at the "
+                         "method's top level and let the control flow compute only "
+                         "values")
+            else:  # pragma: no cover — the parser admits nothing else here
+                raise RevlError(filename, getattr(ms, "line", method.line),
+                                "unexpected statement in method control-flow body")
+
         for mstmt in method.body:
             if returned:
                 raise RevlError(filename, mstmt.line, "unreachable statement after `return`")
@@ -10607,111 +10909,28 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 mbody.append({"step": "await", "expr": _lower_expr(mstmt.expr, env, mode="setup")})
             elif isinstance(mstmt, LetStmt):
                 # a plain value binding: name an intermediate result instead
-                # of nesting every call into a single expression
-                _check_rebind(mstmt.name, mstmt.line)
-                safe = _safe_name(mstmt.name, set(env.params.values())
-                                  | set(method_locals.values()) | set(env.locals.values()))
-                value = _lower_expr(mstmt.value, env, mode="setup")
-                # item 404: raise on a definite operator/index/builtin misuse in
-                # the bound value, uniformly with a `fn`/`test` body.
-                swept = _sweep(value, mstmt.line)
-                method_locals[mstmt.name] = safe
-                env.params[mstmt.name] = safe  # visible to later statements
-                _note_provision_alias(safe, value, env)
-                if isinstance(mstmt.value, ExprArrow):
-                    env.local_arrows[mstmt.name] = mstmt.value
-                if mstmt.type is not None:
-                    # a `let x: T` annotation in a provide-method body. It is
-                    # recorded rather than ignored so `infer_ir` sees it, but
-                    # this is stratum 3: the value is *not* checked against it
-                    # (docs/function-types.md §limits).
-                    check_type_wellformed(filename, mstmt.line, mstmt.type)
-                    env.type_env[safe] = mstmt.type
-                    # ... and it pins an empty-collection literal on the right:
-                    # `var m: Map[Str, Int] = Map.empty()` is the author's own
-                    # expected type (roadmap 76b), carried on the `maplit` node
-                    _pin_empty_literal(mstmt.type, value)
-                else:
-                    # record the inferred type exactly as the activation-body
-                    # setup sweep does, so a later method on the binding is
-                    # checked against the *real* type (`let xs = [1, 2]` then
-                    # `xs.length()` is a List length, not an unpinned call) —
-                    # the stdlib-named-method guard (roadmap 75(b)) depends on
-                    # provable receiver types.
-                    if swept is not None:
-                        env.type_env[safe] = swept
-                mbody.append({"step": "let", "name": safe, "value": value,
-                              "mutable": bool(mstmt.mutable)})
+                # of nesting every call into a single expression. Shared with
+                # the control-flow interior (issue #548) via `_do_let` — item
+                # 404's misuse sweep, the `let x: T` pin (roadmap 76b) and the
+                # inferred-type record (roadmap 75(b)) all live there.
+                _do_let(mstmt, mbody)
             elif isinstance(mstmt, AssignStmt):
-                if mstmt.name not in method_locals:
-                    _reject_foreign_name(mstmt.name, filename, mstmt.line)  # item 384
-                    raise RevlError(filename, mstmt.line,
-                                    f"`{mstmt.name}` is not declared in `{method.name}`",
-                                    hint="declare it with `let` (single-assignment) or "
-                                         "`var` (mutable)")
-                assigned = _lower_expr(mstmt.value, env, mode="setup")
-                _sweep(assigned, mstmt.line)  # item 404
-                mbody.append({"step": "assign", "name": method_locals[mstmt.name],
-                              "value": assigned})
+                _do_assign(mstmt, mbody)
             elif isinstance(mstmt, ReturnStmt):
-                if mstmt.expr is None:
-                    # a void operation: `fn f(x) { return }`
-                    if decl.returns:
-                        raise RevlError(
-                            filename, mstmt.line,
-                            f"`{method.name}` returns `{decl.returns}` but this "
-                            "`return` carries no value")
-                    mbody.append({"step": "return", "expr": None})
-                    returned = True
-                    continue
-                # a hole in return position takes the *service's* declared
-                # return type: the service is the source of truth for the
-                # signature (A6), so it is also the source of the obligation
-                pin_hole(mstmt.expr, decl.returns, filename,
-                         f"`{method.name}` returns")
-                lowered_return = _lower_expr(mstmt.expr, env, mode="setup")
-                # item 308, B1 clause 3: a resource-tainted return escapes the
-                # activation across a signature. Three shapes are admitted, all
-                # borrow-CREATING moves rather than borrow-escapes:
-                #   * the OWNER returning its OWN activation handle (owner-holds);
-                #   * a FRESH MINT — a direct call to a resource CONSTRUCTOR none
-                #     of whose arguments carry a resource (a factory returning a
-                #     newly-acquired handle; the caller becomes its owner, the
-                #     transfer case whose full teardown-migration surface is
-                #     deferred). This keeps resource-constructor factories, e.g.
-                #     the WIT-import codegen's `fn open(p) = wit_open(p)`,
-                #     compiling — refusing them would be a false-positive wall.
-                # A bare BORROW (a parameter/local handle) or a tainted CARRIER
-                # (`Session` wrapping a `Sock`, `wrap(c)` threading a borrow) is
-                # refused. Keys on the tainted return TYPE, not the bare handle.
-                _taint308, _ = _resource_ctx(env.types)
-                _ret_res = (resource_in(decl.returns, _taint308)
-                            or _node_resource(lowered_return, env, _taint308))
-                if _ret_res and not _b1_return_admitted(lowered_return, env, _taint308):
-                    raise RevlError(
-                        filename, mstmt.line,
-                        _b1_message("return", "borrowed", _ret_res),
-                        hint=_b1_hint("return"), code="G7",
-                        category="ownership",
-                        navigate=_b1_navigate(env, "return", "borrowed",
-                                              _ret_res))
-                # item 404: sweep the returned value with the raising oracle so
-                # an internal operator/index/builtin misuse is refused uniformly
-                # with a `fn`/`test` body, not only the return-type mismatch.
-                actual = _sweep(lowered_return, mstmt.line)
-                if decl.returns:
-                    # F4: the service's declared return is a CHECK position, not
-                    # just a `compatible` comparison against an inferred type.
-                    # `check_ir` pushes it inward — a record literal is named
-                    # against the declared record's field set, each `if`/`match`
-                    # arm is checked on its own — so a `provide` body refuses
-                    # exactly what a `fn` body refuses (items 392/404/405).
-                    check_ir(lowered_return, decl.returns, env.type_env,
-                             env.types, env.services, filename, mstmt.line,
-                             f"`{method.name}` returns")
-                    lowered_return = _inject_opt(decl.returns, actual, lowered_return)
-                mbody.append({"step": "return", "expr": lowered_return})
+                # item 308 B1 clause 3 (resource-return admission), the hole pin,
+                # the F4 `check_ir` push and item 404's sweep all live in
+                # `_do_return`; here it additionally marks the top-level body as
+                # having returned so a later statement is unreachable and the
+                # missing-return check below is satisfied.
+                _do_return(mstmt, mbody)
                 returned = True
+            elif isinstance(mstmt, (IfStmt, WhileStmt, ForStmt)):
+                # issue #548: control flow over the method's VALUE computation.
+                # The arms are pure (registration is refused inside them); a
+                # top-level `if`/`while`/`for` does not itself return, so the
+                # method still needs a top-level `return` (or the missing-return
+                # check below fires), exactly as a `fn` does.
+                _lower_control_stmt(mstmt, mbody)
             else:  # pragma: no cover
                 raise RevlError(filename, mstmt.line, "unexpected statement in method body")
         if decl.returns and not returned:

@@ -892,17 +892,36 @@ def _run_composition(args) -> int:
     default (S3): a composition with layers admits only the resolved delta into
     its already-admitted base; `--full` forces the whole composition, to the
     same verdict."""
-    from .composition import admit_composition, resolve_file  # noqa: PLC0415
+    from .composition import (admit_composition, resolve,  # noqa: PLC0415
+                              resolve_file, sole_composition)
+    from .parser import parse_file  # noqa: PLC0415
 
+    trust = bool(getattr(args, "trust_host_code", False))
     try:
         overlay = _parse_overlay(getattr(args, "overrides", []))
         table = resolve_file(args.file, args.root, overlay)
         document = admit_composition(args.file, args.root, overlay,
-                                     full=getattr(args, "full", False)) \
+                                     full=getattr(args, "full", False),
+                                     confine=True, trust_host_code=trust) \
             if args.admit else None
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+
+    if getattr(args, "panel", False):
+        # 426 S5: the authority panel over base -> folded candidate. A set of
+        # qualified labels trusts exactly the non-first-party rows when
+        # --trust-host-code is given.
+        from . import authority_panel  # noqa: PLC0415
+        base = resolve(sole_composition(parse_file(args.file), args.file),
+                       args.file, args.root)
+        thc = True if trust else False
+        result = authority_panel.panel(base, table, trust_host_code=thc)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(authority_panel.render(result))
+        return 0 if result["clean"] else 2
 
     if args.json:
         out = table.to_ir()
