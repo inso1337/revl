@@ -1540,10 +1540,28 @@ class Recorder:
         return self.wal
 
     def commit_wal(self, components: Optional[list] = None) -> None:
-        """Mark activation complete and close the WAL. The presence of this
-        marker is what a restart reads as roll-forward vs roll-back."""
+        """Mark activation complete WITHOUT closing the WAL. The marker's
+        presence is what a restart reads as roll-forward vs roll-back — but the
+        log stays OPEN for the rest of the run, so steady-state crossings
+        (emissions and acquires committed AFTER activation) are appended as they
+        commit and are durable too. A `kill -9` in steady state is then visible
+        to `revl recover`, not silently invisible behind a log closed at
+        activation-complete (issue #536). The run closes the log at teardown via
+        :meth:`close_wal`."""
         if self.wal is not None:
             self.wal.commit_activation(components)
+
+    def close_wal(self, *, clean: bool = False) -> None:
+        """Close the run's WAL at teardown (issue #536). Because the log is now
+        held open across the whole run, this is the single point that closes it,
+        once, at the end. ``clean`` stamps the terminal ``run-complete`` marker
+        whose ABSENCE is what tells a steady-state crash (post-activation
+        crossings orphaned) from an orderly shutdown (those crossings were the
+        program's intended, fully-accounted work). Idempotent; a run with no WAL
+        is a no-op."""
+        if self.wal is not None:
+            if clean and self.wal.is_open:
+                self.wal.commit_run()
             self.wal.close()
 
     # -- reading -----------------------------------------------------------
@@ -2270,6 +2288,21 @@ class WriteAheadLog:
         (the crash case) is roll-back."""
         record = {"record": "activation-complete", "generation": self._generation,
                   "components": components or []}
+        self._write(record)
+        return record
+
+    def commit_run(self) -> dict:
+        """Mark the run's ORDERLY shutdown (issue #536).
+
+        Distinct from ``activation-complete``: that marker is stamped when
+        activation finishes, but the run keeps serving and the WAL keeps
+        appending steady-state crossings after it. ``run-complete`` is stamped at
+        teardown, so its ABSENCE distinguishes a steady-state ``kill -9`` — whose
+        post-activation crossings are orphaned and must be recovered honestly —
+        from a clean exit, whose recorded crossings were the program's intended,
+        fully-accounted work. A crash never reaches teardown, so it never writes
+        this."""
+        record = {"record": "run-complete", "generation": self._generation}
         self._write(record)
         return record
 

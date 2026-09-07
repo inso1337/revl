@@ -302,6 +302,89 @@ def test_a_completed_activation_rolls_forward(tmp_path):
     assert report["components"] == ["Svc"]
     assert report["resumed"] is False  # no snapshot passed to resume from
     assert report["residue"]["clean"] is True
+    assert report["steadyState"]["outstanding"] == []  # nothing after the marker
+
+
+# ---------------------------------------------------- steady-state crash (issue #536)
+
+
+def test_a_steady_state_crossing_after_activation_is_not_falsely_clean(tmp_path):
+    """Issue #536. The WAL stays open past activation, so a crossing committed in
+    STEADY STATE (after `activation-complete`) with no orderly `run-complete`
+    shutdown is a `kill -9` recovery must REFLECT — not a falsely CLEAN
+    roll-forward while the crossing sits unaccounted. Before the fix the log was
+    closed at activation-complete, so the crossing was invisible and recover
+    printed ROLLED-FORWARD [CLEAN] exit 0."""
+    path = str(tmp_path / "steady.wal")
+    wal = replay.WriteAheadLog(path, ir={}, generation=1).open()
+    # an activation-time crossing, then the activation marker
+    wal.record_boundary("Store", "open logfile", resource="File",
+                        inverse_op={"receiver": "fs", "method": "unlink",
+                                    "args": ["/var/db/app.log"]})
+    wal.commit_activation(["Store", "Cache"])
+    # steady state: a bare emission crosses AFTER the marker, then `kill -9` —
+    # the log is abandoned with no `run-complete` shutdown marker.
+    tl = replay.Timeline("Cache")
+    tl.record_emission("bus", "send", ("event",), "Bus", ("<f>", 7))
+    wal.append_timeline(tl)
+    wal.close()  # <-- crash here: no commit_run()
+
+    report = recover(path)
+    assert report["verdict"] == "rolled-forward"   # activation shape is durable
+    assert report["residue"]["clean"] is False     # issue #536: not falsely CLEAN
+    steady = report["steadyState"]["outstanding"]
+    assert len(steady) == 1
+    assert steady[0]["kind"] == "steady-state-residue"
+    assert report["steadyState"]["crossed"][0]["kind"] == "emission"
+    assert "steady state" in report["decision"]
+    # the activation-time File acquire (BEFORE the marker) is NOT steady residue
+    assert all("app.log" not in (r.get("referent") or "") for r in steady)
+    text = render(report)
+    assert "RESIDUE" in text and "steady-state crossing" in text
+
+
+def test_a_clean_shutdown_marks_run_complete_and_reads_clean(tmp_path):
+    """The counterpart: the SAME steady-state crossing, but the run shut down
+    cleanly, stamping `run-complete`. Its recorded crossings were the program's
+    intended work, so recover reads CLEAN. The marker's presence is the whole
+    difference between an orderly exit and a steady-state crash (issue #536)."""
+    path = str(tmp_path / "clean.wal")
+    wal = replay.WriteAheadLog(path, ir={}, generation=1).open()
+    wal.commit_activation(["Cache"])
+    tl = replay.Timeline("Cache")
+    tl.record_emission("bus", "send", ("event",), "Bus", ("<f>", 7))
+    wal.append_timeline(tl)
+    wal.commit_run()   # orderly teardown stamps the shutdown marker
+    wal.close()
+
+    report = recover(path)
+    assert report["verdict"] == "rolled-forward"
+    assert report["residue"]["clean"] is True
+    assert report["steadyState"]["outstanding"] == []
+
+
+def test_commit_wal_keeps_the_log_open_and_close_wal_stamps_run_complete(tmp_path):
+    """Issue #536 at the recorder seam: `commit_wal` stamps `activation-complete`
+    but leaves the WAL OPEN so steady-state steps still append; `close_wal(clean)`
+    writes `run-complete` and closes. (Before the fix `commit_wal` closed the log,
+    so a steady-state append raised or was silently dropped.)"""
+    recorder = replay.Recorder({})
+    path = str(tmp_path / "life.wal")
+    recorder.open_wal(path, generation=1)
+    recorder.commit_wal(["Svc"])
+    assert recorder.wal.is_open   # still open after activation-complete
+
+    step = replay.Timeline("Svc").record_emission("db", "x", ("q",), "Db", ("<f>", 1))
+    recorder.wal.append_step(step, "Svc")   # a steady-state step, durably appended
+    recorder.close_wal(clean=True)
+    assert recorder.wal.is_open is False
+
+    loaded = replay.WriteAheadLog.read(path)
+    assert loaded["complete"] is True
+    kinds = [r["record"] for r in loaded["records"]]
+    assert "activation-complete" in kinds and "run-complete" in kinds
+    # the steady-state effect landed AFTER the activation marker
+    assert "effect" in kinds[kinds.index("activation-complete") + 1:]
 
 
 def test_a_torn_final_record_is_tolerated_not_crashed_on(tmp_path):

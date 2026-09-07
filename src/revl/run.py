@@ -1688,6 +1688,13 @@ class _Driver:
             why_runtime.write_trace(self._events, self.trace_path)
             self._log("trace", "written",
                       f"{len(self._events)} causal event(s) -> {self.trace_path}")
+        # close the run's WAL LAST, stamping `run-complete` (issue #536). The log
+        # was held open for the whole run so steady-state crossings landed in it;
+        # teardown is the orderly end, so its marker says "not a `kill -9`" and a
+        # recover of this file reads CLEAN rather than flagging the program's own
+        # steady-state work as orphaned residue.
+        if self.recorder is not None and self.wal_path is not None:
+            self.recorder.close_wal(clean=True)
 
 
 # --------------------------------------------------------------------------
