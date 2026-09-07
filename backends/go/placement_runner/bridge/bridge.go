@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"revl.goplacement/estop"
 )
 
 // dialAttempts / dialDelay mirror backends/python/bridge.py::_connect: under
@@ -100,6 +102,22 @@ func NewClient(path string) (*Client, error) {
 // Call marshals one request, writes it, and returns the reply's raw `value`
 // (or the remote error). `args` are already canonical-encoded values.
 func (c *Client) Call(key, method string, args []any) (json.RawMessage, error) {
+	// item 443 / issue #122 — the DISPATCH side of the E-Stop seam. Once an
+	// operator arms the latch, this process stops DISPATCHING new crossings: the
+	// outgoing call is REFUSED before it leaves the process, so nothing new
+	// crosses the boundary. It returns an error rather than withdrawing the
+	// proxy, because a halt is not a peer death: reactive withdrawal would
+	// propagate a cooperative teardown to this proxy's dependents, which is
+	// exactly the graceful unwind the E-Stop exists to avoid. The refused
+	// caller's attempt lands in item 440's ambiguous tier, the designed outcome
+	// of a halt (docs/design/443-estop.md). A go process is a consumer as well
+	// as a provider, and the py design puts the check at every point that
+	// dispatches OR accepts a crossing.
+	if estop.EstopEngaged() {
+		return nil, errors.New("revl E-Stop engaged: this process is HALTED and " +
+			"refuses to dispatch new crossings (key " + key + ", method " + method +
+			") — docs/design/443-estop.md")
+	}
 	if args == nil {
 		args = []any{}
 	}
@@ -108,6 +126,11 @@ func (c *Client) Call(key, method string, args []any) (json.RawMessage, error) {
 		return nil, err
 	}
 	line = append(line, '\n')
+
+	// Record the crossing as in flight for its round-trip: a crossing still out
+	// when the latch trips is the AMBIGUOUS one the halt inventory names.
+	seq := estop.BeginCrossing(key, method, "dispatch")
+	defer estop.EndCrossing(seq)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -277,7 +300,36 @@ func serveConn(conn net.Conn, invoke Invoke) {
 			}
 			if json.Unmarshal(line, &req) == nil {
 				var out []byte
-				value, ierr := invoke(req.Key, req.Method, req.Args)
+				if estop.EstopEngaged() {
+					// item 443 / issue #122 — the ACCEPT side of the E-Stop seam.
+					// An armed latch means an operator hit the button, so this
+					// crossing is REFUSED before the service method runs: nothing
+					// new crosses the boundary. The reply is an error, not a
+					// value, and (unlike a cooperative teardown) no inverse is
+					// replayed and nothing is discharged — the caller's attempt
+					// lands in item 440's ambiguous tier, the designed outcome of
+					// a halt (docs/design/443-estop.md).
+					out, _ = json.Marshal(errReply{Ok: false, Error: "revl E-Stop engaged: " +
+						"this process is HALTED and refuses new crossings (key " + req.Key +
+						", method " + req.Method + ") — docs/design/443-estop.md"})
+					out = append(out, '\n')
+					if _, werr := conn.Write(out); werr != nil {
+						return
+					}
+					if err != nil {
+						return
+					}
+					continue
+				}
+				// Record the crossing as in flight WHILE its handler runs: a
+				// crossing still executing when the latch trips is the AMBIGUOUS
+				// one the halt inventory names (item 440). Cleared in a deferred
+				// call so a panicking handler still leaves the registry clean.
+				value, ierr := func() (any, error) {
+					seq := estop.BeginCrossing(req.Key, req.Method, "accept")
+					defer estop.EndCrossing(seq)
+					return invoke(req.Key, req.Method, req.Args)
+				}()
 				if ierr != nil {
 					// item 421 F5: never hand the consumer back the values it
 					// called with.
