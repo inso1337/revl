@@ -392,12 +392,87 @@ def _fork_retired(wal: dict, frozen: dict) -> dict:
     }
 
 
+def _steady_state_residue(steady: list) -> dict:
+    """Classify the boundary crossings a run committed AFTER the
+    ``activation-complete`` marker with no ``run-complete`` shutdown marker
+    (issue #536).
+
+    The WAL is now held open for the whole run, so a steady-state emission or
+    acquire is durably recorded as it commits. When the run reached an orderly
+    teardown it stamped ``run-complete`` and this function is not consulted; its
+    ABSENCE means the process was ``kill -9``'d in steady state, so every durable
+    crossing recorded after activation is in-flight/orphaned and is surfaced as
+    honest residue rather than hidden behind the activation marker. An in-process
+    crossing is moot — its referent died with the process, nothing was orphaned.
+    """
+    world = DictWorld()
+    crossed, moot, outstanding = [], [], []
+    for record in steady:
+        boundary = record.get("boundary") or {}
+        entry = {
+            "component": record.get("component"),
+            "label": record.get("label"),
+            "kind": record.get("kind"),
+            "class": boundary.get("class"),
+            "referent": boundary.get("referent"),
+        }
+        referent = _referent_key(record, world)
+        if referent is None:
+            moot.append({**entry, "why": "in-process referent — died with the "
+                                         "process; nothing durable was orphaned"})
+            continue
+        crossed.append({**entry, "still_out": referent})
+        outstanding.append(_record(
+            "steady-state-residue",
+            crossing=_crossing_of_effect(record),
+            attempted=None,
+            error={"type": "steady-state-crossing",
+                   "message": "a boundary crossing committed AFTER "
+                              "activation-complete with no `run-complete` marker "
+                              "— the run was `kill -9`'d in steady state, so this "
+                              "crossing is still out in the world"},
+            attempted_flag=False, outcome="not-attempted", referent=referent,
+            hint="the WAL is now held open for the run's life (issue #536), so a "
+                 "steady-state crash is visible here instead of reading as CLEAN; "
+                 "reconcile the crossing or resume the generation"))
+    return {"crossed": crossed, "moot": moot, "outstanding": outstanding}
+
+
+def _steady_state_proof(residue: dict) -> str:
+    out = residue["outstanding"]
+    names = ", ".join(sorted({r["referent"] for r in out})) or "none named"
+    return (f"RESIDUE: {len(out)} boundary crossing(s) committed AFTER "
+            f"activation-complete with no `run-complete` shutdown marker — the "
+            f"run was `kill -9`'d in steady state, not shut down cleanly. "
+            f"{len(residue['moot'])} in-process crossing(s) were moot (memory "
+            f"gone). Still out in the world: {names}. The WAL is now held open "
+            f"for the run's life (issue #536), so these are visible instead of "
+            f"hidden behind the activation-complete marker.")
+
+
 def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -> dict:
     """Activation completed before the crash: the shape is durable (item 15).
-    Resume by re-admitting the persisted generation."""
-    effects = [r for r in wal["records"] if r.get("record") == "effect"]
-    complete = next((r for r in wal["records"]
+    Resume by re-admitting the persisted generation.
+
+    The WAL is held open for the whole run (issue #536), so it can carry
+    crossings committed AFTER ``activation-complete``. If the run also stamped
+    ``run-complete`` (an orderly teardown) those crossings were accounted and the
+    verdict is CLEAN. Without it — a steady-state ``kill -9`` — the recorded
+    post-activation crossings are surfaced as honest residue instead of the WAL
+    reading as falsely CLEAN."""
+    records = wal["records"]
+    effects = [r for r in records if r.get("record") == "effect"]
+    complete = next((r for r in records
                      if r.get("record") == "activation-complete"), {})
+    marker_idx = next((i for i, r in enumerate(records)
+                       if r.get("record") == "activation-complete"), len(records))
+    run_complete = any(r.get("record") == "run-complete" for r in records)
+    steady = [r for r in records[marker_idx + 1:] if r.get("record") == "effect"]
+    # a clean shutdown (`run-complete`) accounts for the whole run; only a
+    # steady-state crash (marker absent) turns post-activation crossings into
+    # residue.
+    steady_residue = ({"crossed": [], "moot": [], "outstanding": []}
+                      if run_complete else _steady_state_residue(steady))
     resumed = None
     if session is not None and snapshot is not None:
         from .mcp.approval import ApprovalRequired  # noqa: PLC0415
@@ -444,22 +519,38 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
                 "diagnostic": error.diagnostic,
                 "guarantee": _guarantee(),
             }
+    outstanding = steady_residue["outstanding"]
+    if outstanding:
+        decision = ("the WAL carries `activation-complete` but no `run-complete`: "
+                    "activation finished, then the process was `kill -9`'d in "
+                    "steady state. The composition's shape is durable via item 15, "
+                    f"but the {len(outstanding)} crossing(s) committed after "
+                    "activation are in-flight — recovery reports them honestly "
+                    "instead of reading the WAL as CLEAN (issue #536).")
+        proof = _steady_state_proof(steady_residue)
+    else:
+        decision = ("the WAL carries `activation-complete`: activation finished "
+                    "before the crash, so no in-flight boundary state is "
+                    "outstanding. The composition's shape is durable via item "
+                    "15; recovery resumes the persisted generation rather than "
+                    "undoing anything.")
+        proof = ("a completed activation left the accumulator balanced; "
+                 "there is nothing half-done to roll back.")
     return {
         "verdict": "rolled-forward",
-        "decision": ("the WAL carries `activation-complete`: activation finished "
-                     "before the crash, so no in-flight boundary state is "
-                     "outstanding. The composition's shape is durable via item "
-                     "15; recovery resumes the persisted generation rather than "
-                     "undoing anything."),
+        "decision": decision,
         "committedEffects": len(effects),
         "components": complete.get("components") or [],
         "resumed": resumed is not None,
         "resume": resumed,
+        # issue #536: crossings committed after `activation-complete`. Empty on a
+        # clean shutdown (`run-complete` present) or a run that never left
+        # activation, which keeps every pre-#536 roll-forward report unchanged.
+        "steadyState": steady_residue,
         "residue": {
-            "clean": True,
-            "outstanding": [],
-            "proof": "a completed activation left the accumulator balanced; "
-                     "there is nothing half-done to roll back.",
+            "clean": not outstanding,
+            "outstanding": outstanding,
+            "proof": proof,
         },
         "guarantee": _guarantee(),
     }
@@ -1299,6 +1390,14 @@ def render(report: dict) -> str:
         lines.append(f"  committed effects (all balanced): {report['committedEffects']}")
         lines.append(f"  components: {', '.join(report['components']) or '(none)'}")
         lines.append(f"  resumed persisted generation: {report['resumed']}")
+        steady = report.get("steadyState") or {}
+        for entry in steady.get("crossed") or []:
+            lines.append(f"  RESIDUE  {entry['label'] or '(effect)':<22} "
+                         f"steady-state crossing — still out (post-activation, no "
+                         f"clean shutdown): {entry['still_out']}")
+        for entry in steady.get("moot") or []:
+            lines.append(f"  moot     {entry['label'] or '(effect)':<22} "
+                         f"steady-state in-process crossing (memory gone)")
     elif report["verdict"] == "roll-forward-refused":
         lines.append("  " + (report.get("message")
                              or "the persisted generation no longer passes the gate"))
