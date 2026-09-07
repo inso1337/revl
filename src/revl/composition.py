@@ -599,9 +599,9 @@ def _require_pin(truc: str, root: str, doc: str, line: int) -> None:
     pin = None if lock is None else lock.get(truc)
     if not pin:
         detail = ("there is no `truc.lock`" if lock is None
-                  else f"its lock row has a blank sourceHash"
+                  else "its lock row has a blank sourceHash"
                   if truc in (lock or {}) else
-                  f"no lock row names it")
+                  "no lock row names it")
         raise RevlError(
             doc, line,
             f"unpinned truc `{truc}`: a vendored truc the composition "

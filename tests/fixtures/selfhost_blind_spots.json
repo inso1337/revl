@@ -150,6 +150,9 @@
       ]
     },
     "unported": {
+      "`Float` receiver builtins (e.g. `Float.to_str()`) were added to the reference by item 548 / PR #703 (typecheck.py/lower.py plus the reference java backend). The item-199 Path B self-host (selfhost/lower.rvl and the self-host java emitter selfhost/emit_java.rvl) does not port Float-receiver lowering yet; no corpus document reaches a `recv=Float` construct, so every byte-agreement oracle stays green while the ledger would otherwise flag it as an untracked blind construct. It remains a named unported baseline until the self-host ports Float receivers (tracked under self-host parity #106).": [
+        "recv=Float"
+      ],
       "Existing built-in Result boundary: _v3_match_expr emits Ok/Err switch arms and _uses_builtin_result inspects cases/patterns; the port has no Result runtime. Strict result_ctor_302.rvl preserves the family divergence.": [
         "case=Err",
         "case=Ok",
@@ -208,6 +211,9 @@
       ]
     },
     "unported": {
+      "`Float` receiver builtins (e.g. `Float.to_str()`) were added to the reference by item 548 / PR #703 (typecheck.py/lower.py plus the reference py backend). The item-199 Path B self-host (selfhost/lower.rvl and the self-host py emitter selfhost/emit_py.rvl) does not port Float-receiver lowering yet; no corpus document reaches a `recv=Float` construct, so every byte-agreement oracle stays green while the ledger would otherwise flag it as an untracked blind construct. It remains a named unported baseline until the self-host ports Float receivers (tracked under self-host parity #106).": [
+        "recv=Float"
+      ],
       "Async-runtime planner boundary: emit.py::_group_eligible requires idempotent emissions with safe compensation; _emit_parallel_group emits await/flush/raise ordering and emit adds service metadata. emit_py.rvl::emit_services_table/body_step has sequential dispatch only. tests/test_parallel_259.py::HDR and its commutative/disjoint cases reproduce the family. Witnessed undo_idempotent registration is separately supported.": [
         "commutative=<true>",
         "idempotent=<true>"
@@ -277,6 +283,9 @@
       ]
     },
     "unported": {
+      "`Float` receiver builtins (e.g. `Float.to_str()`) were added to the reference by item 548 / PR #703 (typecheck.py/lower.py plus the reference rust backend). The item-199 Path B self-host (selfhost/lower.rvl and the self-host rust emitter selfhost/emit_rust.rvl) does not port Float-receiver lowering yet; no corpus document reaches a `recv=Float` construct, so every byte-agreement oracle stays green while the ledger would otherwise flag it as an untracked blind construct. It remains a named unported baseline until the self-host ports Float receivers (tracked under self-host parity #106).": [
+        "recv=Float"
+      ],
       "Witnessed effects, lifecycle tests, streams, child instances, timers, and host scheduling terminate in reference-only frame/router/runtime emission. The self-host module emitter does not implement those runtime protocols and reports them through explicit refusal or DEFER paths.": [
         "class=witnessed",
         "fn=Job.run",

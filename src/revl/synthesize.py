@@ -1022,7 +1022,7 @@ def _seam_header(service, params: dict) -> str:
         "//   never MINT one or call the inner with other arguments.",
         "//",
         "// THE INTERPOSITION IS DISTINCT-KEY. `isolate` binds one realm per key,",
-        f"//   so this forwarder requires the wrapped provider under the inner key",
+        "//   so this forwarder requires the wrapped provider under the inner key",
         f"//   `{_comment_safe(inner_key)}` and provides the outer key "
         f"`{_comment_safe(key)}`.",
         "//   The wrapped provider is re-keyed in its own source — §2.2's measured",
