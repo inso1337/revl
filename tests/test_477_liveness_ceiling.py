@@ -182,7 +182,7 @@ def test_producer_withdraws_a_hung_provider_with_a_liveness_expiry_root():
 
 
 def test_the_expiry_root_is_distinct_from_a_fault_withdrawal():
-    ir = compile_source(HANGABLE, "hangable.rvl")
+    compile_source(HANGABLE, "hangable.rvl")
     expiry = wr.cause_liveness_expired(ceiling_ms=1000, silent_ms=1500)
 
     # the producer's own cause-selection: the target roots at the expiry override,
