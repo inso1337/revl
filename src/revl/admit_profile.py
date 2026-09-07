@@ -755,3 +755,41 @@ def enforce_document(document: dict, profile: AdmissionProfile | None) -> None:
     if profile is None or profile.granted is None:
         return
     check_allowlist(document, profile)
+
+
+def enforce_document_per_root(document: dict,
+                              owner_profiles: dict) -> None:
+    """The granted-allowlist half, PER ROOT (roadmap item 426 S4).
+
+    `owner_profiles` maps each admitted component's name to the profile of the
+    ROOT that declared it. A component whose owner has no granted allowlist
+    (`None` — first-party / unrestricted) is not checked; every other component's
+    reaches are bounded by ITS OWN root's granted set.
+
+    Components are grouped by owning root profile so the internal-wiring
+    exemption (`check_allowlist`'s "binds to the candidate's OWN provision")
+    counts only the sibling components under the SAME profile as "own": a
+    non-first-party row reaching a service that a root under a DIFFERENT profile
+    provides is an outward reach and must be granted. The `manifest` in the
+    document view is left whole, so binding-target resolution still sees the
+    entire resulting composition — only the set of components being checked, and
+    the set counted as "own", is narrowed to the root. Grouping (rather than one
+    call per component) keeps a first-party turn
+    that legitimately splits into several own components inside one exemption
+    scope, matching the pre-split whole-turn semantics for a uniform root."""
+    if not owner_profiles:
+        return
+    # group component names by (owning root profile), preserving the components'
+    # order in the document so refusals are deterministic.
+    by_profile: dict[int, tuple[AdmissionProfile, list]] = {}
+    components = document.get("components") or []
+    for comp in components:
+        profile = owner_profiles.get(comp.get("name"))
+        if profile is None or profile.granted is None:
+            continue
+        bucket = by_profile.setdefault(id(profile), (profile, []))
+        bucket[1].append(comp)
+    for profile, comps in by_profile.values():
+        view = dict(document)
+        view["components"] = comps
+        check_allowlist(view, profile)
