@@ -62,7 +62,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import RevlError, compile_source  # noqa: E402
+from revl import compile_source  # noqa: E402
 from revl.test import RUNNERS  # noqa: E402
 
 FAST_TIERS = ("py", "go", "ts")

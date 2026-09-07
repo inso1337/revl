@@ -345,7 +345,7 @@ component C provides cache: Cache {
 }
 """
     out = backend_emitter(tier).emit(compile_source(src))
-    label, (status, detail) = "cf", validator.check([("cf", out)])["cf"]
+    (status, detail) = validator.check([("cf", out)])["cf"]
     assert status == "ok", f"{tier} rejected the emit: {detail}"
 
 
