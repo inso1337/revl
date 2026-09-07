@@ -110,9 +110,24 @@ from .import_openapi import _authority_host, _comment_safe
 # openapi helpers and the redirect policy, never this module.
 from .import_a2a import A2A_VERSION, _TERMINAL_STATES
 
-#: The kinds `synthesize_provider` knows. `remote` is the one this slice
-#: builds; the other three of §4's table are callers to add.
-KINDS = ("remote",)
+#: The kinds `synthesize_provider` knows. `remote` (slice C2) and `seam`
+#: (slice B2) are the two this module builds; `configure` and item 60's mock
+#: are the other two of §4's table.
+KINDS = ("remote", "seam")
+
+#: The seam kinds that carry an observer (D-424b.4). `rewrite` is DELIBERATELY
+#: not here: it has no spelling anywhere in the grammar, because argument
+#: substitution between describe and execute is roadmap 427 F2's approve-one-
+#: run-another shape and F2 is still unfixed (D-424b.4). The parser refuses the
+#: word before this set is ever consulted; it is named here so the refusal has
+#: one place to point.
+SEAM_KINDS = ("observe", "decide")
+
+#: The two-armed decision an `observe`-vs-`decide` observer returns. A `decide`
+#: seam is admitted only on a method returning `Result[T, E]` (D-424b.4): a
+#: `Deny` becomes that method's `Err`, so a method with nowhere to put an `Err`
+#: cannot carry one. `observe` returns nothing and the forwarder ignores it.
+_DECISION = "Decision"
 
 #: The one NAMED transport this slice binds: A2A 1.0.0's `message/send` (item
 #: 439). The default wire — `through` omitted, `transport is None` — is the
@@ -750,6 +765,222 @@ def _remote_header(service, label, key, host, capability, on_failure,
     return "\n".join(lines)
 
 
+# ------------------------------------------------------------------- the seam
+#
+# Slice B2 (item 424 gap (b), `docs/design/424-dsh-language-gaps.md` §2). A seam
+# is the third of §4's four kinds of one function: a SYNTHESIZED FORWARDING
+# PROVIDER derived from the service declaration plus the observer's kind
+# (D-424b.3). The seam author writes an OBSERVER, never a forwarder, so the
+# whole "middleware forgot to call next()" failure class a waterfall has is
+# gone — there is no `next()` to forget because the forwarder is derived, not
+# written.
+#
+# What this slice lands, and what it does not
+# -------------------------------------------
+#
+# B2 lands the SURFACE, the SYNTHESIS and the ADMISSION checks: a seam is a
+# composition row (D-424b.2), it synthesizes a forwarder that observes then
+# forwards (D-424b.3), the observer never holds the inner handle so a seam can
+# SUPPRESS a call but never MINT one (D-424b.8), and `decide` is admitted only
+# on a `Result` method while `rewrite` has no spelling (D-424b.4).
+#
+# Two things measured against the compiler bound what a forwarder can be, and
+# both are exactly what §2.2 measured against `origin/main` — carried here as
+# code rather than left in the prose:
+#
+# 1. **The interposition is DISTINCT-KEY, not same-key.** `isolate` binds ONE
+#    realm per key (`lower.py`), so a single component cannot require `db` from
+#    an inner realm and provide `db` in the parent realm — the two are the same
+#    key and get one realm. The only same-key shape the language admits routes
+#    through `realms(...)`, and that shape is `run.py:747`'s hole: it compiles,
+#    admits, and its provide body is never plugged. So the synthesized forwarder
+#    requires the wrapped provider under a DISTINCT inner key and provides the
+#    outer key, which is §2.2's sanctioned wrapper with the forwarder now
+#    DERIVED. The cost §2.2 named — the wrapped provider is re-keyed in its own
+#    source — is unchanged, and it is the reason a seam over an EXISTING
+#    file provider is not yet source-transparent for that provider.
+#
+# 2. **The forwarder reaches the inner and observer keys, so G4 bounds it.**
+#    A forwarder whose `provide` body emits through `<inner>` and `<obs>` is
+#    refused by G4 unless the WRAPPED SERVICE declares those in its
+#    `emission[...]` — which is the wrong owner (D-424b.5, §2.4). This slice
+#    does NOT make the D-424b.5 rule change (check the forwarder against the
+#    seam's declared `through` set instead of the service's declaration); it
+#    carries `through` into the row and the IR and leaves the check to B3. So a
+#    seam compiles today only where the service already declares a bound wide
+#    enough to cover the crossing — §2.4's stated fallback — and refuses
+#    otherwise with G4's own message. `test_424_seam_row.py` pins both halves.
+
+
+def check_seam_kind(kind: str, *, doc: str, line: int, label: str) -> None:
+    """`observe` and `decide` are the two kinds a seam carries; `rewrite` is
+    refused (D-424b.4).
+
+    The parser already refuses anything but the three words, and refuses
+    `rewrite` there with the F2 argument; this is the synthesizer's own guard so
+    a caller that hand-builds params cannot slip an unknown kind past it.
+    """
+    if kind not in SEAM_KINDS:
+        raise RevlError(
+            doc, line,
+            f"seam row `@{label}` names kind `{kind}`, which is not a seam kind",
+            hint="a seam is `observe` (the forwarder calls the inner method and "
+                 "returns it unchanged) or `decide` (a `Deny` suppresses the call "
+                 "and becomes the method's `Err`). `rewrite` has no spelling: "
+                 "argument substitution between describe and execute is roadmap "
+                 "427 F2's approve-one-run-another shape, still unfixed "
+                 "(424 D-424b.4)")
+
+
+def check_decidable(service, *, doc: str, line: int, label: str) -> None:
+    """D-424b.4: a `decide` seam is admitted only on a service whose every
+    method returns `Result[T, E]`.
+
+    A `Deny(msg)` becomes the method's `Err(msg)`, so a method with nowhere to
+    put an `Err` cannot carry a decision. The refusal names the method, the same
+    shape `on_failure(result)` uses for a non-`Result` remote method.
+    """
+    for op, method in service.methods.items():
+        head, args = _type_head(method.returns or "")
+        if head != "Result" or len(args) != 2:
+            raise RevlError(
+                doc, line,
+                f"`decide` seam `@{label}` needs every method of "
+                f"`{service.name}` to return `Result[T, E]`, and `{op}` returns "
+                f"{'nothing' if not method.returns else f'`{method.returns}`'}",
+                hint="a `decide` seam turns a `Deny` into the method's `Err`, so "
+                     "the method needs somewhere to put it. Use `observe` (which "
+                     "returns the inner result unchanged and needs no `Result`), "
+                     "or declare the method `-> Result[T, E]` (424 D-424b.4)")
+
+
+#: The observer's method name, per kind. `observe` calls `saw`; `decide` calls
+#: `allow`. Named once so the synthesized forwarder and the observer-contract
+#: check in `composition.py` cannot disagree on the spelling.
+OBSERVER_METHOD = {"observe": "saw", "decide": "allow"}
+
+
+def _seam_header(service, params: dict) -> str:
+    label = params["label"]
+    key = params["key"]
+    inner_key = params["inner_key"]
+    obs_key = params["observer_key"]
+    obs_service = params["observer_service"]
+    kind = params["kind"]
+    realm = params.get("realm")
+    through = params.get("through") or ()
+    lines = [
+        f"// SYNTHESIZED for seam row `@{label}` — this file is not on disk.",
+        f"// Item 424 D-424b.1/.3, slice B2. Service `{service.name}`, "
+        f"key `{_comment_safe(key)}`"
+        + (f", realm `{_comment_safe(realm)}`." if realm else "."),
+        f"// Kind: `{kind}`. Observer: `{_comment_safe(obs_service)}` under key "
+        f"`{_comment_safe(obs_key)}`.",
+        "//",
+        "// A SEAM IS A SYNTHESIZED FORWARDING PROVIDER (D-424b.3). The observer",
+        "//   author writes an observer, never a forwarder; the forwarder below is",
+        "//   DERIVED from the service declaration, so there is no `next()` to",
+        "//   forget. The observer NEVER receives the inner handle (D-424b.8): the",
+        "//   forwarder holds it, so a seam can SUPPRESS a call (`decide`) but can",
+        "//   never MINT one or call the inner with other arguments.",
+        "//",
+        "// THE INTERPOSITION IS DISTINCT-KEY. `isolate` binds one realm per key,",
+        f"//   so this forwarder requires the wrapped provider under the inner key",
+        f"//   `{_comment_safe(inner_key)}` and provides the outer key "
+        f"`{_comment_safe(key)}`.",
+        "//   The wrapped provider is re-keyed in its own source — §2.2's measured",
+        "//   cost, unchanged — because the same-key shape routes through",
+        "//   `realms(...)` and is `run.py:747`'s hole (compiles, never runs).",
+    ]
+    if kind == "observe":
+        lines += [
+            "//",
+            "// OBSERVE: the forwarder calls the inner method and returns its",
+            "//   result unchanged. The observer sees the call and has NO effect on",
+            "//   it.",
+        ]
+    else:
+        lines += [
+            "//",
+            "// DECIDE: a `Deny` from the observer suppresses the call and becomes",
+            "//   the method's `Err`; an `Allow` forwards to the inner method.",
+            "//   Admitted only because every method returns `Result[T, E]`.",
+        ]
+    if through:
+        lines += [
+            "//",
+            f"// THROUGH: {', '.join('`' + _comment_safe(c) + '`' for c in through)}."
+            "  The composition declares the reach the",
+            "//   forwarder may cross (D-424b.5). NOTE: this slice CARRIES the",
+            "//   bound into the row and the IR; checking the forwarder against it",
+            "//   instead of against the wrapped service's `emission[...]` is the",
+            "//   D-424b.5 rule change, filed for B3. Until it lands, G4 checks the",
+            "//   forwarder against the service declaration, so a seam compiles",
+            "//   only where that bound already covers the crossing (§2.4).",
+        ]
+    return "\n".join(lines)
+
+
+def _seam_source(service, params: dict) -> tuple[str, str]:
+    """The synthesized forwarding provider for a seam row (D-424b.3).
+
+    Requires the wrapped provider under a distinct inner key and the observer
+    under its own key; provides the outer key. Each method emits the observer
+    call (with the operation name — the full `Untrusted[Value]` record of
+    D-424b.7 is B3) and then, for `observe`, forwards to the inner method and
+    returns it unchanged; for `decide`, forwards only on an `Allow`.
+    """
+    label = params["label"]
+    key = params["key"]
+    inner_key = params["inner_key"]
+    obs_key = params["observer_key"]
+    kind = params["kind"]
+    doc, line = params["doc"], params["line"]
+
+    check_seam_kind(kind, doc=doc, line=line, label=label)
+    if kind == "decide":
+        check_decidable(service, doc=doc, line=line, label=label)
+
+    saw = OBSERVER_METHOD[kind]
+    component = f"Seam{_pascal(label)}Provider"
+    provides: list[str] = []
+    for op, method in service.methods.items():
+        names = [n for n, _ in method.params]
+        call_args = ", ".join(names)
+        inner_call = (f"emit {inner_key}.{op}({call_args})"
+                      if call_args else f"emit {inner_key}.{op}()")
+        # The observer record: the operation name as a `Str`. D-424b.7's
+        # `Untrusted[Value]` record — the typed args funnelled into one dynamic
+        # Value under a fail-closed taint join — needs the Value marshalling B3
+        # builds, so this slice passes the op name and says so.
+        observe_call = f'emit {obs_key}.{saw}("{op}")'
+        if kind == "observe":
+            body = (f"      {observe_call}\n"
+                    f"      return {inner_call}") if method.returns else (
+                    f"      {observe_call}\n"
+                    f"      {inner_call}")
+        else:
+            # `decide`: the observer's `allow` returns `Decision = Allow |
+            # Deny(Str)`. A `Deny` becomes the method's `Err` (checked to be a
+            # `Result` by `check_decidable`); an `Allow` forwards. The decision
+            # is bound first (a bare `match` is not an effect statement, G6) and
+            # returned, so the observer NEVER holds the inner handle (D-424b.8):
+            # only the `Allow` arm names the forwarder's inner call.
+            body = (f"      let _decision = {observe_call}\n"
+                    f"      return match _decision {{\n"
+                    f"        Allow => {inner_call},\n"
+                    f"        Deny(_msg) => Err(_msg),\n"
+                    f"      }}")
+        sig = ", ".join(names)
+        provides.append(f"    fn {op}({sig}) {{\n{body}\n    }}")
+
+    header = _seam_header(service, params)
+    requires = f"requires {inner_key}: {service.name}, {obs_key}: {params['observer_service']}"
+    body = (f"component {component} {requires} provides {key}: {service.name} "
+            f"{{\n  provide {key} {{\n" + "\n".join(provides) + "\n  }\n}")
+    return component, "\n\n".join([header, body]) + "\n"
+
+
 def synthesize_provider(service, kind: str, params: dict) -> tuple[str, str]:
     """Synthesize a provider component for `service`.
 
@@ -760,11 +991,13 @@ def synthesize_provider(service, kind: str, params: dict) -> tuple[str, str]:
     produce source the compiler then refuses — never admit something `_link`
     would not (the same argument 426 §3.3 makes for the resolver).
     """
-    if kind != "remote":
-        raise ValueError(
-            f"unknown provider kind {kind!r}; this slice ships "
-            f"{', '.join(repr(k) for k in KINDS)}")
-    return _remote_source(service, params)
+    if kind == "remote":
+        return _remote_source(service, params)
+    if kind == "seam":
+        return _seam_source(service, params)
+    raise ValueError(
+        f"unknown provider kind {kind!r}; this module ships "
+        f"{', '.join(repr(k) for k in KINDS)}")
 
 
 def check_transport(transport: str | None, *, doc: str, line: int,
