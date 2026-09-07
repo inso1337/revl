@@ -36,6 +36,14 @@ The record schema a durable WAL speaks (all a tier must emit to be recoverable):
 * ``commit-approved`` / ``deferred-emission`` / ``flushed`` / ``flush-residue``
   / ``aborted`` — the item 245 session-commit records; py-only for now, read
   here uniformly so a tier that later emits them is handled with no reader change.
+* ``model-decision``     — ``{component, stepIndex, outcome, llm}``; one model
+  completion made durable at its crossing (item 250 Slice 3a), keyed on the
+  completion's own ``effect`` record. ``llm`` is the trace hop's payload
+  (model, tokens, cost, latency bracket, attempts against the ceiling, each
+  with its provenance); no prompt or response text, no digest. Present only
+  for a crossing that carried a completion; consumes no seq. Recovery ignores
+  it (it names a fact, not an effect); :func:`model_decisions` indexes it for
+  the offline branch surface.
 * ``activation-complete`` — the terminal marker. Its PRESENCE is roll-forward,
   its ABSENCE (the crash) is roll-back. The whole decision.
 """
@@ -129,6 +137,34 @@ def scope_host_confined(scope) -> bool:
     if not caps:
         return True
     return all(cap in HOST_CONFINED_CAPS for cap in caps)
+
+
+# ---------------------------------------------------------------------------
+# the durable model decision (item 250, Slice 3a)
+# ---------------------------------------------------------------------------
+
+#: The record kind that makes one model completion durable. Byte-identical to
+#: ``replay.RECORD_MODEL_DECISION`` (pinned by the agreement test): the py
+#: writer names it and this reader indexes it, and a drift would leave every
+#: decision invisible to `revl compare` while the WAL still carried it.
+RECORD_MODEL_DECISION = "model-decision"
+
+
+def model_decisions(records: list) -> dict:
+    """Index a WAL's ``model-decision`` records by the crossing they describe,
+    ``(component, stepIndex) -> record``, in recorded order.
+
+    The key is the completion's own ``effect`` record identity, the one thing
+    the writer and a post-mortem reader both hold. A WAL written before Slice
+    3a has no such record and indexes to ``{}``; that is indistinguishable from
+    a run that made no completion, which the offline surface states rather than
+    guesses at (see :data:`revl.branch.NOT_COMPARABLE`)."""
+    out: dict = {}
+    for record in records:
+        if record.get("record") != RECORD_MODEL_DECISION:
+            continue
+        out[(record.get("component"), record.get("stepIndex"))] = record
+    return out
 
 
 def read_wal(path: str) -> dict:
