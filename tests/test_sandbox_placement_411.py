@@ -41,6 +41,7 @@ from revl.placement import (  # noqa: E402
     expand_tiers,
     sandbox_capability_gate,
 )
+from revl import sandbox_runtime as _sb  # noqa: E402
 
 # --------------------------------------------------------------------------
 # a two-component composition: a plain provider + a host-code-reaching component
@@ -516,6 +517,134 @@ def test_audit_view_empty_without_sandbox(tmp_path):
     ir = _ir(tmp_path)
     lines, err = sandbox_audit_view(ir, {"default_tier": "py"})
     assert err is None and lines == []
+
+
+# ==========================================================================
+# 4. sandbox seam identity + certificate auto-promotion (item 411 T2), driven
+#    through run_placement with a capturing driver double (no Docker, no jail)
+# ==========================================================================
+
+
+def test_sandbox_seam_participants_are_both_ends_of_a_boundary_seam():
+    # both a sandboxed process and its host-side peer on a cross-boundary seam
+    # need an identity; a remote pseudo-peer and a purely internal seam do not.
+    processes = {"prov": {}, "cons": {}}
+    requires = {"prov": {}, "cons": {"work": "Work"}}
+    provides = {"prov": {"work": "Work"}, "cons": {}}
+    owner = {"work": "prov"}
+    backends = {"prov": "py", "cons": "py"}
+    # only the consumer is sandboxed; the host-side provider is still a participant
+    parts = _placement.sandbox_seam_participants(
+        {"cons": {"isolation": "container"}}, processes, requires, provides,
+        owner, backends, {}, 3.0)
+    assert parts == {"prov", "cons"}
+    # a sandbox with no cross-process seam names nobody
+    solo_req, solo_prov = {"solo": {}}, {"solo": {"k": "K"}}
+    assert _placement.sandbox_seam_participants(
+        {"solo": {"isolation": "container"}}, {"solo": {}}, solo_req, solo_prov,
+        {"k": "solo"}, {"solo": "py"}, {}, 3.0) == set()
+
+
+class _CapturingDriver(_StubDriver):
+    """A driver double that snapshots, per process, exactly what the sandbox gate
+    handed it — while the placement directory (and the minted certs) still live.
+    T3 has not landed, so the real driver would refuse a cross-boundary seam;
+    this double lets the plan-layer cert wiring be seen end to end regardless."""
+
+    def __init__(self):
+        self.seen: dict = {}
+
+    def preflight(self, pname, env, ctx):
+        rec = {"seam_tls": ctx.get("seam_tls"),
+               "mounts": _sb.seam_dir_mounts(ctx)}
+        tls = ctx.get("seam_tls")
+        if tls:
+            pdir = Path(tls["dir"])
+            rec["key_bytes"] = Path(tls["key"]).read_bytes()
+            rec["dir_files"] = sorted(p.name for p in pdir.iterdir())
+            rec["ca_key_in_view"] = (pdir / "seam_ca.key").exists()
+            rec["ca_key_in_mint_root"] = (pdir.parent / "seam_ca.key").exists()
+        self.seen[pname] = rec
+        return super().preflight(pname, env, ctx)
+
+
+_TWO_SANDBOX_TOML = (
+    'default_tier = "py"\n'
+    '[sandbox]\n'
+    'Provider = { isolation = "container", image = "img:1" }\n'
+    'Untrusted = { isolation = "container", image = "img:1" }\n')
+
+
+def test_each_sandboxed_seam_peer_gets_its_own_identity_and_no_siblings_key(tmp_path):
+    # two sandboxed processes on a seam between them: each is minted its own leaf
+    # + key, and each sees ONLY its own key in its narrowed mount view.
+    drv = _CapturingDriver()
+    rc, _ = _drive(tmp_path, _TWO_SANDBOX_TOML, driver=drv)
+    assert rc == 0, drv.seen
+    prov, cons = drv.seen["sandbox_Provider"], drv.seen["sandbox_Untrusted"]
+    # each end has its own conductor-minted material
+    assert prov["seam_tls"] and cons["seam_tls"]
+    assert prov["seam_tls"]["identity"] == "sandbox_Provider"
+    assert cons["seam_tls"]["identity"] == "sandbox_Untrusted"
+    # the two keys are distinct material, not a shared one
+    assert prov["key_bytes"] != cons["key_bytes"]
+    # each per-process directory holds only leaf + key + CA CERT (never the CA key)
+    assert prov["dir_files"] == ["seam.crt", "seam.key", "seam_ca.crt"]
+    assert cons["dir_files"] == ["seam.crt", "seam.key", "seam_ca.crt"]
+    assert prov["ca_key_in_view"] is False and cons["ca_key_in_view"] is False
+    # the CA key WAS minted — it just never enters a sandbox's view
+    assert prov["ca_key_in_mint_root"] is True
+
+
+def test_the_narrowed_mount_view_carries_own_spec_and_identity_only(tmp_path):
+    drv = _CapturingDriver()
+    rc, _ = _drive(tmp_path, _TWO_SANDBOX_TOML, driver=drv)
+    assert rc == 0
+    mounts = drv.seen["sandbox_Untrusted"]["mounts"]
+    paths = [p for p, _ in mounts]
+    tls = drv.seen["sandbox_Untrusted"]["seam_tls"]
+    # the whole placement directory is NOT mounted; the spec and own identity are
+    assert any(p.endswith("sandbox_Untrusted.spec.json") for p in paths)
+    assert tls["cert"] in paths and tls["key"] in paths and tls["ca"] in paths
+    assert all(mode == "ro" for _, mode in mounts)
+    # no sibling's key and no CA key anywhere in the view
+    assert drv.seen["sandbox_Provider"]["seam_tls"]["key"] not in paths
+    assert not any(p.endswith("seam_ca.key") for p in paths)
+
+
+def test_a_seam_free_sandbox_mints_nothing(tmp_path):
+    # both components in ONE sandboxed process: the work seam is internal, so
+    # nothing crosses the boundary and no identity is minted.
+    toml = (
+        '[processes.worker]\n'
+        'components = ["Provider", "Untrusted"]\n'
+        '[processes.worker.sandbox]\n'
+        'isolation = "container"\n'
+        'image = "img:1"\n')
+    drv = _CapturingDriver()
+    rc, _ = _drive(tmp_path, toml, driver=drv)
+    assert rc == 0, drv.seen
+    rec = drv.seen["worker"]
+    assert rec["seam_tls"] is None
+    # the mount view is just the process's own spec, read-only
+    assert [m[1] for m in rec["mounts"]] == ["ro"]
+    assert rec["mounts"][0][0].endswith("worker.spec.json")
+
+
+def test_an_undeclared_sandbox_seam_identity_is_refused_under_an_operator_profile(tmp_path):
+    # item 55 attribution: with an operator_profile named, a sandbox-seam
+    # participant whose identity is not a declared operator is refused.
+    opfile = tmp_path / "ops.txt"
+    opfile.write_text("operator alice may swap on *\n", encoding="utf-8")
+    toml = ('default_tier = "py"\n'
+            f'operator_profile = "{str(opfile).replace(chr(92), "/")}"\n'
+            '[sandbox]\n'
+            'Untrusted = { isolation = "container", image = "img:1" }\n')
+    drv = _CapturingDriver()
+    rc, _ = _drive(tmp_path, toml, driver=drv)
+    assert rc == 1
+    # nothing reached the driver — the refusal is at plan time, before preflight
+    assert drv.seen == {}
 
 
 # ==========================================================================
