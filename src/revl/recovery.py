@@ -328,6 +328,29 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         forward=forward_admissions, wal_path=wal_path)
     if admissions:
         report["admissions"] = admissions
+    # item 308 S1 (issue #96): re-fire the zero-crossing inverse of any `shared`
+    # grant a whole-process crash left with holders still counted, exactly once
+    # (fenced by `shared-reclaim-fence`). A no-op for a WAL with no shared grant,
+    # so every non-shared recover report is byte-identical.
+    shared = recover_shared_grants(wal, wal_path=wal_path,
+                                   world=world or DictWorld())
+    if shared is not None:
+        report["shared"] = shared
+        # a failed (or fenced-unknown) shared reclaim is honest RESIDUE and must
+        # move the verdict's residue proof, so `revl recover`'s exit status is 1
+        # and the operator sees it — a shared handle whose declared inverse could
+        # not be re-fired is exactly the leaked resource recovery exists to name.
+        # A clean set of reclaims (or none) leaves the verdict byte-identical.
+        if not shared.get("clean", True):
+            residue = report.get("residue")
+            if residue is not None:
+                unclean = [r for r in shared["reclaims"] if not r["ok"]]
+                residue["clean"] = False
+                residue["proof"] = (
+                    residue.get("proof", "")
+                    + (" | " if residue.get("proof") else "")
+                    + f"{len(unclean)} shared reclaim(s) unresolved: "
+                    + ", ".join(f"{r['handle']} ({r['outcome']})" for r in unclean))
     return _with_lineage(report, records)
 
 
@@ -797,6 +820,140 @@ def _append_replay_fence(wal_path: str, seq: int) -> None:
             os.fsync(handle.fileno())
         except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
             pass
+
+
+def _append_shared_reclaim_fence(wal_path: str, handle: str) -> None:
+    """Append the `shared-reclaim-fence` record for one `shared` grant BEFORE
+    recover re-fires its zero-crossing inverse (item 308 S1, issue #96), fsync'd.
+
+    The same consume-before-fire discipline `replay-fence`/`reissue-fence` use,
+    and for the same reason: a `shared` grant with `holders > 0` and no orderly
+    zero crossing is residue whose forward referent (a remote session, a lock)
+    still persists after a whole-process crash, so `revl recover` re-fires the
+    declared inverse EXACTLY ONCE. The fence proves an attempt was ABOUT to
+    start, never that it ran: a crash between the fence and the fire leaves
+    'fenced-before-attempt, outcome unknown' and a second recover run over the
+    same durable ledger finds the fence and re-fires NOTHING (no double-close).
+
+    This is the SHIPPED out-of-frame executor S1 named as owed — `revl recover`
+    itself, not a new expiry-sweep step in the 294 grant ledger."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    from .wal import seal_torn_tail  # noqa: PLC0415 — tier-agnostic core
+    seal_torn_tail(wal_path)
+    with open(wal_path, "a", encoding="utf-8") as handle_f:
+        handle_f.write(json.dumps({"record": "shared-reclaim-fence",
+                                   "handle": handle}, sort_keys=True) + "\n")
+        handle_f.flush()
+        try:
+            os.fsync(handle_f.fileno())
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
+
+
+def _reclaim_record(handle: str, holders: int, basis: str, ok: bool,
+                    *, error: Optional[dict] = None,
+                    fenced_unknown: bool = False) -> dict:
+    """The `reclaim` residue record `revl audit` surfaces (item 308 S1). It is
+    DELIBERATELY DISTINCT from a `bracket-fault`: a `bracket-fault` is an
+    in-frame inverse that FAILED, whereas a `reclaim` is an inverse that ran (or
+    failed, or was fenced-unknown) OUTSIDE any activation during recovery. A
+    failed reclaim carries its error in the same record (`ok: false`); there is
+    no separate `reclaim-fault`, the merged-schema economy the teardown contract
+    keeps."""
+    return {
+        "record": "reclaim",
+        "handle": handle,
+        "holders": holders,
+        "basis": basis,
+        "ok": ok,
+        "error": error,
+        "outcome": ("unknown" if fenced_unknown else ("ok" if ok else "err")),
+    }
+
+
+def recover_shared_grants(wal: dict, *, wal_path: Optional[str],
+                          world: World) -> Optional[dict]:
+    """Item 308 S1 (issue #96): re-fire the zero-crossing inverse of every
+    `shared` grant a whole-process crash left with `holders > 0` and no orderly
+    last release, EXACTLY ONCE, gated by the `shared-reclaim-fence`.
+
+    The runtime journals a ``shared-grant`` record when a `shared` acquire mints
+    a counted grant (``{handle, inverse, holders, basis?}``) and a
+    ``shared-complete`` record when the orderly last release runs the inverse in
+    its own LIFO bracket. So on recovery:
+
+      * a grant with a matching ``shared-complete`` is DONE — the orderly path
+        already ran the inverse; skip it (no double-close);
+      * a grant with ``holders`` still counted and no completion is RESIDUE
+        whose forward referent persists (cross-process `shared` is refused, so a
+        whole-process crash is the reachable shape): re-fire the inverse once,
+        fenced. A grant already carrying a ``shared-reclaim-fence`` was fenced
+        before an attempt in a PRIOR recover run — its outcome is unknown and it
+        is NOT re-fired (the fail-closed, no-double-close direction).
+
+    Returns ``None`` for a WAL that declares no shared grant, so a composition
+    with no `shared` handle has a byte-identical recover report. Otherwise a
+    ``{"reclaims": [...], "clean": bool}`` block the caller attaches under the
+    report's ``shared`` key and `revl audit` surfaces as `reclaim` rows."""
+    records = wal["records"]
+    grants = [r for r in records if r.get("record") == "shared-grant"]
+    if not grants:
+        return None
+    completed = {r.get("handle") for r in records
+                 if r.get("record") == "shared-complete"}
+    already_fenced = {r.get("handle") for r in records
+                      if r.get("record") == "shared-reclaim-fence"}
+    # the two crash bases the design (S1, "Crash reclaim") distinguishes: an
+    # operator E-Stop leaves a latch beside the WAL (`<wal>.estop`, the durable
+    # rendezvous `revl recover --wal` already reconciles against, item 443), so a
+    # grant stranded under a halt is `estop-stranded`; otherwise a whole-process
+    # crash left the count with no orderly last release, `whole-process`. Either
+    # way the count is OVER-reported, never under (R4-safe): a holder halted
+    # before its release is still counted, so the handle stays pinned, never
+    # closed early.
+    from .estop import latch_path, read_latch  # noqa: PLC0415
+    basis = ("estop-stranded"
+             if read_latch(latch_path(wal=wal_path)) is not None
+             else "whole-process")
+    # the LATEST grant record per handle carries the holder set at the last
+    # durable ledger write (consume/release are appends, so the last one wins).
+    latest: dict = {}
+    for g in grants:
+        latest[g.get("handle")] = g
+    reclaims: list = []
+    for handle, grant in sorted(latest.items()):
+        holders = list(grant.get("holders") or [])
+        if handle in completed or not holders:
+            # orderly last release already ran the inverse (or the count is
+            # zero): nothing owed, exactly as a balanced accumulator.
+            continue
+        if handle in already_fenced:
+            # a prior recover run fenced this before its single attempt; the
+            # outcome is unknown and a second attempt cannot be proven safe.
+            reclaims.append(_reclaim_record(
+                handle, len(holders), basis, ok=False,
+                error={"type": "fenced-before-attempt",
+                       "message": "an earlier recovery run fenced this shared "
+                                  "reclaim before its single attempt; a second "
+                                  "attempt cannot be proven safe (no "
+                                  "double-close)"},
+                fenced_unknown=True))
+            continue
+        inverse = grant.get("inverse") or {}
+        if wal_path is not None:
+            _append_shared_reclaim_fence(wal_path, handle)
+        try:
+            world.apply_inverse(inverse)
+        except Exception as error:  # noqa: BLE001 — a reclaim close is fallible
+            reclaims.append(_reclaim_record(
+                handle, len(holders), basis, ok=False,
+                error={"type": type(error).__name__, "message": str(error)}))
+            continue
+        reclaims.append(_reclaim_record(handle, len(holders),
+                                        basis, ok=True))
+    return {"reclaims": reclaims,
+            "clean": all(r["ok"] for r in reclaims)}
 
 
 def _append_reissue_fence(wal_path: str, seq: int, register: Optional[str]) -> None:
@@ -1656,6 +1813,18 @@ def render(report: dict) -> str:
         fin = " abandoned" if entry.get("abandoned") else fin
         lines.append(f"  admission {tag:<9} {did}...{fin} — "
                      f"{entry.get('decision', '')}")
+    # item 308 S1 (issue #96): one line per `shared` reclaim, so a lease-lapse
+    # close is legible to the operator as a `reclaim` — distinct from an in-frame
+    # `bracket-fault` — end to end. Present only when the WAL carried a shared
+    # grant, so a handle-free session renders byte-identically.
+    shared = report.get("shared")
+    if shared is not None:
+        for entry in shared.get("reclaims") or []:
+            tag = "reclaim " if entry["ok"] else "RECLAIM!"
+            lines.append(
+                f"  {tag} {entry['handle']:<20} shared last holder gone "
+                f"({entry['basis']}, holders={entry['holders']}) — "
+                f"{entry['outcome']}")
     residue = report["residue"]
     lines += ["", f"residue proof [{'CLEAN' if residue['clean'] else 'RESIDUE'}]:",
               f"  {residue['proof']}"]
