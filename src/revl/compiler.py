@@ -13,6 +13,7 @@ from .admit_profile import AdmissionProfile
 from .admit_profile import check_no_extern as _check_no_extern
 from .admit_profile import check_no_host_extern_reach as _check_no_host_extern_reach
 from .admit_profile import enforce_document as _enforce_document
+from .admit_profile import enforce_document_per_root as _enforce_document_per_root
 from .admit_profile import enforce_source as _enforce_source
 from .errors import RevlError
 from .holes import refuse_admission
@@ -177,7 +178,8 @@ class _ModuleLoader:
     """
 
     def __init__(self, sources: dict[str, str] | None = None,
-                 profile: AdmissionProfile | None = None) -> None:
+                 profile: AdmissionProfile | None = None,
+                 profiles: dict[str, AdmissionProfile] | None = None) -> None:
         self._cache: dict[str, _LoadedModule] = {}
         self._stack: list[str] = []
         # Keys are normalised to abspath ONCE here. Every lookup below is by
@@ -197,6 +199,15 @@ class _ModuleLoader:
         # are ROOT-scoped (re-review F4): an imported (`use`d) module resolves
         # its body files normally, so a pre-granted module may declare externs.
         self._profile = profile
+        # item 426 S4 (§9.3 Part 2): the profile is PER ROOT. `_profiles` maps a
+        # root module abspath to the admission profile that root compiles under —
+        # a stack layer (non-first-party) admits under `untrusted_author`, the
+        # base composition and site layer (first-party) under `None`. Keyed by
+        # abspath, looked up through `_profile_for`, which falls back to the
+        # single `_profile` for every root not named — so a caller passing a bare
+        # `profile=` (or nothing) is byte-identical to before this split.
+        self._profiles: dict[str, AdmissionProfile] = {
+            os.path.abspath(k): v for k, v in (profiles or {}).items()}
         self._root_paths: set[str] = set()
         # item 410: abspath -> the search-path ENTRY that resolved it, recorded
         # by `resolve_use` when a `use` did NOT resolve relative to its importer
@@ -208,6 +219,15 @@ class _ModuleLoader:
         # land on the stdlib this compiler ships, as
         # `{"written", "resolved", "origin"}`. See `stdlib_shadow`.
         self.stdlib_shadow: list[dict] = []
+
+    def _profile_for(self, abs_path: str) -> AdmissionProfile | None:
+        """The admission profile the root at `abs_path` compiles under (item 426
+        S4). A root named in the per-root `_profiles` map uses its own profile;
+        every other path (including a non-root `use` dependency, which carries no
+        profile of its own) falls back to the single `_profile`. When no per-root
+        map was supplied this returns `_profile` for everything, so the split is
+        invisible to a single-profile caller."""
+        return self._profiles.get(abs_path, self._profile)
 
     def mark_roots(self, abs_paths) -> None:
         """Record the composition's root module abspaths BEFORE any load, so a
@@ -271,7 +291,8 @@ class _ModuleLoader:
         confined BEFORE anything is stat'd — see `_confine_use`.
         """
         primary = os.path.join(importer_dir, use.path)
-        if in_memory and self._profile is not None and self._profile.untrusted:
+        importer_profile = self._profile_for(os.path.abspath(importer_path))
+        if in_memory and importer_profile is not None and importer_profile.untrusted:
             self._confine_use(importer_path, use, primary)
         if self._exists(primary):
             self._note_stdlib_shadow(use.path, primary, "importer-relative")
@@ -422,9 +443,10 @@ class _ModuleLoader:
             # is the separate import/reach bypass, refused by
             # `check_no_host_extern_reach` in compile_files (item 330).
             is_root = abs_path in self._root_paths
-            if (is_root and self._profile is not None
-                    and self._profile.no_extern):
-                _check_no_extern([program], self._profile)
+            root_profile = self._profile_for(abs_path)
+            if (is_root and root_profile is not None
+                    and root_profile.no_extern):
+                _check_no_extern([program], root_profile)
             # item 396: resolve external host-body files under the jail,
             # replacing each HostBodyFile node with a spliced HostBody. A
             # virtual (in-memory) module resolves ONLY through the sources map
@@ -657,9 +679,28 @@ def _refuse_unknown_schema_revision(manifest: dict, filename: str) -> None:
 def compile_files(paths: list[str], manifest: dict | None = None,
                   replacing: tuple[str, ...] = (),
                   sources: dict[str, str] | None = None,
-                  profile: AdmissionProfile | None = None) -> dict:
+                  profile: AdmissionProfile | None = None,
+                  profiles: dict[str, AdmissionProfile] | None = None) -> dict:
     """Compile a composition: all services and components across the files
     are checked and linked together (the composition manifest, DESIGN §4).
+
+    `profiles` (roadmap item 426 S4, DESIGN §9.3 Part 2) makes the admission
+    profile PER ROOT: a dict keyed by root path (any spelling in `paths`; both
+    the given spelling and its abspath are accepted) mapping each root to the
+    profile it compiles under. This is the confinement split — a stack layer is
+    non-first-party and compiles under `untrusted_author`, while the base
+    composition and the operator's site layer are first-party and compile under
+    `None`, all in ONE `compile_files` call so the delta is admitted once (the
+    pure-fold determinism decision 3 requires). The per-root STRUCTURAL checks
+    (no-extern, host-extern reach, no-declassify, no-realm-placement) and the
+    granted allowlist run against each root's own profile and NAME THE ROW they
+    refuse; the two genuinely whole-compile analysis flags take the JOIN in the
+    safe (over-refusing) direction. The `_link` phase itself runs ONCE and
+    UNPROFILED over the merged program, exactly as before.
+
+    `profile` (the single-profile form) is unchanged and is the DEFAULT for any
+    root not named in `profiles`; passing neither, or only `profile`, is
+    byte-identical to the pre-split compiler — every root shares the one profile.
 
     `manifest` — the runtime-admission gate: pass a previously compiled IR
     document (or its `manifest` plus `services`) and the new files are
@@ -672,7 +713,22 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     The returned document's `components` are only the newly compiled ones;
     its `manifest` describes the whole resulting composition.
     """
-    loader = _ModuleLoader(sources, profile)
+    # item 426 S4: resolve the per-root profile map keyed by abspath. Every root
+    # in `paths` gets an entry: its own profile from `profiles` (looked up by the
+    # given spelling or its abspath) or, failing that, the single `profile`
+    # default. `profiles=None` leaves the map empty of overrides, so `_profile_for`
+    # returns `profile` for every root — the pre-split single-profile behaviour.
+    per_root_profiles: dict[str, AdmissionProfile | None] = {}
+    for p in paths:
+        ap = os.path.abspath(p)
+        if profiles is not None and (p in profiles or ap in profiles):
+            per_root_profiles[ap] = profiles.get(p, profiles.get(ap))
+        else:
+            per_root_profiles[ap] = profile
+    loader = _ModuleLoader(
+        sources, profile,
+        profiles={ap: prof for ap, prof in per_root_profiles.items()
+                  if prof is not None})
     # item 396: mark every root abspath before loading, so the root-scoped
     # no-extern check and body-file resolution skip apply even to a root that is
     # reached as another root's `use` dependency.
@@ -855,30 +911,60 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             # compares the replacement's *accepted* shape against them.
             "handoffs": _running_handoffs(manifest),
         }
-    # roadmap item 329: the untrusted-author profile, no-extern half — refuse a
-    # new extern/host-block in the admitted source BEFORE lowering it, scoped to
-    # the root modules (the source actually being admitted, not the pre-granted
-    # imported closure). Inert without a profile, so a trusted compile is
-    # byte-identical.
-    _enforce_source([m.program for m in root_modules], profile)
-    # items 330 + 329/transitive: the import/reach bypass of the no-extern check.
-    # 330 refused a root that `use`s a host extern and reaches it directly, but
-    # `compile_files` merges the whole transitive `included` closure into one
-    # program, so an untrusted turn reaches host code through a `pub fn` wrapper in
-    # a NON-root module too. Feed the reach sweep every host-body extern in the
-    # merged closure (not just the root's imports) and let it follow the transitive
-    # call graph across `merged.fn_decls`; refused before lowering runs a body.
-    if profile is not None and profile.no_extern:
-        _check_no_host_extern_reach(
-            [m.program for m in root_modules],
-            merged.fn_decls,
-            _included_host_externs(included), profile)
+    # roadmap item 329, item 426 S4: the untrusted-author profile, structural
+    # (pre-lowering) half — refuse a new extern/host-block, a self-minted
+    # declassifier, or a self-chosen realm in the admitted source BEFORE lowering
+    # it. Scoped to the root modules (the source actually being admitted, not the
+    # pre-granted imported closure) and, since S4, PER ROOT: each root is enforced
+    # against its OWN profile, so a first-party root that legitimately declares an
+    # extern admits while a non-first-party (stack-layer) root declaring one is
+    # refused, both in this one call. The refusal names that root's file. Inert
+    # for a root whose profile is None, so a trusted compile is byte-identical.
+    #
+    # items 330 + 329/transitive: the import/reach bypass of the no-extern check,
+    # also per root. `compile_files` merges the whole transitive `included`
+    # closure into one program, so an untrusted turn reaches host code through a
+    # `pub fn` wrapper in a NON-root module too. Feed the reach sweep every
+    # host-body extern in the merged closure (not just the root's imports) and let
+    # it follow the transitive call graph across `merged.fn_decls`, starting from
+    # THIS root's bodies; refused before lowering runs a body. The feeder is the
+    # same merged-closure set for every root — only the starting root and its
+    # profile (granted set) differ.
+    included_host = _included_host_externs(included)
+    for module in root_modules:
+        root_profile = per_root_profiles.get(os.path.abspath(module.path), profile)
+        _enforce_source([module.program], root_profile)
+        if root_profile is not None and root_profile.no_extern:
+            _check_no_host_extern_reach(
+                [module.program], merged.fn_decls, included_host, root_profile)
+    # The two genuinely whole-compile analysis flags (DESIGN §9.3 Part 3) take the
+    # JOIN across roots, in the safe (over-refusing) direction. `taint_strict`
+    # only ADDS taint edges, so a composition containing any taint-strict root
+    # compiles taint-strict throughout — the direction decision 3's soundness
+    # relies on. `untrusted` is only a refusal-redaction trigger; the design wants
+    # it keyed per refusal site by the row that raised the diagnostic, which is an
+    # S5-panel/navigate concern not yet built, so it is joined here too. Joining
+    # can only OVER-redact a first-party diagnostic (hide detail), never admit
+    # anything, so it is safe as an interim. When every root shares one profile
+    # (the single-profile default) the join is that profile's own value, so this
+    # is byte-identical to the pre-split compiler.
+    _root_profs = [p for p in per_root_profiles.values() if p is not None]
+    _taint_strict = any(p.taint_strict for p in _root_profs)
+    _untrusted = any(p.untrusted for p in _root_profs)
     document = check_and_lower(
-        merged, ambient, taint_strict=bool(profile and profile.taint_strict),
-        untrusted=bool(profile and profile.untrusted))
+        merged, ambient, taint_strict=_taint_strict, untrusted=_untrusted)
     # the allowlist half — refuse a reach outside the granted service set, on the
-    # lowered document's resolved requires/provides.
-    _enforce_document(document, profile)
+    # lowered document's resolved requires/provides. Since S4 this is per root:
+    # each admitted component's reaches are bounded by the granted set of the
+    # profile of the ROOT that declared it, and a cross-root reach is an outward
+    # reach (fail closed). A single-profile compile takes the unchanged whole-doc
+    # path so it stays byte-identical.
+    if profiles is None:
+        _enforce_document(document, profile)
+    else:
+        _enforce_document_per_root(document, {
+            name: per_root_profiles.get(os.path.abspath(path), profile)
+            for name, path in seen_components.items()})
     # roadmap 422 F7: which file each `use "stdlib/..."` actually got. ADDITIVE
     # and present only when one of them did not come from this compiler's own
     # stdlib, so a composition that imports the shipped modules carries no new
