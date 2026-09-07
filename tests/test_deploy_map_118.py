@@ -131,6 +131,33 @@ def test_a_machine_boundary_is_refused_outright_not_best_efforted():
     assert deploy.TEARDOWN_PROMISE[deploy.BOUNDARY_MACHINE] in refusal["reason"]
 
 
+def test_via_peer_is_refused_by_name_not_treated_as_local():
+    """Slice 0 of the verifiable private peer pool (issue #480, design note
+    docs/design/461-verifiable-private-peer-pool.md §5): `via = peer` is in the
+    vocabulary so it is refused by its OWN name — pointing at the design and the
+    missing network seam — rather than as an `unknown-via`, and above all never
+    as a plain local child. The offer record, dispatcher and formal binding
+    (slices 1-4) are gated on the seam and do not land in slice 0."""
+    verdict = deploy.admit_deploy_map(_map(
+        scorer={"components": ["Scorer"],
+                "deploy": {"via": "peer", "trust": "trust/pool.json"}}))
+    assert not verdict.ok
+    (refusal,) = verdict.refusals
+    # refused by NAME: its own rule, not the generic `unknown-via` (peer is a
+    # `via` this build reasons about) and not the generic `machine-boundary`.
+    assert refusal["rule"] == "peer-pool-unavailable"
+    assert refusal["rule"] != "unknown-via"
+    assert refusal["rule"] != "machine-boundary"
+    # the reason names the design note and the seam it waits on.
+    assert "461-verifiable-private-peer-pool" in refusal["reason"]
+    assert "#480" in refusal["reason"]
+    assert "seam" in refusal["reason"]
+    # NOT treated as local: nothing is admitted, all-or-nothing.
+    assert verdict.targets == {}
+    # and `peer` is a KNOWN via, so it never falls into the unknown-via path.
+    assert deploy.VIA_PEER in deploy.KNOWN_VIA
+
+
 def test_a_container_target_that_carries_a_seam_is_refused():
     """The measured fact, not a policy choice: the seam is a Unix socket and a
     Unix socket does not cross a container bind mount portably. `sandbox_runtime`
