@@ -244,6 +244,42 @@ class ClassMap:
         for sid in self.index.scopes:
             self._reach[sid] = self._fold_closure(sid)
 
+    # -- item 296 §6.3: alias token carry-over, at the fold ------------------
+
+    def _carried_caps(self, component: str, key: str, method: str) -> set[str]:
+        """The capability tokens an `emit key.method(...)` service crossing
+        contributes, resolving an aliased require's `carrying(...)` binding to
+        the consumer-facing tokens it stands in for (item 296 §6.3). Ordinarily
+        (no carry) the sole token is the require KEY itself, byte-identical to
+        the pre-296 fold.
+
+        This mirrors `emission_analysis.crossing_caps`, the SAME resolution the
+        checker's G4 attribution uses, including its launder-safety: the carry
+        is honored only when it faithfully covers the candidate method's DECLARED
+        reach. A bare/unbounded candidate emission, or one reaching more distinct
+        boundaries than the carry names, also contributes `*` — the unnameable
+        boundary — so this fold can never read a wider candidate emission as the
+        narrower carried set. The two folds thus agree on the adapted call's real
+        boundary, which is the whole point of §6.3."""
+        comp = self.index.components.get(component) or {}
+        carried = (comp.get("carry") or {}).get(key)
+        if not carried:
+            return {key}
+        result = set(carried)
+        service = (comp.get("requires") or {}).get(key)
+        decl = (((self.index.services.get(service) or {}).get("methods") or {})
+                .get(method))
+        cand_caps = decl.get("capabilities") if decl is not None else None
+        if decl is None or cand_caps is None:
+            # unknown, or a bare/unbounded candidate emission: a finite carry
+            # cannot bound it — surface the unnameable boundary.
+            result.add("*")
+        elif len(set(cand_caps)) > len(set(carried)):
+            # the carry names fewer boundaries than the candidate declares: at
+            # least one real boundary would vanish through the alias.
+            result.add("*")
+        return result
+
     # -- per-scope direct classification -----------------------------------
 
     def _classify_direct(self, scope: dict) -> dict:
@@ -269,8 +305,18 @@ class ClassMap:
         # as `erase_report._crossings` tags it.
         for fact in facts["emissions"]:
             cls = worse(cls, "c")
-            caps.add(fact["key"])
-            class_c.add(fact["key"])
+            # item 296 §6.3: an `emit alias.method` crossing through a require
+            # bound `carrying(...)` reaches the CANDIDATE's boundary, not the
+            # internal alias key. Resolve it to the consumer-facing tokens the
+            # checker's emission attribution already uses, so this fold classes
+            # the adapted call by the real boundary rather than reporting the
+            # adapter as a terminal one (a completeness bug). Ordinary requires
+            # carry nothing, so `key` stands unchanged and every non-adapter
+            # composition classifies byte-identically.
+            tokens = self._carried_caps(comp, fact["key"], fact["method"])
+            for tok in tokens:
+                caps.add(tok)
+                class_c.add(tok)
             crossings.append({
                 "kind": "emission", "component": comp, "scope": scope["kind"],
                 "key": fact["key"], "method": fact["method"], "actionClass": "c",
