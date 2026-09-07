@@ -111,14 +111,16 @@ component AuditSink provides audit: Audit {
   }
 }
 component Seam requires db: Db, audit: Audit provides db: Db {
+  // item 449 (G2): the one-element `realms(...)` route realizes Seam as a
+  // routing proxy, so `db` is provided downstream through that proxy — the
+  // `provides db: Db` header clause is what the route needs. A hand-written
+  // `provide db { … }` body for the routed key is refused (it would be
+  // silently discarded at load), so the pre-#449 body that emitted
+  // `audit.record(q)` on every call is dropped per #492/#596's sanctioned
+  // router shape. That is precisely why the interception never fires: there
+  // is no body to run — the invariant `test_a_routes_carrying_provide_body_is
+  // _never_executed` pins.
   isolate db in realms("inner")
-  provide db {
-    fn execute(q) {
-      let r = emit db.execute(q)
-      emit audit.record(q)
-      return r
-    }
-  }
 }
 """
 
