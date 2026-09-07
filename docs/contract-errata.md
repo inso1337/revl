@@ -441,6 +441,38 @@ faults, and no tier continues past the fault. Revisit only if a tool wants
 to distinguish overflow from a programmatic `unreachable` on the wasm tier;
 until then the tier documents "faults with `unreachable`, no payload".
 
+## stdlib cross-tier divergences (issue #549)
+
+A private review (issue #549) caught a cluster of stdlib operations whose
+emitters disagreed with the reference. Three had an unambiguous documented
+reference and are now closed; each is asserted to AGREE on every tier in
+`tests/test_cross_tier_execution.py` (`AGREED_549`).
+
+- **`split("")` counted UTF-16 units on TypeScript and Java** (closed). An
+  empty separator splits by code point (docs/stdlib-2.0.md §split), so an
+  astral scalar such as U+1F600 is ONE piece. Both tiers walked UTF-16 code
+  units instead, so the surrogate pair came out as two. TypeScript now routes
+  the empty-separator case through `Array.from` and Java through
+  `String.codePoints()`, matching the python `list(s)`, go
+  `utf8.DecodeRuneInString` and wasm helpers that already agreed.
+- **`"+7".to_int()` was `Some(7)` on rust** (closed). The parse takes an
+  optional leading `-` and no `+` (docs/stdlib-2.0.md §Str.to_int), so `"+7"`
+  is `None`. Rust's `str::parse::<i64>` accepts a leading `+`; the emitter now
+  guards `starts_with('+')` before the parse. Every other spelling rust
+  already rejected (empty, partial, out of range) still matches.
+- **`div_trunc(Int.MIN, -1)` wrapped on java** (closed). The true quotient is
+  2^63, one past `Int.MAX`, so it overflows and must TRAP like every other Int
+  overflow (docs/arithmetic.md); py/go/rust/wasm all fault. Java's plain `/`
+  wrapped back to `Int.MIN`. The named `div_trunc` now uses
+  `Math.divideExact`, which throws on that one overflow and on a zero divisor,
+  the same `Math.*Exact` family the `Int.MIN / -1` entry above already used for
+  `+`/`-`/`*` and unary minus.
+
+The remaining #549 divergences turn on a spec decision this repo has not made
+(whether a negative list index or slice bound faults or is end-relative, and
+whether the frontend should accept a mixed `Str + Int` at all) and stay pinned
+in `DIVERGENCES` so they cannot drift, rather than being closed by fiat.
+
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins
 so this section is not read as "arithmetic is broken generally".

@@ -4918,7 +4918,7 @@ fn duration_ms_str(numText: &str, unit: &str) -> String {
     if (mult == 0i64) {
         return String::from("");
     }
-    let n = match { (numText).parse::<i64>().ok() } {
+    let n = match { let _s = (numText); if _s.starts_with('+') { None } else { _s.parse::<i64>().ok() } } {
     Some(v) => v,
     None => (0i64).checked_sub(1i64).expect("revl: Int overflow"),
     _ => unreachable!(),

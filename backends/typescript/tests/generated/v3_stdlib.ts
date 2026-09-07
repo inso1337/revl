@@ -49,6 +49,10 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
   return BigInt(x.indexOf(v))
 }
 
+function revlSplit(s: string, sep: string): string[] {
+  return sep === "" ? Array.from(s) : s.split(sep)
+}
+
 export interface Row {
   id: bigint
   name: string
@@ -71,7 +75,7 @@ export function concatLists(a: bigint[], b: bigint[]): bigint[] {
 }
 
 export function splitOn(s: string, sep: string): string[] {
-    return s.split(sep)
+    return revlSplit(s, sep)
 }
 
 export function joinWith(xs: string[], sep: string): string {
