@@ -9780,6 +9780,29 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         elif isinstance(stmt, AwaitStmt):
             body.append({"step": "await", "expr": _lower_expr(stmt.expr, env, mode="setup")})
         elif isinstance(stmt, ProvideStmt):
+            if stmt.key in routes:
+                # item 449: a `routes`-carrying component is realized as a
+                # routing proxy at load (`run.py` `_install_router`), never
+                # plugged as a fiber — the `_Router` proxy is the one provider
+                # of the routed key downstream (G2). A hand-written `provide`
+                # body for that SAME key used to compile, admit, and pass G4,
+                # then be SILENTLY DISCARDED at load (`audit.seen() == 0`): the
+                # author's body never ran and nothing said so. Refuse it by name
+                # here rather than drop it at runtime — the header `provides
+                # <key>: <Service>` clause is what the route needs, not a body.
+                raise RevlError(
+                    filename, stmt.line,
+                    f"`provide {stmt.key}` in {comp.name} is silently discarded: "
+                    f"the component routes `{stmt.key}` across `realms(...)`, so "
+                    f"it is realized as a routing proxy and never plugged as a "
+                    f"fiber — the provide body would never run (G2)",
+                    hint=f"a `realms(...)` route already provides `{stmt.key}` "
+                         f"downstream through the router proxy (item 162); the "
+                         f"`provides {stmt.key}: <Service>` header clause is "
+                         f"enough. Drop the `provide {stmt.key} {{ … }}` body, or "
+                         f"route a distinct inner key and provide this one from a "
+                         f"separate component (docs/router.md)",
+                )
             provide_seen_line = stmt.line
             body.append(_lower_provide(stmt, provides, provided_keys, env))
         else:  # pragma: no cover — grammar prevents it

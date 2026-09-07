@@ -205,6 +205,42 @@ component Bad provides db: Database {
         compile_source(src, "prov.rvl")
 
 
+def test_routing_and_providing_the_same_key_with_a_body_is_refused():
+    """Regression for #449. A `routes`-carrying component (the router shape:
+    requires + provides the SAME key, distributed across realms) is realized
+    at load as a `_Router` proxy — the sole downstream provider (G2) — and is
+    never plugged as a fiber. A hand-written `provide <routed key> { … }` body
+    used to compile, admit, pass G4, then be SILENTLY DISCARDED at load
+    (`audit.seen() == 0`): the author's body never ran and nothing said so.
+
+    The header `provides <key>: <Service>` clause is all the route needs, so
+    the discarded body is refused BY NAME at admission (the router keeps only
+    the header clause — see `stdlib/router.rvl`)."""
+    src = PROVIDERS + """
+component RoundRobin requires db: Database provides db: Database {
+  isolate db in realms("w1", "w2", "w3") strategy(round_robin)
+  provide db { fn get(k) = db.get(k) }
+}"""
+    with pytest.raises(RevlError, match=r"is silently discarded"):
+        compile_source(src, "discard.rvl")
+
+
+def test_router_with_only_the_header_provides_clause_is_admitted():
+    """The corrected router shape — routes the key and declares it in the
+    `provides` header, but carries NO `provide` body — compiles and records
+    the `routes` IR (the `_Router` proxy provides it at load)."""
+    src = PROVIDERS + """
+component RoundRobin requires db: Database provides db: Database {
+  isolate db in realms("w1", "w2", "w3") strategy(round_robin)
+}"""
+    ir = compile_source(src, "header_only.rvl")
+    rr = _by_name(ir)["RoundRobin"]
+    assert rr["routes"] == {"db": {"realms": ["w1", "w2", "w3"],
+                                   "strategy": "round_robin"}}
+    assert rr["provides"] == {"db": "Database"}
+    assert rr["body"] == []
+
+
 def test_routing_an_undeclared_key_is_refused():
     with pytest.raises(RevlError, match="not a declared requirement"):
         compile_source(_consumer('isolate zzz in realms("w1", "w2")'), "undecl.rvl")

@@ -207,7 +207,6 @@ component W2 provides worker: Worker { isolate worker in realm("w2") provide wor
 component W3 provides worker: Worker { isolate worker in realm("w3") provide worker { fn call(r) = "w3:" + r } }
 component RoundRobin requires worker: Worker provides worker: Worker {
   isolate worker in realms("w1", "w2", "w3") strategy(round_robin)
-  provide worker { fn call(r) = worker.call(r) }
 }
 component Consumer requires worker: Worker provides api: Api {
   provide api { fn fetch(r) = worker.call(r) }
