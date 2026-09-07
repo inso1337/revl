@@ -172,6 +172,79 @@ component Sup { let w = effect spawn Worker with { tag: "x" } as "" undo w.dispo
 """)
 
 
+# -- named instances surfaced in the manifest (item 10, next slice) ---------
+# The address landed on the acquire node (#454); this slice enumerates every
+# named instance at the COMPOSITION layer as `manifest["named_instances"]`, so
+# a later placement slice can key on an instance address, not only a template
+# component. Additive and named-only: no named spawn -> no key (byte-identical).
+
+def test_manifest_enumerates_named_instances():
+    ir = _compile("""
+component Sup {
+  let a = effect spawn Worker with { tag: "x" } as "worker-a" undo a.dispose()
+  let b = effect spawn Worker with { tag: "y" } as "worker-b" undo b.dispose()
+}
+""")
+    ni = ir["manifest"]["named_instances"]
+    assert [{k: r[k] for k in ("spawner", "name", "component")} for r in ni] == [
+        {"spawner": "Sup", "name": "worker-a", "component": "Worker"},
+        {"spawner": "Sup", "name": "worker-b", "component": "Worker"},
+    ]
+    # each record carries a source line for diagnostics, ascending in body order
+    assert all(isinstance(r["line"], int) for r in ni)
+    assert ni[0]["line"] < ni[1]["line"]
+
+
+def test_manifest_has_no_named_instances_key_without_a_named_spawn():
+    """Byte-identical: an unnamed spawn composition carries no new manifest key."""
+    ir = _compile("""
+component Sup { let w = effect spawn Worker with { tag: "x" } undo w.dispose() }
+""")
+    assert "named_instances" not in ir["manifest"]
+
+
+def test_no_named_instances_key_for_a_non_spawning_composition():
+    # just WORKER, statically composed, nothing spawned at all.
+    ir = _compile("")
+    assert "named_instances" not in ir["manifest"]
+    assert "templates" not in ir["manifest"]
+
+
+def test_named_instances_are_sorted_by_spawner_then_name():
+    """Deterministic manifest regardless of source order / declaration order."""
+    ir = _compile("""
+component SupB {
+  let z = effect spawn Worker with { tag: "x" } as "z" undo z.dispose()
+  let a = effect spawn Worker with { tag: "y" } as "a" undo a.dispose()
+}
+component SupA {
+  let m = effect spawn Worker with { tag: "z" } as "m" undo m.dispose()
+}
+""")
+    addrs = [(r["spawner"], r["name"]) for r in ir["manifest"]["named_instances"]]
+    assert addrs == [("SupA", "m"), ("SupB", "a"), ("SupB", "z")]
+
+
+def test_same_name_across_spawners_is_two_distinct_addresses():
+    """A name recurs across spawners, so (spawner, name) is the stable address."""
+    ir = _compile("""
+component SupA { let w = effect spawn Worker with { tag: "x" } as "primary" undo w.dispose() }
+component SupB { let w = effect spawn Worker with { tag: "y" } as "primary" undo w.dispose() }
+""")
+    addrs = [(r["spawner"], r["name"]) for r in ir["manifest"]["named_instances"]]
+    assert addrs == [("SupA", "primary"), ("SupB", "primary")]
+    assert len(addrs) == len(set(addrs))
+
+
+def test_named_instance_records_the_target_template_component():
+    ir = _compile("""
+component Sup { let w = effect spawn Worker with { tag: "x" } as "only" undo w.dispose() }
+""")
+    (rec,) = ir["manifest"]["named_instances"]
+    assert rec["component"] == "Worker"
+    assert ir["manifest"]["templates"] == ["Worker"]
+
+
 # -- rejections -------------------------------------------------------------
 
 def test_unbound_spawn_is_rejected():
