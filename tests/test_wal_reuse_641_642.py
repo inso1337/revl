@@ -34,7 +34,6 @@ BACKEND = ROOT / "backends" / "python"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-import pytest  # noqa: E402
 
 import replay  # noqa: E402
 from revl import wal as wal_core  # noqa: E402

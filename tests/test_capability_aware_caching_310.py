@@ -324,7 +324,7 @@ def test_a_seam_hit_writes_a_cache_hit_wal_record(tmp_path):
     s = _session("auto")
     s.load(copy.deepcopy(ir), record=True)
     assert s.recorder.wal is not None, "the policy session opened no WAL"
-    grant = s.mint_standing_grant(capability="read_db", uses=5)
+    s.mint_standing_grant(capability="read_db", uses=5)
     sink = str(tmp_path / "hitrec.log")
     s.call("users", "get", [sink, "1"])                       # miss
     assert s.call("users", "get", [sink, "1"]).get("cacheHit") is True  # hit
