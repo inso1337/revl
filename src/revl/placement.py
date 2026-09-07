@@ -1378,6 +1378,96 @@ def capability_realm_diagnostic(processes: dict, ir: dict,
     return None
 
 
+# --------------------------------------------------------------------------
+# named-instance placement (roadmap item 10 — the placement horizon)
+# --------------------------------------------------------------------------
+#
+# `[processes.<p>] instances = ["Spawner/name", ...]` is the placement-file
+# spelling of item 10's named horizon: a placement keys on an instance ADDRESS
+# (`Spawner/name` — the `as "<name>"` a `spawn` declares, unique within its
+# spawner) rather than only on a template component. This slice is the STATIC
+# surface: parse the `instances` lists, validate each address against the
+# manifest's `named_instances` index (surfaced by slice 2), and refuse a
+# malformed / unknown / double-placed address at plan time — a typo is one
+# diagnostic before anything spawns, not a silent runtime no-op.
+#
+# It makes no location claim the runtime honours YET: landing an instance in
+# the named process rather than its spawner's is the cross-tier runtime port
+# that CONSUMES this index (reference tier first, then the other five), under
+# the standing constraint that no tier's spawn lowering bakes "same process"
+# into its shape. The placement is RECORDED + gated here and the honour is
+# deferred, exactly the item-411 Slice-1 discipline. A placement with no
+# `instances` key validates trivially and is byte-identical to today
+# (docs/design-v2-instances.md).
+
+
+def _named_instance_addresses(ir: dict) -> dict[str, dict]:
+    """`{"Spawner/name": record}` for every named instance the manifest
+    enumerates (slice 2's `manifest["named_instances"]`). The address is
+    `spawner/name`: the (spawner, name) pair the manifest keys on — unique
+    within a spawner, may recur across spawners — spelled with a `/` so a
+    placement file can name one instance. A composition with no `as "<name>"`
+    spawn has no `named_instances` key and yields an empty map."""
+    out: dict[str, dict] = {}
+    for rec in (ir.get("manifest") or {}).get("named_instances") or []:
+        out[f"{rec['spawner']}/{rec['name']}"] = rec
+    return out
+
+
+def named_instance_placement_diagnostic(processes: dict, ir: dict) -> str | None:
+    """Validate `[processes.<p>] instances = ["Spawner/name", ...]` against the
+    named instances the composition declares; return a diagnostic for the first
+    violation, or None. Three pure reads off the toml + the manifest index,
+    made once before anything spawns:
+
+    * **malformed address** — an entry that is not a `Spawner/name` string.
+    * **unknown address** — an address no `spawn … as "<name>"` in the
+      composition declares (a typo caught here, not a silent runtime no-op).
+    * **double placement** — one instance address named by two processes; an
+      address is a single instance and lands in one place.
+
+    A placement with no `instances` key returns None (a no-op). The instance is
+    NOT required to co-locate with its spawner — placing it elsewhere is the
+    whole point of the horizon; only the runtime honour of that placement is
+    deferred (docs/design-v2-instances.md)."""
+    known = _named_instance_addresses(ir)
+    placed: dict[str, str] = {}
+    for pname, pconf in processes.items():
+        for raw in (pconf.get("instances") or []):
+            addr = str(raw)
+            if "/" not in addr or addr.startswith("/") or addr.endswith("/"):
+                return (
+                    f"process {pname!r} names instance {addr!r}, which is not a "
+                    f"`Spawner/name` address — a placed instance is spelled "
+                    f'"<SpawnerComponent>/<name>" (the `as "<name>"` address the '
+                    f"spawn declares)")
+            if addr not in known:
+                have = ", ".join(repr(a) for a in sorted(known)) or "no named instances"
+                return (
+                    f"process {pname!r} names instance {addr!r}, which the "
+                    f'composition does not declare — a placed instance must be a '
+                    f'`spawn … as "<name>"` the composition spawns (known: {have})')
+            if addr in placed:
+                return (
+                    f"instance {addr!r} is placed in both {placed[addr]!r} and "
+                    f"{pname!r} — a named instance is a single instance and lands "
+                    f"in one process")
+            placed[addr] = pname
+    return None
+
+
+def placed_named_instances(processes: dict) -> dict[str, str]:
+    """`{address: process}` for every instance a placement assigns — the
+    substrate the boot summary reports and the deferred runtime port consumes.
+    Assumes `named_instance_placement_diagnostic` has already validated the
+    addresses (so no double placement)."""
+    return {
+        str(addr): pname
+        for pname, pconf in processes.items()
+        for addr in (pconf.get("instances") or [])
+    }
+
+
 def colocation_advice(processes: dict, placed: dict, ir: dict) -> list[str]:
     """Realm co-location opportunities: any named realm whose components are
     split across more than one host carries at least one same-realm seam that
@@ -2739,6 +2829,17 @@ def run_placement(files, placement_path: str, once: bool = False,
     if cap_realm_problem:
         return abort(cap_realm_problem)
 
+    # --- named-instance placement (item 10, the placement horizon): a process
+    # may name instance ADDRESSES (`instances = ["Spawner/name", ...]`) it hosts,
+    # validated as a pure read against the manifest's `named_instances` index. A
+    # malformed / unknown / double-placed address is one diagnostic here, before
+    # anything spawns. Additive: a placement with no `instances` key is a no-op
+    # (docs/design-v2-instances.md). Runtime honour is the deferred cross-tier
+    # port; the placement is recorded + gated here.
+    inst_problem = named_instance_placement_diagnostic(processes, ir)
+    if inst_problem:
+        return abort(inst_problem)
+
     # --- sandbox placement (item 411, Slice 1): a process may declare an
     # isolation boundary + fs/net envelope, either as `[processes.<p>.sandbox]`
     # (validated here) or via the `[tiers]`-form `[sandbox]` sugar (already
@@ -3544,6 +3645,18 @@ def run_placement(files, placement_path: str, once: bool = False,
 
     summary = "  ".join(process_tag(p, processes, backends, sandboxes) for p in processes)
     print(f"placement: {summary}", flush=True)
+    _instance_placement = placed_named_instances(processes)
+    if _instance_placement:
+        # item 10, the placement horizon: the addresses the placement assigns,
+        # validated above. Reported honestly as RECORDED — the runtime honour
+        # (landing the instance in the named process rather than its spawner's)
+        # is the deferred cross-tier port, so today the instance still lands in
+        # its spawner's process; the line never reads as an enforced move.
+        detail = ", ".join(f"{a} -> {p}" for a, p in sorted(_instance_placement.items()))
+        print(f"  named-instance placement (item 10, horizon): {detail} "
+              "(recorded + validated at plan time; runtime honour is the deferred "
+              "cross-tier port — the instance still lands in its spawner's process "
+              "today)", flush=True)
     if sandboxes:
         # item 411: the envelope + effective reach per sandboxed process (the
         # per-key seam-served provider reach, the opaque residue, the
