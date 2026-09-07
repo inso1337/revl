@@ -169,20 +169,21 @@ def test_accepted_uname_maps_known_arches_and_rejects_the_rest():
     assert _sb.accepted_uname("linux//v7") is None      # empty arch segment
 
 
-def test_the_driverless_microvm_rung_resolves_to_none():
-    # container (OS boundary) and wasm-cell (in-process cell substrate) both have
-    # drivers; microvm needs a hypervisor and is the one driverless rung, so it
-    # is NOT quietly treated as the rung below it.
-    assert _sb.resolve_driver("container") is not None
-    assert _sb.resolve_driver("wasm-cell") is not None
-    assert _sb.resolve_driver("microvm") is None
+def test_every_ladder_rung_now_resolves_to_its_own_driver():
+    # container (OS boundary), wasm-cell (in-process cell substrate) and microvm
+    # (KVM guest) all resolve to their own driver now; none is quietly treated as
+    # the rung below it. microvm still REFUSES without /dev/kvm (its own tests),
+    # but it is no longer driverless.
+    assert isinstance(_sb.resolve_driver("container"), _sb.ContainerDriver)
+    assert isinstance(_sb.resolve_driver("wasm-cell"), _sb.WasmCellDriver)
+    assert isinstance(_sb.resolve_driver("microvm"), _sb.MicroVMDriver)
 
 
-def test_a_rung_with_no_driver_refuses_rather_than_running_unconfined():
-    driver = _sb.resolve_driver("microvm")
-    assert driver is None, (
-        "a rung with no driver must resolve to None so the conductor refuses; "
-        "returning a weaker rung's driver would silently downgrade the boundary")
+def test_an_unknown_rung_resolves_to_none_so_the_conductor_refuses():
+    # every VALID rung resolves now, so the driverless path is reached only by a
+    # rung name that is not on the ladder at all; it must resolve to None so the
+    # conductor refuses rather than picking a weaker rung's driver.
+    assert _sb.resolve_driver("nonsuch") is None
 
 
 def test_missing_container_runtime_is_a_refusal_naming_what_is_missing():
@@ -629,7 +630,10 @@ def _placement_files(tmp_path, rung: str, image: str = _IMAGE_TAG):
     return str(app), str(toml)
 
 
-def test_placement_refuses_a_rung_with_no_driver_and_spawns_nothing(tmp_path, capsys):
+def test_placement_refuses_a_rung_it_cannot_establish_and_spawns_nothing(tmp_path, capsys):
+    # the microvm rung has a driver now, but on a host with no /dev/kvm it
+    # REFUSES rather than downgrade. Patch the reason so the outcome is the same
+    # everywhere — a KVM-capable runner would otherwise go on to boot a VM.
     app, toml = _placement_files(tmp_path, "microvm")
     spawned = []
 
@@ -640,13 +644,15 @@ def test_placement_refuses_a_rung_with_no_driver_and_spawns_nothing(tmp_path, ca
 
     with mock.patch.object(_placement, "_cordis_py_installed", lambda: True), \
          mock.patch.object(_placement, "_preflight", lambda *a, **k: None), \
+         mock.patch.object(_sb, "microvm_runtime_reason",
+                           lambda *a, **k: "/dev/kvm is not present (test)."), \
          mock.patch.object(_placement.subprocess, "Popen", spy):
         rc = _placement.run_placement([app], toml, once=True)
     assert rc == 1
     assert spawned == []
     err = capsys.readouterr().err
-    assert "no runtime driver in this build" in err
-    assert "never downgraded to an unconfined process" in err
+    assert "microvm" in err and "cannot be booted here" in err
+    assert "never downgraded" in err
 
 
 def test_audit_names_the_enforcement_each_rung_would_get(tmp_path):
@@ -663,7 +669,9 @@ def test_audit_names_the_enforcement_each_rung_would_get(tmp_path):
         ir, {"default_tier": "py",
              "sandbox": {"Lonely": {"isolation": "microvm", "image": _IMAGE_TAG}}})
     assert err is None
-    assert any("enforcement: NONE" in ln and "REFUSES" in ln for ln in lines)
+    # microvm has a driver now; the audit says so (the boundary is established at
+    # boot and refused if it cannot be — e.g. no /dev/kvm), no longer "NONE".
+    assert any("enforcement: rung microvm has a runtime driver" in ln for ln in lines)
 
 
 # ==========================================================================
