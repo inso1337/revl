@@ -245,6 +245,13 @@ class LetEffect:
     # `acquire` field holds a `SubscribeExpr`; the bracket lowers exactly like an
     # effect (a `let-effect` step carrying `subscribe: true`).
     subscribe: bool = False
+    # item 308 (issue #96): the ownership mode this acquisition declares. `owned`
+    # is the implicit default of a plain `let x = effect <acquire>` binding (v1,
+    # 5601d70); `shared` is the contextual marker `effect shared <acquire>` — N
+    # holders, teardown at the last release (S1). `transfer` stays reserved and is
+    # refused at parse. Threaded onto the lowered step as `"mode"` only when it is
+    # not `owned`, so a non-shared program's IR is byte-identical to before.
+    mode: str = "owned"
 
 
 @dataclass
@@ -3636,9 +3643,10 @@ class Parser:
                              "revl does not model (see the frontier in "
                              "src/revl/typecheck.py); drop the annotation",
                     )
-                acquire, undo, line, setup, is_async = self.effect_form(tok.line)
+                acquire, undo, line, setup, is_async, mode = \
+                    self.effect_form(tok.line)
                 return LetEffect(bind, acquire, undo, line, setup, verified_effect,
-                                 is_async)
+                                 is_async, mode=mode)
             # item 130: `let sub = subscribe <stream> undo sub.close()` — a
             # subscription bracket. It is deliberately the `effect … undo …`
             # shape (a subscription IS an acquisition), so the bracket
@@ -3714,11 +3722,29 @@ class Parser:
                                f"expected `effect` after `verified`, found {tok2.value!r}",
                                hint="inside a body, `verified` marks an effect for inverse "
                                     "round-trip testing: `verified effect … undo …`")
-            acquire, undo, line, setup, is_async = self.effect_form(tok.line)
+            acquire, undo, line, setup, is_async, mode = \
+                self.effect_form(tok.line)
+            if mode == "shared":
+                raise self.err(
+                    line,
+                    "`effect shared …` must be bound: a shared handle is a "
+                    "COUNTED holder, so the acquiring frame must name it",
+                    hint="write `let h = effect shared <cap>.open() undo "
+                         "h.close()`; the binding is holder #1 of the shared "
+                         "grant (item 308, S1)")
             return EffectStmt(acquire, undo, line, setup, verified=True,
                               is_async=is_async)
         if tok.kind == "kw" and tok.value == "effect":
-            acquire, undo, line, setup, is_async = self.effect_form(tok.line)
+            acquire, undo, line, setup, is_async, mode = \
+                self.effect_form(tok.line)
+            if mode == "shared":
+                raise self.err(
+                    line,
+                    "`effect shared …` must be bound: a shared handle is a "
+                    "COUNTED holder, so the acquiring frame must name it",
+                    hint="write `let h = effect shared <cap>.open() undo "
+                         "h.close()`; the binding is holder #1 of the shared "
+                         "grant (item 308, S1)")
             return EffectStmt(acquire, undo, line, setup, is_async=is_async)
         if tok.kind == "kw" and tok.value == "subscribe":
             # item 130: a subscription must be bound — its inverse `close` names
@@ -3904,6 +3930,11 @@ class Parser:
 
     def effect_form(self, line: int):
         self.expect("kw", "effect")
+        # item 308 (issue #96): the ownership mode a plain acquisition may carry
+        # is threaded out as the final tuple element; `owned` for spawn/lease and
+        # the unmarked default, `shared` for the admitted `effect shared …`
+        # marker below. Only the plain-acquire path can be `shared`.
+        mode = "owned"
         # item 131: `effect await <expr> undo <expr>` — an ASYNC acquisition.
         # The `await` is a divert boundary (paper §4.3.2): the fiber suspends
         # during the call and the LANDED result is bound, not the in-flight
@@ -3940,7 +3971,7 @@ class Parser:
                 )
             self.next()
             undo = self.pure_expr()
-            return acquire, undo, line, [], is_async
+            return acquire, undo, line, [], is_async, mode
         # capability leases: `effect lease fs.write(path="/tmp") ttl 10m undo
         # l.revoke()` (item 294 Slice 2). A lease is a ticket-gated acquisition of
         # a standing grant over the capability's cone; its inverse is its own
@@ -3970,32 +4001,45 @@ class Parser:
                          f"{acquire.capability} … undo l.revoke()` (G4, item 294)")
             self.next()
             undo = self.pure_expr()
-            return acquire, undo, line, [], is_async
+            return acquire, undo, line, [], is_async, mode
         # ownership modes `shared` / `transfer` (item 308, issue #96): the acquire
-        # binding may one day carry an explicit ownership mode marker between
-        # `effect` and the acquisition — `effect shared <cap>.open() undo …` /
-        # `effect transfer <cap>.open() undo …`. `owned` (implicit at acquire) and
-        # `borrowed` (the positional default) shipped inferred in v1 (5601d70, no
-        # grammar); `shared` and `transfer` are RESERVED for a later tier but not
-        # implemented. Both are CONTEXTUAL keywords, exactly like `lease` above:
-        # the marker form is `effect shared <ident…>` / `effect transfer <ident…>`
-        # (the acquire head is an ident), so `effect shared()`, `effect shared.m()`
-        # and any binding named `shared`/`transfer` stay ordinary acquisitions.
-        # Reserving the marker turns the otherwise-generic parse error into a clear
-        # "reserved for a later tier" refusal.
+        # binding may carry an explicit ownership mode marker between `effect` and
+        # the acquisition — `effect shared <cap>.open() undo …` / `effect transfer
+        # <cap>.open() undo …`. `owned` (implicit at acquire) and `borrowed` (the
+        # positional default) shipped inferred in v1 (5601d70, no grammar).
+        #
+        # `shared` (issue #96, S1) is now ADMITTED: it marks an N-holder handle
+        # whose declared inverse is bound to the count's zero crossing and runs
+        # exactly once at the last release. The marker is threaded onto the lowered
+        # step (`mode: "shared"`) so the checker (O1/B1 owner carve-out for the
+        # acquiring frame) and the runtime crash path (SharedGrantBook,
+        # liveness_confirm.py) see it. `transfer` stays RESERVED — it moves the
+        # bracket across a realm/process seam and additionally needs the WAL to
+        # move processes, so it is not a v1 afterthought (design §"Reconciling
+        # with the seam").
+        #
+        # Both are CONTEXTUAL keywords, exactly like `lease` above: the marker
+        # form is `effect shared <ident…>` (the acquire head is an ident), so
+        # `effect shared()`, `effect shared.m()`, and any binding named
+        # `shared`/`transfer` stay ordinary acquisitions — the self-hosted lexer's
+        # keyword-set parity oracle is untouched.
         if self.peek().value in ("shared", "transfer") \
                 and self.at("ident") and self.peek_ahead(1).kind == "ident":
-            mode = self.peek().value
-            raise self.err(
-                self.peek().line,
-                f"`{mode}` ownership mode is reserved for a later tier (shared: "
-                "item 294 leases; transfer: realm transfer) and is not implemented "
-                "in v1",
-                hint="v1 infers ownership over the teardown accumulator — `owned` is "
-                     "implicit at the acquire and `borrowed` is the positional "
-                     "default; write `let h = effect <cap>.open() undo …` with no "
-                     "mode marker (item 308)",
-            )
+            marker = self.peek().value
+            if marker == "transfer":
+                raise self.err(
+                    self.peek().line,
+                    "`transfer` ownership mode is reserved for a later tier "
+                    "(realm/process transfer moves the bracket itself, and across "
+                    "a process seam it needs the WAL to move processes) and is not "
+                    "implemented in v1",
+                    hint="v1 has no transfer: an owned handle stays where it was "
+                         "acquired, and a realm or process boundary refuses it. "
+                         "For an N-holder handle torn down at the last release, "
+                         "use `effect shared <cap>.open() undo …` (item 308, S1)",
+                )
+            self.next()                       # consume `shared`
+            mode = "shared"
         setup: list = []
         if self.at("{"):
             self.next()
@@ -4057,12 +4101,12 @@ class Parser:
             if isinstance(acquire, ExprVar) or (
                     isinstance(acquire, ExprCall)
                     and isinstance(acquire.callee, ExprVar)):
-                return acquire, None, line, setup, is_async
+                return acquire, None, line, setup, is_async, mode
             message, hint = missing_undo_refusal(_describe_expr(acquire))
             raise self.err(line, message, hint=hint)
         self.next()
         undo = self.pure_expr()
-        return acquire, undo, line, setup, is_async
+        return acquire, undo, line, setup, is_async, mode
 
     def _stream_chain(self):
         """`.map(<arrow>)` / `.filter(<arrow>)` / `.take(<int>)` after the stream
