@@ -554,7 +554,20 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
 
         sig = ", ".join(f"{n}: {t}" for n, t in method.params)
         names = [n for n, _ in method.params]
-        arrow = f" -> {returns}" if returns else ""
+        # Slice C3 / D-424c.9: every value a remote provider returns is
+        # `Untrusted[T]`. The extern's declared return is wrapped, which
+        # `taint.extract_and_normalize` reads as a taint source whose origin is
+        # the crossing's reach class (`net`). The provide method below returns
+        # that source, so the flow walk taints it interprocedurally at every
+        # consumer of this key — exactly as `revl import a2a` does by declaring
+        # its service operation `-> Untrusted[Str]`. The qualifier is orthogonal
+        # to the base type and stripped before base typing, so the synthesized
+        # provider still satisfies the service's declared `-> T`; only the taint
+        # verdict is new. `on_failure(result)` wraps the whole `Result[T, Str]`
+        # (the reply object crossed the boundary), the fail-closed reading and
+        # the one a top-level `Untrusted[...]` source registers. A method that
+        # returns nothing has no value to taint, so `arrow` stays empty.
+        arrow = f" -> Untrusted[{returns}]" if returns else ""
         extern = f"remote_{label}_{op}"
         # ONE extern per method, all of them carrying the SAME capability
         # token. D-424c.2 sketches one extern per SERVICE; that shape needs an
@@ -722,11 +735,17 @@ def _remote_header(service, label, key, host, capability, on_failure,
         ]
     lines += [
         "//",
-        "// Values are NOT tainted here. Item 424 D-424c.9 requires every value a",
-        "// remote provider returns to be `Untrusted[T]`, and that is slice C3,",
-        "// not this one. Until it lands, a value that crossed this boundary is",
-        "// indistinguishable at a call site from a local one — which is exactly",
-        "// the hole D-424c.9 exists to close. Treat it as such.",
+        "// EVERY RETURNED VALUE IS `Untrusted[T]` (item 424 D-424c.9, slice C3).",
+        "//   A generated client looks exactly like a local provider at every call",
+        "//   site, so without this a remote value could reach an outbound send",
+        "//   invisibly. Each synthesized crossing below returns `Untrusted[<T>]`,",
+        "//   which the checker propagates through the provide method to every",
+        "//   consumer of this key: a remote result reaching a `Trusted[T]` sink is",
+        "//   refused (G9) unless an `endorse[<origin>]` sits on the flow path. The",
+        "//   origin is the reach class of the peer (`net`). The TAINT IS THE",
+        "//   ADMISSION FACT of remoteness: a consumer of a LOCAL provider of the",
+        "//   same service is unchanged and untainted (D-424c.1), so bringing this",
+        "//   provider back in-process removes the qualifier with no source edit.",
     ]
     return "\n".join(lines)
 
