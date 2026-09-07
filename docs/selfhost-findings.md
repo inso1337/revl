@@ -43,13 +43,18 @@ and each works — compiled *and* executed on the python backend:
 
 ## Friction, ranked by cost per unit
 
-1. **Bindings are function-scoped, not block-scoped.** Two sibling `if`
-   branches cannot each write `let r = …`. In the TypeScript subset revl
-   advertises, `let` *is* block-scoped, so this is legal TS that revl
-   rejects. It rejects loudly rather than silently diverging, so §0 holds
-   — but a parser is a stack of branches doing identically-shaped work,
-   which concentrates the tax exactly where it hurts. Four renames were
-   needed in `p_primary` and `p_unary` alone.
+1. **A `let` binds a name once per scope, and a binding does not shadow.**
+   Two *disjoint sibling* blocks (the arms of an `if`/`else`) may each
+   write `let r = …`, since only one is ever live. What revl rejects is
+   redeclaring a name that is already live: a `let r` inside a block whose
+   enclosing scope already binds `r` is an error (no nested shadowing), and
+   a binding does not leak out of the block it is declared in. This is
+   neither TS block-scoping (which permits nested shadowing) nor pure
+   function-scoping (which would forbid the sibling reuse), so a TS habit
+   that shadows an outer `let` is rejected. It rejects loudly rather than
+   silently diverging, so §0 holds, but a parser is a stack of branches
+   doing identically-shaped work, so the no-shadow rule still costs a few
+   renames where an inner block wants a name an outer one already holds.
 2. **A `var` may not appear in a record literal** (the non-escaping rule,
    §3.5). Correct, and well-diagnosed — but a parser threads a cursor
    through record constructors constantly, so it forced about ten `let`
