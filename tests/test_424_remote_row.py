@@ -505,6 +505,79 @@ composition Shop {
     assert "`Billing`" in message
 
 
+# ------------------------------ slice C3: every returned value is `Untrusted[T]`
+
+# A consumer of the remote `Agent` that hands the reply straight to an authority
+# sink. Byte-identical whether `agent` is local or remote (D-424c.1); only the
+# taint verdict differs, because remoteness is the admission fact.
+TAINT_AGENT = """
+service Agent {
+  emission fn ask(question: Str) -> Str
+}
+service Shell {
+  emission fn go(q: Str) -> Str
+}
+extern emission[shell] fn run_cmd(cmd: Trusted[Str]) -> Str = @py { return "" }
+component ShellSvc requires agent: Agent provides shell: Shell {
+  provide shell {
+    fn go(q) {
+      let answer = emit agent.ask(q)
+      let out = emit run_cmd(answer)
+      return out
+    }
+  }
+}
+"""
+
+LOCAL_AGENT = """
+component LocalAgent provides agent: Agent {
+  provide agent {
+    fn ask(question) = "hi"
+  }
+}
+"""
+
+
+def test_the_canonical_wire_taints_the_returned_value(tmp_path):
+    """D-424c.9, slice C3, on the DEFAULT (canonical) wire — both wires gain
+    tainting together. A remote result flowing into a `Trusted[T]` sink is
+    refused (G9) with no `endorse`, because the synthesized crossing returns
+    `Untrusted[Str]`."""
+    write(tmp_path, services=TAINT_AGENT, base="""
+composition Net {
+  use "services.rvl"
+  row @shell from "services.rvl" provides shell
+  remote @agent provides agent: Agent at host("agent.internal:8443")
+}
+""")
+    # The synthesized extern carries the qualifier.
+    row = next(r for r in resolve(tmp_path).rows if r.label == "agent")
+    assert ("fn remote_agent_ask(question: Str) -> Untrusted[Str]"
+            in resolve(tmp_path).sources[row.source])
+    with pytest.raises(RevlError) as excinfo:
+        compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+    message = str(excinfo.value)
+    assert "untrusted value (net)" in message
+    assert "G9" in message
+
+
+def test_a_local_provider_of_the_same_service_is_not_tainted(tmp_path):
+    """The taint IS the admission fact of remoteness. The identical consumer,
+    wired to a LOCAL provider of the same service, compiles clean — the value
+    never crossed an untrusted boundary, so there is nothing to endorse. This is
+    the other half of D-424c.1: bringing a provider back in-process removes the
+    qualifier with no source edit at any consumer."""
+    write(tmp_path, services=TAINT_AGENT, local=LOCAL_AGENT, base="""
+composition Net {
+  use "services.rvl"
+  row @shell from "services.rvl" provides shell
+  row @agent from "local.rvl" provides agent
+}
+""")
+    document = compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+    assert document is not None
+
+
 def test_synthesize_provider_refuses_an_unknown_kind():
     """§4's claim is that four constructs are four KINDS of one function. The
     function says which kinds it has rather than silently doing the wrong one."""
