@@ -915,14 +915,24 @@ class _LivenessMonitor:
         for name, ceiling in list(self._ceilings.items()):
             if name in self._firing:
                 continue
+            fiber = self._driver.fibers.get(name)
+            if fiber is None:
+                # NOT YET PLUGGED: `_load` drives activation sequentially, so a
+                # provider late in the load order has no fiber until every
+                # earlier provider has activated. It has not begun activating,
+                # so it has no silence of its OWN — a slow EARLIER activation
+                # must never charge (and then permanently drop) it. Rebase its
+                # silence clock to now so timing starts when it is actually
+                # plugged, and leave it enrolled to time its own activation.
+                self._progress[name] = now
+                continue
             started = self._progress.get(name)
             if started is None:
                 continue
             silent_ms = int((now - started) * 1000)
             if not why_runtime.liveness_expired(ceiling, silent_ms):
                 continue
-            fiber = self._driver.fibers.get(name)
-            if fiber is not None and self._state(fiber) in ("DISPOSED", "FAILED"):
+            if self._state(fiber) in ("DISPOSED", "FAILED"):
                 # it already went down by another path — not our expiry to make.
                 self._ceilings.pop(name, None)
                 self._progress.pop(name, None)
