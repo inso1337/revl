@@ -30,8 +30,16 @@ the `adapter_marking` header this module renders, `revl adapt --check` chain
 FLATTENING (`flatten_committed_hop`, section 6.4), and the `federation.check`
 satisfied-via-adapter pin. Slice 4 landed the generative DICHOTOMY standing
 proof (`tests/test_296_synthesis_catalogue.py`): the predicate and the gate
-never disagree. TODO(296-slice3, remaining): `revl diff` (item 123).
-TODO(296-slice4, remaining): the 414 matrix rows (folds see through, E6).
+never disagree, AND the E6 414-matrix rows (`tests/test_296_folds_see_through.py`):
+every in-scope authority-derivation surface attributes the CANDIDATE's real
+emission through the adapter hop (§6.3). Closing E6 fixed one real
+completeness gap: the approval `ClassMap` fold classed an `emit alias.method`
+crossing by the internal alias key, not the candidate's boundary. The
+`carrying(...)` binding is now carried in the component IR (additive) and the
+fold resolves the crossing through it (with the launder-safety `*`), exactly as
+the checker's G4 attribution does. TODO(296-slice3, remaining): `revl diff`
+(item 123) shows the adapter as an added bridge component - a projection of the
+already-committed adapter into the 123 diff surface, tracked on item 123.
 """
 
 from __future__ import annotations

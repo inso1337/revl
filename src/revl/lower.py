@@ -10181,6 +10181,19 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         "provides": provides,
         "body": body,
     }
+    # item 296 §6.3: the alias token carry-over binding, additive and
+    # conditionally present — only a component with a `carrying(...)` require
+    # carries a `carry` key, so every ordinary component's IR (and thus its
+    # digest) is byte-identical to before. Keyed by the QUALIFIED require key to
+    # match `requires`, so an IR-level fold that never saw the checker env (the
+    # approval `ClassMap`) can resolve an `emit alias.method` crossing to the
+    # consumer-facing tokens the checker's emission attribution already uses, and
+    # so the adapter is not a fold-blind eleventh boundary.
+    if env.require_carry:
+        lowered["carry"] = {
+            env.require_keys[binding]: list(tokens)
+            for binding, tokens in env.require_carry.items()
+        }
     # item 350: the boot marking, additive and conditionally present — an
     # ordinary component carries no `boot` key, so a composition that declares
     # no boot component is byte-identical through the IR and every emitter.
