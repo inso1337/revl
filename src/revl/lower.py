@@ -5862,16 +5862,25 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             node: dict = {"kind": "builtin", "method": method,
                           "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
                           "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
-            if method in ("to_int", "to_str"):
+            if method == "to_int":
                 # `to_int` is spelled for two receiver families (Int32 widen,
                 # Str parse) — the backends must dispatch on the receiver's
                 # static type, which the IR node would otherwise not carry
                 # (the same reason `un` annotates Int negation). Annotate it,
-                # exactly as the checker selected the row. `to_str` rides the
-                # same annotation so the tiers can tell a Float receiver (which
-                # renders through the canonical `ftoa`, byte-identical to a
-                # `${aFloat}` interpolation) from an Int one.
+                # exactly as the checker selected the row.
                 node["recv"] = infer_ast(expr.callee.target, type_env, types, None)
+            elif method == "to_str":
+                # `to_str` only needs the annotation to tell a Float receiver
+                # (which renders through the canonical `ftoa`, byte-identical to
+                # a `${aFloat}` interpolation) from an Int one — and only the
+                # py/java/rust tiers read it, exclusively as `recv == "Float"`.
+                # Every other receiver renders the same with or without the tag,
+                # so it is attached ONLY for a Float receiver. This keeps the
+                # common Int case tag-less, matching the item-199 self-host
+                # frontend, which does not carry receiver types on this surface.
+                recv_ty = infer_ast(expr.callee.target, type_env, types, None)
+                if recv_ty == "Float":
+                    node["recv"] = recv_ty
             return node
         # A call argument that widens Int -> Float is marked on the argument
         # node (`_mark_widen`) so every backend emits the conversion — the
@@ -7565,12 +7574,19 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                               "target": _lower_component_pure_expr(expr.callee.target, env, scope,
                                                                    callables, pure_only),
                               "args": args}
-                if method in ("to_int", "to_str"):
+                if method == "to_int":
                     # receiver-family dispatch (`recv`), as in a fn body — the
-                    # tiers read it to tell a Float `to_str` (canonical `ftoa`)
-                    # from an Int one, and a Str/Int32 `to_int` apart.
+                    # tiers read it to tell a Str/Int32 `to_int` apart.
                     node["recv"] = infer_ir({"kind": "name", "id": scope[root]},
                                             env.type_env, env.types, env.services)
+                elif method == "to_str":
+                    # only a Float `to_str` needs the tag (canonical `ftoa`); it
+                    # is attached solely for a Float receiver so the common Int
+                    # case stays tag-less, matching the self-host frontend.
+                    recv_ty = infer_ir({"kind": "name", "id": scope[root]},
+                                       env.type_env, env.types, env.services)
+                    if recv_ty == "Float":
+                        node["recv"] = recv_ty
                 return node
             if root in scope:
                 # A method on a local that is a *known* stdlib-bearing value
@@ -7630,10 +7646,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                                 f"argument(s), {len(args)} given")
             node: dict = {"kind": "builtin", "method": method, "target": target,
                           "args": args}
-            if method in ("to_int", "to_str"):
+            if method == "to_int":
                 # receiver-family dispatch (`recv`), as in a fn body
                 node["recv"] = infer_ast(expr.callee.target, env.type_env,
                                          env.types, None)
+            elif method == "to_str":
+                # only a Float `to_str` needs the tag; attach it solely for a
+                # Float receiver so the common Int case matches the self-host.
+                recv_ty = infer_ast(expr.callee.target, env.type_env,
+                                    env.types, None)
+                if recv_ty == "Float":
+                    node["recv"] = recv_ty
             return node
         callee_node = _lower_component_pure_expr(expr.callee, env, scope, callables,
                                                  pure_only)
