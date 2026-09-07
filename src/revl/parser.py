@@ -735,6 +735,44 @@ class RemoteRowDecl:
 
 
 @dataclass
+class SeamRowDecl:
+    """A `seam` row: a row whose provider is a SYNTHESIZED FORWARDER that
+    interposes an observer on an existing provision edge (item 424 gap (b),
+    D-424b.1/.3, slice B2).
+
+    `seam @label on key("<key>") observe|decide with @observer [through cap, ...]`
+
+    The seam addresses an EDGE — a `(key, realm)` (D-424b.1) — spelled the same
+    way a patch addresses a row (426 §2.3). It never registers itself: the
+    COMPOSITION places it (D-424b.2), so there is no hook table to grab. `with
+    @observer` names the row that provides the observer service; the forwarder
+    calls its `saw` (`observe`) or `allow` (`decide`) method (D-424b.4) and never
+    hands it the inner handle (D-424b.8).
+
+    `seam`, `on`, `observe`, `decide` and `through` are CONTEXTUAL keywords read
+    only in this one position inside a `composition` block, exactly as `remote`,
+    `at`, `host` and `on_failure` are — so the lexer's KEYWORDS set is untouched,
+    the self-host lexer needs no sync, and a program using any of those words as
+    an ordinary name still parses. `with`, `in` and `realm` are the keywords the
+    language already has, reused verbatim.
+    """
+    label: str
+    key: str                        # the edge's provision key
+    kind: str                       # "observe" | "decide"; "rewrite" is refused
+    observer: str                   # the `with @observer` row label
+    line: int
+    realm: str | None = None        # `key("k", realm: "r")`; None == shared realm
+    # D-424b.5: the reach the COMPOSITION grants the forwarder. Empty == the
+    # clause was not written. §2.4's FALLBACK is enforced — the set must be a
+    # SUBSET of the wrapped service's own `emission[...]` bound, checked at
+    # resolution (`composition._check_seam_through`). The WIDENING (checking the
+    # forwarder against this set rather than the service, minting a bound the
+    # service did not declare) is the rule change reserved for the architect and
+    # needs 426 S5's `seam:` token; it is not made here.
+    through: list[str] = field(default_factory=list)
+
+
+@dataclass
 class CompositionDecl:
     name: str
     rows: list[RowDecl]
@@ -745,6 +783,11 @@ class CompositionDecl:
     # file. Kept in their own list because they carry no `from` path and
     # resolution reads no header for them.
     remotes: list["RemoteRowDecl"] = field(default_factory=list)
+    # item 424 B2: seam rows — a synthesized forwarder interposing an observer
+    # on a provision edge. Like `remote`, carries no `from` path; unlike it, its
+    # forwarder is derived from an edge another row provides, so it resolves
+    # AFTER the file rows (composition.py `_resolve_seams`).
+    seams: list["SeamRowDecl"] = field(default_factory=list)
     # item 426 S2 (§3.1): the ordered layer stack. `stack` entries are LEVEL 1
     # peers — conflicts between them refuse — and `site` is the single LEVEL 2
     # layer, the one level at which "I decide" is expressible. Both are ordered
@@ -2956,6 +2999,7 @@ class Parser:
         self.expect("{")
         rows: list[RowDecl] = []
         remotes: list[RemoteRowDecl] = []
+        seams: list[SeamRowDecl] = []
         uses: list[tuple[str, int]] = []
         stack: list[tuple[str, int]] = []
         site: tuple[str, int] | None = None
@@ -2996,20 +3040,28 @@ class Parser:
                 self._composition_label(name, remote.label, remote.line, seen)
                 remotes.append(remote)
                 continue
+            if self.at("ident", "seam"):
+                # item 424 B2: a row whose provider is a SYNTHESIZED FORWARDER
+                # interposing an observer on a provision edge (D-424b.1/.3).
+                seam = self.seam_row_decl(name)
+                self._composition_label(name, seam.label, seam.line, seen)
+                seams.append(seam)
+                continue
             if not self.at("ident", "row"):
                 tok = self.peek()
                 raise self.err(
                     tok.line,
-                    "expected `row`, `remote`, `use`, `stack`, `site`, or "
-                    f"`}}` in composition {name}, found {tok.value!r}",
+                    "expected `row`, `remote`, `seam`, `use`, `stack`, `site`, "
+                    f"or `}}` in composition {name}, found {tok.value!r}",
                     hint="a composition document declares rows: "
-                         '`row @label from "path.rvl" provides key`, or '
-                         '`remote @label provides key: Service at host("h:port")`')
+                         '`row @label from "path.rvl" provides key`, '
+                         '`remote @label provides key: Service at host("h:port")`, '
+                         'or `seam @label on key("k") observe with @observer`')
             rows.append(self.row_decl(name))
             self._composition_label(name, rows[-1].label, rows[-1].line, seen)
         self.expect("}")
         return CompositionDecl(name, rows, line, uses, stack=stack,
-                               site=site, remotes=remotes)
+                               site=site, remotes=remotes, seams=seams)
 
     def _composition_label(self, composition: str, label: str, line: int,
                            seen: dict[str, int]) -> None:
@@ -3461,6 +3513,109 @@ class Parser:
                              on_failure_line=on_failure_line,
                              redirect=redirect, redirect_line=redirect_line,
                              host_line=host_line)
+
+    def seam_row_decl(self, composition: str) -> SeamRowDecl:
+        """`seam @label on key("<key>"[, realm: "r"]) observe|decide
+        with @observer [through cap, cap, ...]`
+
+        Item 424 D-424b.1/.3, slice B2. `seam`, `on`, `observe`, `decide` and
+        `through` are CONTEXTUAL keywords read only here, so the lexer stays
+        context-free and the self-host lexer needs no sync — the same discipline
+        the `remote` row and 426 S2's `configure @db with { ... }` chose. `with`,
+        `in` and `realm` are the keywords the language already has.
+
+        The seam addresses an EDGE, spelled `key("db")` exactly as a patch
+        addresses a row (426 §2.3), and `rewrite` is refused with the F2
+        argument (D-424b.4) — it has no spelling anywhere in the grammar.
+        """
+        line = self.next().line                        # `seam`
+        label = self._row_label()
+        if not self.at("ident", "on"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `on key(\"...\")` after seam row label `@{label}`, "
+                f"found {tok.value!r}",
+                hint='a seam names the edge it wraps: `seam @%s on key("db") '
+                     'observe with @observer` (424 D-424b.1)' % label)
+        self.next()
+        if not self.at("ident", "key"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `key(\"...\")` after `on` on seam row `@{label}`, "
+                f"found {tok.value!r}",
+                hint="a seam addresses an EDGE as a `(key, realm)` pair, spelled "
+                     '`key("db")` or `key("kv", realm: "tenant_a")` — the same '
+                     "address a patch writes (426 §2.3, 424 D-424b.1)")
+        self.next()
+        self.expect("(")
+        key = self.expect("string", what="a provision key string").value
+        realm: str | None = None
+        if self.at(","):
+            self.next()
+            self.expect("kw", "realm", what="`realm:` inside `key(...)`")
+            self.expect(":")
+            realm = self.expect("string", what="a realm name string").value
+        self.expect(")")
+        if not key:
+            raise self.err(line, f"seam row `@{label}` names an empty edge key")
+
+        tok = self.peek()
+        kind = tok.value if tok.kind == "ident" else None
+        if kind == "rewrite":
+            raise self.err(
+                tok.line,
+                f"seam row `@{label}` names kind `rewrite`, which has no spelling",
+                hint="a seam is `observe` or `decide`. `rewrite` is refused: "
+                     "argument substitution between the point a call is DESCRIBED "
+                     "and the point it EXECUTES is roadmap 427 F2's "
+                     "approve-one-run-another shape, a HIGH finding still unfixed, "
+                     "so a construct whose purpose is that substitution would "
+                     "reintroduce it as a feature (424 D-424b.4)")
+        if kind not in ("observe", "decide"):
+            raise self.err(
+                tok.line,
+                f"expected `observe` or `decide` after `on key(\"{key}\")` on "
+                f"seam row `@{label}`, found {tok.value!r}",
+                hint="`observe` sees the call and has no effect; `decide` turns a "
+                     "`Deny` into the method's `Err` and is admitted only on a "
+                     "`Result` method (424 D-424b.4)")
+        self.next()
+
+        if not self.at("kw", "with"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `with @observer` after `{kind}` on seam row "
+                f"`@{label}`, found {tok.value!r}",
+                hint="a seam names the observer row that provides the observer "
+                     "service: `seam @%s on key(\"%s\") %s with @observer`"
+                     % (label, key, kind))
+        self.next()
+        observer = self._row_label()
+
+        through: list[str] = []
+        if self.at("ident", "through"):
+            self.next()
+            while True:
+                parts = [self.expect("ident", what="a capability name").value]
+                while self.at("."):
+                    self.next()
+                    parts.append(self.expect("ident").value)
+                through.append(".".join(parts))
+                if self.at(","):
+                    self.next()
+                    continue
+                break
+            if not through:
+                raise self.err(
+                    line,
+                    f"`through` on seam row `@{label}` names no capability",
+                    hint="drop the `through` clause, or name the reach the "
+                         "composition grants the forwarder (424 D-424b.5)")
+        return SeamRowDecl(label, key, kind, observer, line, realm=realm,
+                           through=through)
 
     def row_config_block(self, label: str) -> list[tuple[str, object, int]]:
         """`config { field: <literal>, ... }` on a row.
