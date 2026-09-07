@@ -214,6 +214,69 @@ def read_wal(path: str) -> dict:
             "complete": complete, "torn": torn}
 
 
+def _last_newline_offset(handle, size: int) -> int:
+    """Offset of the last ``b"\\n"`` in an open binary file of ``size`` bytes, or
+    ``-1`` when the file holds no newline at all. Scans backward in chunks so a
+    large WAL is not read whole into memory just to find its final boundary."""
+    chunk = 4096
+    pos = size
+    while pos > 0:
+        step = min(chunk, pos)
+        pos -= step
+        handle.seek(pos)
+        buf = handle.read(step)
+        idx = buf.rfind(b"\n")
+        if idx != -1:
+            return pos + idx
+    return -1
+
+
+def seal_torn_tail(path: str) -> None:
+    """Truncate a never-acknowledged partial trailing write so the WAL ends at a
+    clean record boundary before it is appended to (issue #535).
+
+    Every WAL record is written as one fsync'd ``json.dumps(record) + "\\n"``, so
+    a durable WAL always ends in a newline. A file that does NOT end in a newline
+    therefore carries a torn trailing line — an interrupted final write (a real
+    ``kill -9`` can leave one) that was never acknowledged. Left in place, the
+    next appended record MERGES onto it: the two become one line that no longer
+    parses, silently swallowing the freshly appended record (a dropped
+    ``replay-fence`` re-runs an undeclared inverse on every recovery — R-C1); and
+    once any record follows, that unparseable line is MID-FILE corruption, which
+    the item 413 gate refuses forever (R-C2).
+
+    Sealing removes exactly that torn tail: it truncates the file back to the
+    byte after its last newline (or to empty when the file has no newline at
+    all), fsync'ing the result. ONLY a non-newline-terminated tail is ever
+    removed, so a completed, acknowledged record — always newline-terminated — is
+    never touched. This is the physical, durable form of the skip
+    :func:`read_wal` already performs for a torn LAST line, applied by every
+    appender so a reopened WAL stays clean instead of merging its torn tail into
+    permanent corruption.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return  # no log yet: nothing to seal
+    if size == 0:
+        return
+    with open(path, "rb") as handle:
+        handle.seek(size - 1)
+        if handle.read(1) == b"\n":
+            return  # already ends at a clean record boundary
+        cut = _last_newline_offset(handle, size)
+    new_len = cut + 1  # keep through the last newline; 0 when the file has none
+    if new_len == size:
+        return
+    with open(path, "r+b") as handle:
+        handle.truncate(new_len)
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
+
+
 def _check_version(header: dict, path: str) -> None:
     """Refuse a WAL whose header names a version this reader cannot read.
 

@@ -56,6 +56,51 @@ from pathlib import Path
 WAL_VERSION = 1
 
 
+def _seal_torn_tail(path: str) -> None:
+    """Truncate a never-acknowledged partial trailing write so this participant's
+    WAL ends at a clean record boundary before it is appended to (issue #535).
+
+    A durable WAL always ends in a newline; a file that does not is carrying a
+    torn final write from a crash. Reopening in append mode without sealing merges
+    that torn tail with the next record and corrupts the file mid-flight. This
+    removes exactly the non-newline-terminated tail and fsyncs; a completed,
+    newline-terminated record is never touched. Behaviourally identical to
+    ``revl.wal.seal_torn_tail`` (kept inline: this module runs standalone in the
+    participant subprocess)."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return
+    if size == 0:
+        return
+    with open(path, "rb") as handle:
+        handle.seek(size - 1)
+        if handle.read(1) == b"\n":
+            return
+        chunk = 4096
+        pos = size
+        cut = -1
+        while pos > 0:
+            step = min(chunk, pos)
+            pos -= step
+            handle.seek(pos)
+            buf = handle.read(step)
+            idx = buf.rfind(b"\n")
+            if idx != -1:
+                cut = pos + idx
+                break
+    new_len = cut + 1
+    if new_len == size:
+        return
+    with open(path, "r+b") as handle:
+        handle.truncate(new_len)
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
+
+
 class _Participant:
     """This process's slice: its accumulator, its WAL, its boundary state."""
 
@@ -125,6 +170,7 @@ class _Participant:
         self._raw(record)
 
     def _raw(self, record: dict) -> None:
+        _seal_torn_tail(self.wal_path)  # never merge a torn tail with a record (#535)
         with open(self.wal_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
             handle.flush()
