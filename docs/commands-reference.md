@@ -11,10 +11,11 @@ The verb set, in the order the parser declares it:
 <!-- docgen:cli-verbs begin -->
 ```text
 compile  explain  grammar  adapt  doctor  scaffold  composition  layer
-audit  policy  diff  changelog  version  contract  erase-report  plan
-apply  undo  canary  query  fmt  quarantine  analyze  test  mcp  import
-export  serve  run  recover  estop  branch  compare  why  metrics  trace
-profile  attest  dash  repair  bundle  emit  verify  deploy  truc
+audit  goal  policy  diff  changelog  version  contract  erase-report
+plan  apply  undo  canary  query  fmt  quarantine  analyze  test  mcp
+import  export  serve  run  recover  estop  branch  compare  why
+metrics  trace  profile  attest  dash  repair  bundle  emit  verify
+deploy  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -328,6 +329,23 @@ contract working, not a hazard.
 - `--mcp-scope COMPONENT` - treat `COMPONENT` as MCP/agent-admitted so the
   policy's `mcp` sandbox allow-list applies to it; repeatable, `*` = every
   component.
+
+### `revl goal audit`
+
+The termination-contract blind-spot report: the class-(c) capabilities a run
+reaches that no criterion in its own contract observes. A pure function of a
+compiled IR, with no session, policy or runtime involved. `goal` has one
+subcommand, `audit` (roadmap item 441,
+[441-goal-contracts.md](design/441-goal-contracts.md) §5.2,
+[458-termination-language-surface.md](design/458-termination-language-surface.md) §7).
+
+- `files ...` - the composition source(s) to audit (required).
+- `--json` - machine-readable output.
+
+```bash
+revl goal audit app.rvl
+revl goal audit app.rvl --json
+```
 
 ### `revl diff`
 
