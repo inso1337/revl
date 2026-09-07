@@ -703,3 +703,302 @@ def test_failed_admission_disposes_turn_fibers_before_recording_abandonment(
     assert [r for r in on_disk if r.get("record") == "admit-abandoned"
             and r.get("reason") == "plug-failed"], \
         "no admit-abandoned {plug-failed} record was written"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #644, disposal helper in isolation. `_dispose_turn_fibers` is the seam
+# the whole fix turns on, and its contract holds without a live cordis
+# composition: driven over a fabricated driver whose fibers expose the runtime's
+# real `dispose()`/`_flush` shape, it must invoke `dispose()` in reverse plug
+# order, WITHDRAW each disposed fiber from `driver.fibers`, RETAIN (never drop) a
+# fiber whose `dispose()` raises, and RETURN those retained names so `_wire_turn`
+# can withhold the terminal settlement while cleanup is unresolved. These run
+# everywhere (no cordis needed) — the end-to-end WAL honesty is proven by the
+# cordis-gated cases below.
+# --------------------------------------------------------------------------- #
+
+class _FakeFiber:
+    """A stand-in for a driver fiber: a real awaitable `dispose()` that records
+    the order it is torn down in, and optionally raises to model a disposal that
+    cannot resolve."""
+
+    def __init__(self, name, log, fail=False):
+        self.name = name
+        self._log = log
+        self._fail = fail
+        self.disposed = False
+
+    async def dispose(self):
+        self._log.append(("dispose", self.name))
+        if self._fail:
+            raise RuntimeError(f"injected dispose failure for {self.name}")
+        self.disposed = True
+        self._log.append(("disposed", self.name))
+
+
+class _FakeDriver:
+    def __init__(self):
+        self.fibers = {}
+        self.flushes = 0
+        self.events = []
+
+    async def _flush(self):
+        self.flushes += 1
+
+    def _log(self, channel, subject, detail=""):
+        self.events.append((channel, subject, detail))
+
+
+def _session_over_driver(driver):
+    from revl.mcp.session import Session
+    s = Session()
+    s._driver = driver
+    return s
+
+
+def test_dispose_turn_fibers_disposes_in_reverse_plug_order_and_withdraws():
+    log = []
+    driver = _FakeDriver()
+    # plug (insertion) order: the provider is plugged before the consumer.
+    driver.fibers["Provider"] = _FakeFiber("Provider", log)
+    driver.fibers["Consumer"] = _FakeFiber("Consumer", log)
+    s = _session_over_driver(driver)
+
+    retained = s._dispose_turn_fibers({"Provider", "Consumer"})
+
+    assert retained == set(), "clean disposal must report nothing retained"
+    # every disposed fiber is withdrawn — none stranded in the driver.
+    assert driver.fibers == {}, "disposed fibers were not withdrawn"
+    # consumers before providers: reverse of plug order.
+    disposed = [name for tag, name in log if tag == "disposed"]
+    assert disposed == ["Consumer", "Provider"], \
+        "fibers were not torn down in reverse plug (LIFO) order"
+    assert driver.flushes >= 2, "each teardown must flush the driver"
+
+
+def test_dispose_turn_fibers_retains_a_fiber_whose_dispose_raises():
+    log = []
+    driver = _FakeDriver()
+    driver.fibers["Provider"] = _FakeFiber("Provider", log, fail=True)
+    driver.fibers["Consumer"] = _FakeFiber("Consumer", log)
+    s = _session_over_driver(driver)
+
+    retained = s._dispose_turn_fibers({"Provider", "Consumer"})
+
+    # the fiber that could not be torn down is reported AND kept inspectable.
+    assert retained == {"Provider"}, "a failed disposal was not reported"
+    assert "Provider" in driver.fibers, \
+        "a fiber that failed to dispose was silently dropped (issue #644)"
+    assert driver.fibers["Provider"]._fail, "the retained fiber was replaced"
+    # the healthy sibling is still torn down and withdrawn.
+    assert "Consumer" not in driver.fibers
+    # retention is explicit, not silent.
+    assert any(subject == "dispose-failed" for _c, subject, _d in driver.events), \
+        "a retained undisposed fiber was not logged"
+
+
+def test_dispose_turn_fibers_only_touches_the_turns_own_names():
+    log = []
+    driver = _FakeDriver()
+    driver.fibers["Base"] = _FakeFiber("Base", log)          # not this turn's
+    driver.fibers["TurnComp"] = _FakeFiber("TurnComp", log)  # this turn's
+    s = _session_over_driver(driver)
+
+    retained = s._dispose_turn_fibers({"TurnComp"})
+
+    assert retained == set()
+    assert "Base" in driver.fibers, "a non-turn fiber was disposed"
+    assert "TurnComp" not in driver.fibers
+    assert [name for tag, name in log if tag == "disposed"] == ["TurnComp"]
+
+
+def test_dispose_turn_fibers_without_a_driver_is_a_noop():
+    from revl.mcp.session import Session
+    s = Session()
+    assert s._driver is None
+    assert s._dispose_turn_fibers({"X"}) == set()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #644, end to end: the two failure shapes the report names. A partial
+# plug whose DISPOSAL then fails must retain the fiber and keep the WAL honest
+# (no terminal `admit-abandoned` while cleanup is unresolved); an activation that
+# exceeds its explicit timeout must still be disposed through the supported path
+# before the honest abandonment is recorded. Both need a live cordis composition.
+# --------------------------------------------------------------------------- #
+
+@needs_cordis
+def test_failed_admission_retains_fiber_and_withholds_abandonment_when_cleanup_fails(
+        tmp_path):
+    """Cleanup is UNRESOLVED: a turn fiber is plugged, the plug fails, and the
+    fiber's own `dispose()` then raises. The fiber must be RETAINED (inspectable,
+    not dropped as if disposed), NO terminal `admit-abandoned` may be written
+    while it still leaks (recovery would skip a terminal decision), and the
+    cleanup failure must be made explicit on the preserved admission error."""
+    from revl.wal import read_wal
+
+    session = _gated_session(tmp_path)
+    driver = session._driver
+    runtime_mod = driver.runtime
+
+    probes: list = []
+    real_plug = runtime_mod.plug
+
+    class _FailingDisposeProbe:
+        def __init__(self, inner):
+            self._inner = inner
+            self.dispose_attempted = False
+
+        @property
+        def state(self):
+            return self._inner.state
+
+        def __await__(self):
+            return self._inner.__await__()
+
+        def dispose(self):
+            self.dispose_attempted = True
+
+            async def _boom():
+                # the supported path was reached, but the teardown itself cannot
+                # resolve — the fiber stays live.
+                raise RuntimeError("injected dispose failure (issue #644 repro)")
+
+            return _boom()
+
+        def __getattr__(self, key):
+            return getattr(self._inner, key)
+
+    def _probing_plug(ctx, component, config=None):
+        probe = _FailingDisposeProbe(real_plug(ctx, component, config))
+        probes.append(probe)
+        return probe
+
+    # fail the plug right after the first fiber is stored (same repro shape as the
+    # test above): the pre-plug gates flush with `probes` empty; the in-plug flush
+    # trips once a fiber has been plugged.
+    real_flush = driver._flush
+    tripped = {"done": False}
+
+    async def _flaky_flush():
+        if probes and not tripped["done"]:
+            tripped["done"] = True
+            raise RuntimeError("injected plug/flush failure (issue #644 repro)")
+        return await real_flush()
+
+    runtime_mod.plug = _probing_plug
+    driver._flush = _flaky_flush
+    try:
+        # the ADMISSION failure (the plug/flush error) is preserved and re-raised.
+        with pytest.raises(RuntimeError,
+                           match="injected plug/flush failure") as caught:
+            session.admit(_TURN_FORWARD, granted=["Ops"])
+    finally:
+        runtime_mod.plug = real_plug
+        driver._flush = real_flush
+
+    assert probes, "no fiber was plugged — the repro never reached the plug"
+    # disposal WAS attempted through the supported path (it just could not resolve).
+    assert any(p.dispose_attempted for p in probes), \
+        "the supported dispose() path was never invoked"
+    # the fiber that could not be disposed is RETAINED, not silently dropped.
+    assert "TurnComp" in driver.fibers, \
+        "a fiber that failed to dispose was dropped as if disposed (issue #644)"
+
+    on_disk = read_wal(session._wal_path)["records"]
+    # honest WAL: the decision is NOT terminally settled while a fiber still leaks.
+    assert not [r for r in on_disk if r.get("record") == "admit-abandoned"], \
+        "admit-abandoned was recorded while cleanup was unresolved (issue #644)"
+    # the decision stays owed (its admit-decided stands) so recovery still sees it.
+    assert [r for r in on_disk if r.get("record") == "admit-decided"], \
+        "the decision's admit-decided record is missing"
+    # the cleanup failure is explicit on the preserved admission error.
+    notes = getattr(caught.value, "__notes__", [])
+    assert any("cleanup is unresolved" in n for n in notes), \
+        "the unresolved cleanup was not made explicit on the admission error"
+
+
+@needs_cordis
+def test_activation_timeout_disposes_then_records_honest_abandonment(tmp_path):
+    """An activating fiber that exceeds the explicit settle timeout raises out of
+    the plug. Its already-plugged fiber must be disposed through the supported
+    path BEFORE the honest terminal `admit-abandoned {plug-failed}` is recorded,
+    and the fiber withdrawn — not stranded."""
+    import asyncio
+
+    from revl.wal import read_wal
+
+    session = _gated_session(tmp_path)
+    driver = session._driver
+    runtime_mod = driver.runtime
+
+    events: list = []
+    probes: list = []
+    real_plug = runtime_mod.plug
+
+    class _HangingProbe:
+        """Reports LOADING so the plug enters its `wait_for(shield(fiber), 2)`
+        settle, then never completes — the activation exceeds its deadline."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.dispose_attempted = False
+
+        @property
+        def state(self):
+            return driver.FiberState.LOADING
+
+        def __await__(self):
+            async def _never():
+                await asyncio.sleep(30)   # longer than the plug's 2s settle
+            return _never().__await__()
+
+        def dispose(self):
+            self.dispose_attempted = True
+            events.append(("dispose",))
+            return self._inner.dispose()
+
+        def __getattr__(self, key):
+            return getattr(self._inner, key)
+
+    def _probing_plug(ctx, component, config=None):
+        probe = _HangingProbe(real_plug(ctx, component, config))
+        probes.append(probe)
+        return probe
+
+    wal = session._approval_wal()
+    real_abandoned = wal.record_admit_abandoned
+
+    def _spy_abandoned(*a, **k):
+        events.append(("abandon",))
+        return real_abandoned(*a, **k)
+
+    runtime_mod.plug = _probing_plug
+    wal.record_admit_abandoned = _spy_abandoned
+    try:
+        with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+            session.admit(_TURN_FORWARD, granted=["Ops"])
+    finally:
+        runtime_mod.plug = real_plug
+        try:
+            del wal.record_admit_abandoned
+        except AttributeError:
+            pass
+
+    assert probes, "no fiber was plugged — the repro never reached the plug"
+    # (a) the timed-out fiber was disposed through the supported path.
+    assert any(p.dispose_attempted for p in probes), \
+        "the activation-timeout fiber was never disposed (issue #644 leak)"
+    # (b) disposal happened BEFORE the terminal abandonment was recorded.
+    assert ("abandon",) in events, "admit-abandoned was never recorded"
+    first_abandon = events.index(("abandon",))
+    assert any(e == ("dispose",) and i < first_abandon
+               for i, e in enumerate(events)), \
+        "admit-abandoned was recorded before the timed-out fiber was disposed"
+    # (c) the disposed fiber is withdrawn, and the honest record is on disk.
+    assert "TurnComp" not in driver.fibers, \
+        "a disposed turn fiber was left stranded in driver.fibers"
+    on_disk = read_wal(session._wal_path)["records"]
+    assert [r for r in on_disk if r.get("record") == "admit-abandoned"
+            and r.get("reason") == "plug-failed"], \
+        "no honest admit-abandoned {plug-failed} record was written"
