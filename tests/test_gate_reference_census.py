@@ -112,9 +112,12 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # gate deliberately does not run:
 #
 # THE TYPE LAYER (docs/design/457). The bulk of this list is the type-layer
-# gap named executably at slice T0: 46 fixtures over `examples/rejections/`
+# gap named executably at slice T0: 45 fixtures over `examples/rejections/`
 # that the reference refuses in its type checker and `selfhost/lower.rvl`'s
-# `admit_src` admits, because the gate runs no type layer yet. They used to sit
+# `admit_src` admits, because the gate runs no type layer yet. (The
+# self-declared async-colour arrow left this gap once the gate learned to parse
+# an arrow's written return annotation and refuse a self-declared `Async[…]`
+# colour — rule C1 — so it now agrees with the reference.) They used to sit
 # in `no-objection-out-of-slice` (the classifier tagged every one "OUT:"); T0
 # taught `tests/test_selfhost_lower.py::_classify` the type vocabulary, so they
 # now surface here where they can be worked down. `TYPE_LAYER_GAP` in that same
@@ -156,11 +159,6 @@ KNOWN_BYPASSES = {
     "examples/rejections/t32_arrow_value_result_flows.rvl",
     "examples/rejections/t33_arrow_value_arity.rvl",
     "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-    # typecheck.py's `an arrow may not declare its own async colour` — carried
-    # with `code="A1"`, so the classifier already read it in-slice before T0,
-    # but it is decided in the reference TYPE layer this gate does not run.
-    # Flips with the arrows/function-values slice (T2c), with its siblings above.
-    "examples/rejections/t34_arrow_self_declared_async.rvl",
     # -- return paths and match --
     "examples/rejections/t8_missing_return.rvl",
     "examples/rejections/t9_return_path_incomplete.rvl",

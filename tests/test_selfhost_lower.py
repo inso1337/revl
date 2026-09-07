@@ -231,7 +231,7 @@ def _classify(e: RevlError) -> str:
     # The reference's type layer refuses a program the gate has no phase for, so
     # `admit_src` waves it through. Every such refusal used to fall here to
     # "OUT:", which parks it in the census bucket `no-objection-out-of-slice`
-    # that the baseline tolerates. Naming it instead moves the 46 measured
+    # that the baseline tolerates. Naming it instead moves the measured
     # false-admits (section 1 of the design) into `false-admit/<tag>`, where
     # `tests/test_gate_reference_census.py`'s KNOWN_BYPASSES caps them by name
     # and the `TYPE_LAYER_GAP` pin below records the divergence per family. No
@@ -2255,7 +2255,9 @@ def test_no_nesting_under_the_size_bound_exhausts_the_descent(admit):
 # the IR but never refuses), so it ADMITS every one of these programs. The two
 # therefore DIVERGE: the reference refuses with a type-layer tag, the gate
 # returns "". Design section 1 measured that gap at 46 fixtures over
-# `examples/rejections/`, grouped below by the reference check that refuses
+# `examples/rejections/`; it now stands at 45 after the self-declared
+# async-colour arrow (rule C1) moved from a pinned gap to gate/reference
+# agreement. Grouped below by the reference check that refuses
 # them (the family each self-host slice T1..T4 will move from "pinned gap" to
 # "agrees").
 #
@@ -2309,14 +2311,16 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
         ("g4_extern_undo_wrong_arg_type", "T1"),
     ],
     # arrows and function values: arrow-body checking, function-value flow and
-    # arity, arrow annotations, the self-declared async colour (already a
-    # false-admit/A1 before T0; it belongs to this family and flips at T2c).
+    # arity, arrow annotations. (The self-declared async colour,
+    # t34_arrow_self_declared_async, was in this family until the gate learned
+    # to parse an arrow's written return annotation and refuse a self-declared
+    # `Async[…]` colour — rule C1 — so it now AGREES with the reference and has
+    # left this gap; see agree-refuse/A1 in the census.)
     "arrows and function values": [
         ("t17_arrow_body_unchecked", "T1"),
         ("t32_arrow_value_result_flows", "T1"),
         ("t33_arrow_value_arity", "T1"),
         ("t35_arrow_annotation_not_quantified", "T1"),
-        ("t34_arrow_self_declared_async", "A1"),
     ],
     # return paths and match: returns on every path, unknown/missing match cases.
     "return paths and match": [
@@ -2353,12 +2357,12 @@ _TYPE_LAYER_CASES = [
 ]
 
 
-def test_the_type_layer_gap_is_exactly_46_fixtures():
+def test_the_type_layer_gap_is_exactly_45_fixtures():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff."""
-    assert len(_TYPE_LAYER_CASES) == 46, len(_TYPE_LAYER_CASES)
+    assert len(_TYPE_LAYER_CASES) == 45, len(_TYPE_LAYER_CASES)
     names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 46, "a fixture is listed twice"
+    assert len(set(names)) == 45, "a fixture is listed twice"
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,
