@@ -859,8 +859,15 @@ fn borrowed_str_lit(node: Any) -> Str {
 // method takes `&self`), so that clone is pure heap waste. `.clone()` is 8
 // chars; stripping the fixed suffix reuses the already-rendered string exactly.
 fn strip_index_clone(node: Any, rendered: Str) -> Str {
-  if (node_kind(node) != "index" || !rendered.endsWith(".clone()")) { return "" }
-  return rendered.slice(0, rendered.length() - 8)
+  if (!rendered.endsWith(".clone()")) { return "" }
+  let k = node_kind(node)
+  // A bare index (`xs[i].clone()`) or a field off one (`xs[i].f.clone()`, the
+  // field render having moved the clone off the whole element onto the field).
+  if (k == "index") { return rendered.slice(0, rendered.length() - 8) }
+  if (k == "field" && node_kind(value_field(node, "target")) == "index") {
+    return rendered.slice(0, rendered.length() - 8)
+  }
+  return ""
 }
 
 // `_v3_str_eq_borrow`'s guard: may the literal on the OTHER side of this `==`
@@ -1446,6 +1453,15 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
 fn render_field(node: Any, ctx: Ctx) -> Str {
   let tn = value_field(node, "target")
   var target = render_expr(tn, ctx)
+  // item 437d: a field read off a `List` index read cloned the WHOLE element,
+  // every sibling field, only to move one field out (`xs[i].clone().kind`).
+  // Clone just the field instead: strictly less copied, still owned, so valid
+  // in every position; a read-only caller then strips even this field clone
+  // via `strip_index_clone`. The `.clone()` is 8 chars.
+  if (node_kind(tn) == "index" && target.endsWith(".clone()")) {
+    let place = target.slice(0, target.length() - 8)
+    return `${place}.${mangle(value_str(value_field(node, "name")))}.clone()`
+  }
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
   return `${target}.${mangle(value_str(value_field(node, "name")))}`
 }
@@ -1519,7 +1535,12 @@ fn render_interp(node: Any, ctx: Ctx) -> Str {
       if (v3_is_float(v)) {
         args = args.push(`revl_ftoa(${render_expr(v, ctx)})`)
       } else {
-        args = args.push(render_expr(v, ctx))
+        // item 437d: a `format!` argument is borrowed by the macro, never
+        // moved, so an index read (or a field off one) in an interpolation
+        // operand needs no owning `.clone()` — strip it as in the `==` slot.
+        let r = render_expr(v, ctx)
+        let place = strip_index_clone(v, r)
+        if (place != "") { args = args.push(place) } else { args = args.push(r) }
       }
     }
   }
