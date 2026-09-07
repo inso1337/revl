@@ -922,6 +922,122 @@ layer Swap for Demo {
     assert table.rows[0].config == {"url": "postgres://prod.internal:5432/app"}
 
 
+# --------------------------- replace vs the inherited open set (426 §8.6/§8.3)
+
+OPEN_BASE = """
+composition Demo {
+  use "services.rvl"
+  row @db from "sqlite.rvl" provides db
+    config { url: "sqlite://prod.internal:5432" }
+    open   { %s }
+%s}
+"""
+
+
+def _open_project(tmp_path: Path, base_open: str, *layers: str) -> Path:
+    """A base whose `@db` row opens `base_open` (the rest of its config stays
+    closed to non-owning stack layers), with each `layers` body written to
+    `layers/` and named `swap`, `tune`, ... in order and stacked in that
+    order."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "services.rvl").write_text(SERVICES)
+    (tmp_path / "sqlite.rvl").write_text(SQLITE)
+    (tmp_path / "postgres.rvl").write_text(POSTGRES)
+    (tmp_path / "layers").mkdir(exist_ok=True)
+    names = ["swap", "tune", "extra"]
+    clauses = ""
+    for name, body in zip(names, layers):
+        (tmp_path / "layers" / f"{name}.rvl").write_text(body)
+        clauses += f'  stack "layers/{name}.rvl"\n'
+    doc = tmp_path / "base.rvl"
+    doc.write_text(OPEN_BASE % (base_open, clauses))
+    return doc
+
+
+def test_a_replacement_may_not_widen_the_inherited_open_set(tmp_path):
+    """426 §8.6/§8.3, soundness: the base composition opens only `url`, keeping
+    `pool` closed to non-owning stack layers. A stack `replace` that re-declares
+    a WIDER `open` set (adding `pool`) must be REFUSED, not admitted — `open`
+    grants configure authority and a replacement may narrow it, never widen it.
+    Before the clamp, the replacement's own open set silently replaced the
+    base's, so `pool` was wrongly opened."""
+    doc = _open_project(tmp_path, "url", """
+layer Swap for Demo {
+  replace key("db") with row @db from "../postgres.rvl" provides db
+    config { url: "postgres://prod.internal:5432/app" }
+    open   { url, pool }
+}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    message = str(caught.value)
+    assert "which the base composition kept closed" in message
+    assert "`pool`" in message
+
+
+def test_a_widened_open_set_would_let_a_later_layer_patch_a_closed_field(tmp_path):
+    """The escalation the clamp closes end to end: the base keeps `pool` closed,
+    a `replace` widens `open` to include it, and a SECOND stack layer that does
+    NOT own `@db` configures `pool`. Before the clamp the widened open set
+    admitted that patch; now the widening `replace` is refused first."""
+    doc = _open_project(tmp_path, "url", """
+layer Swap for Demo {
+  replace key("db") with row @db from "../postgres.rvl" provides db
+    config { url: "postgres://prod.internal:5432/app" }
+    open   { url, pool }
+}
+""", """
+layer Tune for Demo {
+  configure @db with { pool: 99 }
+}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "which the base composition kept closed" in str(caught.value)
+
+
+def test_a_replacement_that_declares_no_open_inherits_the_base_set(tmp_path):
+    """The plain carry-forward still holds: a replacement declaring no `open`
+    of its own inherits the base's set unchanged."""
+    doc = _open_project(tmp_path, "url", """
+layer Swap for Demo {
+  replace key("db") with row @db from "../postgres.rvl" provides db
+    config { url: "postgres://prod.internal:5432/app" }
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[0].open == {"url"}
+
+
+def test_a_replacement_may_narrow_the_open_set(tmp_path):
+    """Narrowing is fine: the base opens `url` and `pool`, the replacement
+    re-declares a smaller `open { url }`, closing `pool` again. The subset is
+    kept, and a later non-owning stack layer can no longer patch `pool`."""
+    doc = _open_project(tmp_path, "url, pool", """
+layer Swap for Demo {
+  replace key("db") with row @db from "../postgres.rvl" provides db
+    config { url: "postgres://prod.internal:5432/app" }
+    open   { url }
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[0].open == {"url"}
+
+
+def test_a_replacement_re_declaring_the_same_open_set_admits(tmp_path):
+    """Re-stating exactly the inherited open set neither widens nor narrows and
+    is admitted unchanged."""
+    doc = _open_project(tmp_path, "url", """
+layer Swap for Demo {
+  replace key("db") with row @db from "../postgres.rvl" provides db
+    config { url: "postgres://prod.internal:5432/app" }
+    open   { url }
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[0].open == {"url"}
+
+
 def test_a_replacement_cannot_drop_the_base_bound_by_re_declaring_reach(tmp_path):
     """A replacement that declares an empty `reach` (or one omitting the bounded
     field) cannot thereby shed the base bound: the inherited bound is carried

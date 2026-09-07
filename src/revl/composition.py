@@ -518,6 +518,47 @@ def _merge_replacement_reach(base_reach: dict[str, str] | None,
     return merged or None
 
 
+def _merge_replacement_open(base_open: set[str] | None,
+                            repl_open: set[str] | None,
+                            layer: LayerDecl, line: int,
+                            target: str) -> set[str] | None:
+    """The `open` set a stack-layer `replace` presents, clamped to the base.
+
+    426 §8.6/§8.3: the composition-level `open` set belongs to the BASE
+    composition. `open` is the allowlist of config fields a non-owning stack
+    layer may `configure`, so it GRANTS authority — the mirror image of a
+    `reach` bound, which restricts it. A `replace` inherits the base's open set
+    and may NARROW it — open fewer fields, keep more closed — but never WIDEN
+    it: a replacement that re-declares `open` to include a field the base kept
+    closed would grant configure authority the base withheld, and a later stack
+    layer could then patch that field. That replacement is REFUSED. This also
+    subsumes the plain carry-forward: a replacement that declares no `open` of
+    its own inherits the base's unchanged.
+    """
+    if repl_open is None:
+        # No `open` of its own: inherit the base's set unchanged.
+        return base_open
+    base_open = base_open or set()
+    widened = repl_open - base_open
+    if widened:
+        opened = ", ".join(f"`{f}`" for f in sorted(widened))
+        inherited = ", ".join(f"`{f}`" for f in sorted(base_open)) or "<none>"
+        requested = ", ".join(f"`{f}`" for f in sorted(repl_open)) or "<none>"
+        raise _layer_error(
+            layer, line,
+            f"layer `{layer.name}` replaces row `{target}` with a component "
+            f"whose `open` set opens {opened}, which the base composition kept "
+            f"closed",
+            hint=f"inherited: open {{ {inherited} }}\n"
+                 f"requested: open {{ {requested} }}\n"
+                 "a `replace` inherits the base's open set and may narrow it "
+                 "(open fewer, keep closed), never widen it; a later stack layer "
+                 "could configure a field the base withheld. Drop the wider "
+                 "`open` or refuse the layer (426 §8.6/§8.3)")
+    # A subset (or the same set) narrows or preserves the base grant: kept.
+    return repl_open
+
+
 def _vendor_truc_of(abspath: str, root: str) -> str | None:
     """The truc a source path is VENDORED under (`trucs/<truc>/...`), or `None`
     if the path is the project's own (426 §7). Distribution facts key off where
@@ -1522,14 +1563,16 @@ def _apply_op(target, layer, layer_origin, op, rel, slots, decl, doc,
         row.provenance = [*slot.row.provenance, (level, layer.name, "replace")]
         # 426 §8.3/§8.6: the composition-level `reach` bound and the `open` set
         # belong to the base composition; a stack-layer `replace` cannot drop
-        # or widen them (that would be raising its own authority). The reach
-        # bound is inherited and clamped — a replacement may narrow it but a
-        # widening/redirecting one is REFUSED — and the resulting bound is
+        # or widen them (that would be raising its own authority). Both are
+        # inherited and clamped — a replacement may narrow (a tighter reach
+        # bound, a smaller open set) but a widening one is REFUSED: a wider
+        # reach lets a config value escape, a wider open set lets a later stack
+        # layer configure a field the base kept closed. The reach bound is then
         # re-checked against the replacement's config below.
         row.reach = _merge_replacement_reach(
             slot.row.reach, row.reach, layer, op.row.line, target)
-        if row.open is None:
-            row.open = slot.row.open
+        row.open = _merge_replacement_open(
+            slot.row.open, row.open, layer, op.row.line, target)
         _check_reach_bounds(row.label, row.config, row.reach,
                             layer.source or doc, op.row.line,
                             f"by layer `{layer.name}`")
