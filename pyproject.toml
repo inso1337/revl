@@ -50,7 +50,7 @@ revl = "revl.__main__:main"
 truc = "revl.truc:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 # WHAT THE DISTRIBUTIONS SHIP, and why it is computed rather than copied.
