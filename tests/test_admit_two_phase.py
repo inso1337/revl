@@ -212,20 +212,42 @@ def test_cas_surface_refuses_when_the_class_map_digest_moved():
 # The epoch moves — the cordis-gated half.
 # --------------------------------------------------------------------------- #
 
-def _base_ir():
+def _base_path(tmp_path):
+    """A REAL on-disk base source. `_record_generation` builds a generation's
+    re-admittable snapshot by materializing the recorded `origin` files off disk
+    (`persist._materialize`), so the base cannot be a purely in-memory virtual
+    path if the generation is to survive an `undo` (item 597). Idempotent: the
+    content is constant, so re-writing across calls is harmless."""
+    p = tmp_path / "base.rvl"
+    p.write_text(_SRC_C)
+    return str(p)
+
+
+def _base_ir(base_path):
     from revl import compile_files
     from revl._paths import stdlib_root
     admit_path = str(stdlib_root() / "admit.rvl")
-    base_abs = os.path.abspath("base.rvl")
-    return compile_files([base_abs, admit_path], sources={base_abs: _SRC_C})
+    return compile_files([base_path, admit_path], sources={base_path: _SRC_C})
+
+
+def _base_origin(base_path):
+    """The admission inputs that let a loaded/swapped generation record a
+    re-admittable snapshot: the co-root files (the on-disk base plus the stdlib
+    `admit.rvl`), materialized from disk at snapshot time exactly as a live
+    `revl_load` records them. Without this the generation snapshots to None and
+    `Session.undo()` correctly refuses it (item 597)."""
+    from revl._paths import stdlib_root
+    return {"files": [base_path, str(stdlib_root() / "admit.rvl")]}
 
 
 def _gated_session(tmp_path):
     from revl.mcp.session import Session
+    base_path = _base_path(tmp_path)
     session = Session()
     session.approval_policy = "auto"
     session._wal_path = str(tmp_path / "session.wal")
-    session.load(copy.deepcopy(_base_ir()), record=True)
+    session.load(copy.deepcopy(_base_ir(base_path)), record=True,
+                 origin=_base_origin(base_path))
     return session
 
 
@@ -233,6 +255,7 @@ def _gated_session(tmp_path):
 def test_surface_epoch_moves_on_every_install_and_not_on_call(tmp_path):
     from revl.mcp.approval import ApprovalRequired
     session = _gated_session(tmp_path)
+    base_path = _base_path(tmp_path)
 
     # load installed the class map: epoch 0 -> 1, alongside generation 1.
     assert session._surface_epoch == 1
@@ -260,11 +283,33 @@ def test_surface_epoch_moves_on_every_install_and_not_on_call(tmp_path):
     assert session._surface_digests() != digests_before
 
     # a swap installs a new generation's class map: epoch and generation both move.
-    session.swap(copy.deepcopy(_base_ir()))
+    session.swap(copy.deepcopy(_base_ir(base_path)), origin=_base_origin(base_path))
     assert session._generation == 2
     assert session._surface_epoch == 3
 
-    # undo routes through swap: one more install, one more of each.
+    # undo routes through swap: one more install, one more of each. Generation 1
+    # was source-backed (see `_gated_session`), so its snapshot re-admits through
+    # the gate rather than being refused for missing sources (item 597).
     session.undo()
     assert session._generation == 3
     assert session._surface_epoch == 4
+
+
+@needs_cordis
+def test_undo_refuses_a_generation_loaded_without_recorded_sources(tmp_path):
+    """Item 597 guard, retained coverage. The success path above now source-backs
+    its generations so the undo/epoch assertions are exercised; keep the
+    COMPLEMENTARY guarantee that `Session.undo()` still REFUSES a generation
+    loaded without re-admittable sources (`snapshot=None`) rather than bypassing
+    the admission gate. This must not be weakened."""
+    from revl.mcp.session import Session, SessionError
+    base_path = _base_path(tmp_path)
+    session = Session()
+    session.approval_policy = "auto"
+    session._wal_path = str(tmp_path / "session.wal")
+    # loaded WITHOUT `origin`: generation 1 records no re-admittable snapshot.
+    session.load(copy.deepcopy(_base_ir(base_path)), record=True)
+    session.swap(copy.deepcopy(_base_ir(base_path)))
+    with pytest.raises(SessionError) as caught:
+        session.undo()
+    assert "without recorded sources" in str(caught.value)
