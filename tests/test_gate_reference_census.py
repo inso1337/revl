@@ -210,6 +210,108 @@ def test_the_open_bypass_surface_is_exactly_the_named_list(census, measured):
         "re-record the census baseline:\n  " + "\n  ".join(fixed))
 
 
+# --- the false-admission scaffold (docs/design/457, issue #346) --------------
+#
+# The gate has no `Admitted` arm yet, so nothing lands in `false-admission`
+# today. These pin the CLASSIFIER and the zero-tolerance handling so the bucket
+# is a working guard the day the arm opens, not a line that has to be wired up
+# under pressure while the dangerous direction is already live.
+
+
+def test_an_issued_admission_the_reference_refuses_is_a_false_admission(census):
+    # in-slice refusal
+    assert census.bucket(("G3", "held providers disagree"),
+                         ("admitted", ("G3", "held providers disagree"))) \
+        == census.ADMISSION
+    # out-of-slice refusal (the type layer): still a false admission, because an
+    # ISSUED admission claims the reference admits — unlike a no-objection, which
+    # forgives an out-of-slice refusal since it never claimed a green.
+    assert census.bucket(("OUT:type mismatch", "x is Int, not Str"),
+                         ("admitted", ("", "x is Int, not Str"))) \
+        == census.ADMISSION
+    # a bare refusal with no code is still refused, so still a false admission
+    assert census.bucket(("TYPE", "ternary branches disagree"),
+                         ("admitted", ("", ""))) == census.ADMISSION
+
+
+def test_an_admission_the_reference_admits_agrees(census):
+    assert census.bucket(("", ""), ("admitted", ("", ""))) == "agree-admit"
+
+
+def test_a_no_objection_out_of_slice_is_forgiven_but_an_admission_is_not(census):
+    ref = ("OUT:type mismatch", "x is Int, not Str")
+    # a no-objection to an out-of-slice refusal is the documented, tolerated
+    # state; the SAME reference verdict against an issued admission is not.
+    assert census.bucket(ref, ("no_objection", "")) == "no-objection-out-of-slice"
+    assert census.bucket(ref, ("admitted", ("", ""))) == census.ADMISSION
+
+
+def test_false_admission_is_never_baselined_and_always_fails_check(census):
+    assert census.ADMISSION in census.NEVER_BASELINED
+    assert census.ADMISSION in census.TRACKED
+    buckets = {census.ADMISSION: ["oracle-reject:some_refused_program"]}
+    # never in a baseline -> compare() reports it even against a full baseline
+    # that happens to list it (a hand-edited baseline cannot buy tolerance).
+    problems = census.compare(buckets, {"buckets": dict(buckets)})
+    assert any("FALSE ADMISSION" in p for p in problems), problems
+    assert census.false_admissions(buckets) == \
+        ["oracle-reject:some_refused_program"]
+
+
+def test_bypasses_does_not_swallow_the_false_admission_bucket(census):
+    # `false-admission` shares `false-admit` as a string prefix; the named-list
+    # bypass surface must key on the exact bucket, not startswith.
+    buckets = {
+        "false-admit/G3": ["a.rvl"],
+        census.ADMISSION: ["b.rvl"],
+    }
+    assert census.bypasses(buckets) == ["a.rvl"]
+    assert census.false_admissions(buckets) == ["b.rvl"]
+
+
+def test_run_routes_an_admitted_gate_kind_to_false_admission(census):
+    """End to end through run(): an engine that ISSUES an admission for a
+    reference-refused program lands in `false-admission`, with a readable
+    details entry."""
+    cases = [("agree", "ok"), ("bad_inslice", "r1"), ("bad_outslice", "r2")]
+    refs = {
+        "ok": ("", ""),
+        "r1": ("G3", "held providers disagree"),
+        "r2": ("OUT:type mismatch", "x is Int, not Str"),
+    }
+
+    class _Engine:
+        name = "fake"
+
+        def verdicts(self, sources):
+            table = {
+                "ok": ("admitted", ("", "")),
+                "r1": ("admitted", ("G3", "held providers disagree")),
+                "r2": ("admitted", ("", "x is Int, not Str")),
+            }
+            for src in sources:
+                yield table[src]
+
+    buckets, details = census.run(cases, _Engine(), lambda s: refs[s])
+    assert buckets.get("agree-admit") == ["agree"]
+    assert sorted(buckets.get(census.ADMISSION, [])) == ["bad_inslice",
+                                                         "bad_outslice"]
+    # the details map records the issued admission's code/message like a refusal
+    assert details["bad_inslice"]["gate"]["kind"] == "admitted"
+    assert details["bad_inslice"]["gate"]["code"] == "G3"
+    assert details["bad_inslice"]["reference"]["tag"] == "G3"
+
+
+def test_the_false_admission_scaffold_is_empty_today(measured):
+    """No gate arm issues an admission yet, so the bucket is empty over the whole
+    census corpus. When it stops being empty, the arm has opened and the exit
+    tests in tests/test_inprocess_gate_rust.py take over."""
+    _, (buckets, _) = measured
+    assert buckets.get("false-admission", []) == [], (
+        "a gate ISSUED an admission the reference refuses — this is the "
+        "release-blocking direction; see docs/design/457 / issue #346")
+
+
 def test_the_frontier_mirror_matches_the_rust(census):
     """The census's fast engine reads the crate's frontier guard through a
     python mirror of `crates/revl-gate/src/frontier.rs::scan`. Its TABLES are
