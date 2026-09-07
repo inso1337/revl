@@ -16,12 +16,15 @@ Slice C the endorsement boundary. This suite covers the last pieces:
 See docs/design/249-taint-provenance.md, "Slice D" and the B3/B4 exit tests.
 """
 
+import copy
+import os
+
 import pytest
 
 from revl import RevlError
 from revl.admit_profile import AdmissionProfile
 from revl.audit_diff import audit_report, crossings
-from revl.compiler import compile_source
+from revl.compiler import compile_files, compile_source
 from revl.diagnostics import classify
 from revl.policy import evaluate, parse_policy
 
@@ -434,3 +437,129 @@ def test_an_indirect_call_in_a_sink_free_program_is_not_over_approximated():
         "}\n"
     )
     compile_source(src, "sinkfree_indirect.rvl")  # must not raise
+
+
+# --- D5: derived classes are preserved across the manifest boundary ----------
+#
+# A per-turn source admitted against a RUNNING composition reaches that
+# composition only through its ambient service operations; the provider bodies
+# that reach the real source/sink externs are not in the turn's own program. The
+# derived sink/source class of an ambient operation is therefore read off the
+# operation's retained `emission` flag and capability scope, so a crossing the
+# turn makes purely through an ambient op is judged against the same class an
+# in-composition op carries — not a stripped one.
+
+# A running composition: a granted tool surface exposing an `fs`-scoped read
+# (a derived source) and a `shell`-scoped exec (a derived sink) as service
+# operations. The turn reaches these ambient services; their provider bodies
+# live here, in the base, not in the turn.
+_BASE_TOOLS = (
+    "extern emission[fs] fn host_read(p: Str) -> Str = @py { return \"\" }\n"
+    "extern emission[shell] fn host_exec(cmd: Str) = @py { return }\n"
+    "service Fs { emission[fs, host_read] fn read(p: Str) -> Str }\n"
+    "service Sh { emission[shell, host_exec] fn exec(cmd: Str) }\n"
+    "component Tools provides fs: Fs, sh: Sh {\n"
+    "  provide fs { fn read(p) = host_read(p) }\n"
+    "  provide sh { fn exec(cmd) { emit host_exec(cmd) } }\n"
+    "}\n"
+)
+
+
+def _tools_manifest() -> dict:
+    base_abs = os.path.abspath("base_tools.rvl")
+    return compile_files([base_abs], sources={base_abs: _BASE_TOOLS})
+
+
+def test_ambient_shell_sink_refuses_untrusted_ambient_source_across_manifest():
+    """The headline: a turn that pipes an ambient `fs`-scoped read into an ambient
+    `shell`-scoped exec is refused at G9 under strict mode, even though both
+    crossings are ambient service operations whose bodies are not in the turn. The
+    derived classes survive the manifest boundary."""
+    turn = (
+        "service Turn { emission fn run(p: Str) }\n"
+        "component TurnComp requires fs: Fs, sh: Sh provides turn: Turn {\n"
+        "  provide turn {\n"
+        "    fn run(p) { let data = emit fs.read(p)  emit sh.exec(data) }\n"
+        "  }\n"
+        "}\n"
+    )
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(turn, "turn.rvl",
+                       manifest=copy.deepcopy(_tools_manifest()),
+                       profile=_strict())
+    err = excinfo.value
+    assert classify(err)["code"] == "G9"
+    assert "shell command" in err.message
+    assert "fs" in err.message
+
+
+def test_untrusted_author_profile_refuses_the_ambient_laundering():
+    """The same laundering under the real `untrusted_author` profile (the door a
+    model-authored per-turn source arrives through): refused at G9, and — because
+    that profile forbids declassify — the verdict teaches no author-side
+    declassifier."""
+    turn = (
+        "service Turn { emission fn run(p: Str) }\n"
+        "component TurnComp requires fs: Fs, sh: Sh provides turn: Turn {\n"
+        "  provide turn {\n"
+        "    fn run(p) { let data = emit fs.read(p)  emit sh.exec(data) }\n"
+        "  }\n"
+        "}\n"
+    )
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(turn, "turn.rvl",
+                       manifest=copy.deepcopy(_tools_manifest()),
+                       profile=AdmissionProfile.untrusted_author(["Fs", "Sh"]))
+    assert classify(excinfo.value)["code"] == "G9"
+
+
+def test_scoped_endorse_admits_the_ambient_flow_across_the_manifest_boundary():
+    """The escape hatch still works across the boundary: an `endorse[fs]` slot the
+    turn's operation declares clears the ambient `fs` origin on the path, so the
+    same flow is admitted. The manifest boundary preserves the class, it does not
+    outlaw the declared declassification."""
+    turn = (
+        "service Turn { emission endorse[fs] fn run(p: Str) }\n"
+        "component TurnComp requires fs: Fs, sh: Sh provides turn: Turn {\n"
+        "  provide turn {\n"
+        "    fn run(p) {\n"
+        "      let data = emit fs.read(p)\n"
+        "      emit sh.exec(endorse[fs](data, reason = \"reviewed\"))\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    compile_source(turn, "turn.rvl",
+                   manifest=copy.deepcopy(_tools_manifest()),
+                   profile=_strict())  # must not raise
+
+
+def test_ambient_source_without_a_sink_is_admitted():
+    """An ambient source that never reaches a sink is not a refusal — the class is
+    preserved, but there is nowhere to leak."""
+    turn = (
+        "service Turn { emission fn run(p: Str) -> Str }\n"
+        "component TurnComp requires fs: Fs provides turn: Turn {\n"
+        "  provide turn { fn run(p) -> Str { return emit fs.read(p) } }\n"
+        "}\n"
+    )
+    compile_source(turn, "turn.rvl",
+                   manifest=copy.deepcopy(_tools_manifest()),
+                   profile=_strict())  # must not raise
+
+
+def test_non_strict_compile_against_the_manifest_is_byte_identical():
+    """With `taint_strict` off (a trusted `load`/`swap` against a running
+    manifest), the ambient fold is inert: the same flow compiles, exactly as
+    before the boundary preservation existed."""
+    turn = (
+        "service Turn { emission fn run(p: Str) }\n"
+        "component TurnComp requires fs: Fs, sh: Sh provides turn: Turn {\n"
+        "  provide turn {\n"
+        "    fn run(p) { let data = emit fs.read(p)  emit sh.exec(data) }\n"
+        "  }\n"
+        "}\n"
+    )
+    compile_source(turn, "turn.rvl",
+                   manifest=copy.deepcopy(_tools_manifest()),
+                   profile=None)  # must not raise

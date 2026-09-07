@@ -62,6 +62,7 @@ from .typecheck import (
 )
 from .taint import (
     extract_and_normalize,
+    fold_ambient_composition,
     check_taint,
     splice_declassifiers,
     strip_qualifiers,
@@ -6512,6 +6513,17 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         name: _service_from_ir(name, spec)
         for name, spec in (ambient.get("services") or {}).items()
     }
+
+    # Fold the AMBIENT composition's service operations into the taint model so a
+    # crossing's derived sink/source class survives the manifest/composition
+    # boundary. A per-turn source admitted against a running manifest reaches the
+    # composition only through its ambient services, whose provider bodies are not
+    # in the turn's program; without this the flow walk sees no sink and no source
+    # and `emit sh.exec(emit fs.read(p))` launders untrusted data into a shell sink
+    # even under `taint_strict`. No-op with `taint_strict` off, so a trusted
+    # load/swap against a running manifest is byte-identical.
+    fold_ambient_composition(taint_model, ambient_services,
+                             taint_strict=taint_strict)
 
     services: dict[str, ServiceDecl] = {}
     for svc in program.services:
