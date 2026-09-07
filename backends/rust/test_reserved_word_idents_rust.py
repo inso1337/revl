@@ -98,6 +98,24 @@ def test_method_rename_is_injective():
     assert len({emit._mname(n) for n in ("drop", "drop_", "drop__")}) == 3
 
 
+def test_smart_pointer_method_rename():
+    """A required service is held as `Arc<Box<dyn Sv>>`; a method whose name is
+    one `Arc<T>`/`Box<T>` implements unconditionally binds to the smart-pointer
+    method (`recv.clone()` -> `Arc::clone`) instead of the user's, so those
+    names are renamed onto the same `_`-ladder as `drop` (GHSA A2)."""
+    for name in ("clone", "deref", "deref_mut", "as_ref", "as_mut",
+                 "borrow", "borrow_mut"):
+        assert emit._mname(name) == name + "_"
+    # Injective: a method actually named `clone_` shifts up a rung, never onto
+    # the renamed `clone`.
+    assert emit._mname("clone_") == "clone__"
+    assert emit._mname("as_ref_") == "as_ref__"
+    assert len({emit._mname(n) for n in ("clone", "clone_", "clone__")}) == 3
+    # A non-colliding method is untouched.
+    assert emit._mname("fetch") == "fetch"
+    assert emit._mname("as_bytes") == "as_bytes"
+
+
 def test_keyword_local_does_not_collide_with_its_underscore_twin():
     out = _emit(
         'pub fn probe() -> Str {\n'

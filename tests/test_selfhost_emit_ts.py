@@ -208,6 +208,12 @@ CORPUS = [
     "cas_runtime.rvl",
     "../emit_go_corpus/variants.rvl",
     "../emit_py_corpus/services_method_effects.rvl",
+    # GHSA-mrqv-535q-jw3x A4 — a `config` field whose name is a JS reserved word
+    # (`static`, `delete`) keys the spec, the `<Comp>Config` interface, and the
+    # `config.<field>` read through the SAME raw key (quoted / bracket form), so
+    # a supplied value is no longer silently dropped. Byte-identical across the
+    # reference and the self-host emitter.
+    "config_reserved.rvl",
 ]
 
 def _load_reference_emit():
