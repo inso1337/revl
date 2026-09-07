@@ -4635,24 +4635,36 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
 
 
 def _v3_strip_index_clone(node: object, rendered: str) -> str | None:
-    """The borrow place `v[i]` for a `List` index read used in a READ-ONLY
-    position — its already-rendered form with the trailing `.clone()` removed —
-    else None (item 437d).
+    """The borrow place for a `List` index read (or a field read off one) used
+    in a READ-ONLY position — its already-rendered form with the trailing
+    `.clone()` removed — else None (item 437d).
 
     revl reads a `List` element BY VALUE, so the `index` arm of `_render_expr`
-    clones the element to own it. But a read-only slot — a `==`/`!=` operand and
-    a builtin receiver (every `Revl*Ops`/`Map` method takes `&self`, or clones
-    the receiver itself) — only borrows the element, and Rust auto-refs the
-    `v[i]` place there, so the clone is pure heap waste: `list_index.rvl`, the
-    isolated worst case, drops from 150,000 heap allocations to zero. Only the
-    read-only positions here are touched; an index read in an OWNED slot (a
+    clones the element to own it, and the `field` arm clones just the field read
+    off one (see there). But a read-only slot — a `==`/`!=` operand, a builtin
+    receiver (every `Revl*Ops`/`Map` method takes `&self`, or clones the
+    receiver itself), and a `format!`/interpolation operand (the macro borrows
+    every argument) — only borrows, and Rust auto-refs the place there, so the
+    clone is pure heap waste: `list_index.rvl`, the isolated worst case, drops
+    from 150,000 heap allocations to zero. Only the read-only positions here are
+    touched; an index read (or a field off one) in an OWNED slot (a
     `return`/`let` value, a by-value argument, a record field) still clones.
     Stripping the fixed `.clone()` suffix off the already-rendered string reuses
     it exactly, so any identifier renaming already applied is preserved and the
-    place is byte-identical to the clone form minus the suffix."""
-    if (isinstance(node, dict) and node.get("kind") == "index"
-            and rendered.endswith(".clone()")):
+    place is byte-identical to the clone form minus the suffix.
+
+    Two shapes strip: a bare `index` (`xs[i].clone()` -> `xs[i]`), and a `field`
+    whose target is an `index` (`xs[i].f.clone()` -> `xs[i].f`, the field render
+    having already moved the clone off the whole element and onto the field)."""
+    if not (isinstance(node, dict) and rendered.endswith(".clone()")):
+        return None
+    kind = node.get("kind")
+    if kind == "index":
         return rendered[:-len(".clone()")]
+    if kind == "field":
+        target = node.get("target")
+        if isinstance(target, dict) and target.get("kind") == "index":
+            return rendered[:-len(".clone()")]
     return None
 
 
@@ -5529,6 +5541,20 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
     if kind == "field":
         target_node = node.get("target")
         target = _render_expr(target_node, ctx, rename)
+        if (target_node.get("kind") == "index"
+                and target.endswith(".clone()")):
+            # item 437d: a field read off a `List` index read cloned the WHOLE
+            # element — every sibling field — only to move one field out
+            # (`xs[i].clone().kind`). Borrow the element place and clone just
+            # the field read: strictly less copied, and valid in every position
+            # the whole-element clone was, since the result is still an owned
+            # value. A read-only caller (`==`/`!=`, a builtin receiver, an
+            # interpolation operand) then strips even this field clone via
+            # `_v3_strip_index_clone`, so the read-only sites allocate nothing.
+            place = target[: -len(".clone()")]
+            if node.get("sized_length"):
+                return f"{place}.revl_length()"
+            return f"{place}.{_ident(node.get('name'), 'field')}.clone()"
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
         if node.get("sized_length"):
@@ -6139,7 +6165,13 @@ def _v3_interp(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) ->
             args.append(f"revl_ftoa({_render_expr(value, ctx, rename)})")
         else:  # ["expr", ir_node]
             format_parts.append("{}")
-            args.append(_render_expr(value, ctx, rename))
+            rendered = _render_expr(value, ctx, rename)
+            # item 437d: a `format!` argument is borrowed by the macro, never
+            # moved, so a `List` index read (or a field off one) in an
+            # interpolation operand needs no owning `.clone()` — Rust auto-refs
+            # the place for `Display`. Strip it as in the `==`/receiver slots.
+            place = _v3_strip_index_clone(value, rendered)
+            args.append(place if place is not None else rendered)
     joined = "".join(format_parts)
     if not args:
         return f"format!({_string(joined)})"
