@@ -37,6 +37,7 @@ if str(BACKEND) not in sys.path:
 
 import replay  # noqa: E402
 from revl import wal as wal_core  # noqa: E402
+from revl.__main__ import main  # noqa: E402
 from revl.recovery import recover, recover_forward_admissions  # noqa: E402
 
 
@@ -189,6 +190,69 @@ def test_a_second_run_that_also_shuts_down_cleanly_reads_clean(tmp_path):
     wal.close()
 
     report = recover(path)
+    assert report["verdict"] == "rolled-forward"
+    assert report["residue"]["clean"] is True
+    assert report["steadyState"]["outstanding"] == []
+
+
+# --------------------------------------------------------------------------- #
+# #642 — end to end: the reused-WAL residue must drive the CLI VERDICT and exit
+# status, not just the in-process `recover()` dict. `revl recover --wal FILE`
+# exits 0 only when the residue is clean (`src/revl/cli/change.py::_run_recover`),
+# so the exact issue-#642 failure — a historical `run-complete` masking a later
+# run's steady crash — is the difference between a false `EXIT 0 / CLEAN` and the
+# honest `EXIT 1 / RESIDUE` an operator relies on after a crash. #642's own
+# "Regression coverage" asks precisely for this CLI-result assertion.
+# --------------------------------------------------------------------------- #
+
+def test_cli_recover_over_reused_wal_surfaces_later_run_residue_nonzero(
+        tmp_path, capsys):
+    """Issue #642, driven through `revl recover --wal` (`main()`), not only the
+    library. Run 1 completed cleanly and Run 2 (same WAL) crashed in steady
+    state: the CLI must exit NON-ZERO and name Run 2's crossing as residue,
+    never a false clean/exit-0 hidden behind Run 1's `run-complete`."""
+    path = str(tmp_path / "reused-cli.wal")
+    _run_one_clean(path)
+    _run_two_crashes(path)
+
+    rc = main(["recover", "--wal", path, "--json"])
+    out = capsys.readouterr().out
+
+    # fail-closed: honest residue means a non-zero exit for the operator.
+    assert rc == 1
+    report = json.loads(out)
+    assert report["verdict"] == "rolled-forward"
+    assert report["residue"]["clean"] is False
+    outstanding = report["steadyState"]["outstanding"]
+    assert len(outstanding) == 1
+    assert outstanding[0]["kind"] == "steady-state-residue"
+    # it is RUN 2's crossing that drives the verdict, not run 1's completed one.
+    referent = outstanding[0].get("referent") or ""
+    assert "run2-event" in referent
+    assert "run1-event" not in referent
+
+
+def test_cli_recover_over_reused_wal_all_clean_exits_zero(tmp_path, capsys):
+    """The scoping counterpart at the CLI boundary: when BOTH runs shut down
+    cleanly, the reused WAL is genuinely settled and `revl recover` exits 0 with
+    a CLEAN verdict. Proves the fix is per-run scoping, not a blanket 'a reused
+    WAL always fails' — the completed intervals keep their correct clean exit."""
+    path = str(tmp_path / "reused-cli-clean.wal")
+    _run_one_clean(path)
+    # run 2 also shuts down cleanly (its own `run-complete`).
+    wal = replay.WriteAheadLog(path, ir={}, generation=2).open()
+    wal.commit_activation(["Svc"])
+    tl = replay.Timeline("Svc")
+    tl.record_emission("bus", "send", ("run2-event",), "Bus", ("<f>", 2))
+    wal.append_timeline(tl)
+    wal.commit_run()
+    wal.close()
+
+    rc = main(["recover", "--wal", path, "--json"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    report = json.loads(out)
     assert report["verdict"] == "rolled-forward"
     assert report["residue"]["clean"] is True
     assert report["steadyState"]["outstanding"] == []
