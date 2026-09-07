@@ -154,6 +154,12 @@ def test_distinct_key_wrapper_compiles_and_pays_the_rekey_cost():
     assert not comps["Inner"].get("routes")
 
 
+@pytest.mark.xfail(
+    reason="same-key interposition via a routes-carrying provide body is refused "
+    "by G2 (#449); it awaits the B3 through-set rule (#110). The day the body "
+    "stops being discarded, drop this marker.",
+    strict=False,
+)
 def test_same_key_routed_wrapper_carries_a_routes_entry():
     """The no-re-key shape compiles and admits, and the seam carries a `routes`
     entry for `db` -- which is exactly what the driver realizes as a router
