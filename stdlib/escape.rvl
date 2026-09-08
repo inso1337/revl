@@ -1,0 +1,224 @@
+// The revl stdlib ESCAPE module — contextual escaping for frontend assets.
+// Roadmap item 459 (issue #722), the web-platform arc (462); design notes
+// docs/design/526-webui-asset-alignment.md and docs/design/530-webui-entry-surface.md.
+//
+// ------------------------------------------------------------------ what this is
+// Item 459 wants first-class frontend asset integration: external asset files,
+// "reusable templates with contextual escaping", source maps, and normal JS/TS
+// tooling behind a clean typed boundary. Notes 526/530 move the frontend itself
+// OFF the "JS carried in revl strings" anti-pattern and onto Cordis WebUI's
+// external Vite/Vue assets (examples/webui-entry/). But wherever server DATA
+// crosses into a page — a bootstrap payload injected next to the entry, a
+// server-rendered HTML shell, a URL built from a request field — that crossing
+// still needs escaping, and the escaper MUST match the CONTEXT the data lands
+// in. One `escape` for every context is the classic injection hole: HTML-entity
+// escaping is wrong inside a `<script>`, and neither is right inside a URL.
+//
+// This module names those context escapers ONCE, so an asset-integration
+// boundary reaches for the right one instead of re-deriving (or, worse,
+// misusing) escaping at each site. It is reusable and app-neutral: it holds no
+// console/template markup and knows nothing about any particular frontend — it
+// is the safe-crossing primitive the asset story is built on, not a console
+// framework (526 argues revl must NOT grow one).
+//
+// The typed reactive-state / RPC `data` contract that would let a component
+// publish structured state to the client WITHOUT hand-built string payloads is
+// design note 530's Decision B, folded into item 457's "one definition" work;
+// until it lands, a payload injected into a page is hand-built text, and that is
+// exactly the crossing `escape_js` guards.
+//
+// ----------------------------------------------------------------- tier status
+// Every function here is PURE revl — no `@py`, no `@<backend>` bodies — built
+// entirely on the base `Str`/`Int` surface (`length`/`slice`/`charCodeAt`/
+// `concat`, `div_floor`/`mod`), which lowers on every tier (py / ts / rs / go /
+// java / wasm). Like stdlib/str.rvl and stdlib/render.rvl it adds no new
+// primitive, so it works on EVERY tier the day it lands. The py tier is executed
+// by tests/test_escape_stdlib.py; the other tiers inherit for free. It avoids
+// `Str.repeat` / `List.indexOf`, the two base methods that do not lower on wasm.
+//
+// Import with a named `use`:
+//
+//     use "stdlib/escape.rvl" { escape_html, escape_js, escape_uri }
+
+// ------------------------------------------------------------------ hex digits
+// Uppercase hex, spelled without a `chr`/`fromCharCode` builtin: a literal digit
+// string sliced at the nibble. `hex2` renders one byte (`%XX`, `\u00XX` halves),
+// `hex4` a 16-bit code unit (`\uXXXX`). All inputs here are non-negative and in
+// range by construction (a byte 0..255, a scalar masked to its low bits).
+fn hex_digit(n: Int) -> Str {
+  let d = "0123456789ABCDEF"
+  if (n >= 0 && n <= 15) { return d.slice(n, n + 1) }
+  return "0"
+}
+
+fn hex2(b: Int) -> Str {
+  return hex_digit(b.div_floor(16)).concat(hex_digit(b.mod(16)))
+}
+
+fn hex4(code: Int) -> Str {
+  return hex2(code.div_floor(256)).concat(hex2(code.mod(256)))
+}
+
+// ------------------------------------------------------------------ HTML context
+// Escape `s` for HTML TEXT content and for double- or single-quoted ATTRIBUTE
+// VALUES. This is the OWASP-recommended minimal safe set — `& < > " '` — which
+// is correct in both places at once: entity-encoding the two quote characters
+// makes the result safe inside `attr="..."` and `attr='...'`, and encoding
+// `< > &` makes it safe as element text. `'` uses the numeric reference `&#39;`
+// (the named `&apos;` is not defined in HTML4). `&` is handled FIRST so an
+// already-produced entity is not double-encoded on a second char.
+//
+// It is NOT sufficient for an UNQUOTED attribute value (which can break out on
+// whitespace or `/`), for a URL attribute (`href`/`src` — use `escape_uri` on
+// the value), or inside `<script>`/`<style>`/event-handler attributes (script
+// context — use `escape_js`). Those are different contexts by design.
+pub fn escape_html(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    let ch = s.slice(i, i + 1)
+    if (ch == "&") {
+      out = out.concat("&amp;")
+    } else if (ch == "<") {
+      out = out.concat("&lt;")
+    } else if (ch == ">") {
+      out = out.concat("&gt;")
+    } else if (ch == "\"") {
+      out = out.concat("&quot;")
+    } else if (ch == "'") {
+      out = out.concat("&#39;")
+    } else {
+      out = out.concat(ch)
+    }
+    i += 1
+  }
+  return out
+}
+
+// ------------------------------------------------------------------ script context
+// Escape `s` for embedding as the CONTENTS of a double-quoted JS string literal
+// (the caller supplies the surrounding `"`). The canonical use is a bootstrap
+// data payload injected next to the frontend entry, e.g.
+// `<script>window.__DATA = "${escape_js(payload)}"</script>`.
+//
+// Two hazards this closes that a bare quote/backslash escaper does not:
+//
+//   * ELEMENT BREAKOUT. Inside `<script>`, the HTML parser still scans for
+//     `</script`, `<!--`, `<![CDATA[`; a raw `<` in the payload can therefore
+//     terminate the element or open a comment even though the JS is well
+//     formed. Encoding `< > &` as `< > &` keeps the JS value
+//     byte-identical (the runtime unescapes them) while removing every `<`/`>`/
+//     `&` from the raw bytes the HTML parser sees. This also makes the output
+//     valid `<script type="application/json">` contents.
+//   * LINE-TERMINATOR BREAK. U+2028 / U+2029 are valid in JSON but are line
+//     terminators in a JS string literal, so a raw copy is a syntax error when
+//     the payload is `eval`d / served as JSONP; they are encoded as
+//     ` ` / ` `.
+//
+// Backslash and the double quote are escaped as `\\` / `\"`; the common C0
+// controls become `\n` `\r` `\t`; any other control below U+0020 becomes
+// `\u00XX`. The single quote is intentionally NOT escaped — the target is a
+// double-quoted literal, and over-escaping is how a context escaper drifts into
+// being wrong for its actual context.
+pub fn escape_js(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    let ch = s.slice(i, i + 1)
+    let code = s.charCodeAt(i)
+    if (code == 92) {                      // \  -> \\
+      out = out.concat("\\\\")
+    } else if (code == 34) {               // "  -> \"
+      out = out.concat("\\\"")
+    } else if (code == 60) {               // <  -> <
+      out = out.concat("\\u003C")
+    } else if (code == 62) {               // >  -> >
+      out = out.concat("\\u003E")
+    } else if (code == 38) {               // &  -> &
+      out = out.concat("\\u0026")
+    } else if (code == 10) {               // LF -> \n
+      out = out.concat("\\n")
+    } else if (code == 13) {               // CR -> \r
+      out = out.concat("\\r")
+    } else if (code == 9) {                // TAB -> \t
+      out = out.concat("\\t")
+    } else if (code == 8232) {             // U+2028 ->
+      out = out.concat("\\u2028")
+    } else if (code == 8233) {             // U+2029 ->
+      out = out.concat("\\u2029")
+    } else if (code < 32) {                // other C0 control -> \u00XX
+      out = out.concat("\\u").concat(hex4(code))
+    } else {
+      out = out.concat(ch)
+    }
+    i += 1
+  }
+  return out
+}
+
+// ------------------------------------------------------------------ URI context
+// The 1-4 UTF-8 bytes of a single Unicode scalar `cp`, standard encoding. A
+// private copy of stdlib/str.rvl's `utf8_encode_scalar` (no stdlib module
+// imports another today, so this module stays self-contained); `escape_uri`
+// percent-encodes on the byte stream, so it must reach the bytes itself.
+// revl has no bitwise operators, so the shift/mask encoding is spelled with
+// `div_floor` / `mod` (both lower on every tier, wasm included).
+fn utf8_bytes_of(cp: Int) -> List[Int] {
+  if (cp < 128) {
+    return [cp]
+  }
+  if (cp < 2048) {
+    return [192 + cp.div_floor(64),
+            128 + cp.mod(64)]
+  }
+  if (cp < 65536) {
+    return [224 + cp.div_floor(4096),
+            128 + cp.div_floor(64).mod(64),
+            128 + cp.mod(64)]
+  }
+  return [240 + cp.div_floor(262144),
+          128 + cp.div_floor(4096).mod(64),
+          128 + cp.div_floor(64).mod(64),
+          128 + cp.mod(64)]
+}
+
+fn is_uri_unreserved(code: Int) -> Bool {
+  if (code >= 65 && code <= 90) { return true }   // A-Z
+  if (code >= 97 && code <= 122) { return true }  // a-z
+  if (code >= 48 && code <= 57) { return true }   // 0-9
+  if (code == 45) { return true }                 // -
+  if (code == 46) { return true }                 // .
+  if (code == 95) { return true }                 // _
+  return code == 126                              // ~
+}
+
+// Percent-encode `s` as a single URI COMPONENT (a query value or one path
+// segment), RFC 3986 style: the unreserved set `A-Za-z0-9 - . _ ~` passes
+// through verbatim and every OTHER byte of the UTF-8 encoding becomes `%XX`
+// with UPPERCASE hex. This is the escaper for data landing in a URL — an
+// `href`/`src` attribute value, a fetch target — where HTML-entity escaping
+// would leave `?`, `&`, `#`, `/`, `=`, space and the reserved delimiters live
+// and let a value forge query structure. It is deliberately STRICTER than JS
+// `encodeURIComponent` (which also leaves `! ' ( ) *` unencoded): encoding a
+// few extra sub-delimiters is always safe, under-encoding is not. The whole
+// component is encoded, so it is a component builder, not a full-URL escaper
+// (it encodes `:` `/` `?` `#` too — do not hand it an entire URL).
+pub fn escape_uri(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    let code = s.charCodeAt(i)
+    if (is_uri_unreserved(code)) {
+      out = out.concat(s.slice(i, i + 1))
+    } else {
+      for (b of utf8_bytes_of(code)) {
+        out = out.concat("%").concat(hex2(b))
+      }
+    }
+    i += 1
+  }
+  return out
+}
