@@ -1,0 +1,189 @@
+// The SECOND driver behind examples/model_store.rvl's driver-independent store:
+// a real sqlite backing for the SAME `Store` service, so the memory -> sqlite
+// swap is a COMPOSITION-TIME CHOICE. Roadmap item 465 (issue #752), design
+// docs/design/527-database-persistence-alignment.md.
+//
+// 527's remaining exit criterion, made concrete: "a driver swap (memory to
+// sqlite) requiring no change to model or query code, and an injected-fault
+// write reverting residue-free on the new driver." Minato's own shape (drivers
+// are separate packages behind ONE API — `memory`, `sqlite`, `postgres` — and
+// the app picks one at composition time without touching model or query code):
+//
+//   * the declared MODEL below (`type Note`, `type Draft`) and the `Store`
+//     service surface are BYTE-IDENTICAL to examples/model_store.rvl's. The
+//     model never learns which driver stands behind it;
+//   * the QUERY CODE in the lifecycle tests — `call store.create(...)`,
+//     `call store.get(...)`, `call store.list()` and their assertions — is
+//     identical to model_store.rvl's, verbatim. Only the `load` target names a
+//     different component (`SqliteStore` vs `MemoryStore`); that IS the swap;
+//   * no raw SQL lives in the model or the query code. The SQL is confined to
+//     the sqlite driver's `@py` extern bodies — exactly where Minato keeps it,
+//     inside the `sqlite` driver package, never in the model.
+//
+// The driver is backed by a REAL embedded sqlite database (Python's stdlib
+// `sqlite3`, an `:memory:` connection) held as an `acquire`d host resource for
+// the component's activation. No new host binding is required: the connection
+// is opened, its schema created, and closed on teardown through ordinary `@py`
+// externs, the same mechanism stdlib/fs.rvl's witnessed externs use.
+//
+// Every persistence MUTATION is still lowered as a revertible `effect` whose
+// derived inverse is the natural CRUD counterpart: `create` (an INSERT) carries
+// `undo` DELETE, so a row written during activation is removed in LIFO order on
+// teardown or ABORT — residue-free, on the new driver. The `abort` lifecycle
+// test below injects a fault after a write and asserts the composition reverts
+// with nothing left behind.
+
+// The declared model: one row type, keyed by a store-assigned `id`. Identical
+// to examples/model_store.rvl — the model does not change across the swap.
+type Note = { id: Str, body: Str }
+
+// What a caller supplies to `create`: the row WITHOUT its key. The store owns
+// key assignment (Minato `autoInc`), so the caller never invents an id.
+type Draft = { body: Str }
+
+// The persistence service: typed CRUD verbs, no SQL. Identical surface to
+// examples/model_store.rvl's `Store`, so consumer query code is unchanged when
+// the driver behind it is swapped from memory to sqlite.
+service Store {
+  fn get(id: Str) -> Opt[Note]
+  fn list() -> List[Note]
+  emission fn create(draft: Draft) -> Str
+}
+
+// ---------------------------------------------------------------- the driver
+
+// The sqlite driver's host boundary. Every SQL string lives HERE, inside the
+// driver's `@py` bodies (Minato keeps SQL inside its `sqlite` driver package,
+// never in the model). `sq_open` is an `acquire` extern: it opens the embedded
+// database and returns the live connection handle, whose site-declared inverse
+// closes it, so the resource is released on teardown.
+extern acquire fn sq_open() -> Conn undo sq_close(result) = @py {
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT)")
+    conn.execute("CREATE TABLE seq (n INTEGER PRIMARY KEY AUTOINCREMENT)")
+    conn.commit()
+    return conn
+}
+
+extern pure fn sq_close(conn: Conn) -> Unit = @py {
+    conn.close()
+    return
+}
+
+// Mint the next primary key from a monotonic sqlite sequence (Minato autoInc):
+// an AUTOINCREMENT column only ever grows, so an id is never reused even after
+// its row is deleted.
+extern pure fn sq_next_id(conn: Conn) -> Str = @py {
+    cur = conn.execute("INSERT INTO seq DEFAULT VALUES")
+    conn.commit()
+    return "note-" + str(cur.lastrowid - 1)
+}
+
+// A typed point read: the row for `id`, or `None`. `Opt[Note]` crosses the host
+// boundary as the value itself (Some) or `None`.
+extern pure fn sq_get(conn: Conn, id: Str) -> Opt[Note] = @py {
+    row = conn.execute("SELECT id, body FROM notes WHERE id = ?", (id,)).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "body": row[1]}
+}
+
+// The driver-owned listing: a real `SELECT` answers the same `list` verb the
+// memory driver folds by hand. Ascending by `id` keeps the order deterministic.
+extern pure fn sq_list(conn: Conn) -> List[Note] = @py {
+    rows = conn.execute("SELECT id, body FROM notes ORDER BY id").fetchall()
+    return [{"id": r[0], "body": r[1]} for r in rows]
+}
+
+// The row write and its natural inverse. `sq_insert` is the INSERT; `sq_remove`
+// is the DELETE the `create` effect declares as its `undo`.
+extern pure fn sq_insert(conn: Conn, id: Str, body: Str) -> Unit = @py {
+    conn.execute("INSERT INTO notes (id, body) VALUES (?, ?)", (id, body))
+    conn.commit()
+    return
+}
+
+extern pure fn sq_remove(conn: Conn, id: Str) -> Unit = @py {
+    conn.execute("DELETE FROM notes WHERE id = ?", (id,))
+    conn.commit()
+    return
+}
+
+// The sqlite driver. It provides the SAME `Store` service `MemoryStore` does,
+// so the swap touches neither the model nor consumer query code. The embedded
+// connection is acquired for the component's life and closed on teardown.
+component SqliteStore provides store: Store {
+  let db = effect sq_open() undo sq_close(db)
+
+  provide store {
+    fn get(id) = sq_get(db, id)
+
+    fn list() = sq_list(db)
+
+    // The mutation, lowered as a revertible effect: the store MINTS the key
+    // from the monotonic sequence, INSERTs the row, and on abort/teardown
+    // DELETEs it. `create`'s derived inverse is `remove` — the Minato-natural
+    // counterpart — so the write reverts residue-free, and the returned key is
+    // the store's, never the caller's. This is the same revertible-effect shape
+    // examples/model_store.rvl's memory driver uses; only the backing differs.
+    fn create(draft) {
+      let id = sq_next_id(db)
+      effect sq_insert(db, id, draft.body)
+      undo sq_remove(db, id)
+      return id
+    }
+  }
+}
+
+// ---------------------------------------------------------------- lifecycle
+
+// The three assertions below have query bodies IDENTICAL to
+// examples/model_store.rvl's; only the `load`/`unload` target changed. That is
+// the whole memory -> sqlite swap.
+
+lifecycle test "a created row is readable under its store-assigned key, and reverts residue-free" {
+  load SqliteStore
+  let id = call store.create({ body: "first" })
+  assert id == "note-0"
+  let hit = call store.get(id)
+  assert hit == Some({ id: "note-0", body: "first" })
+  unload SqliteStore
+  assert no_residue
+}
+
+lifecycle test "list returns every created row, and keys are never reused" {
+  load SqliteStore
+  let a = call store.create({ body: "alpha" })
+  let b = call store.create({ body: "beta" })
+  assert a == "note-0"
+  assert b == "note-1"
+  let all = call store.list()
+  assert all == [{ id: "note-0", body: "alpha" }, { id: "note-1", body: "beta" }]
+  unload SqliteStore
+  assert no_residue
+}
+
+lifecycle test "a reloaded store starts empty" {
+  load SqliteStore
+  call store.create({ body: "gone" })
+  unload SqliteStore
+  load SqliteStore
+  let stale = call store.get("note-0")
+  assert stale == None
+  let empty = call store.list()
+  assert empty == []
+  unload SqliteStore
+  assert no_residue
+}
+
+// The injected fault: write a row, then ABORT mid-activation. The `create`
+// effect's derived inverse (the DELETE) replays LIFO before the connection is
+// closed, so the composition reverts residue-free on the sqlite driver — the
+// same recovery story the memory driver gives, now over a real embedded store.
+lifecycle test "an aborted write reverts residue-free on the sqlite driver" {
+  load SqliteStore
+  call store.create({ body: "doomed" })
+  abort
+  assert no_residue
+}
