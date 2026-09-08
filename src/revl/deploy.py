@@ -1513,6 +1513,41 @@ def serve_admit_request(request_wire: Mapping, *,
     return AdmitResponse(receipt=receipt, challenge=request.challenge).to_wire()
 
 
+def serve_deploy_request(request_wire: Mapping, *,
+                         key_paths: Sequence[Path | str] = (),
+                         host_key: Optional[bytes] = None,
+                         require_gauntlet: bool = False,
+                         require_conformance: bool = False,
+                         runtime_versions: Optional[Mapping[str, str]] = None,
+                         now=None) -> dict:
+    """Route ONE request off the orchestration channel to the phase runner that
+    serves it, and return that runner's response wire dict.
+
+    This is the single dispatch both the in-process stub (:class:`InProcessTransport`)
+    and the real `revl deploy-admit` runner process (:func:`deploy_admit_command`)
+    share, so the stub tested on one host and the process a live transport spawns
+    route identically: a commit-request (:data:`COMMIT_REQUEST_KIND`) goes to
+    :func:`serve_commit_request`, and EVERYTHING ELSE goes to
+    :func:`serve_admit_request`, which itself fail-closes on anything it cannot
+    parse — so an unknown or malformed kind refuses rather than being silently
+    mis-served (a commit mis-read as an admit would run a chain verify instead of
+    a load-time measurement, and the reverse would skip the measurement).
+
+    The host's trust configuration (`key_paths`, `host_key`, the evidence floor,
+    `runtime_versions`) is the RUNNER's, never the request's (design S2.4): a
+    request can ask for admission but never carry the trust that grants it.
+    """
+    kind = request_wire.get("kind") if isinstance(request_wire, Mapping) else None
+    if kind == COMMIT_REQUEST_KIND:
+        return serve_commit_request(request_wire, host_key=host_key,
+                                    runtime_versions=runtime_versions, now=now)
+    return serve_admit_request(request_wire, key_paths=key_paths,
+                               host_key=host_key,
+                               require_gauntlet=require_gauntlet,
+                               require_conformance=require_conformance,
+                               runtime_versions=runtime_versions, now=now)
+
+
 class InProcessTransport:
     """The orchestration channel of §1.2, stubbed to run the runner IN THIS
     PROCESS — no second machine, no ssh, no subprocess. It stands in for the
@@ -1558,18 +1593,147 @@ class InProcessTransport:
         the PREPARE runner (which itself fail-closes on anything it cannot parse,
         so an unknown kind still refuses rather than being silently mis-served)."""
         on_far_side = json.loads(json.dumps(request_wire))
-        kind = on_far_side.get("kind") if isinstance(on_far_side, Mapping) else None
-        if kind == COMMIT_REQUEST_KIND:
-            response_wire = serve_commit_request(
-                on_far_side, host_key=self._host_key,
-                runtime_versions=self._runtime_versions, now=now)
-        else:
-            response_wire = serve_admit_request(
-                on_far_side, key_paths=self._key_paths, host_key=self._host_key,
-                require_gauntlet=self._require_gauntlet,
-                require_conformance=self._require_conformance,
-                runtime_versions=self._runtime_versions, now=now)
+        response_wire = serve_deploy_request(
+            on_far_side, key_paths=self._key_paths, host_key=self._host_key,
+            require_gauntlet=self._require_gauntlet,
+            require_conformance=self._require_conformance,
+            runtime_versions=self._runtime_versions, now=now)
         return json.loads(json.dumps(response_wire))
+
+
+#: The wire kind a :class:`StdioRunnerTransport` synthesises when the runner
+#: process is gone — it never comes off a runner, so `AdmitResponse.from_wire`
+#: and `CommitResponse.from_wire` both reject it, turning a dead runner into the
+#: same fail-closed :data:`LINK_TRANSPORT` refusal an unparseable reply already
+#: is (a conductor must not read a vanished runner as a verdict).
+_RUNNER_GONE_KIND = "revl.deploy.runner-terminated"
+
+
+class StdioRunnerTransport:
+    """The orchestration channel of §1.2 over a real runner PROCESS, spoken to
+    on its stdin/stdout with one newline-delimited JSON request per line and one
+    reply per line — the shape :func:`deploy_admit_command` (`revl deploy-admit`)
+    reads and writes, and the same newline-JSON control channel
+    :mod:`revl._deploy_participant` already uses.
+
+    This is the piece between :class:`InProcessTransport` (which runs the runner
+    inside the conductor for a one-host test) and the deferred cross-machine leg
+    (design R4/R5: scp/rsync staging, a pinned SSH host key). It spawns `argv`
+    and speaks the identical protocol regardless of what `argv` is: locally
+    :meth:`local` builds ``[python, -m, revl, deploy-admit, ...]`` so the far
+    "host" is a child on this machine, and the machine boundary rides on top
+    unchanged by prefixing the same command with ``ssh <host>``. The host's trust
+    configuration lives entirely in `argv` (the runner's own key files and
+    evidence floor), never in the request — the trust inversion S2.4 requires.
+
+    One long-lived process carries BOTH phases (PREPARE admit-requests and COMMIT
+    commit-requests), exactly as a real orchestration channel does; the runner
+    routes each line by its `kind` (:func:`serve_deploy_request`). It is a
+    context manager, and :meth:`close` reaps the child.
+
+    `now` on :meth:`send` is a same-process time hook (for TTL/freshness tests)
+    and cannot cross to the child, which measures against real time; the argument
+    is accepted for interface parity with :class:`InProcessTransport` and ignored
+    on this transport. A runner that dies rather than answering is not an error
+    the conductor swallows: :meth:`send` returns a sentinel wire dict that every
+    ``from_wire`` rejects, so :func:`request_admission` / :func:`request_commit`
+    fail closed to a :data:`LINK_TRANSPORT` refusal.
+    """
+
+    def __init__(self, argv: Sequence[str], *, cwd: Optional[Path | str] = None,
+                 env: Optional[Mapping[str, str]] = None) -> None:
+        self._argv = list(argv)
+        self._cwd = str(cwd) if cwd is not None else None
+        self._env = dict(env) if env is not None else None
+        self._proc: Optional[subprocess.Popen] = None
+
+    @classmethod
+    def local(cls, *, key_paths: Sequence[Path | str] = (),
+              host_key_path: Optional[Path | str] = None,
+              require_gauntlet: bool = False,
+              require_conformance: bool = False,
+              runtime_versions: Optional[Mapping[str, str]] = None,
+              python: Optional[str] = None,
+              env: Optional[Mapping[str, str]] = None) -> "StdioRunnerTransport":
+        """Build a transport that runs the `revl deploy-admit` runner as a LOCAL
+        child (`python -m revl deploy-admit ...`).
+
+        Key material is passed as FILE PATHS, never as bytes on the command line:
+        a secret in `argv` shows up in `ps`, and the far host holds its keys on
+        its own disk anyway (design R5). This is the conductor-side helper a
+        `via = local` cross-process staging step would call; the SSH form is the
+        same argv with an ``ssh <host>`` prefix and remote paths.
+        """
+        argv = [python or sys.executable, "-m", "revl", "deploy-admit"]
+        for path in key_paths:
+            argv += ["--key", str(path)]
+        if host_key_path is not None:
+            argv += ["--host-key", str(host_key_path)]
+        if require_gauntlet:
+            argv.append("--require-gauntlet")
+        if require_conformance:
+            argv.append("--require-conformance")
+        for name, version in (runtime_versions or {}).items():
+            argv += ["--runtime-version", f"{name}={version}"]
+        return cls(argv, env=env)
+
+    def __enter__(self) -> "StdioRunnerTransport":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def _ensure(self) -> subprocess.Popen:
+        if self._proc is None or self._proc.poll() is not None:
+            self._proc = subprocess.Popen(  # noqa: S603 — argv is caller-built
+                self._argv, cwd=self._cwd, env=self._env,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                text=True, encoding="utf-8")
+        return self._proc
+
+    def send(self, request_wire: Mapping, *, now=None) -> dict:
+        """Deliver one request line to the runner child and read one reply line.
+
+        A child that has died, or answers with a closed pipe, is reported as the
+        :data:`_RUNNER_GONE_KIND` sentinel rather than raising — a dead runner is
+        a transport fault the conductor refuses on, not a crash it propagates.
+        """
+        del now  # cannot cross the process boundary; the child uses real time
+        proc = self._ensure()
+        if proc.stdin is None or proc.stdout is None:  # pragma: no cover — PIPE set above
+            return {"kind": _RUNNER_GONE_KIND}
+        try:
+            proc.stdin.write(json.dumps(request_wire) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, ValueError):
+            return {"kind": _RUNNER_GONE_KIND}
+        line = proc.stdout.readline()
+        if not line:
+            return {"kind": _RUNNER_GONE_KIND}
+        try:
+            reply = json.loads(line)
+        except json.JSONDecodeError:
+            # A line that is not JSON is not a verdict; refuse it like a dead runner.
+            return {"kind": _RUNNER_GONE_KIND}
+        return reply if isinstance(reply, dict) else {"kind": _RUNNER_GONE_KIND}
+
+    def close(self) -> None:
+        """Close the channel and reap the runner child, if one was spawned."""
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        for stream in (proc.stdin, proc.stdout):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:  # pragma: no cover
+                pass
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except (OSError, subprocess.SubprocessError):  # pragma: no cover
+                proc.kill()
 
 
 def request_admission(transport, request: AdmitRequest, *, now=None) -> dict:
@@ -3410,6 +3574,96 @@ def _load_deploy_map(path: str) -> dict:
     import tomllib  # noqa: PLC0415 — stdlib, py3.11+
 
     return tomllib.loads(text)
+
+
+def _runtime_versions_from_args(pairs: Optional[Sequence[str]]) -> Optional[dict]:
+    """Parse repeated ``--runtime-version name=ver`` flags into the mapping the
+    runner reports on its verdicts. Returns ``None`` when none were given (the
+    runner then omits the versions rather than reporting an empty set)."""
+    if not pairs:
+        return None
+    versions: dict[str, str] = {}
+    for pair in pairs:
+        name, sep, version = pair.partition("=")
+        if not sep or not name:
+            raise ValueError(
+                f"--runtime-version must be NAME=VERSION, got {pair!r}")
+        versions[name] = version
+    return versions
+
+
+def deploy_admit_command(args) -> int:
+    """`revl deploy-admit [--key PATH]... [--host-key PATH] [--require-gauntlet]
+    [--require-conformance] [--runtime-version NAME=VER]...` — the far-side runner
+    of the deploy orchestration channel (design §1.3 steps 4–5 / step 7).
+
+    It reads one JSON request per line off stdin, serves each with the host's OWN
+    trust configuration (the key files and evidence floor named on THIS command
+    line, never anything the request carries — the S2.4 trust inversion), and
+    writes one JSON reply per line to stdout. A PREPARE admit-request runs the
+    chain verify (:func:`serve_admit_request`); a COMMIT commit-request runs the
+    load-time measurement (:func:`serve_commit_request`); the routing is
+    :func:`serve_deploy_request`, the same dispatch :class:`InProcessTransport`
+    uses, so this process and the one-host stub behave identically. One process
+    serves BOTH phases over its lifetime, exactly as a real channel does.
+
+    This is the process a live transport spawns: locally as
+    ``python -m revl deploy-admit ...`` (see :meth:`StdioRunnerTransport.local`),
+    and across a machine boundary as the same command behind ``ssh <host>`` once
+    the deferred staging + pinned-host-key leg (design R4/R5) lands. It stages and
+    verifies; it never drives the local `apply` — that is the conductor's
+    coordinated protocol (:func:`run_deploy`), unchanged.
+
+    A line that is not a JSON object is answered with a fail-closed
+    :data:`LINK_TRANSPORT` refusal rather than skipped: a runner that could not
+    read what it was asked must refuse audibly, so the conductor's challenge check
+    trips instead of the exchange hanging.
+    """
+    key_paths = list(getattr(args, "key", None) or [])
+    host_key = None
+    host_key_path = getattr(args, "host_key", None)
+    if host_key_path is not None:
+        try:
+            host_key = Path(host_key_path).read_bytes()
+        except OSError as error:
+            print(f"error: cannot read --host-key {host_key_path!r}: {error}",
+                  file=sys.stderr)
+            return 1
+    try:
+        runtime_versions = _runtime_versions_from_args(
+            getattr(args, "runtime_version", None))
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    require_gauntlet = bool(getattr(args, "require_gauntlet", False))
+    require_conformance = bool(getattr(args, "require_conformance", False))
+
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            request_wire = json.loads(line)
+        except json.JSONDecodeError as error:
+            reply = _refusal(
+                LINK_TRANSPORT,
+                f"the deploy-admit runner could not parse a request line, so "
+                f"nothing was served: {error}")
+        else:
+            if not isinstance(request_wire, dict):
+                reply = _refusal(
+                    LINK_TRANSPORT,
+                    "the deploy-admit runner received a request line that is "
+                    "not a JSON object, so nothing was served")
+            else:
+                reply = serve_deploy_request(
+                    request_wire, key_paths=key_paths, host_key=host_key,
+                    require_gauntlet=require_gauntlet,
+                    require_conformance=require_conformance,
+                    runtime_versions=runtime_versions)
+        sys.stdout.write(json.dumps(reply, sort_keys=True) + "\n")
+        sys.stdout.flush()
+    return 0
 
 
 def deploy_command(args) -> int:
