@@ -36,8 +36,10 @@ pub const SERVER_VERSION: &str = "2.0";
 /// The `gate_version` API level this binary speaks (design: the version surface
 /// that makes a stale redistributed binary detectable). Slice 2 answers
 /// navigation from the native gate, so the reported surface changed and the
-/// level is bumped with it.
-pub const GATE_API: &str = "1";
+/// level is bumped with it. The one-file bundling slice adds a `runtime` block
+/// (the distribution shape and pin), another surface change, so the level rises
+/// again.
+pub const GATE_API: &str = "2";
 
 /// Set to any value to stop navigation falling back to the reference, so the
 /// NATIVE answer is observable on its own. This exists for the oracle
@@ -310,6 +312,16 @@ impl LspServer {
             // runtime, or a `revl` on the machine. A client can tell a one-file
             // artifact from one leaning on an installed `revl` alongside it.
             "embedding": self.engine.embedding(),
+            // the distribution SHAPE and pin `embedding` cannot express: a
+            // genuinely single distributed FILE (`source: "embedded"`) vs a
+            // self-contained PAIR (`"beside-exe"`) vs one pointed at by the
+            // environment (`"env"`) vs the system fallback (`"system-python"`,
+            // pin `null`). This is the audit surface the one-file bundling item
+            // (issue #102) is about, and the runtime's own skew comparand (A3).
+            "runtime": {
+                "source": self.engine.runtime_source(),
+                "pin": self.engine.runtime_pin().map(Value::from).unwrap_or(Value::Null),
+            },
             "native": {
                 "api": gate.api,
                 "language": gate.language,
