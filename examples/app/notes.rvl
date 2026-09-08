@@ -1,5 +1,16 @@
-// The exemplary revl web application — the BORING HALF (roadmap item 462,
-// issue #725, design docs/design/525-exemplary-web-app.md; slice 1 of 462).
+// The exemplary revl web application (roadmap item 462, issue #725, design
+// docs/design/525-exemplary-web-app.md). TWO halves, per 525:
+//
+// * the BORING HALF (slice 1) — a typed notes CRUD service written the obvious
+//   way over the `route` clause, the HTTP contract and the model store; and
+// * the DIFFERENTIATED HALF (slice 3, below) — ONE hot-swappable, effect-
+//   governed service (a pluggable ranking/scoring component) that is proposed,
+//   admitted (or refused with retained ownership), swapped in, and on an
+//   injected fault reverts residue-free. Its lifecycle states are made
+//   OBSERVABLE through the documented service lifecycle contract (item 460,
+//   docs/lifecycle-contract.md): serving / cancel-requested vs cancel-completed
+//   / owned-after-failure / recovery-resume. This is 525's claim that the
+//   complexity is reserved for the guarantees revl uniquely provides.
 //
 // 525's first claim, made concrete: ORDINARY web development is boring. A small
 // typed task/notes CRUD service, written the obvious way over the primitives
@@ -156,6 +167,77 @@ component NotesHttp requires store: NoteStore provides notes_api: NotesApi {
   }
 }
 
+// ------------------------------------------- the DIFFERENTIATED half (slice 3)
+
+// 525's second claim: the complexity is reserved for the guarantee revl uniquely
+// provides — a live-reconfigurable, effect-governed service that is hot-swapped
+// through admission, with VISIBLE admission, cancellation and residue-free
+// recovery. One such service, kept small, is enough (525 non-goal: "one clean
+// pass over each guarantee beats breadth").
+//
+// The service: a pluggable RANKING/SCORING component for the notes. It records
+// engagement signals (a note is "bumped" when viewed) into effect-created state,
+// and SCORES a note from those signals under a strategy. The scoring strategy is
+// what gets HOT-SWAPPED at runtime: a `recency` build (each signal weighs 1) is
+// replaced by a `weighted` build (each weighs 3) WITHOUT losing the recorded
+// signals — the state crosses the swap because the component declares a
+// `handoff` (item 53), and admission REFUSES any successor whose declared state
+// shape cannot hold the running one rather than silently dropping it.
+//
+// This is deliberately NOT wired behind the CRUD HTTP surface: its lifecycle is
+// observed through the service lifecycle contract's own surface (`Session.state`
+// fiber states + `providedKeys`, `teardown_disposition`, the recovery verdict),
+// which is exactly where item 460 makes admission / cancellation / recovery
+// observable. The full proposed -> admitted -> refused -> cancelled -> owned ->
+// resumed walk is driven on the real cordis-py runtime through `Session.swap`
+// in tests/test_app_hotswap_725.py (525 acceptance bar 4).
+service Ranker {
+  fn strategy() -> Str         // which scoring build is live (proves the swap)
+  fn signals() -> Int          // how many engagement signals are recorded
+  fn score(id: Str) -> Int     // the note's score under the live strategy
+  fn bump(id: Str)             // record one engagement signal for a note
+}
+
+// The baseline build: `recency`, each signal weighs 1. The engagement log is
+// effect-created state under an `undo`, so every recorded signal reverts in LIFO
+// order on teardown — residue-free — and `handoff ranking` declares the SHAPE
+// that state carries across a hot-swap. A successor build (the `weighted` one in
+// the swap test) declares the same shape and inherits the log warm; a successor
+// whose shape differs is refused at admission, the running build left serving.
+component TrendingRanker provides ranking: Ranker {
+  handoff ranking: Map[Str, Str]           // the state contract for the swap
+  let log = effect Map.new() undo log.drop() // the engagement log itself
+
+  provide ranking {
+    fn strategy() = "recency"
+
+    fn signals() = log.size()
+
+    // One engagement signal is one log row: a unique key (the running count)
+    // mapped to the note id it credits. The insert is a revertible effect whose
+    // derived inverse is `remove`, the model-store-natural counterpart, so a
+    // signal recorded during activation reverts residue-free on teardown/divert.
+    fn bump(id) {
+      let k = `sig-${log.size()}`
+      effect log.insert(k, id)
+      undo   log.remove(k)
+    }
+
+    // Score = the count of signals crediting this id, times the strategy weight.
+    // The `recency` build weighs each signal 1. The keys-then-get fold is the
+    // same boring shape `NoteStore.all` uses (see §2 of the slice-1 gaps note);
+    // no sentinel, no workaround.
+    fn score(id) {
+      var n = 0
+      for (k of log.keys()) {
+        let hit = match log.get(k) { Some(v) => v == id, None => false }
+        if (hit) { n = n + 1 }
+      }
+      return n
+    }
+  }
+}
+
 // ---------------------------------------------------------------- lifecycle
 
 // End-to-end on the real runtime: load the store then the HTTP component (the
@@ -173,6 +255,29 @@ lifecycle test "create then get returns the stored note" {
   assert got == Ok({ id: "note-0", title: "first", body: "hello" })
   unload NotesHttp
   unload MemoryStore
+  assert no_residue
+}
+
+// The differentiated half's baseline, on the real runtime: the ranker serves,
+// records engagement, scores under its live strategy, and reverts residue-free
+// on teardown. The hot-SWAP legs (admission, refusal, cancellation, recovery)
+// need `Session.swap` and live in tests/test_app_hotswap_725.py; a lifecycle
+// test cannot drive a swap, so this proves only the serving + residue-free
+// teardown a swap depends on.
+lifecycle test "ranker records engagement, scores by strategy, reverts residue-free" {
+  load TrendingRanker
+  let live = call ranking.strategy()
+  assert live == "recency"
+  call ranking.bump("note-0")
+  call ranking.bump("note-0")
+  call ranking.bump("note-1")
+  let n = call ranking.signals()
+  assert n == 3
+  let s0 = call ranking.score("note-0")
+  assert s0 == 2
+  let s1 = call ranking.score("note-1")
+  assert s1 == 1
+  unload TrendingRanker
   assert no_residue
 }
 
