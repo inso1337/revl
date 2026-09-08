@@ -42,7 +42,7 @@ docs/design/527-database-persistence-alignment.md) would close.
 no id (the server owns it). With no store verb that assigns a primary key, the
 HTTP handler mints one itself:
 
-```revl
+```revl fragment
 let id  = "note-" + store.size().to_str()
 let row = { id: id, title: note.title, body: note.body }
 emit store.create(row)
@@ -67,7 +67,7 @@ than presented as the intended shape.
 is `new/drop/insert/insert_if_absent/remove/get/size/keys` — it has `keys()` but
 no `values()` — so `NoteStore.all` lists the VALUES with a keys-then-get fold:
 
-```revl
+```revl fragment
 fn all() {
   var out = []
   for (k of rows.keys()) { out = out.push(rows.get(k)) }
