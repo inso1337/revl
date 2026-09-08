@@ -316,11 +316,11 @@ composition F {
 
 
 def test_on_failure_withdraw_is_the_default_and_raises_a_fault(tmp_path):
-    """D-424c.3's default. The declaration is what C2 lands; the runtime half —
+    """D-424c.3's default. The declaration is what C2 landed; the runtime half —
     turning this fault into a provider withdrawal that cascades through R2/R3 —
-    is the seam-client mechanism at `backends/python/bridge.py:723`, which a
-    synthesized row does not join. This pins the contract so the day the
-    runtime wires it, something says so."""
+    landed as item 439 slice T0: the synthesized body raises a typed
+    `TransportFault` carrying the row label and crossing, and the activation
+    runtime maps it to provider withdrawal (see `test_439_a2a_task.py`)."""
     write(tmp_path, services=BILLING, base="""
 composition G {
   use "services.rvl"
@@ -331,7 +331,10 @@ composition G {
     row, = table.rows
     assert row.remote["onFailure"] == "withdraw"
     text = table.sources[row.source]
-    assert 'raise RuntimeError("remote: transport failure") from _exc' in text
+    assert 'raise TransportFault("remote: transport failure") from _exc' in text
+    assert "class TransportFault(RuntimeError):" in text
+    assert "_revl_transport_fault = True" in text
+    assert 'revl_row = "billing"' in text
     # There is no third option: swallowing a transport failure has no spelling.
     assert "return None" not in text
 
