@@ -77,7 +77,7 @@ def test_user_cache_emits_java_structure():
     assert "implements Plugin" in src
     # a required service resolves by its provision key, so a second provider of
     # the same service type could never shadow the one this consumer names.
-    assert 'ctx.get(Database.class, "db")' in src
+    assert 'ctx.get(ServiceKey.of(Database.class, "db"))' in src
     assert 'ctx.provide(ServiceKey.of(Cache.class, "cache")' in src
     assert "Disposables.composite(" in src
     assert "Disposables.of(() -> store.drop())" in src
@@ -128,7 +128,7 @@ def test_requires_binds_the_provider_named_by_its_key():
     assert 'ctx.provide(ServiceKey.of(Store.class, "readonly")' in src
     assert 'ctx.provide(ServiceKey.of(Store.class, "admin")' in src
     # the consumer resolves the key it named — not the bare service class
-    assert 'Store readonly = ctx.get(Store.class, "readonly");' in src
+    assert 'Store readonly = ctx.get(ServiceKey.of(Store.class, "readonly"));' in src
     assert "ctx.get(Store.class);" not in src
 
 
