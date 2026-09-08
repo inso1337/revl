@@ -1064,11 +1064,26 @@ _STREAM_ITER_COUNTER = 0
 # stream leaves it False and emits byte-identically to before.
 _COMP_NEEDS_STREAM = False
 
+# item 130 Slice 5: a typed-event handler (`on <Event> as e in sub`) additionally
+# pulls in the `EventContract` half of the stream runtime (`_STREAM_EVENT_PREAMBLE`)
+# — the derived-schema validator and the bounded dedup window — and needs
+# `encoding/json` to decode the delivered item against that schema. A stream
+# program with no `on … as` handler leaves it False, so a plain `every … in`
+# emits byte-identically to before (no event preamble, no json import).
+_COMP_NEEDS_STREAM_EVENT = False
+
 
 def _flag_stream() -> None:
     """Pull the stream host runtime into this module's preamble (item 130)."""
     global _COMP_NEEDS_STREAM
     _COMP_NEEDS_STREAM = True
+
+
+def _flag_stream_event() -> None:
+    """Pull the typed-event contract runtime in too (item 130 Slice 5)."""
+    global _COMP_NEEDS_STREAM, _COMP_NEEDS_STREAM_EVENT
+    _COMP_NEEDS_STREAM = True
+    _COMP_NEEDS_STREAM_EVENT = True
 
 # item 243/247 (docs/design/teardown-contract.md): witnessed externs by name,
 # so a component step's acquisition can be recognised as a `transactional`
@@ -2556,40 +2571,24 @@ def _refuse_unlowered_stream_surface(node, tier: str) -> None:
             "`--backend py`" % tier)
 
 
-def _refuse_dropped_stream_component(ir: dict) -> None:
-    """Refuse a document the pure typed-core path would route past while a
-    component in it holds a stream (item 130).
+def _document_holds_stream(ir: dict) -> bool:
+    """True when a component in this document holds a stream — a `subscribe`
+    bracket or a `stream-iter` (`every … in` / `on … as`) body step (item 130).
 
-    The pure path exists for documents whose component is incidental to a
-    record/pure-fn/test case, and it drops those components. A stream component
-    is never incidental: its subscription is a bracket with an inverse, and a
-    program emitted without it would run, appear healthy, and never subscribe.
-    Naming the refusal keeps this tier's story the one Slices 3-5 tell — go
-    lowers subscribe / next / close and `merge`, the iteration and event forms
-    are the py reference tier's."""
-    steps = [step for comp in ir.get("components") or []
-             for step in comp.get("body") or []]
-    # the iteration/event form first: it is the more specific refusal, and a
-    # handler always sits BELOW the subscribe it pulls, so a positional walk
-    # would report the subscription and hide the form the author wrote.
-    for step in steps:
-        if step.get("step") == "stream-iter":
-            form = ("`on … as` typed-event handler" if step.get("event")
-                    else "`every … in` stream iteration form")
-            raise EmitError(
-                f"the {form} is not lowered on the go tier, and this "
-                "document would otherwise route to the pure typed-core path "
-                "and drop the component entirely; the iteration and event "
-                "forms run on the py reference tier (item 130 Slices 4 and "
-                "5) — try `--backend py`")
-    for step in steps:
-        if step.get("subscribe"):
-            raise EmitError(
-                "this document declares a stream subscription inside a "
-                "component, but its top-level declarations route it to the "
-                "pure typed-core path, which would drop the component and "
-                "with it the subscription's bracket (item 130) — emit it "
-                "with `--backend py`, or split the pure declarations out")
+    The pure typed-core path exists for documents whose component is incidental
+    to a record/pure-fn/test case, and it DROPS those components. A stream
+    component is never incidental: its subscription is a bracket with an inverse,
+    and a program emitted without it would run, appear healthy, and never
+    subscribe. So a document that holds a stream is diverted to the live stc-go
+    path (which keeps the component AND materializes its record types) rather
+    than routed to the pure path — the case a typed-event program always reaches,
+    because the event's record declaration is what puts a `types` entry in the
+    document in the first place."""
+    for comp in ir.get("components") or []:
+        for step in comp.get("body") or []:
+            if step.get("step") == "stream-iter" or step.get("subscribe"):
+                return True
+    return False
 
 
 def _stream_head(node, env) -> str:
@@ -2815,17 +2814,6 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         out.append("%sreturn nil, err" % inner)
         out.append("%s}" % pad)
     elif s == "stream-iter":
-        if step.get("event") is not None:
-            # Slice 5's `on … as` typed-event handler lowers to this SAME step
-            # with an additive `event` contract (schema + a bounded dedup
-            # window). That contract gate is not lowered on this tier yet — it
-            # runs on the py reference tier — so refuse it by name. The plain
-            # `every … in` iteration form below IS lowered here (Slice 4).
-            raise EmitError(
-                "the `on … as` typed-event handler is not lowered on the go "
-                "tier; its schema-and-dedup contract gate runs on the py "
-                "reference tier (item 130 Slice 5) while the plain `every … in` "
-                "iteration form lowers here — try `--backend py`")
         # item 130 Slice 4: `every <x> in <sub> { … }` on this blocking tier is
         # a plain for-loop over the cancel-channel `next` (design §4.6, the go
         # row). It adds NO runtime primitive: `Next` and `IsStreamClosed` are
@@ -2849,6 +2837,22 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # the provider (§9 Part A). Nested acquisitions in the body are refused
         # by the frontend (§4.7), so the body is emissions only, each rendered
         # through the same path a top-level `emit` takes.
+        #
+        # Slice 5's typed-event handler (`on <Event> as <e> in <sub>`) is THIS
+        # loop with one gate added between the terminal test and the body — the
+        # specialization §6 calls for, not a second lowering (mirrors the py
+        # reference `_ComponentEmitter._stream_iter` and the ts emitter). The
+        # contract is built ONCE above the loop, so the dedup memory is constant
+        # in the length of the stream; the gate sits AFTER the await and after
+        # the terminal test, so the `Closed` still ends the loop unvalidated and
+        # the iteration boundary the guarantee rests on does not move. The go
+        # tier cannot RAISE the way py/ts do, so a schema violation is the
+        # `error` return `admit` hands back — the SAME shape a `Faulted` from
+        # `Next` takes (`return nil, err`), which fails the activation and
+        # reverts the prefix LIFO with the subscription bracket on it (§6, A8);
+        # a duplicate is the `false, nil` that `continue`s and pulls the next
+        # item. The plain `every … in` carries no `event` contract and lowers
+        # byte-identically to before.
         global _STREAM_ITER_COUNTER
         _flag_stream()
         _STREAM_ITER_COUNTER += 1
@@ -2860,6 +2864,27 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         body = step.get("body") or []
         if not body:  # pragma: no cover — the parser rejects an empty body
             raise EmitError("an `every … in` body is empty")
+        contract = step.get("event")
+        gate = None
+        if contract is not None:
+            _flag_stream_event()
+            # name/key stay RAW (validated, never mangled): the key indexes the
+            # delivered item's raw JSON field and the schema's properties are
+            # keyed the same way, so a mangle would break the lookup. The event
+            # NAME is the emitted record type on this tier, so it goes through
+            # `_v3_ident` to name the struct the item decodes into.
+            ename = _v3_ident(contract.get("name"), "event name")
+            key = _raw_go_ident(contract.get("key"), "event key")
+            window = contract.get("window")
+            if not isinstance(window, int) or window < 1:
+                raise EmitError(
+                    "event %r has a non-positive dedup window %r — the window "
+                    "is bounded by construction" % (contract.get("name"), window))
+            schema = _go_string(json.dumps(contract.get("schema")))
+            gate = "_revlEvent%d" % n
+            out.append('%s%s := StreamContract(%s, %s, %s, %d)' % (
+                pad, gate, _go_string(contract.get("name")), schema,
+                _go_string(key), window))
         out.append("%sfor {" % pad)
         out.append("%s%s, %s := %s.Next()" % (inner, itemvar, errvar, subject))
         out.append("%sif %s != nil {" % (inner, errvar))
@@ -2868,12 +2893,40 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         out.append("%sif IsStreamClosed(%s) {" % (inner, itemvar))
         out.append("%s\tbreak" % inner)
         out.append("%s}" % inner)
-        # go stream items are strings on this tier (the host runtime's buffer is
-        # `chan string`), so the delivered `any` is recovered as one. The blank
-        # assignment keeps a body that does not read the item from tripping go's
-        # declared-and-not-used error.
-        out.append("%s%s := %s.(string)" % (inner, bind, itemvar))
-        out.append("%s_ = %s" % (inner, bind))
+        if gate is not None:
+            where = "%s: on %s" % (comp.get("name"), contract.get("name"))
+            okvar = "_revlEventOk%d" % n
+            everr = "_revlEventErr%d" % n
+            out.append("%s%s, %s := %s.admit(%s, %s)" % (
+                inner, okvar, everr, gate, itemvar, _go_string(where)))
+            out.append("%sif %s != nil {" % (inner, everr))
+            out.append("%s\treturn nil, %s" % (inner, everr))
+            out.append("%s}" % inner)
+            out.append("%sif !%s {" % (inner, okvar))
+            out.append("%s\tcontinue" % inner)
+            out.append("%s}" % inner)
+            # the validated item decodes into the event's record struct, so the
+            # body reads `e.<field>` as an ordinary typed field access. `admit`
+            # already proved the shape, so this decode cannot fail on a conforming
+            # item; the error return keeps the tier honest if it somehow does.
+            decerr = "_revlEventDecodeErr%d" % n
+            out.append("%svar %s %s" % (inner, bind, ename))
+            out.append("%sif %s := json.Unmarshal([]byte(%s.(string)), &%s); %s != nil {" % (
+                inner, decerr, itemvar, bind, decerr))
+            out.append("%s\treturn nil, %s" % (inner, decerr))
+            out.append("%s}" % inner)
+            out.append("%s_ = %s" % (inner, bind))
+            # register the item's record type so the body's `e.<field>` accesses
+            # resolve against the declared struct (mirrors the `every … in` loop
+            # variable binding, keyed by the SOURCE name the field node carries).
+            env.var_types[step.get("bind")] = contract.get("name")
+        else:
+            # go stream items are strings on this tier (the host runtime's buffer
+            # is `chan string`), so the delivered `any` is recovered as one. The
+            # blank assignment keeps a body that does not read the item from
+            # tripping go's declared-and-not-used error.
+            out.append("%s%s := %s.(string)" % (inner, bind, itemvar))
+            out.append("%s_ = %s" % (inner, bind))
         for inner_step in body:
             _emit_component_step(comp, inner_step, services, env, out,
                                  indent + 1)
@@ -3801,6 +3854,20 @@ def _v3_ident(name, role: str) -> str:
         if not root.endswith("_"):
             break
         root = root[:-1]
+    return name
+
+
+_RAW_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _raw_go_ident(name, role: str) -> str:
+    """Validate a user identifier and return it VERBATIM (no mangling). Used for
+    an event's idempotency key (item 130 Slice 5): the key is emitted as a STRING
+    literal that the runtime uses to index the delivered item's raw JSON field,
+    so it must stay its source spelling — mangling would break the lookup.
+    Mirrors the ts emitter's `_raw_ident`."""
+    if not isinstance(name, str) or not _RAW_IDENT_RE.match(name):
+        raise EmitError(f"invalid {role} identifier: {name!r}")
     return name
 
 
@@ -7130,6 +7197,252 @@ func StreamReset() {
 '''
 
 
+# The typed-EVENT half of the stream runtime (item 130 Slice 5, design §6). A
+# faithful mirror of backends/python/runtime.py's `EventContract`/`_json_schema_error`
+# and backends/typescript/runtime.ts's, spelt for Go. Emitted only for a document
+# with an `on … as` handler (`_COMP_NEEDS_STREAM_EVENT`), which also pulls in the
+# `encoding/json` import, so a plain `every … in` program is untouched.
+#
+# An event is a `Stream[T]` element with a contract, so this holds exactly the
+# two things events add over the stream protocol and nothing else: the SCHEMA
+# every delivered item is validated against before the body runs, and the bounded
+# window of recently admitted KEYS that collapses a redelivery. Everything else —
+# the subscription bracket, the cancellation-first `next`, the terminal handling,
+# the LIFO teardown — is the Slice 3/4 machinery, untouched.
+#
+# Go cannot RAISE the way py/ts do, so `admit` returns `(admit bool, err error)`:
+# a schema violation is the `err` — the SAME shape a `Faulted` from `Next` takes,
+# which the loop returns uncaught so the activation fails and the prefix reverts
+# LIFO with the subscription bracket on it (§6, A8) — and a duplicate is the
+# `false, nil` the loop `continue`s on. Every decision is traced
+# (`event.<name> admit` / `event.<name> duplicate`), so a collapsed duplicate is
+# observable rather than silent.
+_STREAM_EVENT_PREAMBLE = '''// ---- typed events: the schema-and-dedup contract (item 130 Slice 5, §6) ----
+
+// _revlJSON renders a JSON value for an error message (a faithful stand-in for
+// py's repr on the derived-schema values, which are all JSON scalars/containers).
+func _revlJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
+}
+
+// _revlJSONEqual compares two decoded JSON values by their canonical encoding —
+// enough for the `const`/`enum` scalars the derived schema uses, and total (it
+// never panics on a non-comparable value the way `==` on `any` would).
+func _revlJSONEqual(a, b any) bool {
+	return _revlJSON(a) == _revlJSON(b)
+}
+
+func _revlJSONTypeName(v any) string {
+	switch v.(type) {
+	case nil:
+		return "null"
+	case []any:
+		return "array"
+	case map[string]any:
+		return "object"
+	case string:
+		return "string"
+	case float64:
+		return "number"
+	case bool:
+		return "boolean"
+	default:
+		return "unknown"
+	}
+}
+
+// _revlJSONTypeOk mirrors py's `_json_type_ok`: a decoded JSON number is a
+// float64, `integer` is one with no fractional part (and not NaN), `object` is a
+// map that is neither null nor an array.
+func _revlJSONTypeOk(value any, jsonType string) bool {
+	switch jsonType {
+	case "object":
+		_, ok := value.(map[string]any)
+		return ok
+	case "array":
+		_, ok := value.([]any)
+		return ok
+	case "string":
+		_, ok := value.(string)
+		return ok
+	case "integer":
+		f, ok := value.(float64)
+		return ok && f == f && f == float64(int64(f))
+	case "number":
+		f, ok := value.(float64)
+		return ok && f == f
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
+	case "null":
+		return value == nil
+	default:
+		return true
+	}
+}
+
+// _revlJSONSchemaError validates a decoded JSON value against the derived
+// JSON-Schema subset the revl mapping emits (item 257, §3) — the same subset an
+// event's derived schema uses. Returns the FIRST violation, or "" when the value
+// conforms. A faithful mirror of backends/python/runtime.py `_json_schema_error`:
+// primitive `type`, `const`, `enum`, `nullable`, `properties`/`required`/
+// `additionalProperties` (bool or schema), `items`, and a discriminated `oneOf`.
+// No `$ref` (cyclic types are refused), so the walk is finite.
+func _revlJSONSchemaError(value any, schema any, path string) string {
+	s, ok := schema.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if c, has := s["const"]; has {
+		if !_revlJSONEqual(value, c) {
+			return fmt.Sprintf("%s: expected const %s, got %s", path, _revlJSON(c), _revlJSON(value))
+		}
+		return ""
+	}
+	if e, has := s["enum"]; has {
+		for _, arm := range _revlAsArray(e) {
+			if _revlJSONEqual(value, arm) {
+				return ""
+			}
+		}
+		return fmt.Sprintf("%s: %s is not one of %s", path, _revlJSON(value), _revlJSON(e))
+	}
+	if o, has := s["oneOf"]; has {
+		matches := 0
+		for _, arm := range _revlAsArray(o) {
+			if _revlJSONSchemaError(value, arm, path) == "" {
+				matches++
+			}
+		}
+		if matches == 1 {
+			return ""
+		}
+		if matches == 0 {
+			return fmt.Sprintf("%s: value matches no arm of the union (a well-formed value names exactly one constructor)", path)
+		}
+		return fmt.Sprintf("%s: value is ambiguous, matching %d union arms", path, matches)
+	}
+	if nb, _ := s["nullable"].(bool); nb && value == nil {
+		return ""
+	}
+	jsonType, hasType := s["type"].(string)
+	if hasType && !_revlJSONTypeOk(value, jsonType) {
+		return fmt.Sprintf("%s: expected type %q, got %s", path, jsonType, _revlJSONTypeName(value))
+	}
+	if obj, isObj := value.(map[string]any); jsonType == "object" || isObj {
+		if !isObj {
+			return ""
+		}
+		props, _ := s["properties"].(map[string]any)
+		for _, rn := range _revlAsArray(s["required"]) {
+			name, _ := rn.(string)
+			if _, present := obj[name]; !present {
+				return fmt.Sprintf("%s: missing required property %q", path, name)
+			}
+		}
+		extra, hasExtra := s["additionalProperties"]
+		for k, item := range obj {
+			if ps, ok := props[k]; ok {
+				if e := _revlJSONSchemaError(item, ps, path+"."+k); e != "" {
+					return e
+				}
+			} else if hasExtra {
+				if b, isBool := extra.(bool); isBool {
+					if !b {
+						return fmt.Sprintf("%s: unexpected property %q", path, k)
+					}
+				} else if em, isMap := extra.(map[string]any); isMap {
+					if e := _revlJSONSchemaError(item, em, path+"."+k); e != "" {
+						return e
+					}
+				}
+			}
+		}
+	}
+	if arr, isArr := value.([]any); jsonType == "array" && isArr {
+		if items, ok := s["items"].(map[string]any); ok {
+			for i, item := range arr {
+				if e := _revlJSONSchemaError(item, items, fmt.Sprintf("%s[%d]", path, i)); e != "" {
+					return e
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func _revlAsArray(v any) []any {
+	a, _ := v.([]any)
+	return a
+}
+
+// EventContract is the contract half of a typed event (design §6). The dedup
+// memory is a fixed-size LRU of key values, CONSTANT per handler, so it is not
+// the per-item accumulation §4.7 refuses; being bounded also bounds what it
+// claims — a redelivery further apart than the window runs the handler again
+// (a collapse, not a durable exactly-once claim, which needs §4.5).
+type EventContract struct {
+	name   string
+	schema any
+	key    string
+	window int
+	seen   []any // admitted keys, oldest first (a bounded LRU)
+}
+
+// StreamContract builds the per-handler contract an `on <Event> as … in <sub>`
+// opens. One per handler, built ONCE before the loop — never per delivered item,
+// which is what keeps the dedup memory constant in the length of the stream.
+// The schema arrives as its JSON text and is decoded once here.
+func StreamContract(name string, schemaJSON string, key string, window int) *EventContract {
+	var schema any
+	_ = json.Unmarshal([]byte(schemaJSON), &schema)
+	if window < 1 {
+		window = 1
+	}
+	return &EventContract{name: name, schema: schema, key: key, window: window}
+}
+
+// admit checks one delivered item against the contract: (true, nil) to run the
+// body, (false, nil) to collapse a duplicate, (false, err) to FAULT on a schema
+// violation. Validation comes FIRST: the key read below is only sound because
+// the schema already proved the item is an object carrying that field, so no
+// malformed item reaches the dedup table (or the body).
+func (c *EventContract) admit(item any, where string) (bool, error) {
+	raw, ok := item.(string)
+	if !ok {
+		return false, fmt.Errorf("%s: event %s item is not a delivered value", where, c.name)
+	}
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return false, fmt.Errorf("%s: event %s item is not decodable JSON: %v", where, c.name, err)
+	}
+	if e := _revlJSONSchemaError(v, c.schema, "$"); e != "" {
+		return false, fmt.Errorf("%s: event %s item failed its schema: %s", where, c.name, e)
+	}
+	obj, _ := v.(map[string]any)
+	k := obj[c.key]
+	for i, s := range c.seen {
+		if _revlJSONEqual(s, k) {
+			// move-to-end: most-recently seen.
+			c.seen = append(append(c.seen[:i:i], c.seen[i+1:]...), k)
+			hostRecord("event." + c.name + " duplicate")
+			return false, nil
+		}
+	}
+	c.seen = append(c.seen, k)
+	for len(c.seen) > c.window {
+		c.seen = c.seen[1:]
+	}
+	hostRecord("event." + c.name + " admit")
+	return true, nil
+}
+'''
+
+
 # The pure-tier runtime preamble. Groups are emitted only when used, but every
 # helper here is an ordinary package-level declaration — Go never errors on an
 # unused func/type, only on unused imports (which is why the group flags gate
@@ -7976,22 +8289,24 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
             "but this document declares no components — there is nothing to "
             "load or assert no residue over"
         )
-    if ver == 3 and (not ir.get("components") or (has_top_level and not has_lifecycle)):
+    # item 130: the pure path DROPS the components it routes past — that is the
+    # point for a document whose component is incidental to a record or pure-fn
+    # corpus case. It is NOT acceptable for a stream, whose whole contract is a
+    # live subscription with a bracket: a dropped stream component would emit a
+    # program that silently never subscribes. So a document that holds a stream
+    # is diverted to the live stc-go path below, which keeps the component AND
+    # materializes its record types. Reached routinely from Slice 5, where the
+    # event's record declaration is what puts a `types` entry in the document in
+    # the first place, so a typed-event program would otherwise route to the
+    # pure path and compile to a bare struct.
+    holds_stream = _document_holds_stream(ir)
+    if (ver == 3 and not holds_stream
+            and (not ir.get("components")
+                 or (has_top_level and not has_lifecycle))):
         # A `lifecycle test` is a script over a live composition, so the
         # document must stay on the stc-go runtime path even though it also
         # carries top-level `test` blocks (FR-5); the pure path would drop the
         # components and refuse the lifecycle steps.
-        #
-        # item 130: the pure path DROPS the components it routes past — that is
-        # the point for a document whose component is incidental to a record or
-        # pure-fn corpus case. It is not acceptable for a stream, whose whole
-        # contract is a live subscription with a bracket: dropping the component
-        # would emit a program that silently never subscribes, the exact outcome
-        # the honest `EmitError` exists to prevent. Reached routinely from Slice
-        # 5, where the event's record declaration is what puts a `types` entry in
-        # the document in the first place, so a typed-event program on this tier
-        # would otherwise compile to a bare struct.
-        _refuse_dropped_stream_component(ir)
         return _emit_v3_go(ir, package)
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
@@ -8000,12 +8315,14 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _STREAM_ITER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET, _COMP_NEEDS_STREAM
+    global _COMP_NEEDS_STREAM_EVENT
     global _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
     _STREAM_ITER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
+    _COMP_NEEDS_STREAM_EVENT = False
     # item 243/247: witnessed externs by name, for this document's component
     # steps (see `_witnessed_extern`); empty for a document with none, so
     # every existing v1/v2 golden emits exactly as before.
@@ -8136,9 +8453,12 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     # with slices.Sort (item 434 (h)); the host runtime is unconditional on
     # this tier, so the import is too.
     out.append('\t"slices"')
-    if _RECORD_MODE and _COMP_NEEDS_TEARDOWN:
+    if (_RECORD_MODE and _COMP_NEEDS_TEARDOWN) or _COMP_NEEDS_STREAM_EVENT:
         # item 322 Slice 1: the durable WAL sink marshals records with
         # encoding/json ("os" is already pulled in by the teardown block above).
+        # item 130 Slice 5: a typed-event handler decodes the delivered item and
+        # validates it against the derived schema with encoding/json too (Go
+        # rejects a repeated import, so the two producers share this one line).
         out.append('\t"encoding/json"')
     out.append("")
     out.append('\tstc "github.com/0xdenny218/stc-go"')
@@ -8169,6 +8489,8 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         out.append(_TIMER_PREAMBLE)
     if _COMP_NEEDS_STREAM:
         out.append(_STREAM_PREAMBLE)
+    if _COMP_NEEDS_STREAM_EVENT:
+        out.append(_STREAM_EVENT_PREAMBLE)
 
     out.extend(body)
 

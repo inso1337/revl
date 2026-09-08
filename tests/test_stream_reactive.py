@@ -1755,14 +1755,18 @@ def test_the_emitted_gate_runs_before_the_body_not_after():
     assert code.index(".admit(e,") < code.index("_revl_ctx.ship.dispatch(")
 
 
-@pytest.mark.parametrize("tier", ["go", "rust"])
-def test_the_blocking_tiers_refuse_the_handler_by_name(tier):
-    """go and rust lower the Slice 1/3 protocol but neither iteration form. On
-    go the refusal is doubly load-bearing: an event program always declares a
-    record, and a document with top-level declarations routes to that tier's
-    pure typed-core path, which would DROP the component — emitting a program
-    that silently never subscribes."""
-    emit = _tier_emit(tier)
+def test_rust_refuses_the_handler_by_name():
+    """rust lowers the Slice 1/3 protocol and the plain `every … in` but not the
+    `on … as` handler — its schema-and-dedup contract gate is the py (and now go
+    and ts) tiers'. The refusal names the event form, not the generic
+    `unsupported component step`.
+
+    item 130 (roadmap #81): `go` is no longer here — it now lowers the handler
+    (see `test_go_lowers_the_typed_event_handler_with_an_additive_contract_gate`),
+    keeping the once doubly-load-bearing routing (an event always declares a
+    record, so its document carries a top-level type) live by DIVERTING a
+    stream-holding component to the stc-go path instead of dropping it."""
+    emit = _tier_emit("rust")
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_EVENT, "s.rvl"))
     msg = str(excinfo.value)
@@ -1770,20 +1774,26 @@ def test_the_blocking_tiers_refuse_the_handler_by_name(tier):
     assert "`on … as`" in msg and "backend py" in msg
 
 
-def test_go_refuses_a_dropped_stream_component_rather_than_emitting_a_stub():
-    """The same hole reached without an event: a plain subscription in a
-    document that also declares a record would route past the component too."""
+def test_go_lowers_a_stream_component_that_also_declares_a_record():
+    """The routing hole the go refusal once named is now CLOSED by lowering: a
+    stream-holding component in a document that also declares a record (the shape
+    every typed event takes) is diverted to the live stc-go path — the component
+    is kept and its record type materialized — rather than dropped by the pure
+    typed-core path. The subscription's bracket survives."""
     emit = _tier_emit("go")
-    with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(compile_source("""
-        type Foo = { a: Str }
-        component C {
-          let src = effect Stream.source() undo src.close()
-          let sub = subscribe src undo sub.close()
-          await sub.next()
-        }
-        """, "s.rvl"))
-    assert "drop the component" in str(excinfo.value)
+    code = emit.emit(compile_source("""
+    type Foo = { a: Str }
+    component C {
+      let src = effect Stream.source() undo src.close()
+      let sub = subscribe src undo sub.close()
+      await sub.next()
+    }
+    """, "s.rvl"))
+    # the component is emitted (not dropped) with its subscription bracket, and
+    # the record type is materialized alongside it.
+    assert "func LoadC(" in code
+    assert 'sub = StreamSubscribe(src, "error", 0)' in code
+    assert "type Foo struct {" in code
 
 
 @pytest.mark.parametrize("tier", ["java", "wasm"])
@@ -1816,13 +1826,41 @@ def test_ts_lowers_the_typed_event_handler_with_an_additive_contract_gate():
     assert "if (!_revlEvent1.admit(e, " in ts and ")) continue" in ts
 
 
-@pytest.mark.parametrize("tier", ["go", "rust"])
-def test_the_blocking_tiers_still_refuse_the_typed_event_handler(tier):
-    """go and rust lower the plain `every … in` (Slice 4) but not the `on … as`
+def test_go_lowers_the_typed_event_handler_with_an_additive_contract_gate():
+    """item 130 (roadmap #81): the go tier graduated Slice 5 — it lowers the
+    `on … as` typed-event handler, no longer refusing it. The handler is the
+    SAME blocking `for {}` `next` loop the plain `every … in` emits (the
+    specialization, §6) plus one gate: the contract is built ONCE above the loop,
+    the `admit` call sits AFTER the terminal test, a schema violation is the
+    error return that faults the activation (go cannot raise), and a duplicate
+    `continue`s — so the iteration boundary the guarantee rests on does not move.
+    The runtime proof (a conforming item reaches the body, a duplicate is
+    collapsed, a schema violation faults and leaves no residue) is
+    backends/go/test_stream_exec_130.py; this pins the emitted shape."""
+    go = _tier_emit("go").emit(compile_source(_EVENT, "s.rvl"))
+    # the contract is built once, above the loop, from the derived schema
+    assert 'StreamContract("OrderCreated", ' in go
+    assert '"order_id", 64)' in go, "the derived key and default window"
+    # exactly one loop (one node, one lowering), with the gate after the terminal
+    assert go.count("for {") == 1
+    gate = go.index(".admit(")
+    closed = go.index("IsStreamClosed(")
+    assert closed < gate, "the gate sits after the `Closed` terminal test"
+    # a schema violation faults (uncaught error return); a duplicate continues
+    assert "_revlEventOk1, _revlEventErr1 := _revlEvent1.admit(" in go
+    assert go.index("return nil, _revlEventErr1") < go.index("if !_revlEventOk1")
+    assert "continue" in go
+    # the validated item decodes into the event's record struct for the body
+    assert "var e OrderCreated" in go
+    assert go.index("var e OrderCreated") < go.index("e.OrderId")
+
+
+def test_rust_still_refuses_the_typed_event_handler():
+    """rust lowers the plain `every … in` (Slice 4) but not the `on … as`
     handler (Slice 5): its schema-and-dedup contract gate is still the py (and
-    now ts) tiers'. The refusal must name the event form, not fall through to an
-    `unsupported component step` or silently drop the contract."""
-    emit = _tier_emit(tier)
+    now go and ts) tiers'. The refusal must name the event form, not fall through
+    to an `unsupported component step` or silently drop the contract."""
+    emit = _tier_emit("rust")
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_EVENT, "s.rvl"))
     msg = str(excinfo.value)

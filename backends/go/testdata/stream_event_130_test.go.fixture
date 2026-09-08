@@ -1,0 +1,219 @@
+package streamevent130
+
+// Executes the EMITTED typed-event handler (from testdata/stream_event_130.rvl,
+// lowered by backends/go/emit.py) against the REAL stc-go runtime. This is item
+// 130 Slice 5's exit proof on the go tier — docs/design/130-stream-reactive-types.md
+// §6, §6b. The compile-time shape is pinned in test_stream_reactive.py; this
+// proves the emitted `EventContract` gate actually RUNS: a conforming item
+// reaches the body, an in-window redelivery is collapsed (and traced, not
+// silent), and a schema violation FAULTS the activation and closes the
+// subscription with no residue.
+//
+// White-box (same package) so it can drive the emitted provider handle the way a
+// harness drives a test provider (design §8), emitting the JSON strings the go
+// tier's `chan string` buffer carries.
+
+import (
+	stdctx "context"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	stc "github.com/0xdenny218/stc-go"
+)
+
+func bg() stdctx.Context { return stdctx.Background() }
+
+func reset() {
+	HostReset()
+	StreamReset()
+}
+
+func countMark(marks []string, want string) int {
+	n := 0
+	for _, m := range marks {
+		if m == want {
+			n++
+		}
+	}
+	return n
+}
+
+func marksIndex(marks []string, want string) int {
+	for i, m := range marks {
+		if m == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// waitFor spins until cond holds or the budget runs out — only to observe a
+// goroutine reaching its park; never to make a race "probably" pass.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// collectSink is a hand-written impl of the emitted Sink interface — the
+// observable the handler body emits into (`emit sink.write(e.order_id)`).
+type collectSink struct {
+	mu  sync.Mutex
+	got []string
+}
+
+func (s *collectSink) Write(v string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.got = append(s.got, v)
+}
+
+func (s *collectSink) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.got...)
+}
+
+func sinkProvider(impl *collectSink) stc.Component {
+	return stc.Component{
+		Name:    "SinkProvider",
+		Provide: []stc.Key{_keySink},
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
+			if _, err := ctx.Provide(_keySink, Sink(impl)); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		},
+	}
+}
+
+// A conforming item reaches the body; a redelivery of the same key inside the
+// window is COLLAPSED (traced `event.OrderCreated duplicate`), so the handler
+// runs once per identity. A `Closed` terminal ends the loop, then the ordinary
+// unload closes the subscription with no residue.
+func TestEvent_ConformingItemsDispatch_DuplicateCollapses(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	sink := &collectSink{}
+	provider := root.Load(sinkProvider(sink))
+	if err := provider.Ready(bg()); err != nil {
+		t.Fatalf("SinkProvider: %v", err)
+	}
+
+	type loaded struct {
+		f   *stc.Fiber
+		err error
+	}
+	done := make(chan loaded, 1)
+	go func() {
+		f := LoadHandler(root)
+		done <- loaded{f, f.Ready(bg())}
+	}()
+	waitFor(t, "the handler to subscribe", func() bool {
+		return StreamLiveSubscriptions() == 1
+	})
+
+	src := StreamProviders()[0]
+	src.Emit(`{"order_id":"o1","quantity":1}`)
+	src.Emit(`{"order_id":"o2","quantity":2}`)
+	src.Emit(`{"order_id":"o1","quantity":9}`) // redelivery inside the window
+	src.Close()
+
+	var got loaded
+	select {
+	case got = <-done:
+		if got.err != nil {
+			t.Fatalf("the handler activation failed: %v", got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the Closed terminal never ended the handler loop")
+	}
+
+	if g := sink.snapshot(); !reflect.DeepEqual(g, []string{"o1", "o2"}) {
+		t.Fatalf("dispatched = %v, want [o1 o2] (the redelivery must collapse)", g)
+	}
+	marks := HostMarks()
+	if n := countMark(marks, "event.OrderCreated admit"); n != 2 {
+		t.Fatalf("admits = %d, want 2: %v", n, marks)
+	}
+	if n := countMark(marks, "event.OrderCreated duplicate"); n != 1 {
+		t.Fatalf("collapsed duplicates = %d, want 1: %v", n, marks)
+	}
+
+	got.f.Dispose()
+	if err := got.f.Gone(bg()); err != nil {
+		t.Fatalf("Gone: %v", err)
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("stream residue after unload = %d, want 0", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources after unload = %d, want 0 (R1)", n)
+	}
+}
+
+// A schema violation is the SAME terminal a provider abort delivers: `admit`
+// hands back the error, the loop returns it uncaught, the activation fails, and
+// the accumulated prefix reverts LIFO — closing the subscription. No malformed
+// item ever reaches the body, and nothing is left behind (§6, A8).
+func TestEvent_SchemaViolation_FaultsAndClosesTheSubscription(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	sink := &collectSink{}
+	provider := root.Load(sinkProvider(sink))
+	if err := provider.Ready(bg()); err != nil {
+		t.Fatalf("SinkProvider: %v", err)
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		f := LoadHandler(root)
+		errc <- f.Ready(bg())
+	}()
+	waitFor(t, "the handler to subscribe", func() bool {
+		return StreamLiveSubscriptions() == 1
+	})
+
+	// `quantity` is required by the derived schema and absent here: the item
+	// fails validation before the body, so it is never dispatched.
+	StreamProviders()[0].Emit(`{"order_id":"o1"}`)
+
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("a schema violation must fail the activation")
+		}
+		if !strings.Contains(err.Error(), "failed its schema") {
+			t.Fatalf("activation error = %v, want a schema-violation fault", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the schema violation never terminated the handler")
+	}
+
+	if g := sink.snapshot(); len(g) != 0 {
+		t.Fatalf("a malformed item reached the body: %v", g)
+	}
+	marks := HostMarks()
+	if marksIndex(marks, "stream.close") < 0 {
+		t.Fatalf("the failed activation did not close the subscription: %v", marks)
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("stream residue after the fault = %d, want 0", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources after the fault = %d, want 0 (R1)", n)
+	}
+}
