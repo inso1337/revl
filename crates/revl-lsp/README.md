@@ -127,11 +127,22 @@ distributor can still drop a newer runtime beside the binary. When
 `REVL_LSP_EMBED_RUNTIME` is unset (a bare `cargo build`, and every CI job today)
 nothing is embedded and the resolution falls through unchanged.
 
+The `embedding` (`private-runtime` / `system-python`) says WHETHER the runtime
+is private; `revl/gateVersion` also reports a `runtime` block —
+`{source, pin}` — that says HOW it was shipped: `embedded` (the genuinely
+single distributed FILE, baked into the binary), `beside-exe` (a self-contained
+pair of files), `env` (pointed at by `REVL_LSP_RUNTIME`/`_ARCHIVE`), or
+`system-python` (no private runtime, pin `null`). The one-file bundling item is
+precisely about the `embedded` shape, which `embedding` alone cannot tell from
+`beside-exe`, so a fleet or install audit reads `runtime.source` to confirm an
+artifact really is one file, and `runtime.pin` — the runtime's own skew
+comparand (A3) — to confirm it is the expected pairing.
+
 **What this slice landed, and what it defers.** The runtime-management contract
 is here — the pin, the atomic versioned cache, the isolated-mode launch, and
-the fail-closed rule — and `revl/gateVersion` now reports an `embedding` of
-`private-runtime` or `system-python` so a client can tell a self-contained
-artifact from one leaning on an installed `revl`. The build knob that bakes a
+the fail-closed rule — and `revl/gateVersion` reports the `embedding` and the
+`runtime` `{source, pin}` above so a client can tell a self-contained one-file
+artifact from a pair or from one leaning on an installed `revl`. The build knob that bakes a
 runtime archive INTO the binary is here too (`build.rs` + `include_bytes!`), so a
 distribution build has a genuinely single distributed FILE rather than a binary
 plus a sibling archive; the archive rides the same atomic, versioned, isolated
@@ -148,13 +159,17 @@ the exact move A1 forbids.
 
 One deliberate, additive divergence from the reference's dispatch table: the
 custom request `revl/gateVersion` answers `{api, language, frontier, engine,
-native, server}` so a client, a CI check or a fleet audit can detect a stale
-binary/reference pairing before trusting its greens (design A3: skew is made
-detectable, not solved). `frontier` reads `reference` because DIAGNOSTICS — the
-answers a green depends on — still cover the whole language rather than the
-self-host frontier; the native engine's own pin (`api`, `language`,
-`frontier`, `layer`, and the verbs it answers) sits beside it under `native`,
-and that is the id a stale-binary audit compares. The reference answers
+embedding, runtime, native, server}` so a client, a CI check or a fleet audit
+can detect a stale binary/reference pairing before trusting its greens (design
+A3: skew is made detectable, not solved). `frontier` reads `reference` because
+DIAGNOSTICS — the answers a green depends on — still cover the whole language
+rather than the self-host frontier; the native engine's own pin (`api`,
+`language`, `frontier`, `layer`, and the verbs it answers) sits beside it under
+`native`, and that is the id a stale-binary audit compares. `embedding` and the
+`runtime` `{source, pin}` block make the DISTRIBUTION shape legible — whether
+the runtime is private, and whether it ships as one file (`embedded`), a pair
+(`beside-exe`), an env-named tree (`env`), or the system fallback
+(`system-python`). The reference answers
 `-32601` for this method; `initialize` is left byte-identical rather than
 carrying the version, so the compared surface stays exact.
 
@@ -199,9 +214,10 @@ REVL_LSP_PYTHON=/path/to/python cargo test   # plus the reference oracle
   builds a runtime archive around a real `revl`-capable interpreter, drives the
   binary with only that archive to reach `revl` (no `REVL_LSP_PYTHON`), and
   asserts the interpreter was extracted into the versioned cache, the binary
-  reports the `private-runtime` embedding, its published diagnostics equal the
-  reference server's byte for byte, and a second launch REUSES the cache rather
-  than re-extracting. It sources the interpreter from
+  reports the `private-runtime` embedding with a `runtime` block naming the
+  `env` source and the `test-pin-102` pin it keyed on, its published diagnostics
+  equal the reference server's byte for byte, and a second launch REUSES the
+  cache rather than re-extracting. It sources the interpreter from
   `REVL_LSP_TEST_RUNTIME_PYTHON` (or `REVL_LSP_PYTHON`), skipping with a stated
   reason when neither is set.
 
