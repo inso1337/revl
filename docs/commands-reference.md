@@ -91,7 +91,18 @@ Diagnose each backend tier, runtime, and dependency, then smoke-test every
 available tier. Each row reports `OK` / `WARN` / `MISSING` with a version and a
 one-line reason; the footer counts them. Landed as roadmap item 291.
 
-- `--json` - machine-readable report (for an agent) instead of the table.
+The report also prints a **toolchain resolution** block: a normalized
+`component -> version` map (compiler, python, stdlib stamp, the exact cordis-py
+and cordis-ts bindings, node, cargo, javac, go, wasmtime, wasm-tools) with an
+absent component shown as `-`. It is the one place to pin a run: capture it on
+one box and diff it against another to find the drift that broke a reproduction
+(roadmap item 461). The cordis-py row names the exact binding that loads (its
+on-disk origin and version when it carries one); cordis-ts reports the version
+from its `package.json`.
+
+- `--json` - machine-readable report (for an agent) instead of the table; carries
+  the same `resolution` map as a top-level field, so an automation diffs one
+  field rather than scraping the per-row detail strings.
 - `--no-smoke` - skip the per-tier compile+boot smoke test (report only).
 - `--smoke-timeout SECONDS` - per-tier smoke-test timeout (default: 90).
 
