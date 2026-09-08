@@ -71,11 +71,6 @@
    "backends/go/scenarios/witnessed_teardown.rvl",
    "backends/go/testdata/opt_gaps_280.rvl",
    "backends/go/testdata/result_ctor_302.rvl",
-   "backends/java/scenarios/method_witnessed.rvl",
-   "backends/java/scenarios/secret_registry.rvl",
-   "backends/rust/scenarios/secret_registry.rvl",
-   "backends/typescript/tests/fixtures/a2a_agent.rvl",
-   "backends/wasm/scenarios/crashproof/crashproof.rvl",
    "examples/async_timer.rvl",
    "examples/budget_attenuation.rvl",
    "examples/durable_log.rvl",
@@ -100,8 +95,6 @@
    "stdlib/list.rvl",
    "stdlib/render.rvl",
    "stdlib/value.rvl",
-   "tests/fixtures/emit_py_corpus/witnessed.rvl",
-   "tests/fixtures/erase_net.rvl",
    "tests/fixtures/v2_math_lib.rvl"
   ],
   "false-reject/G1": [
@@ -146,7 +139,7 @@
    "gate": {
     "code": "BAD",
     "kind": "refused",
-    "message": "expected fn after extern"
+    "message": "unexpected token at top level"
    },
    "reference": {
     "message": "",
@@ -158,7 +151,7 @@
    "gate": {
     "code": "BAD",
     "kind": "refused",
-    "message": "expected fn after extern"
+    "message": "unexpected token at top level"
    },
    "reference": {
     "message": "",
@@ -182,7 +175,7 @@
    "gate": {
     "code": "BAD",
     "kind": "refused",
-    "message": "expected fn after extern"
+    "message": "unexpected token at top level"
    },
    "reference": {
     "message": "",
@@ -194,7 +187,7 @@
    "gate": {
     "code": "BAD",
     "kind": "refused",
-    "message": "expected fn after extern"
+    "message": "unexpected token at top level"
    },
    "reference": {
     "message": "",
@@ -237,60 +230,12 @@
     "tag": ""
    }
   },
-  "backends/java/scenarios/method_witnessed.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "expected fn after extern"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/java/scenarios/secret_registry.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "expected fn after extern"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/rust/scenarios/secret_registry.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "expected fn after extern"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
   "backends/rust/scenarios/stream.rvl": {
    "bucket": "false-reject/G1",
    "gate": {
     "code": "G1",
     "kind": "refused",
     "message": "`sub` is not a declared requirement of Parked"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "backends/typescript/tests/fixtures/a2a_agent.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "expected fn after extern"
    },
    "reference": {
     "message": "",
@@ -307,18 +252,6 @@
    "reference": {
     "message": "field read `.function` on a value of type `Any` \u2014 an erased value has no known fields",
     "tag": "T1"
-   }
-  },
-  "backends/wasm/scenarios/crashproof/crashproof.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "expected fn after extern"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
    }
   },
   "examples/async_timer.rvl": {
@@ -1203,30 +1136,6 @@
     "code": "BAD",
     "kind": "refused",
     "message": "unexpected declaration"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "tests/fixtures/emit_py_corpus/witnessed.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "expected fn after extern"
-   },
-   "reference": {
-    "message": "",
-    "tag": ""
-   }
-  },
-  "tests/fixtures/erase_net.rvl": {
-   "bucket": "false-reject/BAD",
-   "gate": {
-    "code": "BAD",
-    "kind": "refused",
-    "message": "expected fn after extern"
    },
    "reference": {
     "message": "",
