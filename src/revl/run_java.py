@@ -193,8 +193,12 @@ def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False) -> str:
 
     javac = str(Path(jdk_bin) / "javac")
     stubs = [str(p) for p in (_JAVA_DIR / "stubs").rglob("*.java")]
+    # Estop.java carries the operator E-Stop seam (item 443, issue #122) that
+    # PlacementRunner consults; it is pure JDK (no cordis4j) and must be compiled
+    # alongside the runner, exactly as placement._build_java does.
+    estop = str(_PLACEMENT_DIR / "Estop.java")
     compile_runner = subprocess.run(
-        [javac, "--release", JAVAC_RELEASE, "-d", str(out), *stubs,
+        [javac, "--release", JAVAC_RELEASE, "-d", str(out), *stubs, estop,
          str(_PLACEMENT_DIR / "PlacementRunner.java"), str(_PLACEMENT_DIR / "RunOnce.java")],
         capture_output=True, text=True,
     )
