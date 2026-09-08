@@ -1487,6 +1487,16 @@ class _Driver:
                              f"PENDING -> {self.FiberState(fiber.state).name}",
                              load_causes.get(name, why_runtime.cause_boot()))
         await self._flush()
+        # item 439 slice T0 (issue #118): a synthesized remote provider's
+        # crossing that faulted under `on_failure(withdraw)` raised a
+        # `TransportFault`, which unwound the calling fiber into FAILED but did
+        # NOT withdraw the provision. Map it now — withdraw the provider named
+        # by the fault's row, so its consumers deactivate reactively (R2/R3),
+        # exactly as peer death does (docs/design/439-a2a-task-lifecycle.md
+        # decision 4). Additive and fail-safe: it acts ONLY on a fault carrying
+        # the `_revl_transport_fault` marker and only when the named provider is
+        # live, so a run with no such fault is byte-identical.
+        await self._withdraw_transport_faulted()
 
     def _arm_liveness_monitor(self) -> None:
         """Create and start the production silence observer for the generation
@@ -1841,6 +1851,84 @@ class _Driver:
             self._record(why_runtime.WITHDRAW, name, f"{frm} -> {to}", cause)
 
         return why_runtime.oracle(self.ir, component, why_runtime.Trace(self._events))
+
+    @staticmethod
+    def _transport_fault(err) -> tuple[str, str] | None:
+        """`(row, crossing)` for a transport fault (item 439 T0), or ``None``.
+
+        Recognised by the duck-typed ``_revl_transport_fault`` marker — never by
+        class identity — so the inline class an emitted `@py` remote body raises
+        (which cannot import the runtime's :class:`TransportFault`) and the
+        runtime's own class are both accepted. A redirect refusal is NOT one (it
+        carries no marker) and never withdraws."""
+        if err is None or not getattr(err, "_revl_transport_fault", False):
+            return None
+        return (getattr(err, "revl_row", "") or "",
+                getattr(err, "revl_crossing", "") or "")
+
+    async def _withdraw_transport_faulted(self) -> None:
+        """Item 439 slice T0 (issue #118): map each synthesized remote
+        provider's transport fault to provider withdrawal.
+
+        A crossing that faulted under `on_failure(withdraw)` unwound its calling
+        fiber into FAILED with a `TransportFault` error; the fault names the row
+        it was declared on, which maps to the synthesized provider component
+        `Remote<Pascal(row)>Provider`. Withdraw that provider (rooted at
+        :func:`why_runtime.cause_transport_fault`) so its OTHER consumers
+        deactivate reactively (R2/R3) and the composition settles to no residue,
+        exactly as peer death does. Fail-safe: acts only on a marker-bearing
+        fault whose named provider is a live component, and each provider is
+        withdrawn at most once."""
+        from .synthesize import _pascal  # noqa: PLC0415 — lazy; frontend stays pure
+        seen: set[str] = set()
+        pending: list[tuple[str, str, str]] = []
+        for _name, fiber in list(self.fibers.items()):
+            if self.FiberState(fiber.state).name != "FAILED":
+                continue
+            info = self._transport_fault(getattr(fiber, "_error", None))
+            if info is None:
+                continue
+            row, crossing = info
+            if not row:
+                continue
+            provider = f"Remote{_pascal(row)}Provider"
+            if provider in seen:
+                continue
+            target = self.fibers.get(provider)
+            if target is None or self.FiberState(target.state).name != "ACTIVE":
+                continue
+            seen.add(provider)
+            pending.append((provider, row, crossing))
+        for provider, row, crossing in pending:
+            await self._perform_transport_fault_withdrawal(provider, row, crossing)
+
+    async def _perform_transport_fault_withdrawal(self, provider: str, row: str,
+                                                  crossing: str) -> None:
+        """Withdraw one synthesized remote provider whose crossing faulted,
+        recording the cascade with a TRANSPORT_FAULT root (item 439 T0). The
+        structural twin of :meth:`_perform_liveness_expiry` — a
+        withdrawal-with-cause whose root is distinct in kind from a fault, an
+        operator trigger, or a silence expiry — so every trace consumer can tell
+        a peer that FAULTED apart from one that went silent or was withdrawn by
+        hand."""
+        fiber = self.fibers.get(provider)
+        if fiber is None or self.FiberState(fiber.state).name != "ACTIVE":
+            return
+        self._log("withdraw", provider,
+                  f"transport fault on row @{row} crossing `{crossing}` — "
+                  f"withdraw the provider, observe the cascade")
+        root_cause = why_runtime.cause_transport_fault(row, crossing)
+        self._observing = {n: self.FiberState(f.state).name
+                           for n, f in self.fibers.items()}
+        self._settled = []
+        cascade_causes = why_runtime.withdrawal_causes(self.ir, provider)
+        await fiber.dispose()
+        await self._flush()
+        self._observing = None
+        for name, frm, to, err in self._settled:
+            cause = self._withdraw_cause(name, provider, to, err,
+                                         cascade_causes, root_cause=root_cause)
+            self._record(why_runtime.WITHDRAW, name, f"{frm} -> {to}", cause)
 
     def reconcile_liveness_from_world(self, *, latch_path: str | None = None,
                                       trace_path: str | None = None) -> dict:
