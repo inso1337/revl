@@ -236,7 +236,7 @@ bridge. The answer is the row table, not a new checker mode. A `host` row is the
 sibling of a `remote` row: a row whose provider is not revl source but the host
 runtime's own service, reached through the reviewed `@ts ref` door:
 
-```revl sketch
+```revl
 composition Notes {
   use "notes.rvl"
   host   @server provides server: Server        // Cordis ctx.server, ts tier
