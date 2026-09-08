@@ -170,6 +170,42 @@ pub type Response = {
 // caller never inspects prose (or a mutation side effect) to tell them apart.
 pub type Outcome = Handled(Response) | NotHandled
 
+// ---------------------------------------------------------------- api error
+
+// A structured error a client can act on — roadmap item 457
+// (docs/design/457-endpoint-one-definition.md). A routed operation that returns
+// `Result[T, ApiError]` renders its `Err(e)` on the wire as `e.status` with the
+// body `{"code": e.code, "message": e.message}`. The status is IN the type so a
+// derived router, an OpenAPI document and a generated client all read the same
+// numeric code — there is no prose to reconstruct it from, the same discipline
+// `Outcome`/`Body` bring to the handled case. `code` is a stable machine token
+// (`"not_found"`), `message` a human sentence; both are safe to ship.
+pub type ApiError = { status: Int, code: Str, message: Str }
+
+// The standard error constructors, one per status the exemplary CRUD app needs.
+// Each fixes the numeric `status` and a stable `code` token and takes the human
+// `message`, so a handler writes `Err(not_found_error("no note 42"))` and the
+// wire status follows from the type, never from the text.
+pub fn bad_request(message: Str) -> ApiError {
+  return { status: 400, code: "bad_request", message: message }
+}
+
+pub fn unauthorized(message: Str) -> ApiError {
+  return { status: 401, code: "unauthorized", message: message }
+}
+
+pub fn forbidden(message: Str) -> ApiError {
+  return { status: 403, code: "forbidden", message: message }
+}
+
+pub fn not_found_error(message: Str) -> ApiError {
+  return { status: 404, code: "not_found", message: message }
+}
+
+pub fn conflict(message: Str) -> ApiError {
+  return { status: 409, code: "conflict", message: message }
+}
+
 // ---------------------------------------------------------------- constructors
 
 pub fn header(name: Str, value: Str) -> Header {

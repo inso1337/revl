@@ -44,6 +44,8 @@ table; this slice is codegen and transport only, no language change.
 
 from __future__ import annotations
 
+import re
+
 from .errors import RevlError
 from .gate import gate_version
 
@@ -227,6 +229,9 @@ class _ClientExporter:
 
     # -- the client class per service ------------------------------------
     def _method(self, op_name: str, spec: dict) -> list[str]:
+        route = spec.get("route")
+        if route:
+            return self._routed_method(op_name, spec, route)
         params = spec.get("params") or []
         sig = ", ".join(
             f"{p['name']}: {self.ts_type(p.get('type'))}" for p in params)
@@ -240,32 +245,161 @@ class _ClientExporter:
         lines.append("  }")
         return lines
 
+    def _routed_return_ts(self, response: dict) -> str:
+        """The TS return type for a routed operation's declared return
+        (item 457). `Result[T, ApiError]` becomes the adjacently-tagged union the
+        wire carries, with the `Err` value typed as the `{status, code, message}`
+        shape the router renders."""
+        kind = response.get("kind")
+        if kind == "result":
+            ok = self.ts_type(response.get("ok")) \
+                if response.get("ok") and response.get("ok") != "Unit" else "null"
+            return (f'{{ "$kind": "Ok", "$value": {ok} }} | '
+                    '{ "$kind": "Err", "$value": '
+                    '{ status: number, code: string, message: string } }')
+        if kind == "response":
+            return ("{ status: number, statusText: string; headers: Array<{ name: "
+                    "string, value: string }>; body: string }")
+        ok_type = response.get("type")
+        return self.ts_type(ok_type) if ok_type and ok_type != "Unit" else "null"
+
+    def _routed_method(self, op_name: str, spec: dict, route: dict) -> list[str]:
+        """A REST method for a routed operation (item 457, artifact 5): it builds
+        the path from its scalar arguments, puts the rest in the query or the JSON
+        body per the bind table, sends a `Bearer` as the `Authorization` header
+        when the operation declares one, and decodes the response into the same
+        canonical-encoding types. No `transport.call` — this is the real route."""
+        params = spec.get("params") or []
+        bind = route.get("bind") or {}
+        method = route["method"].upper()
+        template = route["path"]
+        response = route.get("response") or {"kind": "plain", "type": "Unit"}
+
+        sig = ", ".join(
+            f"{p['name']}: {self.ts_type(p.get('type'))}" for p in params)
+        ret_ts = self._routed_return_ts(response)
+        lines = [f"  async {op_name}({sig}): Promise<{ret_ts}> {{"]
+
+        # 1. the path: substitute each `{name}` with its encoded scalar argument.
+        path_js = "`" + re.sub(
+            r"\{([^{}]+)\}",
+            lambda m: "${encodeURIComponent(String(" + m.group(1) + "))}",
+            template) + "`"
+        lines.append(f"    let __path = {path_js};")
+
+        # 2. the query string, from the query-bound arguments (Opt -> omit null).
+        query = [p["name"] for p in params
+                 if (bind.get(p["name"]) or {}).get("kind") == "query"]
+        if query:
+            lines.append("    const __q = new URLSearchParams();")
+            for pname in query:
+                lines.append(f"    if ({pname} !== null && {pname} !== undefined) "
+                             f'__q.set("{pname}", String({pname}));')
+            lines.append("    const __qs = __q.toString();")
+            lines.append("    if (__qs) __path += `?${__qs}`;")
+
+        # 3. headers: JSON for a body, and the bearer credential when declared.
+        bearer = [p["name"] for p in params
+                  if (bind.get(p["name"]) or {}).get("kind") == "header"]
+        body = [p["name"] for p in params
+                if (bind.get(p["name"]) or {}).get("kind") == "body"]
+        lines.append("    const __headers: Record<string, string> = {};")
+        if body:
+            lines.append('    __headers["Content-Type"] = "application/json";')
+        if bearer:
+            b = bearer[0]
+            lines.append(f"    if ({b} && {b}.token) "
+                         f'__headers["Authorization"] = `Bearer ${{{b}.token}}`;')
+
+        # 4. the fetch.
+        init = [f'method: "{method}"', "headers: __headers"]
+        if body:
+            init.append(f"body: JSON.stringify({body[0]})")
+        lines.append(f"    const __res = await fetch(`${{this.base}}${{__path}}`, "
+                     f"{{ {', '.join(init)} }});")
+
+        # 5. decode per the return rules.
+        lines.extend(self._routed_decode(response, ret_ts))
+        lines.append("  }")
+        return lines
+
+    def _routed_decode(self, response: dict, ret_ts: str) -> list[str]:
+        kind = response.get("kind")
+        if kind == "result":
+            ok = self.ts_type(response.get("ok")) \
+                if response.get("ok") and response.get("ok") != "Unit" else "null"
+            return [
+                "    if (__res.ok) {",
+                ("      const __v = __res.status === 204 ? null : "
+                 "await __res.json();"),
+                f'      return {{ "$kind": "Ok", "$value": __v as {ok} }};',
+                "    }",
+                "    const __e = await __res.json().catch(() => ({}));",
+                '    return { "$kind": "Err", "$value": { status: __res.status, '
+                'code: String(__e.code ?? "error"), '
+                'message: String(__e.message ?? "") } };',
+            ]
+        if kind == "response":
+            return [
+                "    const __body = await __res.text();",
+                "    const __h: Array<{ name: string, value: string }> = [];",
+                "    __res.headers.forEach((value, name) => __h.push({ name, value }));",
+                "    return { status: __res.status, statusText: __res.statusText, "
+                "headers: __h, body: __body };",
+            ]
+        # plain T. A `Unit` return (ret_ts == "null") is the 204 case; a non-Unit
+        # T is a 200 body decoded as that type (no 204 line, which would be a
+        # `null as T` strict error on a dead branch).
+        if ret_ts == "null":
+            return ["    return null;"]
+        return [f"    return (await __res.json()) as {ret_ts};"]
+
     def _service_block(self, sname: str) -> list[str]:
         methods = (self.services.get(sname) or {}).get("methods") or {}
+        routed = any(spec.get("route") for spec in methods.values())
         # refuse a method the projection cannot express, naming the method
         for op_name, spec in methods.items():
             for param in spec.get("params") or []:
+                # a `Bearer`/`Request` parameter binds from transport on a routed
+                # op, not a value the client marshals; skip the wire check for it.
+                bkind = ((spec.get("route") or {}).get("bind") or {}).get(
+                    param.get("name"), {}).get("kind")
+                if bkind in ("header", "request"):
+                    continue
                 reason = self._inexpressible_reason(param.get("type"))
                 if reason is not None:
                     raise RevlError(
                         "<ir>", 0,
                         f"cannot export a client for `{sname}.{op_name}`: "
                         f"parameter `{param.get('name')}` {reason}")
-            reason = self._inexpressible_reason(spec.get("returns"))
-            if reason is not None:
-                raise RevlError(
-                    "<ir>", 0,
-                    f"cannot export a client for `{sname}.{op_name}`: "
-                    f"its result {reason}")
+            # a routed op's `Result[T, ApiError]` is rendered structurally, so the
+            # untagged-Result refusal does not apply to it.
+            if not (spec.get("route") and (spec.get("route") or {}).get(
+                    "response", {}).get("kind") == "result"):
+                reason = self._inexpressible_reason(spec.get("returns"))
+                if reason is not None:
+                    raise RevlError(
+                        "<ir>", 0,
+                        f"cannot export a client for `{sname}.{op_name}`: "
+                        f"its result {reason}")
         lines = [
             f"/** Typed client for revl service `{sname}`. LOCAL contract only: "
             "typed and",
             " *  bounded on THIS side; it makes no claim about what the remote "
             "runs. */",
             f"export class {sname}Client {{",
-            "  constructor(private readonly transport: Transport) {}",
-            "",
         ]
+        if routed:
+            # a routed service is a REST client: `base` is the server's origin
+            # (e.g. `http://host:port`), and `transport` still serves any unrouted
+            # operation over the canonical POST face.
+            lines.append("  constructor(private readonly base: string, "
+                         "private readonly transport: Transport = "
+                         "{ call() { throw new Error(\"no transport configured "
+                         "for an unrouted operation\"); } }) {}")
+        else:
+            lines.append("  constructor(private readonly transport: Transport) {}")
+        lines.append("")
         first = True
         for op_name, spec in methods.items():
             if not first:

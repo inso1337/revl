@@ -37,7 +37,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import sys
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ..gate import gate_version
@@ -51,6 +53,7 @@ from .session import SessionError
 # is 405; a class-(c) crossing awaiting a human yes is 403 with the ticket in
 # the body (fail-closed: nothing fired); a callee that raised is 500.
 _OK = 200
+_NO_CONTENT = 204
 _BAD_REQUEST = 400
 _FORBIDDEN = 403
 _NOT_FOUND = 404
@@ -112,19 +115,180 @@ def _is_emitted_case(value) -> bool:
     return slots <= {"value"}
 
 
+# ------------------------------------------------------------ item 457: routes
+
+_ROUTE_SCALARS = ("Str", "Int", "Bool")
+
+
+@dataclasses.dataclass
+class HttpReply:
+    """A full HTTP reply the routed wire needs but the canonical fourth-quadrant
+    JSON envelope cannot express: an arbitrary status, content type, extra
+    headers and a raw body. Canonical/manifest/error replies are wrapped as a
+    JSON `HttpReply` so `_Handler` has one thing to write."""
+    status: int
+    body: bytes
+    content_type: str = "application/json"
+    headers: tuple = ()
+
+    @classmethod
+    def json(cls, status: int, payload) -> "HttpReply":
+        return cls(status, json.dumps(payload).encode("utf-8"),
+                   "application/json")
+
+
+@dataclasses.dataclass
+class _Route:
+    """One routed operation, resolved from the IR `route` entry (item 457)."""
+    method: str                 # upper-case HTTP verb
+    template: str               # the `/notes/{id}` path template
+    regex: "re.Pattern"         # template compiled to a full-path matcher
+    key: str                    # the provided key on the composition
+    op: str                     # the operation name
+    param_order: list           # declared parameter names, in call order
+    bind: dict                  # param name -> {kind, type, schema?, optional?}
+    response: dict              # the return-rule classification
+    auth: str | None            # "bearer" iff the op declares a Bearer param
+
+
+def _template_regex(template: str) -> "re.Pattern":
+    """Compile a `/notes/{id}` template to a full-path matcher whose named groups
+    are the path parameters. A segment `{name}` matches one non-empty,
+    slash-free segment; every other character is matched literally."""
+    parts = []
+    for token in re.split(r"(\{[^{}]*\})", template):
+        if token.startswith("{") and token.endswith("}"):
+            parts.append(f"(?P<{token[1:-1]}>[^/]+)")
+        else:
+            parts.append(re.escape(token))
+    return re.compile("^" + "".join(parts) + "$")
+
+
+def _coerce_scalar(raw: str, type_name: str):
+    """Coerce a URL-string path/query value to the bound scalar's Python type, or
+    raise `ValueError` naming why (a 400 the caller renders). JSON's own scalar
+    reading, so `Int`/`Bool` match the body encoding."""
+    if type_name == "Str":
+        return raw
+    if type_name == "Int":
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"expected an integer, got {raw!r}")
+    if type_name == "Bool":
+        if raw == "true":
+            return True
+        if raw == "false":
+            return False
+        raise ValueError(f"expected `true` or `false`, got {raw!r}")
+    return raw
+
+
+def _json_type_ok(value, json_type: str) -> bool:
+    if json_type == "object":
+        return isinstance(value, dict)
+    if json_type == "array":
+        return isinstance(value, list)
+    if json_type == "string":
+        return isinstance(value, str)
+    if json_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if json_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if json_type == "boolean":
+        return isinstance(value, bool)
+    if json_type == "null":
+        return value is None
+    return True
+
+
+def _schema_error(value, schema, path: str = "$") -> str | None:
+    """Validate ``value`` against the derived JSON-Schema subset `json_schema_for`
+    emits (item 257 §3), returning the FIRST violation or ``None``. A runtime-free
+    mirror of `backends/python/runtime.py`'s `_json_schema_error` (this module
+    keeps its own copy of the small backend helper it needs, exactly as it does
+    for `_encode_value`), so the wire layer validates with no runtime import."""
+    if not isinstance(schema, dict):
+        return None
+    if "const" in schema:
+        return None if value == schema["const"] else \
+            f"{path}: expected {schema['const']!r}"
+    if "enum" in schema:
+        return None if value in schema["enum"] else \
+            f"{path}: {value!r} is not one of {schema['enum']!r}"
+    if "oneOf" in schema:
+        matches = [arm for arm in schema["oneOf"]
+                   if _schema_error(value, arm, path) is None]
+        if len(matches) == 1:
+            return None
+        if not matches:
+            return f"{path}: value matches no arm of the union"
+        return f"{path}: value is ambiguous, matching {len(matches)} union arms"
+    if schema.get("nullable") and value is None:
+        return None
+    json_type = schema.get("type")
+    if json_type is not None and not _json_type_ok(value, json_type):
+        return f"{path}: expected {json_type}, got {type(value).__name__}"
+    if json_type == "object" and isinstance(value, dict):
+        props = schema.get("properties") or {}
+        for name in schema.get("required") or []:
+            if name not in value:
+                return f"{path}: missing required property {name!r}"
+        extra = schema.get("additionalProperties", True)
+        for pkey, item in value.items():
+            if pkey in props:
+                err = _schema_error(item, props[pkey], f"{path}.{pkey}")
+                if err is not None:
+                    return err
+            elif extra is False:
+                return f"{path}: unexpected property {pkey!r}"
+    if json_type == "array" and isinstance(value, list):
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for i, item in enumerate(value):
+                err = _schema_error(item, items, f"{path}[{i}]")
+                if err is not None:
+                    return err
+    return None
+
+
+def _bearer_token(headers) -> str | None:
+    """The credential in an `Authorization: Bearer <token>` header, or None. The
+    router binds it UNTOUCHED as an untrusted claim; it decides nothing."""
+    if headers is None:
+        return None
+    raw = headers.get("Authorization") or headers.get("authorization")
+    if not raw:
+        return None
+    parts = raw.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1]
+    return raw
+
+
 class HttpComposedServer:
     """A booted composition's provided operations, addressable over HTTP.
 
-    Reuses `ComposedServer`'s projection (one source of truth for the route
-    table and the compiler-derived hints) and dispatches each ``POST`` onto the
-    same `Session.call`. `dispatch` is a pure `(method, path, body) -> (status,
-    payload)` function so the whole wire layer is testable with no runtime.
+    Reuses `ComposedServer`'s projection (one source of truth for the canonical
+    route table and the compiler-derived hints) and dispatches each ``POST`` onto
+    the same `Session.call`. A provided operation that HEADS a `route` clause
+    (item 457) is ALSO reachable at its declared method+path: `dispatch_http`
+    matches routed operations first and falls back to today's
+    ``POST /<composition>/<key>/<op>`` for unrouted ones, so nothing changes for
+    a service with no `route` clause. The wire layer is a pure function of the
+    request (`dispatch`, `dispatch_http`) and is testable with no runtime.
     """
 
-    def __init__(self, session, composition: str = "revl") -> None:
+    def __init__(self, session, composition: str = "revl", decode=None) -> None:
         self.composition = composition
         self._composed = ComposedServer(session, composition=composition)
         self.session = session
+        # `decode` rebuilds native ADT/Result case instances from the canonical
+        # wire encoding, needed only to construct a typed `Request` (the escape
+        # hatch) whose `method`/`body` are variants. Identity by default so the
+        # common path — scalars, records, the bearer record — stays runtime-free;
+        # `serve_http` wires the live module's decoder for the escape hatch.
+        self._decode = decode or (lambda v: v)
         # tool name is `<composition>.<key>.<op>`; index the same routes by the
         # HTTP path `/<composition>/<key>/<op>`, and keep the advertised hints
         # for the manifest so the fourth quadrant's compiler-derived
@@ -136,7 +300,34 @@ class HttpComposedServer:
             path = f"/{composition}/{key}/{method}"
             self._by_path[path] = (key, method, params)
             self._hints[path] = tool
+        # item 457: the declared HTTP routes, resolved from the IR `route` entry.
+        self._routes_457: list[_Route] = self._build_routes(session.ir or {})
         self.frontier = gate_version().get("frontier", "")
+
+    # -- route table (item 457) -------------------------------------------
+    def _build_routes(self, ir: dict) -> list["_Route"]:
+        services = ir.get("services") or {}
+        routes: list[_Route] = []
+        for component in ir.get("components") or []:
+            for key, service_name in (component.get("provides") or {}).items():
+                service = services.get(service_name) or {}
+                for op_name, op in (service.get("methods") or {}).items():
+                    route = op.get("route")
+                    if not route:
+                        continue
+                    routes.append(_Route(
+                        method=route["method"].upper(),
+                        template=route["path"],
+                        regex=_template_regex(route["path"]),
+                        key=key,
+                        op=op_name,
+                        param_order=[p["name"] for p in (op.get("params") or [])],
+                        bind=route.get("bind") or {},
+                        response=route.get("response") or {"kind": "plain",
+                                                           "type": "Unit"},
+                        auth=route.get("auth"),
+                    ))
+        return routes
 
     # -- the manifest (GET /) ---------------------------------------------
     def _manifest(self) -> dict:
@@ -163,6 +354,16 @@ class HttpComposedServer:
             # to this frontier and is not a runtime-confinement claim.
             "frontier": self.frontier,
             "operations": operations,
+            # item 457: the declared HTTP routes (method + template) served
+            # ALONGSIDE the canonical operation paths. `auth` is a
+            # documentation-only marker (a Bearer-bearing operation); the router
+            # grants nothing — authorization is the handler's explicit step.
+            "routes": [
+                {"method": r.method, "path": r.template,
+                 "key": r.key, "operation": r.op,
+                 **({"auth": r.auth} if r.auth else {})}
+                for r in self._routes_457
+            ],
             # D-424c.8: LOCAL contract only. This face is typed and bounded on
             # THIS side; it makes no safety claim about what any callee it
             # reaches ultimately runs, and there is no verified-remote badge. A
@@ -229,6 +430,206 @@ class HttpComposedServer:
         # marshals identical bytes here as over the placement seam.
         return _OK, {"ok": True, "value": _encode_value(result.get("result"))}
 
+    # -- routed dispatch (item 457) ---------------------------------------
+    def dispatch_http(self, method: str, path: str, body: bytes = b"",
+                      headers=None) -> HttpReply:
+        """Route one HTTP request, honouring `route` clauses first (item 457) and
+        falling back to the canonical fourth-quadrant dispatch otherwise.
+
+        A routed match binds every parameter from the path/query/body/header per
+        the compiler's bind table, VALIDATES each bound input against its derived
+        schema BEFORE the handler runs (item 257; a failure is `400` naming the
+        field and the handler is never invoked), then maps the handler's return
+        per the return rules. A path that matches a template with the wrong method
+        is `405`; a path no route and no canonical operation matches is `404`."""
+        clean = path.split("?", 1)[0].rstrip("/") or "/"
+        query = urllib.parse.parse_qs(path.split("?", 1)[1]) \
+            if "?" in path else {}
+
+        matched_path = False
+        for route in self._routes_457:
+            m = route.regex.match(clean)
+            if m is None:
+                continue
+            matched_path = True
+            if route.method != method:
+                continue
+            return self._serve_route(route, m, query, body, headers)
+        if matched_path:
+            allow = sorted({r.method for r in self._routes_457
+                            if r.regex.match(clean)})
+            return HttpReply.json(_METHOD_NOT_ALLOWED, _err(
+                f"`{clean}` is routed for {', '.join(allow)}, not {method}",
+                code="method"))
+
+        # no route matched — the canonical fourth-quadrant path, wrapped as JSON.
+        status, payload = self.dispatch(method, path, body)
+        return HttpReply.json(status, payload)
+
+    def _serve_route(self, route: "_Route", match, query: dict, body: bytes,
+                     headers) -> HttpReply:
+        # 1. bind + validate every parameter BEFORE the handler runs.
+        bound: dict = {}
+        _MISSING = object()
+        parsed_body = _MISSING
+        for pname in route.param_order:
+            entry = route.bind.get(pname) or {}
+            kind = entry.get("kind")
+            if kind == "path":
+                raw = match.groupdict().get(pname)
+                try:
+                    value = _coerce_scalar(raw, entry.get("type"))
+                except ValueError as exc:
+                    return HttpReply.json(_BAD_REQUEST, _err(
+                        f"path parameter `{pname}`: {exc}", code="request"))
+                err = _schema_error(value, entry.get("schema") or {})
+                if err is not None:
+                    return HttpReply.json(_BAD_REQUEST, _err(
+                        f"path parameter `{pname}` {err}", code="request"))
+                bound[pname] = value
+            elif kind == "query":
+                values = query.get(pname)
+                if not values:
+                    if entry.get("optional"):
+                        bound[pname] = None
+                        continue
+                    return HttpReply.json(_BAD_REQUEST, _err(
+                        f"missing required query parameter `{pname}`",
+                        code="request"))
+                inner = entry.get("type")
+                if entry.get("optional"):
+                    inner = _opt_inner(inner)
+                try:
+                    value = _coerce_scalar(values[0], inner)
+                except ValueError as exc:
+                    return HttpReply.json(_BAD_REQUEST, _err(
+                        f"query parameter `{pname}`: {exc}", code="request"))
+                err = _schema_error(value, entry.get("schema") or {})
+                if err is not None:
+                    return HttpReply.json(_BAD_REQUEST, _err(
+                        f"query parameter `{pname}` {err}", code="request"))
+                bound[pname] = value
+            elif kind == "body":
+                if parsed_body is _MISSING:
+                    if not body or not body.strip():
+                        return HttpReply.json(_BAD_REQUEST, _err(
+                            f"missing request body for `{pname}`", code="request"))
+                    try:
+                        parsed_body = json.loads(body)
+                    except json.JSONDecodeError as exc:
+                        return HttpReply.json(_BAD_REQUEST, _err(
+                            f"request body is not JSON ({exc})", code="request"))
+                err = _schema_error(parsed_body, entry.get("schema") or {})
+                if err is not None:
+                    return HttpReply.json(_BAD_REQUEST, _err(
+                        f"body `{pname}` {err}", code="request"))
+                bound[pname] = self._decode(parsed_body)
+            elif kind == "header":
+                # the bearer credential, bound UNTOUCHED as an untrusted claim.
+                bound[pname] = {"token": _bearer_token(headers)}
+            elif kind == "request":
+                bound[pname] = self._build_request(route, match, query, body,
+                                                   headers)
+            else:  # a parameter with no binding — should not happen post-check
+                bound[pname] = None
+
+        args = [bound.get(pname) for pname in route.param_order]
+
+        # 2. run the handler.
+        try:
+            result = self.session.call(route.key, route.op, args, raw=True)
+        except SessionError as error:
+            return HttpReply.json(_BAD_REQUEST, _err(str(error), code="session"))
+        except ApprovalRequired as exc:
+            return HttpReply.json(_FORBIDDEN, two_step_payload(
+                exc.ticket,
+                how_to_approve="This routed HTTP face serves the composition's "
+                               "own operations; there is no approve verb on this "
+                               "wire. Relay the ticket to the operator."))
+        except Exception as exc:  # the callee raised — a result, not a crash
+            return HttpReply.json(_SERVER_ERROR, {
+                "code": "internal_error",
+                "message": f"{type(exc).__name__}: {exc}"})
+
+        # 3. map the handler's return per the return rules (item 457).
+        return self._encode_return(route.response, result.get("result"))
+
+    def _build_request(self, route, match, query, body, headers) -> dict:
+        """Construct the typed `Request` escape-hatch value (a record dict). The
+        `method`/`body` variants are rebuilt through the live module's decoder so
+        a handler that `match`es on `req.method` sees native cases."""
+        verb = route.method.capitalize()
+        raw_body = body.decode("utf-8", "replace") if body else ""
+        body_val = ({"$kind": "Text", "$value": raw_body} if raw_body
+                    else {"$kind": "Empty"})
+        header_list = [{"name": k, "value": v}
+                       for k, v in (headers.items() if headers else [])]
+        return {
+            "method": self._decode({"$kind": verb}),
+            "path": match.string,
+            "headers": header_list,
+            "body": self._decode(body_val),
+        }
+
+    def _encode_return(self, response: dict, value) -> HttpReply:
+        kind = response.get("kind")
+        if kind == "response":
+            return self._encode_response_value(value)
+        if kind == "result":
+            tag = type(value).__name__ if value is not None else None
+            if tag == "Err":
+                return self._encode_api_error(getattr(value, "value", None))
+            inner = getattr(value, "value", None) if tag == "Ok" else value
+            return self._encode_ok(response.get("ok"), inner)
+        # plain T
+        return self._encode_ok(response.get("type"), value)
+
+    def _encode_ok(self, ok_type, value) -> HttpReply:
+        if not ok_type or ok_type == "Unit" or value is None:
+            return HttpReply(_NO_CONTENT, b"", "application/json")
+        return HttpReply.json(_OK, _encode_value(value))
+
+    def _encode_api_error(self, err_value) -> HttpReply:
+        enc = _encode_value(err_value)
+        if not isinstance(enc, dict):
+            return HttpReply.json(_SERVER_ERROR, {
+                "code": "internal_error",
+                "message": "handler returned a malformed ApiError"})
+        status = enc.get("status", _BAD_REQUEST)
+        return HttpReply.json(int(status), {
+            "code": enc.get("code", "error"),
+            "message": enc.get("message", "")})
+
+    def _encode_response_value(self, value) -> HttpReply:
+        """A handler-owned `Response` (stdlib/http.rvl): the handler owns status,
+        headers and body, sent as-is."""
+        enc = _encode_value(value)
+        if not isinstance(enc, dict):
+            return HttpReply.json(_SERVER_ERROR, {
+                "code": "internal_error",
+                "message": "handler returned a malformed Response"})
+        status = int(enc.get("status", _OK))
+        extra_headers = tuple(
+            (h.get("name"), h.get("value"))
+            for h in (enc.get("headers") or [])
+            if isinstance(h, dict) and h.get("name"))
+        body = enc.get("body") or {"$kind": "Empty"}
+        kind = body.get("$kind") if isinstance(body, dict) else None
+        payload = body.get("$value", "") if isinstance(body, dict) else ""
+        if kind == "Empty":
+            return HttpReply(status, b"", "application/json", extra_headers)
+        content_type = "application/json" if kind == "Json" else \
+            "text/plain; charset=utf-8"
+        return HttpReply(status, str(payload).encode("utf-8"),
+                         content_type, extra_headers)
+
+
+def _opt_inner(type_name: str | None) -> str | None:
+    """`Opt[Int]` -> `Int`; otherwise the type unchanged."""
+    if type_name and type_name.startswith("Opt[") and type_name.endswith("]"):
+        return type_name[4:-1].strip()
+    return type_name
+
 
 def _decode_args(body: bytes, param_names: list[str]) -> tuple[list, str | None]:
     """Request body -> the positional argument list, or a problem string.
@@ -269,19 +670,36 @@ def _make_handler(server: HttpComposedServer):
         def _respond(self, method: str) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
-            status, payload = server.dispatch(method, self.path, body)
-            data = json.dumps(payload).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
+            # item 457: `dispatch_http` honours `route` clauses first (with the
+            # request headers and query, for bearer/path/query binding) and falls
+            # back to the canonical fourth-quadrant dispatch otherwise.
+            reply = server.dispatch_http(method, self.path, body, self.headers)
+            self.send_response(reply.status)
+            self.send_header("Content-Type", reply.content_type)
+            for name, value in reply.headers:
+                if name and name.lower() != "content-type":
+                    self.send_header(name, value)
+            self.send_header("Content-Length", str(len(reply.body)))
             self.end_headers()
-            self.wfile.write(data)
+            self.wfile.write(reply.body)
 
         def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
             self._respond("GET")
 
         def do_POST(self) -> None:  # noqa: N802
             self._respond("POST")
+
+        def do_PUT(self) -> None:  # noqa: N802
+            self._respond("PUT")
+
+        def do_PATCH(self) -> None:  # noqa: N802
+            self._respond("PATCH")
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            self._respond("DELETE")
+
+        def do_HEAD(self) -> None:  # noqa: N802
+            self._respond("HEAD")
 
         def log_message(self, *_args) -> None:  # keep the server quiet
             pass
@@ -312,7 +730,23 @@ def serve_http(ir: dict, config: dict | None = None, *,
 
     session = Session()
     session.load(ir, config or {}, origin=None)
-    face = HttpComposedServer(session, composition=composition)
+    # item 457: wire the live module's decoder so a routed handler binding a typed
+    # `Request` (whose `method`/`body` are variants) sees native case instances.
+    # Lazy import: the backend decoder is only reachable on the live path (Session
+    # already pulled cordis above), keeping the pure wire layer decoupled.
+    decode = None
+    module = getattr(session, "_module", None)
+    if module is not None:
+        try:
+            from .._paths import backends_root  # noqa: PLC0415
+            backend_dir = backends_root() / "python"
+            if str(backend_dir) not in sys.path:
+                sys.path.insert(0, str(backend_dir))
+            import bridge  # noqa: PLC0415 — backend import after path setup
+            decode = lambda v: bridge._decode_value(v, module)  # noqa: E731
+        except Exception:  # noqa: BLE001 — the escape hatch degrades to identity
+            decode = None
+    face = HttpComposedServer(session, composition=composition, decode=decode)
     httpd = build_http_server(face, host, port)
     bound_host, bound_port = httpd.server_address[:2]
     print(f"revl serve --http: {composition} on http://{bound_host}:{bound_port}",
