@@ -412,6 +412,23 @@ def _run_export(args) -> int:
             print(source, end="")
         return 0
 
+    if args.export_command == "openapi":
+        from ..export_openapi import export_openapi  # noqa: PLC0415
+        try:
+            source = export_openapi(ir, service=args.service)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        if args.output:
+            try:
+                Path(args.output).write_text(source, encoding="utf-8")
+            except OSError as error:
+                print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
+                return 1
+        else:
+            print(source, end="")
+        return 0
+
     from ..export_wit import export_wit  # noqa: PLC0415
 
     try:

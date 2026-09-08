@@ -142,6 +142,17 @@ class MethodDecl:
     # identifiers the type parser already reads — so the self-host lexer parity
     # oracle is untouched.
     termination: str | None = None
+    # roadmap item 457 (docs/design/457-endpoint-one-definition.md): the `route`
+    # clause `route <method> "<path>"` that HEADS a service-operation declaration
+    # and makes it reachable over HTTP. `route` is a CONTEXTUAL keyword recognised
+    # only in this leading position inside a `service` body (the discipline
+    # `remote`/`through` use), so the lexer is untouched and a program using
+    # `route` as an ordinary name is unaffected; the method set is exactly
+    # stdlib/http.rvl's `Method`. `None` for every non-routed operation, so their
+    # IR is byte-identical. The bind-table check (which parameter is a path
+    # scalar / query / body) and the IR entry are derived in lower, next to the
+    # sibling `validated` schema derivation, where the `types` table is in scope.
+    route: dict | None = None
 
 
 @dataclass
@@ -2722,7 +2733,36 @@ class Parser:
             # the absent clause (byte-identical); `retry N` is a positive literal.
             # Legal only alongside `validated`, checked in lower.
             method_retry = 0
+            # item 457: the `route <method> "<path>"` clause that HEADS the
+            # operation, before the modifiers. `route` is contextual — matched on
+            # the ident, like `endorse`/`validated` — so it is recognised only in
+            # this leading position and stays a legal ordinary name elsewhere. The
+            # method is one of the six `stdlib/http.rvl` `Method` verbs (ordinary
+            # idents, no lexer change); the path is a string literal. The
+            # bind-table and return-rule checks are in lower (where `types` is in
+            # scope); the parser only records the shape.
+            method_route: dict | None = None
             mline = self.peek().line
+            if self.at("ident", "route"):
+                rline = self.next().line
+                _ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head")
+                if not (self.at("ident") and self.peek().value in _ROUTE_METHODS):
+                    raise self.err(
+                        rline,
+                        "a `route` clause needs an HTTP method — one of "
+                        "`get`, `post`, `put`, `patch`, `delete`, `head`",
+                        hint='write e.g. `route get "/notes/{id}"`; the method set '
+                             "is exactly stdlib/http.rvl's `Method`")
+                route_method = self.next().value
+                if not self.at("string"):
+                    raise self.err(
+                        rline,
+                        f"a `route {route_method}` clause needs a path string",
+                        hint=f'write e.g. `route {route_method} "/notes/{{id}}"`')
+                route_path = self.expect("string",
+                                         what="a route path string").value
+                method_route = {"method": route_method, "path": route_path,
+                                "line": rline}
             while (self.at("kw") and self.peek().value in ("emission", "async", "commutative", "idempotent")) \
                     or self.at("ident", "endorse") or self.at("ident", "validated") \
                     or self.at("ident", "retry"):
@@ -2827,7 +2867,7 @@ class Parser:
                 commutative=method_commutative, idempotent=method_idempotent,
                 capabilities=capabilities, endorse_origins=endorse_origins,
                 cache=cache, validated=method_validated, retry=method_retry,
-                termination=termination,
+                termination=termination, route=method_route,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)
