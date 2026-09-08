@@ -498,13 +498,17 @@ guarantees.
   `unresolved` naming the
   target for a human. A deploy that cannot promise teardown must not be the thing
   that quietly discovers it. The refusal also names the control plane that is
-  absent: no bundle staging, no remote `deploy-admit` runner, and no pinned SSH
-  host key (design R4/R5). The load-measured signed COMMIT receipt and the
-  conductor's comparison of it (design R2) now exist as library surface —
-  `commit_receipt` and `compare_commit_receipt` (§1) — but nothing yet drives
-  them across an SSH COMMIT round-trip; that wiring is part of the machine
-  boundary. Without the host-key pin, impersonating the target costs sitting on
-  the network path rather than owning the machine.
+  absent: no bundle staging and no pinned SSH host key (design R4/R5). The
+  far-side runner itself now exists as a real process, `revl deploy-admit`, and
+  is driven over its stdin/stdout by `deploy.StdioRunnerTransport` — locally as
+  a child (`python -m revl deploy-admit ...`), and across a machine boundary as
+  the same command behind `ssh <host>`, which is what is still absent. Over that
+  runner the PREPARE chain verify (`serve_admit_request`) and the load-measured
+  signed COMMIT receipt with the conductor's hard comparison of it
+  (`serve_commit_request` / `request_commit`, design R2) both cross the process
+  seam today; what does not yet cross is the SSH seam, together with the staging
+  and the host-key pin. Without the host-key pin, impersonating the target costs
+  sitting on the network path rather than owning the machine.
 
 ### A participant behind a container boundary
 
@@ -529,20 +533,20 @@ conductor's own kernel.
 
 ## Not landed yet
 
-* **cross-machine orchestration**: the `machine` boundary above, with bundle
-  staging, a remote `deploy-admit` runner, a pinned SSH host key, and the SSH
-  round-trip that drives the load-measured COMMIT receipt (`commit_receipt` /
-  `compare_commit_receipt` are landed as library surface, §1; the round-trip
-  that calls them across the seam is not) (`network-placement.md` still lists
-  orchestration as a non-goal);
+* **cross-machine orchestration**: the `machine` boundary above. The far-side
+  runner (`revl deploy-admit`) and the transport that speaks to it
+  (`StdioRunnerTransport`) are landed, so PREPARE and the load-measured COMMIT
+  both cross a real process seam today; what is not landed is the SSH seam
+  itself — the same runner command behind `ssh <host>`, the bundle staging over
+  scp/rsync, and the pinned SSH host key (design R4/R5). Until the conductor's
+  coordinated protocol (`run_deploy`) drives that runner instead of a local
+  `ProcessParticipant`, a `via = ssh` target stays refused
+  (`network-placement.md` still lists orchestration as a non-goal);
 * a **replicated WAL** and a quorum-durable federation decision;
 * a **partition-safe distributed commit coordinator**;
 * a **seam-carrying container target**, blocked on the per-rung seam transport
   (item 411's next sub-slice); until it lands, a container target must be
   seam-free;
-* a **`revl deploy` CLI command**. Slice 2a lands the map and its admission as
-  library surface; the command that reads a `.toml` off disk and drives
-  `run_deploy` is the next step, and would be a wrapper over what is here;
 * the **Ed25519 upgrade** to `attest.py`, a hard prerequisite for the
   cross-trust-domain deploy, refused explicitly rather than faked;
 * **hardware remote attestation** (TPM/TEE) of the loaded image.

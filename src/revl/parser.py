@@ -757,6 +757,14 @@ class RemoteRowDecl:
     # request, credentials included, would travel with it).
     redirect: str = "refuse"
     redirect_line: int = 0
+    # item 439 T1 (issue #118): `long_running` marks the row's service as an A2A
+    # Task lifecycle, so the synthesizer projects the four-op explicit-handle
+    # surface (`_start`/`_poll`/`_reply`/`_cancel`) over `tasks/get` /
+    # `tasks/cancel` / `message/send`+`taskId` instead of one terminal crossing
+    # (docs/design/439-a2a-task-lifecycle.md). A CONTEXTUAL keyword like the
+    # rest of the clause; the lexer's KEYWORDS set stays untouched.
+    long_running: bool = False
+    long_running_line: int = 0
     # The line the address itself is written on, so an address refusal points at
     # the address rather than at the row's first line.
     host_line: int = 0
@@ -3623,7 +3631,7 @@ class Parser:
     def remote_row_decl(self, composition: str) -> RemoteRowDecl:
         """`remote @label provides <key>: <Service> [in realm("r")]
         at host("h:port") [through <ident>] [on_failure(withdraw|result)]
-        [redirect(refuse|same_origin)]`
+        [redirect(refuse|same_origin)] [long_running]`
 
         Item 424 D-424c.1, slice C2. Every word this clause introduces is a
         CONTEXTUAL keyword read only here (`remote`, `at`, `host`, `through`,
@@ -3682,6 +3690,8 @@ class Parser:
         on_failure_line = line
         redirect = "refuse"
         redirect_line = line
+        long_running = False
+        long_running_line = line
         while True:
             if self.at("kw", "in"):
                 iline = self.next().line
@@ -3762,6 +3772,13 @@ class Parser:
                 self.next()
                 redirect = choice
                 self.expect(")")
+            elif self.at("ident", "long_running"):
+                lline = self.next().line
+                if long_running:
+                    raise self.err(lline, f"duplicate `long_running` clause on "
+                                          f"remote row `@{label}`")
+                long_running = True
+                long_running_line = lline
             else:
                 break
 
@@ -3776,6 +3793,8 @@ class Parser:
                              transport=transport, on_failure=on_failure,
                              on_failure_line=on_failure_line,
                              redirect=redirect, redirect_line=redirect_line,
+                             long_running=long_running,
+                             long_running_line=long_running_line,
                              host_line=host_line)
 
     def host_row_decl(self, composition: str) -> HostRowDecl:

@@ -812,6 +812,8 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
         "realm": remote.realm, "capability": capability,
         "on_failure": remote.on_failure, "transport": remote.transport,
         "redirect": remote.redirect,
+        "long_running": remote.long_running,
+        "long_running_line": remote.long_running_line,
         "doc": doc, "line": remote.line,
     })
     rel = _synth_path(origin, remote.label)
@@ -845,6 +847,10 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
             "inverse": None,
             **({"realm": remote.realm} if remote.realm else {}),
             **({"transport": remote.transport} if remote.transport else {}),
+            # item 439 T1: the row projects the four-op A2A Task lifecycle
+            # (`_start`/`_poll`/`_reply`/`_cancel`) rather than one terminal
+            # crossing. On the row table so `revl audit` sees the shape.
+            **({"longRunning": True} if remote.long_running else {}),
         },
     )
 

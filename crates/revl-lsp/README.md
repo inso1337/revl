@@ -127,11 +127,44 @@ distributor can still drop a newer runtime beside the binary. When
 `REVL_LSP_EMBED_RUNTIME` is unset (a bare `cargo build`, and every CI job today)
 nothing is embedded and the resolution falls through unchanged.
 
+### Building a one-file binary
+
+`tools/embed_runtime.py` is the build glue that produces those two values from a
+real runtime. A distribution build hands it a `python-build-standalone` tree
+(or an archive of one) with the `revl` wheel frozen into its own site; it
+validates the `bin/python3`, normalizes the tree into the `runtime.tar` the
+resolver expects, computes the archive's sha256, derives a content-addressed pin
+(`pbs-<sha256[:12]>`, or an explicit `--pin`), records `{pin, sha256, bytes,
+source}` in a `runtime.lock.json` — the documented pin, so a rebuild bakes the
+SAME bytes under the SAME key — and prints the two build-environment values:
+
+```
+eval "$(python tools/embed_runtime.py --runtime <pbs-tree> --out dist/)"
+cargo build --release --manifest-path crates/revl-lsp/Cargo.toml
+```
+
+It DELIBERATELY does not fetch: downloading a `python-build-standalone` release
+and freezing the wheel into it is the distribution step (roadmap 338), so this
+helper pins and packs bytes the distributor already has and stays offline and
+reproducible — which is also what lets `tests/embedded_runtime.rs` drive it, and
+a real embed build, on every CI run.
+
+The `embedding` (`private-runtime` / `system-python`) says WHETHER the runtime
+is private; `revl/gateVersion` also reports a `runtime` block —
+`{source, pin}` — that says HOW it was shipped: `embedded` (the genuinely
+single distributed FILE, baked into the binary), `beside-exe` (a self-contained
+pair of files), `env` (pointed at by `REVL_LSP_RUNTIME`/`_ARCHIVE`), or
+`system-python` (no private runtime, pin `null`). The one-file bundling item is
+precisely about the `embedded` shape, which `embedding` alone cannot tell from
+`beside-exe`, so a fleet or install audit reads `runtime.source` to confirm an
+artifact really is one file, and `runtime.pin` — the runtime's own skew
+comparand (A3) — to confirm it is the expected pairing.
+
 **What this slice landed, and what it defers.** The runtime-management contract
 is here — the pin, the atomic versioned cache, the isolated-mode launch, and
-the fail-closed rule — and `revl/gateVersion` now reports an `embedding` of
-`private-runtime` or `system-python` so a client can tell a self-contained
-artifact from one leaning on an installed `revl`. The build knob that bakes a
+the fail-closed rule — and `revl/gateVersion` reports the `embedding` and the
+`runtime` `{source, pin}` above so a client can tell a self-contained one-file
+artifact from a pair or from one leaning on an installed `revl`. The build knob that bakes a
 runtime archive INTO the binary is here too (`build.rs` + `include_bytes!`), so a
 distribution build has a genuinely single distributed FILE rather than a binary
 plus a sibling archive; the archive rides the same atomic, versioned, isolated
@@ -148,13 +181,17 @@ the exact move A1 forbids.
 
 One deliberate, additive divergence from the reference's dispatch table: the
 custom request `revl/gateVersion` answers `{api, language, frontier, engine,
-native, server}` so a client, a CI check or a fleet audit can detect a stale
-binary/reference pairing before trusting its greens (design A3: skew is made
-detectable, not solved). `frontier` reads `reference` because DIAGNOSTICS — the
-answers a green depends on — still cover the whole language rather than the
-self-host frontier; the native engine's own pin (`api`, `language`,
-`frontier`, `layer`, and the verbs it answers) sits beside it under `native`,
-and that is the id a stale-binary audit compares. The reference answers
+embedding, runtime, native, server}` so a client, a CI check or a fleet audit
+can detect a stale binary/reference pairing before trusting its greens (design
+A3: skew is made detectable, not solved). `frontier` reads `reference` because
+DIAGNOSTICS — the answers a green depends on — still cover the whole language
+rather than the self-host frontier; the native engine's own pin (`api`,
+`language`, `frontier`, `layer`, and the verbs it answers) sits beside it under
+`native`, and that is the id a stale-binary audit compares. `embedding` and the
+`runtime` `{source, pin}` block make the DISTRIBUTION shape legible — whether
+the runtime is private, and whether it ships as one file (`embedded`), a pair
+(`beside-exe`), an env-named tree (`env`), or the system fallback
+(`system-python`). The reference answers
 `-32601` for this method; `initialize` is left byte-identical rather than
 carrying the version, so the compared surface stays exact.
 
@@ -199,11 +236,29 @@ REVL_LSP_PYTHON=/path/to/python cargo test   # plus the reference oracle
   builds a runtime archive around a real `revl`-capable interpreter, drives the
   binary with only that archive to reach `revl` (no `REVL_LSP_PYTHON`), and
   asserts the interpreter was extracted into the versioned cache, the binary
-  reports the `private-runtime` embedding, its published diagnostics equal the
-  reference server's byte for byte, and a second launch REUSES the cache rather
-  than re-extracting. It sources the interpreter from
+  reports the `private-runtime` embedding with a `runtime` block naming the
+  `env` source and the `test-pin-102` pin it keyed on, its published diagnostics
+  equal the reference server's byte for byte, and a second launch REUSES the
+  cache rather than re-extracting. It sources the interpreter from
   `REVL_LSP_TEST_RUNTIME_PYTHON` (or `REVL_LSP_PYTHON`), skipping with a stated
   reason when neither is set.
+
+`tests/embedded_runtime.rs` is the genuinely-single-distributed-FILE exit check:
+
+- `a_binary_built_with_an_embedded_runtime_answers_from_a_versioned_private_cache`
+  pins and packs a runtime with `tools/embed_runtime.py` (asserting its
+  `runtime.lock.json` records the archive's real sha256), BUILDS a `revl-lsp`
+  binary that bakes that archive in under that pin (`REVL_LSP_EMBED_RUNTIME` +
+  `_PIN`, into an isolated target dir), then drives that binary with no
+  `REVL_LSP_PYTHON`, no runtime env archive and no pin override — so the ONLY
+  way it reaches `revl` is the bytes inside the executable. It asserts the baked
+  pin governed the versioned cache, `revl/gateVersion` reports the `embedded`
+  source, the published diagnostics equal the reference server's byte for byte,
+  and a second launch REUSES the cache. This is the one test that exercises
+  `build.rs` baking a real archive and the `Source::Embedded` branch of `locate`
+  end to end, rather than the extraction helper or an env-named archive alone.
+  It sources the interpreter the same way `private_runtime.rs` does, skipping
+  with a reason when neither knob is set.
 
 **The corpus crosses the self-host frontier on purpose** (a required exit
 condition, not an optional extension). It is built from `examples/rejections/`
@@ -233,12 +288,18 @@ oracle executes for real rather than skipping.
 - **Slice 3** (gated on item 391): the full native checker, the bundled
   interpreter dropped, the binary small and pure rust. Cannot start earlier for
   soundness, not scheduling.
-- Outstanding from the one-file bundling slice: shipping the pinned
-  `python-build-standalone` archive with the crate (so a distributable actually
-  carries a runtime for the resolver above to find), and the in-process pyo3
-  link that replaces the child process with a linked `libpython`. The
-  runtime-management contract they build on — pin, atomic versioned cache,
-  isolated launch — landed here (`runtime.rs`, `tests/private_runtime.rs`).
+- Outstanding from the one-file bundling slice: fetching and shipping the pinned
+  `python-build-standalone` release BYTES a build points the embed knob at (with
+  the `revl` wheel frozen into the runtime's own site) — the distribution step
+  (338) `tools/embed_runtime.py` deliberately does not perform — and the
+  in-process pyo3 link that replaces the child process with a linked
+  `libpython`. The runtime-management contract they build on — pin, atomic
+  versioned cache, isolated launch — landed earlier (`runtime.rs`,
+  `tests/private_runtime.rs`); the BUILD glue that pins, packs and bakes a
+  runtime into the binary, and an end-to-end test of a binary actually built
+  that way, landed here too (`build.rs`, `tools/embed_runtime.py`,
+  `tests/embedded_runtime.rs`). What remains is supplying the real archive bytes,
+  not wiring them in.
 - Outstanding from slice 2: `hover`, `codeAction` and everything about
   diagnostics remain reference-served, and native navigation is confined to
   documents with no diagnostics and to declarations the self-host parser

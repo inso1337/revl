@@ -1,0 +1,207 @@
+// The exemplary revl web application — the BORING HALF (roadmap item 462,
+// issue #725, design docs/design/525-exemplary-web-app.md; slice 1 of 462).
+//
+// 525's first claim, made concrete: ORDINARY web development is boring. A small
+// typed task/notes CRUD service, written the obvious way over the primitives
+// that already exist — nothing here is a differentiator, and nothing here is a
+// workaround:
+//
+//   * typed routes via the `route <method> "<path>"` clause (item 457, PR for
+//     #720) over the first-class HTTP contract in stdlib/http.rvl (item 456,
+//     #745). One declaration per endpoint; routing, request validation and
+//     response serialization are DERIVED from it (docs/design/457-endpoint-one-
+//     definition.md), not hand-rolled;
+//   * persistence via the model-store pattern (examples/model_store.rvl, item
+//     465 / #767): typed CRUD over a declared row type, every mutation a
+//     revertible `effect` whose derived inverse is the natural CRUD counterpart,
+//     so a row written during activation reverts residue-free on teardown;
+//   * status and outcome read through the typed HTTP contract — `Result[T,
+//     ApiError]` maps to the wire status by its TYPE (item 456), never from body
+//     prose.
+//
+// 525 discipline (acceptance bar 2): ZERO routing sentinels (`""`/`"::empty::"`)
+// and ZERO emitter workarounds in this source. Every place one would have been
+// needed is a gap FILED against 456–461, not absorbed here. The authorization
+// step (a `Bearer`/`Principal` handshake) is item 457 Slice 2 and the
+// differentiated hot-swap half is a later slice of 462; neither is in this file.
+
+use "stdlib/http.rvl" { ApiError, not_found_error }
+
+// ---------------------------------------------------------------- the model
+
+// One declared row type. Query and mutation are typed against it, so a field the
+// model does not declare is a front-end type error, not a runtime surprise.
+type Note    = { id: Str, title: Str, body: Str }
+
+// The create payload: what a client supplies. The server owns the `id`, so it is
+// absent here — a `NewNote` cannot carry one.
+type NewNote = { title: Str, body: Str }
+
+// ---------------------------------------------------------------- persistence
+
+// The persistence service, shaped like examples/model_store.rvl: typed CRUD
+// verbs over the declared row, no SQL. `get`/`all`/`size` are pure reads;
+// `create` is an `emission` (a witnessed mutation) whose provider carries the
+// inverse.
+service NoteStore {
+  fn get(id: Str) -> Opt[Note]
+  fn all() -> List[Note]
+  fn size() -> Int
+  emission fn create(row: Note)
+}
+
+// The memory driver. Any other driver (sqlite, postgres) would provide this same
+// `NoteStore`, so neither the model nor the HTTP handlers change when the driver
+// is swapped (model_store.rvl's composition-time-choice point).
+component MemoryStore provides store: NoteStore {
+  let rows = effect Map.new() undo rows.drop()
+
+  provide store {
+    fn get(id) = rows.get(id)
+
+    fn size() = rows.size()
+
+    // List every row. The host Map exposes `keys()` (ascending canonical order)
+    // and `get`, so listing the VALUES is the obvious keys-then-get fold — the
+    // same shape stdlib/list.rvl builds lists with. See the filed-gap note in
+    // docs/design/525-webapp-slice1-gaps.md (§1): a first-class `values()` verb
+    // would make this a one-liner, but its ABSENCE forces no sentinel and no
+    // workaround, so the app absorbs the fold rather than papering a hole.
+    fn all() {
+      var out = []
+      for (k of rows.keys()) {
+        out = out.push(rows.get(k))
+      }
+      return out
+    }
+
+    // The mutation, lowered as a revertible effect: insert the row, and on
+    // abort/teardown remove it. `create`'s derived inverse is `remove` — the
+    // model-store-natural counterpart — so the write reverts residue-free.
+    fn create(row) {
+      effect rows.insert(row.id, row)
+      undo   rows.remove(row.id)
+    }
+  }
+}
+
+// ---------------------------------------------------------------- pure helpers
+
+// Take at most `n` rows. A plain pure list fold (the boring, obvious form),
+// applied to the optional `limit` query parameter. Kept pure and out of the
+// effect stratum so the handler's persistence reads stay the only effects.
+fn take(xs: List[Note], n: Int) -> List[Note] {
+  var out = []
+  var i = 0
+  for (x of xs) {
+    if (i < n) { out = out.push(x) }
+    i = i + 1
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- the endpoints
+
+// One `service` declaration is the whole endpoint surface. Each `route` clause
+// names the method and path template; the compiler derives the router, the
+// per-parameter request validation and the response serialization from the
+// typed signature (item 457). No route carries auth vocabulary — authorization
+// is a separate, explicit step (457 Slice 2), and these operations are public
+// because their handlers reach no principal-taking service.
+service NotesApi {
+  route get "/notes/{id}"
+  fn get_note(id: Str) -> Result[Note, ApiError]
+
+  route get "/notes"
+  fn list_notes(limit: Opt[Int]) -> Result[List[Note], ApiError]
+
+  route post "/notes"
+  emission fn create_note(note: NewNote) -> Result[Note, ApiError]
+}
+
+// The HTTP component wires the endpoints to the store. Status and outcome come
+// from the return TYPE: an `Ok` is 200 (a `Note`/`List[Note]` in the canonical
+// encoding), an `Err(ApiError)` is `e.status` with `{code, message}` — no prose.
+component NotesHttp requires store: NoteStore provides notes_api: NotesApi {
+  provide notes_api {
+    // A miss is a typed 404 through `ApiError`, distinct from the routing-level
+    // `NotHandled` the router answers for an unmatched path.
+    fn get_note(id) {
+      return match store.get(id) {
+        Some(n) => Ok(n),
+        None    => Err(not_found_error("no note with that id")),
+      }
+    }
+
+    // `limit` absent is the whole list; present, it bounds the result. The bad
+    // non-integer `limit` never reaches here — the derived validator rejects it
+    // with a 400 naming the field before the handler runs.
+    fn list_notes(limit) {
+      return match limit {
+        Some(n) => Ok(take(store.all(), n)),
+        None    => Ok(store.all()),
+      }
+    }
+
+    // The server owns the id; the client supplied only a `NewNote`. Minting it
+    // from the store's row count keeps the id server-side and the payload typed.
+    // The `create` emission is revertible in the store, so a faulted activation
+    // leaves no row behind.
+    fn create_note(note) {
+      let id  = "note-" + store.size().to_str()
+      let row = { id: id, title: note.title, body: note.body }
+      emit store.create(row)
+      return Ok(row)
+    }
+  }
+}
+
+// ---------------------------------------------------------------- lifecycle
+
+// End-to-end on the real runtime: load the store then the HTTP component (the
+// `requires` edge resolves provider-first), drive the endpoints through their
+// provision keys, and assert the store persisted and reverts residue-free.
+// Runs under `revl test` on the cordis-py runtime (tests/test_app_notes_725.py
+// gates it on the runtime being installed), the same harness model_store.rvl
+// uses.
+lifecycle test "create then get returns the stored note" {
+  load MemoryStore
+  load NotesHttp
+  let created = call notes_api.create_note({ title: "first", body: "hello" })
+  assert created == Ok({ id: "note-0", title: "first", body: "hello" })
+  let got = call notes_api.get_note("note-0")
+  assert got == Ok({ id: "note-0", title: "first", body: "hello" })
+  unload NotesHttp
+  unload MemoryStore
+  assert no_residue
+}
+
+lifecycle test "get of an absent id is a typed 404 ApiError" {
+  load MemoryStore
+  load NotesHttp
+  let miss = call notes_api.get_note("nope")
+  assert miss == Err({ status: 404, code: "not_found",
+                       message: "no note with that id" })
+  unload NotesHttp
+  unload MemoryStore
+  assert no_residue
+}
+
+lifecycle test "list returns created rows and a reloaded store is empty" {
+  load MemoryStore
+  load NotesHttp
+  call notes_api.create_note({ title: "a", body: "1" })
+  call notes_api.create_note({ title: "b", body: "2" })
+  let all = call notes_api.list_notes(None)
+  assert all == Ok([{ id: "note-0", title: "a", body: "1" },
+                    { id: "note-1", title: "b", body: "2" }])
+  unload NotesHttp
+  unload MemoryStore
+  load MemoryStore
+  load NotesHttp
+  let empty = call notes_api.list_notes(None)
+  assert empty == Ok([])
+  unload NotesHttp
+  unload MemoryStore
+  assert no_residue
+}
