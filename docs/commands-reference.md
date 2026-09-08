@@ -1038,8 +1038,9 @@ own local trust store, rather than the conductor checking in its own process.
 
 The trust configuration is the runner's own, never anything the request carries:
 a request can ASK for admission but cannot supply the trust that would grant it.
-Locally the conductor spawns `python -m revl deploy-admit ...` and speaks to it
-over stdin/stdout (`deploy.StdioRunnerTransport`); across a machine boundary it
+Locally the conductor spawns the `revl deploy-admit` runner as a local child
+process and speaks to it over stdin/stdout (`deploy.StdioRunnerTransport`);
+across a machine boundary it
 is the same command behind `ssh <host>`, which is a following slice together
 with the bundle staging and pinned SSH host key.
 
