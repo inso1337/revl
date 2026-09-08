@@ -41,8 +41,8 @@ import os
 from .admit_profile import AdmissionProfile
 from .errors import RevlError
 from .lower import _config_default_type
-from .parser import (Address, CompositionDecl, IsolateStmt, LayerDecl, Program,
-                     RowDecl, parse_file)
+from .parser import (Address, CompositionDecl, IsolateStmt, LayerDecl,
+                     PlaceDecl, Program, RowDecl, parse_file)
 from .synthesize import (
     OBSERVER_METHOD, cap_token, check_address, check_remotable,
     synthesize_provider)
@@ -136,11 +136,11 @@ class Row:
 
     __slots__ = ("label", "origin", "source", "component", "claims",
                  "extra_claims", "requires", "config", "granted", "line",
-                 "provenance", "remote", "seam", "open", "reach")
+                 "provenance", "remote", "seam", "open", "reach", "place")
 
     def __init__(self, label, origin, source, component, claims, extra_claims,
                  requires, config, granted, line, provenance=None, remote=None,
-                 seam=None, open=None, reach=None):
+                 seam=None, open=None, reach=None, place=None):
         self.label = label
         self.origin = origin
         self.source = source
@@ -172,6 +172,11 @@ class Row:
         # was not written, so a row that uses neither is byte-identical.
         self.open = open              # set[str] | None
         self.reach = reach            # dict[str, str] | None
+        # item 424 R3: the placement fact — `{"process": str, "backend": str?}`
+        # — for a row a `place` statement targets. `None` for a row nobody
+        # placed. Like `remote`/`seam`, an ADMISSION fact beside the wiring, not
+        # read by `wiring()`, so an unplaced row is byte-identical.
+        self.place = place            # dict | None
 
     @property
     def qualified(self) -> str:
@@ -209,6 +214,8 @@ class Row:
             out["remote"] = dict(self.remote)
         if self.seam is not None:
             out["seam"] = dict(self.seam)
+        if self.place is not None:
+            out["place"] = dict(self.place)
         return out
 
 
@@ -1093,6 +1100,12 @@ def resolve(decl: CompositionDecl, doc_path: str,
     base = os.path.dirname(os.path.abspath(doc_path))
 
     rows = [_resolve_row(row, origin, doc, base, root)[0] for row in decl.rows]
+    # item 424 R3: base-composition placement. A `place` names an existing row,
+    # so it runs after the rows resolve and refuses if it names nothing.
+    if decl.places:
+        rows_by_qual = {r.qualified: r for r in rows}
+        for spec in decl.places:
+            _record_place(spec, rows_by_qual, origin, doc, decl.name, 0, BASE_LAYER)
     uses = _resolve_uses(decl, doc, base, root)
     sources = _resolve_remotes(decl, doc, origin, root, uses, rows)
     sources.update(_resolve_seams(decl, doc, origin, root, uses, rows))
@@ -1122,6 +1135,13 @@ def resolve(decl: CompositionDecl, doc_path: str,
 BASE_LAYER = "<base>"
 
 _LEVEL_NAME = {0: "base", 1: "stack", 2: "site", 3: "invocation"}
+
+# item 424 R3: the backends a `place` may name. Mirrors
+# `placement.KNOWN_BACKENDS` (the `[processes]`/`[tiers]` machinery `place`
+# subsumes, `placement.py:85`), kept as a local constant so header-only
+# resolution does not import the placement runner. An unknown backend is a
+# REFUSAL, never a silent default — placement is structure and fails closed.
+_KNOWN_BACKENDS = ("py", "node", "ts", "rust", "java", "go")
 
 
 class _Slot:
@@ -1251,6 +1271,75 @@ def _resolve_address(address: Address, own_origin: str, slots: dict,
              "exact row, or repin the source that dropped the key (426 §2.4)")
 
 
+def _place_ir(spec: PlaceDecl) -> dict:
+    """The placement fact recorded on a row (item 424 R3). `backend` is omitted
+    when the placement leaves it to the composition's default, so a
+    process-only placement stays a one-key dict."""
+    out = {"process": spec.process}
+    if spec.backend is not None:
+        out["backend"] = spec.backend
+    return out
+
+
+def _place_target(address: Address, own_origin: str, rows_by_qual: dict,
+                  source: str, name: str) -> str:
+    """The qualified label a `place` address names, refusing (426 §2.4) if it
+    names nothing. Like `_resolve_address` but reports against the placing
+    document/layer `source` rather than a `LayerDecl`, so a base-composition
+    `place` and a site-layer `place` share one resolver."""
+    if address.kind == "label":
+        want = qualified(address.origin or own_origin, address.label)
+        if want in rows_by_qual:
+            return want
+        near = [q for q in rows_by_qual if q.endswith(f"::@{address.label}")]
+        hint = (f"row `{near[0]}` has that label in another origin — address it "
+                "fully qualified" if near else
+                "rows in the composition: "
+                + (", ".join(f"`{q}`" for q in rows_by_qual) or "<none>"))
+        raise RevlError(
+            source, address.line,
+            f"`place {address.spelling()}` names row `{address.spelling()}`, "
+            f"which is no row in composition {name}",
+            hint=hint + " (426 §2.4: an address that resolves to nothing is a "
+                        "refusal, never a no-op)")
+    claim = (address.key, address.realm)
+    for qual, row in rows_by_qual.items():
+        if claim in row.claims or claim in row.extra_claims:
+            return qual
+    raise RevlError(
+        source, address.line,
+        f"`place {address.spelling()}` names a key no row claims in composition "
+        f"{name}",
+        hint="keys claimed here: "
+             + (", ".join(sorted({claim_str(c) for row in rows_by_qual.values()
+                                  for c in [*row.claims, *row.extra_claims]}))
+                or "<none>")
+             + " (426 §2.4: address a row that exists)")
+
+
+def _record_place(spec: PlaceDecl, rows_by_qual: dict, own_origin: str,
+                  source: str, name: str, level: int, layer_name: str) -> None:
+    """Resolve one `place`'s address and record its fact on the target row.
+
+    A later placement of the same row OVERWRITES an earlier one, which is how the
+    site layer (level 2) has the operator's final say over the base (level 0).
+    An unknown backend is refused here, naming the value (item 424 R3).
+    """
+    if spec.backend is not None and spec.backend not in _KNOWN_BACKENDS:
+        raise RevlError(
+            source, spec.line,
+            f"`place {spec.address.spelling()}` names backend "
+            f"`{spec.backend}`, which is not a known backend",
+            hint="known backends: " + ", ".join(_KNOWN_BACKENDS)
+                 + ". Placement is structure and fails closed, so an unknown "
+                   "backend is a refusal rather than a silent default")
+    qual = _place_target(spec.address, own_origin, rows_by_qual, source, name)
+    row = rows_by_qual[qual]
+    row.place = _place_ir(spec)
+    if level:
+        row.provenance.append((level, layer_name, "place"))
+
+
 def _refuse_peers(sides: list[tuple[LayerDecl, int]], what: str, subject: str,
                   remedy: str, extra: str = "") -> RevlError:
     """A peer conflict. **Neither layer is preferred** (426 decision 4): the
@@ -1328,6 +1417,20 @@ def fold(decl: CompositionDecl, doc_path: str, root: str | None = None,
     if site is not None:
         _apply_site(site, slots, decl, doc, root)
     _apply_overlay(overlay or {}, slots, decl, doc)
+    # item 424 R3: placement, applied over the folded rows. Base placements
+    # (level 0) first, then the site layer's (level 2) — so the operator's site
+    # layer has the final say, exactly as a stack layer may not place at all
+    # (refused at parse). A `place` addressing a vanished row refuses (426 §2.4).
+    rows_by_qual = {q: slot.row for q, slot in slots.items()}
+    for spec in decl.places:
+        _record_place(spec, rows_by_qual, origin, doc, decl.name, 0, BASE_LAYER)
+    if site is not None:
+        site_layer, site_rel, site_origin = site
+        for op in site_layer.ops:
+            if op.op == "place":
+                _record_place(op.place, rows_by_qual, site_origin,
+                              site_layer.source or site_rel, decl.name,
+                              2, site_layer.name)
     rows = [slot.row for slot in slots.values()]
 
     uses = _resolve_uses(decl, doc, base, root)
@@ -1710,6 +1813,12 @@ def _apply_site(site, slots, decl, doc, root) -> None:
     for op in layer.ops:
         if op.op == "add":
             continue
+        if op.op == "place":
+            # item 424 R3: placement is applied separately in `fold`, after the
+            # whole fold, so the site layer's placement lands over any base
+            # placement. It is not a config-style patch, so it does not flow
+            # through `_apply_op`. Its authority (site-only) is enforced at parse.
+            continue
         if op.op == "resolve":
             # Already consumed: a `resolve` that decided nothing is still a
             # refusal, because an operator who wrote it believed there was a
@@ -1741,6 +1850,20 @@ def _apply_overlay(overlay: dict, slots, decl, doc) -> None:
     exists; it cannot add, remove or replace one, and it is typed exactly like
     every other config value."""
     for (label, field_name), value in overlay.items():
+        if field_name in ("process", "backend"):
+            # item 424 R3: placement is STRUCTURE, and the invocation overlay
+            # carries VALUES only (426 §3.1). A row's process or backend is a
+            # `place` statement in the base composition or the site layer, never
+            # a `--set` at invocation — a run choosing where its own row is
+            # judged is item 337's admission-theater at the last tier.
+            raise RevlError(
+                doc, 1,
+                f"`--set @{label}.{field_name}` sets a row's {field_name}, which "
+                "is STRUCTURE, not a value",
+                hint="the invocation overlay carries VALUES only (426 §3.1). A "
+                     "row's process/backend is placement, written as a `place` "
+                     "statement in the base composition or the site layer, never "
+                     "at invocation (424 R3)")
         matches = [q for q in slots if q.endswith(f"::@{label}")] \
             if "::" not in label else [label]
         matches = [q for q in matches if q in slots]
