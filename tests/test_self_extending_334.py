@@ -32,6 +32,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -597,6 +598,99 @@ def test_edge2_post_swap_call_fault_reverts_residue_free(gate_factory, artifact)
     assert not gate.loaded
     gate.load(_BASE)
     assert gate.call("tool", "describe", [])["result"] == "v1"
+
+
+# =========================================================================== #
+# The crash half of the loop (roadmap item 334, "the WAL is the crash half").
+#
+# EDGE 2 above proves the IN-PROCESS revert: a fault after a proposed swap aborts
+# residue-free while the process stays alive. Its durable counterpart is the
+# design's fourth residue-free-revert mechanism: if the process DIES mid-loop,
+# the witnessed effects and their inverses are on the WAL (item 322), and
+# `revl.gate.recover` replays them at next boot — "residue-free in-process;
+# residue ENUMERABLE across a crash", never a dead closure pretended to have run
+# (docs/design/334-self-extending-runtime.md, the residue-free-revert section
+# point 4; `recovery.py:29-37`). No test drove `recover` through the `propose`
+# loop; these two do. A self-extension loop records under a policy (the design's
+# own framing: "a policy is set, so `Gate` defaults `record=True`"), which is
+# what opens the durable WAL, so both configure `approval_policy` + an approver.
+#
+# The crash is simulated the standard way (test_witnessed_wal_recover.py): the
+# WAL is flushed step-by-step as each effect commits, so a byte copy taken mid-
+# loop IS the on-disk state a `kill -9` would leave. `recover` reads that copy
+# through the tier-agnostic reader against an in-memory world, so it is
+# unaffected by whatever the abandoned live gate does when the fixture closes it.
+# =========================================================================== #
+
+
+@needs_cordis
+def test_a_crash_mid_loop_enumerates_the_witnessed_effect_as_residue(
+        gate_factory, artifact, tmp_path):
+    """The durable counterpart of EDGE 2. Accept an agent component through
+    `propose`, run a call that performs a witnessed mutation, then DIE before the
+    session aborts or commits. `revl.gate.recover` reads the WAL and states a
+    checked verdict: it RECONSTRUCTS the witnessed inverse (the loop did not lose
+    it) but, because that inverse is an opaque host body it can only find as a
+    dead closure after the crash, it FENCES it and reports honest RESIDUE rather
+    than pretending the rollback ran. Enumerable, not silent — the guarantee 334
+    makes for the crash the in-process abort makes residue-free."""
+    from revl.gate import recover  # noqa: PLC0415
+
+    wal = str(tmp_path / "loop.wal")
+    gate = gate_factory(wal_path=wal, approval_policy="auto",
+                        approver=lambda _t: True, record=True)
+    gate.load(_BASE)
+    assert gate.propose(_AGENT_V2, granted=["Ops"], providers=_PROVIDERS).swapped
+
+    gate.call("tool", "run", [artifact])
+    assert _mutated(artifact)
+
+    # CRASH: snapshot the WAL as it stands mid-loop (no abort, no commit), the
+    # on-disk state a `kill -9` would leave.
+    crash_wal = str(tmp_path / "crash.wal")
+    shutil.copy(wal, crash_wal)
+
+    report = recover(crash_wal)
+    assert report["verdict"] == "rolled-back"
+    # the witnessed inverse survived the crash on the WAL — recover reconstructed
+    # it, keyed on the declared `undo unstash(result)`.
+    inverses = report["transactionalRolledBack"]
+    assert any(entry["op"]["method"] == "unstash" for entry in inverses), inverses
+    # but it is an opaque host body, so it is FENCED (item 440), not re-issued:
+    # recover names the owed effect instead of running a dead closure.
+    unstash = next(e for e in inverses if e["op"]["method"] == "unstash")
+    assert unstash["replay"] == "fenced", unstash
+    # honest residue: the effect is ENUMERATED, the world still holds the mutated
+    # referent, and the proof never claims a dead closure ran.
+    assert report["residue"]["clean"] is False
+    assert "RESIDUE" in report["residue"]["proof"]
+
+
+@needs_cordis
+def test_a_crash_right_after_the_swap_owes_nothing_durable(
+        gate_factory, artifact, tmp_path):
+    """The contrast that bounds the claim: a crash IMMEDIATELY after a proposed
+    swap, before any witnessed call, owes nothing durable. The swap's own
+    activation inverses are in-process (a spawned instance, a provision
+    registry), moot once memory is gone — not boundary state left out in the
+    world. `recover` states a clean roll-back: the crash half adds residue only
+    for effects that actually crossed the process boundary."""
+    from revl.gate import recover  # noqa: PLC0415
+
+    wal = str(tmp_path / "loop.wal")
+    gate = gate_factory(wal_path=wal, approval_policy="auto",
+                        approver=lambda _t: True, record=True)
+    gate.load(_BASE)
+    assert gate.propose(_AGENT_V2, granted=["Ops"], providers=_PROVIDERS).swapped
+
+    crash_wal = str(tmp_path / "crash.wal")
+    shutil.copy(wal, crash_wal)
+
+    report = recover(crash_wal)
+    assert report["verdict"] == "rolled-back"
+    assert report["residue"]["clean"] is True, report["residue"]["proof"]
+    assert "no residue" in report["residue"]["proof"]
+    assert not _mutated(artifact)
 
 
 # =========================================================================== #
