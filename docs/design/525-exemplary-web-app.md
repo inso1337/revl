@@ -22,14 +22,14 @@ The app is simultaneously the dogfood, the reference, and the public demo/consol
 A minimal task/notes service:
 
 - **Boring half:** a handful of typed CRUD endpoints (item 457: one endpoint declaration → routing + validation + serialization + OpenAPI + TS client), explicit authorization as a separate step, persistence to a small store, a server-sent-events / streaming endpoint, and a UI built from external assets + a TS frontend behind a typed boundary (item 459).
-- **Differentiated half:** one service (e.g. the notification/stream fan-out, or a pluggable ranking/scoring component) that is **hot-swapped at runtime** through admission — a new implementation is proposed, admitted (or refused with retained ownership), swapped in, and on an injected fault reverts residue-free. The app surfaces the lifecycle state (item 460: serving / cancel-requested vs cancel-completed / owned-after-failure / recovery-resume) so the guarantee is observable, not implicit.
+- **Differentiated half:** one service (e.g. the notification/stream fan-out, or a pluggable ranking/scoring component) that is **hot-swapped at runtime** through admission — a new implementation is proposed, admitted (or refused with retained ownership), swapped in, and on an injected fault reverts residue-free. The app surfaces the lifecycle state (item 460: serving / cancel-requested vs cancel-completed / owned-after-failure / recovery-resume, the documented [service lifecycle contract](../lifecycle-contract.md)) so the guarantee is observable, not implicit.
 
 ## Acceptance bar (item 462 exit)
 
 1. Runs under **one** development command (item 461); an induced error names the `.rvl` source line and the failing lifecycle stage.
 2. **Zero** routing sentinels and **zero** emitter workarounds in the app source — every place one would have been needed is instead a filed gap against 456–459.
 3. Status and execution outcome come from the typed HTTP contract (item 456), never from interpreting output prose.
-4. The hot-swap scenario demonstrates admission → cancellation → residue-free recovery against the documented lifecycle contract (item 460), with conformance coverage on the native runtime.
+4. The hot-swap scenario demonstrates admission → cancellation → residue-free recovery against the documented lifecycle contract (item 460, [docs/lifecycle-contract.md](../lifecycle-contract.md), conformance in [tests/test_issue_723_lifecycle_contract.py](../../tests/test_issue_723_lifecycle_contract.py)), with conformance coverage on the native runtime.
 5. Ships with the competitiveness/friction report.
 
 ## Sequencing
