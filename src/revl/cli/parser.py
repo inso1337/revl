@@ -904,6 +904,15 @@ def build_parser() -> argparse.ArgumentParser:
              "re-issues the POST as a GET with the body dropped. Those stay "
              "refused even with this flag; only the two method-preserving codes "
              "on the declared origin are followed")
+    imp_a2a.add_argument(
+        "--long-running", action="store_true", dest="long_running",
+        help="project the four-op A2A Task lifecycle "
+             "(`<skill>_start`/`_poll`/`_reply`/`_cancel`) instead of one "
+             "terminal crossing per skill (item 439 T1). A card that declares "
+             "`capabilities.streaming` triggers this on `--backend py` "
+             "automatically; the flag forces it for a skill the composing "
+             "engineer knows is long-running. `py`-only: a Task crossing "
+             "suspends, and the ts async recolour is a later slice")
     imp_a2a.add_argument("-o", "--output", default=None,
                          help="output path (default: stdout)")
     imp_a2a.add_argument("--json-diagnostics", action="store_true",
