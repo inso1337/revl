@@ -92,8 +92,10 @@ import os
 import secrets
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from ._paths import backends_root
@@ -200,11 +202,17 @@ def _canary_script(net: str) -> str:
 _SEAM_PROBE_PY = r"""
 import socket
 def _c(host, port):
+    # (connected, errno). Connect-success and a timeout must be distinguishable:
+    # a dropped connect on an --internal network raises `TimeoutError` whose
+    # `errno` is None (the network DROPS, it does not refuse), and a bare errno
+    # return would then read a drop as a successful open — the exact inversion
+    # that would misreport a confined sandbox as a LEAK. So success is its own
+    # boolean, never inferred from errno being absent.
     s = socket.socket(); s.settimeout(3)
     try:
-        s.connect((host, int(port))); return None
-    except OSError as e:
-        return e.errno
+        s.connect((host, int(port))); return True, None
+    except OSError as ex:
+        return False, ex.errno
     finally:
         s.close()
 SEAM = __SEAM__
@@ -212,16 +220,16 @@ ISO = __ISO__
 DNS = __DNS__
 ok = True
 for host, port in SEAM:
-    e = _c(host, port)
-    if e is not None:
+    up, e = _c(host, port)
+    if not up:
         print("SEAM=closed:%s(%s:%s)" % (e, host, port)); ok = False
 if ok and SEAM:
     print("SEAM=open")
 elif not SEAM:
     print("SEAM=none")
 if ISO:
-    e = _c(ISO[0], ISO[1])
-    print("ISOLATION=LEAK" if e is None else "ISOLATION=confirmed")
+    up, e = _c(ISO[0], ISO[1])
+    print("ISOLATION=LEAK" if up else "ISOLATION=confirmed")
 else:
     print("ISOLATION=unclaimed")
 leaked = []
@@ -579,6 +587,21 @@ def seam_transport_descriptor(pname: str, seams: list) -> dict:
 # candidate.
 _HOST_BIND_LOOPBACK = "127.0.0.1"
 
+# The probe body a bridge container runs to test one host bind candidate: dial
+# `host.docker.internal:<port>`, exchange a byte, print REACHABLE. Stdlib only
+# (the runner image carries a stock `python3`); a non-zero exit or no REACHABLE
+# line means this candidate did not answer from the relay's vantage.
+_HOST_BIND_PROBE_PY = (
+    "import socket,sys\n"
+    "port=int(sys.argv[1])\n"
+    "s=socket.socket()\n"
+    "s.settimeout(5)\n"
+    "s.connect(('host.docker.internal', port))\n"
+    "s.sendall(b'revl-bind-probe')\n"
+    "s.recv(32)\n"
+    "print('REACHABLE')\n"
+)
+
 
 def seam_network_name(placement_id: str, pname: str) -> str:
     """The `--internal` per-process seam network's name (item 411 T3). One per
@@ -680,30 +703,118 @@ class SeamRelayManager:
             return (f"could not attach the relay to {net!r} ({_tail(err)})")
         return None
 
+    def _bridge_gateway(self, docker: str) -> str | None:
+        """The default bridge's gateway address — the Linux candidate a
+        loopback-bound host listener is NOT reachable on, so the probe must be
+        what decides, never this value on its own."""
+        rc, out, _ = _run([docker, "network", "inspect", "bridge",
+                           "--format", "{{(index .IPAM.Config 0).Gateway}}"])
+        gw = (out or "").strip()
+        return gw or None
+
+    def _host_bind_candidates(self, docker: str) -> list[str]:
+        """The candidate host bind addresses in order: loopback first (right on
+        Docker Desktop), then the bridge gateway (right on Linux)."""
+        candidates = [_HOST_BIND_LOOPBACK]
+        gw = self._bridge_gateway(docker)
+        if gw and gw not in candidates:
+            candidates.append(gw)
+        return candidates
+
+    def _probe_bind_candidate(self, docker: str, candidate: str,
+                              *, timeout: float = 20.0) -> tuple[bool, str]:
+        """The real per-candidate probe (docs/design/411-seam-transport.md,
+        "Host bind address"): bind a throwaway listener on THIS candidate on the
+        host, then run a short-lived container on the default bridge that dials
+        `host.docker.internal:<port>` and exchanges a byte. Returns
+        `(reachable, detail)`; `detail` is the reason it did not answer, for the
+        refusal diagnostic. A bridge container is the faithful stand-in for the
+        relay (same image, same default-bridge vantage, same `host-gateway`
+        route), and it is used because the real relay is not started until the
+        bind address it needs is known."""
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        except OSError as exc:  # pragma: no cover - a broken socket layer
+            return False, f"could not open a probe socket ({exc})"
+        try:
+            try:
+                srv.bind((candidate, 0))
+            except OSError as exc:
+                # a candidate the host cannot even bind (e.g. the Linux bridge
+                # gateway on a macOS host, which lives inside the VM) is not a
+                # host bind address; rule it out rather than treating the later
+                # container failure as ambiguous.
+                return False, f"not bindable on the host ({exc})"
+            srv.listen(1)
+            srv.settimeout(timeout)
+            port = srv.getsockname()[1]
+            answered = {"ok": False}
+
+            def _accept() -> None:
+                try:
+                    conn, _ = srv.accept()
+                    with conn:
+                        conn.settimeout(timeout)
+                        conn.recv(16)
+                        conn.sendall(b"revl-bind-ok")
+                    answered["ok"] = True
+                except OSError:
+                    pass
+
+            acceptor = threading.Thread(target=_accept, daemon=True)
+            acceptor.start()
+            rc, out, err = _run(
+                [docker, "run", "--rm", "--label", "revl.sandbox=411",
+                 "--add-host", "host.docker.internal:host-gateway",
+                 self.image, "python3", "-c", _HOST_BIND_PROBE_PY,
+                 str(port)],
+                timeout=timeout)
+            acceptor.join(timeout=2.0)
+            if rc == 0 and "REACHABLE" in (out or "") and answered["ok"]:
+                return True, "reachable"
+            reason = _tail(err) if err.strip() else _tail(out)
+            return False, f"not reachable via host.docker.internal ({reason})"
+        finally:
+            try:
+                srv.close()
+            except OSError:  # pragma: no cover
+                pass
+
+    def _select_host_bind(self, candidates: list[str], probe) -> tuple[str | None, str | None]:
+        """Take the first candidate `probe(candidate) -> (ok, detail)` reports
+        reachable, or refuse naming every candidate and why each failed. Split
+        from `probe_host_bind` so the selection order and the no-answer refusal
+        are unit-testable with an injected probe (no runtime)."""
+        tried: list[str] = []
+        for candidate in candidates:
+            ok, detail = probe(candidate)
+            if ok:
+                self._bind_host = candidate
+                return candidate, None
+            tried.append(f"{candidate} ({detail})")
+        return None, (
+            "no host bind address answered a relay-side connect via "
+            "host.docker.internal, so a host-side seam listener could not be "
+            f"reached from the sandbox network: tried {', '.join(tried)}. The "
+            "conductor does not fall back to 0.0.0.0 or to net=all.")
+
     def probe_host_bind(self) -> tuple[str | None, str | None]:
         """The address a host-side seam listener binds so the relay can reach it
         (docs/design/411-seam-transport.md, "Host bind address"). Probed, never
         guessed: bind a throwaway listener on each candidate in order
-        (`127.0.0.1`, then the bridge gateway) and have the relay connect to
-        `host.docker.internal:<port>`; the first that answers wins. Returns
-        `(address, None)` or `(None, diagnostic)` naming both candidates.
+        (`127.0.0.1`, then the bridge gateway) and have a bridge container
+        connect to `host.docker.internal:<port>`; the first that answers wins.
+        Returns `(address, None)` or `(None, diagnostic)` naming both candidates.
 
-        Docker-gated and best-effort here (the throwaway-listener probe needs a
-        live relay); when no docker is resolved it returns the loopback so the
-        plan layer has a value, and CI's live run is the real measurement."""
+        Docker-gated: when no docker is resolved it returns the loopback so the
+        plan layer has a value; with a runtime the bind+connect probe runs and
+        decides (`127.0.0.1` on Docker Desktop, the bridge gateway on Linux)."""
         docker = self._resolve_docker()
         if docker is None:  # pragma: no cover - caller refused earlier
             return _HOST_BIND_LOOPBACK, None
-        candidates = [_HOST_BIND_LOOPBACK]
-        rc, out, _ = _run([docker, "network", "inspect", "bridge",
-                           "--format", "{{(index .IPAM.Config 0).Gateway}}"])
-        gw = (out or "").strip()
-        if rc == 0 and gw:
-            candidates.append(gw)
-        # the real probe (bind + relay-connect) runs in CI; here we take the
-        # loopback on Docker Desktop and record the gateway candidate for Linux.
-        self._bind_host = candidates[0]
-        return candidates[0], None
+        candidates = self._host_bind_candidates(docker)
+        return self._select_host_bind(
+            candidates, lambda c: self._probe_bind_candidate(docker, c))
 
     def relay_bridge_target(self, port: int) -> tuple[str, int] | None:
         """The relay's own bridge-side `(ip, port)` — a target the relay proves

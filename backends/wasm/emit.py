@@ -1757,13 +1757,17 @@ class _ComponentEmitter:
             body_lines = []
             mlocals: list[str] = []
             mwhere = f"{where}.{key}.{mname}"
-            # issue #548: control flow in a provide-method body. `break`/
-            # `continue` need named wasm labels (there is no native break), so a
-            # per-method loop-label stack mirrors the fn renderer's
-            # `_loop_label_stack`. `for` over a List needs the memory-walk cursor
-            # apparatus the fn `_emit_for` owns (keyed off a per-loop `_lid`
-            # this method path never assigns), so it is refused here with the
-            # `while`+index workaround; `if`/`while` are the tractable forms.
+            # issue #548 / item 458: control flow in a provide-method body.
+            # `break`/`continue` need named wasm labels (there is no native
+            # break), so a per-method loop-label stack mirrors the fn renderer's
+            # `_loop_label_stack`. Each entry is `(kind, break_target,
+            # continue_target)`: a `while`'s `continue` re-tests at the loop
+            # head, a `for`'s at the inner `$cnt` block so the cursor increment
+            # after the body still runs. `for (x of xs)` walks the same
+            # in-memory list layout the fn `_emit_for` walks, re-spelled here
+            # against the method path's own `$name` locals and `self._lower`
+            # value engine so it agrees with the rest of the body by
+            # construction (item 458 closed the tracked wasm `for` remainder).
             mloop_labels: list[tuple[str, str, str]] = []
 
             def emit_mstep(mstep: dict, out_lines: list[str],
@@ -1898,12 +1902,99 @@ class _ComponentEmitter:
                         raise EmitError(f"{mwhere}: `continue` outside a loop")
                     out_lines.append(f"(br {mloop_labels[-1][2]})")
                 elif mkind == "for":
-                    raise EmitError(
-                        f"{mwhere}: a `for (x of xs)` loop in a provide-method "
-                        f"body is not yet lowerable on the wasm tier — count with "
-                        f"a `var` and a `while`, indexing `xs[i]` (issue #548). "
-                        f"The other tiers support method-body `for`; this one is "
-                        f"the tracked remainder.")
+                    # `for (x of xs)` over a List `[u32 count][pad][slot0]…` in
+                    # linear memory — the fn `_emit_for` cursor walk, re-spelled
+                    # against the method path. The cursor locals ($for_ptr /
+                    # $for_cnt / $for_idx) stay i32 (an address and two counters,
+                    # none an observable `Int`); the bind is an ordinary method
+                    # local of the element type. The arms are pure (a registering
+                    # step inside a method control-flow body is refused at
+                    # lowering), so the walk carries no teardown.
+                    iter_val = self._lower(mstep["iterable"], mscope, mtypes, mwhere)
+                    if not _is_list_type(iter_val.ty):
+                        raise EmitError(
+                            f"{mwhere}: `for … of` iterates a List, got {iter_val.ty!r}")
+                    elem_ty = _list_elem(iter_val.ty)
+                    bind = mstep.get("bind")
+                    if not isinstance(bind, str) or not bind.isidentifier():
+                        raise EmitError(f"{mwhere}: bad loop bind {bind!r}")
+                    # per-method cursor id (reset with the engine's loop counter
+                    # in `_open_function`); `for_*` mirrors the fn tier's names,
+                    # and a method is its own function so nothing clashes.
+                    self.v3._loop_counter += 1
+                    fid = self.v3._loop_counter
+                    ptr, cnt, idx = (f"$for_ptr_{fid}", f"$for_cnt_{fid}",
+                                     f"$for_idx_{fid}")
+                    for scratch in (f"for_ptr_{fid}", f"for_cnt_{fid}",
+                                    f"for_idx_{fid}"):
+                        self.extra_locals.add(scratch)  # i32 by default decl
+                    if bind in mlocals:
+                        raise EmitError(f"{mwhere}: `{bind}` is already bound")
+                    mlocals.append(bind)
+                    mscope[bind] = f"(local.get ${bind})"
+                    mtypes[bind] = elem_ty
+                    self.v3._declare_local(bind, elem_ty, mwhere)
+                    element = self.v3._slot_load(
+                        f"(i32.add (local.get {ptr}) "
+                        f"(i32.add (i32.const {_SLOT}) "
+                        f"(i32.mul (local.get {idx}) (i32.const {_SLOT}))))",
+                        elem_ty)
+                    prologue = [
+                        iter_val.wat, f"(local.set {ptr})",
+                        f"(i32.load (local.get {ptr}))", f"(local.set {cnt})",
+                        "(i32.const 0)", f"(local.set {idx})",
+                    ]
+                    body = mstep.get("body") or []
+                    if self.v3._loop_control_targets(
+                            body, frozenset({"break", "continue"})):
+                        # named labels: `continue` -> the inner `$cnt` block so
+                        # the `idx += 1` after the body still runs; `break` ->
+                        # `$brk`.
+                        self.v3._brk_labels += 1
+                        ln = self.v3._brk_labels
+                        brk, top, cntl = (f"$revl_mbrk_{ln}", f"$revl_mtop_{ln}",
+                                          f"$revl_mcnt_{ln}")
+                        mloop_labels.append(("for", brk, cntl))
+                        body_lines2 = []
+                        for s in body:
+                            emit_mstep(s, body_lines2)
+                        mloop_labels.pop()
+                        out_lines.extend(prologue)
+                        out_lines.append(f"(block {brk}")
+                        out_lines.append(f"  (loop {top}")
+                        out_lines.append(
+                            f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))")
+                        out_lines.append(f"    (br_if {brk})")
+                        out_lines.append(f"    {element}")
+                        out_lines.append(f"    (local.set ${bind})")
+                        out_lines.append(f"    (block {cntl}")
+                        out_lines.extend("      " + line for line in body_lines2)
+                        out_lines.append("    )")
+                        out_lines.append(
+                            f"    (local.set {idx} "
+                            f"(i32.add (local.get {idx}) (i32.const 1)))")
+                        out_lines.append(f"    (br {top})")
+                        out_lines.append("  )")
+                        out_lines.append(")")
+                    else:
+                        body_lines2 = []
+                        for s in body:
+                            emit_mstep(s, body_lines2)
+                        out_lines.extend(prologue)
+                        out_lines.append("(block")
+                        out_lines.append("  (loop")
+                        out_lines.append(
+                            f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))")
+                        out_lines.append("    (br_if 1)")
+                        out_lines.append(f"    {element}")
+                        out_lines.append(f"    (local.set ${bind})")
+                        out_lines.extend("    " + line for line in body_lines2)
+                        out_lines.append(
+                            f"    (local.set {idx} "
+                            f"(i32.add (local.get {idx}) (i32.const 1)))")
+                        out_lines.append("    (br 0)")
+                        out_lines.append("  )")
+                        out_lines.append(")")
                 elif mkind == "effect" and self._witnessed_extern(mstep.get("acquire")) is not None:
                     # item 324: a WITNESSED effect in a provide-method body is
                     # the per-tool-call H1 gate — valid, and registers its

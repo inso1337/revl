@@ -284,6 +284,30 @@ provable from the artifact's own import section. It carries the same
 no-admission asymmetry as the rust crate: `no-objection` is the non-refusing
 arm, not an admission.
 
+## Publish status: the only remaining step
+
+All three dependency forms are built and verified from the committed source in
+CI today; what none of them has yet is a copy on a public registry. That last
+act is the one thing this repository deliberately does not do for itself,
+because putting a version on a registry is irreversible and is the project
+owner's decision, not a merge's. So the honest state of "revl as a dependency"
+is: code-complete on every tier, awaiting one owner-run publish per registry.
+
+| tier | dependency form | built + checked from source in CI | the only step that remains |
+|---|---|---|---|
+| py | `pip install revl`, then `from revl.gate import ...` | wheel built and installed into a fresh venv by `release dry run`, manifest-gated by `tools/check_wheel_manifest.py`, surface-gated by `tests/test_gate_compat.py` | push a `v*` tag: `publish.yml` runs the full matrix on the tag and uploads to **PyPI** by Trusted Publishing (the one-time PyPI publisher config is noted inline in `publish.yml`) |
+| rust | `cargo add revl-gate` | `crates/revl-gate` regenerated and drift-gated by `tests/test_gate_crate_drift.py`; the example depends on it by path and its verdicts are gated by `tests/test_gate_consumer_example_rs.py` | `cargo publish` the crate to **crates.io** with an owner token |
+| wasm / js | `npm i` the jco-transpiled gate | `crates/revl-gate-wasm` built by `tools/build_gate_wasm.py`, transpiled by `tools/build_gate_js.py`, drift/import/vector-gated by the three `test_gate_wasm_*` suites and exercised by `tests/test_gate_consumer_example_js.py` | `npm publish` the transpiled package to **npm** with an owner token |
+
+Nothing above is a code change. Each remaining step is an owner running a
+publish against a registry with a credential this repository does not hold, and
+none of them alters a line of the contract stated at the top of this document:
+a refusal stays authoritative and fail-closed, an admission stays a
+frontier-scoped compile-time judgment, and the registry a consumer fetches from
+changes only where the bytes came from, never what a verdict means.
+`tests/test_gate_dependency_publish_ready.py` pins this readiness so the "only a
+publish remains" claim cannot quietly rot back into a code gap.
+
 See also: [`docs/design/338-revl-as-dependency.md`](design/338-revl-as-dependency.md)
 for the full design and its adversarial review;
 [`docs/stability.md`](stability.md) for what a revl version number promises

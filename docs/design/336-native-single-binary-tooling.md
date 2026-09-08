@@ -674,6 +674,44 @@ path (`runtime.rs`, `embedded_bytes_extract_into_a_versioned_cache_and_reuse_it`
 alongside the end-to-end equivalence the beside-exe archive test already pins;
 the two differ only in where the identical archive bytes come from.
 
+## What the distribution surface grew (as implemented)
+
+Recorded after the fact. The runtime-management slice above surfaced an
+`embedding` (`private-runtime` / `system-python`) over `revl/gateVersion` so a
+client could tell a self-contained artifact from one leaning on an installed
+`revl`. That is WHETHER the runtime is private, not HOW it ships, and the one
+distinction the one-file item is ABOUT — a genuinely single distributed FILE
+(the runtime baked into the binary's own bytes) versus a self-contained PAIR (a
+runtime archive beside the executable) — was invisible at that surface: both
+report `private-runtime`. So a fleet or install audit could not verify from the
+binary that a shipped artifact really is one file, and the runtime's own pin
+(the A3 skew comparand for the interpreter pairing, distinct from the native
+gate's frontier pin) was keyed into the cache but reported nowhere.
+
+**What landed** (`crates/revl-lsp/src/runtime.rs`, `engine.rs`, `server.rs`):
+`runtime::locate` now stamps each resolved runtime with the SHAPE it came from —
+`embedded` (baked into the binary), `beside-exe` (a sibling archive or tree),
+`env` (named by `REVL_LSP_RUNTIME`/`_ARCHIVE`) — and the versioned-cache pin it
+landed under, and `revl/gateVersion` carries a `runtime` `{source, pin}` block
+(with `source: "system-python"`, `pin: null` when no private runtime is
+resolved). `GATE_API` bumps to `2` for the added surface. The block is purely
+additive — it changes not one byte the reference server emits (the reference has
+no `revl/gateVersion` at all) and nothing about which engine computes an answer;
+it makes the distribution shape and the runtime pin legible, which is the same
+"skew and distribution made detectable, not solved" posture A3 fixes for the
+version surface. The exit checks:
+`crates/revl-lsp/tests/private_runtime.rs` now asserts the bundled binary
+reports its `env` source and `test-pin-102` pin end to end over the wire, and
+`the_gate_version_is_reachable_for_a_skew_check`
+(`crates/revl-lsp/tests/reference_agreement.rs`) pins the `system-python` shape
+and the null pin for the `REVL_LSP_PYTHON` fallback, alongside a `runtime.rs`
+unit test that the baked-in bytes report the `embedded` shape and their pin.
+
+**What it did NOT buy.** Not Python removal, not the shipped
+`python-build-standalone` bytes (still 338), and not the in-process pyo3 link.
+It is a legibility slice over the runtime-management contract, not a step of the
+interpreter-embedding half.
+
 ## The honest hard part (consolidated)
 
 Four costs, taken in the open. First, the native-checker half of this item is item

@@ -126,8 +126,8 @@ def test_runtime_transport_fault_is_the_declared_type():
     fault = runtime.TransportFault("x", row="agent", crossing="ask")
     assert isinstance(fault, RuntimeError)
     assert getattr(fault, "_revl_transport_fault", False) is True
-    assert fault.revl_row == "agent"
-    assert fault.revl_crossing == "ask"
+    assert fault._revl_row == "agent"
+    assert fault._revl_crossing == "ask"
     assert "TransportFault" in runtime.__all__
 
 
@@ -183,8 +183,8 @@ def test_withdraw_body_raises_a_marked_transport_fault(a2a):
     keys on and the row label + crossing it withdraws by."""
     fault = _run_withdraw_body(a2a=a2a, label="agent", op="ask")
     assert getattr(fault, "_revl_transport_fault", False) is True
-    assert fault.revl_row == "agent"
-    assert fault.revl_crossing == "ask"
+    assert fault._revl_row == "agent"
+    assert fault._revl_crossing == "ask"
 
 
 # ============================================ T0: the driver seam maps it
@@ -258,3 +258,48 @@ def test_driver_seam_skips_a_provider_that_is_not_live():
     fn, fake, calls = _fake_driver(fibers)
     asyncio.run(fn(fake))
     assert calls == []
+
+
+# ==================================================== T1: the shared four-op wire
+# `src/revl/a2a_task.py` is the ONE JSON-RPC wire the two entry points speak
+# (`synthesize.py`'s `through a2a long_running` and `import_a2a.py`'s
+# `--long-running`), so the vocabulary and the crossings cannot drift.
+
+from revl import a2a_task  # noqa: E402
+
+
+def test_the_four_suffixes_and_shapes_are_the_vocabulary():
+    assert a2a_task.SUFFIXES == ("start", "poll", "reply", "cancel")
+    assert a2a_task.RETURN_TYPE == {
+        "start": "TaskRef", "poll": "TaskEvent",
+        "reply": "TaskEvent", "cancel": "Unit"}
+    assert a2a_task.op_name("research", "start") == "research_start"
+
+
+def test_each_body_names_the_op_it_crosses():
+    """`_poll`/`_cancel` key the task by id on `tasks/get`/`tasks/cancel`;
+    `_start`/`_reply` post `message/send`, and `_reply` carries `taskId`."""
+    ep = "https://agent.example/a2a"
+    assert '"method": "tasks/get"' in a2a_task.task_body("poll", ep, "s")
+    assert '"method": "tasks/cancel"' in a2a_task.task_body("cancel", ep, "s")
+    start = a2a_task.task_body("start", ep, "s")
+    assert '"method": "message/send"' in start and "taskId" not in start
+    assert '"taskId": _task["id"]' in a2a_task.task_body("reply", ep, "s")
+
+
+def test_every_body_raises_a_marked_transport_fault_never_an_err():
+    """Withdraw-mode only: a fault is a `TransportFault` the runtime maps to
+    withdrawal (T0), never an in-band `Err`. The fault names the crossing."""
+    for kind in a2a_task.SUFFIXES:
+        body = a2a_task.task_body(kind, "https://h", "research", label="agent")
+        assert "class TransportFault(RuntimeError):" in body
+        assert "_revl_transport_fault = True" in body
+        assert 'revl_row = "agent"' in body
+        assert f'revl_crossing = "research_{kind}"' in body
+        assert "return Err(" not in body
+
+
+def test_a_redirect_is_refused_on_every_task_crossing():
+    for kind in a2a_task.SUFFIXES:
+        body = a2a_task.task_body(kind, "https://h", "s")
+        assert "except _RedirectRefused:" in body
