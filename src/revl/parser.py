@@ -763,6 +763,45 @@ class RemoteRowDecl:
 
 
 @dataclass
+class HostRowDecl:
+    """A `host` row: a row whose provider is not revl source but the HOST
+    runtime's own ambient service, reached through the reviewed `@ts ref` door
+    (item 457 S3, docs/design/457-endpoint-one-definition.md §"The Cordis
+    `ctx.server` binding: a `host` row"; design note 530 Decision A).
+
+    It is the sibling of a `remote` row. A `remote` row's provider is
+    SYNTHESIZED from a service declaration plus a peer address; a `host` row's
+    provider is SYNTHESIZED from a service declaration plus a stdlib binding
+    module whose externs are `@ts ref ... from` the shipped host shims
+    (`stdlib/server.rvl` over `@cordisjs/server`, `stdlib/auth.rvl` over
+    `@cordisjs/plugin-sso`). Like `remote`, the wiring stays local: every
+    consumer keeps `requires <key>: <Service>` and G2/G3/G4 are unchanged, so
+    HOSTNESS is an ADMISSION fact — the provider is the host runtime, reached
+    through a reviewed ref — and never a wiring fact. That is design note 530's
+    Decision A answered "the row table, not a new checker mode".
+
+    A `host` row on a tier that has no shim for its service is refused when that
+    tier's emitter lowers the synthesized `@ts ref` externs (the ref door is
+    native to `py`/`ts` only, `hostref.EXTERN_REF_TIERS`, and refused on
+    go/rust/java/wasm at lower time), so the tier refusal rides the existing
+    reviewed-ref machinery rather than a new resolution special case.
+
+    `host` is a CONTEXTUAL keyword read only in this one position inside a
+    `composition` block, exactly as `remote`, `seam` and `place` are — so the
+    lexer's KEYWORDS set is untouched, the self-host lexer needs no sync, and a
+    program using `host` as an ordinary name (it is already a config field name
+    and the `at host("...")` sub-keyword of a remote row) still parses. `in` and
+    `realm` are already keywords and are reused verbatim, as `isolate`/`remote`
+    reuse them.
+    """
+    label: str
+    key: str                       # the provision key the row claims
+    service: str                   # the locally declared service being hosted
+    line: int
+    realm: str | None = None       # `in realm("...")`; None == the shared realm
+
+
+@dataclass
 class SeamRowDecl:
     """A `seam` row: a row whose provider is a SYNTHESIZED FORWARDER that
     interposes an observer on an existing provision edge (item 424 gap (b),
@@ -845,6 +884,11 @@ class CompositionDecl:
     # file. Kept in their own list because they carry no `from` path and
     # resolution reads no header for them.
     remotes: list["RemoteRowDecl"] = field(default_factory=list)
+    # item 457 S3: host rows — a row whose provider is the HOST runtime's own
+    # ambient service (Cordis `ctx.server`, `ctx.sso`), reached through the
+    # reviewed `@ts ref` door. Like `remote`, carries no `from` path; its
+    # provider is synthesized from the service declaration and the shipped shim.
+    hosts: list["HostRowDecl"] = field(default_factory=list)
     # item 424 B2: seam rows — a synthesized forwarder interposing an observer
     # on a provision edge. Like `remote`, carries no `from` path; unlike it, its
     # forwarder is derived from an edge another row provides, so it resolves
@@ -3104,6 +3148,7 @@ class Parser:
         self.expect("{")
         rows: list[RowDecl] = []
         remotes: list[RemoteRowDecl] = []
+        hosts: list[HostRowDecl] = []
         seams: list[SeamRowDecl] = []
         places: list[PlaceDecl] = []
         uses: list[tuple[str, int]] = []
@@ -3146,6 +3191,14 @@ class Parser:
                 self._composition_label(name, remote.label, remote.line, seen)
                 remotes.append(remote)
                 continue
+            if self.at("ident", "host"):
+                # item 457 S3: a row whose provider is the HOST runtime's own
+                # ambient service (Cordis `ctx.server`/`ctx.sso`), reached
+                # through the reviewed `@ts ref` door. Sibling of `remote`.
+                host = self.host_row_decl(name)
+                self._composition_label(name, host.label, host.line, seen)
+                hosts.append(host)
+                continue
             if self.at("ident", "seam"):
                 # item 424 B2: a row whose provider is a SYNTHESIZED FORWARDER
                 # interposing an observer on a provision edge (D-424b.1/.3).
@@ -3165,19 +3218,21 @@ class Parser:
                 tok = self.peek()
                 raise self.err(
                     tok.line,
-                    "expected `row`, `remote`, `seam`, `place`, `use`, `stack`, "
-                    f"`site`, or `}}` in composition {name}, found {tok.value!r}",
+                    "expected `row`, `remote`, `host`, `seam`, `place`, `use`, "
+                    f"`stack`, `site`, or `}}` in composition {name}, found "
+                    f"{tok.value!r}",
                     hint="a composition document declares rows: "
                          '`row @label from "path.rvl" provides key`, '
                          '`remote @label provides key: Service at host("h:port")`, '
+                         '`host @label provides key: Service`, '
                          '`seam @label on key("k") observe with @observer`, or '
                          'places one: `place @label on process "p" backend rust`')
             rows.append(self.row_decl(name))
             self._composition_label(name, rows[-1].label, rows[-1].line, seen)
         self.expect("}")
         return CompositionDecl(name, rows, line, uses, stack=stack,
-                               site=site, remotes=remotes, seams=seams,
-                               places=places)
+                               site=site, remotes=remotes, hosts=hosts,
+                               seams=seams, places=places)
 
     def _place_spec(self, address: Address, line: int) -> PlaceDecl:
         """`<address> on process "<name>" [backend <ident>]`, with the leading
@@ -3722,6 +3777,62 @@ class Parser:
                              on_failure_line=on_failure_line,
                              redirect=redirect, redirect_line=redirect_line,
                              host_line=host_line)
+
+    def host_row_decl(self, composition: str) -> HostRowDecl:
+        """`host @label provides <key>: <Service> [in realm("r")]`
+
+        Item 457 S3, docs/design/457-endpoint-one-definition.md §"The Cordis
+        `ctx.server` binding: a `host` row" (design note 530 Decision A). The
+        SIBLING of a `remote` row, spelled the same way minus the peer address:
+        a `host` row's provider is the host runtime's own ambient service, so it
+        names no `at host(...)` (there is no peer to reach — the provider is the
+        process itself) and no `through`/`on_failure`/`redirect` (those describe
+        a network crossing this row does not make). `host` is a CONTEXTUAL
+        keyword read only here, so the lexer stays context-free and the
+        self-host lexer needs no sync — the same discipline `remote`/`seam`/
+        `place` chose. `provides`, `in` and `realm` are the keywords the language
+        already has.
+
+        Like a `remote` row and unlike a `row`, a `host` row names no `from`
+        path: its provider does not exist as source until resolution synthesizes
+        it from the service declaration and the shipped host shim.
+        """
+        line = self.next().line                       # `host`
+        label = self._row_label()
+        if not self.at("kw", "provides"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `provides` after host row label `@{label}`, "
+                f"found {tok.value!r}",
+                hint='a host row names the key it claims AND the service it '
+                     'hosts: `host @%s provides key: Service`' % label)
+        self.next()
+        key = self._provision_key(what="a provision key")
+        # The service name is REQUIRED and is not inferred from the key. A host
+        # row has no component header to check the claim against, so the service
+        # declaration is the only contract there is — the same reason the
+        # `remote` row names it (426 §1.3, 424 D-424c.1).
+        if not self.at(":"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `: <Service>` after `provides {key}` on host row "
+                f"`@{label}`, found {tok.value!r}",
+                hint="a host row has no component header, so the service "
+                     "declaration IS its contract and the document names it "
+                     "(457 S3, mirroring 424 D-424c.1)")
+        self.next()
+        service = self.expect("ident", what="a service name").value
+
+        realm: str | None = None
+        if self.at("kw", "in"):
+            self.next()
+            # `in realm("...")` — a host provider may be placed in a named realm
+            # exactly as a remote one may (424 D-424c.4): two `(key, realm)`
+            # addresses do not collide, with no new rule (426 §2.3).
+            realm = self.realm_label()
+        return HostRowDecl(label, key, service, line, realm=realm)
 
     def seam_row_decl(self, composition: str) -> SeamRowDecl:
         """`seam @label on key("<key>"[, realm: "r"]) observe|decide

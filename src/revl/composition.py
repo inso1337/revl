@@ -44,7 +44,7 @@ from .lower import _config_default_type
 from .parser import (Address, CompositionDecl, IsolateStmt, LayerDecl,
                      PlaceDecl, Program, RowDecl, parse_file)
 from .synthesize import (
-    OBSERVER_METHOD, cap_token, check_address, check_remotable,
+    HOST_SHIMS, OBSERVER_METHOD, cap_token, check_address, check_remotable,
     synthesize_provider)
 from .typecheck import compatible
 
@@ -136,11 +136,12 @@ class Row:
 
     __slots__ = ("label", "origin", "source", "component", "claims",
                  "extra_claims", "requires", "config", "granted", "line",
-                 "provenance", "remote", "seam", "open", "reach", "place")
+                 "provenance", "remote", "seam", "open", "reach", "place",
+                 "host")
 
     def __init__(self, label, origin, source, component, claims, extra_claims,
                  requires, config, granted, line, provenance=None, remote=None,
-                 seam=None, open=None, reach=None, place=None):
+                 seam=None, open=None, reach=None, place=None, host=None):
         self.label = label
         self.origin = origin
         self.source = source
@@ -177,6 +178,13 @@ class Row:
         # placed. Like `remote`/`seam`, an ADMISSION fact beside the wiring, not
         # read by `wiring()`, so an unplaced row is byte-identical.
         self.place = place            # dict | None
+        # item 457 S3: the admission facts of a `host` row — the hosted service
+        # and the shim binding module it is reached through. `None` for an
+        # ordinary row. Like `remote`/`seam`, an ADMISSION fact beside the
+        # wiring, not read by `wiring()`: bringing a host provider back in
+        # process is a one-line composition edit and not a source edit across
+        # every consumer.
+        self.host = host              # dict | None
 
     @property
     def qualified(self) -> str:
@@ -216,6 +224,8 @@ class Row:
             out["seam"] = dict(self.seam)
         if self.place is not None:
             out["place"] = dict(self.place)
+        if self.host is not None:
+            out["host"] = dict(self.host)
         return out
 
 
@@ -839,6 +849,90 @@ def _resolve_remote(remote, catalog: dict, decl: CompositionDecl, doc: str,
     )
 
 
+def _resolve_hosts(decl: CompositionDecl, doc: str, origin: str, root: str,
+                   uses: list[str], rows: list["Row"]) -> dict:
+    """item 457 S3: append the rows whose provider is the HOST runtime's own
+    ambient service, and return the in-memory `<relative path> -> revl source`
+    map they compiled from — the exact shape `_resolve_remotes` returns, because
+    a `host` row is the sibling of a `remote` row (design note 530 Decision A).
+
+    Resolved after the file rows for the same reason `_resolve_remotes` is: the
+    service declaration a host row hosts is looked up in what the file rows and
+    the `use` list already name; a host row introduces no source of its own.
+    """
+    sources: dict[str, str] = {}
+    if not decl.hosts:
+        return sources
+    catalog = _service_catalog([*uses, *(r.source for r in rows)], root)
+    for host in decl.hosts:
+        rows.append(_resolve_host(host, catalog, decl, doc, origin, root,
+                                  sources))
+    return sources
+
+
+def _synth_host_path(origin: str, label: str) -> str:
+    """The provenance path a synthesized HOST provider is recorded under, the
+    host counterpart of `_synth_path`. No file is written; the key is derived
+    from the origin and the label alone so two machines resolving the same
+    composition produce byte-identical rows (426 exit test 18)."""
+    scope = "_project" if origin == PROJECT_ORIGIN else origin
+    return f".revl/synthesized/{scope}/{label}.host.rvl"
+
+
+def _resolve_host(host, catalog: dict, decl: CompositionDecl, doc: str,
+                  origin: str, root: str, sources: dict) -> "Row":
+    """Resolve one `host` row: look the service up, synthesize its host-shim
+    provider, and return an ORDINARY row — everything downstream treats it like
+    a file row, which is design note 530 Decision A holding at the level of this
+    module's data structures and not just the prose (as `_resolve_remote` does
+    for a remote row)."""
+    if host.service not in catalog:
+        known = ", ".join(f"`{n}`" for n in sorted(catalog)) or "<none>"
+        raise RevlError(
+            doc, host.line,
+            f"host row `@{host.label}` hosts service `{host.service}`, which "
+            f"composition {decl.name} does not declare",
+            hint=f"services in scope: {known}. A host row has no component "
+                 "header, so the service declaration IS its contract; add a "
+                 "`use` for the file declaring it")
+    service, service_source = catalog[host.service]
+
+    shim = HOST_SHIMS.get(host.service)
+    component, text = synthesize_provider(service, "host", {
+        "label": host.label, "key": host.key, "realm": host.realm,
+        "doc": doc, "line": host.line,
+    })
+    rel = _synth_host_path(origin, host.label)
+    sources[rel] = text
+    return Row(
+        label=host.label,
+        origin=origin,
+        source=rel,
+        component=component,
+        claims=[(host.key, host.realm)],
+        extra_claims=[],
+        # Like a synthesized remote provider, a host provider requires nothing:
+        # it holds one extern per method and no coeffect. A row that required
+        # something would have to name a provider for it, and there is no source
+        # in which to write one.
+        requires=[],
+        config={},
+        granted=None,
+        line=host.line,
+        host={
+            "service": host.service,
+            "serviceSource": service_source,
+            # The shipped shim this host provider is reached through, so the
+            # audit surface and the manifest carry "where this ambient reach
+            # goes": the reviewed `@ts ref` module and the Cordis package it
+            # wraps, not an opaque `globalThis`.
+            "shim": shim["module"],
+            "package": shim["package"],
+            **({"realm": host.realm} if host.realm else {}),
+        },
+    )
+
+
 def _seam_inner_key(key: str) -> str:
     """The DISTINCT inner key a seam's forwarder requires the wrapped provider
     under (item 424 B2).
@@ -1108,6 +1202,7 @@ def resolve(decl: CompositionDecl, doc_path: str,
             _record_place(spec, rows_by_qual, origin, doc, decl.name, 0, BASE_LAYER)
     uses = _resolve_uses(decl, doc, base, root)
     sources = _resolve_remotes(decl, doc, origin, root, uses, rows)
+    sources.update(_resolve_hosts(decl, doc, origin, root, uses, rows))
     sources.update(_resolve_seams(decl, doc, origin, root, uses, rows))
     _check_disjoint(rows, decl.name, doc)
     return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
@@ -1439,6 +1534,9 @@ def fold(decl: CompositionDecl, doc_path: str, root: str | None = None,
     # Layers reach rows by address and no op addresses a synthesized row, so
     # the remotes join AFTER the fold and before the one disjointness check.
     sources = _resolve_remotes(decl, doc, origin, root, uses, rows)
+    # item 457 S3: a `host` row is an ordinary row like a `remote` one, so it
+    # joins here too — no layer op addresses a synthesized row.
+    sources.update(_resolve_hosts(decl, doc, origin, root, uses, rows))
 
     _check_disjoint(rows, decl.name, doc)
     return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
