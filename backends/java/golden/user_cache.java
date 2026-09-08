@@ -243,7 +243,7 @@ public final class Components {
         @Override
         public Disposable apply(Context ctx) {
             Context.EffectScope fx = ctx.effect();
-            Database db = ctx.get(Database.class, "db");
+            Database db = ctx.get(ServiceKey.of(Database.class, "db"));
             try {
                 Map<String> store = Map.create();
                 fx.track(Disposables.of(() -> store.drop()));

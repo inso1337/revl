@@ -19,6 +19,7 @@
 
 import io.cordis4j.core.Context;
 import io.cordis4j.core.Contexts;
+import io.cordis4j.core.ServiceKey;
 
 public final class RunInstanceAccessor {
     private static void fail(String message) {
@@ -32,7 +33,8 @@ public final class RunInstanceAccessor {
 
         // (1) positive supervision-tree direction: each read goes through the
         // handle its spawner alone holds and resolves THAT instance's counter.
-        revl.Components.Reader reader = root.get(revl.Components.Reader.class);
+        revl.Components.Reader reader =
+            root.get(ServiceKey.of(revl.Components.Reader.class, "reader"));
         long a = reader.read_a();
         long b = reader.read_b();
         if (a != 7L) {
@@ -52,7 +54,7 @@ public final class RunInstanceAccessor {
         // realm — the root cannot resolve Counter (throws NoSuchService).
         boolean rootBlocked = false;
         try {
-            root.get(revl.Components.Counter.class);
+            root.get(ServiceKey.of(revl.Components.Counter.class, "counter"));
         } catch (RuntimeException e) {
             rootBlocked = true;
         }
