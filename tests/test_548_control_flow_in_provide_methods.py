@@ -142,6 +142,29 @@ component K provides cap: Cap {
 }
 """
 
+# item 458 / issue #721: a dispatch written as PLAIN control flow — an
+# `if`/`else if`/`else` that returns in every arm, with NO trailing `return`.
+# This is the natural migration target away from a ternary chain
+# (`n >= 90 ? `A` : n >= 80 ? `B` : …`), which is the exact "ternary-heavy
+# dispatch" the harness carried only because the provide-method return checker
+# used to demand a top-level trailing `return`. The method grammar now shares
+# the module-`fn` terminator analysis (`_definitely_returns`): an `if`/`else`
+# whose arms both return terminates the body, so the ternary and the plain
+# control flow are interchangeable, byte-agreement holding on every tier.
+DISPATCH_DRAFT = """
+service Grader { fn grade(n: Int) -> Str }
+component D provides grader: Grader {
+  provide grader {
+    fn grade(n) {
+      if (n >= 90) { return `A` }
+      else if (n >= 80) { return `B` }
+      else if (n >= 70) { return `C` }
+      else { return `F` }
+    }
+  }
+}
+"""
+
 ALL_DRAFTS = {
     "if": IF_DRAFT,
     "while": WHILE_DRAFT,
@@ -149,6 +172,7 @@ ALL_DRAFTS = {
     "break": BREAK_DRAFT,
     "while_break": WHILE_BREAK_DRAFT,
     "guard_then_emit": GUARD_THEN_EMIT_DRAFT,
+    "dispatch": DISPATCH_DRAFT,
 }
 
 
@@ -182,6 +206,95 @@ def test_method_control_flow_lowers_to_the_fn_grammar_step_shape():
     assert for_step is not None
     assert set(for_step) >= {"bind", "iterable", "body"}
     assert find(for_step, "if") is not None  # nested control flow
+
+
+# ---------------------------------------------------------------------------
+# item 458 / issue #721 — a method whose control flow returns on EVERY path
+# needs no trailing `return`, exactly as a module `fn` does. This is what lets a
+# ternary-heavy dispatch migrate to plain `if`/`else` control flow.
+# ---------------------------------------------------------------------------
+
+def test_dispatch_returns_on_every_path_needs_no_trailing_return():
+    # the plain-control-flow dispatch compiles with NO trailing `return`: the
+    # `if`/`else if`/`else` returns in every arm, which terminates the method
+    # body. It lowers to the ordinary `if` step shape (a nested `if` in the
+    # `else`), no fabricated fall-through value.
+    ir = compile_source(DISPATCH_DRAFT)
+    comp = ir["components"][0]
+    provide = next(s for s in comp["body"] if s.get("step") == "provide")
+    grade = next(m for m in provide["methods"] if m["name"] == "grade")
+    assert grade["body"][-1]["step"] == "if"
+    assert grade["body"][-1]["else"] is not None
+
+
+def test_method_terminator_analysis_matches_the_fn_grammar():
+    # PARITY: the identical dispatch shape is accepted in a module `fn` and in a
+    # provide method. Before item 458 the `fn` compiled and the method was
+    # refused ("body never returns a value"), which is precisely why the harness
+    # reached for a ternary in the method position.
+    fn_src = """
+fn grade(n: Int) -> Str {
+  if (n >= 90) { return `A` }
+  else if (n >= 80) { return `B` }
+  else { return `F` }
+}
+"""
+    method_src = """
+service Grader { fn grade(n: Int) -> Str }
+component D provides grader: Grader {
+  provide grader {
+    fn grade(n) {
+      if (n >= 90) { return `A` }
+      else if (n >= 80) { return `B` }
+      else { return `F` }
+    }
+  }
+}
+"""
+    assert compile_source(fn_src).get("functions")
+    assert compile_source(method_src).get("components")
+
+
+def test_missing_return_when_no_path_returns():
+    # no `return` anywhere: the "never returns a value" message (T1), the same
+    # the `fn` grammar and the pre-458 method check gave.
+    src = """
+service S { fn f(n: Int) -> Str }
+component C provides s: S {
+  provide s { fn f(n) { var r = `x`  r = r } }
+}
+"""
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "x.rvl")
+    assert "never returns a value" in str(ei.value)
+
+
+def test_missing_return_when_a_bare_if_can_fall_through():
+    # a bare `if` (no `else`) returns on one path only, so control can reach the
+    # end — the second, more precise message the `fn` grammar gives, now shared.
+    src = """
+service S { fn f(n: Int) -> Str }
+component C provides s: S {
+  provide s { fn f(n) { if (n > 0) { return `pos` } } }
+}
+"""
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "x.rvl")
+    assert "reach the end of its body without a `return`" in str(ei.value)
+
+
+def test_for_that_may_run_zero_times_is_not_a_terminator():
+    # a `for`/`while` may run zero times, so a trailing loop never terminates the
+    # body — matches `_definitely_returns` (rust E0308 / java missing-return).
+    src = """
+service S { fn f(xs: List[Int]) -> Int }
+component C provides s: S {
+  provide s { fn f(xs) { for (x of xs) { return x } } }
+}
+"""
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "x.rvl")
+    assert "reach the end" in str(ei.value)
 
 
 # ---------------------------------------------------------------------------
@@ -487,3 +600,14 @@ async def test_runtime_while_break_and_continue():
 
     for n, ceiling in ((10, 100), (10, 5), (0, 3), (8, 9)):
         assert cap.cap_at(n, ceiling) == reference(n, ceiling), (n, ceiling)
+
+
+@cordis_only
+async def test_runtime_dispatch_grades():
+    # the plain-control-flow dispatch (no trailing return) runs and answers
+    # exactly as the ternary/label spellings do.
+    grader = await _activate(DISPATCH_DRAFT, "D", "grader")
+    assert grader.grade(95) == "A"
+    assert grader.grade(85) == "B"
+    assert grader.grade(72) == "C"
+    assert grader.grade(50) == "F"

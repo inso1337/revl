@@ -11206,20 +11206,48 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 _lower_control_stmt(mstmt, mbody)
             else:  # pragma: no cover
                 raise RevlError(filename, mstmt.line, "unexpected statement in method body")
-        if decl.returns and not returned:
+        if decl.returns and not _definitely_returns(method.body):
             # same guarantee as a `fn` with a declared return, on the other
             # surface that has one: the emitted java method and rust trait impl
             # both fall off the end ("missing return statement" / E0308) while
-            # python hands the caller a silent None
+            # python hands the caller a silent None.
+            #
+            # PARITY with the module-`fn` grammar (`_check_returns_on_every_path`,
+            # via `_definitely_returns`): a method whose control flow returns on
+            # EVERY path needs no trailing `return`. An `if`/`else` that returns
+            # in both arms terminates the body exactly as it does in a `fn`, so a
+            # dispatch written as plain control flow — the natural migration
+            # target away from a ternary chain (item 458, issue #721) — is
+            # accepted, not only the guard-then-trailing-return spelling. The two
+            # messages mirror the fn checker: "never returns a value" when no
+            # `return` appears at all, "control can reach the end" when one does
+            # but not on every path (a bare `if` with no `else`, a `for`/`while`
+            # that may run zero times).
+            src = comp.source or filename
+            if not _has_return(method.body):
+                raise RevlError(
+                    src, method.line,
+                    f"`{method.name}` implements `{svc.name}.{method.name}`, which "
+                    f"returns `{render_type(decl.returns)}`, but this body never "
+                    f"returns a value",
+                    hint=f"end the body with `return <{render_type(decl.returns)}>` — a "
+                         f"provider must produce what its service promises, or "
+                         f"consumers bound to `{svc.name}` receive nothing (rust E0308, "
+                         'java "missing return statement")',
+                    code="T1", category="type-mismatch",
+                    expected=decl.returns, actual=None,
+                )
+            last_line = (getattr(method.body[-1], "line", method.line)
+                         if method.body else method.line)
             raise RevlError(
-                comp.source or filename, method.line,
+                src, last_line,
                 f"`{method.name}` implements `{svc.name}.{method.name}`, which "
-                f"returns `{render_type(decl.returns)}`, but this body never "
-                f"returns a value",
-                hint=f"end the body with `return <{render_type(decl.returns)}>` — a "
-                     f"provider must produce what its service promises, or "
-                     f"consumers bound to `{svc.name}` receive nothing (rust E0308, "
-                     'java "missing return statement")',
+                f"returns `{render_type(decl.returns)}`, but control can reach the "
+                f"end of its body without a `return`",
+                hint="every path must return: give the trailing `if` an `else` that "
+                     "returns, or add a final `return` after it — a `for`/`while` may "
+                     "run zero times and never counts (rust E0308, java \"missing "
+                     "return statement\")",
                 code="T1", category="type-mismatch",
                 expected=decl.returns, actual=None,
             )
