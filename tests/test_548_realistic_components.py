@@ -29,9 +29,10 @@ closed:
   `div_trunc`/`mod`/`to_str` (c6).
 
 Per-tier remainders (pre-existing, documented, NOT #548 language gaps): the wasm
-tier does not lower a `Float` value (c2), a method-body `for (x of xs)` (the
-tracked #681 remainder — count with a `while`+index, c4/c7), or an Opt method
-(c8). Those four assert wasm refuses; the other four emit on all six tiers.
+tier does not lower a `Float` value (c2) or an Opt method (c8). Those two assert
+wasm refuses; the other six emit on all six tiers — item 458 landed the
+method-body `for (x of xs)` walk, so c4/c7 (the old #681 remainder) now emit and
+run on wasm too.
 """
 
 import shutil
@@ -129,7 +130,7 @@ component Norm provides normalizer: Normalizer {
 """
 
 # 4 — a CSV field splitter: a `for (x of xs)` loop over `Str.split` accumulating
-#     into a `List[Str]`. wasm's method-body `for` is the tracked #681 remainder.
+#     into a `List[Str]`. Emits on all six tiers (item 458 landed wasm `for`).
 CSV = """
 service Csv { fn fields(line: Str) -> List[Str] }
 component CsvReader provides csv: Csv {
@@ -185,7 +186,7 @@ component Price provides money: Money {
 """
 
 # 7 — a list summarizer: a `for` loop with an inner `if` selecting a running max
-#     (control flow, #681). wasm's method-body `for` is the tracked remainder.
+#     (control flow, #681). Emits on all six tiers (item 458 landed wasm `for`).
 SUMMARIZER = """
 service Nums { fn positive_max(xs: List[Int]) -> Int }
 component Summ provides nums: Nums {
@@ -220,10 +221,10 @@ FIVE_TIERS = ["python", "typescript", "go", "java", "rust"]
 IN_MEMORY = [
     ("grader", GRADER, ALL_TIERS),
     ("stats", STATS, FIVE_TIERS),        # wasm: no Float value
-    ("csv", CSV, FIVE_TIERS),            # wasm: method-body `for` (#681 remainder)
+    ("csv", CSV, ALL_TIERS),             # wasm method-body `for` landed (item 458)
     ("lexer", LEXER, ALL_TIERS),
     ("money", MONEY, ALL_TIERS),
-    ("summarizer", SUMMARIZER, FIVE_TIERS),  # wasm: method-body `for`
+    ("summarizer", SUMMARIZER, ALL_TIERS),  # wasm method-body `for` landed (item 458)
     ("config", CONFIG, FIVE_TIERS),      # wasm: no Opt method
 ]
 
@@ -282,8 +283,6 @@ def test_normalizer_emits_on_all_tiers(tmp_path):
 
 @pytest.mark.parametrize("name,source,reason", [
     ("stats", STATS, "type 'Float' is not lowerable"),
-    ("csv", CSV, "a `for (x of xs)` loop in a provide-method body is not yet lowerable on the wasm tier"),
-    ("summarizer", SUMMARIZER, "a `for (x of xs)` loop in a provide-method body is not yet lowerable on the wasm tier"),
     ("config", CONFIG, "scalar values have no methods"),
 ])
 def test_wasm_remainder_is_a_clear_refusal(name, source, reason):
