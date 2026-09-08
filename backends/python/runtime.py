@@ -2493,9 +2493,14 @@ class Frame:
                 seq=getattr(entry, "seq", None), reason=reason,
                 entry_kind=entry_kind))
         for resource in self._resources:
+            # A host resource names itself through `_tag`, which every stateful
+            # resource (`Pool`, `Timer`, `Map`) exposes as a *property* returning
+            # a string (`"map#8"`), NOT a method — so read it as a value and only
+            # fall back to the type name when a resource carries no `_tag` at all.
+            tag = getattr(resource, "_tag", None)
             records.append(_estop_record(
                 _ESTOP_STRANDED, component=self.name,
-                method=getattr(resource, "_tag", lambda: type(resource).__name__)(),
+                method=tag if tag is not None else type(resource).__name__,
                 seq=None, reason=reason, entry_kind="bracket",
                 referent=repr(resource)))
         return records
