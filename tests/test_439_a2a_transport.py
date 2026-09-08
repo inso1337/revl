@@ -169,8 +169,8 @@ def test_on_failure_withdraw_raises_a_fault(tmp_path):
     assert 'raise TransportFault("a2a: transport failure") from _exc' in text
     assert "class TransportFault(RuntimeError):" in text
     assert "_revl_transport_fault = True" in text
-    assert 'revl_row = "agent"' in text
-    assert 'revl_crossing = "ask"' in text
+    assert '_revl_row = "agent"' in text
+    assert '_revl_crossing = "ask"' in text
     assert "return Err(" not in text
 
 
