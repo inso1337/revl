@@ -28,6 +28,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 FIXTURE = HERE / "testdata" / "stream_130.rvl"
 HARNESS = HERE / "testdata" / "stream_130_test.go.fixture"
+EVENT_FIXTURE = HERE / "testdata" / "stream_event_130.rvl"
+EVENT_HARNESS = HERE / "testdata" / "stream_event_130_test.go.fixture"
 GO_SUM = HERE / "scenarios" / "go.sum"
 STC = "github.com/0xdenny218/stc-go v0.6.1-0.20260818143352-b3d6788a428e"
 
@@ -48,6 +50,11 @@ emit = _emit_module()
 def _emit_go() -> str:
     return emit.emit(compile_source(FIXTURE.read_text(encoding="utf-8")),
                      package="stream130")
+
+
+def _emit_event_go() -> str:
+    return emit.emit(compile_source(EVENT_FIXTURE.read_text(encoding="utf-8")),
+                     package="streamevent130")
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +155,50 @@ def test_iteration_lowers_as_a_blocking_next_loop():
     assert ".(string)" in body
 
 
+def test_typed_event_handler_lowers_with_the_contract_gate():
+    """item 130 Slice 5 on the go tier: `on OrderCreated as e in sub { … }` is
+    the Slice 4 loop plus one gate — the contract is built ONCE above the loop,
+    the `admit` call sits AFTER the terminal test, a schema violation is the
+    uncaught error return (go cannot raise), and a duplicate `continue`s. The
+    validated item decodes into the event's record struct so the body reads
+    `e.<field>` as a typed field access. The document also declares the event's
+    record type, which the pure typed-core path would drop — so the go tier
+    diverts the stream-holding component to the live stc-go path and materializes
+    the struct alongside it."""
+    src = _emit_event_go()
+    body = src.split("func Handler() stc.Component {", 1)[1].split("\nfunc ", 1)[0]
+    # the record type is materialized (the component was kept, not dropped)
+    assert "type OrderCreated struct {" in src
+    # the contract is built once, above the loop, from the derived schema
+    assert 'StreamContract("OrderCreated", ' in body
+    assert '"order_id", 64)' in body, "the derived key and default window"
+    # one loop, with the gate after the `Closed` terminal test
+    assert body.count("for {") == 1
+    assert body.index("IsStreamClosed(") < body.index(".admit(")
+    # a schema violation faults (uncaught error return); a duplicate continues
+    assert ".admit(_revlStreamItem1, \"Handler: on OrderCreated\")" in body
+    assert body.index("return nil, _revlEventErr1") < body.index("if !_revlEventOk1")
+    assert "continue" in body
+    # the item decodes into the record struct for the typed body access
+    assert "var e OrderCreated" in body
+    assert body.index("var e OrderCreated") < body.index("e.OrderId")
+
+
+def test_typed_event_handler_pulls_the_contract_runtime_and_json_import():
+    """The `EventContract` half of the stream runtime and its `encoding/json`
+    import are emitted ONLY for a document with an `on … as` handler, so a plain
+    `every … in` program stays byte-identical."""
+    src = _emit_event_go()
+    assert "type EventContract struct {" in src
+    assert "func StreamContract(" in src
+    assert '"encoding/json"' in src
+    # the plain stream fixture carries neither
+    plain = _emit_go()
+    assert "type EventContract struct {" not in plain
+    assert "func StreamContract(" not in plain
+    assert '"encoding/json"' not in plain
+
+
 # ---------------------------------------------------------------------------
 # the executable proof (the only thing that proves the select unparks)
 # ---------------------------------------------------------------------------
@@ -184,6 +235,37 @@ def test_go_stream_scenario_builds_and_runs():
         shutil.copy(HARNESS, root / "stream_130_test.go")
         (root / "go.mod").write_text(
             "module stream130\n\ngo 1.25.0\n\nrequire %s\n" % STC, encoding="utf-8")
+        shutil.copy(GO_SUM, root / "go.sum")
+        run = subprocess.run(
+            [go, "test", "-count=1", "-race", "./..."],
+            cwd=root, capture_output=True, text=True)
+    if run.returncode != 0 and "no required module provides" in (
+            run.stdout + run.stderr):  # pragma: no cover — offline module cache
+        pytest.skip("stc-go is not in the local module cache")
+    assert run.returncode == 0, (run.stdout + "\n" + run.stderr)
+
+
+def test_go_typed_event_scenario_builds_and_runs():
+    """Definition of done for the typed-event handler on the go tier: the emitted
+    `EventContract` gate RUNS on real stc-go and proves, by running,
+
+      * a conforming item is validated against the derived schema and reaches the
+        body (§6);
+      * an in-window redelivery of the same key is COLLAPSED — the handler runs
+        once per identity, and the collapse is traced, not silent;
+      * a schema violation FAULTS the activation — the same terminal a provider
+        abort delivers — so no malformed item reaches the body and the failed
+        activation closes the subscription with no residue (§6, A8).
+    """
+    go = _go_or_skip()
+    src = _emit_event_go()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "gen.go").write_text(src, encoding="utf-8")
+        shutil.copy(EVENT_HARNESS, root / "stream_event_130_test.go")
+        (root / "go.mod").write_text(
+            "module streamevent130\n\ngo 1.25.0\n\nrequire %s\n" % STC,
+            encoding="utf-8")
         shutil.copy(GO_SUM, root / "go.sum")
         run = subprocess.run(
             [go, "test", "-count=1", "-race", "./..."],

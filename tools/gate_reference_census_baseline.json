@@ -71,6 +71,7 @@
    "backends/go/scenarios/witnessed_teardown.rvl",
    "backends/go/testdata/opt_gaps_280.rvl",
    "backends/go/testdata/result_ctor_302.rvl",
+   "backends/go/testdata/stream_event_130.rvl",
    "examples/async_timer.rvl",
    "examples/budget_attenuation.rvl",
    "examples/durable_log.rvl",
@@ -224,6 +225,18 @@
     "code": "G1",
     "kind": "refused",
     "message": "`sub` is not a declared requirement of Parked"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "backends/go/testdata/stream_event_130.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
    },
    "reference": {
     "message": "",
