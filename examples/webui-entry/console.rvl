@@ -10,39 +10,54 @@
 //
 // THE SHAPE. A revl component contributes a frontend by naming EXTERNAL asset
 // files and handing them to Cordis WebUI (`ctx.webui.addEntry`, studied in
-// design note 526). The binding is one small, real TypeScript module
-// (`webui_host.ts`) reached through the reviewed host-ref door
-// (`= @ts ref ... from "..."`, item 396/410) — the same door stdlib/fs.rvl uses
-// to reach backends/typescript/revl_fs_ts.ts. No JavaScript lives in a revl
-// string; the emitted artifact IMPORTS the shim from its file (the ref is
-// content-hash-pinned in the IR), and the frontend entry itself
-// (`frontend/entry.client.ts`) is a normal Vite/Vue source with source maps.
+// design note 526). WebUI is an AMBIENT SERVICE the host runtime provides: the
+// component declares a first-class coeffect on it — `requires webui: WebUI` —
+// and reaches it through that typed boundary. No JavaScript lives in a revl
+// string; the frontend entry itself (`frontend/entry.client.ts`) is a normal
+// Vite/Vue source with source maps, named here only by PATH.
 //
-// This is the ENABLING SLICE, not the full close. Two pieces stay architect- or
-// app-gated and are recorded in design note 530: making the ambient `ctx.webui`
-// binding a first-class declared coeffect (so the entry's RPC surface is an
-// enumerable typed contract, not an untyped `data: T`), and the exemplary
-// frontend itself, which is item 462's deliverable.
+// WHY A COEFFECT, NOT A `globalThis` BRIDGE. The enabling slice (#761) reached
+// the Cordis `Context` through the retained embedder bridge
+// `globalThis.__revlWebui`, a `@ts ref` host-ref door onto an untyped seam.
+// Design note 530 flagged that as a slice compromise and asked the architect to
+// choose the first-class surface; the coeffect (option 1) was approved. This is
+// that surface: `webui` is a declared `requires` key, so the emitted artifact
+// resolves it through Cordis' own `inject` (the host-provided `ctx.webui`), and
+// the whole frontend-entry contribution — the coeffect and its `add_entry`
+// emission — is an ENUMERABLE crossing `revl audit` (G1) reports and G8 marks as
+// the trusted host boundary. There is no `globalThis` reach and no untyped door.
+//
+// This is the ENABLING SLICE, not the full close. Two pieces stay app-gated and
+// are recorded in design note 530: the typed reactive-state / RPC contract that
+// replaces Cordis' untyped `data: T` (folded into item 457's "one definition"
+// work — this slice publishes an empty `data` surface deliberately), and the
+// exemplary frontend itself, which is item 462's deliverable.
 //
 // Copy this file the way router.rvl is copied: rename the component, point the
 // paths at your own Vite project's dev source, built manifest, and routes.
 
-// The webui contribution boundary. `dev_source` and `prod_manifest` are PATHS to
-// external asset files; `routes` are the client route patterns. The body is a
-// reference to a real host module, never an inline JS body.
-extern emission fn webui_add_entry(
-  dev_source: Str,
-  prod_manifest: Str,
-  routes: List[Str],
-) -> Str
-    = @ts ref webuiAddEntry from "./webui_host.ts"
+// The ambient WebUI service — the typed contract the host runtime provides as
+// `ctx.webui`. `add_entry` names external asset files and returns a stable entry
+// handle; it is an `emission` because registering a frontend is an outward
+// effect on the host (G4 upper bound, the shape a `revl import cordis` of
+// `@cordisjs/plugin-webui` recovers). A real console would grow this service
+// with the typed reactive-state / RPC methods design note 530 defers to 457.
+service WebUI {
+  emission fn add_entry(
+    dev_source: Str,
+    prod_manifest: Str,
+    routes: List[Str],
+  ) -> Str
+}
 
-// The console component. At activation it registers its frontend entry with
-// WebUI, naming external files only. A real console additionally `requires` its
-// domain services and publishes reactive state; that typed server-to-client
-// contract is design note 530.
-component ConsoleUI {
-  emit webui_add_entry(
+// The console component. It declares a first-class coeffect on the ambient WebUI
+// service (`requires webui: WebUI`) and, at activation, registers its frontend
+// entry by naming external files only. The binding is the declared coeffect —
+// not a `globalThis` bridge and not an inline JS body — so `revl audit` sees the
+// `webui` requirement and the `webui.add_entry` emission on this component's
+// boundary.
+component ConsoleUI requires webui: WebUI {
+  emit webui.add_entry(
     "./frontend/entry.client.ts",       // dev-mode source (a Vite/Vue module)
     "./dist/.vite/manifest.json",       // built Vite manifest for production
     ["/console"],                       // client route patterns this entry owns
