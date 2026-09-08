@@ -6747,6 +6747,12 @@ fn lir_builtin(f: FieldN, args: Vec<Expr>, env: Vec<Bind>) -> String {
         let rt = infer(f.target.clone(), &env);
         s = (s.revl_concat(",\"recv\":")).revl_concat(&if (rt == "") { String::from("null") } else { jstr(&rt) });
     }
+    if (f.name == "to_str") {
+        let rt = infer(f.target.clone(), &env);
+        if (rt == "Float") {
+            s = (s.revl_concat(",\"recv\":")).revl_concat(&jstr(&rt));
+        }
+    }
     return s.revl_concat("}");
 }
 

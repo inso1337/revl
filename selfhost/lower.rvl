@@ -7316,6 +7316,16 @@ fn lir_builtin(f: FieldN, args: List[Expr], env: List[Bind]) -> Str {
     let rt = infer(f.target, env)
     s = s.concat(",\"recv\":").concat(rt == "" ? "null" : jstr(rt))
   }
+  // `to_str` only needs the `recv` tag to tell a Float receiver (which renders
+  // through the canonical `ftoa`, byte-identical to a `${aFloat}` interpolation)
+  // from an Int one; the py/java/rust tiers read it exclusively as
+  // `recv == "Float"` (item 548 / PR #703, self-host port item 391). It is
+  // attached ONLY for a Float receiver, so the common Int case stays tag-less,
+  // exactly as lower.py does.
+  if (f.name == "to_str") {
+    let rt = infer(f.target, env)
+    if (rt == "Float") { s = s.concat(",\"recv\":").concat(jstr(rt)) }
+  }
   return s.concat("}")
 }
 
