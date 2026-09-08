@@ -511,9 +511,11 @@ until then the tier documents "faults with `unreachable`, no payload".
 ## stdlib cross-tier divergences (issue #549)
 
 A private review (issue #549) caught a cluster of stdlib operations whose
-emitters disagreed with the reference. Three had an unambiguous documented
-reference and are now closed; each is asserted to AGREE on every tier in
-`tests/test_cross_tier_execution.py` (`AGREED_549`).
+emitters disagreed with the reference. Each is now closed. The ones with a
+value-or-fault verdict (`split("")`, `"+7".to_int()`, `div_trunc(Int.MIN, -1)`,
+a negative slice bound, a negative list index) are asserted to AGREE on every
+tier in `tests/test_cross_tier_execution.py` (`AGREED_549`); `Str + Int` is
+closed by uniform frontend rejection (below).
 
 - **`split("")` counted UTF-16 units on TypeScript and Java** (closed). An
   empty separator splits by code point (docs/stdlib-2.0.md §split), so an
@@ -535,10 +537,43 @@ reference and are now closed; each is asserted to AGREE on every tier in
   the same `Math.*Exact` family the `Int.MIN / -1` entry above already used for
   `+`/`-`/`*` and unary minus.
 
-The remaining #549 divergences turn on a spec decision this repo has not made
-(whether a negative list index or slice bound faults or is end-relative, and
-whether the frontend should accept a mixed `Str + Int` at all) and stay pinned
-in `DIVERGENCES` so they cannot drift, rather than being closed by fiat.
+- **A negative slice bound diverged: py/ts sliced, go/rust/java faulted**
+  (closed, end-relative). `xs.slice(-2, -1)` is one element on python and
+  TypeScript (a python/JS end-relative slice), while go, rust and java clamped
+  the negative bound to `0` and returned the wrong (empty) slice. The PO
+  decision for #549 is that a negative slice bound is END-RELATIVE on every
+  tier: py and ts already spell it that way and stratum-1 mirrors those priors.
+  The go `revlListSlice`/`revlStrSlice`, rust `revl_slice` and java `revlSlice`
+  helpers now add the length to a negative bound before clamping, so every tier
+  yields the same one element. Asserted in `AGREED_549`
+  ("negative slice bounds are end-relative everywhere", verdict `pass`).
+- **A negative list index diverged: py read the wrapped last element, ts read
+  `undefined`, go/rust/java faulted** (closed, uniform fault). `xs[-1]` has no
+  agreed reading — JS bracket indexing is not end-relative (`xs[-1]` is
+  `undefined`, not the last element), so the only close that makes every tier
+  agree without pervasive runtime surgery is the FAULT the original reference
+  names and that go/rust/java already take. End-relative indexing was rejected
+  as disproportionate: it would need a bounds-checked indexer on the hottest
+  read path of ts AND go/rust/java, and rust's index read is woven through its
+  borrow/clone machinery. Instead a List subscript now routes through
+  `_revl_index` (python) / `revlIndex` (TypeScript), each throwing on a
+  negative index the way go/rust/java panic. Asserted in `AGREED_549`
+  ("negative list index faults everywhere", verdict `fail`).
+- **`Str + Int` scattered across every tier** (closed by rejection). The
+  frontend accepted a mixed `Str + <non-Str>` and left the operand to the
+  tiers, which disagreed: python raised a `TypeError`, go REFUSED to compile
+  (`mismatched types`), while rust, ts and java coerced the int and rendered
+  `"n=3"`. String `+` is Str-only concatenation (docs/stdlib-2.0.md), so the
+  checker now refuses a known non-`Str` operand (numeric included) in
+  `_binop_type` with `operand of string `+` expects `Str``. That makes it a
+  compile error on every tier — the same uniform-rejection close used for
+  `List[Int].join` — rather than a runtime divergence; convert with `.to_str()`
+  first. Asserted in `tests/test_typesafety.py::test_str_plus_int_rejected`. An
+  UNKNOWN operand (the gradual frontier) is unaffected.
+
+With the value-or-fault divergences agreeing on every tier (`AGREED_549`) and
+`Str + Int` refused uniformly at the frontend, every #549 divergence is now
+closed — none remains pinned in `DIVERGENCES`.
 
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins

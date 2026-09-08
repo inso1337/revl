@@ -1204,7 +1204,7 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
       return { text: `${tr.text}[${json_dumps(value_field(index, "value"))}]`, counter: tr.counter }
     }
     let ir = int_as_number(value_field(node, "index"), tr.counter, acx)
-    return { text: `${tr.text}[${ir.text}]`, counter: ir.counter }
+    return { text: `revlIndex(${tr.text}, ${ir.text})`, counter: ir.counter }
   }
   if (kind == "len") {
     let tr = paren_target(value_field(node, "target"), counter, acx)
@@ -2837,6 +2837,18 @@ fn revl_str_helper() -> Str {
   return o.join(newline())
 }
 
+// A negative List index FAULTS on every tier (#549): `xs[-1]` reads
+// `undefined` in JS, so guard it here to throw the way go/rust/java panic and
+// python raises. Mirrors `_REVL_INDEX_HELPER`.
+fn revl_index_helper() -> Str {
+  var o = []
+  o = o.push("function revlIndex<T>(xs: T[], i: number): T {")
+  o = o.push(`  if (i < 0) { throw new Error("revl: negative list index") }`)
+  o = o.push("  return xs[i]")
+  o = o.push("}")
+  return o.join(newline())
+}
+
 fn revl_parse_int_helper() -> Str {
   var o = []
   o = o.push("function revlParseInt(s: string): bigint | undefined {")
@@ -3092,6 +3104,22 @@ fn uses_split(n: Any) -> Bool {
   return false
 }
 
+// `_uses_index`: does this IR read a List subscript `xs[i]` (routed through
+// `revlIndex`)? A string-LITERAL key is a host/`Any` property read, not a List
+// subscript, so it does not pull the helper in (#549).
+fn uses_index(n: Any) -> Bool {
+  if (node_kind(n) == "index") {
+    let idx = value_field(n, "index")
+    if (!(node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str")) {
+      return true
+    }
+  }
+  for (c of value_children(n)) {
+    if (uses_index(c)) { return true }
+  }
+  return false
+}
+
 // `_revl_helpers`: the helper functions this document actually needs, in
 // dependency order (revlI64 before the named integer operations that call it).
 fn revl_helpers(ir: Any) -> List[Str] {
@@ -3104,6 +3132,7 @@ fn revl_helpers(ir: Any) -> List[Str] {
   if (uses_str_methods(ir)) { out = out.push(revl_str_helper()); out = out.push("") }
   if (uses_split(ir)) { out = out.push(revl_split_helper()); out = out.push("") }
   if (uses_parse_int(ir)) { out = out.push(revl_parse_int_helper()); out = out.push("") }
+  if (uses_index(ir)) { out = out.push(revl_index_helper()); out = out.push("") }
   return out
 }
 

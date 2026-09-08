@@ -808,9 +808,19 @@ landable pieces. Progress is tracked here so a piece is never started twice.
   over scp/rsync, spawning `revl deploy-admit` over ssh, and the pinned SSH
   host key (§1.3). Implements the same `send` contract as the stub; verified
   end-to-end on the two self-hosted runners (azure-amd-1 + oracle-arm64).
-- **[REMAINS] the load-measured COMMIT receipt gate across the seam**: the
-  primitive (`deploy.commit_receipt` / `deploy.compare_commit_receipt`) is
-  landed local; carrying it over the runner protocol is the remaining wiring.
+- **[LANDED] the load-measured COMMIT receipt gate across the seam**: the
+  primitive (`deploy.commit_receipt` / `deploy.compare_commit_receipt`) was
+  landed local; it is now carried over the runner protocol. `deploy.CommitRequest`
+  / `deploy.CommitResponse` are the COMMIT twin of the admit message shapes;
+  `deploy.serve_commit_request` is the runner side (measures fresh at load time,
+  signs with the host's own key, refuses when it cannot measure or has no signing
+  key); `deploy.request_commit` is the conductor side (sends, binds the reply to
+  the request via a challenge nonce, then runs `compare_commit_receipt` as an
+  INTEGRAL hard gate, so a host that loaded different bytes than it was admitted
+  to load is DETECTED at COMMIT, not merely at PREPARE). `InProcessTransport` now
+  carries both phases, dispatching on the request kind. Tested in
+  `tests/test_deploy_commit_runner_118.py`. Still on the in-process transport
+  stub; the live cross-machine leg rides on top unchanged.
 - **[REMAINS] mTLS staging identity, replicated WAL, the partition-safe
   distributed commit coordinator, and the Ed25519 migration** of the receipt/
   attestation signatures (the hard prerequisite for a genuinely cross-trust-

@@ -1,17 +1,18 @@
 # revl backend: cordis v4 (TypeScript)
 
 The v0 TypeScript backend for revl, targeting [cordis](https://github.com/cordiverse/cordis)
-4.0.0-rc.8 (the reference implementation of the spatiotemporal-composability
+4.0.0-rc.9 (the reference implementation of the spatiotemporal-composability
 paradigm), pinned to revl's fork [`inso1337/cordis`](https://github.com/inso1337/cordis)
-at `harden-assert-active` — the rc.8 source plus the `assertActive` lifecycle
-fix (see `docs/upstream/cordis-ts-assertActive.md` and
-`docs/contract-errata.md`). Implements the frozen contract in
-`docs/backend-ir.md`.
+at `3c60883` — upstream `packages/core` re-rooted on tag `v4.0.0-rc.9`
+(`ed8a775`) plus the scoped `assertRegistrable` lifecycle hardening (see
+`docs/upstream/cordis-ts-assertActive.md`,
+`docs/design/cordis-upstream-sync-2026-09.md` and `docs/contract-errata.md`).
+Implements the frozen contract in `docs/backend-ir.md`.
 
 ## Setup + test (one command each)
 
 ```sh
-npm install     # pinned deps (cordis fork c8b94b2, vitest)
+npm install     # pinned deps (cordis fork 3c60883, vitest)
 npm test        # emits test fixtures, runs R1–R5 + emitter + upstream suites
 ```
 

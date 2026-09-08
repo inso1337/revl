@@ -1,0 +1,65 @@
+// webui-entry — the canonical shape for a revl frontend behind a typed boundary
+// (roadmap item 459, issue #722; design docs/design/526-webui-asset-alignment.md
+// and docs/design/530-webui-entry-surface.md).
+//
+// THE ANTI-PATTERN THIS REPLACES. The legacy console is ~4,800 lines of
+// HTML/CSS/JS carried inside revl source strings, with browser tooling
+// extracting the scripts back out. There are no source maps to an original, the
+// frontend cannot be type-checked or bundled by normal tooling, and the set of
+// server methods the page can call is not stated anywhere.
+//
+// THE SHAPE. A revl component contributes a frontend by naming EXTERNAL asset
+// files and handing them to Cordis WebUI (`ctx.webui.addEntry`, studied in
+// design note 526). WebUI is an AMBIENT SERVICE the host runtime provides: the
+// component declares a first-class coeffect on it — `requires webui: WebUI` —
+// and reaches it through that typed boundary. No JavaScript lives in a revl
+// string; the frontend entry itself (`frontend/entry.client.ts`) is a normal
+// Vite/Vue source with source maps, named here only by PATH.
+//
+// WHY A COEFFECT, NOT A `globalThis` BRIDGE. The enabling slice (#761) reached
+// the Cordis `Context` through the retained embedder bridge
+// `globalThis.__revlWebui`, a `@ts ref` host-ref door onto an untyped seam.
+// Design note 530 flagged that as a slice compromise and asked the architect to
+// choose the first-class surface; the coeffect (option 1) was approved. This is
+// that surface: `webui` is a declared `requires` key, so the emitted artifact
+// resolves it through Cordis' own `inject` (the host-provided `ctx.webui`), and
+// the whole frontend-entry contribution — the coeffect and its `add_entry`
+// emission — is an ENUMERABLE crossing `revl audit` (G1) reports and G8 marks as
+// the trusted host boundary. There is no `globalThis` reach and no untyped door.
+//
+// This is the ENABLING SLICE, not the full close. Two pieces stay app-gated and
+// are recorded in design note 530: the typed reactive-state / RPC contract that
+// replaces Cordis' untyped `data: T` (folded into item 457's "one definition"
+// work — this slice publishes an empty `data` surface deliberately), and the
+// exemplary frontend itself, which is item 462's deliverable.
+//
+// Copy this file the way router.rvl is copied: rename the component, point the
+// paths at your own Vite project's dev source, built manifest, and routes.
+
+// The ambient WebUI service — the typed contract the host runtime provides as
+// `ctx.webui`. `add_entry` names external asset files and returns a stable entry
+// handle; it is an `emission` because registering a frontend is an outward
+// effect on the host (G4 upper bound, the shape a `revl import cordis` of
+// `@cordisjs/plugin-webui` recovers). A real console would grow this service
+// with the typed reactive-state / RPC methods design note 530 defers to 457.
+service WebUI {
+  emission fn add_entry(
+    dev_source: Str,
+    prod_manifest: Str,
+    routes: List[Str],
+  ) -> Str
+}
+
+// The console component. It declares a first-class coeffect on the ambient WebUI
+// service (`requires webui: WebUI`) and, at activation, registers its frontend
+// entry by naming external files only. The binding is the declared coeffect —
+// not a `globalThis` bridge and not an inline JS body — so `revl audit` sees the
+// `webui` requirement and the `webui.add_entry` emission on this component's
+// boundary.
+component ConsoleUI requires webui: WebUI {
+  emit webui.add_entry(
+    "./frontend/entry.client.ts",       // dev-mode source (a Vite/Vue module)
+    "./dist/.vite/manifest.json",       // built Vite manifest for production
+    ["/console"],                       // client route patterns this entry owns
+  )
+}

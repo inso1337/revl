@@ -81,7 +81,7 @@ __all__ = [
     "SpawnHandle", "StateIncompatible",
     "EventContract",
     "Stream", "StreamFaulted", "StreamSource", "Subscription", "STREAM_CLOSED",
-    "TimerHandle", "TransientError", "add_trace", "arm_fault_probe", "clear_session_owner",
+    "TimerHandle", "TransientError", "TransportFault", "add_trace", "arm_fault_probe", "clear_session_owner",
     "disarm_fault_probe",
     "fmt", "live_instances", "plug", "realm_label", "remove_trace", "resolved_config",
     "retry_idempotent", "schedule_after", "schedule_every", "session_owner",
@@ -117,6 +117,48 @@ class TransientError(RuntimeError):
     server committed). The runtime retries it *iff* the emission is declared
     `idempotent`; for any other emission it propagates unchanged.
     """
+
+
+#: The duck-typed marker the activation runtime keys on to recognise a
+#: transport fault, regardless of the concrete class that carries it (item 439
+#: T0). An exception whose ``_revl_transport_fault`` attribute is truthy — this
+#: class, or the small class a synthesized `@py` remote body defines inline
+#: (which cannot import this module) — is a synthesized remote crossing that
+#: FAILED under `on_failure(withdraw)`. It carries ``revl_row`` (the composition
+#: row label the crossing was declared on) and ``revl_crossing`` (the method
+#: that failed) so the runtime knows which provider to withdraw. Keying on the
+#: attribute rather than on class identity is what lets the exec'd emitted
+#: module and this module share one contract without sharing an import.
+_TRANSPORT_FAULT_MARKER = "_revl_transport_fault"
+
+
+class TransportFault(RuntimeError):
+    """A synthesized remote provider's declared crossing faulted (item 439
+    slice T0, issue #118, docs/design/439-a2a-task-lifecycle.md decision 4).
+
+    A `remote` row's synthesized `@py` body raises a transport fault — a
+    connection error, a crossing deadline, a JSON-RPC error, a non-terminal
+    task — under the default `on_failure(withdraw)`. Until this slice that
+    fault only unwound the calling fiber; the activation runtime now MAPS it to
+    provider WITHDRAWAL, so the provider is withdrawn and every consumer
+    deactivates reactively (R2/R3), exactly as peer death does. Under
+    `on_failure(result)` no fault is raised — the failure is the `Err` — so the
+    provider stays wired.
+
+    This is the DECLARED type for that fault, subclassing ``RuntimeError`` so a
+    body or test that catches ``RuntimeError`` still sees it. It carries the
+    ``_revl_transport_fault`` marker plus ``revl_row``/``revl_crossing`` so the
+    runtime can attribute the withdrawal to the row and crossing that failed.
+    The emitted `@py` body cannot import this module, so it defines its own
+    marker-bearing class inline; the runtime recognises both by the marker
+    (see :data:`_TRANSPORT_FAULT_MARKER`), never by class identity."""
+
+    _revl_transport_fault = True
+
+    def __init__(self, message: str, *, row: str = "", crossing: str = "") -> None:
+        super().__init__(message)
+        self.revl_row = row
+        self.revl_crossing = crossing
 
 
 async def retry_idempotent(call, *, idempotent: bool = False,

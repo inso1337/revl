@@ -70,6 +70,12 @@ SHAPES = [
         r"for \w+ in \w+\.clone\(\)",
         "`for x in &v` when the binding is dead after the loop",
     ),
+    (
+        "constant list of literals rebuilt per call",
+        r"fn \w+\(\) -> Vec<String> \{\s*\n\s*return vec!\[String::from\(",
+        "a `static NAME: &[&str]` lent out; item 437(e), ACCEPTED (item-277 "
+        "calling-convention change), so this count is expected to stay nonzero",
+    ),
 ]
 
 TOTALS = [

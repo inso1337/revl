@@ -24,17 +24,22 @@ import os
 LATCH_ENV = "REVL_ESTOP_LATCH"
 
 #: The tiers whose runtime checks the latch at every boundary-crossing seam:
-#: the py reference tier (item 443), and the go and rust tiers (issue #122),
-#: whose placement runners now read the latch, refuse a new crossing at the
-#: accept seam, record what is in flight, and — via an idle watcher — print
-#: their inventory and die where they stand rather than being SIGKILLed.
-#: A component on any OTHER tier (java, wasm, and — until #598 lands — node)
-#: keeps its cooperative teardown and has no E-Stop: the only halt available
-#: for it is a SIGKILL, which unwinds nothing and leaves its residue UNKNOWN.
-#: That is honest and visible rather than a silently degraded halt, and
-#: `_estop_halt_report` names every such component individually
-#: (docs/design/443-estop.md, "Per-tier status").
-TIERS_WITH_ESTOP = frozenset({"py", "go", "rust"})
+#: the py reference tier (item 443), the go and rust tiers (issue #122), and now
+#: the java tier (issue #122, per docs/design/443-estop-tier-contract.md), whose
+#: placement runners read the latch, refuse a new crossing at the accept and
+#: dispatch seams, record what is in flight, and — via an idle watcher — print
+#: their inventory and die where they stand rather than being SIGKILLed. Both
+#: java runners honor it: the JDK-17 stub `PlacementRunner` and the reactive
+#: cordis4j `RealPlacementRunner` (backends/java/placement/Estop.java).
+#: A component on any OTHER tier (wasm, and — until #769 lands — node/ts) keeps
+#: its cooperative teardown and has no runtime E-Stop seam: the only halt
+#: available for it is a SIGKILL, which unwinds nothing and leaves its residue
+#: UNKNOWN. That is honest and visible rather than a silently degraded halt, and
+#: `_estop_halt_report` names every such component individually. wasm cannot run
+#: a watcher (no process, no clock) and is instead reported STATICALLY from its
+#: compile-time teardown section, a separate population from this set
+#: (docs/design/443-estop-tier-contract.md, "Per-tier decisions").
+TIERS_WITH_ESTOP = frozenset({"py", "go", "rust", "java"})
 
 #: What the py runner prints when the latch trips: its own in-flight
 #: inventory, on one line, so the conductor can merge it into the halt report

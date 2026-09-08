@@ -328,8 +328,32 @@ def check_remotable(service, *, doc: str, line: int, label: str,
 
 # ------------------------------------------------------------- the remote kind
 
+def _transport_fault_class(label: str, op: str, indent: int = 4) -> str:
+    """Source for the inline `TransportFault` class a synthesized `@py` remote
+    body raises under `on_failure(withdraw)` (item 439 T0, issue #118).
+
+    The emitted module cannot import the runtime's `TransportFault`, so — like
+    `_RedirectRefused` in `crossing_redirect.py:py_policy` — the fault is a
+    small class defined inline. It carries the `_revl_transport_fault` MARKER
+    the activation runtime keys on (never on class identity, so the exec'd
+    module and the runtime share one contract without an import) plus the row
+    label and the crossing that failed, so the runtime knows which provider to
+    withdraw and how to attribute the cascade. It subclasses `RuntimeError` so a
+    caller catching `RuntimeError` still sees it — the settlement the terminal
+    single-crossing wire has always had."""
+    pad = " " * indent
+    rq, oq = json.dumps(label), json.dumps(op)
+    return (
+        f"{pad}class TransportFault(RuntimeError):\n"
+        f"{pad}    # item 439 T0: a crossing fault under `on_failure(withdraw)`\n"
+        f"{pad}    # WITHDRAWS the provider (the runtime keys on the marker).\n"
+        f"{pad}    _revl_transport_fault = True\n"
+        f"{pad}    revl_row = {rq}\n"
+        f"{pad}    revl_crossing = {oq}\n")
+
+
 def _py_body(host: str, key: str, op: str, in_band: bool,
-             follow_redirects: bool = False) -> str:
+             follow_redirects: bool = False, *, label: str = "") -> str:
     """One crossing, Python tier. The canonical envelope
     (`{"key","method","args"}` -> `{"ok","value"|"error"}`,
     `backends/python/bridge.py:19`) over HTTPS.
@@ -345,21 +369,23 @@ def _py_body(host: str, key: str, op: str, in_band: bool,
     """
     url = json.dumps(f"https://{host}/{key}/{op}")
     kj, oj = json.dumps(key), json.dumps(op)
+    fault_class = "" if in_band else _transport_fault_class(label, op)
     fail = (
         '        return Err("remote: transport failure")\n'
         if in_band else
         '        # `on_failure(withdraw)`: the failure is a FAULT, never a\n'
         '        # quietly-empty result. Nothing is retried and nothing is\n'
-        '        # undone — a remote effect has no local inverse.\n'
-        '        raise RuntimeError("remote: transport failure") from _exc\n')
+        '        # undone — a remote effect has no local inverse. Item 439 T0:\n'
+        '        # the activation runtime WITHDRAWS the provider on this fault.\n'
+        '        raise TransportFault("remote: transport failure") from _exc\n')
     err = ('        return Err("remote: peer error")\n' if in_band else
-           '        raise RuntimeError("remote: peer error")\n')
+           '        raise TransportFault("remote: peer error")\n')
     ok = "    return Ok(_reply.get(\"value\"))\n" if in_band else \
          "    return _reply.get(\"value\")\n"
     policy = py_policy("remote", follow=follow_redirects)
     return f"""
     import json as _json, urllib.request as _req, urllib.parse as _urlp
-    _payload = _json.dumps({{"key": {kj}, "method": {oj},
+{fault_class}    _payload = _json.dumps({{"key": {kj}, "method": {oj},
                             "args": list(_args)}}).encode()
     _r = _req.Request({url}, data=_payload,
                       headers={{"content-type": "application/json"}})
@@ -452,7 +478,8 @@ def _check_a2a_method(service, op, method, in_band: bool, *, doc: str,
 
 def _py_body_a2a(host: str, op: str, in_band: bool,
                  follow_redirects: bool = False, *, rest: bool = False,
-                 in_modality: str = "text", out_modality: str = "text") -> str:
+                 in_modality: str = "text", out_modality: str = "text",
+                 label: str = "") -> str:
     """One crossing, Python tier, over A2A 1.0.0 `message/send`.
 
     This is the `through a2a` / `through a2a_rest` wire (item 439). It maps the
@@ -507,7 +534,12 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
         if in_band:
             return f"{pad}return Err({expr})\n"
         tail = f" from {cause}" if cause else ""
-        return f"{pad}raise RuntimeError({expr}){tail}\n"
+        # item 439 T0: under `on_failure(withdraw)` a crossing fault is a
+        # `TransportFault`, which the activation runtime maps to provider
+        # withdrawal. The redirect refusal above is deliberately NOT one — it
+        # is the peer declining to be the declared endpoint, re-raised as
+        # `_RedirectRefused`, and never withdraws.
+        return f"{pad}raise TransportFault({expr}){tail}\n"
 
     # The one `Part` SENT. A `Str` is a text part; a `Bytes` is a file part
     # with INLINE base64 bytes (A2A 1.0.0 `FileWithBytes`).
@@ -575,10 +607,11 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
         '        # undone — a remote effect has no local inverse.\n'
         if not in_band else "")
     ok = "    return Ok(_value)\n" if in_band else "    return _value\n"
+    fault_class = "" if in_band else _transport_fault_class(label, op)
     return f"""
     import json as _json, urllib.request as _req, urllib.parse as _urlp
     import uuid as _uuid
-    # A2A {A2A_VERSION}, {wire}. ONE crossing. The one canonical arg is the
+{fault_class}    # A2A {A2A_VERSION}, {wire}. ONE crossing. The one canonical arg is the
     # message `Part`; the method name rides as `revl.skill`.
     _message = _args[0]
 {send_prep}    _payload = _json.dumps({payload}).encode()
@@ -710,9 +743,10 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
         # per parameter so the envelope is identical for every arity.
         body_src = (_py_body_a2a(host, op, in_band, redirect == 'same_origin',
                                  rest=is_rest, in_modality=in_modality,
-                                 out_modality=out_modality)
+                                 out_modality=out_modality, label=label)
                     if is_a2a else
-                    _py_body(host, key, op, in_band, redirect == 'same_origin'))
+                    _py_body(host, key, op, in_band, redirect == 'same_origin',
+                             label=label))
         externs.append(
             f"extern emission[{capability}] fn {extern}({sig}){arrow}\n"
             f"  = @py {{\n    _args = [{', '.join(names)}]\n"

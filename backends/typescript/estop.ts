@@ -5,18 +5,29 @@
 // halt on the py reference tier: a latch file, a crossing seam that refuses
 // once it is armed, and an in-flight inventory. The five non-py tiers kept
 // their cooperative teardown and had NO E-Stop, so a placement halt SIGKILLed
-// them and reported their residue UNKNOWN. This module is the first half of
-// the node tier honoring the latch: the latch reader, and the check the
-// crossing seam consults so it stops dispatching NEW crossings the instant an
-// operator arms it (`bridge.ts::serve`).
+// them and reported their residue UNKNOWN. This module is the node tier's
+// E-Stop vocabulary, the twin of the go tier's `estop.go` package: the latch
+// reader, the check the crossing seams consult so they stop dispatching NEW
+// crossings the instant an operator arms it (`bridge.ts::serve`,
+// `bridge.ts::makeProxy`), and the in-flight crossing registry the halt reads
+// to name what was in flight.
 //
-// The three things here MUST read IDENTICALLY to the py reader
+// The latch-reading half MUST read IDENTICALLY to the py reader
 // (`src/revl/estop.py::read_latch`, `backends/python/runtime.py::_latch_record`)
 // so the two tiers cannot drift on what an armed — or a malformed — latch means:
 //
 //   * where the latch file is (`latchPath`);
 //   * what an armed latch means, including a malformed one (`readLatch`);
 //   * whether a halt is in force right now (`estopEngaged`).
+//
+// The in-flight half (`beginCrossing`/`endCrossing`/`inFlightCrossings`,
+// `estopInventory`/`estopHaltLine`) mirrors the go tier's reviewed registry
+// (`backends/go/placement_runner/estop/estop.go`), so the inventory a node
+// child would name reads in the SAME merged-residue shape the conductor
+// (`src/revl/placement.py::_estop_halt_report`) already parses from the py and
+// go runners. A crossing still executing when the button is hit is the
+// AMBIGUOUS one (item 440): its at-most-once attempt may or may not have
+// landed, the designed outcome of an operator halt rather than an edge case.
 
 import fs from 'node:fs'
 
@@ -97,4 +108,107 @@ function unreadable(): LatchRecord {
  *  none is — the default — because `latchPath` short-circuits to null. */
 export function estopEngaged(path: string | null = latchPath()): boolean {
   return readLatch(path) !== null
+}
+
+// --- the in-flight crossing registry (item 443, issue #122) ------------------
+//
+// The go twin is `backends/go/placement_runner/estop/estop.go`. A node process
+// is single-threaded, so this needs none of go's mutex: the event loop cannot
+// interleave two `beginCrossing` calls.
+
+/** One boundary crossing recorded while it is in flight. A crossing still in
+ *  the registry when the latch trips is AMBIGUOUS: its at-most-once attempt may
+ *  or may not have landed (item 440). */
+export interface Crossing {
+  key: string
+  method: string
+  /** `"accept"` (an incoming call the serve seam is answering) or `"dispatch"`
+   *  (an outgoing call this process's proxy made). */
+  direction: 'accept' | 'dispatch'
+  seq: number
+}
+
+const inFlight = new Map<number, Crossing>()
+let seqCounter = 0
+
+/** Record a crossing as in flight and return its sequence number. The seam
+ *  pairs it with `endCrossing` in a `finally` so a throwing handler still
+ *  leaves the registry clean. */
+export function beginCrossing(
+  key: string,
+  method: string,
+  direction: 'accept' | 'dispatch',
+): number {
+  const seq = ++seqCounter
+  inFlight.set(seq, { key, method, direction, seq })
+  return seq
+}
+
+/** Clear a recorded crossing once its handler returns. */
+export function endCrossing(seq: number): void {
+  inFlight.delete(seq)
+}
+
+/** A snapshot of the crossings executing right now, ordered by sequence so the
+ *  inventory is deterministic. */
+export function inFlightCrossings(): Crossing[] {
+  return [...inFlight.values()].sort((a, b) => a.seq - b.seq)
+}
+
+// --- the halt inventory (item 443, issue #122) -------------------------------
+
+function stringField(record: LatchRecord | null, key: string, fallback: string): string {
+  const v = record?.[key]
+  return typeof v === 'string' && v ? v : fallback
+}
+
+/** Shape the crossings that were in flight when the button was hit into the
+ *  merged residue schema (`src/revl/placement.py::_estop_halt_report`),
+ *  byte-compatible with the shape the py runner and the go tier emit.
+ *
+ *  A crossing still executing when the operator armed the latch is AMBIGUOUS —
+ *  its at-most-once attempt may or may not have landed (item 440), the designed
+ *  outcome of an operator halt, not an edge case. This tier keeps no
+ *  witnessed-inverse ledger, so `stranded` is empty and HONESTLY so: the halt
+ *  reports what it can name (the crossings in flight) rather than inventing a
+ *  book it does not keep, and the conductor never reads that empty list as
+ *  "nothing was owed" because the ambiguous crossings are still reported. */
+export function estopInventory(
+  process: string,
+  crossings: Crossing[],
+  record: LatchRecord | null,
+): Record<string, unknown> {
+  return {
+    process,
+    verdict: 'halted',
+    reason: stringField(record, 'reason', 'operator halt'),
+    operator: stringField(record, 'operator', 'unknown'),
+    activations: [],
+    inFlight: crossings.map((c) => ({
+      kind: 'estop-ambiguous',
+      state: 'unresolved',
+      component: c.key,
+      method: c.method,
+      seq: c.seq,
+      entry: 'crossing',
+      direction: c.direction,
+      attemptedFlag: true,
+      outcome: 'unknown',
+    })),
+    stranded: [],
+    resumable: false,
+  }
+}
+
+/** The single line a latch-honoring child prints when the button is hit:
+ *  `[name] HALTED {inventory}`. The conductor parses it off stdout by the
+ *  `HALTED_LINE` prefix (`src/revl/placement.py::pump`) and merges the
+ *  inventory into the halt report without a second channel — the exact contract
+ *  the py runner and the go tier already meet. */
+export function estopHaltLine(
+  process: string,
+  crossings: Crossing[],
+  record: LatchRecord | null,
+): string {
+  return `[${process}] ${HALTED_LINE} ${JSON.stringify(estopInventory(process, crossings, record))}`
 }

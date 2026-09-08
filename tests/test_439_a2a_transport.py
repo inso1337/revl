@@ -162,9 +162,15 @@ def test_the_header_states_the_peer_is_a_claim(tmp_path):
 
 def test_on_failure_withdraw_raises_a_fault(tmp_path):
     """The default. A transport failure is a FAULT (peer-death withdrawal is
-    the intended settlement, R2/R3), never a quietly-empty result."""
+    the settlement, R2/R3), never a quietly-empty result. Item 439 T0: the
+    fault is a typed `TransportFault` the activation runtime maps to provider
+    withdrawal, carrying the row label and the crossing that failed."""
     text = _synth_source(tmp_path, WITHDRAW)
-    assert 'raise RuntimeError("a2a: transport failure") from _exc' in text
+    assert 'raise TransportFault("a2a: transport failure") from _exc' in text
+    assert "class TransportFault(RuntimeError):" in text
+    assert "_revl_transport_fault = True" in text
+    assert 'revl_row = "agent"' in text
+    assert 'revl_crossing = "ask"' in text
     assert "return Err(" not in text
 
 

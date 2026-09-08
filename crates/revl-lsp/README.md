@@ -108,23 +108,41 @@ binary with `include_str!`) in a fixed order (`runtime.rs`, `engine.rs`):
    native binary PLUS a reference `revl` alongside", so a bare `cargo` build and
    every machine that already has `revl` keep working unchanged.
 
-A runtime is resolved from `REVL_LSP_RUNTIME` (an already-extracted directory),
-`REVL_LSP_RUNTIME_ARCHIVE` (a pinned `tar`, extracted atomically on first use),
-or a `runtime/<pin>/` tree / `runtime.tar` sitting beside the executable (the
-packaged install layout). `REVL_LSP_CACHE` and `REVL_LSP_RUNTIME_PIN` override
-where and under what key the cache lands.
+A runtime is resolved from one of five sources, in order: `REVL_LSP_RUNTIME` (an
+already-extracted directory), `REVL_LSP_RUNTIME_ARCHIVE` (a pinned `tar`,
+extracted atomically on first use), a `runtime/<pin>/` tree or a `runtime.tar`
+sitting beside the executable (the packaged install layout), and finally a
+runtime archive **baked into the executable itself**. `REVL_LSP_CACHE` and
+`REVL_LSP_RUNTIME_PIN` override where and under what key the cache lands.
+
+The first four name the runtime as a SEPARATE file, so the distributable is the
+binary plus that file. The baked-in source is the genuinely single distributed
+FILE: a build that sets `REVL_LSP_EMBED_RUNTIME` to a pinned runtime archive
+(and, optionally, `REVL_LSP_EMBED_RUNTIME_PIN` to its pin) compiles the archive
+into the binary with `include_bytes!` (`build.rs`), and `runtime.rs` extracts it
+through the very same atomic, versioned, isolated-mode cache path — the child
+process just reads its bytes from the binary instead of a sibling file. It is
+the baked-in DEFAULT, overridden by any of the four sources above, so a
+distributor can still drop a newer runtime beside the binary. When
+`REVL_LSP_EMBED_RUNTIME` is unset (a bare `cargo build`, and every CI job today)
+nothing is embedded and the resolution falls through unchanged.
 
 **What this slice landed, and what it defers.** The runtime-management contract
 is here — the pin, the atomic versioned cache, the isolated-mode launch, and
 the fail-closed rule — and `revl/gateVersion` now reports an `embedding` of
 `private-runtime` or `system-python` so a client can tell a self-contained
-artifact from one leaning on an installed `revl`. What is NOT in this crate is
-shipping the pinned `python-build-standalone` archive itself, nor the in-process
-pyo3 link (`libpython`, `PyConfig.isolated`); those are the distribution/build
-step (338, and the design's slice-0 embed), which layer on this contract
-without changing it — a child process or a linked interpreter reads the same
-pin, cache and isolation. What was explicitly NOT done to avoid the dependency:
-substituting a native checker for the reference, the exact move A1 forbids.
+artifact from one leaning on an installed `revl`. The build knob that bakes a
+runtime archive INTO the binary is here too (`build.rs` + `include_bytes!`), so a
+distribution build has a genuinely single distributed FILE rather than a binary
+plus a sibling archive; the archive rides the same atomic, versioned, isolated
+cache path a beside-exe archive takes. What is still NOT in this crate is
+shipping the pinned `python-build-standalone` archive bytes a build points that
+knob at, nor the in-process pyo3 link (`libpython`, `PyConfig.isolated`); those
+are the distribution/build step (338) and the design's slice-0 in-process embed,
+which layer on this contract without changing it — a child process or a linked
+interpreter reads the same pin, cache and isolation. What was explicitly NOT
+done to avoid the dependency: substituting a native checker for the reference,
+the exact move A1 forbids.
 
 ## `revl/gateVersion`
 
