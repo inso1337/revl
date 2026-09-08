@@ -20,9 +20,9 @@ tiers emit; python/go/rust/java/wasm are compile-checked here (typescript when
 its toolchain is present); the cordis-py runtime section executes the methods
 and asserts their answers.
 
-wasm carries `if`/`while`/`break`/`continue`; a method-body `for (x of xs)` on
-wasm is the tracked remainder (its List-cursor apparatus is fn-only), refused
-with a `while`+index redirect.
+wasm now carries `if`/`while`/`for`/`break`/`continue`: item 458 closed the
+tracked `for (x of xs)` remainder by re-spelling the fn `_emit_for` List-cursor
+memory walk against the method path, so every tier lowers the same IR step shape.
 """
 
 import importlib.util
@@ -185,27 +185,35 @@ def test_method_control_flow_lowers_to_the_fn_grammar_step_shape():
 
 
 # ---------------------------------------------------------------------------
-# every tier emits (wasm `for` is the tracked remainder)
+# every tier emits — `for`/`break` included (item 458 closed the wasm remainder)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("name", ["if", "while", "while_break", "guard_then_emit"])
+@pytest.mark.parametrize("name", sorted(ALL_DRAFTS))
 def test_all_tiers_emit(backend, name):
-    # every tier — wasm included — carries `if`/`while`/`break`/`continue`.
+    # every tier — wasm included — carries `if`/`while`/`for`/`break`/`continue`.
     out = _emit(ALL_DRAFTS[name], backend)
     assert out  # a non-empty artifact (str for most tiers, dict for wasm)
 
 
-@pytest.mark.parametrize("backend", ["python", "typescript", "go", "java", "rust"])
-def test_for_emits_on_hosted_and_native_tiers(backend):
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_for_emits_on_every_tier(backend):
     assert _emit(FOR_DRAFT, backend)
 
 
-def test_wasm_refuses_method_for_with_a_redirect():
+def test_wasm_lowers_method_for_to_a_cursor_walk():
+    # item 458: the tracked wasm `for` remainder is gone. The method-body loop
+    # lowers to the same in-memory List cursor the fn `for` walks: a `$for_ptr`
+    # address, a `$for_cnt` count, a `$for_idx` slot index, and the `_SLOT`-
+    # strided element load — mirroring backends/wasm/emit.py `_emit_for`.
     from _backend_import import backend_emitter as be  # noqa: PLC0415
-    with pytest.raises(Exception) as ei:
-        be("wasm").emit(compile_source(FOR_DRAFT))
-    assert "for" in str(ei.value) and "while" in str(ei.value)
+    out = be("wasm").emit(compile_source(FOR_DRAFT))
+    wat = out["T"] if isinstance(out, dict) else out
+    assert "$for_ptr_1" in wat and "$for_cnt_1" in wat and "$for_idx_1" in wat
+    # break/continue in a method `for` re-tests at the inner `$cnt` block
+    brk = be("wasm").emit(compile_source(BREAK_DRAFT))
+    wat_brk = brk["F"] if isinstance(brk, dict) else brk
+    assert "$revl_mcnt_1" in wat_brk and "$revl_mbrk_1" in wat_brk
 
 
 def test_python_emit_is_valid_python():
@@ -349,18 +357,55 @@ component C provides cache: Cache {
     assert status == "ok", f"{tier} rejected the emit: {detail}"
 
 
-def test_wasm_if_while_component_validates():
+def test_wasm_control_flow_component_validates():
     import validate  # noqa: PLC0415
 
     validator = validate.VALIDATORS["wasm"]
     reason = validator.unavailable()
     if reason:
         pytest.skip(f"wasm toolchain unavailable: {reason}")
-    for draft in (WHILE_DRAFT, IF_DRAFT, WHILE_BREAK_DRAFT):
+    # `for`/`break` join `if`/`while` now that item 458 lowers method-body `for`.
+    for draft in (WHILE_DRAFT, IF_DRAFT, WHILE_BREAK_DRAFT, FOR_DRAFT, BREAK_DRAFT):
         out = backend_emitter("wasm").emit(compile_source(draft))
         assert isinstance(out, dict)
         status, detail = validator.check([("cf", out)])["cf"]
         assert status == "ok", f"wasm rejected the emit: {detail}"
+
+
+def test_wasm_method_for_runs_on_wasmtime(tmp_path):
+    # the strongest proof: a method-body `for` with a `continue` executes on the
+    # real substrate and returns the right scalar. It iterates an internal list
+    # literal so the export takes only scalar args (wasmtime `--invoke`).
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    if shutil.which("wasmtime") is None:
+        pytest.skip("wasmtime not installed")
+    src = """
+service S { fn f(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn f(n) {
+      var total = 0
+      for (x of [10, 20, 30, 40]) {
+        if (x == 30) { continue }
+        total = total + x
+      }
+      return total + n
+    }
+  }
+}
+"""
+    out = backend_emitter("wasm").emit(compile_source(src))
+    wat = out["C"] if isinstance(out, dict) else out
+    path = tmp_path / "c.wat"
+    path.write_text(wat)
+    proc = subprocess.run(
+        ["wasmtime", "--invoke", "provide:s.f", str(path), "5"],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    # 10 + 20 + 40 (30 skipped by `continue`) + 5
+    assert proc.stdout.strip().splitlines()[-1].strip() == "75"
 
 
 # ---------------------------------------------------------------------------
