@@ -6,7 +6,7 @@ a stub that runs the runner INSIDE the conductor. The design (§1.3 steps 3–5 
 step 7) has the conductor STAGE the bundle on the far host and spawn
 `revl deploy-admit` THERE — a separate process reached over a real byte channel,
 holding its OWN local trust store. This slice builds that process and a
-:class:`deploy.StdioRunnerTransport` that speaks to it over stdin/stdout, so the
+:class:`deploy.ProcessRunnerTransport` that speaks to it over stdin/stdout, so the
 whole PREPARE→COMMIT handshake runs across a real process boundary on one
 machine. The cross-machine leg (scp/rsync staging, a pinned SSH host key) is the
 same command behind `ssh <host>` and is a following slice.
@@ -107,7 +107,7 @@ def _child_env():
 
 
 def _transport(keyfile=None, hostkeyfile=None, **flags):
-    return deploy.StdioRunnerTransport.local(
+    return deploy.ProcessRunnerTransport.local(
         key_paths=[keyfile] if keyfile is not None else [],
         host_key_path=hostkeyfile,
         runtime_versions=RUNTIME,
@@ -237,7 +237,7 @@ def test_a_dead_runner_fails_closed(bundle):
     """A transport whose child exits immediately (it imports nothing and returns)
     returns no verdict line; `request_admission` must refuse at the transport
     link, never mistake the silence for an answer."""
-    transport = deploy.StdioRunnerTransport(
+    transport = deploy.ProcessRunnerTransport(
         [sys.executable, "-c", "raise SystemExit(0)"])
     try:
         receipt = deploy.request_admission(transport, _request(bundle))

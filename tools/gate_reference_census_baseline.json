@@ -84,6 +84,8 @@
    "examples/lifecycle_leak.rvl",
    "examples/lifecycle_timer.rvl",
    "examples/lifecycle_wasm.rvl",
+   "examples/model_store.rvl",
+   "examples/model_store_sqlite.rvl",
    "examples/prop_test.rvl",
    "examples/regressions/fuzz_go_letbind_valuetype.rvl",
    "examples/ts_host_body.rvl",
@@ -91,7 +93,9 @@
    "examples/uxprobe2_jobs.rvl",
    "examples/uxprobe_cache.rvl",
    "selfhost/lexer.rvl",
+   "stdlib/a2a.rvl",
    "stdlib/crypto.rvl",
+   "stdlib/http.rvl",
    "stdlib/json.rvl",
    "stdlib/list.rvl",
    "stdlib/render.rvl",
@@ -402,6 +406,30 @@
    }
   },
   "examples/lifecycle_wasm.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/model_store.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected token at top level"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "examples/model_store_sqlite.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
@@ -1097,7 +1125,31 @@
     "tag": ""
    }
   },
+  "stdlib/a2a.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
   "stdlib/crypto.rvl": {
+   "bucket": "false-reject/BAD",
+   "gate": {
+    "code": "BAD",
+    "kind": "refused",
+    "message": "unexpected declaration"
+   },
+   "reference": {
+    "message": "",
+    "tag": ""
+   }
+  },
+  "stdlib/http.rvl": {
    "bucket": "false-reject/BAD",
    "gate": {
     "code": "BAD",
