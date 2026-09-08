@@ -57,12 +57,13 @@ def test_stamp_is_the_expected_bumped_counter():
     # The stamp is a monotonic counter bumped once per public stdlib change
     # (add/remove/signature). Pinning the literal here makes every future bump
     # DELIBERATE: a public addition that forgets to bump reds this test instead
-    # of shipping a stale stamp. It is "4" as of `stdlib/a2a.rvl` (item 439,
-    # issue #118); it was "3" for the two additions that landed without a bump
-    # (fs.rvl is_dir/lexists/resolve_within, shell.rvl plan_op_name). Raise it
-    # here in lock-step with the next public change.
-    assert EXPECTED_STDLIB_VERSION == "4"
-    assert read_stamp(STDLIB) == "4"
+    # of shipping a stale stamp. It is "5" as of `stdlib/escape.rvl` (item 459,
+    # issue #722); "4" was `stdlib/a2a.rvl` (item 439, issue #118); it was "3"
+    # for the two additions that landed without a bump (fs.rvl
+    # is_dir/lexists/resolve_within, shell.rvl plan_op_name). Raise it here in
+    # lock-step with the next public change.
+    assert EXPECTED_STDLIB_VERSION == "5"
+    assert read_stamp(STDLIB) == "5"
 
 
 def test_repo_stamp_matches_expected():
