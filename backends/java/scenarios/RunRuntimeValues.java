@@ -34,7 +34,7 @@ public final class RunRuntimeValues {
         Context root = Contexts.create();
         root.provide(ServiceKey.of(revl.Components.Probe.class, "probe"), new Rec());
         Disposable comp = root.plugin(new revl.Components.CPlugin());
-        revl.Components.N n = root.get(revl.Components.N.class);
+        revl.Components.N n = root.get(ServiceKey.of(revl.Components.N.class, "n"));
         n.ping("a");
         n.ping("b");
         // Both emissions have run; no compensation has (teardown hasn't happened).
