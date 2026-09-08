@@ -1,0 +1,137 @@
+// The revl stdlib authorization module — roadmap item 457 Slice 2
+// (docs/design/457-endpoint-one-definition.md, "Authorization: explicit, and
+// not derivable"; Cordis alignment docs/design/529-sso-auth-alignment.md).
+//
+// ---------------------------------------------------------------- the problem
+// An endpoint (a service operation with a `route` clause, Slice 1) makes an
+// operation reachable over HTTP. The requirement the design is really after is
+// that GENERATED metadata must never grant access, and that REMOVING the
+// explicit authorization step denies the request — provably, not by convention.
+// Neither the derived router, the OpenAPI document nor the TypeScript client
+// carries anything that could stand in for an authorization decision (Slice 1
+// pins that: the clause has no auth vocabulary and the export derives no
+// `security`). What was missing was the value that IS the right to reach user
+// data, and a way to make skipping the check impossible rather than merely
+// unwise.
+//
+// ---------------------------------------------------------------- the fix
+// Three declarations, and one checker invariant that ties them together.
+//
+//   * `Bearer` — the credential AS PRESENTED. A record carrying an optional
+//     token, bound from the `Authorization` header by the Slice-1 route bind
+//     table (the `x-revl-auth: bearer` marker). It is an untrusted CLAIM: it
+//     decides nothing on its own.
+//   * `Auth.validate` — the ONE producer of a `Principal`. It turns a `Bearer`
+//     into `Result[Principal, ApiError]`: `Ok(who)` when the credential checks
+//     out, `Err(unauthorized(...))` (a `401`) when it is missing or invalid.
+//   * `Principal` — the opaque authorization principal. It has NO revl
+//     declaration and NO constructor: no record literal, no variant case, no
+//     `type Principal = ...` (the checker RESERVES the name and refuses such a
+//     declaration). The only expression in the language whose type is
+//     `Principal` is a call to `Auth.validate`.
+//
+// A user-scoped store or handler operation takes a `Principal`:
+//
+//     service NoteStore {
+//       fn get(who: Principal, id: Str) -> Result[Note, ApiError]
+//     }
+//
+// so the only path to a note runs through a value only `Auth.validate` mints.
+// A handler that DROPS the validate step has no `Principal` in scope and cannot
+// call `store.get`; the compiler refuses it AT ADMISSION, naming `Principal` and
+// its sole producer (`typecheck.PRINCIPAL_PRODUCER_HINT`). That is the
+// stronger-than-runtime guarantee: the mutant does not fail closed at runtime,
+// it fails to type-check. The runtime twin still holds where the step is
+// present — a missing/invalid credential is the `Err` from `validate`, rendered
+// `401` by the Slice-1 return rules.
+//
+// The correct shape:
+//
+//     component NotesHttp requires auth: Auth, store: NoteStore
+//                         provides notes_api: NotesApi {
+//       provide notes_api {
+//         fn get_note(bearer, id) {
+//           return match auth.validate(bearer) {   // the explicit step
+//             Err(e) => Err(e),                       // 401, from the auth service
+//             Ok(who) => store.get(who, id),          // `who` is the only key
+//           }
+//         }
+//       }
+//     }
+//
+// ---------------------------------------------------------------- Cordis anchor
+// On the ts tier the provider binds `Auth.validate` to Cordis SSO's
+// `ctx.sso.validateSession` through a `host @auth` row over a shipped shim
+// (docs/design/529-sso-auth-alignment.md). That host binding — the `host` row,
+// `stdlib/server.rvl`, and the `@cordisjs/plugin-sso` shim — is Slice 3. This
+// module is the Slice-2 SURFACE plus the py test binding: `host_validate` is a
+// deterministic stub (a non-empty token is a session, anything else is a `401`)
+// so the authorization property is exercised on the reference tier without a
+// live SSO. The `Principal`/`Auth.validate` shape and the admission refusal are
+// tier-independent and land here.
+//
+// Compose this file as a ROOT module of the composition (components are never
+// `use`-imported): `compile_files(["your_app.rvl", "stdlib/auth.rvl"])`, and
+// name the row `host @auth provides auth: Auth` once Slice 3 lands the shim.
+//
+// Import the surface with a named `use`:
+//
+//     use "stdlib/auth.rvl" { Auth, Bearer }
+//
+// `Principal` is NOT imported: it has no declaration to import — it is only ever
+// the result of `Auth.validate` and a parameter type on the services that
+// consume it.
+
+use "stdlib/http.rvl" { ApiError }
+
+// ---------------------------------------------------------------- credential
+
+// The bearer credential as presented on the wire — an UNTRUSTED claim. `token`
+// is `Opt[Str]` because a request may carry no `Authorization` header at all;
+// `None` is the honest "no credential", never a sentinel `""`. The Slice-1 route
+// bind table binds a `Bearer` parameter from the single `Authorization` header
+// (`docs/design/457-endpoint-one-definition.md`, "Binding rules"). A `Bearer`
+// decides nothing: it is the INPUT to `Auth.validate`, and holding one grants no
+// access until it is validated into a `Principal`.
+pub type Bearer = { token: Opt[Str] }
+
+// ---------------------------------------------------------------- the service
+
+// The authorization service: the sole producer of a `Principal`. `validate`
+// turns an untrusted `Bearer` into `Result[Principal, ApiError]` — `Ok(who)`
+// when the credential checks out, `Err(unauthorized(...))` (a `401`) otherwise.
+// It is a plain `fn` (non-emission): validating a credential reaches host auth
+// state to READ it, it does not alter the running world, so a consumer sees from
+// the declaration that calling it cannot emit. `Principal` is opaque and
+// undeclared — no revl body can construct one, so this operation is the only
+// door to it (checker-enforced: `typecheck.PRINCIPAL`).
+service Auth {
+  fn validate(b: Bearer) -> Result[Principal, ApiError]
+}
+
+// The single host body behind the crossing. On py it is the test stub below; on
+// ts it becomes the `host @auth` row over Cordis SSO's `ctx.sso.validateSession`
+// (Slice 3). It is `pure` for the same reason `stdlib/fs.rvl`'s read ops are: it
+// READS external state (the session store) and performs no accounted mutation,
+// so it carries no emission on the G8 audit surface. Its RESULT type is the
+// opaque `Principal`, which no caller can otherwise obtain.
+extern pure fn host_validate(b: Bearer) -> Result[Principal, ApiError] = @py {
+    # Deterministic py test stub (design §"Authorization": "a stub on py for
+    # tests"). A record arrives as a dict and `Opt[Str]` as the bare value or
+    # None; a present, non-blank token is a session, anything else is a 401.
+    tok = b.get("token") if isinstance(b, dict) else None
+    if isinstance(tok, str) and tok.strip():
+        return Ok({"subject": tok})
+    return Err({"status": 401, "code": "unauthorized",
+                "message": "missing or invalid credential"})
+}
+
+// ---------------------------------------------------------------- provider
+
+// The py-tier provider. Compose it as a root module alongside the app; on the ts
+// tier a `host @auth` row supersedes it with the Cordis SSO binding (Slice 3).
+component AuthProvider provides auth: Auth {
+  provide auth {
+    fn validate(b) = host_validate(b)
+  }
+}

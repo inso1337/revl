@@ -99,6 +99,7 @@ import re
 # The audited authority helpers (items 416f and 421 F4). A peer address is the
 # same class of value an importer's server URL is, so these are reused rather
 # than re-derived.
+from . import a2a_task
 from .crossing_redirect import CROSSING_TIMEOUT, py_policy
 from .errors import RevlError
 from .import_openapi import _authority_host, _comment_safe
@@ -348,8 +349,8 @@ def _transport_fault_class(label: str, op: str, indent: int = 4) -> str:
         f"{pad}    # item 439 T0: a crossing fault under `on_failure(withdraw)`\n"
         f"{pad}    # WITHDRAWS the provider (the runtime keys on the marker).\n"
         f"{pad}    _revl_transport_fault = True\n"
-        f"{pad}    revl_row = {rq}\n"
-        f"{pad}    revl_crossing = {oq}\n")
+        f"{pad}    _revl_row = {rq}\n"
+        f"{pad}    _revl_crossing = {oq}\n")
 
 
 def _py_body(host: str, key: str, op: str, in_band: bool,
@@ -474,6 +475,97 @@ def _check_a2a_method(service, op, method, in_band: bool, *, doc: str,
                 hint=hint)
         out_modality = _A2A_MODALITY[ret]
     return in_modality, out_modality
+
+
+def _task_hint() -> str:
+    return (
+        "a `long_running` A2A row projects the four-op Task lifecycle "
+        "(docs/design/439-a2a-task-lifecycle.md T1), so its service declares one "
+        "or more complete quadruples sharing a base name:\n"
+        "  emission fn <base>_start(message: Str) -> TaskRef\n"
+        "  emission fn <base>_poll(task: TaskRef) -> TaskEvent\n"
+        "  emission fn <base>_reply(task: TaskRef, message: Str) -> TaskEvent\n"
+        "  emission fn <base>_cancel(task: TaskRef) -> Unit\n"
+        "with `TaskRef`/`TaskState`/`TaskEvent` from `stdlib/a2a.rvl`. Under the "
+        "default `on_failure(withdraw)` the returns are the bare vocabulary "
+        "types, exactly as the terminal wire returns a bare `Str`.")
+
+
+def _check_task_method(method, base: str, suffix: str, *, doc: str, line: int,
+                       label: str, service_name: str) -> None:
+    """One method of a `long_running` service must match the four-op shape its
+    suffix names (item 439 T1). The signature IS the contract the four bodies
+    marshal, so a mismatch is refused naming the method rather than projected
+    onto a wire it does not fit."""
+    op = a2a_task.op_name(base, suffix)
+    want_params = a2a_task.PARAMS[suffix]
+    want_ret = a2a_task.RETURN_TYPE[suffix]
+    got_params = [t for _n, t in method.params]
+    if got_params != [t for _n, t in want_params]:
+        want = ", ".join(f"{n}: {t}" for n, t in want_params)
+        raise RevlError(
+            doc, line,
+            f"remote row `@{label}` (`long_running`): method `{op}` of service "
+            f"`{service_name}` must take ({want}), not "
+            f"({', '.join(got_params) or 'no parameters'})",
+            hint=_task_hint())
+    if (method.returns or "") != want_ret:
+        raise RevlError(
+            doc, line,
+            f"remote row `@{label}` (`long_running`): method `{op}` of service "
+            f"`{service_name}` must return `{want_ret}`, not "
+            f"{'nothing' if not method.returns else f'`{method.returns}`'}",
+            hint=_task_hint())
+
+
+def _classify_task_ops(service, *, doc: str, line: int, label: str) -> list:
+    """Group a `long_running` service's methods into complete four-op quadruples
+    (item 439 T1). Returns `[(base, {suffix: op_name}), ...]` in declaration
+    order of each base's `_start`. Every method must belong to a quadruple that
+    has all four suffixes with the right signatures; anything else is refused."""
+    groups: dict[str, dict[str, str]] = {}
+    order: list[str] = []
+    for op, method in service.methods.items():
+        matched = None
+        for suffix in a2a_task.SUFFIXES:
+            tail = f"_{suffix}"
+            if op.endswith(tail) and len(op) > len(tail):
+                matched = (op[: -len(tail)], suffix)
+                break
+        if matched is None:
+            raise RevlError(
+                doc, line,
+                f"remote row `@{label}` (`long_running`): method `{op}` of "
+                f"service `{service.name}` is not one of the four Task-lifecycle "
+                f"operations",
+                hint=_task_hint())
+        base, suffix = matched
+        _check_task_method(method, base, suffix, doc=doc, line=line,
+                           label=label, service_name=service.name)
+        if base not in groups:
+            groups[base] = {}
+            if suffix == "start":
+                order.append(base)
+        if suffix in groups[base]:
+            raise RevlError(
+                doc, line,
+                f"remote row `@{label}` (`long_running`): duplicate "
+                f"`{suffix}` operation for base `{base}` of service "
+                f"`{service.name}`",
+                hint=_task_hint())
+        groups[base][suffix] = op
+    for base in groups:
+        missing = [s for s in a2a_task.SUFFIXES if s not in groups[base]]
+        if missing:
+            raise RevlError(
+                doc, line,
+                f"remote row `@{label}` (`long_running`): the Task-lifecycle "
+                f"base `{base}` of service `{service.name}` is missing "
+                f"{', '.join('`' + a2a_task.op_name(base, s) + '`' for s in missing)}",
+                hint=_task_hint())
+        if base not in order:
+            order.append(base)
+    return [(base, groups[base]) for base in order]
 
 
 def _py_body_a2a(host: str, op: str, in_band: bool,
@@ -640,6 +732,90 @@ def _py_body_a2a(host: str, op: str, in_band: bool,
 {fault(8, '"a2a: unexpected result kind %r" % (_kind,)')}{extract}{empty_guard}{ok}    """
 
 
+def _check_long_running(is_a2a: bool, is_rest: bool, in_band: bool, *,
+                        doc: str, line: int, label: str,
+                        transport: str | None) -> None:
+    """`long_running` is an A2A JSON-RPC Task-lifecycle shape (item 439 T1), so
+    it is admitted only on `through a2a`. It is refused on the canonical wire
+    (there is no `tasks/get` there), on `through a2a_rest` (the REST task paths
+    are a distinct binding this slice does not build) and with
+    `on_failure(result)` (the feed IS the failure settlement)."""
+    if not is_a2a:
+        where = ("the default (canonical) wire" if transport is None
+                 else f"`through {transport}`")
+        raise RevlError(
+            doc, line,
+            f"remote row `@{label}` writes `long_running`, but its transport is "
+            f"{where}",
+            hint="the A2A Task lifecycle (`_start`/`_poll`/`_reply`/`_cancel`) is "
+                 "an A2A protocol shape spoken over `tasks/get` / `tasks/cancel` "
+                 "/ `message/send`; write `through a2a` on the row (item 439 T1)")
+    if is_rest:
+        raise RevlError(
+            doc, line,
+            f"remote row `@{label}` combines `long_running` with "
+            f"`through a2a_rest`",
+            hint="T1 binds the Task lifecycle over A2A 1.0.0 JSON-RPC 2.0 only. "
+                 "The HTTP+JSON/REST task paths (`GET /v1/tasks/{id}`, "
+                 "`POST /v1/tasks/{id}:cancel`) are a distinct binding not built "
+                 "in this slice; write `through a2a` (item 439 T1)")
+    if in_band:
+        raise RevlError(
+            doc, line,
+            f"remote row `@{label}` combines `long_running` with "
+            f"`on_failure(result)`",
+            hint="the four-op Task lifecycle IS the failure settlement: a fault "
+                 "on any crossing withdraws (T0), and a `Faulted`/terminal "
+                 "`TaskEvent` closes the feed. `on_failure(result)` would fold "
+                 "that back into one bare `Err` with no `TaskEvent` to carry it. "
+                 "Drop the clause to get the default `on_failure(withdraw)` "
+                 "(item 439 T1)")
+
+
+def _task_ops(service, host: str, capability: str, redirect: str, *,
+              doc: str, line: int, label: str) -> tuple[list[str], list[str]]:
+    """The four-op projection's externs and provide methods (item 439 T1).
+
+    Each op is ONE emission crossing exactly as the terminal wire is; the only
+    new thing is that `_start` carries a `tasks/cancel` compensation keyed by the
+    `TaskRef` it returns (item 247), and the returns are the `stdlib/a2a.rvl`
+    vocabulary rather than `Str`/`Bytes`. Every return is `Untrusted[T]` (slice
+    C3): a `Done` payload a consumer reads is tainted `net` exactly as a terminal
+    reply is, so it cannot reach a `Trusted[T]` sink without an `endorse`.
+    """
+    quads = _classify_task_ops(service, doc=doc, line=line, label=label)
+    externs: list[str] = []
+    provides: list[str] = []
+    follow = redirect == "same_origin"
+    for base, ops in quads:
+        for suffix in a2a_task.SUFFIXES:
+            op = ops[suffix]
+            method = service.methods[op]
+            names = [n for n, _ in method.params]
+            sig = ", ".join(f"{n}: {t}" for n, t in method.params)
+            arrow = f" -> Untrusted[{method.returns}]"
+            extern = f"remote_{label}_{op}"
+            body_src = a2a_task.task_body(suffix, f"https://{host}", base,
+                                          follow_redirects=follow, label=label)
+            # The `tasks/cancel` COMPENSATION of `_start` (item 247) is the
+            # consumer's to register, keyed by the `TaskRef` `_start` returns —
+            # `_cancel` below is exactly that compensation as a first-class op
+            # (design §T1: "the compensation of the start emission, AND an
+            # explicit op the consumer may call"). It is NOT a synthesized
+            # extern-level `compensate`, because an emission extern's compensate
+            # slot binds no `result` (lower.py:_check_extern_undo) — the value to
+            # cancel is only known after the crossing returns. Auto-registering
+            # it from the service declaration is the one T1 piece that waits on a
+            # declaration-site compensation binding (see the header).
+            externs.append(
+                f"extern emission[{capability}] fn {extern}({sig}){arrow}\n"
+                f"  = @py {{\n    _args = [{', '.join(names)}]\n"
+                f"{body_src}}}")
+            provides.append(f"    fn {op}({', '.join(names)}) = "
+                            f"{extern}({', '.join(names)})")
+    return externs, provides
+
+
 def _remote_source(service, params: dict) -> tuple[str, str]:
     label = params["label"]
     key = params["key"]
@@ -662,11 +838,18 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
     check_transport(transport, doc=doc, line=line, label=label)
     is_a2a = transport in _A2A_TRANSPORTS
     is_rest = transport == _A2A_REST
+    long_running = params.get("long_running", False)
+    lr_line = params.get("long_running_line", line)
 
     component = f"Remote{_pascal(label)}Provider"
     externs: list[str] = []
     provides: list[str] = []
-    for op, method in service.methods.items():
+    if long_running:
+        _check_long_running(is_a2a, is_rest, in_band, doc=doc, line=lr_line,
+                            label=label, transport=transport)
+        externs, provides = _task_ops(service, host, capability, redirect,
+                                      doc=doc, line=line, label=label)
+    for op, method in ([] if long_running else service.methods.items()):
         if method.async_ and not method.emission:
             raise RevlError(
                 doc, line,
@@ -756,18 +939,66 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
 
     isolate = f"  isolate {key} in realm(\"{realm}\")\n" if realm else ""
     header = _remote_header(service, label, key, host, capability, on_failure,
-                            transport, realm, redirect)
+                            transport, realm, redirect,
+                            long_running=long_running)
     body = (f"component {component} provides {key}: {service.name} {{\n"
             f"{isolate}  provide {key} {{\n" + "\n".join(provides) + "\n  }\n}")
     return component, "\n\n".join([header, *externs, body]) + "\n"
 
 
-def _a2a_header_lines(rest: bool = False) -> list[str]:
+def _a2a_task_scope_lines() -> list[str]:
+    """The SCOPE block for a `long_running` row: the four-op Task lifecycle
+    (item 439 T1), which polls and resumes rather than crossing once."""
+    return [
+        "//   the one argument of `_start`/`_reply` becomes the message's single",
+        "//   text `Part`; the method name rides as the `revl.skill` reference.",
+        "//   Version is claimed EXACTLY, never as bare \"A2A\" (decision (3)).",
+        "//   SCOPE: the FOUR-OP A2A Task LIFECYCLE (item 439 T1), the explicit-",
+        "//   handle surface for a long-running Task:",
+        "//     * `_start`  -> `message/send`, returns a `TaskRef` handle;",
+        "//     * `_poll`   -> `tasks/get`, one `TaskEvent` per call (the consumer",
+        "//       drives the loop; `is_terminal` decides when to stop);",
+        "//     * `_reply`  -> `message/send` + `taskId`, answers an",
+        "//       `input-required` / `auth-required` prompt;",
+        "//     * `_cancel` -> `tasks/cancel`, the best-effort COMPENSATION of",
+        "//       `_start` (item 247) AND an explicit op the consumer may call.",
+        "//   `_cancel` is the compensation the consumer registers on `_start`,",
+        "//   keyed by the returned `TaskRef`; a peer's claim to have cancelled is",
+        "//   audit-grade, not a witness, so it is `compensate`, never an inverse.",
+        "//   Each is ONE crossing, so redirect refusal, the deadline and the",
+        "//   `Untrusted[T]` return hold unchanged. A deadline or transport error",
+        "//   is a `TransportFault` the runtime maps to WITHDRAWAL (T0) — item",
+        "//   130's \"provider death is a terminal, never silence\", at the adapter.",
+        "//   The stream sugar (item 130, T2), gRPC and the REST task paths are",
+        "//   NOT this wire (item 439 T1).",
+    ]
+
+
+def _a2a_header_lines(rest: bool = False, long_running: bool = False) -> list[str]:
     """The `through a2a` / `through a2a_rest` header block (item 439). It states
     the protocol exactly (A2A 1.0.0, never bare "A2A", decision (3)), which of
     the two JSON-body sub-transports the row crosses, the terminal `Part` subset
     this slice binds, and — the load-bearing one — that the peer is a CLAIM, not
     a checked composition (decision (2); item 329's untrusted-author case)."""
+    if long_running:
+        wire_lines = [
+            f"// Transport: A2A {A2A_VERSION} over JSON-RPC 2.0, the four-op Task",
+            "//   lifecycle. The peer authority above is the agent's HTTPS "
+            "endpoint root.",
+        ]
+        return wire_lines + _a2a_task_scope_lines() + [
+            "//",
+            "// THE A2A PEER IS A CLAIM, NOT A CHECKED COMPOSITION. An external "
+            "agent",
+            "//   is not a revl composition, so nothing about it is verified: this "
+            "row",
+            "//   admits, verifies and re-admits NOTHING about the callee (a "
+            "client is",
+            "//   the SENDER, D-424c.8; item 337 requires the RECEIVER to "
+            "re-compile",
+            "//   from its own source). Every A2A provider is item 329's",
+            "//   untrusted-author case BY CONSTRUCTION (item 439 decision (2)).",
+        ]
     if rest:
         wire_lines = [
             f"// Transport: A2A {A2A_VERSION} over HTTP+JSON/REST "
@@ -811,7 +1042,8 @@ def _a2a_header_lines(rest: bool = False) -> list[str]:
 
 
 def _remote_header(service, label, key, host, capability, on_failure,
-                   transport, realm, redirect="refuse") -> str:
+                   transport, realm, redirect="refuse", *,
+                   long_running: bool = False) -> str:
     safe_host = _comment_safe(host)
     lines = [
         f"// SYNTHESIZED for remote row `@{label}` — this file is not on disk.",
@@ -825,7 +1057,8 @@ def _remote_header(service, label, key, host, capability, on_failure,
         "//   spelling (item 424 D-424c.10, roadmap 421 F4).",
     ]
     if transport in _A2A_TRANSPORTS:
-        lines += _a2a_header_lines(rest=transport == _A2A_REST)
+        lines += _a2a_header_lines(rest=transport == _A2A_REST,
+                                   long_running=long_running)
     elif transport:
         lines.append(f"// Transport requested: `{_comment_safe(transport)}`.")
     lines += [

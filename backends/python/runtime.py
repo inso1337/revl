@@ -124,8 +124,8 @@ class TransientError(RuntimeError):
 #: T0). An exception whose ``_revl_transport_fault`` attribute is truthy — this
 #: class, or the small class a synthesized `@py` remote body defines inline
 #: (which cannot import this module) — is a synthesized remote crossing that
-#: FAILED under `on_failure(withdraw)`. It carries ``revl_row`` (the composition
-#: row label the crossing was declared on) and ``revl_crossing`` (the method
+#: FAILED under `on_failure(withdraw)`. It carries ``_revl_row`` (the composition
+#: row label the crossing was declared on) and ``_revl_crossing`` (the method
 #: that failed) so the runtime knows which provider to withdraw. Keying on the
 #: attribute rather than on class identity is what lets the exec'd emitted
 #: module and this module share one contract without sharing an import.
@@ -147,7 +147,7 @@ class TransportFault(RuntimeError):
 
     This is the DECLARED type for that fault, subclassing ``RuntimeError`` so a
     body or test that catches ``RuntimeError`` still sees it. It carries the
-    ``_revl_transport_fault`` marker plus ``revl_row``/``revl_crossing`` so the
+    ``_revl_transport_fault`` marker plus ``_revl_row``/``_revl_crossing`` so the
     runtime can attribute the withdrawal to the row and crossing that failed.
     The emitted `@py` body cannot import this module, so it defines its own
     marker-bearing class inline; the runtime recognises both by the marker
@@ -157,8 +157,8 @@ class TransportFault(RuntimeError):
 
     def __init__(self, message: str, *, row: str = "", crossing: str = "") -> None:
         super().__init__(message)
-        self.revl_row = row
-        self.revl_crossing = crossing
+        self._revl_row = row
+        self._revl_crossing = crossing
 
 
 async def retry_idempotent(call, *, idempotent: bool = False,

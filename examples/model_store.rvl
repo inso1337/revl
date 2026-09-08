@@ -3,8 +3,8 @@
 // (issue #752), design docs/design/527-database-persistence-alignment.md.
 //
 // This is the memory-driver slice. The store's surface is the Minato CRUD verbs
-// (`get`, `create`) over a declared row type — not the raw `query(sql: Str)` the
-// v0 examples/user_cache.rvl uses (that raw-SQL sketch predates Minato; #752
+// over a declared row type — not the raw `query(sql: Str)` the v0
+// examples/user_cache.rvl uses (that raw-SQL sketch predates Minato; #752
 // replaces it). Every persistence MUTATION is lowered as a revertible `effect`
 // whose derived inverse is the natural CRUD counterpart: `create` (an insert)
 // carries `undo remove`, so a row written during activation is removed in LIFO
@@ -14,54 +14,121 @@
 // The driver is a composition-time choice: `MemoryStore` provides `store` over
 // an in-memory Map here; a sqlite/postgres driver would provide the SAME `Store`
 // service, so model and query code never change when the driver is swapped.
+//
+// Two verbs beyond the first slice (#767) close the ergonomics gaps the
+// exemplary app's boring half (#777) filed against this pattern:
+//
+//   1. STORE-OWNED KEY ASSIGNMENT. `create` takes a keyless `Draft` and MINTS
+//      the primary key itself, returning it — Minato's autoInc + insert-
+//      returning-id. The handler no longer mints `"note-" + size().to_str()`
+//      (not concurrency-safe, and reuses an id after a delete). The store's
+//      key is drawn from a monotonic sequence that only ever grows, so an id
+//      is never reused even after its row is removed.
+//   2. A DRIVER-OWNED `list` VERB. Listing folds `keys()`-then-`get` ONCE,
+//      inside the driver, so a consumer says `store.list()` instead of
+//      re-implementing the fold at every call site — Minato's `select` with no
+//      filter. A sqlite/postgres driver answers the same verb with a real
+//      `SELECT`; the surface does not change.
 
-// The declared model: one row type. Query and mutation are typed against it,
-// so a field the model does not declare is a front-end type error, not a
-// string an ORM discovers at runtime.
-type User = { id: Str, name: Str }
+// The declared model: one row type, keyed by a store-assigned `id`. Query and
+// mutation are typed against it, so a field the model does not declare is a
+// front-end type error, not a string an ORM discovers at runtime.
+type Note = { id: Str, body: Str }
 
-// The persistence service: typed CRUD verbs, no SQL. A `create` is an
-// `emission` (a witnessed mutation) whose provider carries the inverse; `get`
-// is a pure read.
+// What a caller supplies to `create`: the row WITHOUT its key. The store owns
+// key assignment (Minato `autoInc`), so the caller never invents an id.
+type Draft = { body: Str }
+
+// The persistence service: typed CRUD verbs, no SQL. `create` is an `emission`
+// (a witnessed mutation) whose provider carries the inverse and RETURNS the
+// store-assigned key; `get` and `list` are pure reads.
 service Store {
-  fn get(id: Str) -> Opt[User]
-  emission fn create(row: User)
+  fn get(id: Str) -> Opt[Note]
+  fn list() -> List[Note]
+  emission fn create(draft: Draft) -> Str
 }
 
 // The memory driver. Any other driver (sqlite, postgres) provides this same
 // `Store`, so the swap touches neither the model nor consumer query code.
 component MemoryStore provides store: Store {
   let rows = effect Map.new() undo rows.drop()
+  // The key sequence: an append-only tick map. Its `size()` is the next id and
+  // only ever grows — ticking is never reverted and never removed — so a key
+  // is unique for the life of the activation even after a row is deleted. On
+  // teardown the whole map drops, so a reloaded store starts its ids at 0.
+  let seq = effect Map.new() undo seq.drop()
 
   provide store {
     fn get(id) = rows.get(id)
 
-    // The mutation, lowered as a revertible effect: insert the row, and on
-    // abort/teardown remove it. `create`'s derived inverse is `remove` — the
-    // Minato-natural counterpart — so the write reverts residue-free.
-    fn create(row) {
-      effect rows.insert(row.id, row)
-      undo   rows.remove(row.id)
+    // The driver-owned listing: fold `keys()`-then-`get` once, here, into the
+    // typed `List[Note]`. A consumer calls `store.list()` and never re-rolls
+    // the fold. `keys()` is ascending-canonical, so the order is deterministic.
+    fn list() {
+      var out = []
+      for (id of rows.keys()) {
+        // every key came from `keys()`, so `get` is always `Some`; the `None`
+        // arm is unreachable and folds nothing.
+        let hit = match rows.get(id) {
+          Some(row) => [row],
+          None => [],
+        }
+        out = out.concat(hit)
+      }
+      return out
+    }
+
+    // The mutation, lowered as a revertible effect: the store MINTS the key
+    // from the monotonic sequence, inserts the row, and on abort/teardown
+    // removes it. `create`'s derived inverse is `remove` — the Minato-natural
+    // counterpart — so the write reverts residue-free, and the returned key is
+    // the store's, never the caller's.
+    fn create(draft) {
+      let id = `note-${seq.size()}`
+      // tick the monotonic sequence: a witnessed insert whose inverse only
+      // fires on abort/teardown, never on a user-initiated row delete — so a
+      // later `create` keeps growing the key and never reuses `id`.
+      effect seq.insert(id, "1")
+      undo   seq.remove(id)
+      // the row itself, whose inverse is the Minato-natural `remove`.
+      effect rows.insert(id, { id: id, body: draft.body })
+      undo   rows.remove(id)
+      return id
     }
   }
 }
 
-lifecycle test "a created row is readable, and reverts residue-free" {
+lifecycle test "a created row is readable under its store-assigned key, and reverts residue-free" {
   load MemoryStore
-  call store.create({ id: "u1", name: "Alice" })
-  let hit = call store.get("u1")
-  assert hit == Some({ id: "u1", name: "Alice" })
+  let id = call store.create({ body: "first" })
+  assert id == "note-0"
+  let hit = call store.get(id)
+  assert hit == Some({ id: "note-0", body: "first" })
+  unload MemoryStore
+  assert no_residue
+}
+
+lifecycle test "list returns every created row, and keys are never reused" {
+  load MemoryStore
+  let a = call store.create({ body: "alpha" })
+  let b = call store.create({ body: "beta" })
+  assert a == "note-0"
+  assert b == "note-1"
+  let all = call store.list()
+  assert all == [{ id: "note-0", body: "alpha" }, { id: "note-1", body: "beta" }]
   unload MemoryStore
   assert no_residue
 }
 
 lifecycle test "a reloaded store starts empty" {
   load MemoryStore
-  call store.create({ id: "u2", name: "Bob" })
+  call store.create({ body: "gone" })
   unload MemoryStore
   load MemoryStore
-  let stale = call store.get("u2")
+  let stale = call store.get("note-0")
   assert stale == None
+  let empty = call store.list()
+  assert empty == []
   unload MemoryStore
   assert no_residue
 }

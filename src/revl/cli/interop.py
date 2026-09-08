@@ -345,7 +345,8 @@ def _run_import(args) -> int:
             source = import_a2a_file(args.file, backend=args.backend,
                                      service=args.service,
                                      allow_plaintext=args.allow_plaintext,
-                                     follow_redirects=args.follow_redirects)
+                                     follow_redirects=args.follow_redirects,
+                                     long_running=args.long_running)
         else:
             from ..import_wit import import_wit_file
             source = import_wit_file(args.file, backend=args.backend, pure=args.pure)

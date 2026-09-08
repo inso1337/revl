@@ -20,9 +20,9 @@ tiers emit; python/go/rust/java/wasm are compile-checked here (typescript when
 its toolchain is present); the cordis-py runtime section executes the methods
 and asserts their answers.
 
-wasm carries `if`/`while`/`break`/`continue`; a method-body `for (x of xs)` on
-wasm is the tracked remainder (its List-cursor apparatus is fn-only), refused
-with a `while`+index redirect.
+wasm now carries `if`/`while`/`for`/`break`/`continue`: item 458 closed the
+tracked `for (x of xs)` remainder by re-spelling the fn `_emit_for` List-cursor
+memory walk against the method path, so every tier lowers the same IR step shape.
 """
 
 import importlib.util
@@ -142,6 +142,29 @@ component K provides cap: Cap {
 }
 """
 
+# item 458 / issue #721: a dispatch written as PLAIN control flow — an
+# `if`/`else if`/`else` that returns in every arm, with NO trailing `return`.
+# This is the natural migration target away from a ternary chain
+# (`n >= 90 ? `A` : n >= 80 ? `B` : …`), which is the exact "ternary-heavy
+# dispatch" the harness carried only because the provide-method return checker
+# used to demand a top-level trailing `return`. The method grammar now shares
+# the module-`fn` terminator analysis (`_definitely_returns`): an `if`/`else`
+# whose arms both return terminates the body, so the ternary and the plain
+# control flow are interchangeable, byte-agreement holding on every tier.
+DISPATCH_DRAFT = """
+service Grader { fn grade(n: Int) -> Str }
+component D provides grader: Grader {
+  provide grader {
+    fn grade(n) {
+      if (n >= 90) { return `A` }
+      else if (n >= 80) { return `B` }
+      else if (n >= 70) { return `C` }
+      else { return `F` }
+    }
+  }
+}
+"""
+
 ALL_DRAFTS = {
     "if": IF_DRAFT,
     "while": WHILE_DRAFT,
@@ -149,6 +172,7 @@ ALL_DRAFTS = {
     "break": BREAK_DRAFT,
     "while_break": WHILE_BREAK_DRAFT,
     "guard_then_emit": GUARD_THEN_EMIT_DRAFT,
+    "dispatch": DISPATCH_DRAFT,
 }
 
 
@@ -185,27 +209,124 @@ def test_method_control_flow_lowers_to_the_fn_grammar_step_shape():
 
 
 # ---------------------------------------------------------------------------
-# every tier emits (wasm `for` is the tracked remainder)
+# item 458 / issue #721 — a method whose control flow returns on EVERY path
+# needs no trailing `return`, exactly as a module `fn` does. This is what lets a
+# ternary-heavy dispatch migrate to plain `if`/`else` control flow.
+# ---------------------------------------------------------------------------
+
+def test_dispatch_returns_on_every_path_needs_no_trailing_return():
+    # the plain-control-flow dispatch compiles with NO trailing `return`: the
+    # `if`/`else if`/`else` returns in every arm, which terminates the method
+    # body. It lowers to the ordinary `if` step shape (a nested `if` in the
+    # `else`), no fabricated fall-through value.
+    ir = compile_source(DISPATCH_DRAFT)
+    comp = ir["components"][0]
+    provide = next(s for s in comp["body"] if s.get("step") == "provide")
+    grade = next(m for m in provide["methods"] if m["name"] == "grade")
+    assert grade["body"][-1]["step"] == "if"
+    assert grade["body"][-1]["else"] is not None
+
+
+def test_method_terminator_analysis_matches_the_fn_grammar():
+    # PARITY: the identical dispatch shape is accepted in a module `fn` and in a
+    # provide method. Before item 458 the `fn` compiled and the method was
+    # refused ("body never returns a value"), which is precisely why the harness
+    # reached for a ternary in the method position.
+    fn_src = """
+fn grade(n: Int) -> Str {
+  if (n >= 90) { return `A` }
+  else if (n >= 80) { return `B` }
+  else { return `F` }
+}
+"""
+    method_src = """
+service Grader { fn grade(n: Int) -> Str }
+component D provides grader: Grader {
+  provide grader {
+    fn grade(n) {
+      if (n >= 90) { return `A` }
+      else if (n >= 80) { return `B` }
+      else { return `F` }
+    }
+  }
+}
+"""
+    assert compile_source(fn_src).get("functions")
+    assert compile_source(method_src).get("components")
+
+
+def test_missing_return_when_no_path_returns():
+    # no `return` anywhere: the "never returns a value" message (T1), the same
+    # the `fn` grammar and the pre-458 method check gave.
+    src = """
+service S { fn f(n: Int) -> Str }
+component C provides s: S {
+  provide s { fn f(n) { var r = `x`  r = r } }
+}
+"""
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "x.rvl")
+    assert "never returns a value" in str(ei.value)
+
+
+def test_missing_return_when_a_bare_if_can_fall_through():
+    # a bare `if` (no `else`) returns on one path only, so control can reach the
+    # end — the second, more precise message the `fn` grammar gives, now shared.
+    src = """
+service S { fn f(n: Int) -> Str }
+component C provides s: S {
+  provide s { fn f(n) { if (n > 0) { return `pos` } } }
+}
+"""
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "x.rvl")
+    assert "reach the end of its body without a `return`" in str(ei.value)
+
+
+def test_for_that_may_run_zero_times_is_not_a_terminator():
+    # a `for`/`while` may run zero times, so a trailing loop never terminates the
+    # body — matches `_definitely_returns` (rust E0308 / java missing-return).
+    src = """
+service S { fn f(xs: List[Int]) -> Int }
+component C provides s: S {
+  provide s { fn f(xs) { for (x of xs) { return x } } }
+}
+"""
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "x.rvl")
+    assert "reach the end" in str(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# every tier emits — `for`/`break` included (item 458 closed the wasm remainder)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("name", ["if", "while", "while_break", "guard_then_emit"])
+@pytest.mark.parametrize("name", sorted(ALL_DRAFTS))
 def test_all_tiers_emit(backend, name):
-    # every tier — wasm included — carries `if`/`while`/`break`/`continue`.
+    # every tier — wasm included — carries `if`/`while`/`for`/`break`/`continue`.
     out = _emit(ALL_DRAFTS[name], backend)
     assert out  # a non-empty artifact (str for most tiers, dict for wasm)
 
 
-@pytest.mark.parametrize("backend", ["python", "typescript", "go", "java", "rust"])
-def test_for_emits_on_hosted_and_native_tiers(backend):
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_for_emits_on_every_tier(backend):
     assert _emit(FOR_DRAFT, backend)
 
 
-def test_wasm_refuses_method_for_with_a_redirect():
+def test_wasm_lowers_method_for_to_a_cursor_walk():
+    # item 458: the tracked wasm `for` remainder is gone. The method-body loop
+    # lowers to the same in-memory List cursor the fn `for` walks: a `$for_ptr`
+    # address, a `$for_cnt` count, a `$for_idx` slot index, and the `_SLOT`-
+    # strided element load — mirroring backends/wasm/emit.py `_emit_for`.
     from _backend_import import backend_emitter as be  # noqa: PLC0415
-    with pytest.raises(Exception) as ei:
-        be("wasm").emit(compile_source(FOR_DRAFT))
-    assert "for" in str(ei.value) and "while" in str(ei.value)
+    out = be("wasm").emit(compile_source(FOR_DRAFT))
+    wat = out["T"] if isinstance(out, dict) else out
+    assert "$for_ptr_1" in wat and "$for_cnt_1" in wat and "$for_idx_1" in wat
+    # break/continue in a method `for` re-tests at the inner `$cnt` block
+    brk = be("wasm").emit(compile_source(BREAK_DRAFT))
+    wat_brk = brk["F"] if isinstance(brk, dict) else brk
+    assert "$revl_mcnt_1" in wat_brk and "$revl_mbrk_1" in wat_brk
 
 
 def test_python_emit_is_valid_python():
@@ -349,18 +470,55 @@ component C provides cache: Cache {
     assert status == "ok", f"{tier} rejected the emit: {detail}"
 
 
-def test_wasm_if_while_component_validates():
+def test_wasm_control_flow_component_validates():
     import validate  # noqa: PLC0415
 
     validator = validate.VALIDATORS["wasm"]
     reason = validator.unavailable()
     if reason:
         pytest.skip(f"wasm toolchain unavailable: {reason}")
-    for draft in (WHILE_DRAFT, IF_DRAFT, WHILE_BREAK_DRAFT):
+    # `for`/`break` join `if`/`while` now that item 458 lowers method-body `for`.
+    for draft in (WHILE_DRAFT, IF_DRAFT, WHILE_BREAK_DRAFT, FOR_DRAFT, BREAK_DRAFT):
         out = backend_emitter("wasm").emit(compile_source(draft))
         assert isinstance(out, dict)
         status, detail = validator.check([("cf", out)])["cf"]
         assert status == "ok", f"wasm rejected the emit: {detail}"
+
+
+def test_wasm_method_for_runs_on_wasmtime(tmp_path):
+    # the strongest proof: a method-body `for` with a `continue` executes on the
+    # real substrate and returns the right scalar. It iterates an internal list
+    # literal so the export takes only scalar args (wasmtime `--invoke`).
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    if shutil.which("wasmtime") is None:
+        pytest.skip("wasmtime not installed")
+    src = """
+service S { fn f(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn f(n) {
+      var total = 0
+      for (x of [10, 20, 30, 40]) {
+        if (x == 30) { continue }
+        total = total + x
+      }
+      return total + n
+    }
+  }
+}
+"""
+    out = backend_emitter("wasm").emit(compile_source(src))
+    wat = out["C"] if isinstance(out, dict) else out
+    path = tmp_path / "c.wat"
+    path.write_text(wat)
+    proc = subprocess.run(
+        ["wasmtime", "--invoke", "provide:s.f", str(path), "5"],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    # 10 + 20 + 40 (30 skipped by `continue`) + 5
+    assert proc.stdout.strip().splitlines()[-1].strip() == "75"
 
 
 # ---------------------------------------------------------------------------
@@ -442,3 +600,14 @@ async def test_runtime_while_break_and_continue():
 
     for n, ceiling in ((10, 100), (10, 5), (0, 3), (8, 9)):
         assert cap.cap_at(n, ceiling) == reference(n, ceiling), (n, ceiling)
+
+
+@cordis_only
+async def test_runtime_dispatch_grades():
+    # the plain-control-flow dispatch (no trailing return) runs and answers
+    # exactly as the ternary/label spellings do.
+    grader = await _activate(DISPATCH_DRAFT, "D", "grader")
+    assert grader.grade(95) == "A"
+    assert grader.grade(85) == "B"
+    assert grader.grade(72) == "C"
+    assert grader.grade(50) == "F"

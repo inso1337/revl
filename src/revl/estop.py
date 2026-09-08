@@ -41,6 +41,126 @@ LATCH_ENV = "REVL_ESTOP_LATCH"
 #: (docs/design/443-estop-tier-contract.md, "Per-tier decisions").
 TIERS_WITH_ESTOP = frozenset({"py", "go", "rust", "java"})
 
+#: The tiers reported STATICALLY rather than by honoring the latch at runtime
+#: (docs/design/443-estop-tier-contract.md, "Per-tier decisions"). A wasm
+#: instance has no process, no clock and no file access, so it cannot run the
+#: E2 crossing seam or the E6 watcher a honoring tier does — its embedder is
+#: the halt authority, and halting it is dropping the instance without running
+#: its teardown. But its inventory is knowable from OUTSIDE, at compile time:
+#: the `revl:teardown` custom section (item 243 Slice 2b) enumerates every
+#: activation-registered `transactional`/`compensation` descriptor, so the
+#: conductor or embedder prints the instance's inventory on its behalf with
+#: those entries as `estop-stranded` under the `static` population. That is a
+#: strict improvement over UNKNOWN — the SIGKILL population every other
+#: seamless tier falls in — for the one tier that cannot watch, and it costs no
+#: runtime seam. A wasm host that later exposes a clock and a latch read can
+#: move to `TIERS_WITH_ESTOP` under the same E1–E8; nothing here forecloses it.
+TIERS_STATIC_ESTOP = frozenset({"wasm"})
+
+#: The three E-Stop populations a tier's halt can be reported in, the label
+#: `tier_estop_status` returns and the disposition the conductor/embedder uses.
+ESTOP_HONORING = "honoring"
+ESTOP_STATIC = "static"
+ESTOP_UNKNOWN = "unknown"
+
+
+def tier_estop_status(tier: str) -> str:
+    """Which E-Stop population `tier` is reported in — the honest three-way
+    split of docs/design/443-estop-tier-contract.md.
+
+      * ``"honoring"`` — the runtime reads the latch at every crossing seam,
+        halts at its own seams and names its own in-flight inventory
+        (`TIERS_WITH_ESTOP`: py, go, rust, java);
+      * ``"static"`` — the runtime cannot watch, but its inventory is projected
+        from its compile-time teardown section (`TIERS_STATIC_ESTOP`: wasm);
+      * ``"unknown"`` — no seam and no static projection, so a halt is a
+        SIGKILL and the residue is UNKNOWN (node/ts until #769, and any tier
+        with neither honoring nor a static section).
+
+    A `static` tier is deliberately DISTINCT from both: it neither honors the
+    latch (it runs no seam) nor is UNKNOWN (its residue IS named, from the
+    module rather than from the dead runtime)."""
+    if tier in TIERS_WITH_ESTOP:
+        return ESTOP_HONORING
+    if tier in TIERS_STATIC_ESTOP:
+        return ESTOP_STATIC
+    return ESTOP_UNKNOWN
+
+
+def _static_stranded_record(*, component: str | None, method: str | None,
+                            seq, entry_kind: str, reason: str) -> dict:
+    """One `estop-stranded` residue fact projected STATICALLY, in the merged
+    residue schema (docs/design/teardown-contract.md), tagged with the
+    ``population: "static"`` marker so a reader can tell it apart from an entry
+    a honoring runtime named from a live frame.
+
+    It is `not-attempted` with a null `attempted.call`, exactly like the
+    runtime's own `estop-stranded` (`backends/python/runtime.py`,
+    `_estop_record`): the halt ran nothing, and this projection knows the entry
+    exists but not the runtime argument/witness values the section deliberately
+    does not carry (backends/wasm/emit.py, `_teardown_section`), so `method`
+    and `referent` are honestly left null rather than faked."""
+    return {
+        "kind": "estop-stranded",
+        "state": "unresolved",
+        "population": "static",
+        "component": component,
+        "method": method,
+        "seq": seq,
+        "entry": entry_kind,
+        "attemptedFlag": False,
+        "attempted": None,
+        "outcome": "not-attempted",
+        "referent": None,
+        "error": {
+            "type": "estop",
+            "message": (f"operator halt: {reason} — this instance was dropped "
+                        "without running its teardown; the entry is known "
+                        "statically from `revl:teardown` and is still owed"),
+        },
+        "hint": "replayed by `revl recover --wal <file>` from its WAL descriptor",
+    }
+
+
+def static_halt_inventory(entries, *, name: str, reason: str = "operator halt",
+                          operator: str = "unknown", at=None) -> dict:
+    """Project a compile-time teardown descriptor's `entries` into a halt
+    inventory in the same shape a honoring runner prints (its `estop_report`),
+    so the conductor or embedder can merge it BY NAME with no second channel
+    (docs/design/443-estop-tier-contract.md, the wasm row).
+
+    `entries` is the `revl:teardown` section's `entries` list — each
+    ``{"seq": int, "entry": "transactional"|"compensation", "dispatch": int}``.
+    Every one becomes an `estop-stranded (static)` record: the instance was
+    dropped, its teardown never ran, and the obligation is still owed. There is
+    no `estop-ambiguous` record here, and one is never invented — a wasm
+    crossing goes through a HOST import, so the host's own in-flight registry
+    (E4) names the at-most-one ambiguous crossing, not this static projection,
+    which leaves `inFlight` empty by construction."""
+    reason = reason or "operator halt"
+    stranded = [
+        _static_stranded_record(
+            component=name, method=None, seq=entry.get("seq"),
+            entry_kind=entry.get("entry") or "crossing", reason=reason)
+        for entry in (entries or [])
+    ]
+    return {
+        "process": name,
+        "halted": True,
+        "verdict": "halted",
+        "population": "static",
+        "reason": reason,
+        "operator": operator or "unknown",
+        "at": at,
+        "activations": ([{"component": name, "stranded": len(stranded)}]
+                        if stranded else []),
+        "inFlight": [],
+        "stranded": stranded,
+        "resumable": False,
+        "reconcile": "revl recover --wal <file>",
+    }
+
+
 #: What the py runner prints when the latch trips: its own in-flight
 #: inventory, on one line, so the conductor can merge it into the halt report
 #: without a second channel.
