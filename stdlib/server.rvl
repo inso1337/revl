@@ -1,0 +1,55 @@
+// The revl stdlib SERVER binding module (roadmap item 457 S3,
+// docs/design/457-endpoint-one-definition.md).
+//
+// ---------------------------------------------------------------- what this is
+// `stdlib/http.rvl` (item 456) is the typed HTTP CONTRACT — `Request`,
+// `Response`, `Outcome`, `Method`, `ApiError` — the data a routed operation
+// speaks. This module is the other half item 457 S3 needs: the declaration of
+// the HOST-PROVIDED server itself, the Cordis `ctx.server` a `host` row binds so
+// a routed service is actually SERVED on the ts tier.
+//
+//     composition Notes {
+//       use "stdlib/server.rvl"
+//       host @server provides server: Server   // Cordis ctx.server, ts tier
+//       ...
+//     }
+//
+// A `host` row's provider is synthesized from THIS service declaration plus the
+// shipped host shim (`backends/typescript/revl_server_ts.ts` over
+// `@cordisjs/server`), reached through the reviewed `@ts ref` door — never a
+// `globalThis` bridge (design note 530, answered by the row table). See
+// `src/revl/synthesize.py` `_host_source` and `HOST_SHIMS`.
+//
+// ---------------------------------------------------------------- the Server surface
+// The method set mirrors `@cordisjs/server`'s `Server.methods` EXACTLY —
+// `['get', 'post', 'put', 'patch', 'delete', 'head']` (packages/core/src/index.ts,
+// minus the `all` wildcard and the `ws` upgrade, as `stdlib/http.rvl`'s `Method`
+// variant already does) — so the route table a `route` clause lands (item 457
+// S1) and the host server it registers on cannot disagree on the verb set.
+//
+// Each verb is the REGISTRATION primitive for one path: `ctx.server.get(path,
+// handler)`. The HANDLER argument is NOT passed from revl here — it is
+// synthesized and bound by the ts route-registration EMITTER (item 457 S3's
+// emitted-`ctx.server` half, docs/design/457 §"The five derived artifacts" (1)),
+// which decodes the typed `Request`, binds the operation's parameters per the
+// route bind table, calls the provide method and encodes the `Outcome`. So the
+// revl-facing method carries the path it registers; the handler is the compiler's
+// to wire. The exact handler-value contract is finalized against the exemplary
+// app (item 462); this declaration pins the verb set and the emission bound the
+// binding rests on.
+//
+// Every method is `emission`: reaching the host runtime to register a route is a
+// boundary crossing (it mutates the server's route table), so a plain `fn` would
+// be refused as unhostable — G4 read at the host boundary (item 457 S3, the same
+// rule `remote` reads at the client, 424 D-424c.2).
+
+// The host HTTP server (`@cordisjs/server`'s `ctx.server`). One registration
+// method per verb `stdlib/http.rvl`'s `Method` variant admits.
+service Server {
+  emission fn get(path: Str) -> Unit
+  emission fn post(path: Str) -> Unit
+  emission fn put(path: Str) -> Unit
+  emission fn patch(path: Str) -> Unit
+  emission fn delete(path: Str) -> Unit
+  emission fn head(path: Str) -> Unit
+}

@@ -41,6 +41,7 @@
     "estop.ts",
     "placement_runner.ts",
     "revl_fs_ts.ts",
+    "revl_server_ts.ts",
     "revl_shell_classify_ts.ts",
     "revl_shell_ts.ts",
     "vitest.config.ts",

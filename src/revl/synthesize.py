@@ -111,10 +111,30 @@ from .import_openapi import _authority_host, _comment_safe
 # openapi helpers and the redirect policy, never this module.
 from .import_a2a import A2A_VERSION, _HTTPJSON_SEND_PATH, _TERMINAL_STATES
 
-#: The kinds `synthesize_provider` knows. `remote` (slice C2) and `seam`
-#: (slice B2) are the two this module builds; `configure` and item 60's mock
-#: are the other two of §4's table.
-KINDS = ("remote", "seam")
+#: The kinds `synthesize_provider` knows. `remote` (slice C2), `seam`
+#: (slice B2) and `host` (item 457 S3) are the three this module builds;
+#: `configure` and item 60's mock are the other two of §4's table.
+KINDS = ("remote", "seam", "host")
+
+#: item 457 S3: the shipped host shims, keyed by the service a `host` row hosts.
+#: Each entry names the `@ts ref` module (a `.ts` file in the revl tree, jailed
+#: to the install root as an install-origin ref, item 410) that exports one
+#: symbol per service method, and the Cordis package that module wraps. The
+#: `host` row's provider is synthesized to bind each method to a `@ts ref` of
+#: that module — the reviewed host-reference door (item 396 option B), never a
+#: `globalThis` bridge (design note 530's question, answered by the row table).
+#: A service with no entry here has no shipped shim and a `host` row for it is
+#: refused naming the service; a tier with no ref door (`hostref.EXTERN_REF_TIERS`
+#: is `py`/`ts` only) refuses the synthesized ref at lower time, which is the
+#: per-tier shim refusal design 457 S3 describes riding existing machinery.
+#: `stdlib/auth.rvl`'s `Auth` shim over `@cordisjs/plugin-sso` lands with item
+#: 457 S2 (the opaque `Principal` machinery); its entry is added there.
+HOST_SHIMS: dict[str, dict[str, str]] = {
+    "Server": {
+        "module": "../backends/typescript/revl_server_ts.ts",
+        "package": "@cordisjs/server",
+    },
+}
 
 #: The seam kinds that carry an observer (D-424b.4). `rewrite` is DELIBERATELY
 #: not here: it has no spelling anywhere in the grammar, because argument
@@ -1389,6 +1409,141 @@ def _seam_source(service, params: dict) -> tuple[str, str]:
     return component, "\n\n".join([header, body]) + "\n"
 
 
+# -------------------------------------------------------------- the host kind
+#
+# item 457 S3, docs/design/457-endpoint-one-definition.md §"The Cordis
+# `ctx.server` binding: a `host` row" (design note 530 Decision A). The fourth
+# caller of §4's one function, and the sibling of the `remote` kind: where
+# `remote` synthesizes a provider that reaches a PEER over the wire, `host`
+# synthesizes a provider that reaches the HOST PROCESS's own ambient service
+# (Cordis `ctx.server`, `ctx.sso`) through the reviewed `@ts ref` door
+# (item 396 option B). Design note 530 asked how a revl component reaches an
+# ambient host service without a `globalThis` bridge; the answer is the row
+# table, not a new checker mode, so this is a row whose provider is synthesized
+# exactly as a `remote` row's is — and remains an ordinary component `_link`
+# runs G2/G3/G4 over, so a bug here can only over-refuse, never admit.
+
+
+def check_hostable(service, shim, *, doc: str, line: int, label: str) -> None:
+    """Is this service reachable as a host service at all (item 457 S3)?
+
+    Two conditions, both G4 read at the host boundary:
+
+      * a shipped shim exists for the service (`HOST_SHIMS`). A `host` row for a
+        service with no shim is refused naming it, never bound to a module that
+        does not exist;
+      * every method declares an emission bound (or is `async`). Reaching the
+        host runtime IS a boundary crossing — `ctx.server.get` registers a route,
+        `ctx.sso.validateSession` performs I/O — so a plain `fn` host service is
+        not hostable, exactly as a plain `fn` service is not remotable
+        (D-424c.2). The refusal names the method.
+    """
+    if shim is None:
+        known = ", ".join(f"`{n}`" for n in sorted(HOST_SHIMS)) or "<none>"
+        raise RevlError(
+            doc, line,
+            f"host row `@{label}` hosts service `{service.name}`, which has no "
+            f"shipped host shim",
+            hint=f"services with a host shim: {known}. A `host` row binds the "
+                 "service to the host runtime's own ambient service through a "
+                 "reviewed `@ts ref` shim; a service with none cannot be hosted "
+                 "(item 457 S3)")
+    if not service.methods:
+        raise RevlError(
+            doc, line,
+            f"host row `@{label}` hosts service `{service.name}`, which declares "
+            "no methods",
+            hint="a host row synthesizes one host-shim binding per method; a "
+                 "service with none has nothing to host")
+    for op, method in service.methods.items():
+        if not method.emission and not method.async_:
+            raise RevlError(
+                doc, line,
+                f"service `{service.name}` is not hostable: method `{op}` is a "
+                f"plain `fn` (host row `@{label}`)",
+                hint="every method of a host service declares an emission bound "
+                     "— `emission fn` or `emission[cap] fn` — or is `async`. "
+                     "Reaching the host runtime is a boundary crossing (a route "
+                     "registration, an SSO check), so this is G4 read at the host "
+                     "boundary, not a new rule (item 457 S3, mirroring D-424c.2)")
+
+
+def _host_header(service, label, key, realm, shim) -> str:
+    module = _comment_safe(shim["module"])
+    package = _comment_safe(shim["package"])
+    return "\n".join([
+        f"// SYNTHESIZED for host row `@{label}` — this file is not on disk.",
+        f"// Item 457 S3 (docs/design/457-endpoint-one-definition.md). "
+        f"Service: `{service.name}`,",
+        f"// key `{_comment_safe(key)}`"
+        + (f", realm `{_comment_safe(realm)}`." if realm else "."),
+        f"// Host shim: `{module}` over `{package}` (the ts tier).",
+        "//",
+        "// A HOST ROW IS THE SIBLING OF A REMOTE ROW. Its provider is not revl",
+        "//   source but the HOST PROCESS's own ambient service — Cordis",
+        "//   `ctx.server`/`ctx.sso` — reached through the REVIEWED `@ts ref`",
+        "//   door (item 396 option B), never a `globalThis` bridge. Design note",
+        "//   530 asked how a revl component reaches an ambient host service; the",
+        "//   answer is the row table, not a new checker mode (Decision A).",
+        "//",
+        "// THE WIRING IS LOCAL. Every consumer keeps `requires "
+        f"{_comment_safe(key)}: {service.name}`",
+        "//   and G2/G3/G4 are unchanged. HOSTNESS is an ADMISSION fact — the",
+        "//   provider is the host runtime, reached through a reviewed ref — and",
+        "//   never a wiring fact, so bringing a real revl provider in for this",
+        "//   key is a one-line composition edit and not a source edit across",
+        "//   every consumer (mirroring 424 D-424c.1).",
+        "//",
+        "// TIER: `ts` only. The `@ts ref` door is native to `py`/`ts`",
+        "//   (`hostref.EXTERN_REF_TIERS`) and refused on go/rust/java/wasm at",
+        "//   lower time, so a host row on a tier with no shim is refused there —",
+        "//   the per-tier shim refusal riding the existing reviewed-ref",
+        "//   machinery rather than a new resolution special case.",
+    ])
+
+
+def _host_source(service, params: dict) -> tuple[str, str]:
+    """The synthesized provider for a `host` row (item 457 S3).
+
+    Provides the outer key, binding each service method to a `@ts ref` extern of
+    the shipped host shim (one exported symbol per method). The provider is an
+    ordinary component: `_link` runs G4 over it, so a method the shim cannot
+    honour is caught by the ordinary gate, not trusted here.
+    """
+    label = params["label"]
+    key = params["key"]
+    realm = params.get("realm")
+    doc, line = params["doc"], params["line"]
+    shim = HOST_SHIMS.get(service.name)
+
+    check_hostable(service, shim, doc=doc, line=line, label=label)
+
+    module = shim["module"]
+    component = f"Host{_pascal(label)}Provider"
+    externs: list[str] = []
+    provides: list[str] = []
+    for op, method in service.methods.items():
+        sig = ", ".join(f"{n}: {t}" for n, t in method.params)
+        names = [n for n, _ in method.params]
+        arrow = f" -> {method.returns}" if method.returns else ""
+        extern = f"host_{label}_{op}"
+        # ONE extern per method, each a `@ts ref` of the shipped shim's matching
+        # export. The reviewed host-reference door pins the shim's bytes into the
+        # IR and jails the module to the install root (item 396 option B / item
+        # 410), so the binding is auditable rather than an opaque ambient reach.
+        externs.append(
+            f"extern emission fn {extern}({sig}){arrow} "
+            f"= @ts ref {op} from \"{module}\"")
+        call_args = ", ".join(names)
+        provides.append(f"    fn {op}({call_args}) = {extern}({call_args})")
+
+    isolate = f"  isolate {key} in realm(\"{realm}\")\n" if realm else ""
+    header = _host_header(service, label, key, realm, shim)
+    body = (f"component {component} provides {key}: {service.name} {{\n"
+            f"{isolate}  provide {key} {{\n" + "\n".join(provides) + "\n  }\n}")
+    return component, "\n\n".join([header, *externs, body]) + "\n"
+
+
 def synthesize_provider(service, kind: str, params: dict) -> tuple[str, str]:
     """Synthesize a provider component for `service`.
 
@@ -1403,6 +1558,8 @@ def synthesize_provider(service, kind: str, params: dict) -> tuple[str, str]:
         return _remote_source(service, params)
     if kind == "seam":
         return _seam_source(service, params)
+    if kind == "host":
+        return _host_source(service, params)
     raise ValueError(
         f"unknown provider kind {kind!r}; this module ships "
         f"{', '.join(repr(k) for k in KINDS)}")
