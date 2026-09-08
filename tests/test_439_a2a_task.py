@@ -126,8 +126,8 @@ def test_runtime_transport_fault_is_the_declared_type():
     fault = runtime.TransportFault("x", row="agent", crossing="ask")
     assert isinstance(fault, RuntimeError)
     assert getattr(fault, "_revl_transport_fault", False) is True
-    assert fault.revl_row == "agent"
-    assert fault.revl_crossing == "ask"
+    assert fault._revl_row == "agent"
+    assert fault._revl_crossing == "ask"
     assert "TransportFault" in runtime.__all__
 
 
@@ -183,8 +183,8 @@ def test_withdraw_body_raises_a_marked_transport_fault(a2a):
     keys on and the row label + crossing it withdraws by."""
     fault = _run_withdraw_body(a2a=a2a, label="agent", op="ask")
     assert getattr(fault, "_revl_transport_fault", False) is True
-    assert fault.revl_row == "agent"
-    assert fault.revl_crossing == "ask"
+    assert fault._revl_row == "agent"
+    assert fault._revl_crossing == "ask"
 
 
 # ============================================ T0: the driver seam maps it
