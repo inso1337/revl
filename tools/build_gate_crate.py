@@ -1913,7 +1913,7 @@ path = "src/lib.rs"
 # verdict: `admit` never constructs a Context, never plugs, never boots. That
 # distinction is the design's "the crate's purity is runtime-purity, not
 # graph-purity" — taken in the open, and item 336's call to change.
-cordis = { package = "cordis-rs", version = "0.3" }
+cordis = { package = "cordis-rs", version = "0.6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 '''

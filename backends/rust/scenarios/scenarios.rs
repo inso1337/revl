@@ -55,7 +55,7 @@ fn marks(log: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
 fn g7_teardown_is_lifo() {
     let (root, log) = root_with_probe();
     let fiber = root.plugin(two_steps(), ());
-    fiber.wait().unwrap();
+    fiber.try_wait().unwrap();
     assert_eq!(marks(&log), ["do:a", "do:b"]);
     fiber.dispose().unwrap();
     assert_eq!(marks(&log), ["do:a", "do:b", "undo:b", "undo:a"],
@@ -66,7 +66,7 @@ fn g7_teardown_is_lifo() {
 fn a8_fail_reverts_accumulated_effects() {
     let (root, log) = root_with_probe();
     let fiber = root.plugin(fails_after(), ());
-    let result = fiber.wait();
+    let result = fiber.try_wait();
     assert!(result.is_err(), "activation must surface the L-Raise");
     assert_eq!(marks(&log), ["do:a", "undo:a"],
         "the accumulated effect reverts before the fiber lands FAILED (A8)");
@@ -82,8 +82,8 @@ fn consumer_waits_for_provider_and_deactivates_on_withdrawal() {
     assert!(marks(&log).is_empty(), "consumer must not activate before kv exists");
 
     let provider = root.plugin(kv_provider(), ());
-    provider.wait().unwrap();
-    consumer.wait().unwrap();
+    provider.try_wait().unwrap();
+    consumer.try_wait().unwrap();
     assert_eq!(marks(&log), ["provider:up", "consumer:up"]);
 
     provider.dispose().unwrap();
@@ -102,7 +102,7 @@ fn a1_boundary_completes_and_tears_down_lifo() {
     // emission runs, disposal reverts LIFO.
     let (root, log) = root_with_probe();
     let fiber = root.plugin(boundary(), ());
-    fiber.wait().unwrap();
+    fiber.try_wait().unwrap();
     assert_eq!(marks(&log), ["do:a", "do:b", "emit:post"]);
     fiber.dispose().unwrap();
     assert_eq!(marks(&log), ["do:a", "do:b", "emit:post", "undo:b", "undo:a"]);
@@ -126,7 +126,7 @@ fn a1_concurrent_divert_leaves_no_torn_state() {
                 let _ = fiber.dispose();
             })
         };
-        let _ = fiber.wait();
+        let _ = fiber.try_wait();
         disposer.join().unwrap();
         let _ = fiber.dispose();
 
@@ -180,12 +180,12 @@ fn realm_labels_share_within_and_separate_across() {
     // The realm placement is applied at plug time (isolate BEFORE plugin), the
     // same lowering `_revl_load` uses — not inside the plugin body.
     let store = _revl_isolate_ctx(&root, "realm_store_t").plugin(realm_store_t(), ());
-    store.wait().unwrap();
+    store.try_wait().unwrap();
     assert!(marks(&log).contains(&"store_t:up".to_string()), "provider must activate");
 
     // Same label => same isolation slot: the provision is visible.
     let same = root.isolate_with("kv", _revl_realm("t"));
-    let seen = same.get_unchecked::<Box<dyn Kv>>("kv").unwrap();
+    let seen = same.get_relaxed::<Box<dyn Kv>>("kv").unwrap();
     assert!(
         seen.is_some(),
         "a branch naming realm(\"t\") must see the realm(\"t\") provision (equal labels = same realm)"
@@ -193,7 +193,7 @@ fn realm_labels_share_within_and_separate_across() {
 
     // Different label => disjoint slot: the provision is invisible.
     let other = root.isolate_with("kv", _revl_realm("other"));
-    let unseen = other.get_unchecked::<Box<dyn Kv>>("kv").unwrap();
+    let unseen = other.get_relaxed::<Box<dyn Kv>>("kv").unwrap();
     assert!(
         unseen.is_none(),
         "a branch naming realm(\"other\") must NOT see the realm(\"t\") provision (distinct labels = distinct realms)"
@@ -229,8 +229,8 @@ fn isolated_consumer_reactively_links_to_isolated_provider_same_realm() {
 
     // Now plug the isolated provider in the SAME realm("t").
     let provider = _revl_isolate_ctx(&root, "realm_store_t").plugin(realm_store_t(), ());
-    provider.wait().unwrap();
-    consumer.wait().unwrap();
+    provider.try_wait().unwrap();
+    consumer.try_wait().unwrap();
 
     assert_eq!(
         consumer.state(),
@@ -267,7 +267,7 @@ fn spawn_instances_coexist_dispose_is_scoped_and_lifo() {
     //      sibling (here the root, standing in for any outside party) cannot.
     let (root, log) = root_with_probe();
     let supervisor = root.plugin(supervisor(), ());
-    supervisor.wait().unwrap();
+    supervisor.try_wait().unwrap();
 
     // (1) Two live instances, each carrying the config that flowed through its
     // spawn: worker A (tag "a") then worker B (tag "b") each activated and ran
@@ -285,7 +285,7 @@ fn spawn_instances_coexist_dispose_is_scoped_and_lifo() {
     // Two providers of the SAME key coexisting without a DuplicateService
     // collision is only possible because each lives in its own local realm.
     assert!(
-        root.get_unchecked::<Box<dyn Counter>>("counter")
+        root.get_relaxed::<Box<dyn Counter>>("counter")
             .unwrap()
             .is_none(),
         "an instance's provision must stay private to its local realm (a sibling cannot reach it)"
@@ -298,7 +298,7 @@ fn spawn_instances_coexist_dispose_is_scoped_and_lifo() {
     // supervisor's teardown, and leaves the supervisor and worker B live.
     log.lock().unwrap().clear();
     let ctl = root
-        .get_unchecked::<Box<dyn Ctl>>("ctl")
+        .get_relaxed::<Box<dyn Ctl>>("ctl")
         .unwrap()
         .expect("the supervisor provides `ctl` in the shared realm");
     assert_eq!(ctl.retire_a(), 1);
@@ -344,10 +344,10 @@ fn instance_accessor_reads_the_spawned_instances_own_provision() {
     //      instance's local realm (supervision-tree addressing).
     let root = cordis::Context::new();
     let reader = root.plugin(reader(), ());
-    reader.wait().unwrap();
+    reader.try_wait().unwrap();
 
     let reading = root
-        .get_unchecked::<Box<dyn Reading>>("reading")
+        .get_relaxed::<Box<dyn Reading>>("reading")
         .unwrap()
         .expect("Reader provides `reading` in the shared realm");
 
@@ -367,7 +367,7 @@ fn instance_accessor_reads_the_spawned_instances_own_provision() {
     // (2) negative: neither instance's `counter` escaped to the root realm, so
     // the accessor cannot be a back-door to a sibling's or the root's view.
     assert!(
-        root.get_unchecked::<Box<dyn Counter>>("counter")
+        root.get_relaxed::<Box<dyn Counter>>("counter")
             .unwrap()
             .is_none(),
         "an instance's provision must stay private to its local realm (only the handle holder reaches it)"

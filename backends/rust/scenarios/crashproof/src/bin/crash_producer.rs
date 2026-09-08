@@ -42,7 +42,7 @@ fn main() {
     let root = cordis::Context::new();
     let cfg = serde_json::json!({ "Crasher": {} });
     let f = revl_crashproof::_revl_load(&root, "crasher", &cfg).expect("load Crasher");
-    f.wait().expect("Crasher did not reach ACTIVE");
+    f.try_wait().expect("Crasher did not reach ACTIVE");
     // The witnessed mutation ran in-process and its discharge-descriptor is now
     // durable on disk (revl_record_transactional fsynced it before returning).
 
