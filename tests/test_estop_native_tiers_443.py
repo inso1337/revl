@@ -293,5 +293,63 @@ def test_an_unarmed_native_placement_tears_down_gracefully(tmp_path, monkeypatch
     assert "E-STOP" not in out.out and "E-STOP" not in out.err
 
 
+# ---------------------------------------------------------------------------
+# the third population: wasm is reported STATICALLY, not honoring and not
+# UNKNOWN (docs/design/443-estop-tier-contract.md, "Per-tier decisions")
+# ---------------------------------------------------------------------------
+
+from revl import estop as _estop  # noqa: E402
+
+
+def test_wasm_is_the_static_population_distinct_from_honoring_and_unknown():
+    """wasm is the one tier reported STATICALLY: it runs no latch seam (so it
+    is NOT in TIERS_WITH_ESTOP), but its residue is named from its compile-time
+    teardown section (so it is NOT the UNKNOWN/SIGKILL population either)."""
+    assert "wasm" not in _estop.TIERS_WITH_ESTOP
+    assert "wasm" in _estop.TIERS_STATIC_ESTOP
+    assert _estop.tier_estop_status("wasm") == "static"
+    # the honoring tiers stay honoring, the still-seamless ones stay UNKNOWN
+    for tier in ("py", "go", "rust", "java"):
+        assert _estop.tier_estop_status(tier) == "honoring"
+    for tier in ("node", "ts", "elixir"):
+        assert _estop.tier_estop_status(tier) == "unknown"
+
+
+def test_static_halt_inventory_strands_every_descriptor_entry():
+    """The projection turns each teardown-section descriptor entry into an
+    `estop-stranded (static)` record: not-attempted, still owed, and marked as
+    the static population so a reader can tell it from a runtime-named entry."""
+    entries = [{"seq": 0, "entry": "transactional", "dispatch": 1},
+               {"seq": 1, "entry": "compensation", "dispatch": 2}]
+    inv = _estop.static_halt_inventory(entries, name="Probe",
+                                       reason="runaway loop", operator="ops@x")
+    assert inv["population"] == "static"
+    assert inv["verdict"] == "halted"
+    assert inv["resumable"] is False
+    # ambiguity is the HOST's to name (E4), never invented by this projection
+    assert inv["inFlight"] == []
+    assert [r["entry"] for r in inv["stranded"]] == ["transactional", "compensation"]
+    for record in inv["stranded"]:
+        assert record["kind"] == "estop-stranded"
+        assert record["population"] == "static"
+        assert record["attemptedFlag"] is False
+        assert record["outcome"] == "not-attempted"
+        assert record["error"]["type"] == "estop"
+    # the activation summary sums to the registered count (the books partition
+    # the stack), exactly as a honoring tier's `activations[].stranded` does
+    assert sum(a["stranded"] for a in inv["activations"]) == 2
+
+
+def test_static_halt_inventory_of_a_seamless_component_holds_no_residue():
+    """A component that registered no transactional/compensation entry has no
+    `revl:teardown` section, so its static inventory is empty-but-well-formed —
+    a claim of no residue, never a fabricated one."""
+    inv = _estop.static_halt_inventory([], name="Idle")
+    assert inv["population"] == "static"
+    assert inv["stranded"] == []
+    assert inv["activations"] == []
+    assert inv["resumable"] is False
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

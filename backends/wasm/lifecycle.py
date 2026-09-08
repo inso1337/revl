@@ -227,6 +227,41 @@ def parse_teardown_descriptor(wat: str) -> dict | None:
     return _json.loads(_wat_string_unescape(match.group(1)))
 
 
+def static_estop_inventory(wat: str, *, name: str,
+                           reason: str = "operator halt",
+                           operator: str = "unknown") -> dict:
+    """The `static` E-Stop inventory for one compiled wasm component (item 443,
+    docs/design/443-estop-tier-contract.md, the wasm row).
+
+    A wasm instance cannot honor the latch — it has no process, clock or file
+    access to run a crossing seam or a watcher — so halting it is the embedder
+    DROPPING the instance without running its teardown. Its inventory is still
+    knowable, from OUTSIDE and at compile time: this reads the component's
+    `revl:teardown` custom section (`parse_teardown_descriptor`) and projects
+    every activation-registered `transactional`/`compensation` descriptor as an
+    `estop-stranded (static)` record, via the tier-agnostic
+    `revl.estop.static_halt_inventory`. A component with no such entry (the
+    common case: the section is absent) yields an empty-but-well-formed
+    inventory, never a claim of residue it does not hold."""
+    from revl.estop import static_halt_inventory  # noqa: PLC0415
+    descriptor = parse_teardown_descriptor(wat) or {"entries": []}
+    return static_halt_inventory(
+        descriptor.get("entries") or [], name=name, reason=reason,
+        operator=operator)
+
+
+def static_estop_line(wat: str, *, name: str, reason: str = "operator halt",
+                      operator: str = "unknown") -> str:
+    """The one line the conductor or embedder prints on a halted wasm
+    instance's behalf: ``[<name>] HALTED <json>``, byte-shaped like a honoring
+    tier's E5 inventory line (`revl.estop.HALTED_LINE`) so a conductor merges
+    it into the halt report by name with no second channel."""
+    from revl.estop import HALTED_LINE  # noqa: PLC0415
+    inventory = static_estop_inventory(wat, name=name, reason=reason,
+                                       operator=operator)
+    return f"[{name}] {HALTED_LINE} {_json.dumps(inventory)}"
+
+
 def _residue_record(kind: str, seq: int, *, error: dict | None,
                     attempted: bool, outcome: str) -> dict:
     """One record in the merged residue schema (docs/design/teardown-
