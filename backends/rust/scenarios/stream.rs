@@ -55,7 +55,7 @@ fn drive(
     std::thread::spawn(move || {
         let root = cordis::Context::new();
         let p = root.plugin(component(), ());
-        let outcome = match p.wait() {
+        let outcome = match p.try_wait() {
             Ok(_) => format!("{} activated", what),
             Err(e) => format!("{:?}", e),
         };
@@ -75,7 +75,7 @@ fn drive_and_dispose(
     std::thread::spawn(move || {
         let root = cordis::Context::new();
         let p = root.plugin(component(), ());
-        let outcome = match p.wait() {
+        let outcome = match p.try_wait() {
             Err(e) => format!("{} failed to activate: {:?}", what, e),
             Ok(_) => match p.dispose() {
                 Err(e) => format!("{} dispose failed: {:?}", what, e),
@@ -96,7 +96,7 @@ fn unload_closes_the_stream_lifo() {
     reset();
     let root = cordis::Context::new();
     let c = root.plugin(consumer(), ());
-    c.wait().expect("Consumer did not reach ACTIVE");
+    c.try_wait().expect("Consumer did not reach ACTIVE");
 
     assert_eq!(
         revl_stream_live_subscriptions(),
