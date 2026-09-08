@@ -23,6 +23,13 @@ on:
   # A version on PyPI must be a claim this whole matrix passed. No job below
   # changes; this only lets the workflow be `uses:`-called from the tag build.
   workflow_call:
+  # Nightly full sweep and a manual trigger. Both are NON-pull_request events,
+  # so the `changes` job below reports frontend='true' for them and the whole
+  # matrix runs -- the PR fast-path narrows only pull_request events, never
+  # main, nightly or an on-demand dispatch.
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
 
 # One run per branch at a time. Agents push to a PR branch repeatedly while
 # iterating, and without this every push stacked another full matrix behind the
@@ -73,6 +80,60 @@ env:
   GOSUMDB: "off"
 
 jobs:
+  # PR fast-path (approved CI-topology change). The heavy frontend-family jobs
+  # (`frontend`'s 3.11/3.12/3.13 matrix and `frontend-cordis`, and by
+  # dependency `conformance` and `formal`) only need to run when a PR actually
+  # touches language sources. This job decides that ONCE, and those jobs gate
+  # on its `frontend` output.
+  #
+  # On any NON-pull_request event -- push to main, the nightly schedule, a
+  # manual workflow_dispatch, a merge_group candidate, or a workflow_call from
+  # the tag build -- it reports 'true', so the full matrix always runs there.
+  # The narrowing applies to pull_request events alone.
+  #
+  # It uses only the already-pinned `actions/checkout` (no new third-party
+  # action) and a `git diff` against the PR base, and inherits the workflow's
+  # `contents: read` floor -- it opens nothing and writes no check.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.detect.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          # full history so the base tip and the PR merge commit are both real
+          # locally; the explicit base fetch below is the belt-and-braces guard
+          # that a shallow checkout still works.
+          fetch-depth: 0
+      - id: detect
+        env:
+          # a branch name is attacker-controllable text, so it goes through
+          # env: rather than being interpolated into the shell (the same rule
+          # the roadmap-marker step in `lint` follows for github.head_ref).
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "non-PR event ($EVENT_NAME): frontend=true (full matrix)"
+            exit 0
+          fi
+          # Shallow-checkout guard: make sure the PR base tip exists locally as
+          # refs/remotes/origin/<base>, then diff the base tip against the PR's
+          # merge commit (HEAD). A two-dot tree diff needs no deep merge-base
+          # history, so a depth-1 base tip is enough.
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          if git diff --name-only "origin/${BASE_REF}" HEAD \
+               | grep -Eq '^(src/revl/|selfhost/|stdlib/)'; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "PR touches src/revl|selfhost|stdlib: frontend=true"
+          else
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+            echo "PR touches no language sources: frontend=false (skip frontend family)"
+          fi
+
   # roadmap 110d: lint gate. The repo's `# noqa` discipline is F-level
   # (Pyflakes: unused imports/locals, undefined names, empty f-strings) but no
   # job enforced it. Config lives in pyproject [tool.ruff]; ruff is version-
@@ -206,6 +267,12 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    # PR fast-path: run on every non-PR event (push/nightly/dispatch/merge_group/
+    # workflow_call, where `changes` reports 'true'), and on a PR only when it
+    # touches language sources. A skip here cascades to `conformance` and
+    # `formal` (which `needs: frontend`), so those narrow with it automatically.
+    needs: [changes]
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' }}
     strategy:
       matrix:
         python: ["3.11", "3.12", "3.13"]
@@ -281,13 +348,12 @@ jobs:
 
   backend-python:
     runs-on: ubuntu-latest
-    # Fail fast to save compute: this heavy backend job is skipped entirely if
-    # the cheap `lint` gate or the `frontend` suite is red, rather than running
-    # a full matrix that a lint/frontend failure has already doomed. This only
-    # reorders execution — the required-check context is unchanged, so branch
-    # protection still requires it, and a skip only happens when an upstream gate
-    # has already failed the run.
-    needs: [lint, frontend]
+    # Decoupled from `frontend` (approved CI-topology change): the backends
+    # import revl directly and self-contain their frontend usage, so the old
+    # `needs: frontend` was pure ordering. Dropping it lets every backend run on
+    # EVERY PR without waiting on -- or being skipped by -- the frontend
+    # fast-path. `needs: [lint]` keeps the cheap-gate fail-fast.
+    needs: [lint]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
@@ -336,6 +402,10 @@ jobs:
   # the runtime IS there.
   frontend-cordis:
     runs-on: ubuntu-latest
+    # Same PR fast-path as `frontend`: full matrix on non-PR events, and on a
+    # PR only when language sources changed.
+    needs: [changes]
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
@@ -519,9 +589,8 @@ jobs:
 
   backend-typescript:
     runs-on: ubuntu-latest
-    # Fail fast: skip this heavy job when `lint` or `frontend` is red (see
-    # backend-python for the rationale — required context unchanged).
-    needs: [lint, frontend]
+    # Decoupled from `frontend`; runs on every PR (see backend-python).
+    needs: [lint]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
@@ -576,9 +645,8 @@ jobs:
 
   backend-wasm:
     runs-on: ubuntu-latest
-    # Fail fast: skip this heavy job when `lint` or `frontend` is red (see
-    # backend-python for the rationale — required context unchanged).
-    needs: [lint, frontend]
+    # Decoupled from `frontend`; runs on every PR (see backend-python).
+    needs: [lint]
     # The cordis-wasm checkout this job provisions below. Declared as a JOB env
     # rather than exported into $GITHUB_ENV so that
     # tests/test_env_gated_skips_run_somewhere.py can read WHICH job sets it and
@@ -719,9 +787,8 @@ jobs:
 
   backend-rust:
     runs-on: ubuntu-latest
-    # Fail fast: skip this heavy job (5+ min of cargo) when `lint` or `frontend`
-    # is red (see backend-python for the rationale — required context unchanged).
-    needs: [lint, frontend]
+    # Decoupled from `frontend`; runs on every PR (see backend-python).
+    needs: [lint]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
@@ -840,9 +907,8 @@ jobs:
 
   backend-java:
     runs-on: ubuntu-latest
-    # Fail fast: skip this heavy job when `lint` or `frontend` is red (see
-    # backend-python for the rationale — required context unchanged).
-    needs: [lint, frontend]
+    # Decoupled from `frontend`; runs on every PR (see backend-python).
+    needs: [lint]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
@@ -880,9 +946,8 @@ jobs:
 
   backend-go:
     runs-on: ubuntu-latest
-    # Fail fast: skip this heavy job when `lint` or `frontend` is red (see
-    # backend-python for the rationale — required context unchanged).
-    needs: [lint, frontend]
+    # Decoupled from `frontend`; runs on every PR (see backend-python).
+    needs: [lint]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
