@@ -74,11 +74,15 @@ public class Context {
         return type.cast(value);
     }
 
-    /** Committed-view read of the provision registered under `name`. This is the
-     *  read an emitted `requires <name>: <Svc>` resolves through, so two
-     *  providers of one service type route by key instead of colliding. */
-    public <T> T get(Class<T> type, String name) {
-        String key = name == null ? "" : name;
+    /** Committed-view read of the provision registered under a keyed
+     *  {@link ServiceKey}. This is the read an emitted `requires <name>: <Svc>`
+     *  resolves through, so two providers of one service type route by key
+     *  instead of colliding. Mirrors real cordis4j's `get(ServiceKey<T>)` — the
+     *  runtime exposes no `get(Class<T>, String)` overload, only this keyed form
+     *  and the type-only `get(Class<T>)` above. */
+    public <T> T get(ServiceKey<T> serviceKey) {
+        Class<T> type = serviceKey.type();
+        String key = serviceKey.name();
         java.util.Map<Class<?>, java.util.Map<String, Object>> store = storeFor(type);
         Object value = null;
         java.util.Map<String, Object> byName = store.get(type);
