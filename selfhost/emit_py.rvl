@@ -1352,8 +1352,10 @@ fn comp_names(ir: Any) -> Str {
 // await-seed), host roots (`Pool`/`Map`/`Job`) in COMPONENT bodies (fn/test
 // bodies already covered), realm placements (`isolate`/`intercept`/`routes`/the
 // router), spawn/instances, lifecycle TESTS (the `plug`/`set_trace`/`Clock`/
-// `asyncio` driver), and the `format`/`host`/`spawn`/`instance-get` cexpr
-// kinds.
+// `asyncio` driver), and the `host`/`spawn`/`instance-get` cexpr kinds. The
+// component-body `${…}` template (the `format` cexpr, `_revl_fmt` + the `fmt`
+// runtime import) is ported — a fn body lowers `${…}` to `interp` instead, so
+// `format` is the component/method-body twin of the fn-body f-string concat.
 
 // A body-emission result: the lines produced AND the running timer counter (the
 // reference's `self._counter`, threaded here since revl has no method state).
@@ -1371,6 +1373,11 @@ fn runtime_ref(name: Str) -> Str {
   // the `ConfigSchema` argument list and needs no name of its own.
   if (name == "mark_secret") { return "_revl_mark_secret" }
   if (name == "secret_result") { return "_revl_secret_result" }
+  // A component-body `${…}` template lowers to a `format` node whose emission
+  // calls the runtime string formatter (the fn-body `${…}` uses the inline
+  // `interp` f-string concat instead; only the component/method-body path
+  // reaches `format`).
+  if (name == "fmt") { return "_revl_fmt" }
   return name
 }
 
@@ -1565,6 +1572,16 @@ fn cexpr(node: Any) -> Str {
   }
   if (kind == "fn") {
     return `${mangle(value_str(value_field(node, "name")))}(${ccommajoin(value_list(value_field(node, "args")))})`
+  }
+  // A `${…}` template in a component/method body (the fn-body path lowers to
+  // `interp` instead). The reference `_ComponentEmitter._expr` renders
+  // `_revl_fmt(<template repr>, arg0, arg1, …)` and pulls `fmt` into the
+  // `from runtime import` line (`ir_uses_fmt`). Each arg is prefixed with `, `
+  // so a zero-arg template stays `_revl_fmt('<template>')`.
+  if (kind == "format") {
+    var args = ""
+    for (a of value_list(value_field(node, "args"))) { args = args.concat(", ").concat(cexpr(a)) }
+    return `${runtime_ref("fmt")}(${py_repr(value_field(node, "template"))}${args})`
   }
   return `<<UNSUPPORTED-CEXPR:${kind}>>`
 }
@@ -2388,6 +2405,20 @@ fn ir_uses_host_root(ir: Any, root: Str) -> Bool {
   return false
 }
 
+// `fmt as _revl_fmt`: a component/method body carries a `${…}` template
+// (lowered to a `format` node), whose `cexpr` emission calls `_revl_fmt`. The
+// reference accumulates `fmt` in the per-component `emitter.uses`; `format`
+// only ever lands inside a component (fn/test bodies use `interp`), so a walk
+// of `components` is the equivalent IR-wide gate.
+fn uses_fmt(n: Any) -> Bool {
+  if (node_kind(n) == "format") { return true }
+  for (c of value_children(n)) { if (uses_fmt(c)) { return true } }
+  return false
+}
+fn ir_uses_fmt(ir: Any) -> Bool {
+  return uses_fmt(value_field(ir, "components"))
+}
+
 // Safe pure-function templates mirror the reference's evaluation-preserving
 // substitution. All rebuilt objects are fresh maps/lists; the caller's IR is
 // never mutated.
@@ -2642,6 +2673,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   var imports = []
   if (need_config) { imports = imports.push("ConfigSchema as _revl_ConfigSchema") }
   if (components.length() > 0) { imports = imports.push("Frame as _revl_Frame") }
+  if (ir_uses_fmt(ir)) { imports = imports.push("fmt as _revl_fmt") }
   if (ir_uses_host_root(ir, "Job")) { imports = imports.push("Job") }
   if (ir_uses_host_root(ir, "Map")) { imports = imports.push("Map") }
   if (ir_uses_host_root(ir, "Pool")) { imports = imports.push("Pool") }
