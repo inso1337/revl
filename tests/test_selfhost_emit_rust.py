@@ -156,6 +156,12 @@ CORPUS = [
                         #   builtin receiver, an interpolation operand) strips even
                         #   that. Both tiers pinned so the port cannot fall behind
                         #   (item 429).
+    "perf_arg_index.rvl",  # item 437d — a List index read in a `&str` builtin
+                        #   ARGUMENT slot (`hay.startsWith(xs[i])`) borrows the
+                        #   element place rather than cloning it; the owned
+                        #   by-value free-fn argument keeps its clone. The
+                        #   receiver/operand slots were already done; this pins
+                        #   the argument slot on both tiers (item 429).
     "perf_iter.rvl",    # item 437f — a `for` iterable that is dead after the loop
                         #   MOVES instead of cloning. The self-host port never
                         #   cloned a for-iterable, so before the optimisation the
