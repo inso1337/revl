@@ -15,7 +15,7 @@ audit  goal  policy  diff  changelog  version  contract  erase-report
 plan  apply  undo  canary  query  fmt  quarantine  analyze  test  mcp
 import  export  serve  run  recover  estop  branch  compare  replay  why
 metrics  trace  profile  attest  dash  repair  bundle  emit  verify
-deploy  truc
+deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -1001,6 +1001,40 @@ host-side chain verify at admission are following slices.
 revl deploy deploy.toml --dry-run     # plan admission, stop before COMMIT
 revl deploy deploy.toml               # deploy over the process boundary
 revl deploy deploy.toml --json        # machine-readable verdict
+```
+
+### `revl deploy-admit`
+
+The far-side runner of the deploy orchestration channel (roadmap item 118). It
+reads one JSON request per line on stdin and writes one signed verdict per line
+to stdout: a PREPARE admit-request runs the attestation-chain verify, and a
+COMMIT commit-request runs the load-time measurement. It is the process a
+transport spawns to have the RECEIVING side do the check, against that host's
+own local trust store, rather than the conductor checking in its own process.
+
+- `--key PATH` - a file holding a raw HMAC verify key this host trusts;
+  repeatable. The request carries no key, so with no `--key` the chain cannot be
+  verified and admission refuses at the signer link.
+- `--host-key PATH` - a file holding this host's own signing key. PREPARE signs
+  its admission verdict with it and COMMIT signs the load-time measurement with
+  it; with no `--host-key` a COMMIT refuses rather than returning an unsigned,
+  unattributable measurement.
+- `--require-gauntlet` / `--require-conformance` - refuse a chain that binds no
+  item-31 gauntlet or item-306 conformance evidence. The host is the floor: a
+  request may add either requirement but never turn one off.
+- `--runtime-version NAME=VER` - a runtime this host reports on its verdicts
+  (e.g. `python=3.14`); repeatable.
+
+The trust configuration is the runner's own, never anything the request carries:
+a request can ASK for admission but cannot supply the trust that would grant it.
+Locally the conductor spawns `python -m revl deploy-admit ...` and speaks to it
+over stdin/stdout (`deploy.StdioRunnerTransport`); across a machine boundary it
+is the same command behind `ssh <host>`, which is a following slice together
+with the bundle staging and pinned SSH host key.
+
+```bash
+# usually spawned by a transport, not by hand; driven over stdin/stdout:
+revl deploy-admit --key host.pub --host-key host.key --runtime-version python=3.14
 ```
 
 ## Interop: MCP, import, export, serve

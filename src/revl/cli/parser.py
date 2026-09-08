@@ -1512,6 +1512,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --bundle, REFUSE a chain that binds no item-306 conformance "
              "cert for --backend rather than admitting on absent evidence")
 
+    # `revl deploy-admit` — the FAR-SIDE runner of the deploy orchestration
+    # channel (roadmap item 118, design §1.3 steps 4–5 / step 7). It reads one
+    # JSON request per line off stdin and answers each with a verdict its OWN
+    # local trust store minted: a PREPARE admit-request runs the chain verify, a
+    # COMMIT commit-request runs the load-time measurement. It is the process a
+    # transport spawns — locally as `python -m revl deploy-admit ...`, and across
+    # a machine boundary as the same command behind `ssh <host>` once the
+    # deferred staging + pinned-host-key leg lands. The trust configuration is
+    # the runner's own (these flags), never anything the request carries (S2.4).
+    admit_cmd = sub.add_parser(
+        "deploy-admit",
+        help="the far-side deploy runner: read JSON admit/commit requests on "
+             "stdin, verify each against THIS host's own trust store, and write "
+             "a signed verdict per line to stdout (item 118)")
+    admit_cmd.add_argument(
+        "--key", metavar="PATH", action="append",
+        help="a file holding a raw HMAC verify key THIS host trusts; repeatable. "
+             "The request carries no key (S2.4), so with no --key the chain "
+             "cannot be verified and admission refuses at the signer link")
+    admit_cmd.add_argument(
+        "--host-key", metavar="PATH",
+        help="a file holding this host's own signing key (design R5: the "
+             "receipt key is the host's identity). PREPARE signs its admission "
+             "verdict with it, and COMMIT signs the load-time measurement with "
+             "it; with no --host-key a COMMIT refuses rather than returning an "
+             "unsigned, unattributable measurement")
+    admit_cmd.add_argument(
+        "--require-gauntlet", action="store_true",
+        help="REFUSE a chain that binds no item-31 gauntlet evidence. The host "
+             "is the floor: a request may add this requirement but never turn it "
+             "off (S2.4)")
+    admit_cmd.add_argument(
+        "--require-conformance", action="store_true",
+        help="REFUSE a chain that binds no item-306 conformance cert for the "
+             "request's backend. The host is the floor: a request may add this "
+             "requirement but never turn it off (S2.4)")
+    admit_cmd.add_argument(
+        "--runtime-version", metavar="NAME=VER", action="append",
+        help="a runtime this host reports on its verdicts (e.g. python=3.14); "
+             "repeatable. These are the versions bound into the load-time "
+             "measurement a later audit correlates against")
+
     # `revl truc <verb> ...` — a namespaced door onto the standalone `truc`
     # binary (roadmap item 136, slice S2). This is a pure passthrough: the tail
     # after `truc` is handed verbatim to truc's own launcher (`revl.truc:main`,
