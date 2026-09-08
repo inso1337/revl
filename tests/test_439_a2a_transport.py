@@ -591,3 +591,324 @@ def test_on_failure_result_returns_err_on_transport_failure():
     out, _ = _run_row_body({}, in_band=True, status=503)
     assert isinstance(out, _Err)
     assert "transport failure" in out.e
+
+
+# ================================================ the four-op Task lifecycle (T1)
+# Item 439 T1 (issue #118): `long_running` projects the four-op explicit-handle
+# surface (`_start`/`_poll`/`_reply`/`_cancel`) over `message/send` / `tasks/get`
+# / `tasks/cancel` instead of one terminal crossing, speaking the pure-revl
+# vocabulary of `stdlib/a2a.rvl`. `docs/design/439-a2a-task-lifecycle.md`.
+
+import io  # noqa: E402
+import textwrap  # noqa: E402
+import urllib.request  # noqa: E402
+
+from revl.a2a_task import task_body  # noqa: E402
+
+RESEARCHER = """
+use "stdlib/a2a.rvl" { TaskRef, TaskState, TaskEvent }
+service Researcher {
+  emission fn research_start(message: Str) -> TaskRef
+  emission fn research_poll(task: TaskRef) -> TaskEvent
+  emission fn research_reply(task: TaskRef, message: Str) -> TaskEvent
+  emission fn research_cancel(task: TaskRef) -> Unit
+}
+"""
+
+LR = """
+composition Net {
+  use "services.rvl"
+  remote @researcher provides researcher: Researcher
+    at host("agent.example:8443")
+    through a2a
+    long_running
+}
+"""
+
+
+def _write_lr(tmp_path: Path, base: str = LR, services: str = RESEARCHER) -> Path:
+    (tmp_path / "stdlib").mkdir(exist_ok=True)
+    (tmp_path / "stdlib" / "a2a.rvl").write_text(
+        (ROOT / "stdlib" / "a2a.rvl").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    write(tmp_path, services=services, base=base)
+    return tmp_path
+
+
+def _lr_source(tmp_path: Path, base: str = LR, services: str = RESEARCHER) -> str:
+    _write_lr(tmp_path, base, services)
+    table = resolve(tmp_path)
+    return table.sources[next(r for r in table.rows if r.label == "researcher").source]
+
+
+def test_long_running_resolves_and_projects_four_ops(tmp_path):
+    """`long_running` carries onto the row table and synthesizes the four-op
+    provider — the four crossings, not one terminal `message/send`."""
+    _write_lr(tmp_path)
+    table = resolve(tmp_path)
+    row, = table.rows
+    assert row.remote.get("longRunning") is True
+    assert row.remote.get("transport") == "a2a"
+    text = table.sources[row.source]
+    for op in ("start", "poll", "reply", "cancel"):
+        assert f"fn remote_researcher_research_{op}(" in text
+
+
+def test_the_four_op_provider_compiles(tmp_path):
+    """The synthesized four-op source is ordinary revl: `_link` runs G2/G3/G4
+    over it, and the emitted `@py` bodies coexist with the `stdlib/a2a.rvl`
+    vocabulary classes and the two pure gates in one module."""
+    _write_lr(tmp_path)
+    assert compile_composition(str(tmp_path / "base.rvl"), str(tmp_path)) is not None
+
+
+def test_the_four_ops_speak_the_task_wire(tmp_path):
+    """`_poll` -> `tasks/get`, `_cancel` -> `tasks/cancel`, `_reply` ->
+    `message/send` + `taskId`, and every op rides `revl.skill`."""
+    text = _lr_source(tmp_path)
+    assert '"method": "tasks/get"' in text
+    assert '"method": "tasks/cancel"' in text
+    assert '"method": "message/send"' in text
+    assert '"taskId": _task["id"]' in text
+    assert '"revl.skill": "research"' in text
+    assert '"id": _task["id"]' in text  # poll/cancel key the task by id
+
+
+def test_every_four_op_return_is_untrusted(tmp_path):
+    """Slice C3 on the lifecycle wire: the handle and every event are
+    `Untrusted[T]` with origin `net`, so a `Done` payload cannot reach a
+    `Trusted[T]` sink invisibly."""
+    text = _lr_source(tmp_path)
+    assert "fn remote_researcher_research_start(message: Str) -> Untrusted[TaskRef]" in text
+    assert "fn remote_researcher_research_poll(task: TaskRef) -> Untrusted[TaskEvent]" in text
+    assert "fn remote_researcher_research_cancel(task: TaskRef) -> Untrusted[Unit]" in text
+
+
+def test_the_header_states_the_four_op_scope(tmp_path):
+    """The header names the four-op lifecycle and that `_cancel` is the
+    best-effort `tasks/cancel` compensation of `_start` (item 247), never an
+    inverse."""
+    text = _lr_source(tmp_path)
+    assert "four-op A2A Task" in text or "four-op Task" in text
+    assert "COMPENSATION of" in text
+    assert "tasks/cancel" in text
+    assert "A2A PEER IS A CLAIM" in text
+
+
+# -- the two failure settlements / scope refusals -----------------------------
+
+def test_long_running_on_the_default_wire_is_refused(tmp_path):
+    base = LR.replace("    through a2a\n", "")
+    _write_lr(tmp_path, base=base)
+    with pytest.raises(RevlError) as excinfo:
+        resolve(tmp_path)
+    assert "long_running" in str(excinfo.value)
+    assert "through a2a" in str(excinfo.value)
+
+
+def test_long_running_over_rest_is_refused(tmp_path):
+    base = LR.replace("through a2a\n", "through a2a_rest\n")
+    _write_lr(tmp_path, base=base)
+    with pytest.raises(RevlError) as excinfo:
+        resolve(tmp_path)
+    assert "a2a_rest" in str(excinfo.value)
+
+
+def test_a_service_not_in_the_four_op_shape_is_refused(tmp_path):
+    services = """
+use "stdlib/a2a.rvl" { TaskRef, TaskEvent }
+service Researcher {
+  emission fn research_start(message: Str) -> TaskRef
+  emission fn research_poll(task: TaskRef) -> TaskEvent
+}
+"""
+    _write_lr(tmp_path, services=services)
+    with pytest.raises(RevlError) as excinfo:
+        resolve(tmp_path)
+    message = str(excinfo.value)
+    assert "long_running" in message and "missing" in message
+
+
+def test_a_wrongly_typed_task_op_is_refused(tmp_path):
+    services = """
+use "stdlib/a2a.rvl" { TaskRef, TaskEvent }
+service Researcher {
+  emission fn research_start(message: Str) -> Str
+  emission fn research_poll(task: TaskRef) -> TaskEvent
+  emission fn research_reply(task: TaskRef, message: Str) -> TaskEvent
+  emission fn research_cancel(task: TaskRef) -> Unit
+}
+"""
+    _write_lr(tmp_path, services=services)
+    with pytest.raises(RevlError) as excinfo:
+        resolve(tmp_path)
+    assert "research_start" in str(excinfo.value) and "TaskRef" in str(excinfo.value)
+
+
+# -- the returned event feed taints (C3 on the lifecycle) ---------------------
+
+TASK_SINK = """
+use "stdlib/a2a.rvl" { TaskRef, TaskState, TaskEvent }
+service Researcher {
+  emission fn research_start(message: Str) -> TaskRef
+  emission fn research_poll(task: TaskRef) -> TaskEvent
+  emission fn research_reply(task: TaskRef, message: Str) -> TaskEvent
+  emission fn research_cancel(task: TaskRef) -> Unit
+}
+service Shell { emission fn go(t: TaskRef) -> TaskEvent }
+extern emission[shell] fn sink(e: Trusted[TaskEvent]) -> Unit = @py { return None }
+component ShellSvc requires researcher: Researcher provides shell: Shell {
+  provide shell {
+    fn go(t) {
+      let ev = emit researcher.research_poll(t)
+      emit sink(ev)
+      return ev
+    }
+  }
+}
+"""
+
+
+def test_a_task_event_cannot_reach_an_authority_sink(tmp_path):
+    """A polled `TaskEvent` (a `Done` payload among them) flowing into a
+    `Trusted[T]` sink is refused (G9) without an `endorse`."""
+    _write_lr(tmp_path, services=TASK_SINK)
+    with pytest.raises(RevlError) as excinfo:
+        compile_composition(str(tmp_path / "base.rvl"), str(tmp_path))
+    message = str(excinfo.value)
+    assert "untrusted value (net)" in message and "G9" in message
+
+
+def test_an_endorse_admits_the_task_event(tmp_path):
+    consumer = TASK_SINK.replace(
+        "emission fn go(t: TaskRef) -> TaskEvent",
+        "emission endorse[net] fn go(t: TaskRef) -> TaskEvent").replace(
+        "emit sink(ev)",
+        'emit sink(endorse[net](ev, reason = "operator vetted"))')
+    _write_lr(tmp_path, services=consumer)
+    assert compile_composition(str(tmp_path / "base.rvl"), str(tmp_path)) is not None
+
+
+# -- the generated bodies, executed against a fake A2A server -----------------
+
+class _TaskOk:
+    def __init__(self, v):
+        self.v = v
+
+
+def _run_task_body(kind, reply, *args, status=200, label="researcher"):
+    """Execute a synthesized four-op `@py` body against a stubbed transport, the
+    technique `_run_row_body` uses — the vocabulary constructors and the pure
+    `task_state_from_wire` gate are injected the way the emitted module carries
+    them."""
+    body = task_body(kind, "https://agent.example:8443", "research", label=label)
+    names = {"start": ["_a"], "poll": ["_a"], "reply": ["_a", "_b"],
+             "cancel": ["_a"]}[kind]
+    sig = ", ".join(names)
+    src = (f"def _crossing({sig}):\n    _args = [{sig}]\n"
+           + textwrap.indent(textwrap.dedent(body), "    "))
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    calls = []
+
+    class _Opener:
+        def open(self, request, *a, **k):
+            calls.append(json.loads(request.data))
+            if status >= 400:
+                raise urllib.request.HTTPError(
+                    request.full_url, status, "err", {}, io.BytesIO(b""))
+            return _Resp(json.dumps(reply).encode())
+
+    class _Ev:
+        def __init__(self, tag, value=None):
+            self.tag = tag
+            self.value = value
+
+        def __eq__(self, other):
+            return (isinstance(other, _Ev) and other.tag == self.tag
+                    and other.value == self.value)
+
+    ns = {
+        "__name__": "generated",
+        "Status": lambda v: _Ev("Status", v),
+        "Done": lambda v: _Ev("Done", v),
+        "Message": lambda v: _Ev("Message", v),
+        "task_state_from_wire": lambda s: s,
+    }
+    exec(compile(src, "<task-body>", "exec"), ns)
+    original = urllib.request.build_opener
+    urllib.request.build_opener = lambda *h: _Opener()
+    try:
+        return ns["_crossing"](*args), calls, _Ev
+    finally:
+        urllib.request.build_opener = original
+
+
+def test_start_returns_a_task_ref():
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "id": "t-42", "contextId": "c-1",
+        "status": {"state": "working"}}}
+    out, calls, _Ev = _run_task_body("start", reply, "survey the field")
+    assert out == {"id": "t-42", "context": "c-1"}
+    assert calls[0]["method"] == "message/send"
+    assert calls[0]["params"]["message"]["metadata"]["revl.skill"] == "research"
+
+
+def test_poll_walks_working_to_done():
+    working = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "status": {"state": "working"}}}
+    out, calls, _Ev = _run_task_body("poll", working, {"id": "t-42", "context": None})
+    assert out == _Ev("Status", "working")
+    assert calls[0]["method"] == "tasks/get" and calls[0]["params"]["id"] == "t-42"
+    done = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "status": {"state": "completed"},
+        "artifacts": [{"parts": [{"kind": "text", "text": "the answer"}]}]}}
+    out, _c, _Ev = _run_task_body("poll", done, {"id": "t-42", "context": None})
+    assert out == _Ev("Done", "the answer")
+
+
+def test_input_required_then_reply_advances():
+    prompt = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "status": {"state": "input-required"}}}
+    out, _c, _Ev = _run_task_body("poll", prompt, {"id": "t", "context": None})
+    assert out == _Ev("Status", "input-required")
+    advanced = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "status": {"state": "working"}}}
+    out, calls, _Ev = _run_task_body(
+        "reply", advanced, {"id": "t-42", "context": None}, "my input")
+    assert out == _Ev("Status", "working")
+    assert calls[0]["method"] == "message/send"
+    assert calls[0]["params"]["message"]["taskId"] == "t-42"
+
+
+def test_cancel_posts_tasks_cancel_and_returns_unit():
+    reply = {"jsonrpc": "2.0", "id": "1", "result": {
+        "kind": "task", "status": {"state": "canceled"}}}
+    out, calls, _Ev = _run_task_body("cancel", reply, {"id": "t-42", "context": None})
+    assert out is None
+    assert calls[0]["method"] == "tasks/cancel" and calls[0]["params"]["id"] == "t-42"
+
+
+@pytest.mark.parametrize("kind,args", [
+    ("start", ("x",)),
+    ("poll", ({"id": "t", "context": None},)),
+    ("reply", ({"id": "t", "context": None}, "m")),
+    ("cancel", ({"id": "t", "context": None},)),
+])
+def test_a_dead_peer_faults_and_names_the_crossing(kind, args):
+    """A peer that stops answering raises a marked `TransportFault` carrying the
+    row label and the crossing — the T0 handle the activation runtime maps to
+    provider WITHDRAWAL, on every one of the four crossings."""
+    with pytest.raises(RuntimeError) as excinfo:
+        _run_task_body(kind, {}, *args, status=503)
+    fault = excinfo.value
+    assert getattr(fault, "_revl_transport_fault", False) is True
+    assert fault.revl_row == "researcher"
+    assert fault.revl_crossing == f"research_{kind}"
