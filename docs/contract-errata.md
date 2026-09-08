@@ -513,7 +513,8 @@ until then the tier documents "faults with `unreachable`, no payload".
 A private review (issue #549) caught a cluster of stdlib operations whose
 emitters disagreed with the reference. Three had an unambiguous documented
 reference and are now closed; each is asserted to AGREE on every tier in
-`tests/test_cross_tier_execution.py` (`AGREED_549`).
+`tests/test_cross_tier_execution.py` (`AGREED_549`). A fourth, `Str + Int`, is
+closed by uniform frontend rejection (below).
 
 - **`split("")` counted UTF-16 units on TypeScript and Java** (closed). An
   empty separator splits by code point (docs/stdlib-2.0.md §split), so an
@@ -535,10 +536,29 @@ reference and are now closed; each is asserted to AGREE on every tier in
   the same `Math.*Exact` family the `Int.MIN / -1` entry above already used for
   `+`/`-`/`*` and unary minus.
 
-The remaining #549 divergences turn on a spec decision this repo has not made
-(whether a negative list index or slice bound faults or is end-relative, and
-whether the frontend should accept a mixed `Str + Int` at all) and stay pinned
-in `DIVERGENCES` so they cannot drift, rather than being closed by fiat.
+- **`Str + Int` scattered across every tier** (closed by rejection). The
+  frontend accepted a mixed `Str + <non-Str>` and left the operand to the
+  tiers, which disagreed: python raised a `TypeError`, go REFUSED to compile
+  (`mismatched types`), while rust, ts and java coerced the int and rendered
+  `"n=3"`. String `+` is Str-only concatenation (docs/stdlib-2.0.md), so the
+  checker now refuses a known non-`Str` operand (numeric included) in
+  `_binop_type` with `operand of string `+` expects `Str``. That makes it a
+  compile error on every tier — the same uniform-rejection close used for
+  `List[Int].join` — rather than a runtime divergence; convert with `.to_str()`
+  first. Asserted in `tests/test_typesafety.py::test_str_plus_int_rejected`. An
+  UNKNOWN operand (the gradual frontier) is unaffected.
+
+The remaining #549 divergences turn on a spec decision this repo has not made:
+whether a negative list index or slice bound FAULTS or is END-RELATIVE
+(docs/stdlib-2.0.md leaves negatives underspecified). They stay pinned in
+`DIVERGENCES` so they cannot drift, rather than being closed by fiat. Closing
+either honestly needs both a ratified spec choice and cross-tier runtime work
+that a value-equality assert cannot even verify: the fault route needs python
+(and ts, which reads `undefined`) to bounds-guard the hottest read path plus a
+per-tier static emitted-code guard to tell a silent `undefined` from a genuine
+fault; the end-relative route needs go/rust/java to each grow python-style
+negative-bound normalisation. Both are disproportionate to the payoff, so the
+pin — not a premature "agreement" — is the honest state.
 
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins

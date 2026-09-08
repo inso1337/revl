@@ -719,16 +719,26 @@ DIVERGENCES = {
     # the tier that diverges is exactly the tier whose status is "fail" here
     # (or, for a value the reference rejects, the diverging tier is the one that
     # answers "pass"). The per-tier map records what every tier does TODAY,
-    # empirically measured on py/ts/go/rust/java. These three remain because
-    # each turns on a SPEC decision this repo has not made — whether a negative
+    # empirically measured on py/ts/go/rust/java. These TWO remain because each
+    # turns on a SPEC decision this repo has not made — whether a negative
     # index/slice bound faults or is end-relative (docs/stdlib-2.0.md leaves
-    # negatives underspecified), and whether the frontend should accept a mixed
-    # `Str + Int` at all — not on an emitter that merely disagrees with a
-    # settled reference. The point of the pin is that the divergence can no
-    # longer drift or grow silently. The three #549 divergences with an
-    # unambiguous documented reference (`split("")`, `to_int` on `"+7"`,
-    # `div_trunc(Int.MIN, -1)`) are now FIXED and asserted to AGREE in
-    # AGREED_549 below. The marker after each name says which tier(s) diverge.
+    # negatives underspecified) — not on an emitter that merely disagrees with a
+    # settled reference. Closing either honestly would need a ratified spec
+    # choice AND cross-tier runtime machinery: to make the negative bound FAULT
+    # everywhere, python (and ts, which reads `undefined`) must bounds-guard the
+    # hottest read path AND grow a per-tier static emitted-code guard, because a
+    # value-equality assert cannot tell a silent `undefined` from a genuine
+    # fault (see the `xs[5]` note below AGREED_549); to make it END-RELATIVE
+    # everywhere, go/rust/java must each grow python-style negative-bound
+    # normalisation. Both are disproportionate to a divergence a value-assert
+    # cannot even verify, so these stay honestly pinned rather than moved to a
+    # dishonest "agreement". The point of the pin is that the divergence can no
+    # longer drift or grow silently. The #549 divergences with an unambiguous
+    # documented reference (`split("")`, `to_int` on `"+7"`, `div_trunc(Int.MIN,
+    # -1)`) are FIXED and asserted to AGREE in AGREED_549 below; `Str + Int` is
+    # now refused by the frontend (a compile error on every tier — see the
+    # FIXED-not-pinned note below). The marker after each name says which
+    # tier(s) diverge.
     #
     # A negative list index. Reference: an out-of-range index FAULTS — there is
     # no wrap. python's `xs[-1]` silently reads the LAST element instead, so the
@@ -749,15 +759,13 @@ DIVERGENCES = {
         'test "a negative slice yields one element" { assert n() == 1 }\n',
         {"py": "pass", "ts": "pass", "go": "fail", "rust": "fail", "java": "fail"},
     ),
-    # `Str + Int`. The frontend accepts the mixed `+` (arguably it should not —
-    # see the follow-up note below), and the tiers then scatter: py raises a
-    # `TypeError`, go REFUSES TO COMPILE (`mismatched types`), while rust, java
-    # and ts coerce the int and render `"n=3"` — DIVERGE (py, go vs rust/ts/java).
-    "Str + Int: py raises, go won't compile, others coerce": (
-        'pub fn s() -> Str { return "n=" + 3 }\n'
-        'test "Str + Int renders the int" { assert s() == "n=3" }\n',
-        {"py": "fail", "ts": "pass", "go": "fail", "rust": "pass", "java": "pass"},
-    ),
+    # `Str + Int` used to be pinned here (py raised, go would not compile, and
+    # rust/ts/java coerced to `"n=3"`). It is now FIXED at the frontend — the
+    # checker refuses a mixed `Str + <non-Str>` (`_binop_type`, "operand of
+    # string `+` expects `Str`"), so it is a compile error on EVERY tier, the
+    # same uniform-rejection close as `List[Int].join`. Asserted in
+    # tests/test_typesafety.py::test_str_plus_int_rejected; see the
+    # FIXED-not-pinned note below.
 }
 
 
@@ -819,6 +827,11 @@ AGREED_549 = {
 # FIXED (not pinned): `List[Int].join(sep)` crashed the py runtime while ts
 # coerced; it is now a compile error on every tier (typecheck.builtin_check
 # pins `join`'s receiver to `List[Str]`, matching docs/stdlib-2.0.md).
+# FIXED (not pinned): `Str + Int` scattered (py raised, go would not compile,
+# rust/ts/java coerced to `"n=3"`); the checker now refuses a mixed
+# `Str + <non-Str>` in `_binop_type` (numeric included), so it is a compile
+# error on every tier — convert with `.to_str()` first. Asserted in
+# tests/test_typesafety.py::test_str_plus_int_rejected.
 
 
 def _observed(tier: str, source: str) -> str:

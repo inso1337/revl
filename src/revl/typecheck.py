@@ -1066,10 +1066,16 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
         return "Int32"
     if op == "+":
         if lt == "Str" or rt == "Str":
-            if filename and (
-                (lt and lt != "Str" and lt not in _NUMERIC)
-                or (rt and rt != "Str" and rt not in _NUMERIC)
-            ):
+            # String `+` is concatenation of two `Str`s. A KNOWN non-`Str`
+            # operand is refused — numeric included. A mixed `Str + Int`
+            # scattered across the tiers (issue #549): python raised a
+            # `TypeError`, go REFUSED to compile, while rust/ts/java coerced the
+            # int and rendered `"n=3"`. Rather than leave that to diverge at
+            # runtime, the frontend refuses the mix here, so it is a compile
+            # error on EVERY tier (docs/stdlib-2.0.md: `+` on `Str` concatenates
+            # strings; convert with `.to_str()` first). An UNKNOWN operand stays
+            # on the gradual frontier (result `None`), unchanged.
+            if filename and ((lt and lt != "Str") or (rt and rt != "Str")):
                 bad = lt if lt != "Str" else rt
                 raise mismatch(filename, line, "operand of string `+`", "Str", bad)
             return "Str" if (lt == "Str" and rt == "Str") else None
