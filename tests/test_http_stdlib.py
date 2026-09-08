@@ -41,9 +41,10 @@ STDLIB = ROOT / "stdlib" / "http.rvl"
 #: body / emptiness / a header THROUGH the type, with no string sentinel anywhere.
 CONSUMER = """\
 use "stdlib/http.rvl" {
-  Request, Response, Outcome, Body,
+  Request, Response, Outcome, Body, Method,
   request, ok_text, ok_json, not_found, handled, not_handled,
-  is_handled, status_of, response_of, is_empty_body, body_text, header_value
+  is_handled, status_of, status_text_of, response_of, is_ok,
+  is_empty_body, body_text, header_value, method_str
 }
 
 // The route table. /hello -> 200 text; /data -> 200 json; /gone -> a HANDLED
@@ -60,38 +61,61 @@ fn route(req: Request) -> Outcome {
 // STATUS read through the type; -1 stands for "no route handled it" (there is no
 // status to read), itself derived from the typed None, not from prose.
 fn status_for(path: Str) -> Int {
-  return match status_of(route(request("GET", path))) {
+  return match status_of(route(request(Get, path))) {
     Some(s) => s,
     None => -1,
   }
 }
 
 fn handled_for(path: Str) -> Bool {
-  return is_handled(route(request("GET", path)))
+  return is_handled(route(request(Get, path)))
 }
 
 fn body_for(path: Str) -> Str {
-  return match response_of(route(request("GET", path))) {
+  return match response_of(route(request(Get, path))) {
     Some(r) => body_text(r.body),
     None => "<unrouted>",
   }
 }
 
 fn empty_body_for(path: Str) -> Bool {
-  return match response_of(route(request("GET", path))) {
+  return match response_of(route(request(Get, path))) {
     Some(r) => is_empty_body(r.body),
     None => false,
   }
 }
 
 fn ctype_for(path: Str) -> Str {
-  return match response_of(route(request("GET", path))) {
+  return match response_of(route(request(Get, path))) {
     Some(r) => match header_value(r.headers, "content-type") {
       Some(v) => v,
       None => "",
     },
     None => "",
   }
+}
+
+// REASON PHRASE (Cordis `statusText`) read through the type; "<unrouted>" only
+// via the typed None, never from prose.
+fn reason_for(path: Str) -> Str {
+  return match status_text_of(route(request(Get, path))) {
+    Some(t) => t,
+    None => "<unrouted>",
+  }
+}
+
+// 2xx-ness read through the typed response (mirrors Cordis `Response.ok`);
+// false for the unrouted case, reached only via the typed None.
+fn ok_for(path: Str) -> Bool {
+  return match response_of(route(request(Get, path))) {
+    Some(r) => is_ok(r),
+    None => false,
+  }
+}
+
+// the method survives the round trip through `method_str` on the typed record.
+fn method_for(path: Str) -> Str {
+  return method_str(request(Post, path).method)
 }
 """
 
@@ -134,6 +158,10 @@ def test_module_file_is_the_documented_surface():
     assert "pub type Response = {" in text
     assert "pub type Outcome = Handled(Response) | NotHandled" in text
     assert "pub fn status_of(o: Outcome) -> Opt[Int]" in text
+    # aligned to the Cordis vocabulary: a typed Method set (mirrors
+    # @cordisjs/server's method set) and Cordis's statusText on the Response.
+    assert "pub type Method =" in text
+    assert "status_text: Str" in text
 
 
 def test_the_module_carries_no_status_or_empty_sentinels():
@@ -218,3 +246,26 @@ def test_headers_are_read_from_the_record(ns):
     assert ns["ctype_for"]("/data") == "application/json"
     # a 404 with no headers -> the header lookup is None -> "" by the reader
     assert ns["ctype_for"]("/gone") == ""
+
+
+# ---- Cordis-aligned status_text / ok / Method read through the type ----------
+
+def test_status_text_mirrors_cordis_statustext(ns):
+    # the reason phrase (Cordis `statusText`) travels on the typed Response and is
+    # read through the outcome, distinct from the numeric status.
+    assert ns["reason_for"]("/hello") == "OK"
+    assert ns["reason_for"]("/gone") == "Not Found"
+    # the unrouted case is the reader's typed-None default, never a body sentinel
+    assert ns["reason_for"]("/nope") == "<unrouted>"
+
+
+def test_is_ok_mirrors_cordis_response_ok(ns):
+    assert ns["ok_for"]("/hello") is True   # 200
+    assert ns["ok_for"]("/gone") is False   # handled 404
+    assert ns["ok_for"]("/nope") is False   # unrouted
+
+
+def test_method_is_a_typed_variant_not_a_free_string(ns):
+    # the request carries a typed `Method`; its canonical wire spelling comes back
+    # through `method_str`, mirroring Cordis's method vocabulary.
+    assert ns["method_for"]("/hello") == "POST"
