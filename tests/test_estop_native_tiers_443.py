@@ -1,25 +1,26 @@
-"""The operator E-Stop across the go and rust placement tiers — roadmap item
-443, issue #122.
+"""The operator E-Stop across the go, rust and java placement tiers — roadmap
+item 443, issue #122.
 
 Item 443 landed the halt on the py reference tier and the conductor half
-(`tests/test_estop_conductor_443.py`). The five non-py tiers kept their
-cooperative teardown and had no E-Stop, so under a placement halt they were
-SIGKILLed and reported residue UNKNOWN per component.
+(`tests/test_estop_conductor_443.py`). The non-py tiers kept their cooperative
+teardown and had no E-Stop, so under a placement halt they were SIGKILLed and
+reported residue UNKNOWN per component.
 
-This suite pins the conductor honoring the go and rust tiers, which now read
+This suite pins the conductor honoring the go, rust and java tiers, which read
 the latch in their placement runners (`backends/go/placement_runner`,
-`backends/rust/placement_runner`): the conductor hands them the latch in the
-spec, gives them the bounded inventory window rather than an immediate kill,
-and merges their inventory into the halt report by name. A tier that still has
-no seam (here `java`, `wasm`) is killed and reported UNKNOWN, exactly as before.
+`backends/rust/placement_runner`, `backends/java/placement`): the conductor
+hands them the latch in the spec, gives them the bounded inventory window
+rather than an immediate kill, and merges their inventory into the halt report
+by name. A tier that still has no runtime seam (here `node`/`ts`, until #769;
+`wasm` is reported statically, a separate population) is killed and reported
+UNKNOWN, exactly as before.
 
-The per-tier runtime behavior (the latch reader, the accept-seam refusal, the
-in-flight registry, the idle watcher) is pinned by the native suites
-(`backends/go/placement_runner/estop/estop_test.go`,
-`backends/rust/placement_runner/src/estop.rs`). This suite is disjoint from
-`tests/test_estop_conductor_443.py` (which #598 edits for the node tier) and
-drives the real `run_placement` with the stubbed-child pattern, so it needs no
-go/rust toolchain.
+The per-tier runtime behavior (the latch reader, the accept/dispatch-seam
+refusal, the in-flight registry, the idle watcher) is pinned by the native
+suites (`backends/go/placement_runner/estop/estop_test.go`,
+`backends/rust/placement_runner/src/estop.rs`,
+`backends/java/test_estop_java.py`). This suite drives the real `run_placement`
+with the stubbed-child pattern, so it needs no go/rust/java toolchain.
 """
 
 from __future__ import annotations
@@ -166,6 +167,14 @@ def _run(tmp_path, monkeypatch, placement: str, *, latch: str | None, live: floa
     monkeypatch.setattr(_placement, "_emit_ts_module", lambda ir, tmp: str(Path(tmp) / "mod.ts"))
     monkeypatch.setattr(_placement, "_build_go", lambda ir, tmp: str(Path(tmp) / "go-bin"))
     monkeypatch.setattr(_placement, "_build_rust", lambda ir, tmp: str(Path(tmp) / "rust-bin"))
+    # java joined the honoring set (item 443, docs/design/443-estop-tier-contract.md);
+    # the java BUILD (a JVM, cordis4j) is not what is under test here, the halt is,
+    # so the toolchain is stubbed to the JDK-17 stub-runner path exactly as go/rust
+    # are. A java child watches the latch and prints the same inventory line.
+    monkeypatch.setattr(_placement, "_find_jdk21", lambda: None, raising=False)
+    monkeypatch.setattr(_placement, "_find_cordis4j_classes", lambda: None, raising=False)
+    monkeypatch.setattr(_placement, "_build_java", lambda ir, tmp: str(Path(tmp) / "java-out"),
+                        raising=False)
     monkeypatch.setattr(_placement.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(_placement, "_interactive", lambda: True)
 
@@ -199,7 +208,7 @@ def _run(tmp_path, monkeypatch, placement: str, *, latch: str | None, live: floa
     return rc, procs, time.monotonic() - started
 
 
-@pytest.mark.parametrize("backend", ["go", "rust"])
+@pytest.mark.parametrize("backend", ["go", "rust", "java"])
 def test_the_latch_is_handed_to_the_native_tier(backend, tmp_path, monkeypatch, capsys):
     """A go/rust process is in `TIERS_WITH_ESTOP`, so the conductor carries the
     latch to it in the spec — a sandboxed child (item 411) need not inherit the
@@ -214,7 +223,7 @@ def test_the_latch_is_handed_to_the_native_tier(backend, tmp_path, monkeypatch, 
     assert procs["edge"].spec.get("estopLatch") == latch
 
 
-@pytest.mark.parametrize("backend", ["go", "rust"])
+@pytest.mark.parametrize("backend", ["go", "rust", "java"])
 def test_a_native_tier_halts_at_its_seams_and_is_not_torn_down(
         backend, tmp_path, monkeypatch, capsys):
     """The headline: a go/rust child honors the latch. It HALTS at its own
@@ -247,28 +256,27 @@ def test_a_native_tier_halts_at_its_seams_and_is_not_torn_down(
 
 def test_a_still_seamless_tier_is_killed_while_the_native_one_halts(
         tmp_path, monkeypatch, capsys):
-    """A mixed placement: a rust process honors the latch, a java process (no
-    seam yet) is killed and reported UNKNOWN. The report must tell them apart."""
+    """A mixed placement: a rust process honors the latch, a node process (the
+    ts tier's runtime seam is still #769, so it is not yet in TIERS_WITH_ESTOP)
+    is killed and reported UNKNOWN. The report must tell them apart. java used to
+    be the seamless example here; it now honors, so the still-seamless role
+    passes to node (wasm cannot be a placement process — it is refused at plan
+    time — so it cannot fill this role)."""
     placement = ("[processes.rustproc]\nbackend = \"rust\"\ncomponents = [\"HotWorker\"]\n\n"
-                 "[processes.javaproc]\nbackend = \"java\"\ncomponents = [\"Edge\"]\n")
+                 "[processes.nodeproc]\nbackend = \"node\"\ncomponents = [\"Edge\"]\n")
     latch = str(tmp_path / "halt.estop")
-    # the java build is stubbed so the placement never needs a JVM
-    monkeypatch.setattr(_placement, "_build_java", lambda ir, tmp: str(Path(tmp) / "java-out"),
-                        raising=False)
-    monkeypatch.setattr(_placement, "_find_jdk21", lambda: None, raising=False)
-    monkeypatch.setattr(_placement, "_find_cordis4j_classes", lambda: None, raising=False)
     rc, procs, _elapsed = _run(tmp_path, monkeypatch, placement, latch=latch)
     err = capsys.readouterr().err
 
     assert rc != 0
-    # the rust child halted itself; the java child was killed for want of a seam
+    # the rust child halted itself; the node child was killed for want of a seam
     assert procs["rustproc"].killed is False or procs["rustproc"].terminated is False
-    assert procs["javaproc"].killed is True
-    assert procs["javaproc"].terminated is False
+    assert procs["nodeproc"].killed is True
+    assert procs["nodeproc"].terminated is False
     assert "HALTED at its own crossing seams" in err
     assert "NO E-Stop seam" in err
-    java_line = [ln for ln in err.splitlines() if "NO E-Stop seam" in ln][0]
-    assert "java" in java_line
+    node_line = [ln for ln in err.splitlines() if "NO E-Stop seam" in ln][0]
+    assert "node" in node_line
     assert "1 of them UNKNOWN" in err
 
 

@@ -2527,8 +2527,14 @@ def _build_java(ir: dict, tmp: Path) -> str:
     (gen / "Components.java").write_text(emit_module.emit(ir), encoding="utf-8")
 
     stubs = [str(p) for p in (_JAVA_DIR / "stubs").rglob("*.java")]
+    # Estop.java carries the operator E-Stop seam (item 443, issue #122): the
+    # latch reader, the in-flight registry and the halt inventory the runner's
+    # accept/dispatch seams and idle watcher consult. Compiled alongside the
+    # runner (it is pure JDK, no cordis4j).
+    estop = str(_JAVA_DIR / "placement" / "Estop.java")
     compile_runner = subprocess.run(
-        ["javac", "--release", "17", "-d", str(out), *stubs, str(_JAVA_DIR / "placement" / "PlacementRunner.java")],
+        ["javac", "--release", "17", "-d", str(out), *stubs, estop,
+         str(_JAVA_DIR / "placement" / "PlacementRunner.java")],
         capture_output=True, text=True,
     )
     if compile_runner.returncode:
@@ -2628,6 +2634,7 @@ def _build_java_real(ir: dict, tmp: Path, jdk_bin: str, cordis_classes: str) -> 
     (gen / "Components.java").write_text(emit_module.emit(ir), encoding="utf-8")
     compile_result = subprocess.run(
         [str(Path(jdk_bin) / "javac"), "--release", "21", "-cp", cordis_classes, "-d", str(out),
+         str(_JAVA_DIR / "placement" / "Estop.java"),
          str(_JAVA_DIR / "placement" / "RealPlacementRunner.java"), str(gen / "Components.java")],
         capture_output=True, text=True,
     )
@@ -2850,10 +2857,11 @@ def _halt_all(children: dict, backends: dict, has_inventory,
 
     Two populations, and the split is the honest part:
 
-      * a child on a tier with NO E-Stop seam (`node`, `rust`, `go`, `java`,
-        `wasm`) is SIGKILLed immediately, because a kill is the only halt that
-        exists for it. It may have dispatched a crossing microseconds before
-        it died and nothing recorded that, so its residue is UNKNOWN;
+      * a child on a tier with NO E-Stop seam (`node`/`ts` until #769, and
+        `wasm`, which is reported statically rather than honoring) is SIGKILLed
+        immediately, because a kill is the only halt that exists for it. It may
+        have dispatched a crossing microseconds before it died and nothing
+        recorded that, so its residue is UNKNOWN;
       * a child on a latch-honoring tier is already refusing new crossings at
         its own seams by the time we get here, so it is given a BOUNDED window
         to print its in-flight inventory, then killed regardless.
