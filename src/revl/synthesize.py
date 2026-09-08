@@ -348,8 +348,8 @@ def _transport_fault_class(label: str, op: str, indent: int = 4) -> str:
         f"{pad}    # item 439 T0: a crossing fault under `on_failure(withdraw)`\n"
         f"{pad}    # WITHDRAWS the provider (the runtime keys on the marker).\n"
         f"{pad}    _revl_transport_fault = True\n"
-        f"{pad}    revl_row = {rq}\n"
-        f"{pad}    revl_crossing = {oq}\n")
+        f"{pad}    _revl_row = {rq}\n"
+        f"{pad}    _revl_crossing = {oq}\n")
 
 
 def _py_body(host: str, key: str, op: str, in_band: bool,

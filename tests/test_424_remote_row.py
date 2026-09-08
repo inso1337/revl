@@ -334,7 +334,7 @@ composition G {
     assert 'raise TransportFault("remote: transport failure") from _exc' in text
     assert "class TransportFault(RuntimeError):" in text
     assert "_revl_transport_fault = True" in text
-    assert 'revl_row = "billing"' in text
+    assert '_revl_row = "billing"' in text
     # There is no third option: swallowing a transport failure has no spelling.
     assert "return None" not in text
 
