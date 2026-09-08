@@ -43,6 +43,7 @@ from ._paths import backends_root
 from .compiler import compile_files
 from .holes import refuse_admission
 from .errors import RevlError
+from . import lifecycle
 from . import diagnostics
 from . import taint
 from . import why_runtime
@@ -1487,6 +1488,16 @@ class _Driver:
                              f"PENDING -> {self.FiberState(fiber.state).name}",
                              load_causes.get(name, why_runtime.cause_boot()))
         await self._flush()
+        # item 439 slice T0 (issue #118): a synthesized remote provider's
+        # crossing that faulted under `on_failure(withdraw)` raised a
+        # `TransportFault`, which unwound the calling fiber into FAILED but did
+        # NOT withdraw the provision. Map it now — withdraw the provider named
+        # by the fault's row, so its consumers deactivate reactively (R2/R3),
+        # exactly as peer death does (docs/design/439-a2a-task-lifecycle.md
+        # decision 4). Additive and fail-safe: it acts ONLY on a fault carrying
+        # the `_revl_transport_fault` marker and only when the named provider is
+        # live, so a run with no such fault is byte-identical.
+        await self._withdraw_transport_faulted()
 
     def _arm_liveness_monitor(self) -> None:
         """Create and start the production silence observer for the generation
@@ -1842,6 +1853,84 @@ class _Driver:
 
         return why_runtime.oracle(self.ir, component, why_runtime.Trace(self._events))
 
+    @staticmethod
+    def _transport_fault(err) -> tuple[str, str] | None:
+        """`(row, crossing)` for a transport fault (item 439 T0), or ``None``.
+
+        Recognised by the duck-typed ``_revl_transport_fault`` marker — never by
+        class identity — so the inline class an emitted `@py` remote body raises
+        (which cannot import the runtime's :class:`TransportFault`) and the
+        runtime's own class are both accepted. A redirect refusal is NOT one (it
+        carries no marker) and never withdraws."""
+        if err is None or not getattr(err, "_revl_transport_fault", False):
+            return None
+        return (getattr(err, "revl_row", "") or "",
+                getattr(err, "revl_crossing", "") or "")
+
+    async def _withdraw_transport_faulted(self) -> None:
+        """Item 439 slice T0 (issue #118): map each synthesized remote
+        provider's transport fault to provider withdrawal.
+
+        A crossing that faulted under `on_failure(withdraw)` unwound its calling
+        fiber into FAILED with a `TransportFault` error; the fault names the row
+        it was declared on, which maps to the synthesized provider component
+        `Remote<Pascal(row)>Provider`. Withdraw that provider (rooted at
+        :func:`why_runtime.cause_transport_fault`) so its OTHER consumers
+        deactivate reactively (R2/R3) and the composition settles to no residue,
+        exactly as peer death does. Fail-safe: acts only on a marker-bearing
+        fault whose named provider is a live component, and each provider is
+        withdrawn at most once."""
+        from .synthesize import _pascal  # noqa: PLC0415 — lazy; frontend stays pure
+        seen: set[str] = set()
+        pending: list[tuple[str, str, str]] = []
+        for _name, fiber in list(self.fibers.items()):
+            if self.FiberState(fiber.state).name != "FAILED":
+                continue
+            info = self._transport_fault(getattr(fiber, "_error", None))
+            if info is None:
+                continue
+            row, crossing = info
+            if not row:
+                continue
+            provider = f"Remote{_pascal(row)}Provider"
+            if provider in seen:
+                continue
+            target = self.fibers.get(provider)
+            if target is None or self.FiberState(target.state).name != "ACTIVE":
+                continue
+            seen.add(provider)
+            pending.append((provider, row, crossing))
+        for provider, row, crossing in pending:
+            await self._perform_transport_fault_withdrawal(provider, row, crossing)
+
+    async def _perform_transport_fault_withdrawal(self, provider: str, row: str,
+                                                  crossing: str) -> None:
+        """Withdraw one synthesized remote provider whose crossing faulted,
+        recording the cascade with a TRANSPORT_FAULT root (item 439 T0). The
+        structural twin of :meth:`_perform_liveness_expiry` — a
+        withdrawal-with-cause whose root is distinct in kind from a fault, an
+        operator trigger, or a silence expiry — so every trace consumer can tell
+        a peer that FAULTED apart from one that went silent or was withdrawn by
+        hand."""
+        fiber = self.fibers.get(provider)
+        if fiber is None or self.FiberState(fiber.state).name != "ACTIVE":
+            return
+        self._log("withdraw", provider,
+                  f"transport fault on row @{row} crossing `{crossing}` — "
+                  f"withdraw the provider, observe the cascade")
+        root_cause = why_runtime.cause_transport_fault(row, crossing)
+        self._observing = {n: self.FiberState(f.state).name
+                           for n, f in self.fibers.items()}
+        self._settled = []
+        cascade_causes = why_runtime.withdrawal_causes(self.ir, provider)
+        await fiber.dispose()
+        await self._flush()
+        self._observing = None
+        for name, frm, to, err in self._settled:
+            cause = self._withdraw_cause(name, provider, to, err,
+                                         cascade_causes, root_cause=root_cause)
+            self._record(why_runtime.WITHDRAW, name, f"{frm} -> {to}", cause)
+
     def reconcile_liveness_from_world(self, *, latch_path: str | None = None,
                                       trace_path: str | None = None) -> dict:
         """Rebuild the expected liveness of this composition's declared-ceiling
@@ -2175,6 +2264,16 @@ class _Driver:
 # --------------------------------------------------------------------------
 
 
+def _fail(exc_text: str, stage: str, code: int = 1) -> int:
+    """Print a `revl run` failure naming the lifecycle stage it hit (item 461),
+    then return the exit code. The diagnostic is printed unchanged first — a
+    `RevlError` keeps its `file.rvl:line` on the first line — and the stage is
+    appended underneath so the source location and the failing stage are both
+    on the record."""
+    print(f"error: {lifecycle.render(exc_text, stage)}", file=sys.stderr)
+    return code
+
+
 def run_command(args) -> int:
     if getattr(args, "placement", None):
         # `--placement` splits the composition across processes, each with its
@@ -2204,17 +2303,21 @@ def run_command(args) -> int:
 
     try:
         ir = compile_files(args.files)
+    except RevlError as exc:
+        return _fail(str(exc), lifecycle.COMPILE)
+    try:
         # booting is admission: a draft with open obligations may not become a
         # running composition, however it was compiled (docs/holes.md)
         refuse_admission(ir)
+    except RevlError as exc:
+        return _fail(str(exc), lifecycle.ADMISSION)
+    try:
         config = _load_config(getattr(args, "config", None))
         env = _load_env(getattr(args, "env", None))
     except RevlError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        return _fail(str(exc), lifecycle.CONFIG)
     except OSError as exc:
-        print(f"error: cannot read config: {exc}", file=sys.stderr)
-        return 1
+        return _fail(f"cannot read config: {exc}", lifecycle.CONFIG)
 
     # item 350: the environment contract is checked BEFORE the plan is printed
     # and before a runtime is imported — an undeclared key, a missing required
@@ -2223,8 +2326,7 @@ def run_command(args) -> int:
     # same reason the required-config preflight lives here).
     problem = _env_contract_problem(ir, env, config)
     if problem is not None:
-        print(f"error: {problem}", file=sys.stderr)
-        return 1
+        return _fail(problem, lifecycle.CONFIG)
     config = _merge_env(ir, env, config)
 
     if getattr(args, "plan", False):
@@ -2237,8 +2339,7 @@ def run_command(args) -> int:
 
     problem = _required_config_problem(ir, config)
     if problem is not None:
-        print(f"error: {problem}", file=sys.stderr)
-        return 1
+        return _fail(problem, lifecycle.CONFIG)
 
     if backend in ("rust", "java", "ts", "wasm", "go"):
         # each non-py tier boots as a separate process over the bridge seam, not
@@ -2271,8 +2372,7 @@ def run_command(args) -> int:
             try:
                 policy = load_policy(args.policy)
             except (RevlError, OSError) as exc:
-                print(f"error: cannot load policy: {exc}", file=sys.stderr)
-                return 1
+                return _fail(f"cannot load policy: {exc}", lifecycle.CONFIG)
         from .run_wasm import run_wasm  # noqa: PLC0415 — lazy: no wasmtime needed to compile/plan
         return run_wasm(ir, config, args.files, once=once,
                         interactive=interactive, policy=policy)
@@ -2294,13 +2394,13 @@ def run_command(args) -> int:
         # closed by `drop_cwd_entry` but not removed (the `-P` closes the
         # rest), and `revl` (a console script) is window-free by design. The
         # next two lines point at both.
-        print(f"error: the cordis-py runtime is not installed ({exc.name!r} missing).\n"
-              f"       set it up:  sh {backend_dir / 'setup.sh'}\n"
-              f"       then either:\n"
-              f"         revl run ...                                       # the documented happy path\n"
-              f"         .venv/bin/python -P -m revl run ...                # absolute-interpreter fallback (the `-P` closes the CWD-shadowing window)",
-              file=sys.stderr)
-        return 3
+        return _fail(
+            f"the cordis-py runtime is not installed ({exc.name!r} missing).\n"
+            f"       set it up:  sh {backend_dir / 'setup.sh'}\n"
+            f"       then either:\n"
+            f"         revl run ...                                       # the documented happy path\n"
+            f"         .venv/bin/python -P -m revl run ...                # absolute-interpreter fallback (the `-P` closes the CWD-shadowing window)",
+            lifecycle.BOOT, code=3)
     # The backend directory is a trusted loader path, not an import capability
     # for generated user bodies. Keep the already-loaded runtime modules alive,
     # but remove the ambient path before any generated module is executed.
@@ -2328,8 +2428,8 @@ def run_command(args) -> int:
     except ActivationError as exc:
         # item 372: a component's deferred activation did not complete — report
         # it loudly and named, rather than dropping into a REPL over a
-        # composition whose "loaded" would be a lie.
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        # composition whose "loaded" would be a lie. item 461: activation is the
+        # boot stage, so the failure names it.
+        return _fail(str(exc), lifecycle.BOOT)
     except KeyboardInterrupt:  # pragma: no cover — signal handler covers unix
         return 130

@@ -76,6 +76,8 @@ from .deploy import (ADMISSION_PEER_BOUND, ADMISSION_SEALED,
 from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
+from .resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS, resource_base
+from .typecheck import FN_HEAD, parse_type
 from .estop import (HALTED_LINE, LATCH_ENV, TIERS_WITH_ESTOP, latch_path,
                     read_latch)
 from . import sandbox_runtime as _sb
@@ -1115,6 +1117,133 @@ def sandbox_capability_gate(ir: dict, processes: dict, sandboxes: dict,
                     f"set and an opaque reach has no representable import. Use the "
                     f"`container` rung, whose runtime envelope binds an opaque body "
                     f"regardless.")
+    return None
+
+
+def _crossing_type_fault(tname: str | None, types: dict, resources: set,
+                         path: str, seen: frozenset) -> tuple[str, str, str] | None:
+    """The first structural fault in a crossing type, walking every record field
+    and variant-case payload transitively (item 411 T4). Returns
+    ``(path, offending_type, kind)`` where `kind` is:
+
+    * ``"resource"`` — the walk reached an `extern acquire` handle (a live
+      resource whose lifetime is tied to the providing activation). Such a value
+      crosses a seam only by PROXY, and a proxy cannot follow the seam across an
+      isolation boundary the way it does a same-host UDS: the confined peer holds
+      no reference the host process could stand behind. `path` names where the
+      handle sits (``"Conn.sock"`` for a `record Conn { sock: Sock }`), or the
+      type itself when it is the top-level crossing type.
+    * ``"unresolved"`` — a nominal type the walk cannot resolve to a primitive, a
+      builtin carrier, a declared record/variant, or a known handle. Type
+      aliases are inlined before this layer, so a name that is none of those is a
+      genuine gap, and a value the plan cannot prove copyable must not be assumed
+      to cross a boundary: fail closed.
+
+    ``None`` when the type crosses cleanly by value-copy. A function type is not
+    this check's concern (the seam already refuses a non-async contract). The
+    `seen` set breaks a recursive type (`type Tree = { kids: List[Tree] }`)."""
+    head, args = parse_type(tname)
+    if head is None or head == FN_HEAD:
+        return None
+    if head in resources:
+        return (path or head, head, "resource")
+    if head in PRIMITIVE_TYPE_NAMES:
+        return None
+    if head in _STRUCTURAL_HEADS:
+        for arg in args:
+            fault = _crossing_type_fault(arg, types, resources, path, seen)
+            if fault:
+                return fault
+        return None
+    spec = types.get(head) if isinstance(types, dict) else None
+    if not isinstance(spec, dict):
+        return (path or head, head, "unresolved")
+    if head in seen:  # a self-referential type: it resolves, so it is clean here
+        return None
+    seen = seen | {head}
+    if spec.get("kind") == "record":
+        for field, ftype in (spec.get("fields") or {}).items():
+            sub = f"{path}.{field}" if path else f"{head}.{field}"
+            fault = _crossing_type_fault(ftype, types, resources, sub, seen)
+            if fault:
+                return fault
+    elif spec.get("kind") == "variant":
+        for case in spec.get("cases") or []:
+            payload = case.get("payload")
+            if not payload:
+                continue
+            sub = f"{path}.{case.get('name')}" if path else f"{head}.{case.get('name')}"
+            fault = _crossing_type_fault(payload, types, resources, sub, seen)
+            if fault:
+                return fault
+    return None
+
+
+def sandbox_crossing_check(ir: dict, sandboxes: dict, processes: dict,
+                           requires: dict, provides: dict, owner: dict,
+                           backends: dict, remote_specs: dict | None = None,
+                           default_deadline=DEFAULT_SEAM_DEADLINE) -> str | None:
+    """The item-411 T4 structural crossing-type walk. Returns a diagnostic for
+    the first refusal, or None. Runs next to `sandbox_capability_gate`, before
+    anything spawns; a no-op when no process is sandboxed (`sandboxes == {}`).
+
+    The 363 boundary check (`distribute.cross_tier_boundary_check`) already
+    refuses a resource handle NAMED at the top of a seam signature. This is the
+    stronger rule the isolation boundary needs: for a seam that touches a
+    SANDBOXED process, walk the crossing type STRUCTURALLY — into every record
+    field and variant arm, transitively — and refuse on any embedded handle
+    (naming the field path, identically to the top-level case) or on a type it
+    cannot resolve. A resource can no more cross an isolation boundary two
+    records deep than at the surface, and the confined peer cannot serve a proxy
+    back the way a co-located process can. The same seam on an UNSANDBOXED
+    placement is untouched (the 363 verdict, whatever it is, stands)."""
+    if not sandboxes:
+        return None
+    services = (ir or {}).get("services") or {}
+    types = (ir or {}).get("types") or {}
+    resources = resource_base((ir or {}).get("externs"))
+    edges = _unique_sandbox_seams(sandboxes, processes, requires, provides, owner,
+                                  backends, remote_specs or {}, default_deadline)
+    for edge in edges:
+        key = edge["key"]
+        consumer, provider = edge["consumer"], edge["provider"]
+        iface = (requires.get(consumer, {}) or {}).get(key) \
+            or (provides.get(provider, {}) or {}).get(key)
+        svc = services.get(iface) if isinstance(services, dict) else None
+        if not isinstance(svc, dict):
+            continue
+        confined = provider if provider in sandboxes else consumer
+        for method, spec in sorted((svc.get("methods") or {}).items()):
+            crossing = [(p.get("name"), p.get("type"))
+                        for p in spec.get("params") or []]
+            if spec.get("returns"):
+                crossing.append(("(return)", spec["returns"]))
+            for slot, tname in crossing:
+                fault = _crossing_type_fault(tname, types, resources, "", frozenset())
+                if not fault:
+                    continue
+                fpath, offending, kind = fault
+                where = (f"{iface}.{method} {slot}" if slot != "(return)"
+                         else f"{iface}.{method} return")
+                if kind == "resource":
+                    depth = (f" (at {fpath})" if fpath != offending else "")
+                    return (
+                        f"seam {key!r} crosses the sandbox boundary of process "
+                        f"{confined!r} carrying a resource handle: {where} is "
+                        f"{tname!r}, which embeds the handle type {offending!r}"
+                        f"{depth}. A handle's lifetime is bound to the providing "
+                        f"activation, so it crosses a seam by proxy, and a proxy "
+                        f"cannot follow the seam across an isolation boundary. "
+                        f"Serve only value-typed operations across a sandbox seam, "
+                        f"or move {confined!r} out of the sandbox.")
+                return (
+                    f"seam {key!r} crosses the sandbox boundary of process "
+                    f"{confined!r} carrying an unresolvable type: {where} is "
+                    f"{tname!r}, whose component {offending!r} (at "
+                    f"{fpath or offending}) resolves to no primitive, builtin "
+                    f"carrier, declared record/variant, or known handle. The plan "
+                    f"cannot prove it copies cleanly across the boundary, so it is "
+                    f"refused rather than assumed safe.")
     return None
 
 
@@ -2527,8 +2656,14 @@ def _build_java(ir: dict, tmp: Path) -> str:
     (gen / "Components.java").write_text(emit_module.emit(ir), encoding="utf-8")
 
     stubs = [str(p) for p in (_JAVA_DIR / "stubs").rglob("*.java")]
+    # Estop.java carries the operator E-Stop seam (item 443, issue #122): the
+    # latch reader, the in-flight registry and the halt inventory the runner's
+    # accept/dispatch seams and idle watcher consult. Compiled alongside the
+    # runner (it is pure JDK, no cordis4j).
+    estop = str(_JAVA_DIR / "placement" / "Estop.java")
     compile_runner = subprocess.run(
-        ["javac", "--release", "17", "-d", str(out), *stubs, str(_JAVA_DIR / "placement" / "PlacementRunner.java")],
+        ["javac", "--release", "17", "-d", str(out), *stubs, estop,
+         str(_JAVA_DIR / "placement" / "PlacementRunner.java")],
         capture_output=True, text=True,
     )
     if compile_runner.returncode:
@@ -2628,6 +2763,7 @@ def _build_java_real(ir: dict, tmp: Path, jdk_bin: str, cordis_classes: str) -> 
     (gen / "Components.java").write_text(emit_module.emit(ir), encoding="utf-8")
     compile_result = subprocess.run(
         [str(Path(jdk_bin) / "javac"), "--release", "21", "-cp", cordis_classes, "-d", str(out),
+         str(_JAVA_DIR / "placement" / "Estop.java"),
          str(_JAVA_DIR / "placement" / "RealPlacementRunner.java"), str(gen / "Components.java")],
         capture_output=True, text=True,
     )
@@ -2850,10 +2986,11 @@ def _halt_all(children: dict, backends: dict, has_inventory,
 
     Two populations, and the split is the honest part:
 
-      * a child on a tier with NO E-Stop seam (`node`, `rust`, `go`, `java`,
-        `wasm`) is SIGKILLed immediately, because a kill is the only halt that
-        exists for it. It may have dispatched a crossing microseconds before
-        it died and nothing recorded that, so its residue is UNKNOWN;
+      * a child on a tier with NO E-Stop seam (`node`/`ts` until #769, and
+        `wasm`, which is reported statically rather than honoring) is SIGKILLed
+        immediately, because a kill is the only halt that exists for it. It may
+        have dispatched a crossing microseconds before it died and nothing
+        recorded that, so its residue is UNKNOWN;
       * a child on a latch-honoring tier is already refusing new crossings at
         its own seams by the time we get here, so it is given a BOUNDED window
         to print its in-flight inventory, then killed regardless.
@@ -3813,6 +3950,21 @@ def run_placement(files, placement_path: str, once: bool = False,
     # seams, which the earlier cross-tier-only check let a handle cross ungated.
     # The sync (address-space-bound) REPORT half stays cross-tier only: a
     # same-tier value-typed seam is still byte-identical to today.
+    # --- sandbox crossing-type walk (item 411 T4): for a seam that crosses a
+    # SANDBOXED process's isolation boundary, walk the crossing type structurally
+    # (every record field and variant arm, transitively) and refuse an embedded
+    # resource handle — naming the field path — or an unresolvable type. Runs
+    # BEFORE the tier-agnostic 363 check so a sandboxed seam gets this stronger,
+    # path-naming, fail-closed verdict (a handle two records deep can no more
+    # cross an isolation boundary than at the surface, and this rule is
+    # independent of where the 363 fix lands). A no-op with no sandbox; an
+    # UNSANDBOXED seam is untouched and keeps the 363 verdict below.
+    crossing_problem = sandbox_crossing_check(
+        ir, sandboxes, processes, requires, provides, owner, backends,
+        remote_specs, default_deadline)
+    if crossing_problem:
+        return abort(crossing_problem)
+
     boundary_problem, boundary_report = cross_tier_boundary_check(
         ir, requires, provides, owner, backends, services)
     if boundary_problem:

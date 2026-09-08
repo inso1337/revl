@@ -42,6 +42,9 @@
 //        (`is_dir`, `lexists`, `resolve_within`) and `plan_op_name` on
 //        `stdlib/shell.rvl`. One increment per public-API change, so two
 //        un-stamped additions move the counter by two.
+//   4 -> adds `stdlib/a2a.rvl` (roadmap item 439, issue #118): the pure-revl
+//        A2A Task-lifecycle vocabulary — `TaskRef`, `TaskState`, `TaskEvent`,
+//        `is_terminal` and `task_state_from_wire`.
 pub fn stdlib_version() -> Str {
-  return "3"
+  return "4"
 }

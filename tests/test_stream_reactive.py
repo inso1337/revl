@@ -846,10 +846,11 @@ def test_blocking_tiers_honour_a_declared_buffer(tier):
 # mirror of the py reference (design §4.6), NOT a blocking erasure like go/rust.
 # It lowers the core protocol (subscribe / next / close + the cancellation-first
 # race), the Slice 2 derived-combinator chain + backpressure policies, the
-# Slice 3 `merge` fan-in, and the Slice 4 plain `every … in` iteration form. The
-# Slice 5 `on … as` typed-event handler and the §4.5 durable `replay` are still
-# the py reference tier's — the first is refused by name here, the second is a
-# frontend refusal (a provider must declare it) that never reaches the emitter.
+# Slice 3 `merge` fan-in, the Slice 4 plain `every … in` iteration form, and the
+# Slice 5 `on … as` typed-event handler (its schema-and-dedup contract gate, item
+# 130 (roadmap #81)). The §4.5 durable `replay` is still the py reference tier's
+# — a frontend refusal (a provider must declare it) that never reaches the
+# emitter.
 # ===========================================================================
 
 def _ts():
@@ -1793,17 +1794,37 @@ def test_the_unlowered_tiers_still_refuse_a_handler_program(tier):
     assert "suspends a fiber" in str(excinfo.value)
 
 
-def test_ts_refuses_the_handler_program_by_name_not_as_a_whole_surface():
-    """item 130 (roadmap #81): the ts tier lowers subscribe / source / merge /
-    the plain `every … in`, but NOT the Slice 5 `on … as` typed-event handler:
-    its schema-and-dedup contract gate is the py reference tier's. So an event
-    program is refused by NAME (like go and rust), never with the whole-surface
-    `suspends a fiber` message — and never half-wired to a `Stream.contract`
-    this tier's runtime does not carry."""
-    emit = _tier_emit("typescript")
+def test_ts_lowers_the_typed_event_handler_with_an_additive_contract_gate():
+    """item 130 (roadmap #81): the ts tier graduated Slice 5 — it lowers the
+    `on … as` typed-event handler, no longer refusing it. The handler is the
+    SAME `while (true)` loop the plain `every … in` emits (the specialization,
+    §6) plus one gate: the contract is built ONCE above the loop, and the
+    `admit` gate sits AFTER the terminal test and its `continue` collapses a
+    duplicate — so the iteration boundary the guarantee rests on does not move.
+    The runtime proof (a conforming item reaches the body, a duplicate is
+    collapsed, a schema violation faults and closes) is backends/typescript/
+    test_stream_ts.py; this pins the emitted shape."""
+    ts = _tier_emit("typescript").emit(compile_source(_EVENT, "s.rvl"))
+    # the contract is built once, above the loop, from the derived schema
+    assert 'host.Stream.contract("OrderCreated", ' in ts
+    assert '"order_id", 64)' in ts, "the derived key and default window"
+    # exactly one loop (one node, one lowering), with the gate after the terminal
+    assert ts.count("while (true) {") == 1
+    gate = ts.index(".admit(")
+    closed = ts.index("host.Stream.isClosed(")
+    assert closed < gate, "the gate sits after the `Closed` terminal test"
+    assert "if (!_revlEvent1.admit(e, " in ts and ")) continue" in ts
+
+
+@pytest.mark.parametrize("tier", ["go", "rust"])
+def test_the_blocking_tiers_still_refuse_the_typed_event_handler(tier):
+    """go and rust lower the plain `every … in` (Slice 4) but not the `on … as`
+    handler (Slice 5): its schema-and-dedup contract gate is still the py (and
+    now ts) tiers'. The refusal must name the event form, not fall through to an
+    `unsupported component step` or silently drop the contract."""
+    emit = _tier_emit(tier)
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_EVENT, "s.rvl"))
     msg = str(excinfo.value)
-    assert "suspends a fiber" not in msg
-    assert "unsupported" not in msg
+    assert "unsupported component step" not in msg
     assert "`on … as` typed-event handler" in msg and "backend py" in msg

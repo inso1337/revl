@@ -172,6 +172,42 @@ per row is the confinement slice, and it waits on the trust decision recorded in
 roadmap 425 F1. Until then the clause and its subset check are enforced and the
 profile is not, which is exactly the split roadmap item 424 slice A1 states.
 
+## `place`: which process a row runs on
+
+`place` says which process (and optionally which backend) a row's provider runs
+on — the data `placement.py` reads today from a `[processes]`/`[tiers]` TOML
+table, written as a checked statement about a row instead. It names an existing
+row rather than declaring one, so it sits beside the rows:
+
+```revl
+composition Demo {
+  use "services.rvl"
+  row @db from "db.rvl" provides db
+    config { url: "postgres://primary:5432/app" }
+  place @db on process "provider" backend rust
+}
+```
+
+`backend` is optional and defaults to the composition's own. An address that
+resolves to no row is a refusal, never a no-op (the same rule every address
+follows), and an unknown backend is a refusal naming the value — placement is
+structure and fails closed.
+
+**Authority: only the base composition and the operator's site layer may
+`place`.** A stack layer that writes `place` is refused at parse, and the
+invocation overlay may not set a `process` or `backend` at all. The reason is
+item 337's, not an ergonomic one: moving a row across a process or backend
+boundary moves it into a different admission domain, so a third party that could
+`place` would choose which tier judges its own row — 337's admission-theater one
+tier up, where a sender controlling both gate inputs picks the question
+([composition layers](composition-layers.md), item 424 residual R3). The site
+layer's placement lands over any base placement, the operator's final say.
+
+Placement is recorded on the row as an ADMISSION fact (`place` in the IR and the
+manifest), beside the wiring and not read by the wiring projection, exactly as
+`remote` and `seam` are. Wiring the recorded fact to `placement.py`'s runtime is
+a separate, larger concern the row table is now the seam for.
+
 ## `remote`: a row whose provider is synthesized
 
 A `remote` row places a provider that runs somewhere else. It names no file,
@@ -578,9 +614,11 @@ without lowering the body; the operator-facing bound is naturally written on the
 field the operator configures. This is the same kind of surface deviation S2
 already recorded (`configure … with { … }`, `layer NAME for …`).
 
-`place` and `variant` are still not grammar, and writing one is a parse error
-rather than a silently ignored clause — a clause that parses and does nothing is
-worse than one that refuses. Each arrives with the slice that gives it meaning.
+`place` is now grammar — a statement about a row, documented under
+[`place`](#place-which-process-a-row-runs-on) above. `variant` is still not
+grammar, and writing one is a parse error rather than a silently ignored clause
+— a clause that parses and does nothing is worse than one that refuses. It
+arrives with the slice that gives it meaning.
 
 Activation is unchanged and stays whole-generation for anything but a pure
 addition. That is a property of G7, not of effort: a withdrawn component's fiber

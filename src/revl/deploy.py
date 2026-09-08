@@ -1516,9 +1516,9 @@ def serve_admit_request(request_wire: Mapping, *,
 class InProcessTransport:
     """The orchestration channel of §1.2, stubbed to run the runner IN THIS
     PROCESS — no second machine, no ssh, no subprocess. It stands in for the
-    real SSH/scp transport so the whole PREPARE handshake is buildable and
-    testable on one host; the live cross-machine transport is a following slice
-    that implements the same `send` contract.
+    real SSH/scp transport so the whole PREPARE→COMMIT handshake is buildable
+    and testable on one host; the live cross-machine transport is a following
+    slice that implements the same `send` contract.
 
     `send` carries the request through its canonical wire form and carries the
     reply back the same way (`to_wire` -> json text -> `from_wire`), so the stub
@@ -1527,6 +1527,14 @@ class InProcessTransport:
     rather than on the wire between two machines. It holds the runner-side trust
     configuration (the host's keys and evidence floor), exactly the state a real
     far host owns and the conductor never sees.
+
+    One channel carries BOTH phases, exactly as a real orchestration channel
+    does: `send` dispatches on the request `kind`, routing an admit-request to
+    :func:`serve_admit_request` (PREPARE) and a commit-request to
+    :func:`serve_commit_request` (COMMIT). The COMMIT leg reuses the host's own
+    signing key and runtime versions but NOT its trust store — the chain was
+    verified at PREPARE, and COMMIT is a fresh load-time measurement, not a
+    second chain check (design R2).
     """
 
     def __init__(self, *, key_paths: Sequence[Path | str] = (),
@@ -1544,13 +1552,23 @@ class InProcessTransport:
     def send(self, request_wire: Mapping, *, now=None) -> dict:
         """Deliver one request to the runner and return its response wire dict.
         The json round trips are what make this a faithful stub and not just a
-        function call: they are the bytes a real channel would carry."""
+        function call: they are the bytes a real channel would carry.
+
+        A commit-request is routed to the COMMIT runner; everything else goes to
+        the PREPARE runner (which itself fail-closes on anything it cannot parse,
+        so an unknown kind still refuses rather than being silently mis-served)."""
         on_far_side = json.loads(json.dumps(request_wire))
-        response_wire = serve_admit_request(
-            on_far_side, key_paths=self._key_paths, host_key=self._host_key,
-            require_gauntlet=self._require_gauntlet,
-            require_conformance=self._require_conformance,
-            runtime_versions=self._runtime_versions, now=now)
+        kind = on_far_side.get("kind") if isinstance(on_far_side, Mapping) else None
+        if kind == COMMIT_REQUEST_KIND:
+            response_wire = serve_commit_request(
+                on_far_side, host_key=self._host_key,
+                runtime_versions=self._runtime_versions, now=now)
+        else:
+            response_wire = serve_admit_request(
+                on_far_side, key_paths=self._key_paths, host_key=self._host_key,
+                require_gauntlet=self._require_gauntlet,
+                require_conformance=self._require_conformance,
+                runtime_versions=self._runtime_versions, now=now)
         return json.loads(json.dumps(response_wire))
 
 
@@ -1582,6 +1600,237 @@ def request_admission(transport, request: AdmitRequest, *, now=None) -> dict:
             f"{response.challenge[:12]}…): a reply that is not bound to this "
             "request is refused rather than mistaken for an answer to it")
     return response.receipt
+
+
+# ---------------------------------------------------------------------------
+# §1.3 step 7 / R2 over the runner protocol. the COMMIT-phase handshake
+# ---------------------------------------------------------------------------
+#
+# PREPARE (above) carries :func:`admit` over the orchestration channel; the load-
+# measured COMMIT receipt (:func:`commit_receipt`) and the conductor's hard
+# comparison of it (:func:`compare_commit_receipt`) were landed as LOCAL
+# primitives, usable only when the conductor and the host shared a process. The
+# design's Slice 2 names the remaining wiring precisely: *carrying it over the
+# runner protocol*. That is this handshake — the COMMIT twin of §1.3 steps 3–5.
+#
+# The message shapes mirror the admit ones (dict in, dict out, a challenge nonce
+# binding the reply to the request), and the two ends reuse the landed
+# primitives unchanged: the runner side (:func:`serve_commit_request`) is
+# :func:`commit_receipt` behind a fail-closed wire parse, and the conductor side
+# (:func:`request_commit`) sends, binds the challenge, and then runs the landed
+# :func:`compare_commit_receipt` gate. That last step is the whole point of the
+# COMMIT twin existing at all: PREPARE returns a verdict the caller may or may
+# not check, but COMMIT's comparison is design R2's HARD gate — a host that
+# measured different bytes than it was admitted to load is caught HERE, at
+# COMMIT, not merely at PREPARE's earlier verify. So :func:`request_commit`
+# performs the comparison itself and answers `(ok, reason, receipt)`; `ok is
+# False` REFUSES the deploy.
+
+#: The two message kinds of the COMMIT-phase handshake. Domain-distinct from the
+#: admit kinds and from :data:`RECEIPT_KIND`, so a COMMIT request can never be
+#: read as an admit request (which would run a chain verify instead of a
+#: measurement) or as a receipt; `from_wire` refuses any other value.
+COMMIT_REQUEST_KIND = "revl.deploy.commit-request"
+COMMIT_RESPONSE_KIND = "revl.deploy.commit-response"
+
+#: Protocol version of the COMMIT envelope, independent of the admit one so
+#: either phase's shape can move without silently changing the other's meaning.
+COMMIT_PROTOCOL_VERSION = "1.0"
+
+
+@dataclass(frozen=True)
+class CommitRequest:
+    """The conductor's COMMIT request to a remote deploy-admit runner (§1.3 step
+    7). It names the STAGED bundle path on the runner's own filesystem and the
+    `backend` the host will load, and carries a `challenge` nonce the runner
+    echoes so the conductor can bind the reply to THIS request.
+
+    It carries NO admitted hash: an echo of what PREPARE bound would defeat the
+    entire purpose of the load-time measurement (design R2), so the request asks
+    the host to MEASURE, never tells it what it should have measured. The
+    conductor holds the admission receipt and does the comparison itself
+    (:func:`request_commit`)."""
+
+    bundle: str
+    backend: str
+    challenge: str
+
+    def to_wire(self) -> dict:
+        return {"kind": COMMIT_REQUEST_KIND,
+                "version": COMMIT_PROTOCOL_VERSION,
+                "bundle": self.bundle,
+                "backend": self.backend,
+                "challenge": self.challenge}
+
+    @classmethod
+    def from_wire(cls, wire: Mapping) -> "CommitRequest":
+        """Parse a COMMIT request off the wire, fail-closed — same discipline as
+        :meth:`AdmitRequest.from_wire`."""
+        if not isinstance(wire, Mapping):
+            raise ValueError("commit request is not a mapping")
+        if wire.get("kind") != COMMIT_REQUEST_KIND:
+            raise ValueError(
+                f"not a {COMMIT_REQUEST_KIND} record: kind is "
+                f"{wire.get('kind')!r}")
+        if wire.get("version") != COMMIT_PROTOCOL_VERSION:
+            raise ValueError(
+                f"commit request version is {wire.get('version')!r}, expected "
+                f"{COMMIT_PROTOCOL_VERSION!r}")
+        bundle = wire.get("bundle")
+        backend = wire.get("backend")
+        challenge = wire.get("challenge")
+        for name, value in (("bundle", bundle), ("backend", backend),
+                            ("challenge", challenge)):
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"commit request {name!r} must be a non-empty string, got "
+                    f"{value!r}")
+        return cls(bundle=bundle, backend=backend, challenge=challenge)
+
+
+@dataclass(frozen=True)
+class CommitResponse:
+    """The runner's COMMIT reply: the signed `receipt` (a COMMITTED load-time
+    measurement from :func:`commit_receipt`, or a REFUSE when the host could not
+    measure the bytes it was to load) plus the `challenge` echoed back."""
+
+    receipt: dict
+    challenge: str
+
+    def to_wire(self) -> dict:
+        return {"kind": COMMIT_RESPONSE_KIND,
+                "version": COMMIT_PROTOCOL_VERSION,
+                "challenge": self.challenge,
+                "receipt": dict(self.receipt)}
+
+    @classmethod
+    def from_wire(cls, wire: Mapping) -> "CommitResponse":
+        """Parse a COMMIT response off the wire, fail-closed — same discipline as
+        :meth:`AdmitResponse.from_wire`."""
+        if not isinstance(wire, Mapping):
+            raise ValueError("commit response is not a mapping")
+        if wire.get("kind") != COMMIT_RESPONSE_KIND:
+            raise ValueError(
+                f"not a {COMMIT_RESPONSE_KIND} record: kind is "
+                f"{wire.get('kind')!r}")
+        if wire.get("version") != COMMIT_PROTOCOL_VERSION:
+            raise ValueError(
+                f"commit response version is {wire.get('version')!r}, expected "
+                f"{COMMIT_PROTOCOL_VERSION!r}")
+        receipt = wire.get("receipt")
+        challenge = wire.get("challenge")
+        if not isinstance(receipt, Mapping):
+            raise ValueError("commit response carries no receipt mapping")
+        if not isinstance(challenge, str) or not challenge:
+            raise ValueError("commit response carries no challenge")
+        return cls(receipt=dict(receipt), challenge=challenge)
+
+
+def serve_commit_request(request_wire: Mapping, *,
+                         host_key: Optional[bytes] = None,
+                         runtime_versions: Optional[Mapping[str, str]] = None,
+                         now=None) -> dict:
+    """Runner side of §1.3 step 7: read one COMMIT request off the orchestration
+    channel and answer with a signed load-time measurement of the exact bytes it
+    is about to hand the runtime (:func:`commit_receipt`). Returns a response
+    WIRE dict; the transport moves it, the conductor reads it with
+    :meth:`CommitResponse.from_wire`.
+
+    Unlike PREPARE, COMMIT runs NO chain verify and needs no trust store: the
+    chain was verified at admission, and this is a fresh measurement, not a
+    second check (design R2). What it does need is the host's OWN signing key —
+    the receipt is a claim the host signs so a later audit can ATTRIBUTE a lie
+    about what it loaded (R2/R5). With no `host_key` there is no key to make that
+    claim attributable, so it REFUSES rather than returning an unsigned "COMMIT".
+
+    Fails CLOSED throughout:
+
+      * a request the runner cannot parse is a :data:`LINK_TRANSPORT` REFUSE — a
+        runner that could not read what it was asked to commit must not commit;
+      * a bundle whose staged bytes cannot be measured (a missing or un-digestible
+        artifact, an unreadable IR) is a local COMMIT failure, reported as a
+        :data:`LINK_ARTIFACT` REFUSE — "a host that cannot measure what it loads
+        has not committed, and must report a local COMMIT failure, never a
+        COMMITTED receipt" (:func:`commit_receipt`).
+    """
+    try:
+        request = CommitRequest.from_wire(request_wire)
+    except ValueError as error:
+        challenge = ""
+        if isinstance(request_wire, Mapping):
+            got = request_wire.get("challenge")
+            challenge = got if isinstance(got, str) else ""
+        receipt = _refusal(LINK_TRANSPORT,
+                           f"the deploy commit request could not be parsed, so "
+                           f"nothing was committed: {error}")
+        return CommitResponse(receipt=receipt, challenge=challenge).to_wire()
+
+    if host_key is None:
+        receipt = _refusal(
+            LINK_TRANSPORT,
+            "the runner holds no signing key, so it cannot mint an attributable "
+            "load-time measurement; a COMMIT the conductor could not pin to the "
+            "host's key is refused rather than returned unsigned")
+        return CommitResponse(receipt=receipt,
+                              challenge=request.challenge).to_wire()
+
+    try:
+        receipt = commit_receipt(request.bundle, backend=request.backend,
+                                 host_key=host_key,
+                                 runtime_versions=runtime_versions, now=now)
+    except RevlError as error:
+        receipt = _refusal(
+            LINK_ARTIFACT,
+            f"the host could not measure the bytes it was to load at COMMIT, so "
+            f"it has NOT committed: {error}")
+    return CommitResponse(receipt=receipt,
+                          challenge=request.challenge).to_wire()
+
+
+def request_commit(transport, request: CommitRequest, *,
+                   admission_receipt: Mapping, host_key: bytes,
+                   now=None) -> tuple[bool, str, dict]:
+    """Conductor side of §1.3 step 7: send a COMMIT `request` over `transport`,
+    receive the host's signed load-time measurement, CHECK that it answers THIS
+    request (the `challenge` must round-trip), and run design R2's HARD gate over
+    it. Answers `(ok, reason, receipt)`; `ok is False` REFUSES the deploy.
+
+    This is the COMMIT twin of :func:`request_admission`, but with the
+    comparison folded in on purpose. PREPARE returns a verdict the caller checks
+    at its discretion; COMMIT's comparison is not discretionary — it is the gate
+    that turns "the host loaded different bytes than it was admitted to load"
+    from undetectable into DETECTABLE (design R2 / §5-A2). So this function does
+    not merely fetch the COMMIT receipt: it compares it, with
+    :func:`compare_commit_receipt`, against the `admission_receipt` the host
+    signed in PREPARE, using the host's own key.
+
+    Fails CLOSED before ever reaching the gate: a reply that cannot be parsed as
+    a :class:`CommitResponse`, or one whose challenge does not echo, is a
+    :data:`LINK_TRANSPORT` refusal (`ok is False`) — a measurement the conductor
+    cannot tie to the request it sent is not one it may commit on. The `receipt`
+    element of the triple is then the transport refusal, so a caller always has a
+    structured record of why the COMMIT did not stand.
+    """
+    try:
+        response = CommitResponse.from_wire(transport.send(request.to_wire(),
+                                                           now=now))
+    except ValueError as error:
+        refusal = _refusal(LINK_TRANSPORT,
+                          f"the runner's reply could not be read as a commit "
+                          f"response, so no load-time measurement was received: "
+                          f"{error}")
+        return False, refusal["reason"], refusal
+    if not hmac.compare_digest(response.challenge, request.challenge):
+        refusal = _refusal(
+            LINK_TRANSPORT,
+            "the runner's commit reply did not echo this request's challenge "
+            f"nonce (sent {request.challenge[:12]}…, got "
+            f"{response.challenge[:12]}…): a measurement that is not bound to "
+            "this request is refused rather than mistaken for an answer to it")
+        return False, refusal["reason"], refusal
+    ok, reason = compare_commit_receipt(admission_receipt, response.receipt,
+                                        host_key=host_key)
+    return ok, reason, response.receipt
 
 
 # ---------------------------------------------------------------------------

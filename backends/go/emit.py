@@ -7379,11 +7379,22 @@ func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }
 // form and answers exactly what it always did.
 func revlStrSlice(s string, a, b int64) string {
 \tn := int64(utf8.RuneCountInString(s))
+\t// JS/Python slice semantics (docs/stdlib-2.0.md §slice): a negative bound
+\t// counts from the end, then both bounds clamp into range; never panics.
+\tif a < 0 {
+\t\ta += n
+\t}
 \tif a < 0 {
 \t\ta = 0
 \t}
 \tif a > n {
 \t\ta = n
+\t}
+\tif b < 0 {
+\t\tb += n
+\t}
+\tif b < 0 {
+\t\tb = 0
 \t}
 \tif b > n {
 \t\tb = n
@@ -7527,11 +7538,22 @@ func revlListLen[T any](xs []T) int64 { return int64(len(xs)) }
 
 func revlListSlice[T any](xs []T, a, b int64) []T {
 \tn := int64(len(xs))
+\t// JS/Python slice semantics (docs/stdlib-2.0.md §slice): a negative bound
+\t// counts from the end, then both bounds clamp into range; never panics.
+\tif a < 0 {
+\t\ta += n
+\t}
 \tif a < 0 {
 \t\ta = 0
 \t}
 \tif a > n {
 \t\ta = n
+\t}
+\tif b < 0 {
+\t\tb += n
+\t}
+\tif b < 0 {
+\t\tb = 0
 \t}
 \tif b > n {
 \t\tb = n

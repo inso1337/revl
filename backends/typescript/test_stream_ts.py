@@ -119,9 +119,9 @@ _DRIVER = textwrap.dedent("""
 """).lstrip()
 
 
-def test_a_ts_stream_program_runs_under_plain_node():
+def _run_driver(body: str) -> dict[str, str]:
     driver = BACKEND / f"__revl_stream_driver_{__import__('os').getpid()}.mts"
-    driver.write_text(_DRIVER, encoding="utf-8")
+    driver.write_text(body, encoding="utf-8")
     try:
         result = subprocess.run(
             ["node", driver.name],
@@ -131,7 +131,12 @@ def test_a_ts_stream_program_runs_under_plain_node():
         driver.unlink(missing_ok=True)
     detail = (result.stdout + result.stderr).strip()
     assert result.returncode == 0, f"driver failed under plain node:\n{detail}"
-    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    return dict(line.split("=", 1)
+                for line in result.stdout.splitlines() if "=" in line)
+
+
+def test_a_ts_stream_program_runs_under_plain_node():
+    lines = _run_driver(_DRIVER)
     # the combinator chain transformed and bounded the stream, in order
     assert lines["chain"] == "[2,4,6]"
     # the fan-in delivered both sources' items on one subscription
@@ -142,3 +147,120 @@ def test_a_ts_stream_program_runs_under_plain_node():
     assert lines["fault"] == "boom"
     # a full teardown left no listener, source or derived link behind
     assert lines["pending"] == "0"
+
+
+# The Slice 5 `on … as` typed-event handler runs under plain node too — item 130
+# (roadmap #81). This is the ts end of backends/python/tests/test_stream_runtime.py's
+# events proof: the driver runs the exact loop shape the emitter emits (a
+# `host.Stream.contract(...)` built ONCE above the loop, then per turn `next` ->
+# terminal test -> `admit` gate -> body), and pins the three things events add:
+# a conforming item reaches the body, a duplicate inside the window is collapsed
+# (and traced, not silent), and a schema violation THROWS `StreamFaulted` — the
+# same terminal a provider abort delivers, which the loop does not catch, so the
+# subscription closes on the LIFO teardown (`pending()` back to zero).
+_EVENT_DRIVER = textwrap.dedent("""
+    import { Stream, host, StreamFaulted, hostLog } from './runtime.ts'
+
+    const SCHEMA = {
+      type: 'object',
+      properties: { order_id: { type: 'string' }, quantity: { type: 'integer' } },
+      required: ['order_id', 'quantity'],
+    }
+    const log: string[] = []
+
+    // The exact loop the emitter emits for `on OrderCreated as e in sub { … }`,
+    // with a window of 2. `dispatched` stands in for the handler body.
+    async function drive(
+      sub: any, contract: any, dispatched: string[],
+    ): Promise<void> {
+      for (;;) {
+        const e = await sub.next()
+        if (host.Stream.isClosed(e)) break            // a Closed terminal ends it
+        if (!contract.admit(e, 'Fulfiller: on OrderCreated')) continue
+        dispatched.push((e as any).order_id)          // the handler body
+      }
+    }
+
+    async function main(): Promise<void> {
+      // (1) a conforming item reaches the body; a duplicate inside the window is
+      //     collapsed and never runs the body again. `next()` drains the buffer
+      //     BEFORE it observes a terminal, so an orderly `src.close()` (the
+      //     provider's Closed) ends the loop only after every buffered item ran.
+      {
+        hostLog.length = 0
+        const src = host.Stream.source()
+        const sub = host.Stream.subscribe(src, 'error', null)
+        const contract = host.Stream.contract('OrderCreated', SCHEMA, 'order_id', 2)
+        const dispatched: string[] = []
+        src.emit({ order_id: 'o1', quantity: 1 })
+        src.emit({ order_id: 'o2', quantity: 1 })
+        src.emit({ order_id: 'o1', quantity: 1 })   // redelivery, inside window
+        src.close()                                  // orderly Closed after buffer
+        await drive(sub, contract, dispatched)
+        sub.close()                                  // the bracket inverse (LIFO)
+        log.push('dedup=' + JSON.stringify(dispatched))
+        const admits = hostLog.filter((e) => e === 'event.OrderCreated admit').length
+        const dups = hostLog.filter((e) => e === 'event.OrderCreated duplicate').length
+        log.push('admits=' + admits)
+        log.push('dups=' + dups)
+        log.push('dedup_pending=' + Stream.pending())
+      }
+
+      // (2) the window is bounded: once a key ages out of a 2-key window, its
+      //     redelivery runs the body again (a collapse, not exactly-once).
+      {
+        const src = host.Stream.source()
+        const sub = host.Stream.subscribe(src, 'error', null, { capacity: 16 })
+        const contract = host.Stream.contract('OrderCreated', SCHEMA, 'order_id', 2)
+        const dispatched: string[] = []
+        for (const oid of ['o1', 'o2', 'o3', 'o1']) {   // o1 aged out by o3
+          src.emit({ order_id: oid, quantity: 1 })
+        }
+        src.close()
+        await drive(sub, contract, dispatched)
+        sub.close()
+        log.push('window=' + JSON.stringify(dispatched))
+      }
+
+      // (3) a schema violation THROWS StreamFaulted out of `admit` — the item
+      //     never reaches the body — and the subscription still tears down clean.
+      {
+        const src = host.Stream.source()
+        const sub = host.Stream.subscribe(src, 'error', null)
+        const contract = host.Stream.contract('OrderCreated', SCHEMA, 'order_id', 2)
+        const dispatched: string[] = []
+        let faulted = ''
+        src.emit({ order_id: 'o1', quantity: 1 })
+        src.emit({ order_id: 'o2' })                 // `quantity` missing
+        await drive(sub, contract, dispatched).catch((err) => {
+          faulted = err instanceof StreamFaulted ? 'faulted' : 'other:' + err
+        })
+        sub.close()                                  // the bracket inverse (LIFO)
+        src.close()
+        log.push('schema_body=' + JSON.stringify(dispatched))
+        log.push('schema_faulted=' + faulted)
+        log.push('schema_pending=' + Stream.pending())
+      }
+    }
+
+    main().then(
+      () => { process.stdout.write(log.join('\\n') + '\\n') },
+      (e) => { console.error(e); process.exit(1) },
+    )
+""").lstrip()
+
+
+def test_a_ts_typed_event_handler_runs_under_plain_node():
+    lines = _run_driver(_EVENT_DRIVER)
+    # a conforming item reached the body; the in-window redelivery was collapsed
+    assert lines["dedup"] == '["o1","o2"]'
+    assert lines["admits"] == "2"
+    assert lines["dups"] == "1", "the collapse is traced, not silent"
+    assert lines["dedup_pending"] == "0"
+    # the window is bounded: o1 ran again after ageing out of the 2-key window
+    assert lines["window"] == '["o1","o2","o3","o1"]'
+    # a schema violation threw StreamFaulted and never reached the body; teardown
+    # still left no residue (the subscription closed on the LIFO inverse)
+    assert lines["schema_body"] == '["o1"]'
+    assert lines["schema_faulted"] == "faulted"
+    assert lines["schema_pending"] == "0"

@@ -8,10 +8,12 @@
 // Finding 2 was the same class of gap — an undo could register an effect
 // while the fiber was merely UNLOADING (assertActive checked uid, not
 // lifecycle state), leaving permanent residue. It is FIXED in the pinned
-// fork (inso1337/cordis@harden-assert-active, see package.json): the test
-// below now pins the FIXED behavior (a red-on-fix characterization test
-// flipped green), so it fails loudly if the pin ever drifts back to the
-// upstream rc.8 guard.
+// fork (inso1337/cordis@3c60883, upstream packages/core at v4.0.0-rc.9 plus
+// the scoped hardening; see package.json): registration now routes through
+// assertRegistrable(), which refuses a disposed OR UNLOADING fiber. The test
+// below pins that FIXED behavior (a red-on-fix characterization test flipped
+// green), so it fails loudly if the pin ever drifts back to the upstream
+// disposed-only guard.
 //
 // The emitted code never relies on either behavior: the emitter's
 // one-generator-per-body lowering avoids finding 1, and revl's type system
@@ -80,10 +82,10 @@ describe('upstream finding 2 — effects registered during teardown are refused 
             // position for this (undo bodies type in teardown mode), but
             // upstream cordis only guarded against DISPOSED fibers
             // (assertActive checked uid, not lifecycle state). The pinned
-            // fork now refuses it: assertActive also checks the UNLOADING
-            // state, so this ctx.effect throws INACTIVE_EFFECT (swallowed
-            // into the fiber logger by the unload pass) instead of landing
-            // a disposer after the unload snapshot.
+            // fork routes registration through assertRegistrable(), which
+            // also refuses the UNLOADING state, so this ctx.effect throws
+            // INACTIVE_EFFECT (swallowed into the fiber logger by the unload
+            // pass) instead of landing a disposer after the unload snapshot.
             ctx.effect(() => {
               leaked = true
               return () => {

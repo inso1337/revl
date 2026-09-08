@@ -131,6 +131,15 @@ CORPUS = [
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     "result.rvl",      # built-in Result (Ok/Err) classes, gated by a match on Ok/Err
     "floats.rvl",      # `_revl_ftoa` canonical Float->Str, gated by a float `${…}` interpolation
+    # item 548 / PR #703 (self-host port item 391): a Float `.to_str()` renders
+    # through the canonical `_revl_ftoa`, byte-identical to a `${aFloat}`
+    # interpolation. The frontend tags the builtin `recv: "Float"`; the emitter
+    # had no site for the tag (`str(x)` for every receiver) and did not pull in
+    # the helper for a to_str-only program — the `recv=Float` self-host gap the
+    # coverage ledger recorded. No interpolation here, so the Float `to_str` is
+    # the sole `_revl_ftoa` trigger; an Int `to_str` in the same fn stays
+    # tag-less. Added FAILING FIRST (item 429 exit (3)).
+    "float_to_str.rvl",
     "hostroots.rvl",   # host roots (Map/Pool/Job) in a fn body -> the sorted `from runtime import`
     # externs / config / method-body effects (slice 4, item 206)
     "externs.rvl",              # `_emit_externs`: verbatim `@py` body via stdlib/str.rvl::dedent (item 193) + splitlines

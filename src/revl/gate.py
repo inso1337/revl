@@ -575,6 +575,111 @@ class ProposeResult:
 # never naming a decider service at all (`admit_profile.check_allowlist`).
 _DECIDER_SERVICES = frozenset({"Admission", "AdmitGate"})
 
+# The host-extern CROSSINGS that reach the decider — the `@py` bodies that call
+# `revl.mcp.admit_bridge.admit` (`stdlib/admit.rvl`'s `host_admit`, `truc`'s
+# `host_admit_all`). These are the enumerable admit-control surface on the G8
+# audit boundary, and they are what `_DECIDER_SERVICES` names ONE spelling of.
+#
+# The name-based `_DECIDER_SERVICES` check above inspects the granted SET only,
+# so it catches the decider only when it is composed under its stdlib SERVICE
+# name. A candidate that is granted a decider service under ANY OTHER name (an
+# operator provider that `provides judge: Judge` whose body emits `host_admit`,
+# say) slips the name check, and `check_no_host_extern_reach` does not catch it
+# either: that sweep follows bare-name calls into imported `pub fn`s, while a
+# granted service's host body is reached through a SERVICE METHOD, which the
+# sweep does not descend into (composing a granted service is the whole point).
+# The forbidden-grant rule is the one exception — the decider is the single
+# granted host body a candidate must not reach — so it is enforced STRUCTURALLY
+# on the composed IR here, against the crossing itself, "independent of the
+# operator" as the item-334 design requires, not against two stdlib names. An
+# operator that writes its OWN admit-bridge extern under a fresh name is the
+# genuinely-new-host-code path (out of scope for autonomous self-extension), so
+# keying on the known crossings is the honest boundary.
+_DECIDER_EXTERNS = frozenset({"host_admit", "host_admit_all"})
+
+
+def _ir_referenced_names(node, out: set) -> None:
+    """Every identifier a lowered-IR fragment could reach: a `{"kind": "fn",
+    "name": ...}` call target, a `{"kind": "var", "name": ...}` reference (which
+    covers a `call` node's `callee` var and any bare reference). Over-approximates
+    toward MORE references, never fewer, exactly `check_no_host_extern_reach`'s
+    "any reference on a reachable path is a reach" stance — conservative and
+    sound for a fail-closed refusal."""
+    if isinstance(node, dict):
+        if node.get("kind") in ("fn", "var") and isinstance(node.get("name"), str):
+            out.add(node["name"])
+        for value in node.values():
+            _ir_referenced_names(value, out)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            _ir_referenced_names(item, out)
+
+
+def _forbidden_decider_grant(ir: dict, granted: list) -> str | None:
+    """The STRUCTURAL half of the forbidden-grant rule (item 334): the name of a
+    granted service whose provider reaches a decider crossing, or None.
+
+    A no-op unless the composed IR actually declares a decider extern, so a
+    normal candidate never pays for it and never false-refuses. When one is
+    present, a fixpoint over the `requires` graph marks every component that
+    reaches it — directly (its own body, transitively through `pub fn`s) or
+    through a service it requires whose provider reaches it — and any GRANTED
+    service provided by a marked component is refused."""
+    extern_names = {e.get("name") for e in ir.get("externs") or []
+                    if isinstance(e, dict)}
+    decider = _DECIDER_EXTERNS & extern_names
+    if not decider:
+        return None
+
+    pub_fns = {f.get("name"): f for f in ir.get("functions") or []
+               if isinstance(f, dict) and f.get("name")}
+    components = [c for c in ir.get("components") or [] if isinstance(c, dict)]
+
+    def _reaches_directly(comp: dict) -> bool:
+        names: set = set()
+        _ir_referenced_names(comp.get("body"), names)
+        seen: set = set()
+        work = [n for n in names if n in pub_fns]
+        while work:
+            fn_name = work.pop()
+            if fn_name in seen:
+                continue
+            seen.add(fn_name)
+            body_names: set = set()
+            _ir_referenced_names(pub_fns[fn_name].get("body"), body_names)
+            for ref in body_names:
+                names.add(ref)
+                if ref in pub_fns and ref not in seen:
+                    work.append(ref)
+        return bool(names & decider)
+
+    # provider_of[service type] -> component; reaches[component name] -> bool
+    provider_of: dict = {}
+    for comp in components:
+        for svc in (comp.get("provides") or {}).values():
+            provider_of.setdefault(svc, comp)
+    reaches = {comp.get("name"): _reaches_directly(comp) for comp in components}
+    # fixpoint over the requires edges: a component reaches the decider if any
+    # service it requires is provided by a component that reaches it.
+    changed = True
+    while changed:
+        changed = False
+        for comp in components:
+            if reaches.get(comp.get("name")):
+                continue
+            for svc in (comp.get("requires") or {}).values():
+                dep = provider_of.get(svc)
+                if dep is not None and reaches.get(dep.get("name")):
+                    reaches[comp.get("name")] = True
+                    changed = True
+                    break
+
+    for svc in granted:
+        provider = provider_of.get(svc)
+        if provider is not None and reaches.get(provider.get("name")):
+            return svc
+    return None
+
 
 # The process-global single live gate (v1). A second live `Gate` in one process
 # is refused loudly at construction, the honest spelling of today's
@@ -884,6 +989,35 @@ class Gate:
             return ProposeResult(False, code=getattr(error, "code", None),
                                  message=str(error),
                                  rejection=_propose_rejection(error))
+
+        # 0b. FORBIDDEN-GRANT, the STRUCTURAL half. The step-0 name check above
+        #     catches the decider under its stdlib SERVICE name; this catches it
+        #     under ANY name, by walking the composed IR for a granted service
+        #     whose provider reaches a decider CROSSING (`host_admit`/
+        #     `host_admit_all`). `check_no_host_extern_reach` does not cover this
+        #     — its sweep follows `pub fn` calls, not the service methods a
+        #     granted host body is reached through — so without it a candidate
+        #     granted `judge: Judge` whose provider emits `host_admit` reaches the
+        #     decider with no `extern` of its own, the exact re-entrant-admit hole
+        #     the rule exists to keep shut, "independent of the operator" (item
+        #     334). Runs after the compile because it needs the lowered IR; the
+        #     name check stays before it so a broken source still refuses fast.
+        forbidden_reach = _forbidden_decider_grant(ir, granted)
+        if forbidden_reach is not None:
+            return ProposeResult(
+                False, code="FORBIDDEN_GRANT",
+                message=(
+                    f"propose refused: the granted service {forbidden_reach!r} is "
+                    f"provided by a component that reaches the decider crossing "
+                    f"(`host_admit`/`host_admit_all`, the admit-control host "
+                    f"body). Granting it hands the untrusted candidate the loop's "
+                    f"own re-entrant-admit plumbing through a granted host body "
+                    f"with no `extern` of its own — the non-extern path neither "
+                    f"the untrusted profile nor the host-extern-reach check "
+                    f"closes. Re-entrant propose is deferred and this rule "
+                    f"enforces it (item 334); drop {forbidden_reach!r} from "
+                    f"`granted`, or route the decider through an operator-gated "
+                    f"trusted swap."))
 
         from functools import partial  # noqa: PLC0415
         try:
