@@ -1112,7 +1112,10 @@ class _ComponentEmitter:
             _ident(local, "requires key"): service
             for local, service in (component.get("requires") or {}).items()
         }
-        self.provides = component.get("provides") or {}
+        self.provides = {
+            _ident(key, "provides key"): service
+            for key, service in (component.get("provides") or {}).items()
+        }
         self.config_fields = component.get("config") or []
         self.snake = _snake(self.name)
         self.uses: set[str] = set()
