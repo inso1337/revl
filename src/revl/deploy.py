@@ -1513,6 +1513,41 @@ def serve_admit_request(request_wire: Mapping, *,
     return AdmitResponse(receipt=receipt, challenge=request.challenge).to_wire()
 
 
+def serve_deploy_request(request_wire: Mapping, *,
+                         key_paths: Sequence[Path | str] = (),
+                         host_key: Optional[bytes] = None,
+                         require_gauntlet: bool = False,
+                         require_conformance: bool = False,
+                         runtime_versions: Optional[Mapping[str, str]] = None,
+                         now=None) -> dict:
+    """Route ONE request off the orchestration channel to the phase runner that
+    serves it, and return that runner's response wire dict.
+
+    This is the single dispatch both the in-process stub (:class:`InProcessTransport`)
+    and the real `revl deploy-admit` runner process (:func:`deploy_admit_command`)
+    share, so the stub tested on one host and the process a live transport spawns
+    route identically: a commit-request (:data:`COMMIT_REQUEST_KIND`) goes to
+    :func:`serve_commit_request`, and EVERYTHING ELSE goes to
+    :func:`serve_admit_request`, which itself fail-closes on anything it cannot
+    parse — so an unknown or malformed kind refuses rather than being silently
+    mis-served (a commit mis-read as an admit would run a chain verify instead of
+    a load-time measurement, and the reverse would skip the measurement).
+
+    The host's trust configuration (`key_paths`, `host_key`, the evidence floor,
+    `runtime_versions`) is the RUNNER's, never the request's (design S2.4): a
+    request can ask for admission but never carry the trust that grants it.
+    """
+    kind = request_wire.get("kind") if isinstance(request_wire, Mapping) else None
+    if kind == COMMIT_REQUEST_KIND:
+        return serve_commit_request(request_wire, host_key=host_key,
+                                    runtime_versions=runtime_versions, now=now)
+    return serve_admit_request(request_wire, key_paths=key_paths,
+                               host_key=host_key,
+                               require_gauntlet=require_gauntlet,
+                               require_conformance=require_conformance,
+                               runtime_versions=runtime_versions, now=now)
+
+
 class InProcessTransport:
     """The orchestration channel of §1.2, stubbed to run the runner IN THIS
     PROCESS — no second machine, no ssh, no subprocess. It stands in for the
@@ -1558,18 +1593,147 @@ class InProcessTransport:
         the PREPARE runner (which itself fail-closes on anything it cannot parse,
         so an unknown kind still refuses rather than being silently mis-served)."""
         on_far_side = json.loads(json.dumps(request_wire))
-        kind = on_far_side.get("kind") if isinstance(on_far_side, Mapping) else None
-        if kind == COMMIT_REQUEST_KIND:
-            response_wire = serve_commit_request(
-                on_far_side, host_key=self._host_key,
-                runtime_versions=self._runtime_versions, now=now)
-        else:
-            response_wire = serve_admit_request(
-                on_far_side, key_paths=self._key_paths, host_key=self._host_key,
-                require_gauntlet=self._require_gauntlet,
-                require_conformance=self._require_conformance,
-                runtime_versions=self._runtime_versions, now=now)
+        response_wire = serve_deploy_request(
+            on_far_side, key_paths=self._key_paths, host_key=self._host_key,
+            require_gauntlet=self._require_gauntlet,
+            require_conformance=self._require_conformance,
+            runtime_versions=self._runtime_versions, now=now)
         return json.loads(json.dumps(response_wire))
+
+
+#: The wire kind a :class:`StdioRunnerTransport` synthesises when the runner
+#: process is gone — it never comes off a runner, so `AdmitResponse.from_wire`
+#: and `CommitResponse.from_wire` both reject it, turning a dead runner into the
+#: same fail-closed :data:`LINK_TRANSPORT` refusal an unparseable reply already
+#: is (a conductor must not read a vanished runner as a verdict).
+_RUNNER_GONE_KIND = "revl.deploy.runner-terminated"
+
+
+class StdioRunnerTransport:
+    """The orchestration channel of §1.2 over a real runner PROCESS, spoken to
+    on its stdin/stdout with one newline-delimited JSON request per line and one
+    reply per line — the shape :func:`deploy_admit_command` (`revl deploy-admit`)
+    reads and writes, and the same newline-JSON control channel
+    :mod:`revl._deploy_participant` already uses.
+
+    This is the piece between :class:`InProcessTransport` (which runs the runner
+    inside the conductor for a one-host test) and the deferred cross-machine leg
+    (design R4/R5: scp/rsync staging, a pinned SSH host key). It spawns `argv`
+    and speaks the identical protocol regardless of what `argv` is: locally
+    :meth:`local` builds ``[python, -m, revl, deploy-admit, ...]`` so the far
+    "host" is a child on this machine, and the machine boundary rides on top
+    unchanged by prefixing the same command with ``ssh <host>``. The host's trust
+    configuration lives entirely in `argv` (the runner's own key files and
+    evidence floor), never in the request — the trust inversion S2.4 requires.
+
+    One long-lived process carries BOTH phases (PREPARE admit-requests and COMMIT
+    commit-requests), exactly as a real orchestration channel does; the runner
+    routes each line by its `kind` (:func:`serve_deploy_request`). It is a
+    context manager, and :meth:`close` reaps the child.
+
+    `now` on :meth:`send` is a same-process time hook (for TTL/freshness tests)
+    and cannot cross to the child, which measures against real time; the argument
+    is accepted for interface parity with :class:`InProcessTransport` and ignored
+    on this transport. A runner that dies rather than answering is not an error
+    the conductor swallows: :meth:`send` returns a sentinel wire dict that every
+    ``from_wire`` rejects, so :func:`request_admission` / :func:`request_commit`
+    fail closed to a :data:`LINK_TRANSPORT` refusal.
+    """
+
+    def __init__(self, argv: Sequence[str], *, cwd: Optional[Path | str] = None,
+                 env: Optional[Mapping[str, str]] = None) -> None:
+        self._argv = list(argv)
+        self._cwd = str(cwd) if cwd is not None else None
+        self._env = dict(env) if env is not None else None
+        self._proc: Optional[subprocess.Popen] = None
+
+    @classmethod
+    def local(cls, *, key_paths: Sequence[Path | str] = (),
+              host_key_path: Optional[Path | str] = None,
+              require_gauntlet: bool = False,
+              require_conformance: bool = False,
+              runtime_versions: Optional[Mapping[str, str]] = None,
+              python: Optional[str] = None,
+              env: Optional[Mapping[str, str]] = None) -> "StdioRunnerTransport":
+        """Build a transport that runs the `revl deploy-admit` runner as a LOCAL
+        child (`python -m revl deploy-admit ...`).
+
+        Key material is passed as FILE PATHS, never as bytes on the command line:
+        a secret in `argv` shows up in `ps`, and the far host holds its keys on
+        its own disk anyway (design R5). This is the conductor-side helper a
+        `via = local` cross-process staging step would call; the SSH form is the
+        same argv with an ``ssh <host>`` prefix and remote paths.
+        """
+        argv = [python or sys.executable, "-m", "revl", "deploy-admit"]
+        for path in key_paths:
+            argv += ["--key", str(path)]
+        if host_key_path is not None:
+            argv += ["--host-key", str(host_key_path)]
+        if require_gauntlet:
+            argv.append("--require-gauntlet")
+        if require_conformance:
+            argv.append("--require-conformance")
+        for name, version in (runtime_versions or {}).items():
+            argv += ["--runtime-version", f"{name}={version}"]
+        return cls(argv, env=env)
+
+    def __enter__(self) -> "StdioRunnerTransport":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def _ensure(self) -> subprocess.Popen:
+        if self._proc is None or self._proc.poll() is not None:
+            self._proc = subprocess.Popen(  # noqa: S603 — argv is caller-built
+                self._argv, cwd=self._cwd, env=self._env,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                text=True, encoding="utf-8")
+        return self._proc
+
+    def send(self, request_wire: Mapping, *, now=None) -> dict:
+        """Deliver one request line to the runner child and read one reply line.
+
+        A child that has died, or answers with a closed pipe, is reported as the
+        :data:`_RUNNER_GONE_KIND` sentinel rather than raising — a dead runner is
+        a transport fault the conductor refuses on, not a crash it propagates.
+        """
+        del now  # cannot cross the process boundary; the child uses real time
+        proc = self._ensure()
+        if proc.stdin is None or proc.stdout is None:  # pragma: no cover — PIPE set above
+            return {"kind": _RUNNER_GONE_KIND}
+        try:
+            proc.stdin.write(json.dumps(request_wire) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, ValueError):
+            return {"kind": _RUNNER_GONE_KIND}
+        line = proc.stdout.readline()
+        if not line:
+            return {"kind": _RUNNER_GONE_KIND}
+        try:
+            reply = json.loads(line)
+        except json.JSONDecodeError:
+            # A line that is not JSON is not a verdict; refuse it like a dead runner.
+            return {"kind": _RUNNER_GONE_KIND}
+        return reply if isinstance(reply, dict) else {"kind": _RUNNER_GONE_KIND}
+
+    def close(self) -> None:
+        """Close the channel and reap the runner child, if one was spawned."""
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        for stream in (proc.stdin, proc.stdout):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:  # pragma: no cover
+                pass
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except (OSError, subprocess.SubprocessError):  # pragma: no cover
+                proc.kill()
 
 
 def request_admission(transport, request: AdmitRequest, *, now=None) -> dict:
@@ -1831,6 +1995,366 @@ def request_commit(transport, request: CommitRequest, *,
     ok, reason = compare_commit_receipt(admission_receipt, response.receipt,
                                         host_key=host_key)
     return ok, reason, response.receipt
+
+
+# ---------------------------------------------------------------------------
+# §1.2 / R4. the live cross-machine runner transport (SSH) — slice 1
+# ---------------------------------------------------------------------------
+#
+# :class:`InProcessTransport` ran the runner IN THIS PROCESS. The design's live
+# leg (§1.2, the [REMAINS] "live cross-machine transport") spawns `revl
+# deploy-admit` on the far host and speaks the SAME `send` contract over its
+# stdin/stdout — one JSON request line in, one JSON response line back. This is
+# the FOUNDATIONAL first slice of that leg: the process/ssh transport itself and,
+# the piece R4 turns on, a PINNED host-key verification that fails CLOSED.
+#
+# What this slice builds:
+#   * :meth:`StdioRunnerTransport.local` -> `python -m revl deploy-admit`, a
+#     child of THIS host: the same runner the in-process stub ran, now behind a
+#     real pipe so the wire bytes are exercised end to end;
+#   * :meth:`StdioRunnerTransport.ssh` -> `ssh <opts> <host> revl deploy-admit`,
+#     with host-key checking PINNED to a `known_hosts` file and
+#     `StrictHostKeyChecking=yes` / `BatchMode=yes` forced on. R4's whole point:
+#     a network MITM that impersonates the target host is refused at connect, so
+#     the A2 blast-radius argument holds. `StrictHostKeyChecking=no` (and its
+#     `accept-new` trust-on-first-use cousin) is the exact hole this transport
+#     exists to close, so it is REFUSED, never offered as a caller option.
+#
+# The same `send` contract means the conductor-side drivers written for the stub
+# — :func:`request_admission`, :func:`request_commit` and their challenge/gate
+# discipline — carry over UNCHANGED; only the seam the bytes cross is different.
+# A transport-level fault (a spawn that fails, a timeout, a host-key refusal, a
+# reply that is not JSON) fails CLOSED to a :data:`LINK_TRANSPORT` REFUSE that
+# echoes the request's challenge, so the existing drivers read it as a refusal to
+# act on rather than a verdict — a runner the conductor could not reach is never
+# mistaken for one that admitted.
+#
+# Deliberately NOT here, and named so the boundary stays explicit (all §1.2 /
+# [REMAINS] or Deferred): STAGING the sliced bundle over scp/rsync (this slice
+# assumes the bundle is already staged at the path the request names), the mTLS
+# staging identity (R5), the replicated WAL, the partition-safe distributed
+# commit coordinator and its two-phase commit/ABORT over > 1 host (S3), the
+# container/microVM transport, and the Ed25519 migration a genuinely
+# cross-trust-domain deploy needs (S2.4 / S5-A1).
+
+#: The subcommand the far host exposes as the runner. The conductor never trusts
+#: it to admit; it ASKS, and the host answers against its OWN trust store (S2.4).
+DEPLOY_ADMIT_SUBCOMMAND = "deploy-admit"
+
+#: `ssh` options this transport forces on and a caller may never countermand:
+#: `StrictHostKeyChecking=yes` refuses BOTH an unknown host (no trust-on-first-
+#: use) and a host whose key does not match the pinned `known_hosts`;
+#: `BatchMode=yes` makes ssh ERROR instead of blocking on an interactive prompt.
+SSH_PINNED_OPTIONS = ("StrictHostKeyChecking=yes", "BatchMode=yes")
+
+#: The `ssh -o` keys this transport OWNS. A caller-supplied option that sets
+#: either is refused: host-key checking and the pinned file are the transport's
+#: to set, and a caller that could re-set them could loosen the pin (R4).
+_SSH_RESERVED_OPTION_KEYS = frozenset(
+    {"stricthostkeychecking", "userknownhostsfile"})
+
+#: Substrings ssh prints when host-key verification fails. Matched (lower-cased)
+#: so a changed or unverifiable host key on the wire is reported as the R4 event
+#: it is — a possible impersonation — and not as a generic non-zero exit.
+_SSH_HOST_KEY_MARKERS = (
+    "host key verification failed",
+    "remote host identification has changed",
+    "no matching host key",
+    "differs from the key for the ip address",
+    "host key for ",
+)
+
+
+class SshRunnerRefused(RevlError):
+    """A runner transport refused to complete an exchange, fail-closed.
+
+    `host_key_failure` is set when the cause was host-key verification: a
+    missing / empty / unmatched pin caught BEFORE the connection, or ssh
+    reporting a changed or unverifiable host key ON the connection. That is R4's
+    event — a possible impersonation of the target host, refused rather than
+    served. It is surfaced on the :data:`LINK_TRANSPORT` refusal receipt so an
+    audit can tell a host-key refusal apart from an ordinary unreachable runner.
+    """
+
+    def __init__(self, message: str, *, host_key_failure: bool = False):
+        super().__init__("ssh-runner-transport", 0, message)
+        self.host_key_failure = host_key_failure
+
+
+def _hostname_for_known_hosts(host: str) -> str:
+    """The bare hostname ssh records in `known_hosts`: the `user@` prefix is the
+    login the operator authenticates as, not part of the host key's identity."""
+    return host.split("@", 1)[1] if "@" in host else host
+
+
+def _known_hosts_pin(path: Path, hostname: str,
+                     port: Optional[int]) -> tuple[bool, str]:
+    """Fail-closed pre-flight: does `path` pin a host key for `hostname`?
+
+    Distinct from ssh's own check on purpose: ssh would refuse an unpinned host
+    at connect time, but a LOCATED refusal here — before a single byte crosses —
+    is clearer and testable without a live remote. Plaintext entries are matched
+    by name (and by the `[host]:port` spelling ssh uses for a non-default port);
+    a HASHED `known_hosts` cannot be matched by name, so its presence is treated
+    as "pinned, ssh will verify at connect" rather than guessed at — refusing a
+    legitimately hashed pin would be worse than deferring to ssh's own check.
+    Answers `(ok_to_proceed, reason)`.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        return False, f"cannot read the pinned known_hosts {path}: {error}"
+    tokens = {hostname}
+    tokens.add(f"[{hostname}]:{port}" if port and port != 22
+               else f"[{hostname}]:22")
+    saw_plaintext = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        patterns = fields[0]
+        # `@cert-authority` / `@revoked` markers push the patterns to field 1.
+        if patterns.startswith("@") and len(fields) > 1:
+            patterns = fields[1]
+        if patterns.startswith("|"):
+            # A hashed entry: name-matching is impossible, so defer to ssh.
+            return True, ("the pinned known_hosts holds hashed entries; ssh "
+                          "verifies the host key against it at connect")
+        saw_plaintext = True
+        if any(pattern in tokens for pattern in patterns.split(",")):
+            return True, "a host key is pinned for this host"
+    if not saw_plaintext:
+        return False, (f"the pinned known_hosts {path} carries no host-key "
+                       "entries (it is empty or all comments); refusing to ssh "
+                       "with no pin rather than trusting on first use")
+    return False, (f"the pinned known_hosts {path} carries no entry for "
+                   f"{hostname!r}; refusing to ssh with no pinned host key for "
+                   "this host rather than trusting on first use")
+
+
+class StdioRunnerTransport:
+    """A runner transport that spawns `revl deploy-admit` behind a stdio pipe and
+    speaks the same `send(request_wire, *, now=None) -> dict` contract as
+    :class:`InProcessTransport`.
+
+    Two shapes, both the same one process-boundary wire:
+
+      * :meth:`local` runs the runner as a child of THIS host
+        (`python -m revl deploy-admit`) — useful for exercising the real pipe
+        and for a single-host deploy whose "far" side is another local process;
+      * :meth:`ssh` runs it on a remote host (`ssh <opts> <host> revl
+        deploy-admit`) with host-key checking pinned to a `known_hosts` file and
+        `StrictHostKeyChecking=yes` / `BatchMode=yes` forced on (R4). The pin is
+        checked twice over: a located pre-flight (:meth:`verify_host_key`) before
+        anything is spawned, and ssh's own connect-time check against the same
+        file. A caller may ADD `-o` options but may never set the two keys this
+        transport owns (:data:`_SSH_RESERVED_OPTION_KEYS`), so the pin cannot be
+        loosened through the option list.
+
+    `send` writes the request as one JSON line to the child's stdin and reads its
+    reply as JSON from stdout — the identical bytes a real orchestration channel
+    carries. Every transport-level fault fails CLOSED to a :data:`LINK_TRANSPORT`
+    REFUSE (with the request's `challenge` echoed so the existing conductor-side
+    drivers bind and reject it), never to a raised exception the caller must
+    remember to catch.
+    """
+
+    def __init__(self, argv: Sequence[str], *, host: Optional[str] = None,
+                 known_hosts: Optional[Path | str] = None,
+                 is_ssh: bool = False, port: Optional[int] = None,
+                 timeout: float = 30.0) -> None:
+        self._argv = [str(a) for a in argv]
+        self._host = host
+        self._known_hosts = Path(known_hosts) if known_hosts is not None else None
+        self._is_ssh = bool(is_ssh)
+        self._port = port
+        self._timeout = float(timeout)
+
+    # -- constructors -------------------------------------------------------
+
+    @classmethod
+    def local(cls, *, python: Optional[str] = None,
+              extra_args: Sequence[str] = (), timeout: float = 30.0
+              ) -> "StdioRunnerTransport":
+        """The runner as a local child process: `python -m revl deploy-admit`."""
+        exe = python or sys.executable
+        argv = [exe, "-m", "revl", DEPLOY_ADMIT_SUBCOMMAND, *extra_args]
+        return cls(argv, timeout=timeout)
+
+    @classmethod
+    def ssh(cls, host: str, *, known_hosts: Path | str,
+            ssh_exe: str = "ssh", remote_revl: str = "revl",
+            port: Optional[int] = None, options: Sequence[str] = (),
+            extra_args: Sequence[str] = (), timeout: float = 30.0
+            ) -> "StdioRunnerTransport":
+        """The runner on a remote host over ssh, with a PINNED host key (R4).
+
+        `known_hosts` is REQUIRED: host-key checking is never disabled here, so
+        there must be a pinned key to check against. `options` are extra `ssh -o`
+        settings the caller may add, but never `StrictHostKeyChecking` or
+        `UserKnownHostsFile` — those are the transport's, and re-setting them is
+        how the pin would be loosened, so an attempt to is refused.
+        """
+        if not isinstance(host, str) or not host:
+            raise ValueError("an ssh runner transport needs a non-empty host")
+        if known_hosts is None:
+            raise ValueError(
+                "an ssh runner transport requires a pinned known_hosts file: "
+                "host-key checking is never disabled, so there must be a pinned "
+                "key to verify the host against (R4)")
+        opts: list[str] = []
+        for pinned in SSH_PINNED_OPTIONS:
+            opts += ["-o", pinned]
+        opts += ["-o", f"UserKnownHostsFile={Path(known_hosts)}"]
+        for opt in options:
+            key = str(opt).split("=", 1)[0].strip().lower()
+            if key in _SSH_RESERVED_OPTION_KEYS:
+                raise ValueError(
+                    f"the ssh option {opt!r} would re-set a host-key setting "
+                    "this transport pins; it is refused rather than allowed to "
+                    "loosen the pin (R4 forbids StrictHostKeyChecking=no)")
+            opts += ["-o", str(opt)]
+        if port is not None:
+            opts += ["-p", str(int(port))]
+        argv = [ssh_exe, *opts, host, remote_revl, DEPLOY_ADMIT_SUBCOMMAND,
+                *extra_args]
+        return cls(argv, host=host, known_hosts=Path(known_hosts), is_ssh=True,
+                   port=port, timeout=timeout)
+
+    # -- introspection (pinned so a test can assert the argv it will run) ---
+
+    @property
+    def argv(self) -> list[str]:
+        return list(self._argv)
+
+    # -- host-key verification ---------------------------------------------
+
+    def verify_host_key(self) -> None:
+        """Fail-closed pre-flight for the pinned host key (R4). A no-op for a
+        local transport; for ssh it refuses — before anything is spawned — when
+        the pinned `known_hosts` is missing, unreadable, empty, or carries no
+        entry for this host. Raises :class:`SshRunnerRefused` with
+        `host_key_failure=True`; ssh's own connect-time check is the second,
+        independent gate against the same file."""
+        if not self._is_ssh:
+            return
+        path = self._known_hosts
+        if path is None or not path.exists():
+            raise SshRunnerRefused(
+                f"the pinned known_hosts {path} does not exist; refusing to ssh "
+                "with no pinned host key rather than trusting on first use (R4)",
+                host_key_failure=True)
+        if not path.is_file():
+            raise SshRunnerRefused(
+                f"the pinned known_hosts {path} is not a regular file, so it is "
+                "not a host-key pin this transport can stand on",
+                host_key_failure=True)
+        hostname = _hostname_for_known_hosts(self._host or "")
+        ok, reason = _known_hosts_pin(path, hostname, self._port)
+        if not ok:
+            raise SshRunnerRefused(reason, host_key_failure=True)
+
+    # -- the send() contract ------------------------------------------------
+
+    def send(self, request_wire: Mapping, *, now=None) -> dict:
+        """Deliver one request to the runner and return its response wire dict.
+        `now` is accepted for contract parity with :class:`InProcessTransport`
+        and is not sent over the wire — the far runner keeps its own clock."""
+        kind = (request_wire.get("kind")
+                if isinstance(request_wire, Mapping) else None)
+        try:
+            if not isinstance(request_wire, Mapping):
+                raise SshRunnerRefused(
+                    "the request is not a mapping, so it cannot be sent to the "
+                    "runner")
+            if self._is_ssh:
+                self.verify_host_key()
+            return self._exchange(json.dumps(dict(request_wire)))
+        except SshRunnerRefused as error:
+            return self._refusal_response(
+                kind, request_wire, error.message,
+                host_key_failure=error.host_key_failure)
+
+    def _exchange(self, payload: str) -> dict:
+        try:
+            completed = subprocess.run(
+                self._argv, input=payload + "\n", capture_output=True,
+                text=True, timeout=self._timeout)
+        except FileNotFoundError as error:
+            raise SshRunnerRefused(
+                f"the runner command {self._argv[0]!r} could not be launched: "
+                f"{error}") from None
+        except subprocess.TimeoutExpired:
+            raise SshRunnerRefused(
+                f"the runner did not reply within {self._timeout:.0f}s; the "
+                "exchange is refused rather than left hanging") from None
+        except OSError as error:
+            raise SshRunnerRefused(
+                f"the runner command {self._argv[0]!r} could not be launched: "
+                f"{error}") from None
+        if completed.returncode != 0:
+            stderr = (completed.stderr or "").strip()
+            host_key = self._is_ssh and _looks_like_host_key_failure(
+                completed.returncode, stderr)
+            raise SshRunnerRefused(
+                f"the runner exited {completed.returncode}: "
+                f"{stderr or '(no stderr)'}", host_key_failure=bool(host_key))
+        out = (completed.stdout or "").strip()
+        if not out:
+            raise SshRunnerRefused(
+                "the runner produced no output on stdout, so there is no verdict "
+                "to read")
+        parsed = _first_json_object(out)
+        if parsed is None:
+            raise SshRunnerRefused(
+                "the runner's reply was not a JSON object the transport could "
+                f"read: {out[:200]!r}")
+        return parsed
+
+    def _refusal_response(self, kind, request_wire, reason: str, *,
+                          host_key_failure: bool = False) -> dict:
+        challenge = ""
+        if isinstance(request_wire, Mapping):
+            got = request_wire.get("challenge")
+            if isinstance(got, str):
+                challenge = got
+        extra = {"host_key_failure": True} if host_key_failure else {}
+        receipt = _refusal(LINK_TRANSPORT, reason, **extra)
+        if kind == COMMIT_REQUEST_KIND:
+            return CommitResponse(receipt=receipt, challenge=challenge).to_wire()
+        return AdmitResponse(receipt=receipt, challenge=challenge).to_wire()
+
+
+def _looks_like_host_key_failure(returncode: int, stderr: str) -> bool:
+    """Whether an ssh non-zero exit is a host-key verification failure. ssh exits
+    255 on connection errors generally, so the exit code alone is not proof; the
+    stderr markers are what tell an impersonation apart from an ordinary
+    unreachable host."""
+    low = stderr.lower()
+    return any(marker in low for marker in _SSH_HOST_KEY_MARKERS)
+
+
+def _first_json_object(text: str) -> Optional[dict]:
+    """The first JSON OBJECT in `text`, tolerant of a leading ssh banner line.
+    The runner writes one JSON line; a login banner or motd on the channel would
+    otherwise make the whole capture unparseable."""
+    try:
+        whole = json.loads(text)
+        return whole if isinstance(whole, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        pass
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            candidate = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(candidate, dict):
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2993,6 +3517,81 @@ class ProcessParticipant(Participant):
             proc.kill()
 
 
+class RemoteParticipant(Participant):
+    """A :class:`Participant` whose PREPARE and COMMIT cross a runner transport —
+    a local stdio pipe or an ssh channel (:class:`StdioRunnerTransport`) — rather
+    than a same-host process pipe. :func:`run_deploy` drives it EXACTLY like a
+    :class:`ProcessParticipant`; the only difference is the seam the phase
+    messages cross, which is the whole point of the `send` contract being the
+    same on both transports.
+
+    `prepare` carries :func:`request_admission`: the HOST verifies the staged
+    chain against its OWN local trust store (S2.4) and signs an ACCEPT / REFUSE,
+    which this side both binds to its challenge and verifies against the host's
+    key. `commit` carries :func:`request_commit`, whose
+    :func:`compare_commit_receipt` gate is INTEGRAL — a host that loaded
+    different bytes than it was admitted to load REFUSES the commit here (design
+    R2), so the seam does not weaken the load-measured guarantee.
+
+    `abort` is honest about this slice's boundary. The runner protocol carries
+    PREPARE and COMMIT but has no ABORT leg yet (that is the [REMAINS] two-phase
+    commit/abort over more than one host, S3), so the coordinator cannot drive a
+    remote unwind and MUST NOT report a rollback it did not obtain. It raises
+    :class:`Unreachable`, which :func:`run_deploy` records as `unresolved(...)` —
+    the same fail-closed verdict it gives any participant it cannot settle, to be
+    resolved by that host's own WAL, never a false `rolled-back`.
+    """
+
+    def __init__(self, identity: str, transport, *,
+                 admit_request: "AdmitRequest",
+                 commit_request: "CommitRequest",
+                 host_key: bytes, now=None) -> None:
+        self.identity = identity
+        self._transport = transport
+        self._admit_request = admit_request
+        self._commit_request = commit_request
+        self._host_key = bytes(host_key)
+        self._now = now
+        self._admission_receipt: Optional[dict] = None
+
+    def prepare(self) -> dict:
+        receipt = request_admission(self._transport, self._admit_request,
+                                    now=self._now)
+        if receipt.get("verdict") != ACCEPT:
+            return {"ok": False, "receipt": receipt,
+                    "reason": (f"the runner refused admission at "
+                               f"`{receipt.get('link')}`: "
+                               f"{receipt.get('reason')}")}
+        ok, why = verify_receipt(receipt, self._host_key)
+        if not ok:
+            return {"ok": False, "receipt": receipt,
+                    "reason": ("the runner's admission receipt did not verify "
+                               f"against this host's key: {why}")}
+        self._admission_receipt = receipt
+        return {"ok": True, "receipt": receipt}
+
+    def commit(self) -> dict:
+        if self._admission_receipt is None:
+            return {"ok": False,
+                    "reason": ("COMMIT was reached without a verified admission "
+                               "receipt from PREPARE, so there is nothing to "
+                               "commit against")}
+        ok, reason, receipt = request_commit(
+            self._transport, self._commit_request,
+            admission_receipt=self._admission_receipt,
+            host_key=self._host_key, now=self._now)
+        if not ok:
+            return {"ok": False, "reason": reason, "receipt": receipt}
+        return {"ok": True, "receipt": receipt}
+
+    def abort(self) -> dict:
+        raise Unreachable(
+            "the cross-machine ABORT leg is a later slice: the runner protocol "
+            "carries PREPARE and COMMIT but no ABORT, so this coordinator cannot "
+            "drive a remote unwind and will not report a rollback it did not "
+            f"obtain; settle participant {self.identity!r} against its own WAL")
+
+
 # ---------------------------------------------------------------------------
 # §5. the deploy map, and the boundary a deploy may actually cross
 #     (roadmap item 118, Slice 2a)
@@ -3410,6 +4009,96 @@ def _load_deploy_map(path: str) -> dict:
     import tomllib  # noqa: PLC0415 — stdlib, py3.11+
 
     return tomllib.loads(text)
+
+
+def _runtime_versions_from_args(pairs: Optional[Sequence[str]]) -> Optional[dict]:
+    """Parse repeated ``--runtime-version name=ver`` flags into the mapping the
+    runner reports on its verdicts. Returns ``None`` when none were given (the
+    runner then omits the versions rather than reporting an empty set)."""
+    if not pairs:
+        return None
+    versions: dict[str, str] = {}
+    for pair in pairs:
+        name, sep, version = pair.partition("=")
+        if not sep or not name:
+            raise ValueError(
+                f"--runtime-version must be NAME=VERSION, got {pair!r}")
+        versions[name] = version
+    return versions
+
+
+def deploy_admit_command(args) -> int:
+    """`revl deploy-admit [--key PATH]... [--host-key PATH] [--require-gauntlet]
+    [--require-conformance] [--runtime-version NAME=VER]...` — the far-side runner
+    of the deploy orchestration channel (design §1.3 steps 4–5 / step 7).
+
+    It reads one JSON request per line off stdin, serves each with the host's OWN
+    trust configuration (the key files and evidence floor named on THIS command
+    line, never anything the request carries — the S2.4 trust inversion), and
+    writes one JSON reply per line to stdout. A PREPARE admit-request runs the
+    chain verify (:func:`serve_admit_request`); a COMMIT commit-request runs the
+    load-time measurement (:func:`serve_commit_request`); the routing is
+    :func:`serve_deploy_request`, the same dispatch :class:`InProcessTransport`
+    uses, so this process and the one-host stub behave identically. One process
+    serves BOTH phases over its lifetime, exactly as a real channel does.
+
+    This is the process a live transport spawns: locally as
+    ``python -m revl deploy-admit ...`` (see :meth:`StdioRunnerTransport.local`),
+    and across a machine boundary as the same command behind ``ssh <host>`` once
+    the deferred staging + pinned-host-key leg (design R4/R5) lands. It stages and
+    verifies; it never drives the local `apply` — that is the conductor's
+    coordinated protocol (:func:`run_deploy`), unchanged.
+
+    A line that is not a JSON object is answered with a fail-closed
+    :data:`LINK_TRANSPORT` refusal rather than skipped: a runner that could not
+    read what it was asked must refuse audibly, so the conductor's challenge check
+    trips instead of the exchange hanging.
+    """
+    key_paths = list(getattr(args, "key", None) or [])
+    host_key = None
+    host_key_path = getattr(args, "host_key", None)
+    if host_key_path is not None:
+        try:
+            host_key = Path(host_key_path).read_bytes()
+        except OSError as error:
+            print(f"error: cannot read --host-key {host_key_path!r}: {error}",
+                  file=sys.stderr)
+            return 1
+    try:
+        runtime_versions = _runtime_versions_from_args(
+            getattr(args, "runtime_version", None))
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    require_gauntlet = bool(getattr(args, "require_gauntlet", False))
+    require_conformance = bool(getattr(args, "require_conformance", False))
+
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            request_wire = json.loads(line)
+        except json.JSONDecodeError as error:
+            reply = _refusal(
+                LINK_TRANSPORT,
+                f"the deploy-admit runner could not parse a request line, so "
+                f"nothing was served: {error}")
+        else:
+            if not isinstance(request_wire, dict):
+                reply = _refusal(
+                    LINK_TRANSPORT,
+                    "the deploy-admit runner received a request line that is "
+                    "not a JSON object, so nothing was served")
+            else:
+                reply = serve_deploy_request(
+                    request_wire, key_paths=key_paths, host_key=host_key,
+                    require_gauntlet=require_gauntlet,
+                    require_conformance=require_conformance,
+                    runtime_versions=runtime_versions)
+        sys.stdout.write(json.dumps(reply, sort_keys=True) + "\n")
+        sys.stdout.flush()
+    return 0
 
 
 def deploy_command(args) -> int:

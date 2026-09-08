@@ -609,6 +609,30 @@ _BUILTIN_TYPE_NAMES = {
 }
 
 
+# item 457 S2 (docs/design/457-endpoint-one-definition.md): `Principal` is the
+# opaque authorization principal — the value that IS the right to reach
+# user-scoped data. It has no revl declaration and no constructor: its sole
+# producer is `Auth.validate` (stdlib/auth.rvl), which turns an untrusted
+# `Bearer` credential into a `Principal` or an `ApiError`. The name is RESERVED
+# (a `type Principal = ...` declaration is refused in lowering) so the opacity
+# is a checker invariant, not an accident of "the program happened not to
+# declare it" — otherwise a body could mint its own record-shaped `Principal`
+# and pass every user-scoped guard without ever authorizing.
+PRINCIPAL = "Principal"
+
+#: the admission-refusal hint shown wherever a `Principal` is expected but the
+#: value supplied is not one (a dropped `auth.validate`, a `Bearer` passed
+#: straight through, a fabricated record). It names the sole producer so the
+#: refusal reads as the missing authorization STEP, not a bare type error.
+PRINCIPAL_PRODUCER_HINT = (
+    "a `Principal` is the only key to user-scoped data and it is opaque — its "
+    "sole producer is `Auth.validate` (stdlib/auth.rvl), which turns a `Bearer` "
+    "credential into `Result[Principal, ApiError]`. Reach the user data through "
+    "that step (`match auth.validate(bearer) { Err(e) => Err(e), Ok(who) => "
+    "store.get(who, ...) }`); there is no other way to obtain one"
+)
+
+
 def validate_explicit_tparams(names, declared: dict,
                               filename: str | None, line: int) -> set[str]:
     """Validate an explicit `fn id[T, U](...)` list and return it as a set.
@@ -940,6 +964,18 @@ def mismatch(filename: str, line: int, where: str,
     if ahead == "Opt" and ehead != "Opt":
         hint = ("unwrap the optional first: `match` on it, or use `??` "
                 "to supply a fallback (syntax-2.0 §2)")
+    elif ehead == PRINCIPAL and ahead != PRINCIPAL:
+        # item 457 S2, the authorization admission refusal
+        # (docs/design/457-endpoint-one-definition.md, "Authorization"): a
+        # `Principal` is the ONLY key to user-scoped data, and it is opaque —
+        # `Auth.validate` is its sole producer, no revl body can construct one.
+        # So a handler that reaches a `Principal` position with anything else
+        # (a `Bearer`, a fabricated record, a value it never authorized) is
+        # refused HERE, at admission, naming the missing step. This is stronger
+        # than a runtime denial: the only path to a note runs through a value
+        # only the auth service mints, so DELETING the `auth.validate` step
+        # cannot type-check — it does not merely fail closed at runtime.
+        hint = PRINCIPAL_PRODUCER_HINT
     expected, actual = render_type(expected), render_type(actual)
     return RevlError(filename, line,
                      f"{where} expects `{expected}`, got `{actual}`", hint,

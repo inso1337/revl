@@ -991,6 +991,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "deploy":
         from .deploy import deploy_command  # noqa: PLC0415 — lazy
         return deploy_command(args)
+    if args.command == "deploy-admit":
+        from .deploy import deploy_admit_command  # noqa: PLC0415 — lazy
+        return deploy_admit_command(args)
     if args.command == "composition":
         return _run_composition(args)
     if args.command == "analyze":

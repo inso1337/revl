@@ -138,11 +138,12 @@ its own PR series. Listed in the review's own priority order.
    (`lower._validate_no_loop_scoped_registration` now enforces it over method
    loops instead of refusing method loops outright), so sanctioned recursion is
    no longer the only answer and the rust/java/wasm death and the ~1000-frame py
-   limit are gone. Five tiers (py/ts/go/java/rust) carry method-body `for`;
-   wasm carries `if`/`while`/`break`/`continue`, and a method-body `for (x of
-   xs)` on wasm is the TRACKED REMAINDER (the List-cursor apparatus is fn-only;
-   the refusal redirects to a `while`+index count). REMAINDER: registering steps
-   inside a loop (teardown across iterations), and wasm method-body `for`.
+   limit are gone. All six tiers now carry method-body `for (x of xs)`: item 458
+   closed the former wasm remainder by re-spelling the fn `_emit_for` List-cursor
+   memory walk against the method path (`$for_ptr`/`$for_cnt`/`$for_idx`, the
+   `_SLOT`-strided element load), with `break`/`continue` re-testing at an inner
+   `$cnt` block exactly as the fn `for` does. REMAINDER: registering steps
+   inside a loop (teardown across iterations).
 
 10. **Expression-bodied top-level fns (review item 3).** `fn f(x) = expr` works
     in a provide method but not at module top level, so an author writing a
