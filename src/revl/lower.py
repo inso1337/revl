@@ -29,6 +29,8 @@ from .typecheck import (
     _reject_float_literal_range,
     FN_HEAD,
     FNS_KEY,
+    PRINCIPAL,
+    PRINCIPAL_PRODUCER_HINT,
     _SIZED_HEADS,
     check_ast,
     refuse_self_declared_async,
@@ -1389,6 +1391,19 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
     for decl in program.type_decls:
         if decl.name in types:
             raise RevlError(filename, decl.line, f"duplicate type `{decl.name}`")
+        if decl.name == PRINCIPAL:
+            # item 457 S2 (docs/design/457-endpoint-one-definition.md,
+            # "Authorization: explicit, and not derivable"): `Principal` is the
+            # opaque authorization principal, produced only by `Auth.validate`
+            # (stdlib/auth.rvl). A `type Principal = ...` declaration would give
+            # it a constructor and let a body MINT one — passing every
+            # user-scoped guard without authorizing. Reserve the name so the
+            # opacity is enforced, not merely conventional.
+            raise RevlError(
+                filename, decl.line,
+                "`Principal` is the reserved opaque authorization principal and "
+                "cannot be declared as a revl type",
+                hint=PRINCIPAL_PRODUCER_HINT, code="G4", category="route")
         if decl.fields:
             fields: dict[str, str] = {}
             for field in decl.fields:
