@@ -101,6 +101,18 @@ public final class PlacementRunner {
         name = (String) spec.get("name");
         String container = (String) spec.getOrDefault("module", "revl.Components");
         bindSecretRegistry(container); // before the first line is printed
+
+        // item 443 / issue #122: publish the spec's E-Stop latch to the ambient
+        // path the crossing seams (`BridgeClient.call`, `Stub.serveConn`) and the
+        // idle watcher below all read. A java process cannot rewrite its own
+        // environment the way the go runner does with `os.Setenv`, so the latch
+        // travels here instead of through the environment. Done BEFORE any proxy
+        // dials or any key is served, so a latch already armed at boot is honored
+        // from the first crossing. A placement that was never armed carries no
+        // latch and this is a no-op, so an unarmed run is byte-identical to the
+        // pre-443 runner (E3).
+        String estopLatch = (String) spec.get("estopLatch");
+        Estop.publishLatch(estopLatch);
         Map<String, Object> ifaces = (Map<String, Object>) spec.getOrDefault("ifaces", Map.of());
         Map<String, Object> config = (Map<String, Object>) spec.getOrDefault("config", Map.of());
 
@@ -190,6 +202,40 @@ public final class PlacementRunner {
 
         System.out.println("[" + name + "] UP");
         System.out.flush();
+
+        // item 443 / issue #122 — the idle watcher (E6). The seams refuse lazily,
+        // at the NEXT crossing, which is useless for a process parked on
+        // `latch.await()` below waiting to be stopped: it crosses nothing and
+        // would sit through the emergency. So the runner polls the latch and, on
+        // the button, prints its in-flight inventory on one `[name] HALTED {json}`
+        // line (the conductor merges it by prefix — `src/revl/placement.py::pump`
+        // — with no second channel) and calls `Runtime.getRuntime().halt`, which
+        // runs NO teardown: it does NOT run the shutdown hook above, so there is
+        // no LIFO unwind, no inverse, no no-residue proof, and — deliberately — no
+        // `DOWN` line (E7). `System.exit` would run the hook and print `DOWN`;
+        // `halt` is the java equivalent of the go runner's `os.Exit`. Started only
+        // when the placement is armed, so an unarmed run spawns no watcher.
+        final String watchLatch = Estop.latchPath(null, null, true);
+        if (watchLatch != null) {
+            Thread watcher = new Thread(() -> {
+                while (true) {
+                    Map<String, Object> record = Estop.readLatch(watchLatch);
+                    if (record != null) {
+                        System.out.println(
+                                Estop.estopHaltLine(name, Estop.inFlightCrossings(), record));
+                        System.out.flush();
+                        // A short grace so the conductor's pump reads the line off
+                        // the pipe before this process vanishes; well inside the
+                        // halt window (REVL_ESTOP_HALT_WINDOW, default 2s).
+                        try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+                        Runtime.getRuntime().halt(1); // E7: die where it stands, non-zero, no DOWN
+                    }
+                    try { Thread.sleep(20); } catch (InterruptedException ignored) { return; }
+                }
+            }, "revl-estop");
+            watcher.setDaemon(true);
+            watcher.start();
+        }
 
         // hold until SIGTERM/SIGINT; the hook above tears down consumers-first
         latch.await();
@@ -353,27 +399,50 @@ public final class PlacementRunner {
         BridgeClient(String path) { this.path = path; }
 
         Object call(String key, String method, List<Object> args) {
-            RuntimeException last = null;
-            for (int attempt = 0; attempt < 100; attempt++) { // retry while the provider comes up
-                try (SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX)) {
-                    ch.connect(UnixDomainSocketAddress.of(path));
-                    BufferedWriter w = new BufferedWriter(new OutputStreamWriter(Channels.newOutputStream(ch), StandardCharsets.UTF_8));
-                    BufferedReader r = new BufferedReader(new InputStreamReader(Channels.newInputStream(ch), StandardCharsets.UTF_8));
-                    Map<String, Object> req = new java.util.LinkedHashMap<>();
-                    req.put("key", key); req.put("method", method); req.put("args", args);
-                    w.write(Json.write(req)); w.write("\n"); w.flush();
-                    String line = r.readLine();
-                    if (line == null) throw new RuntimeException("bridge peer closed the connection");
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> reply = (Map<String, Object>) Json.parse(line);
-                    if (!Boolean.TRUE.equals(reply.get("ok"))) throw new RuntimeException(String.valueOf(reply.get("error")));
-                    return reply.get("value");
-                } catch (java.io.IOException io) {
-                    last = new RuntimeException(io);
-                    try { Thread.sleep(50); } catch (InterruptedException ignored) {}
-                }
+            // item 443 / issue #122 — the DISPATCH side of the E-Stop seam. Once
+            // an operator arms the latch, this process stops DISPATCHING new
+            // crossings: the outgoing call is REFUSED before it leaves the
+            // process, so nothing new crosses the boundary. It throws rather than
+            // withdrawing the proxy, because a halt is not a peer death: reactive
+            // withdrawal would propagate a cooperative teardown to this proxy's
+            // dependents, exactly the graceful unwind the E-Stop exists to avoid.
+            // The refused caller's attempt lands in item 440's ambiguous tier, the
+            // designed outcome of a halt (docs/design/443-estop.md).
+            if (Estop.estopEngaged()) {
+                throw new RuntimeException("revl E-Stop engaged: this process is HALTED and "
+                        + "refuses to dispatch new crossings (key " + key + ", method " + method
+                        + ") — docs/design/443-estop.md");
             }
-            throw last != null ? last : new RuntimeException("bridge connect failed");
+            // Record the crossing as in flight for its round-trip: a crossing
+            // still out when the latch trips is the AMBIGUOUS one the halt
+            // inventory names (item 440). Cleared in a finally so a throwing round
+            // trip still leaves the registry clean.
+            long seq = Estop.beginCrossing(key, method, "dispatch");
+            try {
+                RuntimeException last = null;
+                for (int attempt = 0; attempt < 100; attempt++) { // retry while the provider comes up
+                    try (SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX)) {
+                        ch.connect(UnixDomainSocketAddress.of(path));
+                        BufferedWriter w = new BufferedWriter(new OutputStreamWriter(Channels.newOutputStream(ch), StandardCharsets.UTF_8));
+                        BufferedReader r = new BufferedReader(new InputStreamReader(Channels.newInputStream(ch), StandardCharsets.UTF_8));
+                        Map<String, Object> req = new java.util.LinkedHashMap<>();
+                        req.put("key", key); req.put("method", method); req.put("args", args);
+                        w.write(Json.write(req)); w.write("\n"); w.flush();
+                        String line = r.readLine();
+                        if (line == null) throw new RuntimeException("bridge peer closed the connection");
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> reply = (Map<String, Object>) Json.parse(line);
+                        if (!Boolean.TRUE.equals(reply.get("ok"))) throw new RuntimeException(String.valueOf(reply.get("error")));
+                        return reply.get("value");
+                    } catch (java.io.IOException io) {
+                        last = new RuntimeException(io);
+                        try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+                    }
+                }
+                throw last != null ? last : new RuntimeException("bridge connect failed");
+            } finally {
+                Estop.endCrossing(seq);
+            }
         }
 
         void close() {}
@@ -509,12 +578,40 @@ public final class PlacementRunner {
                     try {
                         Map<String, Object> req = (Map<String, Object>) Json.parse(line);
                         String key = (String) req.get("key");
+                        String method = (String) req.get("method");
+                        // item 443 / issue #122 — the ACCEPT side of the E-Stop
+                        // seam. An armed latch means an operator hit the button, so
+                        // this crossing is REFUSED before the service method runs:
+                        // nothing new crosses the boundary. The reply is an error,
+                        // not a value, and (unlike a cooperative teardown) no
+                        // inverse is replayed and nothing is discharged — the
+                        // caller's attempt lands in item 440's ambiguous tier, the
+                        // designed outcome of a halt (docs/design/443-estop.md).
+                        if (Estop.estopEngaged()) {
+                            reply.put("ok", false);
+                            reply.put("error", "revl E-Stop engaged: this process is HALTED and "
+                                    + "refuses new crossings (key " + key + ", method " + method
+                                    + ") — docs/design/443-estop.md");
+                            w.write(Json.write(reply)); w.write("\n"); w.flush();
+                            continue;
+                        }
                         Class<?> iface = served.get(key);
                         if (iface == null) throw new RuntimeException("key " + key + " not exported");
                         Object service = ctx.get(ServiceKey.of((Class) iface, key));
                         args = (List<Object>) req.getOrDefault("args", List.of());
-                        Method m = findMethod(iface, (String) req.get("method"), args.size());
-                        Object result = m.invoke(service, coerceArgs(m, args));
+                        Method m = findMethod(iface, method, args.size());
+                        // Record the crossing as in flight WHILE its handler runs: a
+                        // crossing still executing when the latch trips is the
+                        // AMBIGUOUS one the halt inventory names (item 440). Cleared
+                        // in a finally so a throwing handler still leaves the
+                        // registry clean.
+                        long seq = Estop.beginCrossing(key, method, "accept");
+                        Object result;
+                        try {
+                            result = m.invoke(service, coerceArgs(m, args));
+                        } finally {
+                            Estop.endCrossing(seq);
+                        }
                         reply.put("ok", true);
                         reply.put("value", BridgeCodec.encode(result));
                     } catch (Throwable t) {

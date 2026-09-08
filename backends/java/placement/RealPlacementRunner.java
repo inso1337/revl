@@ -107,6 +107,17 @@ public final class RealPlacementRunner {
         name = (String) spec.get("name");
         String container = (String) spec.getOrDefault("module", "revl.Components");
         bindSecretRegistry(container); // before the first line is printed
+
+        // item 443 / issue #122: publish the spec's E-Stop latch to the ambient
+        // path the dispatch seam (`BridgeClient.call`) and the idle watcher below
+        // read. A java process cannot rewrite its own environment the way the go
+        // runner does with `os.Setenv`, so the latch travels here. Done BEFORE any
+        // proxy dials, so a latch already armed at boot is honored from the first
+        // crossing; a placement that was never armed carries no latch and this is
+        // a no-op, so an unarmed run is byte-identical to the pre-443 runner (E3).
+        // The reactive runner honors the SAME contract and prints the SAME
+        // `[name] HALTED {json}` line as the JDK-17 stub `PlacementRunner`.
+        Estop.publishLatch((String) spec.get("estopLatch"));
         Map<String, Object> ifaces = (Map<String, Object>) spec.getOrDefault("ifaces", Map.of());
         Map<String, Object> config = (Map<String, Object>) spec.getOrDefault("config", Map.of());
         Map<String, Object> proxies = (Map<String, Object>) spec.getOrDefault("proxies", Map.of());
@@ -194,6 +205,35 @@ public final class RealPlacementRunner {
 
         System.out.println("[" + name + "] UP");
         System.out.flush();
+
+        // item 443 / issue #122 — the idle watcher (E6). The dispatch seam
+        // refuses lazily, at the NEXT crossing, which is useless for a process
+        // parked on the event queue below waiting to be stopped: it crosses
+        // nothing and would sit through the emergency. So the runner polls the
+        // latch and, on the button, prints its in-flight inventory on one
+        // `[name] HALTED {json}` line (the conductor merges it by prefix) and
+        // calls `Runtime.getRuntime().halt`, which runs NO teardown and prints no
+        // `DOWN` (E7). `System.exit(0)` below runs the shutdown hook and prints
+        // `DOWN`; `halt` is the reactive-runner equivalent of the go runner's
+        // `os.Exit`. Started only when the placement is armed.
+        final String watchLatch = Estop.latchPath(null, null, true);
+        if (watchLatch != null) {
+            Thread watcher = new Thread(() -> {
+                while (true) {
+                    Map<String, Object> record = Estop.readLatch(watchLatch);
+                    if (record != null) {
+                        System.out.println(
+                                Estop.estopHaltLine(name, Estop.inFlightCrossings(), record));
+                        System.out.flush();
+                        try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+                        Runtime.getRuntime().halt(1); // E7: die where it stands, non-zero, no DOWN
+                    }
+                    try { Thread.sleep(20); } catch (InterruptedException ignored) { return; }
+                }
+            }, "revl-estop");
+            watcher.setDaemon(true);
+            watcher.start();
+        }
 
         // 3. main loop: every context call stays on this thread (cordis4j D8).
         while (true) {
@@ -420,27 +460,48 @@ public final class RealPlacementRunner {
         BridgeClient(String path) { this.path = path; }
 
         Object call(String key, String method, List<Object> args) {
-            RuntimeException last = null;
-            for (int attempt = 0; attempt < 200; attempt++) {
-                try (SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX)) {
-                    ch.connect(UnixDomainSocketAddress.of(path));
-                    BufferedWriter w = new BufferedWriter(new OutputStreamWriter(Channels.newOutputStream(ch), StandardCharsets.UTF_8));
-                    BufferedReader r = new BufferedReader(new InputStreamReader(Channels.newInputStream(ch), StandardCharsets.UTF_8));
-                    Map<String, Object> req = new LinkedHashMap<>();
-                    req.put("key", key); req.put("method", method); req.put("args", args);
-                    w.write(Json.write(req)); w.write("\n"); w.flush();
-                    String line = r.readLine();
-                    if (line == null) throw new RuntimeException("bridge peer closed the connection");
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> reply = (Map<String, Object>) Json.parse(line);
-                    if (!Boolean.TRUE.equals(reply.get("ok"))) throw new RuntimeException(String.valueOf(reply.get("error")));
-                    return reply.get("value");
-                } catch (java.io.IOException io) {
-                    last = new RuntimeException(io);
-                    try { Thread.sleep(50); } catch (InterruptedException ignored) {}
-                }
+            // item 443 / issue #122 — the DISPATCH side of the E-Stop seam. Once
+            // an operator arms the latch, this process stops DISPATCHING new
+            // crossings: the outgoing call is REFUSED before it leaves the
+            // process. It throws rather than withdrawing the proxy, because a halt
+            // is not a peer death — reactive withdrawal would propagate the
+            // graceful unwind the E-Stop exists to avoid. The refused caller's
+            // attempt is item 440's ambiguous tier (docs/design/443-estop.md).
+            if (Estop.estopEngaged()) {
+                throw new RuntimeException("revl E-Stop engaged: this process is HALTED and "
+                        + "refuses to dispatch new crossings (key " + key + ", method " + method
+                        + ") — docs/design/443-estop.md");
             }
-            throw last != null ? last : new RuntimeException("bridge connect failed");
+            // Record the crossing as in flight for its round-trip: a crossing
+            // still out when the latch trips is the AMBIGUOUS one the inventory
+            // names (item 440). Cleared in a finally so a throwing round trip
+            // still leaves the registry clean.
+            long seq = Estop.beginCrossing(key, method, "dispatch");
+            try {
+                RuntimeException last = null;
+                for (int attempt = 0; attempt < 200; attempt++) {
+                    try (SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX)) {
+                        ch.connect(UnixDomainSocketAddress.of(path));
+                        BufferedWriter w = new BufferedWriter(new OutputStreamWriter(Channels.newOutputStream(ch), StandardCharsets.UTF_8));
+                        BufferedReader r = new BufferedReader(new InputStreamReader(Channels.newInputStream(ch), StandardCharsets.UTF_8));
+                        Map<String, Object> req = new LinkedHashMap<>();
+                        req.put("key", key); req.put("method", method); req.put("args", args);
+                        w.write(Json.write(req)); w.write("\n"); w.flush();
+                        String line = r.readLine();
+                        if (line == null) throw new RuntimeException("bridge peer closed the connection");
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> reply = (Map<String, Object>) Json.parse(line);
+                        if (!Boolean.TRUE.equals(reply.get("ok"))) throw new RuntimeException(String.valueOf(reply.get("error")));
+                        return reply.get("value");
+                    } catch (java.io.IOException io) {
+                        last = new RuntimeException(io);
+                        try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+                    }
+                }
+                throw last != null ? last : new RuntimeException("bridge connect failed");
+            } finally {
+                Estop.endCrossing(seq);
+            }
         }
     }
 
