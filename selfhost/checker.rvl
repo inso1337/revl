@@ -166,13 +166,15 @@ fn binop_type(op: Str, lt: Str, rt: Str) -> Infer {
   }
   if (op == "+") {
     if (lt == "Str" || rt == "Str") {
-      // string concatenation path: the other side must be Str or numeric;
-      // only both-Str *knows* it is a Str result (the reference returns
-      // unknown when a numeric side will be coerced by the backend later)
-      if (lt != "" && lt != "Str" && !is_numeric(lt)) {
+      // string concatenation path: `+` on a `Str` concatenates two `Str`s, so
+      // any KNOWN non-Str operand is refused — numeric included (issue #549:
+      // `Str + Int` scattered across the tiers, now a compile error on every
+      // tier). An UNKNOWN operand ("") stays on the gradual frontier and the
+      // result is unknown until it resolves.
+      if (lt != "" && lt != "Str") {
         return refuse("operand of string `+`")
       }
-      if (rt != "" && rt != "Str" && !is_numeric(rt)) {
+      if (rt != "" && rt != "Str") {
         return refuse("operand of string `+`")
       }
       if (lt == "Str" && rt == "Str") { return ok_ty("Str") }
