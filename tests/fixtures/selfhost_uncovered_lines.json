@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 4223,
+      "statements": 4235,
       "uncovered": {
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
@@ -166,7 +166,7 @@
           "_revl_decode_fn": 1,
           "_revl_encode_fn": 1,
           "_v3_declared_variant": 4,
-          "emit_placement": 16
+          "emit_placement": 3
         },
         "Remaining accumulator recognition handles .concat builtin chains rather than the covered + chains; stdlib concat emission is an explicit Go deferral.": {
           "_v3_str_concat_pieces": 6
@@ -190,9 +190,6 @@
         },
         "Remaining constructor paths implement deferred builtin Some/None/Ok/Err layouts, or reject unknown cases/bad arity. Covered user variants take the declared-layout branch; builtin tagged preambles are not emitted by the port.": {
           "_go_v3_construct": 29
-        },
-        "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return. The oracle calls emit(ir) on module-only v3 documents.": {
-          "emit": 102
         },
         "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised.": {
           "_go_v3_expr": 47
@@ -252,6 +249,9 @@
         "The non-boxing Result[T, E] match discriminator (item 434(d), #114): `_go_v3_match_result` renders the `.Ok` if/else for a v3 Result match, the sibling of `_go_v3_match_opt`. The go v3 module byte-agreement corpus has no Result-match program, so the oracle never enters it. Reachable in principle, not exercised by the corpus.": {
           "_go_v3_match_result": 61
         },
+        "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
+          "_emit_placement": 16
+        },
         "emit calls this Secret-marking scan only after the pure-module early return, to select component record/WAL redaction. The corpus already exercises a pure extern Secret return, but service secret parameters, config secrets and secret_witness descriptors remain a separate roadmap 421F6 runtime/redaction gap; pure wrapping is not evidence of runtime parity.": {
           "_declares_secret": 16
         },
@@ -269,9 +269,12 @@
           "_method_ret": 1,
           "_method_returns_value": 1,
           "_needs_sync": 1
+        },
+        "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return. The oracle calls _emit(ir) on module-only v3 documents.": {
+          "_emit": 102
         }
       },
-      "uncovered_statements": 3047
+      "uncovered_statements": 3050
     },
     "java": {
       "statements": 2583,
