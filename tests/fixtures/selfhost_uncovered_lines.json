@@ -980,7 +980,7 @@
       "uncovered_statements": 1293
     },
     "ts": {
-      "statements": 2121,
+      "statements": 2138,
       "uncovered": {
         "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), emits sync/async timer scheduling and in-flight tracking, dispatches the item-130 `stream-iter` step (roadmap #81), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards and fail are covered; witnessed transactions, timers and the ts reactive-tier stream steps are declared port boundaries": {
           "_component_step": 44
@@ -1094,15 +1094,16 @@
         "backends/typescript/emit.py::_reject_service_key: refuses a provide/require key that would collide with a cordis Context member, an inherited JS prototype member, or the reserved _-prefixed namespace (a loud host-safety error over a silent wrong resolution). Every corpus key is host-safe, so _is_reserved_service_key returns early and the refusal body with its per-case messages never runs.": {
           "_reject_service_key": 8
         },
-        "ts reactive tier (item 130, roadmap #81): `_stream_head` renders the `merge(a, b)` fan-in and its recursive nesting, and `_stream_iter` emits the `every ... in` async-iteration loop (the while/next/isClosed shape) and refuses the `on ... as` typed-event handler by name. The reference now lowers these against runtime.ts's Stream, but the self-host emitter selfhost/emit_ts.rvl has not yet mirrored the stream tier and no self-host corpus document subscribes a stream, so both are reference-only until the self-host stream port and a stream corpus fixture land": {
+        "ts reactive tier (item 130, roadmap #81): `_stream_head` renders the `merge(a, b)` fan-in and its recursive nesting; `_stream_iter` emits the `every ... in` async-iteration loop (the while/next/isClosed shape) AND the `on ... as` typed-event handler (its `Stream.contract` schema-and-dedup gate, Slice 5); `_raw_ident` validates the event name/key without mangling. The reference now lowers all of these against runtime.ts's Stream, but the self-host emitter selfhost/emit_ts.rvl has not yet mirrored the stream tier and no self-host corpus document subscribes a stream, so both are reference-only until the self-host stream port and a stream corpus fixture land": {
+          "_raw_ident": 3,
           "_stream_head": 4,
-          "_stream_iter": 13
+          "_stream_iter": 26
         },
         "v1/v2 live-component routing is selected before the v3 emitter mirrored by `selfhost/emit_ts.rvl`; the remaining statements are the legacy runtime branch": {
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 517
+      "uncovered_statements": 533
     },
     "wasm": {
       "statements": 2758,
