@@ -20,20 +20,37 @@ on 3.11 and on 3.14: it turns on the presence of a `lambda`/helper call and on
 copy COUNTS, never on whether a comprehension is inlined (which is a version
 difference, PEP 709).
 
-Two findings are DELIBERATELY still open, and are asserted at their current
-value so a future fix flips this test on purpose rather than by accident:
+Two findings are ACCEPTED as permanent micro-perf residuals — issue #71 was
+CLOSED on that basis, not because they were fixed — and are asserted at their
+accepted value so a change that removes one flips this test on purpose rather
+than by accident:
 
   * F3, the match PAYLOAD bind read from inside a larger body, keeps its
-    one-shot lambda. A walrus would write the bind through to an enclosing
-    local of the same name (revl lets an arm bind shadow one), so closing it
-    needs the set of names bound in the enclosing function threaded into
-    `_match_expr` and its self-host mirror — a threading change, pinned as
-    correct-by-design in `tests/test_163_match_payload_bind_scope.py`.
+    one-shot lambda. The gain is one interpreter frame per such evaluation, and
+    the walrus that would remove it (writing the bind through to an enclosing
+    local of the same name, which revl lets an arm bind shadow) is safe ONLY
+    when that name is bound nowhere else in the function. The reference emitter
+    can decide that from a single module-level tally set at each function entry
+    — a clean, small change (verified: it emits the walrus for a unique bind
+    and keeps the lambda for the shadow / nested / arrow shapes item 163 pins,
+    and the walrus executes to the same value). But `selfhost/emit_py.rvl` has
+    NO module state, so byte-agreement (`tests/test_selfhost_emit_py.py`) forces
+    the same tally to be THREADED through its `expr` (112 call sites) and
+    `cexpr` (52 call sites) recursions plus their helpers, and mirrored as a
+    `collect_bound_names` walk over the value_* IR API. That ~180-edit
+    deep-recursion signature refactor of the self-host emitter, graded
+    byte-exact over the whole corpus (including the arbitrary whole-tree survey
+    fixtures), is disproportionate to removing one frame from a micro-benchmark.
+    Accepted; the arm-local scope contract stays pinned in
+    `tests/test_163_match_payload_bind_scope.py`.
   * F4, the `isinstance(p, dict)` dispatch on every record field read. The
     helper FRAME is gone; the dynamic dispatch stays, because a field read off
     a record-typed value must still tolerate a host object an extern handed
-    back under that type. Removing it needs a value-PROVENANCE fact (the value
-    was built here, as a dict), not just its declared type.
+    back under that type (`src/revl/typecheck.py`: an extern's return is
+    deliberately opaque). Removing it needs a value-PROVENANCE fact (the value
+    was built here, as a dict), not just its declared type — a FRONTEND change
+    that is its own tracked follow-up (roadmap item 436 F4), out of scope for a
+    codegen-only close. Accepted/deferred.
 """
 
 import importlib
@@ -205,16 +222,19 @@ def test_module_load_enters_only_a_handful_of_frames():
 
 
 # --------------------------------------------------------------------------
-# The two findings still open, asserted at their current value (see the module
-# docstring). If a later change closes one, THIS is the test that must be
-# updated — deliberately — rather than a silent measurement.
+# The two ACCEPTED residuals (see the module docstring). Issue #71 was closed
+# with these two taxes accepted, not removed, so they are pinned at their
+# accepted value: a change that removes one must flip THIS test deliberately,
+# and doing so is the signal that the accepted decision has been revisited.
 
-def test_toward_71_match_payload_bind_still_keeps_its_lambda():
-    """F3 remainder. `matching` carries exactly one `(lambda ` — the payload
+def test_accepted_residual_match_payload_bind_keeps_its_lambda():
+    """F3, ACCEPTED. `matching` carries exactly one `(lambda ` — the payload
     bind of `Some(v) => v + 1`, read from inside a larger body — and it costs
-    the one extra frame the hand-written arm does not. Closing it needs the
-    enclosing-function bound-name threading described in the module docstring
-    and in test_163."""
+    the one extra frame the hand-written arm does not. Removing it is a clean
+    change in the reference emitter but a ~180-site threading refactor in the
+    stateless `selfhost/emit_py.rvl` to keep byte-agreement, disproportionate to
+    one frame per match; accepted per the module docstring. The arm-local scope
+    contract the walrus would have to respect stays pinned in test_163."""
     assert _shape("matching")["lambda-in-expression"] == 1, _source("matching")
     em, hw = _emitted("matching"), run._load_handwritten()
     e = run.count_calls(lambda: em.classify(7))
@@ -222,8 +242,10 @@ def test_toward_71_match_payload_bind_still_keeps_its_lambda():
     assert e == h + 1, f"matching.classify: emitted {e} frames vs hand-written {h}"
 
 
-def test_toward_71_record_field_read_still_dispatches_dynamically():
-    """F4 remainder. The helper frame is gone, but the field read still spells
-    the `isinstance(p, dict)` dispatch that only a value-provenance fact could
-    remove. Pinned so its removal is a conscious flip of this test."""
+def test_accepted_residual_record_field_read_dispatches_dynamically():
+    """F4, ACCEPTED/DEFERRED. The helper frame is gone, but the field read still
+    spells the `isinstance(p, dict)` dispatch that only a value-provenance fact
+    could remove — a frontend change tracked as its own follow-up (roadmap item
+    436 F4), out of scope for a codegen-only close. Pinned so its removal is a
+    conscious flip of this test."""
     assert "isinstance(p, dict)" in _source("records"), _source("records")
