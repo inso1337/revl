@@ -1,0 +1,290 @@
+// The revl stdlib HTTP module (roadmap item 456, docs/design/525-exemplary-web-app.md).
+//
+// ---------------------------------------------------------------- the problem
+// Routing in the harness passes bare `Str` and reconstructs status from body
+// prose: a route hands back a plain string, and the caller decides what happened
+// by inspecting that string — an empty `""` means "nothing", a magic
+// `"::empty::"` means "handled, but no body", and anything else is application
+// output. Status codes are likewise recovered by reading the text. That is a
+// sentinel protocol carried inside a value type that cannot express the
+// distinctions it is being asked to carry, so the meaning lives in a convention
+// no compiler can check and any refactor can silently break.
+//
+// ---------------------------------------------------------------- the fix
+// A first-class typed contract. A route produces an `Outcome`, and the two
+// things the caller used to read out of prose are now read out of the type:
+//
+//   * WHETHER the route handled the request — `Handled(Response)` vs the
+//     explicit nullary `NotHandled`. A mishandled route is a typed
+//     `NotHandled`, never an empty string.
+//   * The STATUS and BODY of a handled response — fields on `Response`, and a
+//     `Body` whose emptiness is the `Empty` variant, not a `""`/`"::empty::"`
+//     stand-in.
+//
+// None of this needs new language surface: `Request`/`Response`/`Header` are
+// ordinary records and `Body`/`Outcome`/`Method` are ordinary variant types, so
+// an HTTP contract is a LIBRARY, not a language feature (525 non-goals). The
+// value of pinning it here is that every route and every router shares one
+// contract instead of re-deriving a private string convention.
+//
+// ---------------------------------------------------------------- Cordis anchor
+// revl runs inside the Cordis ecosystem, so this contract deliberately REUSES
+// Cordis's HTTP vocabulary rather than inventing a parallel dialect. Two Cordis
+// packages are the anchors:
+//
+//   * `@cordisjs/server` — the HTTP/WebSocket SERVER, and the closer reference
+//     for item 456 (a server routing requests to handlers). Its handler sees a
+//     `Request` and a `Response` (packages/core/src/body.ts): `req.method`,
+//     `req.path`, `req.headers` (a WHATWG `Headers` multimap); `res.status`,
+//     `res.statusText`, `res.headers`, `res.body`. Its method set is
+//     `['all', 'get', 'delete', 'head', 'post', 'put', 'patch']` plus `ws`
+//     (packages/core/src/index.ts). This module's field NAMES track that shape.
+//   * `@cordisjs/http` — the client fetch SERVICE, orthogonal to the server but
+//     the same vocabulary: `Http.Response` is `{ url, data, status, statusText,
+//     headers }` and its methods are get/post/put/patch/delete/head/ws
+//     (packages/core/src/index.ts). We mirror `status`/`statusText` from it too.
+//
+// Where revl adds a typed distinction Cordis expresses by convention — the
+// routing `Outcome` and the typed `Body` — that divergence is deliberate and
+// named below, not an oversight.
+//
+// ---------------------------------------------------------------- pure revl
+// Like stdlib/render.rvl and stdlib/list.rvl (and unlike value.rvl/json.rvl),
+// every declaration here is PURE revl — records, variants, `match`, and the
+// base List surface — with no `@py` block, so there is nothing to defer per
+// tier: the module compiles and runs identically on every backend the moment it
+// emits variants and the base builtins. The py tier is executed by the test
+// suite (tests/test_http_stdlib.py); the other tiers inherit for free.
+//
+// Import with a named `use`:
+//
+//     use "stdlib/http.rvl" { Request, Response, Outcome, Body, Method,
+//                             ok_text, not_found, handled, not_handled,
+//                             status_of }
+
+// ---------------------------------------------------------------- method
+
+// The HTTP request method, modelled as a variant instead of a free `Str` so a
+// route table matches it exhaustively. The set mirrors `@cordisjs/server`'s
+// `Server.methods` (packages/core/src/index.ts) minus its `all` wildcard —
+// `Get | Post | Put | Patch | Delete | Head`. Cordis's WebSocket upgrade is a
+// separate route kind (`ctx.server.ws(...)`), not a method, so there is no `Ws`
+// case here either; a websocket surface, if added, is its own contract.
+pub type Method =
+    Get
+  | Post
+  | Put
+  | Patch
+  | Delete
+  | Head
+
+// The canonical wire spelling of a method (upper-case, as node hands it to a
+// Cordis server on `req.method`). The typed replacement for passing method
+// strings around by hand.
+pub fn method_str(m: Method) -> Str {
+  return match m {
+    Get => "GET",
+    Post => "POST",
+    Put => "PUT",
+    Patch => "PATCH",
+    Delete => "DELETE",
+    Head => "HEAD",
+  }
+}
+
+// Recover a `Method` from a wire string (the inverse of `method_str`); `None`
+// for an unknown/unsupported verb — never a sentinel string.
+pub fn parse_method(s: Str) -> Opt[Method] {
+  if (s == "GET") { return Some(Get) }
+  if (s == "POST") { return Some(Post) }
+  if (s == "PUT") { return Some(Put) }
+  if (s == "PATCH") { return Some(Patch) }
+  if (s == "DELETE") { return Some(Delete) }
+  if (s == "HEAD") { return Some(Head) }
+  return None
+}
+
+// ---------------------------------------------------------------- headers
+
+// One HTTP header as a name/value pair. Header sets are `List[Header]` rather
+// than a `Map[Str, Str]` because this mirrors Cordis's WHATWG `Headers`
+// (`req.headers` / `res.headers`): a real request may repeat a header name
+// (Set-Cookie, Accept), and order is observable on the wire — a plain map loses
+// both. WHATWG `Headers` lower-cases names on the wire, so callers normalise
+// before storing (see `header_value`).
+pub type Header = { name: Str, value: Str }
+
+// ---------------------------------------------------------------- body
+
+// A typed message body. This is revl's typed value-add over Cordis's untyped
+// body slot — `@cordisjs/server`'s `res.body: BodyInit` and `@cordisjs/http`'s
+// `Response.data: T` are both "whatever payload"; here the payload's KIND is in
+// the type. `Empty` is the FIRST-CLASS "no body" — the thing the harness spelled
+// `""` or `"::empty::"`. `Text` and `Json` both carry a `Str` payload, but the
+// variant records the author's intent (and lets a serializer pick the content
+// type) instead of leaving a bare string whose kind must be re-guessed
+// downstream. (Cordis's `res.json(x)` likewise sets `content-type` for you.)
+pub type Body =
+    Empty
+  | Text(Str)
+  | Json(Str)
+
+// ---------------------------------------------------------------- request
+
+// The handler-facing request, tracking `@cordisjs/server`'s `Request`
+// (body.ts): `method`, `path`, `headers`. `method` is the typed `Method` rather
+// than Cordis's `Str`; `body` is the typed `Body` rather than a stream.
+pub type Request = {
+  method: Method,
+  path: Str,
+  headers: List[Header],
+  body: Body,
+}
+
+// ---------------------------------------------------------------- response
+
+// The handler-facing response, tracking `@cordisjs/server`'s `Response` (and
+// `@cordisjs/http`'s `Response`): `status`, `status_text` (Cordis's
+// `statusText` / node's `statusMessage`), `headers`, and a `body`. `status_text`
+// is the human-readable reason phrase carried alongside the numeric `status`,
+// exactly as Cordis does — revl no longer drops it. `body` is the typed `Body`
+// (revl's value-add) where Cordis carries `res.body` / `data`.
+pub type Response = {
+  status: Int,
+  status_text: Str,
+  headers: List[Header],
+  body: Body,
+}
+
+// ---------------------------------------------------------------- outcome
+
+// The explicit routing outcome — revl's DELIBERATE DIVERGENCE from Cordis, and
+// the core item-456 contribution. `@cordisjs/server` has no typed "did a route
+// handle this": a handler mutates `res` (setting `res.status`/`res.body` flips
+// an internal `res.claimed` flag), and the server FALLS BACK to `res.status =
+// 404` / `405` by convention when nothing claimed the response
+// (packages/core/src/index.ts). That is exactly the untyped, refactor-fragile
+// convention item 456 exists to replace. Here `Handled` carries the response the
+// route produced and `NotHandled` is the typed "no route matched" — a router
+// folds a request across its routes and returns exactly one of these, and the
+// caller never inspects prose (or a mutation side effect) to tell them apart.
+pub type Outcome = Handled(Response) | NotHandled
+
+// ---------------------------------------------------------------- constructors
+
+pub fn header(name: Str, value: Str) -> Header {
+  return { name: name, value: value }
+}
+
+// A bare request: no headers, empty body. Add headers/body by rebuilding the
+// record (revl records are immutable), exactly as `response` is specialised.
+pub fn request(method: Method, path: Str) -> Request {
+  return { method: method, path: path, headers: [], body: Empty }
+}
+
+// A response with an explicit status, reason phrase and body (the general
+// constructor; `ok_text`/`ok_json`/`not_found` specialise it with the standard
+// reason phrases Cordis / node use).
+pub fn response(status: Int, status_text: Str, body: Body) -> Response {
+  return { status: status, status_text: status_text, headers: [], body: body }
+}
+
+// A 200 with a text body and the matching content type.
+pub fn ok_text(text: Str) -> Response {
+  return { status: 200, status_text: "OK",
+           headers: [header("content-type", "text/plain; charset=utf-8")],
+           body: Text(text) }
+}
+
+// A 200 with a JSON body (the payload is the already-serialized JSON string,
+// e.g. from stdlib/json.rvl `json_stringify`) and the matching content type.
+pub fn ok_json(payload: Str) -> Response {
+  return { status: 200, status_text: "OK",
+           headers: [header("content-type", "application/json")],
+           body: Json(payload) }
+}
+
+// A 404 with no body. Note this is a RESPONSE (the route ran and answered "not
+// found"), which is distinct from the routing-level `NotHandled` below (no route
+// matched at all) — a distinction the old empty-string convention could not make,
+// and which Cordis collapses into a single fallback status.
+pub fn not_found() -> Response {
+  return { status: 404, status_text: "Not Found", headers: [], body: Empty }
+}
+
+pub fn handled(r: Response) -> Outcome { return Handled(r) }
+
+pub fn not_handled() -> Outcome { return NotHandled }
+
+// ---------------------------------------------------------------- readers
+
+// Did a route handle the request? Read from the variant, not from `text == ""`.
+pub fn is_handled(o: Outcome) -> Bool {
+  return match o {
+    Handled(r) => true,
+    NotHandled => false,
+  }
+}
+
+// The status of a handled outcome, or `None` when nothing handled it. This is
+// the reader that replaces "parse the status out of the body prose".
+pub fn status_of(o: Outcome) -> Opt[Int] {
+  return match o {
+    Handled(r) => Some(r.status),
+    NotHandled => None,
+  }
+}
+
+// The reason phrase of a handled outcome (Cordis's `statusText`), or `None` when
+// nothing handled it.
+pub fn status_text_of(o: Outcome) -> Opt[Str] {
+  return match o {
+    Handled(r) => Some(r.status_text),
+    NotHandled => None,
+  }
+}
+
+// The response of a handled outcome, or `None`. Lets a caller reach headers and
+// body through the typed record rather than re-decoding a string.
+pub fn response_of(o: Outcome) -> Opt[Response] {
+  return match o {
+    Handled(r) => Some(r),
+    NotHandled => None,
+  }
+}
+
+// Whether a response's status is a 2xx success, mirroring Cordis's
+// `Response.ok` (a derived reader over the numeric status).
+pub fn is_ok(r: Response) -> Bool {
+  return r.status >= 200 && r.status < 300
+}
+
+// Is the body the first-class empty body? The typed replacement for the
+// `text == "" || text == "::empty::"` test.
+pub fn is_empty_body(b: Body) -> Bool {
+  return match b {
+    Empty => true,
+    _ => false,
+  }
+}
+
+// The body's text payload — `""` only for the genuine `Empty` case. Unlike the
+// sentinel protocol, `is_empty_body` distinguishes "empty" from "the string
+// happened to be empty" BEFORE this collapses them for display.
+pub fn body_text(b: Body) -> Str {
+  return match b {
+    Empty => "",
+    Text(s) => s,
+    Json(s) => s,
+  }
+}
+
+// Look up the first value for a header name (case-sensitive on the stored name;
+// callers normalise to lower-case before storing, as WHATWG `Headers` does).
+// `None` when absent — never a sentinel.
+pub fn header_value(headers: List[Header], name: Str) -> Opt[Str] {
+  for (h of headers) {
+    if (h.name == name) { return Some(h.value) }
+  }
+  return None
+}
