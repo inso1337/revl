@@ -45,6 +45,9 @@
 //   4 -> adds `stdlib/a2a.rvl` (roadmap item 439, issue #118): the pure-revl
 //        A2A Task-lifecycle vocabulary — `TaskRef`, `TaskState`, `TaskEvent`,
 //        `is_terminal` and `task_state_from_wire`.
+//   5 -> adds `stdlib/escape.rvl` (roadmap item 459, issue #722): the pure-revl
+//        contextual-escaping kit for frontend-asset crossings — `escape_html`,
+//        `escape_js` and `escape_uri`.
 pub fn stdlib_version() -> Str {
-  return "4"
+  return "5"
 }

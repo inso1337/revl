@@ -52,14 +52,75 @@ use std::process::Command;
 // build set `REVL_LSP_EMBED_RUNTIME`, `None` for every bare `cargo` build.
 include!(concat!(env!("OUT_DIR"), "/embedded_runtime.rs"));
 
-/// A resolved private runtime: the interpreter to launch and the isolation the
-/// launch must apply. `isolated` is always `true` for a private runtime — a
-/// bundled interpreter must not read the machine's `PYTHONPATH` or user site —
-/// and is carried as a field rather than assumed so the engine's launch code
-/// reads one flag instead of re-deriving the rule.
+/// Where a resolved private runtime came from — the distribution SHAPE, made
+/// legible so a fleet or install audit can tell a genuinely single distributed
+/// FILE from a self-contained PAIR of files or a runtime pointed at by the
+/// environment. The one-file bundling item (issue #102) is precisely about the
+/// `Embedded` shape, and `embedding()` alone ("private-runtime" vs
+/// "system-python") cannot distinguish it from `BesideExe`, so the source rides
+/// `revl/gateVersion` beside the embedding for exactly that audit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// A runtime named by `REVL_LSP_RUNTIME` / `REVL_LSP_RUNTIME_ARCHIVE`. In a
+    /// shipped artifact this is a red flag (currency leaning on the machine's
+    /// environment); it is how CI, the oracle and a developer point at a tree.
+    Env,
+    /// A runtime tree or archive sitting BESIDE the executable — self-contained,
+    /// but a PAIR of files, not the one-file the item's prose reaches for.
+    BesideExe,
+    /// A runtime archive baked INTO the executable's own bytes — the genuinely
+    /// single distributed FILE.
+    Embedded,
+}
+
+impl Source {
+    /// The stable wire label surfaced over `revl/gateVersion`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Env => "env",
+            Source::BesideExe => "beside-exe",
+            Source::Embedded => "embedded",
+        }
+    }
+}
+
+/// A resolved private runtime: the interpreter to launch, the isolation the
+/// launch must apply, and the provenance a distribution audit reads. `isolated`
+/// is always `true` for a private runtime — a bundled interpreter must not read
+/// the machine's `PYTHONPATH` or user site — and is carried as a field rather
+/// than assumed so the engine's launch code reads one flag instead of
+/// re-deriving the rule. `source` is the distribution shape and `pin` the
+/// versioned-cache key this runtime resolved under (design A3: the runtime's own
+/// skew comparand, distinct from the native gate's frontier pin).
 pub struct Runtime {
     pub python: String,
     pub isolated: bool,
+    pub source: Source,
+    pub pin: String,
+}
+
+impl Runtime {
+    /// Stamp a freshly resolved interpreter with the provenance the resolving
+    /// branch in `locate` knows: its distribution shape and its cache pin.
+    fn tagged(mut self, source: Source, pin: String) -> Self {
+        self.source = source;
+        self.pin = pin;
+        self
+    }
+}
+
+/// A resolved interpreter with placeholder provenance, isolated as every private
+/// runtime is. The resolving branch in `locate` stamps the real `source`/`pin`
+/// via `Runtime::tagged`, which is the single source of truth for provenance —
+/// a shared extraction helper cannot know whether its caller was the env, a
+/// beside-exe file, or the baked-in bytes.
+fn resolved(python: PathBuf) -> Runtime {
+    Runtime {
+        python: python.to_string_lossy().into_owned(),
+        isolated: true,
+        source: Source::Env,
+        pin: String::new(),
+    }
 }
 
 /// The runtime identity the cache is keyed by: bump it whenever the pinned
@@ -97,10 +158,10 @@ const PIN_ENV: &str = "REVL_LSP_RUNTIME_PIN";
 /// a `python3` on PATH that may be a different — or no — `revl`.
 pub fn locate() -> Option<Result<Runtime, String>> {
     if let Some(dir) = env_path(RUNTIME_DIR_ENV) {
-        return Some(from_extracted_dir(&dir));
+        return Some(from_extracted_dir(&dir).map(|rt| rt.tagged(Source::Env, pin())));
     }
     if let Some(archive) = env_path(RUNTIME_ARCHIVE_ENV) {
-        return Some(ensure_extracted(&archive));
+        return Some(ensure_extracted(&archive).map(|rt| rt.tagged(Source::Env, pin())));
     }
     // The real single-file install layout: a runtime unpacked, or an archive,
     // sitting beside the executable. Absent in a bare `cargo` checkout, present
@@ -109,11 +170,15 @@ pub fn locate() -> Option<Result<Runtime, String>> {
         if let Some(dir) = exe.parent() {
             let bundled_dir = dir.join("runtime").join(pin());
             if interpreter_in(&bundled_dir).is_some() {
-                return Some(from_extracted_dir(&bundled_dir));
+                return Some(
+                    from_extracted_dir(&bundled_dir).map(|rt| rt.tagged(Source::BesideExe, pin())),
+                );
             }
             let bundled_archive = dir.join("runtime.tar");
             if bundled_archive.is_file() {
-                return Some(ensure_extracted(&bundled_archive));
+                return Some(
+                    ensure_extracted(&bundled_archive).map(|rt| rt.tagged(Source::BesideExe, pin())),
+                );
             }
         }
     }
@@ -130,10 +195,7 @@ pub fn locate() -> Option<Result<Runtime, String>> {
 
 fn from_extracted_dir(dir: &Path) -> Result<Runtime, String> {
     match interpreter_in(dir) {
-        Some(python) => Ok(Runtime {
-            python: python.to_string_lossy().into_owned(),
-            isolated: true,
-        }),
+        Some(python) => Ok(resolved(python)),
         None => Err(format!(
             "the runtime at {} has no bin/python3 (set {RUNTIME_DIR_ENV} to a \
              python-build-standalone tree, or unset it to use a python on PATH)",
@@ -160,12 +222,13 @@ fn ensure_extracted_bytes(bytes: &[u8]) -> Result<Runtime, String> {
 /// path, so an embedded runtime reuses the very same versioned-cache, atomic
 /// `rename` and reuse behavior a beside-exe archive gets.
 fn ensure_extracted_bytes_into(bytes: &[u8], dest: &Path) -> Result<Runtime, String> {
+    // This helper only ever handles the baked-in bytes, so it can stamp the
+    // `Embedded` shape itself; `locate` re-stamps with `embedded_pin()` (the same
+    // value in production), and a direct unit-test caller sees the honest source.
+    let pin = pin_of(dest);
     if let Some(python) = interpreter_in(dest) {
         // already populated by an earlier launch — no need to re-stage the bytes
-        return Ok(Runtime {
-            python: python.to_string_lossy().into_owned(),
-            isolated: true,
-        });
+        return Ok(resolved(python).tagged(Source::Embedded, pin));
     }
     let parent = dest
         .parent()
@@ -183,7 +246,8 @@ fn ensure_extracted_bytes_into(bytes: &[u8], dest: &Path) -> Result<Runtime, Str
             staged_archive.display()
         )
     })?;
-    let result = ensure_extracted_into(&staged_archive, dest);
+    let result = ensure_extracted_into(&staged_archive, dest)
+        .map(|rt| rt.tagged(Source::Embedded, pin));
     let _ = std::fs::remove_file(&staged_archive);
     result
 }
@@ -196,10 +260,7 @@ fn ensure_extracted_bytes_into(bytes: &[u8], dest: &Path) -> Result<Runtime, Str
 fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String> {
     if let Some(python) = interpreter_in(dest) {
         // already populated by an earlier launch (or a peer that just won)
-        return Ok(Runtime {
-            python: python.to_string_lossy().into_owned(),
-            isolated: true,
-        });
+        return Ok(resolved(python));
     }
     if !archive.is_file() {
         return Err(format!(
@@ -251,10 +312,7 @@ fn ensure_extracted_into(archive: &Path, dest: &Path) -> Result<Runtime, String>
     let _ = std::fs::remove_dir_all(&staging);
 
     match interpreter_in(dest) {
-        Some(python) => Ok(Runtime {
-            python: python.to_string_lossy().into_owned(),
-            isolated: true,
-        }),
+        Some(python) => Ok(resolved(python)),
         None => Err(format!(
             "the runtime archive {} unpacked without a bin/python3",
             archive.display()
@@ -347,6 +405,15 @@ fn pin() -> String {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| RUNTIME_PIN.to_string())
+}
+
+/// The pin a versioned-cache directory is keyed by: its final path segment,
+/// which `runtime_dir_for` builds from the pin. Used to stamp a resolved
+/// `Runtime` with the key it actually landed under.
+fn pin_of(dest: &Path) -> String {
+    dest.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// The pin a BAKED-IN runtime caches under: the `PIN_ENV` override still wins
@@ -443,6 +510,10 @@ mod tests {
         let first =
             ensure_extracted_bytes_into(&bytes, &dest).expect("embedded bytes should extract");
         assert!(first.isolated, "an embedded runtime must launch in isolated mode");
+        // Baked-in bytes report the single-distributed-FILE shape and the pin
+        // they cached under, which is what a distribution audit reads.
+        assert_eq!(first.source, Source::Embedded);
+        assert_eq!(first.pin, "embed-unit-pin");
         assert!(
             dest.join("bin").join("python3").is_file(),
             "the interpreter did not land in the versioned cache at {}",
@@ -457,12 +528,23 @@ mod tests {
         let second =
             ensure_extracted_bytes_into(&bytes, &dest).expect("the cache should be reused");
         assert_eq!(first.python, second.python);
+        assert_eq!(second.source, Source::Embedded, "the reuse path keeps the shape");
+        assert_eq!(second.pin, "embed-unit-pin");
         assert!(
             sentinel.is_file(),
             "the second call re-extracted the runtime instead of reusing the cache"
         );
 
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn the_source_wire_labels_are_stable() {
+        // These strings ride `revl/gateVersion`; a distribution audit keys on
+        // them, so a rename is a wire break, not a refactor.
+        assert_eq!(Source::Env.as_str(), "env");
+        assert_eq!(Source::BesideExe.as_str(), "beside-exe");
+        assert_eq!(Source::Embedded.as_str(), "embedded");
     }
 
     #[test]

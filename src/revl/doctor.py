@@ -177,6 +177,43 @@ class Prober:
         except (ImportError, ValueError):  # a broken install resolves to absent
             return False
 
+    def module_origin(self, name: str) -> str | None:
+        """The on-disk file a module would import from (its ``spec.origin``), or
+        None when it is not resolvable or has no file (a namespace/builtin). This
+        is the exact binding a reproduction pins — *which* copy of ``cordis``
+        actually loads, out of however many are on the box."""
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, ValueError):
+            return None
+        if spec is None:
+            return None
+        origin = spec.origin
+        if origin in (None, "built-in", "frozen"):
+            locations = list(getattr(spec, "submodule_search_locations", None) or [])
+            return locations[0] if locations else None
+        return origin
+
+    def dist_version(self, name: str) -> str | None:
+        """The installed distribution version of a package, or None when it has
+        no resolvable metadata (importable-but-unpackaged — a path-installed
+        backend often is — or simply absent). Never raises: an unversioned
+        binding is a fact to report, not a crash."""
+        try:
+            from importlib.metadata import version  # noqa: PLC0415
+            return version(name)
+        except Exception:  # noqa: BLE001 — any metadata failure reads as "no version"
+            return None
+
+    def read_text(self, path: Path) -> str | None:
+        """The text of a file, or None if it cannot be read. Used to read a
+        runtime's own version stamp off disk (e.g. a ``package.json``) without
+        importing or launching it."""
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return None
+
     def is_dir(self, path: Path) -> bool:
         try:
             return Path(path).is_dir()
@@ -437,24 +474,54 @@ def check_wasm_tools(prober: Prober) -> Check:
 def check_cordis_py(prober: Prober) -> Check:
     """The cordis-py runtime, resolvable by the interpreter that boots py
     processes (this one). Absent it, py runs and placements skip with a reason —
-    a WARN, not a MISSING error, because the compiler itself is fine without it."""
-    if prober.module_available("cordis"):
-        return Check("cordis-py runtime", OK, None,
-                     "importable by the running interpreter")
-    return Check("cordis-py runtime", WARN, None,
-                 "'cordis' not importable — set up backends/python "
-                 "(sh backends/python/setup.sh)")
+    a WARN, not a MISSING error, because the compiler itself is fine without it.
+
+    When it *is* resolvable, report the exact binding a reproduction has to pin:
+    which copy of ``cordis`` loads (its on-disk origin) and, when it carries
+    distribution metadata, its version. This is the "exact cordis bindings" the
+    reproducible-workflow issue (#724) calls out — the same fact appears in the
+    toolchain-resolution map so two boxes can diff it directly."""
+    if not prober.module_available("cordis"):
+        return Check("cordis-py runtime", WARN, None,
+                     "'cordis' not importable — set up backends/python "
+                     "(sh backends/python/setup.sh)")
+    version = prober.dist_version("cordis")
+    origin = prober.module_origin("cordis")
+    if origin is not None:
+        detail = f"loaded from {origin}"
+        if version is None:
+            detail += " (no distribution version stamp)"
+    else:
+        detail = "importable by the running interpreter"
+    return Check("cordis-py runtime", OK, version, detail)
+
+
+def _package_json_version(prober: Prober, path: Path) -> str | None:
+    """The ``version`` field of a JS package's ``package.json`` at *path*, read
+    off disk (never launching node), or None if it is unreadable or malformed."""
+    text = prober.read_text(path)
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version if isinstance(version, str) else None
 
 
 def check_cordis_ts(prober: Prober, backends_dir: Path) -> Check:
     """The cordis-ts runtime — installed under the typescript backend's
-    node_modules, the same location the ts driver checks."""
+    node_modules, the same location the ts driver checks. Report its pinned
+    version (read from the package's own ``package.json``) so the exact ts
+    binding is on the record for a reproduction, not just its path."""
     cordis = backends_dir / "typescript" / "node_modules" / "cordis"
-    if prober.is_dir(cordis):
-        return Check("cordis-ts runtime", OK, None, f"installed at {cordis}")
-    return Check("cordis-ts runtime", WARN, None,
-                 "not installed (backends/typescript/node_modules/cordis "
-                 "missing) — run `npm install` there")
+    if not prober.is_dir(cordis):
+        return Check("cordis-ts runtime", WARN, None,
+                     "not installed (backends/typescript/node_modules/cordis "
+                     "missing) — run `npm install` there")
+    version = _package_json_version(prober, cordis / "package.json")
+    return Check("cordis-ts runtime", OK, version, f"installed at {cordis}")
 
 
 def check_mtls(prober: Prober) -> Check:
@@ -671,6 +738,13 @@ def render_text(report: Report) -> str:
         detail = f"  {check.detail}" if check.detail else ""
         lines.append(f"  [{label:<7}] {check.name:<{width}}{version}{detail}")
 
+    resolved = resolution(report)
+    lines.append("")
+    lines.append("toolchain resolution (pin these to reproduce a run):")
+    rwidth = max(len(name) for name in resolved)
+    for name, version in resolved.items():
+        lines.append(f"  {name:<{rwidth}}  {version if version else '-'}")
+
     if report.smoke:
         lines.append("")
         lines.append("smoke test (compile + boot --once, available tiers only):")
@@ -702,6 +776,43 @@ def _counts(report: Report) -> dict[str, int]:
     }
 
 
+# The pieces whose exact versions a reproduction must pin, paired with the check
+# each is read from. The order is stable so the resolution reads identically on
+# every box — an operator or an automation can diff two resolutions line for line.
+_RESOLUTION_SOURCES: tuple[tuple[str, str], ...] = (
+    ("revl", "compiler (revl)"),
+    ("python", "python backend"),
+    ("stdlib", "stdlib version stamp"),
+    ("cordis-py", "cordis-py runtime"),
+    ("cordis-ts", "cordis-ts runtime"),
+    ("node", "typescript backend (node)"),
+    ("cargo", "rust backend (cargo)"),
+    ("javac", "java backend (JDK)"),
+    ("go", "go backend"),
+    ("wasmtime", "wasm backend (wasmtime)"),
+    ("wasm-tools", "wasm Component Model (wasm-tools)"),
+)
+
+
+def resolution(report: Report) -> dict[str, str | None]:
+    """The reproducible toolchain resolution (roadmap item 461, issue #724): a
+    normalized ``{component: version}`` map an operator or agent captures on one
+    box and diffs against another to find the drift that broke a reproduction.
+
+    Reproducing behavior has repeatedly needed the *exact* compiler / runtime /
+    cordis bindings, and until now those facts were scattered across the per-row
+    ``detail`` strings — readable, but not diffable. This gathers the same data
+    into one stable, greppable place. A component that is absent (or importable
+    but unversioned) resolves to ``null`` — an explicit "not pinned here", still
+    a fact worth diffing, never an omitted key."""
+    by_name = {c.name: c for c in report.checks}
+    out: dict[str, str | None] = {}
+    for key, check_name in _RESOLUTION_SOURCES:
+        check = by_name.get(check_name)
+        out[key] = check.version if check is not None else None
+    return out
+
+
 def to_json(report: Report) -> dict:
     """The machine-readable form for an agent calling `revl doctor --json`."""
     return {
@@ -715,6 +826,7 @@ def to_json(report: Report) -> dict:
             {"tier": s.tier, "outcome": s.outcome, "detail": s.detail}
             for s in report.smoke
         ],
+        "resolution": resolution(report),
         "summary": _counts(report),
     }
 

@@ -57,6 +57,16 @@ pub struct Engine {
     /// the machine's `PYTHONPATH`, user site, and `PATH`. False for the PATH
     /// fallback, whose whole job is to find the machine's installed `revl`.
     isolated: bool,
+    /// The distribution SHAPE the interpreter was resolved from —
+    /// `"embedded"` (the single distributed FILE), `"beside-exe"` (a
+    /// self-contained pair), `"env"` (pointed at by the environment), or
+    /// `"system-python"` (no private runtime; the machine's `revl`). Surfaced
+    /// over `revl/gateVersion` so a fleet or install audit can tell a genuinely
+    /// one-file artifact from the others.
+    source: &'static str,
+    /// The versioned-cache pin a private runtime resolved under — the runtime's
+    /// own skew comparand (design A3), `None` for the system-python fallback.
+    pin: Option<String>,
     /// A runtime that was CONFIGURED but could not be prepared. Held so the
     /// first request fails closed with the reason (rendered as a visible engine
     /// diagnostic), rather than silently degrading to a `python3` on PATH.
@@ -72,10 +82,12 @@ struct Worker {
 
 impl Engine {
     pub fn new() -> Self {
-        let (python, isolated, init_error) = Self::resolve_interpreter();
+        let (python, isolated, source, pin, init_error) = Self::resolve_interpreter();
         Engine {
             python,
             isolated,
+            source,
+            pin,
             init_error,
             worker: None,
         }
@@ -91,16 +103,34 @@ impl Engine {
     ///
     /// A runtime that is configured but broken becomes `init_error`, not a
     /// silent fall-through to PATH.
-    fn resolve_interpreter() -> (String, bool, Option<String>) {
+    ///
+    /// Returns `(interpreter, isolated, source, pin, init_error)`, where `source`
+    /// and `pin` are the distribution provenance surfaced over
+    /// `revl/gateVersion`. An explicit `REVL_LSP_PYTHON` and the PATH fallback
+    /// are both `"system-python"` with no pin — neither is a bundled private
+    /// runtime — so only a resolved private runtime reports a bundling shape.
+    fn resolve_interpreter() -> (String, bool, &'static str, Option<String>, Option<String>) {
         if let Ok(explicit) = std::env::var(PYTHON_ENV) {
             if !explicit.is_empty() {
-                return (explicit, false, None);
+                return (explicit, false, "system-python", None, None);
             }
         }
         match runtime::locate() {
-            Some(Ok(rt)) => (rt.python, rt.isolated, None),
-            Some(Err(reason)) => ("python3".to_string(), false, Some(reason)),
-            None => ("python3".to_string(), false, None),
+            Some(Ok(rt)) => (
+                rt.python,
+                rt.isolated,
+                rt.source.as_str(),
+                Some(rt.pin),
+                None,
+            ),
+            Some(Err(reason)) => (
+                "python3".to_string(),
+                false,
+                "system-python",
+                None,
+                Some(reason),
+            ),
+            None => ("python3".to_string(), false, "system-python", None, None),
         }
     }
 
@@ -115,6 +145,22 @@ impl Engine {
         } else {
             "system-python"
         }
+    }
+
+    /// The distribution SHAPE the interpreter came from — `"embedded"`,
+    /// `"beside-exe"`, `"env"`, or `"system-python"`. `embedding()` says WHETHER
+    /// the runtime is private; this says HOW it was shipped, which is what tells
+    /// a genuinely one-file artifact (`"embedded"`) from a self-contained pair
+    /// (`"beside-exe"`) or one leaning on the environment.
+    pub fn runtime_source(&self) -> &'static str {
+        self.source
+    }
+
+    /// The versioned-cache pin a private runtime resolved under, `None` for the
+    /// system-python fallback: the runtime's own skew comparand a stale-binary
+    /// audit compares (design A3).
+    pub fn runtime_pin(&self) -> Option<&str> {
+        self.pin.as_deref()
     }
 
     pub fn diagnostics(&mut self, text: &str, filename: &str) -> Result<Value, String> {

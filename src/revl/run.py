@@ -1864,8 +1864,8 @@ class _Driver:
         carries no marker) and never withdraws."""
         if err is None or not getattr(err, "_revl_transport_fault", False):
             return None
-        return (getattr(err, "revl_row", "") or "",
-                getattr(err, "revl_crossing", "") or "")
+        return (getattr(err, "_revl_row", "") or "",
+                getattr(err, "_revl_crossing", "") or "")
 
     async def _withdraw_transport_faulted(self) -> None:
         """Item 439 slice T0 (issue #118): map each synthesized remote
