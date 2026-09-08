@@ -62,11 +62,22 @@ func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }
 // form and answers exactly what it always did.
 func revlStrSlice(s string, a, b int64) string {
 	n := int64(utf8.RuneCountInString(s))
+	// JS/Python slice semantics (docs/stdlib-2.0.md §slice): a negative bound
+	// counts from the end, then both bounds clamp into range; never panics.
+	if a < 0 {
+		a += n
+	}
 	if a < 0 {
 		a = 0
 	}
 	if a > n {
 		a = n
+	}
+	if b < 0 {
+		b += n
+	}
+	if b < 0 {
+		b = 0
 	}
 	if b > n {
 		b = n
@@ -210,11 +221,22 @@ func revlListLen[T any](xs []T) int64 { return int64(len(xs)) }
 
 func revlListSlice[T any](xs []T, a, b int64) []T {
 	n := int64(len(xs))
+	// JS/Python slice semantics (docs/stdlib-2.0.md §slice): a negative bound
+	// counts from the end, then both bounds clamp into range; never panics.
+	if a < 0 {
+		a += n
+	}
 	if a < 0 {
 		a = 0
 	}
 	if a > n {
 		a = n
+	}
+	if b < 0 {
+		b += n
+	}
+	if b < 0 {
+		b = 0
 	}
 	if b > n {
 		b = n
