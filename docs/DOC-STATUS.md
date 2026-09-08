@@ -103,9 +103,9 @@ was corrected by hand and had drifted back within a day.
 | component-leases.md | needs-work | 26 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 20 |  |
-| composition-rows.md | needs-work | 19 |  |
+| composition-rows.md | needs-work | 23 |  |
 | conformance.md | needs-work | 0 |  |
-| contract-errata.md | needs-work | 19 | yes |
+| contract-errata.md | needs-work | 23 | yes |
 | crash-recovery.md | needs-work | 52 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
@@ -141,6 +141,7 @@ was corrected by hand and had drifted back within a day.
 | integer-proposal.md | needs-work | 20 |  |
 | interchange-format.md | needs-work | 8 |  |
 | interop-bridge.md | needs-work | 51 |  |
+| lifecycle-contract.md | needs-work | 0 |  |
 | mcp-bridge.md | needs-work | 76 |  |
 | mcp-reference.md | current | 3 |  |
 | namespacing.md | needs-work | 8 |  |
@@ -176,7 +177,7 @@ was corrected by hand and had drifted back within a day.
 | signals-and-queries.md | needs-work | 44 |  |
 | stability.md | needs-work | 17 |  |
 | state-handoff.md | needs-work | 22 |  |
-| stdlib-2.0.md | current | 80 | yes |
+| stdlib-2.0.md | current | 82 | yes |
 | stdlib-json.md | needs-work | 41 |  |
 | stdlib-list.md | current | 14 |  |
 | stdlib-str.md | current | 16 |  |
