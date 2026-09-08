@@ -719,36 +719,16 @@ DIVERGENCES = {
     # the tier that diverges is exactly the tier whose status is "fail" here
     # (or, for a value the reference rejects, the diverging tier is the one that
     # answers "pass"). The per-tier map records what every tier does TODAY,
-    # empirically measured on py/ts/go/rust/java. These three remain because
-    # each turns on a SPEC decision this repo has not made — whether a negative
-    # index/slice bound faults or is end-relative (docs/stdlib-2.0.md leaves
-    # negatives underspecified), and whether the frontend should accept a mixed
-    # `Str + Int` at all — not on an emitter that merely disagrees with a
-    # settled reference. The point of the pin is that the divergence can no
-    # longer drift or grow silently. The three #549 divergences with an
-    # unambiguous documented reference (`split("")`, `to_int` on `"+7"`,
-    # `div_trunc(Int.MIN, -1)`) are now FIXED and asserted to AGREE in
-    # AGREED_549 below. The marker after each name says which tier(s) diverge.
+    # empirically measured on py/ts/go/rust/java. The one entry that remains
+    # turns on whether the frontend should accept a mixed `Str + Int` at all —
+    # not on an emitter that merely disagrees with a settled reference — and is
+    # closed by the sibling change that rejects it at the frontend (#549's
+    # divergence 1). The point of the pin is that the divergence can no longer
+    # drift or grow silently. The #549 divergences with a settled reference
+    # (`split("")`, `to_int` on `"+7"`, `div_trunc(Int.MIN, -1)`, and now the
+    # two NEGATIVE-BOUND cases) are FIXED and asserted to AGREE in AGREED_549
+    # below. The marker after each name says which tier(s) diverged.
     #
-    # A negative list index. Reference: an out-of-range index FAULTS — there is
-    # no wrap. python's `xs[-1]` silently reads the LAST element instead, so the
-    # assertion of the wrapped value passes on py alone and every other tier
-    # faults — DIVERGES (py). (ts reads `undefined`; both are the silent-answer
-    # bug, pinned here from py's side because py returns a comparable value.)
-    "xs[0-1] wraps to the last element on py": (
-        'pub fn read() -> Int { let xs = [10, 20, 30]  return xs[0 - 1] }\n'
-        'test "a negative index reads the wrapped last element" { assert read() == 30 }\n',
-        {"py": "pass", "ts": "fail", "go": "fail", "rust": "fail", "java": "fail"},
-    ),
-    # A negative slice `xs.slice(-2, -1)`. Three answers across the matrix:
-    # py and ts take a python/JS end-relative slice (one element), while go,
-    # rust and java FAULT on the negative bound — DIVERGE (py+ts vs go/rust/java;
-    # the reference end-relative semantics is still undecided, docs/errata).
-    "negative slice bounds: py/ts slice, others fault": (
-        'pub fn n() -> Int { let xs = [10, 20, 30, 40]  return xs.slice(0 - 2, 0 - 1).length() }\n'
-        'test "a negative slice yields one element" { assert n() == 1 }\n',
-        {"py": "pass", "ts": "pass", "go": "fail", "rust": "fail", "java": "fail"},
-    ),
     # `Str + Int`. The frontend accepts the mixed `+` (arguably it should not —
     # see the follow-up note below), and the tiers then scatter: py raises a
     # `TypeError`, go REFUSES TO COMPILE (`mismatched types`), while rust, java
@@ -762,11 +742,11 @@ DIVERGENCES = {
 
 
 # ---- issue #549: divergences FIXED so every tier now agrees ----
-# The three #549 divergences whose reference is unambiguous in the docs are
-# fixed in the emitters and asserted to agree here. Where the reference is a
-# VALUE the verdict is "pass" on every tier; where it is an overflow TRAP the
-# verdict is "fail" (a fault) on every tier — agreement either way. Any tier
-# that drifts back reds this the same way the pins above red a regression.
+# The #549 divergences whose reference is settled are fixed in the emitters and
+# asserted to agree here. Where the reference is a VALUE the verdict is "pass"
+# on every tier; where it is a TRAP the verdict is "fail" (a fault) on every
+# tier — agreement either way. Any tier that drifts back reds this the same way
+# the pins above red a regression.
 #
 #   - `split("")` walks CODE POINTS (docs/stdlib-2.0.md §split): an astral
 #     scalar is ONE piece. ts now routes the empty-separator case through
@@ -779,6 +759,20 @@ DIVERGENCES = {
 #     tier. java's plain `/` wrapped back to `Int.MIN`; it now uses
 #     `Math.divideExact`, which throws like the `Math.*Exact` family already
 #     used for `+`/`-`/`*`.
+#   - A NEGATIVE SLICE bound is END-RELATIVE on every tier (the PO decision for
+#     #549: py and ts already sliced python/JS-style, so the reference follows
+#     them). go/rust/java used to clamp the negative bound to 0 (the wrong
+#     value); their `revlListSlice`/`revlSlice`/`revl_slice` helpers now add the
+#     length to a negative bound first, then clamp — so every tier yields the
+#     same one element. Verdict "pass".
+#   - A NEGATIVE LIST INDEX FAULTS on every tier (the PO fallback for #549:
+#     end-relative indexing is disproportionate — it needs a bounds-checked
+#     indexer on the hottest read path of ts AND go/rust/java, and rust's index
+#     read is woven through its borrow/clone machinery — so the uniform close is
+#     the fault that go/rust/java already take and that the original reference
+#     names). python used to read the wrapped last element and ts read
+#     `undefined`; both now route a List subscript through `_revl_index` /
+#     `revlIndex`, which throws on a negative index. Verdict "fail".
 AGREED_549 = {
     "split('') counts code points, not UTF-16 units": (
         'pub fn units() -> Int { return "\U0001F600".split("").length() }\n'
@@ -794,6 +788,20 @@ AGREED_549 = {
         'pub fn dt(a: Int, b: Int) -> Int { return a.div_trunc(b) }\n'
         'pub fn imin() -> Int { return 0 - 9223372036854775807 - 1 }\n'
         'test "Int.MIN div_trunc -1 traps" { assert dt(imin(), 0 - 1) == imin() }\n',
+        "fail",
+    ),
+    # #549 divergence 3: a negative slice bound counts from the end on EVERY
+    # tier (py/ts already did; go/rust/java now normalise the same way).
+    "negative slice bounds are end-relative everywhere": (
+        'pub fn n() -> Int { let xs = [10, 20, 30, 40]  return xs.slice(0 - 2, 0 - 1).length() }\n'
+        'test "a negative slice yields one element" { assert n() == 1 }\n',
+        "pass",
+    ),
+    # #549 divergence 2: a negative list index faults on EVERY tier (go/rust/
+    # java already did; py/ts now throw through `_revl_index` / `revlIndex`).
+    "negative list index faults everywhere": (
+        'pub fn read() -> Int { let xs = [10, 20, 30]  return xs[0 - 1] }\n'
+        'test "a negative index faults" { assert read() == 30 }\n',
         "fail",
     ),
 }
@@ -814,8 +822,11 @@ AGREED_549 = {
 #     covers the ASCII case where all tiers agree.
 # FIXED (asserted to AGREE in AGREED_549 above): `split("")` on an astral
 # scalar (ts/java split by UTF-16 units, now code points), `"+7".to_int()`
-# (rust accepted the leading `+`, now `None`), and `div_trunc(Int.MIN, -1)`
-# (java wrapped, now traps like every other tier).
+# (rust accepted the leading `+`, now `None`), `div_trunc(Int.MIN, -1)`
+# (java wrapped, now traps like every other tier), a NEGATIVE SLICE bound
+# (go/rust/java clamped to 0, now end-relative like py/ts), and a NEGATIVE
+# LIST INDEX (py read the last element and ts read `undefined`, now both fault
+# like go/rust/java).
 # FIXED (not pinned): `List[Int].join(sep)` crashed the py runtime while ts
 # coerced; it is now a compile error on every tier (typecheck.builtin_check
 # pins `join`'s receiver to `List[Str]`, matching docs/stdlib-2.0.md).
