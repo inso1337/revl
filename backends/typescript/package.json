@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit && node scripts/typecheck-generated.mjs && node scripts/typecheck-handwritten.mjs"
   },
   "dependencies": {
-    "cordis": "https://github.com/inso1337/cordis/archive/c8b94b2c4a921c85ae1ee292514bc8396c98d114.tar.gz"
+    "cordis": "https://github.com/inso1337/cordis/archive/3c60883aa41e85436a176bf7ebed6798c714825d.tar.gz"
   },
   "devDependencies": {
     "@types/node": "26.2.0",
