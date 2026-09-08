@@ -238,6 +238,60 @@ component TrendingRanker provides ranking: Ranker {
   }
 }
 
+// ------------------------------------------------- the FRONTEND (slice, item 459)
+
+// 525's boring half also owns the UI, and 525 is explicit about its shape: "a UI
+// built from external assets + a TS frontend behind a typed boundary (item 459)",
+// NOT HTML/CSS/JS carried inside revl strings (the ~4,800-line console this whole
+// milestone replaces). The webui coeffect (#772, design docs/design/526 and 530)
+// is the boundary: an AMBIENT WebUI service the host runtime provides as
+// `ctx.webui`, declared here as a first-class coeffect (`requires webui: WebUI`)
+// and reached through `webui.add_entry`, which names EXTERNAL asset files only.
+//
+// The frontend itself is a normal Vite/Vue project under `examples/app/frontend/`
+// with source maps to its own originals; this file names it by PATH and contains
+// no JavaScript. The frontend consumes the notes app's TYPED ROUTES through the
+// client `revl export client --lang ts --service NotesApi` derives from the
+// `NotesApi` declaration above (item 457 artifact 5) — one declaration is both
+// the server's router and the browser's typed call surface.
+//
+// The typed reactive-state / RPC `data` channel Cordis WebUI also offers (526,
+// design note 530 Decision B) is NOT expressible from revl yet: `add_entry` has
+// no `data` parameter, so the coeffect publishes an empty reactive surface and
+// the shared state/RPC contract is authored on the TS side rather than PROJECTED
+// from the service declaration. That is a filed gap against 459/457 (see
+// docs/design/525-webapp-slice4-frontend.md §G3), not a workaround absorbed here:
+// the frontend drives all note state through the typed REST routes, the landed
+// typed contract, and the gap is what a `revl export client --face webui` slice
+// (457 S4) closes.
+
+// The ambient WebUI service the host provides as `ctx.webui`. `add_entry` names
+// external asset files and returns a stable entry handle; it is an `emission`
+// because registering a frontend is an outward effect on the host (the shape a
+// `revl import cordis` of `@cordisjs/plugin-webui` recovers, design note 526).
+service WebUI {
+  emission fn add_entry(
+    dev_source: Str,
+    prod_manifest: Str,
+    routes: List[Str],
+  ) -> Str
+}
+
+// The notes console component. It declares the first-class coeffect on the
+// ambient WebUI service and, at activation, registers the app's Vite/Vue frontend
+// by naming external files only — the dev-mode source, the built Vite manifest,
+// and the client route the entry owns. The binding is the declared coeffect, so
+// `revl audit` reports the `webui` requirement (G1) and the `webui.add_entry`
+// emission (the trusted host boundary, G8) on this component's surface; there is
+// no `globalThis` bridge and no inline JS.
+component NotesConsole requires webui: WebUI {
+  emit webui.add_entry(
+    "./frontend/entry.client.ts",            // dev-mode Vite/Vue source
+    "./frontend/dist/.vite/manifest.json",   // built Vite manifest for production
+    ["/notes"],                              // client route this entry owns
+  )
+}
+
 // ---------------------------------------------------------------- lifecycle
 
 // End-to-end on the real runtime: load the store then the HTTP component (the
