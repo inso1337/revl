@@ -464,6 +464,110 @@ def test_forbidden_grant_fires_before_compiling(gate_factory):
     assert result.code == "FORBIDDEN_GRANT"
 
 
+# The decider crossing, provided under a NON-stdlib SERVICE name. Same
+# `host_admit` @py body the stdlib `AdmitGate` carries (reaches
+# `revl.mcp.admit_bridge.admit`), so it is exactly as much the decider — only the
+# service name differs. It does not declare `service Judge`; the candidate co-root
+# does, so the merged composition declares it once (the `_OPS_PROVIDER` pattern).
+_JUDGE_PROVIDER = (
+    "extern emission fn host_admit(source: Str, granted: Trusted[List[Str]])"
+    " -> Str\n"
+    "  = @py { from revl.mcp.admit_bridge import admit;"
+    " return admit(source, granted) }\n"
+    "component JudgeGate provides judge: Judge {\n"
+    "  provide judge {\n"
+    '    fn decide(source) = emit host_admit(source, ["tool"])\n'
+    "  }\n"
+    "}\n"
+)
+
+# A candidate that COMPOSES the renamed decider (grants + requires `judge: Judge`)
+# on top of the witnessed `Ops` service. Carries NO host code of its own.
+_AGENT_JUDGE = _DECLS + (
+    "service Judge { emission fn decide(source: Str) -> Str }\n"
+    "component ToolV2 requires ops: Ops, judge: Judge provides tool: Tool {\n"
+    "  provide tool {\n"
+    '    fn describe() = "v2"\n'
+    "    fn run(p) { emit ops.stash(p) }\n"
+    "  }\n"
+    "}\n"
+)
+
+# One level removed: a benign-looking `Front` service whose provider REQUIRES the
+# `Judge` decider and calls it. The candidate grants only `Front`, so the name
+# check sees nothing and the reach is a requires-edge away from the granted
+# service — exactly the transitive case the structural rule's fixpoint covers.
+_INDIRECT_PROVIDER = (
+    "extern emission fn host_admit(source: Str, granted: Trusted[List[Str]])"
+    " -> Str\n"
+    "  = @py { from revl.mcp.admit_bridge import admit;"
+    " return admit(source, granted) }\n"
+    "component JudgeGate provides judge: Judge {\n"
+    '  provide judge { fn decide(source) = emit host_admit(source, ["tool"]) }\n'
+    "}\n"
+    "component FrontProvider requires judge: Judge provides front: Front {\n"
+    "  provide front { fn ask(source) = emit judge.decide(source) }\n"
+    "}\n"
+)
+_AGENT_FRONT = _DECLS + (
+    "service Judge { emission fn decide(source: Str) -> Str }\n"
+    "service Front { emission fn ask(source: Str) -> Str }\n"
+    "component ToolV2 requires ops: Ops, front: Front provides tool: Tool {\n"
+    "  provide tool {\n"
+    '    fn describe() = "v2"\n'
+    "    fn run(p) { emit ops.stash(p) }\n"
+    "  }\n"
+    "}\n"
+)
+
+
+@needs_cordis
+def test_forbidden_grant_rejects_a_decider_under_any_service_name(gate_factory):
+    """The forbidden-grant rule is "independent of the operator" (item 334): a
+    decider granted under a NON-stdlib service name is refused just the same.
+
+    The step-0 name check only knows `Admission`/`AdmitGate`, and
+    `check_no_host_extern_reach` does not catch this — its sweep follows `pub fn`
+    calls, not the SERVICE METHOD a granted host body is reached through. So
+    before the structural check this candidate ADMITTED and SWAPPED, handing the
+    untrusted candidate a live handle to the loop's own re-entrant-admit
+    plumbing. It is now refused on the crossing it reaches, not on the name it
+    happens to wear, and gen N keeps serving."""
+    gate = gate_factory()
+    gate.load(_BASE)
+
+    result = gate.propose(_AGENT_JUDGE, granted=["Ops", "Judge"],
+                          providers={**_PROVIDERS,
+                                     "judge_provider.rvl": _JUDGE_PROVIDER})
+    assert not result.admitted
+    assert result.code == "FORBIDDEN_GRANT"
+    assert "Judge" in (result.message or "")
+    assert "host_admit" in (result.message or "")
+
+    # the live composition is untouched: still serving gen N.
+    assert gate.call("tool", "describe", [])["result"] == "v1"
+
+
+@needs_cordis
+def test_forbidden_grant_reaches_the_decider_through_a_requires_edge(gate_factory):
+    """The reach need not be direct. A granted `Front` service whose provider
+    REQUIRES the decider and calls it reaches `host_admit` one requires-edge
+    away, with the granted set naming no decider at all. The structural rule's
+    fixpoint over the `requires` graph marks `Front` as reaching the decider and
+    refuses the grant; gen N keeps serving."""
+    gate = gate_factory()
+    gate.load(_BASE)
+
+    result = gate.propose(_AGENT_FRONT, granted=["Ops", "Front"],
+                          providers={**_PROVIDERS,
+                                     "indirect_provider.rvl": _INDIRECT_PROVIDER})
+    assert not result.admitted
+    assert result.code == "FORBIDDEN_GRANT"
+    assert "Front" in (result.message or "")
+
+    assert gate.call("tool", "describe", [])["result"] == "v1"
+
+
 # =========================================================================== #
 # EDGE 2 (holds): a fault during a POST-swap call unwinds residue-free and the
 # process is alive (the item-245/247 escrow carryover).
