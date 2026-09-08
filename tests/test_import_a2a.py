@@ -805,3 +805,106 @@ def test_the_ts_backend_fixture_is_current():
         f"{_gen_a2a_agent.RVL.name} {stale}"
     assert json.loads(_gen_a2a_agent.IR.read_text(encoding="utf-8")) == ir, \
         f"{_gen_a2a_agent.IR.name} {stale}"
+
+
+# =========================================== the four-op Task lifecycle (item 439 T1)
+# `--long-running` (or a card's `capabilities.streaming`, when the engineer asks
+# for it) projects the four-op explicit-handle surface
+# (`<skill>_start`/`_poll`/`_reply`/`_cancel`) instead of one terminal crossing,
+# speaking the `stdlib/a2a.rvl` vocabulary — the SAME projection the `remote`
+# row's `through a2a long_running` uses, so the two entry points cannot drift.
+# `docs/design/439-a2a-task-lifecycle.md`.
+
+from revl import compile_files  # noqa: E402
+
+_LR_CARD = {
+    "protocolVersion": "1.0.0",
+    "name": "Researcher",
+    "url": "https://agent.example/a2a",
+    "preferredTransport": "JSONRPC",
+    "capabilities": {"streaming": True},
+    "skills": [{"id": "research", "name": "Deep research"}],
+}
+
+
+def _compile_generated(source: str) -> object:
+    """Compile a generated four-op file, which `use`s `stdlib/a2a.rvl` — so the
+    stdlib must be on disk beside it (the `_compile_with_a2a` shape)."""
+    import os
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    (d / "stdlib").mkdir()
+    (d / "stdlib" / "a2a.rvl").write_text(
+        (ROOT / "stdlib" / "a2a.rvl").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    (d / "researcher.rvl").write_text(source, encoding="utf-8")
+    cwd = os.getcwd()
+    os.chdir(d)
+    try:
+        return compile_files(["researcher.rvl"])
+    finally:
+        os.chdir(cwd)
+
+
+def test_long_running_projects_four_ops_per_skill_on_py():
+    source = import_a2a(_LR_CARD, filename="card.json", backend="py",
+                        long_running=True)
+    assert 'use "stdlib/a2a.rvl" { TaskRef, TaskState, TaskEvent }' in source
+    for op in ("start", "poll", "reply", "cancel"):
+        assert f"emission fn research_{op}(" in source
+        assert f"a2a_researcher_research_{op}" in source
+    # the vocabulary in the signatures
+    assert "research_start(message: Str) -> Untrusted[TaskRef]" in source
+    assert "research_poll(task: TaskRef) -> Untrusted[TaskEvent]" in source
+    assert "research_cancel(task: TaskRef) -> Untrusted[Unit]" in source
+    # the task wire
+    assert '"method": "tasks/get"' in source
+    assert '"method": "tasks/cancel"' in source
+    assert '"taskId": _task["id"]' in source
+
+
+def test_the_generated_four_op_file_compiles():
+    source = import_a2a(_LR_CARD, filename="card.json", backend="py",
+                        long_running=True)
+    assert _compile_generated(source) is not None
+
+
+def test_four_op_ops_synthesize_no_inverse():
+    """The family invariant holds on the lifecycle wire too: every op is
+    `emission`, and `_cancel` is the compensation the CONSUMER registers, never
+    a synthesized `undo`/`compensate` on the extern."""
+    source = import_a2a(_LR_CARD, filename="card.json", backend="py",
+                        long_running=True)
+    assert " undo " not in source
+    # the four externs carry no declaration-site inverse slot
+    for line in source.splitlines():
+        if line.startswith("extern emission"):
+            assert "undo" not in line and "compensate" not in line
+
+
+def test_long_running_is_refused_on_ts():
+    with pytest.raises(RevlError) as excinfo:
+        import_a2a(_LR_CARD, filename="card.json", backend="ts",
+                   long_running=True)
+    assert "`--backend py`" in str(excinfo.value)
+
+
+def test_long_running_skill_with_a_file_modality_is_refused():
+    card = dict(_LR_CARD)
+    card["skills"] = [{"id": "render", "name": "Render",
+                       "inputModes": ["application/pdf"],
+                       "outputModes": ["application/pdf"]}]
+    with pytest.raises(RevlError) as excinfo:
+        import_a2a(card, filename="card.json", backend="py", long_running=True)
+    message = str(excinfo.value)
+    assert "render" in message and "Task lifecycle" in message
+
+
+def test_streaming_note_points_at_the_buildable_lifecycle():
+    """Without `--long-running`, a streaming card still imports terminal, and the
+    note now points at the buildable four-op T1 answer rather than only calling
+    it an open question."""
+    source = import_a2a(_LR_CARD, filename="card.json", backend="py")
+    assert "emission fn research_start(" not in source  # not projected
+    assert "--long-running" in source
+    assert "item 439's open question" in source
