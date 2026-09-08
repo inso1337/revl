@@ -498,7 +498,15 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   // instead of raising — a pure fn cannot `fail`, so the error travels as a
   // value. The helper is emitted into the preamble by `checked_div_block`.
   if (is_checked_div(method)) { return `_revl_${method}(${target}, ${args[0]})` }
-  if (method == "to_str") { return `str(${target})` }
+  if (method == "to_str") {
+    // A Float `.to_str()` renders through `_revl_ftoa`, the same canonical
+    // ECMAScript Number::toString a `${aFloat}` interpolation uses, so
+    // `x.to_str()` and `${x}` agree byte-for-byte (`str(float)` would print
+    // python's `3.0`/`1e+30`, which diverges from every other tier). The tag
+    // is attached by `lower.rvl` solely for a Float receiver (item 548).
+    if (recv == "Float") { return `_revl_ftoa(${target})` }
+    return `str(${target})`
+  }
   return `<<UNSUPPORTED-BUILTIN:${method}>>`
 }
 
@@ -2299,14 +2307,20 @@ fn user_case_names(types: Any) -> List[Str] {
 }
 
 // -------------------------------------------------- canonical Float -> Str
-// `_uses_float_interp`: does any `${…}` template interpolate a provably-Float
-// expression? Only then is `_revl_ftoa` emitted (docs/strings.md).
+// `_uses_float_interp`: does the program need `_revl_ftoa`? Either a `${…}`
+// template interpolates a provably-Float expression, or a Float `.to_str()`
+// builtin renders through the same canonical helper (item 548). Only then is
+// `_revl_ftoa` emitted (docs/strings.md); mirrors the reference `scan`, which
+// sets `float_interp` for both.
 fn uses_float_interp(n: Any) -> Bool {
   if (node_kind(n) == "interp") {
     for (p of value_list(value_field(n, "parts"))) {
       if (value_str(value_at(p, 0)) == "expr" && is_float_expr(value_at(p, 1))) { return true }
     }
   }
+  if (node_kind(n) == "builtin"
+      && value_str(value_field(n, "method")) == "to_str"
+      && value_str(value_field(n, "recv")) == "Float") { return true }
   for (c of value_children(n)) { if (uses_float_interp(c)) { return true } }
   return false
 }
