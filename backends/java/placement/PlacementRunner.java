@@ -213,7 +213,7 @@ public final class PlacementRunner {
             }
         }
         Class<?> iface = Class.forName((String) ifaces.get(key));
-        Object service = ctx.get((Class) iface, key);
+        Object service = ctx.get(ServiceKey.of((Class) iface, key));
         Method m = findMethod(iface, method, args.size());
         return m.invoke(service, coerceArgs(m, args));
     }
@@ -511,7 +511,7 @@ public final class PlacementRunner {
                         String key = (String) req.get("key");
                         Class<?> iface = served.get(key);
                         if (iface == null) throw new RuntimeException("key " + key + " not exported");
-                        Object service = ctx.get((Class) iface, key);
+                        Object service = ctx.get(ServiceKey.of((Class) iface, key));
                         args = (List<Object>) req.getOrDefault("args", List.of());
                         Method m = findMethod(iface, (String) req.get("method"), args.size());
                         Object result = m.invoke(service, coerceArgs(m, args));
