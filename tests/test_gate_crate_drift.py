@@ -126,8 +126,10 @@ def test_the_crate_is_admit_only_and_says_so():
     """Stage 3 is admit-only. `compile_to` is exported but fails closed (Stage
     4), `admit_into` does not exist at all (manifest-spanning admission has no
     self-host path, and a stub that ignored the manifest would be the exact
-    wave-through the crate exists to prevent), and layer 2 is a reserved empty
-    module (item 334)."""
+    wave-through the crate exists to prevent), and layer 2 is item 334 slice 1:
+    a real `Session` state machine that still issues NO admission (the accept
+    half is a later slice, so a candidate the native gate does not refuse is
+    fail-closed, never waved through)."""
     lib_rs = (CRATE / "src" / "lib.rs").read_text(encoding="utf-8")
     assert "pub fn admit(source: &str) -> Verdict" in lib_rs
     assert "pub fn compile_to(" in lib_rs
@@ -137,10 +139,24 @@ def test_the_crate_is_admit_only_and_says_so():
         "through")
     assert "pub mod session;" in lib_rs
     session_rs = (CRATE / "src" / "session.rs").read_text(encoding="utf-8")
-    # reserved means documented and EMPTY — no item, not even a stub type
-    assert all(line.startswith("//!") or not line.strip()
-               for line in session_rs.splitlines()), \
-        "session.rs must stay a reserved, empty module until item 334"
+    # Item 334 slice 1: the session is a real state machine now, not an empty
+    # reservation. It carries the generation state, the untrusted-author
+    # admission entry, and the item-245 witnessed-call recording path.
+    assert "pub struct Session" in session_rs, \
+        "item 334 slice 1 ships a real `Session`, not a reserved empty module"
+    for verb in ("fn load(", "fn propose(", "fn admit(", "fn call(",
+                 "fn commit(", "fn abort(", "fn unload("):
+        assert verb in session_rs, f"session.rs must ship `{verb}...` (item 334 slice 1)"
+    # But slice 1 still issues NO admission: layer 1 has no `Admitted` arm and
+    # this tier has no runtime, so the CODE (doc comments excluded) must never
+    # set an outcome's `admitted` to true — a candidate the gate does not refuse
+    # is fail-closed, exactly the wave-through the crate exists to prevent.
+    session_code = "\n".join(
+        line for line in session_rs.splitlines()
+        if not line.lstrip().startswith(("//!", "///", "//")))
+    assert "admitted: true" not in session_code and "admitted:true" not in session_code, (
+        "session.rs must never set `admitted: true`: the accept-and-swap half is "
+        "a later slice, and until then a non-refusal fails closed, not admits")
 
 
 def test_the_crate_ships_no_admission_at_all():

@@ -102,8 +102,12 @@ the drift gate.
 * **`compile_to` output.** Exported, and it refuses unconditionally: the
   self-host emitters still carry `@py`-only helper externs and do not emit to
   rust. Stage 4's lane.
-* **Layer 2 (the session surface).** `revl_gate::session` is a reserved,
-  documented, EMPTY module. The witnessed runtime half is roadmap item 334.
+* **Layer 2 (the session surface).** `revl_gate::session::Session` is item 334's
+  foundational first slice: the generation state machine, the untrusted-author
+  admission entry (`propose`/`admit`), and the item-245 witnessed-call recording
+  path (`call`/`commit`/`abort`/`unload`). The accept-and-swap half, the
+  witnessed-effect runtime, the WAL and the approver callback are later slices;
+  a candidate the native gate does not refuse is fail-closed, never admitted.
 
 ## Host obligations
 
@@ -148,7 +152,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:d3da280f0738a0ba"
+    // frontier "selfhost-admit:4f8508c70e594fe7"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
