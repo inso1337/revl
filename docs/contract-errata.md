@@ -511,8 +511,8 @@ until then the tier documents "faults with `unreachable`, no payload".
 ## stdlib cross-tier divergences (issue #549)
 
 A private review (issue #549) caught a cluster of stdlib operations whose
-emitters disagreed with the reference. Three had an unambiguous documented
-reference and are now closed; each is asserted to AGREE on every tier in
+emitters disagreed with the reference. Each is now closed; the ones with a
+value-or-fault verdict are asserted to AGREE on every tier in
 `tests/test_cross_tier_execution.py` (`AGREED_549`).
 
 - **`split("")` counted UTF-16 units on TypeScript and Java** (closed). An
@@ -535,10 +535,32 @@ reference and are now closed; each is asserted to AGREE on every tier in
   the same `Math.*Exact` family the `Int.MIN / -1` entry above already used for
   `+`/`-`/`*` and unary minus.
 
-The remaining #549 divergences turn on a spec decision this repo has not made
-(whether a negative list index or slice bound faults or is end-relative, and
-whether the frontend should accept a mixed `Str + Int` at all) and stay pinned
-in `DIVERGENCES` so they cannot drift, rather than being closed by fiat.
+- **A negative slice bound diverged: py/ts sliced, go/rust/java faulted**
+  (closed, end-relative). `xs.slice(-2, -1)` is one element on python and
+  TypeScript (a python/JS end-relative slice), while go, rust and java clamped
+  the negative bound to `0` and returned the wrong (empty) slice. The PO
+  decision for #549 is that a negative slice bound is END-RELATIVE on every
+  tier: py and ts already spell it that way and stratum-1 mirrors those priors.
+  The go `revlListSlice`/`revlStrSlice`, rust `revl_slice` and java `revlSlice`
+  helpers now add the length to a negative bound before clamping, so every tier
+  yields the same one element. Asserted in `AGREED_549`
+  ("negative slice bounds are end-relative everywhere", verdict `pass`).
+- **A negative list index diverged: py read the wrapped last element, ts read
+  `undefined`, go/rust/java faulted** (closed, uniform fault). `xs[-1]` has no
+  agreed reading — JS bracket indexing is not end-relative (`xs[-1]` is
+  `undefined`, not the last element), so the only close that makes every tier
+  agree without pervasive runtime surgery is the FAULT the original reference
+  names and that go/rust/java already take. End-relative indexing was rejected
+  as disproportionate: it would need a bounds-checked indexer on the hottest
+  read path of ts AND go/rust/java, and rust's index read is woven through its
+  borrow/clone machinery. Instead a List subscript now routes through
+  `_revl_index` (python) / `revlIndex` (TypeScript), each throwing on a
+  negative index the way go/rust/java panic. Asserted in `AGREED_549`
+  ("negative list index faults everywhere", verdict `fail`).
+
+The one remaining #549 divergence — whether the frontend should accept a mixed
+`Str + Int` at all — is closed by the sibling change that rejects it at the
+frontend (uniform compile error). Together the two changes close #549.
 
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins

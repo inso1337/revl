@@ -46,7 +46,17 @@ revl refuses.)
   capture-by-value and G6: no revl value is ever mutated in place. Rebind:
   `out = out.push(v)`.
 - `.length` also works in property position (the existing `len` node).
-- List element read is indexing (`xs[i]`), not a method.
+- List element read is indexing (`xs[i]`), not a method. A **negative index
+  FAULTS** on every tier — there is no wrap and no silent `undefined` (issue
+  #549). python and TypeScript route the read through `_revl_index`/`revlIndex`
+  which raise on a negative index; go, rust and java fault natively. (Positive
+  out-of-range indexing is a separate case still under review.)
+- `slice(a, b)` bounds are **end-relative**: a negative bound counts from the
+  end of the receiver (`len + bound`), then both bounds clamp into `[0, len]`
+  and the slice is empty if `b < a` — the python/JS reading, on every tier
+  (issue #549). So `[10, 20, 30, 40].slice(-2, -1)` is `[30]`. go/rust/java
+  used to clamp a negative bound straight to `0`; their `revlListSlice` /
+  `revlSlice` / `revl_slice` helpers now normalise first.
 - `charAt`/`charCodeAt` are Str-only, and the checker enforces it: a non-Str
   receiver is refused with ``builtin `charAt` needs a Str receiver, got
   `List[Int]` `` (`src/revl/typecheck.py`).

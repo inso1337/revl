@@ -531,7 +531,7 @@ class _UsesScan:
 
     __slots__ = (
         "bounded_int", "bounded_int32", "i32_shl", "true_division",
-        "trunc_rem", "float_interp", "opt_to_int", "builtins",
+        "trunc_rem", "float_interp", "opt_to_int", "list_index", "builtins",
     )
 
     def __init__(self) -> None:
@@ -542,6 +542,7 @@ class _UsesScan:
         self.trunc_rem = False
         self.float_interp = False
         self.opt_to_int = False
+        self.list_index = False
         self.builtins: set = set()
 
 
@@ -603,6 +604,16 @@ def _scan_uses(root) -> _UsesScan:
                                 and part[0] == "expr" and _is_float_expr(part[1])):
                             scan.float_interp = True
                             break
+            elif kind == "index":
+                # A List subscript `xs[i]` routes through `_revl_index`, which
+                # faults on a negative index (#549: every tier faults, python
+                # would otherwise read from the end). A string-LITERAL key is a
+                # host/`Any` property read, not a List subscript, so it stays a
+                # bare `[...]`.
+                idx = node.get("index")
+                if not (isinstance(idx, dict) and idx.get("kind") == "lit"
+                        and isinstance(idx.get("value"), str)):
+                    scan.list_index = True
             stack.extend(node.values())
         elif isinstance(node, (list, tuple)):
             stack.extend(node)
@@ -1571,7 +1582,16 @@ class _ComponentEmitter:
             return _field_read(self._expr(tgt, where), name,
                                opt=bool(expr.get("opt")), rereadable=atom)
         if kind == "index":
-            return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
+            idx = expr.get("index")
+            # A string-LITERAL key is a host/`Any` property read (`tc["fn"]`),
+            # not a List subscript — emit the bare `[...]` unchanged. A List
+            # subscript routes through `_revl_index`, which faults on a negative
+            # index so python agrees with every other tier (#549).
+            if (isinstance(idx, dict) and idx.get("kind") == "lit"
+                    and isinstance(idx.get("value"), str)):
+                return f"{self._expr(expr.get('target'), where)}[{self._expr(idx, where)}]"
+            return (f"_revl_index({self._expr(expr.get('target'), where)}, "
+                    f"{self._expr(idx, where)})")
         if kind == "bin":
             if expr.get("op") == "??":
                 # `x ?? d`: `Opt[T]` is represented as `T | None` at runtime
@@ -3386,7 +3406,15 @@ def _expr(node: dict) -> str:
         return _field_read(_expr(tgt), node["name"],
                            opt=bool(node.get("opt")), rereadable=atom)
     if kind == "index":
-        return f"{_expr(node['target'])}[{_expr(node['index'])}]"
+        idx = node["index"]
+        # A string-LITERAL key is a host/`Any` property read (`tc["fn"]`), not a
+        # List subscript — bare `[...]`. A List subscript routes through
+        # `_revl_index`, which faults on a negative index so python agrees with
+        # every other tier (#549).
+        if (isinstance(idx, dict) and idx.get("kind") == "lit"
+                and isinstance(idx.get("value"), str)):
+            return f"{_expr(node['target'])}[{_expr(idx)}]"
+        return f"_revl_index({_expr(node['target'])}, {_expr(idx)})"
     if kind == "if":
         return f"({_expr(node['then'])} if {_expr(node['cond'])} else {_expr(node['else'])})"
     if kind == "record":
@@ -4972,6 +5000,19 @@ def emit(ir: dict) -> str:
         out.add(0, "        return float('nan')")
         out.add(0, "    return (_revl_math.copysign(float('inf'), a)")
         out.add(0, "            * _revl_math.copysign(1.0, b))")
+        out.add(0)
+    if _scan.list_index:
+        # A negative List index FAULTS on every tier (#549, docs/stdlib-2.0.md
+        # §index): go/rust/java panic and TypeScript throws, so python — which
+        # would silently read from the end — guards the read here. A
+        # non-negative index reads exactly as `xs[i]` always did.
+        out.add(0, "def _revl_index(xs, i):")
+        out.add(0, '    """A negative List index faults on every tier (#549); '
+                   'python would"""')
+        out.add(0, '    """otherwise read from the end, so guard it here."""')
+        out.add(0, "    if i < 0:")
+        out.add(0, "        raise IndexError('revl: negative list index')")
+        out.add(0, "    return xs[i]")
         out.add(0)
     # The stdlib lowerings that need more than one expression: a MODULE-LEVEL
     # `def`, gated on use, rather than a lambda built and applied at every
