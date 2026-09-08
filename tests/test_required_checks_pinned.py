@@ -76,6 +76,10 @@ NOT_REQUIRED_CHECKS = {
     # not run on a default PR at all. Not in branch protection; run for signal
     # where a KVM runner is provisioned, never a hard merge gate.
     "sandbox-microvm": "opt-in self-hosted KVM smoke; not a hard merge gate",
+    # Path-filter gate (item, PR #765): decides whether the frontend/cordis/
+    # conformance/formal jobs run on a given PR. Pure routing over `git diff`;
+    # it gates nothing itself and is never a merge blocker.
+    "changes": "path-filter router for the gated frontend jobs; not a gate",
 }
 
 
