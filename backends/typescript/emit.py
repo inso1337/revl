@@ -357,6 +357,17 @@ def _ident(name: object, role: str) -> str:
     return _mangle(name)
 
 
+def _raw_ident(name: object, role: str) -> str:
+    """Validate a user identifier and return it VERBATIM (no mangling). For a
+    name emitted as a string literal the runtime dispatches or indexes by its
+    source spelling — an event's name and its idempotency key (item 130 Slice 5)
+    — where `_mangle`ing would break the lookup. Mirrors the py emitter's
+    validate-without-rename `_ident`."""
+    if not isinstance(name, str) or not IDENT_RE.match(name):
+        raise EmitError(f"invalid {role} identifier: {name!r}")
+    return name
+
+
 def _string(value: str) -> str:
     # json.dumps produces a valid TS double-quoted string literal.
     return json.dumps(value)
@@ -2171,27 +2182,62 @@ def _stream_iter(step: dict, component: dict, services: dict, ctx: "_Ctx",
     on it, which CLOSES the subscription (A8, §4.7).
 
     Slice 5's typed-event handler (`on <Event> as <x> in <sub>`) is THIS loop
-    with a schema-and-dedup contract gate added between the terminal test and the
-    body. That gate is the py reference tier's — this tier does not lower it, so
-    a step carrying an `event` contract is REFUSED by name (the same call the
-    rust tier makes), not half-wired to a runtime with no `Stream.contract`. The
-    plain `every … in` below IS lowered here."""
-    if step.get("event") is not None:
-        raise EmitError(
-            "the `on … as` typed-event handler is not lowered on the ts tier; "
-            "its schema-and-dedup contract gate runs on the py reference tier "
-            "(item 130 Slice 5) while the plain `every … in` iteration form "
-            "lowers here — try `--backend py`")
+    with one gate added between the terminal test and the body:
+
+        const <c> = host.Stream.contract(<name>, <schema>, <key>, <window>)
+        while (true) {
+          const <x> = await <sub>.next()
+          yield () => {}                   // iteration boundary (A1)
+          if (host.Stream.isClosed(<x>)) break
+          if (!<c>.admit(<x>, <where>)) continue
+          <body>
+        }
+
+    Where each line sits is the argument that the contract costs the guarantee
+    nothing (mirrors backends/python/emit.py `_ComponentEmitter._stream_iter`):
+    the contract is built ONCE above the loop, so the dedup memory is constant in
+    the length of the stream, not one entry per item (§4.7); the gate is AFTER
+    the await and its `yield`, so the iteration boundary a divert-while-parked
+    depends on stays where Slice 4 put it; and after the terminal test, so a
+    `Closed` still ends the loop without being validated as an item. A schema
+    violation THROWS `StreamFaulted` out of `admit` — the same terminal a
+    provider abort delivers — which the loop does not catch, so the activation
+    fails and the prefix reverts LIFO with the subscription bracket on it (§6,
+    A8). The plain `every … in` carries no `event` key and lowers as before."""
     scope = ctx.component_scope
     item = scope.bind(step.get("bind"))
     subject = _expr(step.get("subject"), ctx)
     body = step.get("body") or []
     if not body:  # pragma: no cover — the parser rejects an empty body
         raise EmitError("an `every … in` body is empty")
+    gate = None
+    contract = step.get("event")
+    if contract is not None:
+        # name/key stay RAW (validated, never mangled): the key indexes the
+        # delivered item's raw field, and the schema's properties are keyed the
+        # same way, so a mangle here would break the runtime lookup. Mirrors the
+        # py emitter, whose `_ident` validates without renaming.
+        name = _raw_ident(contract.get("name"), "event name")
+        key = _raw_ident(contract.get("key"), "event key")
+        window = contract.get("window")
+        if not isinstance(window, int) or window < 1:
+            raise EmitError(
+                f"event {name!r} has a non-positive dedup window {window!r} — "
+                "the window is bounded by construction")
+        ctx._counter[0] += 1
+        gate = f"_revlEvent{ctx._counter[0]}"
+        schema = json.dumps(contract.get("schema"))
+        lines.append(
+            f"{indent}const {gate} = host.Stream.contract("
+            f"{_string(name)}, {schema}, {_string(key)}, {window})")
     lines.append(f"{indent}while (true) {{")
     lines.append(f"{indent}  const {item} = await {subject}.next()")
     lines.append(f"{indent}  yield () => {{}}  // iteration boundary (A1)")
     lines.append(f"{indent}  if (host.Stream.isClosed({item})) break")
+    if gate is not None:
+        where = f"{component.get('name')}: on {name}"
+        lines.append(
+            f"{indent}  if (!{gate}.admit({item}, {_string(where)})) continue")
     for inner in body:
         _component_step(inner, component, services, ctx, indent + "  ", lines, frame_var)
     lines.append(f"{indent}}}")
@@ -2461,9 +2507,10 @@ _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 # item 130 (roadmap #81): `Stream` graduated OFF this table — `runtime.ts` now
 # carries a real `Stream`/`StreamSource`/`Subscription`/`StreamStage` runtime
 # (the same async-generator mirror the py reference runs, design §4.6), so
-# `Stream.source()` / `subscribe` / `merge` and the `every … in` iteration form
-# lower here. The typed-event (`on … as`) and durable-replay surfaces are still
-# the py reference tier's and are refused by name (see `_component_step`).
+# `Stream.source()` / `subscribe` / `merge`, the `every … in` iteration form and
+# the `on … as` typed-event handler (its `Stream.contract` schema-and-dedup gate,
+# Slice 5) all lower here. Only the durable-replay surface is still the py
+# reference tier's — a frontend refusal that never reaches the emitter.
 _UNIMPLEMENTED_HOST_ROOTS: dict = {
 }
 

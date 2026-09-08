@@ -1464,8 +1464,10 @@ function applyConfigDefaults(
 // backends/python/runtime.py's `StreamSource`/`StreamStage`/`Subscription`/
 // `Stream`; the same states, policies, drain clock and combinator chain, spelt
 // for node's single-threaded event loop with a wake-Promise where the py tier
-// uses an asyncio.Event. The typed-event contract (`on … as`) and durable
-// replay remain the py reference tier's — the ts EMITTER refuses them by name.
+// uses an asyncio.Event. The typed-event contract (`on … as`, `EventContract`
+// below) now lowers here too (item 130 Slice 5); only the durable `replay`
+// (§4.5) remains the py reference tier's — a frontend refusal that never reaches
+// the emitter.
 
 export class StreamFaulted extends Error {
   readonly reason: string
@@ -1930,6 +1932,179 @@ export class Subscription {
   }
 }
 
+/** Does `value` satisfy the JSON-Schema primitive `type`? A faithful mirror of
+ *  backends/python/runtime.py `_json_type_ok`: `integer` is a JS number with no
+ *  fractional part (never a boolean), `number` is any non-boolean number, and a
+ *  JS object is neither `null` nor an array. */
+function _jsonTypeOk(value: unknown, jsonType: string): boolean {
+  switch (jsonType) {
+    case 'object':
+      return typeof value === 'object' && value !== null && !Array.isArray(value)
+    case 'array':
+      return Array.isArray(value)
+    case 'string':
+      return typeof value === 'string'
+    case 'integer':
+      return typeof value === 'number' && Number.isInteger(value)
+    case 'number':
+      return typeof value === 'number' && !Number.isNaN(value)
+    case 'boolean':
+      return typeof value === 'boolean'
+    case 'null':
+      return value === null
+    default:
+      return true
+  }
+}
+
+/** Validate `value` against the derived JSON-Schema subset the revl mapping
+ *  emits (item 257, §3) — the same subset an event's derived schema uses.
+ *  Returns an error string for the FIRST violation, or `null` when the value
+ *  conforms. A faithful mirror of backends/python/runtime.py
+ *  `_json_schema_error`: primitive `type`, `const`, `enum`, `nullable`,
+ *  `properties`/`required`/`additionalProperties` (bool or schema), `items`, and
+ *  a discriminated `oneOf`. No `$ref` (cyclic types are refused), so the walk is
+ *  finite. */
+function _jsonSchemaError(value: unknown, schema: unknown, path = '$'): string | null {
+  if (typeof schema !== 'object' || schema === null) return null
+  const s = schema as Record<string, unknown>
+
+  if ('const' in s) {
+    return value === s.const ? null
+      : `${path}: expected const ${JSON.stringify(s.const)}, got ${JSON.stringify(value)}`
+  }
+
+  if ('enum' in s) {
+    const arms = (s.enum as unknown[]) ?? []
+    return arms.some((a) => a === value) ? null
+      : `${path}: ${JSON.stringify(value)} is not one of ${JSON.stringify(arms)}`
+  }
+
+  if ('oneOf' in s) {
+    const arms = (s.oneOf as unknown[]) ?? []
+    const matches = arms.filter((arm) => _jsonSchemaError(value, arm, path) === null)
+    if (matches.length === 1) return null
+    if (matches.length === 0) {
+      return `${path}: value matches no arm of the union `
+        + `(a well-formed value names exactly one constructor)`
+    }
+    return `${path}: value is ambiguous, matching ${matches.length} union arms`
+  }
+
+  if (s.nullable && value === null) return null
+
+  const jsonType = s.type as string | undefined
+  if (jsonType !== undefined && !_jsonTypeOk(value, jsonType)) {
+    return `${path}: expected type ${JSON.stringify(jsonType)}, got ${_jsTypeName(value)}`
+  }
+
+  if (jsonType === 'object' || (typeof value === 'object' && value !== null && !Array.isArray(value))) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+    const obj = value as Record<string, unknown>
+    const props = (s.properties as Record<string, unknown>) ?? {}
+    for (const name of (s.required as string[]) ?? []) {
+      if (!(name in obj)) return `${path}: missing required property ${JSON.stringify(name)}`
+    }
+    const extra = 'additionalProperties' in s ? s.additionalProperties : true
+    for (const key of Object.keys(obj)) {
+      if (key in props) {
+        const err = _jsonSchemaError(obj[key], props[key], `${path}.${key}`)
+        if (err !== null) return err
+      } else if (extra === false) {
+        return `${path}: unexpected property ${JSON.stringify(key)}`
+      } else if (typeof extra === 'object' && extra !== null) {
+        const err = _jsonSchemaError(obj[key], extra, `${path}.${key}`)
+        if (err !== null) return err
+      }
+    }
+  }
+
+  if (jsonType === 'array' && Array.isArray(value)) {
+    const items = s.items
+    if (typeof items === 'object' && items !== null) {
+      for (let i = 0; i < value.length; i++) {
+        const err = _jsonSchemaError(value[i], items, `${path}[${i}]`)
+        if (err !== null) return err
+      }
+    }
+  }
+
+  return null
+}
+
+function _jsTypeName(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  return typeof value
+}
+
+/** The contract half of a typed event (item 130 Slice 5,
+ *  docs/design/130-stream-reactive-types.md §6). A faithful mirror of
+ *  backends/python/runtime.py `EventContract`.
+ *
+ *  An event is a `Stream[T]` element with a contract, so this object holds
+ *  exactly the two things events add on top of the stream protocol and nothing
+ *  else: the SCHEMA every delivered item is checked against before the handler
+ *  body runs, and the bounded window of recently admitted KEYS that collapses a
+ *  redelivery. Everything else about an `on … as` handler — the subscription
+ *  bracket, the cancellation-first `next`, the terminal handling, the LIFO
+ *  teardown — is the Slice 1/4 machinery, untouched.
+ *
+ *  A schema violation throws `StreamFaulted`: the SAME terminal a provider abort
+ *  delivers, so it takes the same uncaught path the iteration form already
+ *  defines — out of the loop, the activation fails, the accumulated prefix
+ *  reverts LIFO, and the subscription bracket on it CLOSES the subscription.
+ *  That is §6's "a failed handler does not leave a subscription active", reached
+ *  with no line of new teardown.
+ *
+ *  The dedup memory is a fixed-size LRU of key values, CONSTANT per handler, so
+ *  it is not the per-item accumulation §4.7 refuses. Being bounded also bounds
+ *  what it claims: a redelivery further apart than the window runs the handler
+ *  again — a collapse, not a durable exactly-once claim (§4.5). Every decision
+ *  is traced (`event.<name> admit` / `event.<name> duplicate`). */
+export class EventContract {
+  readonly name: string
+  private readonly schema: unknown
+  private readonly key: string
+  private readonly window: number
+  private readonly _seen: Map<unknown, true> = new Map()
+
+  constructor(name: string, schema: unknown, key: string, window: number) {
+    this.name = name
+    this.schema = schema
+    this.key = key
+    this.window = Math.max(1, Math.trunc(window))
+  }
+
+  /** Check one delivered item against the contract; `true` to run the body.
+   *  Validation comes FIRST: the key read below is only sound because the schema
+   *  already proved the item is an object carrying that field, so no malformed
+   *  item reaches the dedup table (or the body) at all. */
+  admit(item: unknown, where = ''): boolean {
+    const err = _jsonSchemaError(item, this.schema, '$')
+    if (err !== null) {
+      throw new StreamFaulted(
+        where
+          ? `${where}: event ${this.name} item failed its schema: ${err}`
+          : `event ${this.name} item failed its schema: ${err}`,
+      )
+    }
+    const key = (item as Record<string, unknown>)[this.key]
+    if (this._seen.has(key)) {
+      this._seen.delete(key)
+      this._seen.set(key, true)   // move-to-end: most-recently seen
+      record(`event.${this.name} duplicate`)
+      return false
+    }
+    this._seen.set(key, true)
+    while (this._seen.size > this.window) {
+      this._seen.delete(this._seen.keys().next().value)
+    }
+    record(`event.${this.name} admit`)
+    return true
+  }
+}
+
 /** Host builtin (item 130): `Stream.source()` opens a provider; a `subscribe`
  *  lowers to `host.Stream.subscribe(source, policy, ctx, opts)`. `pending()` is
  *  the residue probe — open sources + un-closed subscriptions + live links. */
@@ -1946,6 +2121,14 @@ export const Stream = {
    *  deliberately NOT a value here — it THROWS out of `next`. */
   isClosed(value: unknown): boolean {
     return value === STREAM_CLOSED
+  },
+
+  /** The per-handler contract an `on <Event> as … in <sub>` opens (item 130
+   *  Slice 5). One per handler, built ONCE before the loop — never per delivered
+   *  item, which is what keeps the dedup memory constant in the length of the
+   *  stream. Mirrors backends/python/runtime.py `Stream.contract`. */
+  contract(name: string, schema: unknown, key: string, window: number): EventContract {
+    return new EventContract(name, schema, key, window)
   },
 
   /** The fan-in behind `subscribe merge(a, b)` — one derived stream from two
