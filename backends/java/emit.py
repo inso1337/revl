@@ -7,9 +7,9 @@ Mapping (DESIGN.md §7, docs/design-v2-realms.md, docs/syntax-2.0.md):
 
 - service     -> `public interface <Name> { <ret> <m>(<params>); }`
 - component   -> `public final class <Name>Plugin implements Plugin { apply(ctx) }`
-- requires    -> `ctx.get(<Svc>.class, "<key>")` (manifest load order
-                 guarantees the provider is already active). The provision key
-                 is part of the lookup: when two providers share one service
+- requires    -> `ctx.get(ServiceKey.of(<Svc>.class, "<key>"))` (manifest load
+                 order guarantees the provider is already active). The provision
+                 key is part of the lookup: when two providers share one service
                  type, the required key selects the right one (the same routing
                  the go/rust/py tiers do — a require binds the provision named
                  by its key, not merely the first provider of the class).
@@ -2072,13 +2072,16 @@ def _v3_instance_get(
     key the spawned component provides. The matching `spawn` isolated that key's
     service into the instance's OWN private local realm (a fork()-isolated child
     `Context`, per-spawn-unique label), and the handle stored that child context.
-    Resolving through it — `<handle>.get(<Svc>.class)` — yields THAT instance's
-    provision and no other's: only the spawner holding this handle reaches it,
-    so a sibling instance (a different realm) and the root cannot
-    (supervision-tree addressing). `service` is frozen inline on the node (the
-    typing rule's result), so this tier never re-derives it — mirroring how
-    `_v3_spawn` reads the realm services and the cordis-py reference
-    (backends/python/emit.py + runtime.py `SpawnHandle.get`).
+    Resolving through it — `<handle>.get(<Svc>.class, "<key>")` — yields THAT
+    instance's provision and no other's: only the spawner holding this handle
+    reaches it, so a sibling instance (a different realm) and the root cannot
+    (supervision-tree addressing). The provision is registered under its
+    provision key (`ServiceKey.of(<Svc>.class, "<key>")`, matching `provides`),
+    so the read carries the key too — cordis4j has no type-only view of a keyed
+    provision. `service` is frozen inline on the node (the typing rule's
+    result), so this tier never re-derives it — mirroring how `_v3_spawn` reads
+    the realm services and the cordis-py reference (backends/python/emit.py +
+    runtime.py `SpawnHandle.get`).
     """
     target = _expr(node.get("target"), ctx, rename, env)
     key = node.get("key")
@@ -2087,7 +2090,7 @@ def _v3_instance_get(
     service = node.get("service")
     if not isinstance(service, str) or not service.isidentifier():
         raise EmitError(f"bad instance-get service {service!r}")
-    return f"{target}.get({_ident(service, 'service')}.class)"
+    return f"{target}.get({_ident(service, 'service')}.class, {_string(key)})"
 
 
 def _v3_spawn(
@@ -5537,7 +5540,10 @@ def _emit_component_modern(
             out.append(f"        {service} {local} = "
                        f"new RevlRouter{cname}{_camel(local)}(ctx);")
             continue
-        out.append(f"        {service} {local} = ctx.get({service}.class, {_string(local)});")
+        out.append(
+            f"        {service} {local} = "
+            f"ctx.get(ServiceKey.of({service}.class, {_string(local)}));"
+        )
     # A8 self-revert: cordis4j's ctx.effect() scope is NOT owned by the
     # fiber until apply returns it, so a failing activation must dispose
     # the accumulated effects itself before the failure routes to the
@@ -5689,7 +5695,10 @@ def _emit_component(
     out.append("    @Override")
     out.append("    public Disposable apply(Context ctx) {")
     for local, service in env.reqs.items():
-        out.append(f"        {service} {local} = ctx.get({service}.class, {_string(local)});")
+        out.append(
+            f"        {service} {local} = "
+            f"ctx.get(ServiceKey.of({service}.class, {_string(local)}));"
+        )
     # A8 self-revert: undos accumulate as the steps land; if a later step
     # throws mid-activation, the accumulated inverses run (reverse order)
     # before the failure routes to the runtime — cordis4j only owns what
@@ -5882,9 +5891,9 @@ def _emit_spawn_handle(with_get: bool = False) -> list[str]:
 
     When `with_get` (the document uses the instance accessor `s.<key>`), the
     handle also stores the instance's fork()-isolated child `Context` and
-    exposes `get(<Svc>.class)`, which resolves a provision through THAT realm —
-    the runtime side of `instance-get`. It is gated so a spawn-only document
-    keeps the original handle byte-for-byte.
+    exposes `get(<Svc>.class, "<key>")`, which resolves the keyed provision
+    through THAT realm — the runtime side of `instance-get`. It is gated so a
+    spawn-only document keeps the original handle byte-for-byte.
 
     `spawn` plugs the target template as a CHILD instance of the spawner: each
     key it provides is isolated into a FRESH LOCAL realm (a per-spawn-unique
@@ -5961,11 +5970,14 @@ def _emit_spawn_handle(with_get: bool = False) -> list[str]:
         lines += [
             "",
             "    /** Read a provision the instance published, in ITS local realm:",
-            "     * `s.<key>` -> `get(<Svc>.class)`. Only the spawner holding this",
+            "     * `s.<key>` -> `get(<Svc>.class, \"<key>\")`. The provision is keyed",
+            "     * by its provision name (matching `provides`), so the read carries",
+            "     * the key — cordis4j resolves a keyed provision only through its",
+            "     * ServiceKey, never a type-only view. Only the spawner holding this",
             "     * handle reaches it — a sibling (a different realm) and the root",
             "     * cannot (supervision-tree addressing, docs/design-v2-instances.md). */",
-            "    <T> T get(Class<T> service) {",
-            "        return ctx.get(service);",
+            "    <T> T get(Class<T> service, String key) {",
+            "        return ctx.get(ServiceKey.of(service, key));",
             "    }",
         ]
     lines += [
