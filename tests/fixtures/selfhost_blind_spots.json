@@ -221,8 +221,7 @@
       "Internal reference-only pseudo-node, not frontend syntax: emit.py::_RenderedBody wraps already rendered component match arms with kind=__rendered__; emit_py.rvl::cmatch_branch passes expression strings directly. emit_py_corpus/branches.rvl::block_match covers the corresponding source behavior.": [
         "kind=__rendered__"
       ],
-      "Component host-runtime boundary from the port banner: emit.py::_ComponentEmitter._expr lowers host roots and format via runtime imports; emit_py.rvl::cexpr returns named markers. backends/go/scenarios/advance.rvl reproduces host/format, pinned by test_named_runtime_and_harness_boundaries. Module builtins and interpolation are supported and not included.": [
-        "kind=format",
+      "Component host-runtime boundary from the port banner: emit.py::_ComponentEmitter._expr lowers host roots via runtime imports; emit_py.rvl::cexpr returns a named marker for kind=host. backends/go/scenarios/advance.rvl reproduces host, pinned by test_named_runtime_and_harness_boundaries. Module builtins and interpolation are supported and not included; component-body kind=format (the `${…}` template) is now ported and covered by emit_py_corpus/services_interp.rvl.": [
         "kind=host"
       ],
       "Intentional refusal, not missing positive emission: emit.py::_refuse_holes rejects kind=hole before rendering. tests/test_holes.py supplies ?? source inputs. A successful byte-oracle document cannot contain an unresolved hole; adding one would incorrectly require reference emission.": [

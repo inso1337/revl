@@ -127,6 +127,14 @@ CORPUS = [
     # binder decision had no oracle over it. Added FAILING FIRST, and the
     # component half of F3's binder-free arms was the divergence it caught.
     "services_match.rvl",    # a match in a provide-method body: the body-IS-the-bind, unread-bind and read-bind arms, over an ADT and an Opt
+    # a `${…}` template in a provide-method body: the COMPONENT-path `format`
+    # node (a fn body lowers `${…}` to `interp` instead), emitted as
+    # `_revl_fmt('<template>', args)` with `fmt as _revl_fmt` pulled into the
+    # `from runtime import` line. The self-host `cexpr` had no `format` site
+    # (it rendered `<<UNSUPPORTED-CEXPR:format>>`) and dropped the import — the
+    # `kind=format` py-tier emitter gap the coverage ledger recorded. Covers a
+    # single name arg, two args, the A4 literal-`$` escape, and a `bin` arg.
+    "services_interp.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     "result.rvl",      # built-in Result (Ok/Err) classes, gated by a match on Ok/Err
@@ -522,8 +530,13 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     ("examples/regressions/fuzz_go_6be27824.rvl", "REVL_TESTS = []", None),
     ("backends/go/scenarios/accessor.rvl", "spawn as _revl_spawn",
      "<<UNSUPPORTED-CEXPR:spawn>>"),
-    ("backends/go/scenarios/advance.rvl", "fmt as _revl_fmt",
-     "<<UNSUPPORTED-CEXPR:format>>"),
+    # advance.rvl's component-body `${…}` (`format`) is now ported (see
+    # `services_interp.rvl` in the CORPUS above and the `fmt as _revl_fmt`
+    # import), so this document is pinned on its REMAINING deferred boundary:
+    # the `host` builtin `Map.new()` in an activation body, which the port
+    # still refuses.
+    ("backends/go/scenarios/advance.rvl", "store = Map.new()",
+     "<<UNSUPPORTED-CEXPR:host>>"),
     ("backends/go/testdata/stream_130.rvl", "Pool, Stream",
      "<<UNSUPPORTED-CEXPR:subscribe>>"),
 ])

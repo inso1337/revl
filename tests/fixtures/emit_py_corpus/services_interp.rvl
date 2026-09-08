@@ -1,0 +1,22 @@
+// Component/method-body `${…}` interpolation. Unlike a fn body (which lowers a
+// template to an `interp` f-string concat), a provide-method or component body
+// lowers `${…}` to a `format` node, emitted as `_revl_fmt('<template>', args)`
+// with `fmt as _revl_fmt` pulled into the `from runtime import` line. The
+// self-host `cexpr` had no `format` site (it rendered `<<UNSUPPORTED-CEXPR:
+// format>>`) and dropped the `fmt` import — the `kind=format` emitter gap the
+// coverage ledger recorded for the py tier.
+service Fmt {
+  fn one(name: Str) -> Str
+  fn many(a: Str, b: Str) -> Str
+  fn dollar(x: Str) -> Str
+  fn expr(a: Int, b: Int) -> Str
+}
+
+component Templater provides fmt: Fmt {
+  provide fmt {
+    fn one(name) = `hi ${name}!`
+    fn many(a, b) = `${a}=${b}`
+    fn dollar(x) = `cost $ is ${x}`
+    fn expr(a, b) = `sum ${a + b}`
+  }
+}
