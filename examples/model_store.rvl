@@ -1,0 +1,67 @@
+// A driver-independent persistence store, shaped like Cordis Database (Minato):
+// typed CRUD over a declared model, with NO raw-SQL strings. Roadmap item 465
+// (issue #752), design docs/design/527-database-persistence-alignment.md.
+//
+// This is the memory-driver slice. The store's surface is the Minato CRUD verbs
+// (`get`, `create`) over a declared row type — not the raw `query(sql: Str)` the
+// v0 examples/user_cache.rvl uses (that raw-SQL sketch predates Minato; #752
+// replaces it). Every persistence MUTATION is lowered as a revertible `effect`
+// whose derived inverse is the natural CRUD counterpart: `create` (an insert)
+// carries `undo remove`, so a row written during activation is removed in LIFO
+// order on teardown or divert — residue-free — exactly the recovery story 462
+// wants, now expressed over a real store instead of a file.
+//
+// The driver is a composition-time choice: `MemoryStore` provides `store` over
+// an in-memory Map here; a sqlite/postgres driver would provide the SAME `Store`
+// service, so model and query code never change when the driver is swapped.
+
+// The declared model: one row type. Query and mutation are typed against it,
+// so a field the model does not declare is a front-end type error, not a
+// string an ORM discovers at runtime.
+type User = { id: Str, name: Str }
+
+// The persistence service: typed CRUD verbs, no SQL. A `create` is an
+// `emission` (a witnessed mutation) whose provider carries the inverse; `get`
+// is a pure read.
+service Store {
+  fn get(id: Str) -> Opt[User]
+  emission fn create(row: User)
+}
+
+// The memory driver. Any other driver (sqlite, postgres) provides this same
+// `Store`, so the swap touches neither the model nor consumer query code.
+component MemoryStore provides store: Store {
+  let rows = effect Map.new() undo rows.drop()
+
+  provide store {
+    fn get(id) = rows.get(id)
+
+    // The mutation, lowered as a revertible effect: insert the row, and on
+    // abort/teardown remove it. `create`'s derived inverse is `remove` — the
+    // Minato-natural counterpart — so the write reverts residue-free.
+    fn create(row) {
+      effect rows.insert(row.id, row)
+      undo   rows.remove(row.id)
+    }
+  }
+}
+
+lifecycle test "a created row is readable, and reverts residue-free" {
+  load MemoryStore
+  call store.create({ id: "u1", name: "Alice" })
+  let hit = call store.get("u1")
+  assert hit == Some({ id: "u1", name: "Alice" })
+  unload MemoryStore
+  assert no_residue
+}
+
+lifecycle test "a reloaded store starts empty" {
+  load MemoryStore
+  call store.create({ id: "u2", name: "Bob" })
+  unload MemoryStore
+  load MemoryStore
+  let stale = call store.get("u2")
+  assert stale == None
+  unload MemoryStore
+  assert no_residue
+}
