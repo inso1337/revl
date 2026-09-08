@@ -1,0 +1,89 @@
+// The revl stdlib A2A TASK-LIFECYCLE module (roadmap item 439, issue #118).
+//
+// `docs/design/439-a2a-task-lifecycle.md` decides that a long-running A2A
+// 1.0.0 Task is STREAM-SHAPED, and that its first implementable surface (T1)
+// is the four-op explicit-handle projection: a `_start` that returns a handle,
+// a `_poll` that reads one lifecycle event, a `_reply` that answers an
+// `input-required` / `auth-required` prompt, and a `_cancel`. This module is
+// the pure-revl vocabulary those four synthesized crossings speak — the same
+// types on BOTH entry points (`through a2a` / `through a2a_rest` on the remote
+// row, and `revl import a2a`), so the two projections cannot drift.
+//
+// ------------------------------------------------------------------- purity
+// Every declaration here is PURE revl — no `@py`/`@ts` body — so the module
+// lowers on every tier and carries no host surface of its own. The taint, the
+// crossing, the deadline and the `Faulted`-on-EOF synthesis all live at the
+// ADAPTER (the synthesized `@py` body); this module only NAMES the shapes that
+// cross. A `TaskEvent` a consumer reads back is `Untrusted[TaskEvent]` because
+// the crossing that produced it said so (item 424 D-424c.9), never because of
+// anything spelled here.
+//
+// ------------------------------------------------------------- the lifecycle
+// A2A 1.0.0 gives a Task the states below. `Unknown` is the adapter's honest
+// answer for a state string this binding does not recognise: a peer is a claim
+// (item 329), so an unrecognised state is surfaced, never guessed into a
+// terminal. `is_terminal` is the single gate a poll loop consults to decide
+// whether to stop; it is total over the enum.
+//
+// A `Faulted` TaskEvent is SYNTHESISED at the adapter (SSE EOF, poll deadline,
+// or transport error) — item 130's rule "provider death is a terminal, never
+// silence", satisfied at the boundary because the peer cannot be made to
+// promise it. It is a `TaskEvent`, not a `TaskState`, because it is the feed's
+// terminal, not a state the peer ever reported.
+//
+// ------------------------------------------------------------ BUMP DISCIPLINE
+// Adding, removing or changing a `pub` symbol here bumps
+// `stdlib/version.rvl` (see its bump log).
+
+// A handle to a running Task. `id` is the A2A task id; `context` is the
+// optional A2A `contextId` that groups related tasks. A `TaskRef` is what a
+// `_start` returns and what `_poll` / `_reply` / `_cancel` take back.
+pub type TaskRef = { id: Str, context: Opt[Str] }
+
+// The A2A 1.0.0 Task lifecycle states. The first four are non-terminal (the
+// task is still live: `input-required` / `auth-required` want a second
+// `message/send`); the next four are terminal; `Unknown` is the adapter's
+// answer for an unrecognised wire state — surfaced, never coerced.
+pub type TaskState = Submitted | Working | InputRequired | AuthRequired
+                   | Completed | Failed | Canceled | Rejected | Unknown
+
+// One event read off a Task feed. `Status` reports a lifecycle transition;
+// `Artifact` / `Message` carry a text payload the peer produced; `Done`
+// carries the terminal payload; `Faulted` is the adapter-synthesised terminal
+// for a peer that stopped answering (EOF / deadline / transport error).
+pub type TaskEvent = Status(TaskState) | Artifact(Str) | Message(Str)
+                   | Done(Str) | Faulted(Str)
+
+// Total: is a lifecycle state one the Task can no longer leave? A poll loop
+// stops when this is true. `Unknown` is NOT terminal — a peer that reports a
+// state this binding does not recognise may still advance.
+pub fn is_terminal(s: TaskState) -> Bool {
+  return match s {
+    Completed => true,
+    Failed => true,
+    Canceled => true,
+    Rejected => true,
+    Submitted => false,
+    Working => false,
+    InputRequired => false,
+    AuthRequired => false,
+    Unknown => false,
+  }
+}
+
+// Total: map an A2A 1.0.0 wire state string to a `TaskState`. An unrecognised
+// string is `Unknown` — surfaced, never guessed into a terminal. The adapter
+// (the synthesized `@py` body) reads the wire and calls this so the mapping is
+// one pure-revl definition shared by every crossing rather than re-derived per
+// tier.
+pub fn task_state_from_wire(s: Str) -> TaskState {
+  if (s == "submitted") { return Submitted }
+  if (s == "working") { return Working }
+  if (s == "input-required") { return InputRequired }
+  if (s == "auth-required") { return AuthRequired }
+  if (s == "completed") { return Completed }
+  if (s == "failed") { return Failed }
+  if (s == "canceled") { return Canceled }
+  if (s == "rejected") { return Rejected }
+  return Unknown
+}

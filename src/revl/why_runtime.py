@@ -57,6 +57,13 @@ LIVENESS_EXPIRED = "liveness-expired"  # root: silent past its declared ceiling
                                        # faulted nor answered — distinct from a
                                        # fault, which is a TRIGGER carrying a
                                        # classifiable diagnostic `code`)
+TRANSPORT_FAULT = "transport-fault"    # root: a synthesized remote provider's
+                                       # crossing faulted, so the provider is
+                                       # withdrawn (item 439 T0, issue #118).
+                                       # Distinct in KIND from LIVENESS_EXPIRED
+                                       # (a peer that faulted, not one that went
+                                       # silent) and carries the row label and
+                                       # the crossing that failed.
 
 
 # --------------------------------------------------------------------------
@@ -212,6 +219,26 @@ def cause_liveness_expired(ceiling_ms, silent_ms) -> dict:
     make the QUIET case masquerade as a fault."""
     return {"kind": LIVENESS_EXPIRED,
             "ceilingMs": ceiling_ms, "silentMs": silent_ms}
+
+
+def cause_transport_fault(row: str, crossing: str) -> dict:
+    """Root cause: a synthesized remote provider's declared crossing faulted,
+    so the provider is withdrawn and its consumers deactivate reactively
+    (item 439 slice T0, issue #118, docs/design/439-a2a-task-lifecycle.md
+    decision 4).
+
+    Distinct in KIND from :func:`cause_liveness_expired` (a peer that went
+    SILENT past its ceiling) and from :func:`cause_trigger` (an operator, or a
+    generic fault): a transport fault is the peer's declared crossing FAILING —
+    a connection error, a deadline, a non-terminal task, a redirect-free
+    protocol fault — under `on_failure(withdraw)`. It carries the accounting an
+    operator reads off the withdrawal: the `row` label the crossing was
+    declared on and the `crossing` (the method) that failed. It carries no
+    diagnostic ``code``: the fault is the peer's, not a classifiable
+    ``RevlError`` raised in our own composition, so a fabricated code would
+    misattribute it. Under `on_failure(result)` no fault is raised (the failure
+    is the `Err`), so this cause never arises and the provider stays wired."""
+    return {"kind": TRANSPORT_FAULT, "row": row, "crossing": crossing}
 
 
 # --------------------------------------------------------------------------
