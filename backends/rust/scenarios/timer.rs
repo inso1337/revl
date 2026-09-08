@@ -44,7 +44,7 @@ fn timer_deterministic_firing_and_unload_cancels() {
 
     // Load Heartbeat: it resolves `log` and arms its two timers at activation.
     let hb = root.plugin(heartbeat(), ());
-    hb.wait().expect("Heartbeat did not reach ACTIVE");
+    hb.try_wait().expect("Heartbeat did not reach ACTIVE");
 
     // Arming happened, but nothing fires unbidden — time has not advanced.
     assert_eq!(revl_clock_pending(), 2, "two timers armed at activation");

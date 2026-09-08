@@ -176,7 +176,7 @@ fn main() {
             match components::_revl_proxy_plugin(key, service, socket.clone()) {
                 Some(handle) => {
                     let fiber = root.plugin(handle, ());
-                    fiber.wait().unwrap();
+                    fiber.try_wait().unwrap();
                     fibers.push((format!("{key}-proxy"), fiber));
                     log("proxy", key, &format!("-> {socket} [{service}]"));
                     if !once {
@@ -205,7 +205,7 @@ fn main() {
                     // the no-residue proof the fault sweep reads. Outside `--once`
                     // there is no teardown-and-prove round-trip to salvage, so a
                     // boot failure stays fatal: tear down what booted, exit nonzero.
-                    match fiber.wait() {
+                    match fiber.try_wait() {
                         Ok(_) => {
                             log("load", cname, &format!("state={:?}", fiber.state()));
                             fibers.push((cname.to_string(), fiber));
@@ -238,7 +238,7 @@ fn main() {
             .map(|a| a.iter().filter_map(|k| k.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
         let fiber = root.plugin(serve_plugin(socket.clone(), keys.clone()), ());
-        fiber.wait().unwrap();
+        fiber.try_wait().unwrap();
         fibers.push(("serve".to_string(), fiber));
         log("serve", &keys.join(", "), &format!("-> {socket}"));
     }
@@ -252,7 +252,7 @@ fn main() {
                 probe_plugin(name.clone(), key, method, args_of(probe)),
                 (),
             );
-            fiber.wait().unwrap();
+            fiber.try_wait().unwrap();
             fibers.push(("probe".to_string(), fiber));
         }
     }
