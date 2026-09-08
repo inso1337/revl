@@ -29,6 +29,11 @@ function revlEq(a: unknown, b: unknown): boolean {
     && revlEq((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
 }
 
+function revlIndex<T>(xs: T[], i: number): T {
+  if (i < 0) { throw new Error("revl: negative list index") }
+  return xs[i]
+}
+
 export interface Row {
   id: bigint
   name: string
@@ -68,7 +73,7 @@ export function classify(n: bigint): string {
 }
 
 export function first(xs: bigint[]): bigint {
-    return xs[0]
+    return revlIndex(xs, 0)
 }
 
 export function makeRow(id: bigint, name: string): Row {
