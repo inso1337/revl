@@ -651,6 +651,29 @@ extraction, caching and isolation paths are the production ones; only the shippe
 sources its interpreter from `REVL_LSP_TEST_RUNTIME_PYTHON` (or `REVL_LSP_PYTHON`)
 and skips with a stated reason when neither is set — never a hollow green.
 
+**The follow-on: the runtime baked into the binary's own bytes (the single
+distributed FILE).** The runtime-management contract above resolves a private
+runtime from a file BESIDE the executable, so a self-contained runtime is a
+self-contained PAIR of files: the binary plus the archive. The next step on that
+contract, and the one that makes the item's "one distributable file" prose
+literal, is to carry the archive INSIDE the executable. What landed
+(`crates/revl-lsp/build.rs`, `runtime.rs`): a build that sets
+`REVL_LSP_EMBED_RUNTIME` to a pinned runtime archive (and optionally
+`REVL_LSP_EMBED_RUNTIME_PIN` to its pin) compiles the archive into the binary via
+`include_bytes!`, and `runtime::locate` extracts those bytes through the very same
+atomic, versioned, isolated-mode cache path a beside-exe archive takes — the
+child process reads its bytes from the binary instead of a sibling file. It is
+the baked-in DEFAULT, resolved only after the env and beside-exe sources so a
+distributor can still override it, and `None` for a bare `cargo` build, so
+nothing in CI changes. This does NOT ship the pinned `python-build-standalone`
+bytes (still 338, the archive a build points the knob at) nor move the
+interpreter in-process (still the pyo3 link); it is the mechanism by which a
+distribution build, once it carries those bytes, produces a single file rather
+than a pair. The exit check is a unit test of the bytes→versioned-cache→reuse
+path (`runtime.rs`, `embedded_bytes_extract_into_a_versioned_cache_and_reuse_it`),
+alongside the end-to-end equivalence the beside-exe archive test already pins;
+the two differ only in where the identical archive bytes come from.
+
 ## The honest hard part (consolidated)
 
 Four costs, taken in the open. First, the native-checker half of this item is item
