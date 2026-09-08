@@ -289,7 +289,7 @@ public final class RealPlacementRunner {
                 }
             }
             Class<?> iface = Class.forName((String) ifaces.get(key));
-            Object service = ctx.get((Class) iface, key);
+            Object service = ctx.get(ServiceKey.of((Class) iface, key));
             Method m = findMethod(iface, method, args.size());
             Object value = m.invoke(service, coerceArgs(m, args));
             log("probe", expr, "=> " + render(value));
