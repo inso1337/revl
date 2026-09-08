@@ -643,6 +643,73 @@ def test_the_overlay_cannot_name_a_row_that_is_not_there(tmp_path):
     assert "is not in the composition" in str(caught.value)
 
 
+# ---------------------------------------------------- placement authority (R3)
+#
+# 424 residual R3, decided by citing item 337: placement is STRUCTURE, so the
+# invocation overlay may not touch it and a STACK layer may not `place` at all
+# (a third party choosing which tier judges its row is 337's admission-theater
+# one tier up). Only the base composition and the operator's site layer place.
+
+def test_a_stack_layer_may_not_place_a_row(tmp_path):
+    """A stack layer writing `place` is refused, naming the layer and the
+    reason: it may not choose which admission domain its row is judged in."""
+    doc = _project(tmp_path, "shove", shove="""
+layer Shove for Demo {
+  place @db on process "provider" backend rust
+}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    message = str(caught.value)
+    assert "`Shove` is a stack layer" in message
+    assert "may not place a row" in message
+
+
+def test_the_site_layer_may_place_a_row(tmp_path):
+    """The operator's site layer places a row, and the placement is recorded at
+    level 2 in the provenance — the operator's final say."""
+    doc = _project(tmp_path, site="ops", ops="""
+site layer Ops for Demo {
+  place @db on process "provider" backend rust
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    db = next(row for row in table.rows if row.label == "db")
+    assert db.place == {"process": "provider", "backend": "rust"}
+    assert db.provenance[-1] == (2, "Ops", "place")
+
+
+def test_the_site_layer_overrides_a_base_placement(tmp_path):
+    """Base places (level 0), the site layer places over it (level 2): the site
+    layer wins, the same way it has the final say on every other row."""
+    doc = _project(tmp_path, site="ops", ops="""
+site layer Ops for Demo {
+  place @db on process "isolated" backend go
+}
+""")
+    # add a base placement the site layer then overrides
+    base_text = (tmp_path / "base.rvl").read_text().replace(
+        "  row @cache from \"cache.rvl\" provides cache\n",
+        "  row @cache from \"cache.rvl\" provides cache\n"
+        "  place @db on process \"shared\" backend rust\n")
+    (tmp_path / "base.rvl").write_text(base_text)
+    table = resolve_file(str(doc), str(tmp_path))
+    db = next(row for row in table.rows if row.label == "db")
+    assert db.place == {"process": "isolated", "backend": "go"}
+
+
+def test_the_invocation_overlay_may_not_set_a_process_or_backend(tmp_path):
+    """The overlay carries VALUES only: a run may not choose where its own row
+    is placed (structure, 424 R3)."""
+    doc = _project(tmp_path)
+    for field in ("process", "backend"):
+        with pytest.raises(RevlError) as caught:
+            resolve_file(str(doc), str(tmp_path), {("db", field): "elsewhere"})
+        message = str(caught.value)
+        assert "STRUCTURE, not a value" in message
+        assert field in message
+
+
 # -------------------------------------------------------------------- the CLI
 
 def test_layer_check_renders_the_fold_header_only(tmp_path, capsys):

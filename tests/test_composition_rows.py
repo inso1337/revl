@@ -450,15 +450,86 @@ def test_a_row_must_assert_what_it_claims(tmp_path):
 
 
 def test_a_layer_clause_is_not_grammar_yet(tmp_path):
-    """`place` and `variant` are still S-future surface. Until they are built,
-    writing one is a parse error rather than a silently ignored clause — the
-    fail-closed direction. `open` and `reach` are 426 S5 and now DO parse (see
-    below)."""
-    for clause in ("place @db on process \"provider\"",
-                   "variant \"voice\" { }"):
-        with pytest.raises(RevlError):
-            Parser(f'composition Demo {{\n  row @db from "db.rvl" provides db '
-                   f'{clause}\n}}\n', "base.rvl").parse()
+    """`variant` is still S-future surface. Until it is built, writing one is a
+    parse error rather than a silently ignored clause — the fail-closed
+    direction. `open` and `reach` are 426 S5 and `place` is 424 R3, both of
+    which now DO parse (see below)."""
+    with pytest.raises(RevlError):
+        Parser('composition Demo {\n  row @db from "db.rvl" provides db '
+               'variant "voice" { }\n}\n', "base.rvl").parse()
+
+
+def test_place_is_a_base_composition_statement(tmp_path):
+    """424 R3, 426 §6 point 4: `place @row on process "p" [backend b]` records a
+    placement fact on the row it addresses. It is a STATEMENT about an existing
+    row (it names one, never declares one), so it sits beside the rows rather
+    than hanging off one, and a row nobody places is byte-identical."""
+    doc = _project(tmp_path, """
+composition Demo {
+  use "services.rvl"
+  row @db from "db.rvl" provides db
+    config { url: "postgres://primary:5432/app", pool_size: 8 }
+  row @cache from "cache.rvl" provides cache
+  place @db on process "provider" backend rust
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    by_label = {row.label: row for row in table.rows}
+    assert by_label["db"].place == {"process": "provider", "backend": "rust"}
+    # a row nobody placed carries no placement fact and no `place` IR key
+    assert by_label["cache"].place is None
+    assert "place" not in by_label["cache"].to_ir()
+    # base placement is level 0, so it adds no provenance a reader would see
+    assert by_label["db"].to_ir()["place"] == {"process": "provider",
+                                               "backend": "rust"}
+
+
+def test_place_backend_is_optional(tmp_path):
+    """The backend defaults to the composition's own, so a process-only
+    placement stays a one-key fact."""
+    doc = _project(tmp_path, """
+composition Demo {
+  use "services.rvl"
+  row @db from "db.rvl" provides db
+    config { url: "x" }
+  place @db on process "provider"
+}
+""")
+    table = resolve_file(str(doc), str(tmp_path))
+    assert table.rows[0].place == {"process": "provider"}
+
+
+def test_place_addressing_nothing_refuses(tmp_path):
+    """426 §2.4: an address that resolves to nothing is a REFUSAL, never a
+    no-op. A `place` naming a row that is not there is caught at resolution."""
+    doc = _project(tmp_path, """
+composition Demo {
+  use "services.rvl"
+  row @db from "db.rvl" provides db
+    config { url: "x" }
+  place @nope on process "provider"
+}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "@nope" in str(caught.value)
+    assert "no row" in str(caught.value)
+
+
+def test_place_names_an_unknown_backend_refuses(tmp_path):
+    """Placement is structure and fails closed: an unknown backend is a refusal
+    naming the value, never a silent default (424 R3)."""
+    doc = _project(tmp_path, """
+composition Demo {
+  use "services.rvl"
+  row @db from "db.rvl" provides db
+    config { url: "x" }
+  place @db on process "provider" backend fortran
+}
+""")
+    with pytest.raises(RevlError) as caught:
+        resolve_file(str(doc), str(tmp_path))
+    assert "fortran" in str(caught.value)
 
 
 def test_open_and_reach_are_grammar(tmp_path):
