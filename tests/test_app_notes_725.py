@@ -249,4 +249,8 @@ def test_crud_persists_and_reverts_residue_free_on_the_runtime():
     assert "PASS create then get returns the stored note" in result.stdout
     assert "PASS get of an absent id is a typed 404 ApiError" in result.stdout
     assert "PASS list returns created rows and a reloaded store is empty" in result.stdout
-    assert "[py] pass: 3 test(s) passed" in result.stdout
+    # the differentiated half's baseline lifecycle test (the hot-swap legs need
+    # `Session.swap`, so they live in tests/test_app_hotswap_725.py, not here).
+    assert ("PASS ranker records engagement, scores by strategy, reverts "
+            "residue-free" in result.stdout)
+    assert "[py] pass: 4 test(s) passed" in result.stdout
