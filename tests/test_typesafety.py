@@ -217,6 +217,22 @@ def test_setup_operator_mismatch_rejected():
     assert "operand of `+` expects `Int`, got `Bool`" in err
 
 
+def test_str_plus_int_rejected():
+    # issue #549: `Str + Int` scattered across the tiers (py raised, go would
+    # not compile, rust/ts/java coerced to `"n=3"`). String `+` is Str-only
+    # concatenation, so the frontend now refuses a mixed operand — a compile
+    # error on every tier instead of a runtime divergence. Convert first with
+    # `.to_str()`.
+    err = _err('pub fn s() -> Str { return "n=" + 3 }\n')
+    assert "operand of string `+` expects `Str`, got `Int`" in err
+    # symmetric: a numeric left operand with a Str right is refused too
+    err = _err('pub fn s(n: Int) -> Str { return n + "x" }\n')
+    assert "operand of string `+` expects `Str`, got `Int`" in err
+    # Str + Str still concatenates
+    ir = compile_source('pub fn s() -> Str { return "a" + "b" }\n')
+    assert ir is not None
+
+
 def test_setup_if_condition_must_be_bool():
     err = _err(SETUP.format(body="if (5) { let q = 1 }"))
     assert "`if` condition expects `Bool`, got `Int`" in err

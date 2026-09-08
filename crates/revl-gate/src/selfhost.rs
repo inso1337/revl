@@ -8507,11 +8507,11 @@ fn singles() -> String {
 }
 
 fn op_at(source: &str, i: i64, source_revl_cs: &[char]) -> String {
-    let three = { let _rsa = (i) as i64; let _rsb = ((i).checked_add(3i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() };
+    let three = { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((i).checked_add(3i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() };
     if (ops3().revl_index_of(&three) != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return three;
     }
-    let two = { let _rsa = (i) as i64; let _rsb = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() };
+    let two = { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() };
     if (ops2().revl_index_of(&two) != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
         return two;
     }
@@ -8525,7 +8525,7 @@ fn scan_word(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
     let jj = j;
-    return Scan { j: jj, out: { let _rsa = (i) as i64; let _rsb = (jj) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() }, nl: 0i64 };
+    return Scan { j: jj, out: { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (jj) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }, nl: 0i64 };
 }
 
 fn scan_digits(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
@@ -8535,7 +8535,7 @@ fn scan_digits(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
     let jj = j;
-    return Scan { j: jj, out: { let _rsa = (i) as i64; let _rsb = (jj) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() }, nl: 0i64 };
+    return Scan { j: jj, out: { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (jj) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }, nl: 0i64 };
 }
 
 fn scan_grouped(source: &str, i: i64, valid: &str, source_revl_cs: &[char]) -> Scan {
@@ -8636,13 +8636,13 @@ fn scan_quoted(source: &str, i: i64, q: i64, source_revl_cs: &[char]) -> Scan {
 }
 
 fn is_triple_at(source: &str, j: i64, source_revl_cs: &[char]) -> bool {
-    if (code0(&({ let _rsa = (j) as i64; let _rsb = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() })) != 34i64) {
+    if (code0(&({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (j) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() })) != 34i64) {
         return false;
     }
-    if (code0(&({ let _rsa = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let _rsb = ((j).checked_add(2i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() })) != 34i64) {
+    if (code0(&({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((j).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() })) != 34i64) {
         return false;
     }
-    return (code0(&({ let _rsa = ((j).checked_add(2i64).expect("revl: Int overflow")) as i64; let _rsb = ((j).checked_add(3i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() })) == 34i64);
+    return (code0(&({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((j).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((j).checked_add(3i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() })) == 34i64);
 }
 
 fn scan_triple(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
@@ -8650,7 +8650,7 @@ fn scan_triple(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
     let n = (source_revl_cs.len() as i64);
     let mut out = String::from("");
     let mut nl = 0i64;
-    if (code0(&({ let _rsa = (j) as i64; let _rsb = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() })) == 10i64) {
+    if (code0(&({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (j) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() })) == 10i64) {
         nl = (nl).checked_add(1i64).expect("revl: Int overflow");
         j = (j).checked_add(1i64).expect("revl: Int overflow");
     }
@@ -8764,7 +8764,7 @@ fn scan_interp(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
                         if (depth == 0i64) {
                             let jj = j;
                             let lines = nl;
-                            return Scan { j: jj, out: { let _rsa = (i) as i64; let _rsb = (jj) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() }, nl: lines };
+                            return Scan { j: jj, out: { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (jj) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }, nl: lines };
                         }
                     }
                     if (cc == 10i64) {
@@ -8799,7 +8799,7 @@ fn scan_template(source: &str, i: i64, source_revl_cs: &[char]) -> Scan {
         }
         if (cc != 96i64) {
             let mut handled = false;
-            if ((cc == 36i64) && ({ let _rsa = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let _rsb = ((j).checked_add(2i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() } == "{")) {
+            if ((cc == 36i64) && ({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((j).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() } == "{")) {
                 let inner = scan_interp(source, (j).checked_add(2i64).expect("revl: Int overflow"), source_revl_cs);
                 if (inner.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                     let lines2 = (nl).checked_add(inner.nl).expect("revl: Int overflow");
@@ -8871,7 +8871,7 @@ fn scan_host_body(source: &str, k: i64, source_revl_cs: &[char]) -> Scan {
                 depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
                 if (depth == 0i64) {
                     let jj = j;
-                    return Scan { j: (jj).checked_add(1i64).expect("revl: Int overflow"), out: { let _rsa = ((k).checked_add(1i64).expect("revl: Int overflow")) as i64; let _rsb = (jj) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() }, nl: 0i64 };
+                    return Scan { j: (jj).checked_add(1i64).expect("revl: Int overflow"), out: { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((k).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (jj) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }, nl: 0i64 };
                 }
             }
             j = (j).checked_add(1i64).expect("revl: Int overflow");
@@ -8890,7 +8890,7 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
     if { let _rc: &str = &c; _rc == " " || _rc == "\t" || _rc == "\n" || _rc == "\r" } {
         return Step { i: (i).checked_add(1i64).expect("revl: Int overflow"), line: line, tok: none.clone() };
     }
-    if ({ let _rsa = (i) as i64; let _rsb = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() } == "//") {
+    if ({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() } == "//") {
         let sc = scan_comment(source, i, source_revl_cs);
         return Step { i: sc.j, line: line, tok: none.clone() };
     }
@@ -8939,7 +8939,7 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
         return Step { i: sq.j, line: line, tok: Token { kind: String::from("string"), text: sq.out.clone(), line: line } };
     }
     if is_digit(&c) {
-        let nx = { let _rsa = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let _rsb = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() };
+        let nx = { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() };
         if ((c == "0") && ((((((nx == "x") || (nx == "X")) || (nx == "b")) || (nx == "B")) || (nx == "o")) || (nx == "O"))) {
             let mut base = 16i64;
             let mut valid = String::from("0123456789abcdefABCDEF");
@@ -8969,7 +8969,7 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
         let mut j = ip.j;
         let mut isf = false;
         let mut fracpart = String::from("");
-        if (({ let _rsa = (j) as i64; let _rsb = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() } == ".") && is_digit(&({ let _rsa = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let _rsb = ((j).checked_add(2i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() }))) {
+        if (({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (j) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() } == ".") && is_digit(&({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((j).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }))) {
             let fr = scan_grouped(source, (j).checked_add(1i64).expect("revl: Int overflow"), "0123456789", source_revl_cs);
             if (fr.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                 return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
@@ -8979,16 +8979,16 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
             isf = true;
         }
         let mut exppart = String::from("");
-        let e = { let _rsa = (j) as i64; let _rsb = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() };
+        let e = { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (j) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((j).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() };
         if ((e == "e") || (e == "E")) {
             let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
-            let sign = { let _rsa = (k.clone()) as i64; let _rsb = ((k).checked_add(1i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() };
+            let sign = { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (k.clone()) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((k).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() };
             let mut signstr = String::from("");
             if ((sign == "+") || (sign == "-")) {
                 signstr = sign.clone();
                 k = (k).checked_add(1i64).expect("revl: Int overflow");
             }
-            if is_digit(&({ let _rsa = (k.clone()) as i64; let _rsb = ((k).checked_add(1i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() })) {
+            if is_digit(&({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (k.clone()) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((k).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() })) {
                 let ex = scan_grouped(source, k.clone(), "0123456789", source_revl_cs);
                 if (ex.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                     return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("bad numeric literal"), line: line } };
@@ -9010,14 +9010,14 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
         return Step { i: jj, line: line, tok: Token { kind: String::from("int"), text: (ival).to_string(), line: line } };
     }
     if (cc == 64i64) {
-        let nxt = { let _rsa = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let _rsb = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() };
+        let nxt = { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = ((i).checked_add(2i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() };
         if ((nxt != "") && is_alpha(&nxt)) {
             let n1 = (source_revl_cs.len() as i64);
             let mut jb = (i).checked_add(1i64).expect("revl: Int overflow");
             while ((jb < n1) && ({ let _rc: &str = &({ source_revl_cs[(jb.clone()) as usize].to_string() }); ("0" <= _rc && _rc <= "9") || ("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z") } || ({ source_revl_cs[(jb.clone()) as usize].to_string() } == "_"))) {
                 jb = (jb).checked_add(1i64).expect("revl: Int overflow");
             }
-            let backend = { let _rsa = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let _rsb = (jb.clone()) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() };
+            let backend = { let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = ((i).checked_add(1i64).expect("revl: Int overflow")) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (jb.clone()) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() };
             let mut kb = jb.clone();
             while (((kb < n1) && ({ source_revl_cs[(kb.clone()) as usize] as u32 as i64 } != 10i64)) && { let _rc: &str = &({ source_revl_cs[(kb.clone()) as usize].to_string() }); _rc == " " || _rc == "\t" || _rc == "\n" || _rc == "\r" }) {
                 kb = (kb).checked_add(1i64).expect("revl: Int overflow");
@@ -9030,7 +9030,7 @@ fn step(source: &str, i: i64, line: i64, source_revl_cs: &[char]) -> Step {
                 if (hb.j == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                     return Step { i: (source_revl_cs.len() as i64), line: line, tok: Token { kind: String::from("error"), text: String::from("unterminated host body"), line: line } };
                 }
-                let nl = count_nl(&({ let _rsa = (i) as i64; let _rsb = (hb.j) as i64; source_revl_cs.iter().skip(_rsa.max(0) as usize).take((_rsb - _rsa).max(0) as usize).collect::<String>() }));
+                let nl = count_nl(&({ let _rsn = source_revl_cs.len() as i64; let _rsa = { let x = (i) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn) }; let _rsb = { let x = (hb.j) as i64; let x = if x < 0 { x + _rsn } else { x }; x.max(0).min(_rsn).max(_rsa) }; source_revl_cs.iter().skip(_rsa as usize).take((_rsb - _rsa) as usize).collect::<String>() }));
                 return Step { i: hb.j, line: (line).checked_add(nl).expect("revl: Int overflow"), tok: Token { kind: String::from("hostbody"), text: (backend.revl_concat("{")).revl_concat(&hb.out), line: line } };
             }
         }
@@ -10884,7 +10884,12 @@ trait RevlStrOps {
 impl RevlStrOps for str {
     fn revl_length(&self) -> i64 { self.chars().count() as i64 }
     fn revl_slice(&self, a: i64, b: i64) -> String {
-        self.chars().skip(a.max(0) as usize).take((b - a).max(0) as usize).collect()
+        // JS/Python slice: a negative bound counts from the end, then
+        // both bounds clamp into range (docs/stdlib-2.0.md §slice).
+        let n = self.chars().count() as i64;
+        let a2 = { let x = if a < 0 { a + n } else { a }; x.max(0).min(n) };
+        let b2 = { let x = if b < 0 { b + n } else { b }; x.max(0).min(n).max(a2) };
+        self.chars().skip(a2 as usize).take((b2 - a2) as usize).collect()
     }
     fn revl_index_of(&self, needle: &str) -> i64 {
         match self.find(needle) {
@@ -10925,10 +10930,11 @@ trait RevlListSearchOps<T> {
 impl<T: Clone> RevlListOps<T> for Vec<T> {
     fn revl_length(&self) -> i64 { self.len() as i64 }
     fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {
-        // JS slice semantics: out-of-range bounds clamp, never panic.
-        let len = self.len();
-        let a2 = (a.max(0) as usize).min(len);
-        let b2 = (b.max(0) as usize).min(len).max(a2);
+        // JS/Python slice: a negative bound counts from the end, then
+        // both bounds clamp into range, never panic (docs §slice).
+        let len = self.len() as i64;
+        let a2 = { let x = if a < 0 { a + len } else { a }; x.max(0).min(len) as usize };
+        let b2 = { let x = if b < 0 { b + len } else { b }; (x.max(0).min(len) as usize).max(a2) };
         self[a2..b2].to_vec()
     }
     fn revl_concat(&self, other: &Vec<T>) -> Vec<T> {
@@ -10946,9 +10952,10 @@ impl<T: Clone + PartialEq> RevlListSearchOps<T> for Vec<T> {
 impl<T: Clone> RevlListOps<T> for [T] {
     fn revl_length(&self) -> i64 { self.len() as i64 }
     fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {
-        let len = self.len();
-        let a2 = (a.max(0) as usize).min(len);
-        let b2 = (b.max(0) as usize).min(len).max(a2);
+        // JS/Python slice: negative bounds count from the end (docs §slice).
+        let len = self.len() as i64;
+        let a2 = { let x = if a < 0 { a + len } else { a }; x.max(0).min(len) as usize };
+        let b2 = { let x = if b < 0 { b + len } else { b }; (x.max(0).min(len) as usize).max(a2) };
         self[a2..b2].to_vec()
     }
     fn revl_concat(&self, other: &Vec<T>) -> Vec<T> { let mut out = self.to_vec(); out.extend(other.iter().cloned()); out }

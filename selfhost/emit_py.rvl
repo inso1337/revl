@@ -299,6 +299,22 @@ fn uses_true_division(n: Any) -> Bool {
   return false
 }
 
+// Does the IR read a List subscript `xs[i]` (routed through `_revl_index`)? A
+// string-LITERAL key is a host/`Any` property read, not a List subscript, so
+// it does not pull the helper in (#549).
+fn uses_index(n: Any) -> Bool {
+  if (node_kind(n) == "index") {
+    let idx = value_field(n, "index")
+    if (!(node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str")) {
+      return true
+    }
+  }
+  for (c of value_children(n)) {
+    if (uses_index(c)) { return true }
+  }
+  return false
+}
+
 // `_uses_i32_shl`: left shift is the one bitwise op whose result can leave the
 // 32-bit range (a bit op, not a trap), so python re-wraps it through
 // `_revl_i32_wrap`; `& | ^ >> ~` all stay in range and need no helper.
@@ -749,7 +765,14 @@ fn expr_inner(node: Any) -> Str {
     return field_read(expr(value_field(node, "target")), py_repr(value_field(node, "name")), atom, value_bool(value_field(node, "opt")))
   }
   if (kind == "index") {
-    return `${expr(value_field(node, "target"))}[${expr(value_field(node, "index"))}]`
+    let idx = value_field(node, "index")
+    // A string-LITERAL key is a host/`Any` property read (`tc["fn"]`), not a
+    // List subscript — bare `[...]`. A List subscript routes through
+    // `_revl_index`, which faults on a negative index (#549).
+    if (node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str") {
+      return `${expr(value_field(node, "target"))}[${expr(idx)}]`
+    }
+    return `_revl_index(${expr(value_field(node, "target"))}, ${expr(idx)})`
   }
   if (kind == "if") {
     return `(${expr(value_field(node, "then"))} if ${expr(value_field(node, "cond"))} else ${expr(value_field(node, "else"))})`
@@ -1184,6 +1207,21 @@ fn div_euclid_block() -> List[Str] {
   return o
 }
 
+// A negative List index FAULTS on every tier (#549): python would otherwise
+// silently read from the end, so guard the read here. Mirrors the reference
+// `_revl_index` preamble def.
+fn index_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_index(xs, i):")
+  o = o.push(`    """A negative List index faults on every tier (#549); python would"""`)
+  o = o.push(`    """otherwise read from the end, so guard it here."""`)
+  o = o.push("    if i < 0:")
+  o = o.push(`        raise IndexError('revl: negative list index')`)
+  o = o.push("    return xs[i]")
+  o = o.push("")
+  return o
+}
+
 fn index_of_block() -> List[Str] {
   var o = []
   o = o.push("def _revl_index_of(v, n):")
@@ -1475,7 +1513,11 @@ fn cexpr(node: Any) -> Str {
     return field_read(cexpr(value_field(node, "target")), py_repr(value_field(node, "name")), atom, value_bool(value_field(node, "opt")))
   }
   if (kind == "index") {
-    return `${cexpr(value_field(node, "target"))}[${cexpr(value_field(node, "index"))}]`
+    let idx = value_field(node, "index")
+    if (node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str") {
+      return `${cexpr(value_field(node, "target"))}[${cexpr(idx)}]`
+    }
+    return `_revl_index(${cexpr(value_field(node, "target"))}, ${cexpr(idx)})`
   }
   if (kind == "bin") { return cbin(node) }
   if (kind == "un") { return cun(node) }
@@ -2602,6 +2644,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (uses_bounded_int32(ir)) { out = out.concat(i32_block()) }
   if (uses_i32_shl(ir)) { out = out.concat(i32_wrap_block()) }
   if (uses_true_division(ir)) { out = out.concat(div_block()) }
+  if (uses_index(ir)) { out = out.concat(index_block()) }
   if (uses_trunc_rem(ir)) { out = out.concat(rem_block()) }
   if (uses_builtin_method(ir, "div_trunc")) { out = out.concat(div_trunc_block()) }
   if (uses_builtin_method(ir, "div_euclid")) { out = out.concat(div_euclid_block()) }
