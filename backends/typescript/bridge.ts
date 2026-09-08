@@ -29,7 +29,7 @@ import { redactText } from './runtime.ts'
 // this process must stop dispatching NEW crossings — the seam is where a node
 // child does that (`estopEngaged` reads the same latch the py runtime and the
 // conductor read). See `estop.ts` and docs/design/443-estop.md.
-import { estopEngaged } from './estop.ts'
+import { beginCrossing, endCrossing, estopEngaged } from './estop.ts'
 
 // --- seam endpoints: a local UDS (default) or a network TCP + mTLS seam -------
 //
@@ -464,6 +464,14 @@ export function makeProxy(
             `new crossings (key ${key}, method ${method}) — docs/design/443-estop.md`,
         )
       }
+      // item 443 / issue #122 — record this dispatched crossing as in flight
+      // for the duration of the round-trip. `seamCall` is synchronous, so a
+      // halt cannot land BETWEEN the gate above and here; but a crossing whose
+      // reply never arrives (a wedged provider) stays in the registry until the
+      // seam gives up, and if the button is hit meanwhile this outgoing call is
+      // the AMBIGUOUS one — dispatched, its completion never recorded (item
+      // 440). `finally` clears it whether the call returns or throws.
+      const seq = beginCrossing(key, method, 'dispatch')
       try {
         return seamCall(target, key, method, args, deadlineMs, correlation)
       } catch (error) {
@@ -472,6 +480,8 @@ export function makeProxy(
         // it rather than re-attempting against a wedged machine.
         if (network && error instanceof SeamDeadlineError) fireLost()
         throw error
+      } finally {
+        endCrossing(seq)
       }
     }
   }
@@ -669,9 +679,21 @@ export async function serve(
                 error: `method ${req.method} is not exported for key ${req.key} (exported: ${listed})`,
               }
             } else {
-              let result = service[req.method](...(req.args ?? []))
-              if (result && typeof result.then === 'function') result = await result
-              reply = { ok: true, value: encodeValue(result ?? null) }
+              // item 443 / issue #122 — record this accepted crossing as in
+              // flight for the duration of the handler. If the operator hits
+              // the button WHILE the handler runs, this crossing is the one the
+              // halt inventory names AMBIGUOUS (item 440): it was dispatched and
+              // its completion was never recorded, so it may or may not have
+              // landed. `finally` clears it so a throwing handler leaves the
+              // registry clean (`estop.ts::endCrossing`).
+              const seq = beginCrossing(req.key, req.method, 'accept')
+              try {
+                let result = service[req.method](...(req.args ?? []))
+                if (result && typeof result.then === 'function') result = await result
+                reply = { ok: true, value: encodeValue(result ?? null) }
+              } finally {
+                endCrossing(seq)
+              }
             }
           }
         } catch (error) {

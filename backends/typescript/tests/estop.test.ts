@@ -22,11 +22,23 @@
 //     provider, and the py design puts `_estop_check` at every point that
 //     dispatches OR accepts a crossing, so both directions honor the latch.
 //
+//   * the in-flight crossing REGISTRY and the halt INVENTORY it feeds
+//     (`estop.ts::beginCrossing`/`endCrossing`/`inFlightCrossings`,
+//     `estopInventory`/`estopHaltLine`): a crossing still executing when the
+//     button is hit is the AMBIGUOUS one (item 440), and the inventory reads in
+//     the same merged-residue shape the conductor already parses from the py
+//     and go runners — byte-compatible with the go twin
+//     `backends/go/placement_runner/estop/estop_test.go`;
+//   * the accept seam records a crossing it is answering as in flight, so a
+//     halt landing mid-handler can name it.
+//
 // What is deliberately NOT here (issue #122 remainder): the conductor still
 // SIGKILLs the node child and reports it as no-seam, because `node` is not yet
 // in `src/revl/estop.py::TIERS_WITH_ESTOP` and the runner
-// (`placement_runner.ts`) does not yet print its inventory. Flipping that, and
-// the idle-process watcher, is a later slice.
+// (`placement_runner.ts`) does not yet print the inventory or run the
+// idle-process watcher. Flipping the tier — which inverts the conductor's
+// "node is no-seam" contract (`tests/test_estop_conductor_443.py`) — is an
+// architect decision, tracked in `docs/design/443-estop-node-tier.md`.
 import { afterEach, describe, expect, it } from 'vitest'
 import net from 'node:net'
 import fs from 'node:fs'
@@ -34,7 +46,16 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { makeProxy, serve } from '../bridge.ts'
-import { estopEngaged, latchPath, readLatch } from '../estop.ts'
+import {
+  beginCrossing,
+  endCrossing,
+  estopEngaged,
+  estopHaltLine,
+  estopInventory,
+  inFlightCrossings,
+  latchPath,
+  readLatch,
+} from '../estop.ts'
 
 const dirs: string[] = []
 const servers: net.Server[] = []
@@ -193,5 +214,99 @@ describe('the ts E-Stop DISPATCH seam — outgoing proxy (item 443, slice 2)', (
     // crosses the boundary. (It would also be instant rather than wait out the
     // deadline, since it never reaches the wire.)
     expect(() => proxy.query('SELECT 2')).toThrowError(/E-Stop engaged.*refuses to dispatch/)
+  })
+})
+
+describe('the ts E-Stop in-flight registry and inventory (item 443, issue #122)', () => {
+  // The go twin is `backends/go/placement_runner/estop/estop_test.go`
+  // (`TestGoEstopCrossingRegistry` / `TestGoEstopInventoryShapeAndHaltLine`).
+
+  it('records a crossing while it is in flight and clears it when it ends', () => {
+    const seq = beginCrossing('db', 'query', 'accept')
+    const during = inFlightCrossings()
+    expect(during.some((c) => c.seq === seq && c.key === 'db' && c.method === 'query')).toBe(true)
+    endCrossing(seq)
+    expect(inFlightCrossings().some((c) => c.seq === seq)).toBe(false)
+  })
+
+  it('shapes the in-flight crossing as an AMBIGUOUS record, never stranded', () => {
+    // The whole point of item 440: a crossing that was already dispatched when
+    // the button was read MAY have landed, so it is ambiguous, not stranded
+    // (stranding means "never attempted"). This tier keeps no witnessed-inverse
+    // ledger, so `stranded` is honestly empty.
+    const seq = beginCrossing('db', 'write', 'accept')
+    try {
+      const record = { halted: true, reason: 'runaway loop', operator: 'ops@example' }
+      const inv = estopInventory('edge', inFlightCrossings(), record)
+      expect(inv.verdict).toBe('halted')
+      expect(inv.resumable).toBe(false)
+      expect(inv.reason).toBe('runaway loop')
+      expect(inv.operator).toBe('ops@example')
+      expect(inv.stranded).toEqual([])
+
+      const flight = inv.inFlight as Array<Record<string, unknown>>
+      const mine = flight.find((e) => e.seq === seq)
+      expect(mine).toBeDefined()
+      expect(mine!.kind).toBe('estop-ambiguous')
+      expect(mine!.outcome).toBe('unknown')
+      expect(mine!.attemptedFlag).toBe(true)
+      expect(mine!.entry).toBe('crossing')
+      expect(mine!.direction).toBe('accept')
+      expect(mine!.component).toBe('db')
+      expect(mine!.method).toBe('write')
+    } finally {
+      endCrossing(seq)
+    }
+  })
+
+  it('defaults reason/operator when the latch record names neither', () => {
+    const inv = estopInventory('edge', [], null)
+    expect(inv.reason).toBe('operator halt')
+    expect(inv.operator).toBe('unknown')
+  })
+
+  it('formats a HALTED line the conductor pump can parse', () => {
+    const seq = beginCrossing('db', 'read', 'dispatch')
+    try {
+      const line = estopHaltLine('edge', inFlightCrossings(), { reason: 'halt', operator: 'ops' })
+      // `src/revl/placement.py::pump` matches `[name] HALTED ` then json.loads
+      // the remainder — so the prefix and a parseable tail are the contract.
+      expect(line.startsWith('[edge] HALTED ')).toBe(true)
+      const parsed = JSON.parse(line.slice('[edge] HALTED '.length))
+      expect(parsed.verdict).toBe('halted')
+      expect(parsed.process).toBe('edge')
+      expect((parsed.inFlight as unknown[]).length).toBeGreaterThan(0)
+    } finally {
+      endCrossing(seq)
+    }
+  })
+})
+
+describe('the ts E-Stop accept seam records the crossing it is answering (item 443)', () => {
+  it('a handler observes ITS OWN crossing in the in-flight registry, cleared after', async () => {
+    const dir = tmpdir()
+    const sock = path.join(dir, 'provider.sock')
+
+    // The handler snapshots the registry from INSIDE the call — the one moment
+    // the crossing is genuinely in flight — so a halt landing here would name it.
+    let snapshotDuring: ReturnType<typeof inFlightCrossings> = []
+    const ctx = {
+      db: {
+        query: (_sql: string) => {
+          snapshotDuring = inFlightCrossings()
+          return [{ id: 1 }]
+        },
+      },
+    }
+    const server = await serve(ctx as any, { db: ['query'] }, sock)
+    servers.push(server)
+
+    const reply = await call(sock, { key: 'db', method: 'query', args: ['SELECT 1'] })
+    expect(reply.ok).toBe(true)
+    // While the handler ran, exactly this accepted crossing was in flight.
+    const mine = snapshotDuring.find((c) => c.key === 'db' && c.method === 'query' && c.direction === 'accept')
+    expect(mine).toBeDefined()
+    // And the `finally` cleared it once the handler returned.
+    expect(inFlightCrossings().some((c) => c.seq === mine!.seq)).toBe(false)
   })
 })
