@@ -38,11 +38,15 @@ class FakeProber:
     token, and imports/paths from explicit sets. Anything unspecified reads as
     absent — the same shape a real box with nothing installed would show."""
 
-    def __init__(self, *, present=(), runs=None, modules=(), dirs=()):
+    def __init__(self, *, present=(), runs=None, modules=(), dirs=(),
+                 dists=None, origins=None, texts=None):
         self._present = set(present)
         self._runs = dict(runs or {})
         self._modules = set(modules)
         self._dirs = {str(d) for d in dirs}
+        self._dists = dict(dists or {})
+        self._origins = dict(origins or {})
+        self._texts = {str(p): t for p, t in (texts or {}).items()}
         self.run_calls = []
 
     def which(self, name):
@@ -60,6 +64,15 @@ class FakeProber:
 
     def module_available(self, name):
         return name in self._modules
+
+    def module_origin(self, name):
+        return self._origins.get(name)
+
+    def dist_version(self, name):
+        return self._dists.get(name)
+
+    def read_text(self, path):
+        return self._texts.get(str(path))
 
     def is_dir(self, path):
         return str(path) in self._dirs
@@ -99,6 +112,11 @@ def _full_house():
         },
         modules={"ssl", "cordis"},
         dirs=(ROOT / "backends" / "typescript" / "node_modules" / "cordis",),
+        dists={"cordis": "0.9.4"},
+        origins={"cordis": str(ROOT / "backends" / "python" / "cordis"
+                               / "__init__.py")},
+        texts={ROOT / "backends" / "typescript" / "node_modules" / "cordis"
+               / "package.json": '{"name": "cordis", "version": "4.2.0"}'},
     )
 
 
@@ -131,8 +149,74 @@ def test_all_present_reads_as_ok_with_versions():
     assert _check(report, "rust backend (cargo)").version == "1.85.1"
     assert _check(report, "go backend").version == "1.26.5"
     assert _check(report, "java backend (JDK)").status is OK
-    assert _check(report, "cordis-py runtime").status is OK
-    assert _check(report, "cordis-ts runtime").status is OK
+    cordis_py = _check(report, "cordis-py runtime")
+    assert cordis_py.status is OK and cordis_py.version == "0.9.4"
+    # the exact binding a reproduction pins: which copy of cordis loads
+    assert "backends/python/cordis" in cordis_py.detail
+    cordis_ts = _check(report, "cordis-ts runtime")
+    assert cordis_ts.status is OK and cordis_ts.version == "4.2.0"
+
+
+# ------------------------------------------------ reproducible toolchain (#724)
+
+
+def test_cordis_py_ok_without_metadata_reports_the_binding_path():
+    # a path-installed backend is importable but carries no distribution
+    # metadata: OK, version null, and the on-disk origin still named so the
+    # exact binding is pinnable.
+    prober = FakeProber(modules={"cordis"},
+                        origins={"cordis": "/opt/backends/python/cordis/__init__.py"})
+    check = doctor.check_cordis_py(prober)
+    assert check.status is OK
+    assert check.version is None
+    assert "/opt/backends/python/cordis/__init__.py" in check.detail
+    assert "no distribution version stamp" in check.detail
+
+
+def test_cordis_ts_reports_the_pinned_version_from_package_json():
+    cordis = ROOT / "backends" / "typescript" / "node_modules" / "cordis"
+    prober = FakeProber(
+        dirs=(cordis,),
+        texts={cordis / "package.json": '{"name": "cordis", "version": "4.2.0"}'})
+    check = doctor.check_cordis_ts(prober, backends_dir=ROOT / "backends")
+    assert check.status is OK and check.version == "4.2.0"
+
+
+def test_cordis_ts_malformed_package_json_is_still_ok_without_a_version():
+    cordis = ROOT / "backends" / "typescript" / "node_modules" / "cordis"
+    prober = FakeProber(dirs=(cordis,),
+                        texts={cordis / "package.json": "not json {"})
+    check = doctor.check_cordis_ts(prober, backends_dir=ROOT / "backends")
+    assert check.status is OK and check.version is None
+
+
+def test_resolution_is_a_normalized_diffable_version_map():
+    report = doctor.diagnose(_full_house(), backends_dir=ROOT / "backends")
+    resolved = doctor.resolution(report)
+    # every reproduction-relevant component is a key, always present (absent ->
+    # null), so two boxes diff the same fixed set of lines
+    for key in ("revl", "python", "stdlib", "cordis-py", "cordis-ts", "node",
+                "cargo", "javac", "go", "wasmtime", "wasm-tools"):
+        assert key in resolved
+    assert resolved["cordis-py"] == "0.9.4"
+    assert resolved["cordis-ts"] == "4.2.0"
+    assert resolved["node"] == "26.7.0"
+    assert resolved["cargo"] == "1.85.1"
+    # it rides in the JSON as its own top-level field
+    blob = doctor.to_json(report)
+    assert blob["resolution"] == resolved
+
+
+def test_resolution_marks_absent_components_null_not_missing_key():
+    report = doctor.diagnose(FakeProber(), backends_dir=ROOT / "backends")
+    resolved = doctor.resolution(report)
+    # nothing installed: the tiers resolve to null, but the keys are still there
+    assert resolved["node"] is None
+    assert resolved["cordis-ts"] is None
+    assert "cordis-py" in resolved
+    # the compiler and python host are definitionally present, so they pin
+    assert resolved["revl"] == report.revl_version
+    assert resolved["python"] is not None
 
 
 # --------------------------------------------------------- missing / broken
@@ -270,7 +354,8 @@ def test_json_shape_is_stable_and_complete():
     report = doctor.diagnose(_full_house(), backends_dir=ROOT / "backends")
     report.smoke = [doctor.Smoke("py", SKIPPED, "no runtime")]
     blob = doctor.to_json(report)
-    assert set(blob) == {"revl_version", "checks", "smoke", "summary"}
+    assert set(blob) == {"revl_version", "checks", "smoke", "resolution",
+                         "summary"}
     row = blob["checks"][0]
     assert set(row) == {"name", "status", "version", "detail", "tier"}
     assert blob["smoke"][0] == {"tier": "py", "outcome": SKIPPED,
