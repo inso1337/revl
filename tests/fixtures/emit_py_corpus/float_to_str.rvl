@@ -1,0 +1,15 @@
+// A Float `.to_str()` renders through the canonical `_revl_ftoa` helper, the
+// same ECMAScript Number::toString a `${aFloat}` interpolation uses, so
+// `x.to_str()` and `${x}` agree byte-for-byte (item 548 / PR #703, self-host
+// port item 391). Unlike `floats.rvl`, this document has NO interpolation, so
+// the ONLY thing that can pull in the `_revl_ftoa` helper is the Float `to_str`
+// itself — the frontend attaches `recv: "Float"` to the builtin node
+// (`lower.rvl::lir_builtin`) and the emitter reads it. An Int `.to_str()` in
+// the same file stays tag-less and renders through `str(...)`, pinning that the
+// tag is attached ONLY for a Float receiver.
+fn show(a: Float, b: Float, n: Int) -> Str {
+  let ratio = (a / b).to_str()
+  let pi = (3.14).to_str()
+  let count = n.to_str()
+  return ratio + " " + pi + " " + count
+}
