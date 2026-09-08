@@ -245,6 +245,10 @@ class Session:
     def __init__(self) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._driver = None
+        # item 457: the emitted module of the live generation (set at load), so a
+        # caller can rebuild native ADT/Result case instances from the canonical
+        # wire encoding. None until a composition is loaded.
+        self._module = None
         self.ir: dict | None = None
         self.previous: dict | None = None  # the generation `rollback` restores
         self.config: dict = {}
@@ -697,7 +701,13 @@ class Session:
         # cleared ambient owner and take the pre-245 implicit-commit path).
         self._install_session_owner(ir)
         try:
-            self._run(self._driver._load(ir, self._prepare_module(ir)))
+            module = self._prepare_module(ir)
+            # item 457: keep the emitted module so a caller that must rebuild
+            # native ADT/Result case instances from the canonical wire encoding
+            # (the HTTP face binding a typed `Request`) can reach the case
+            # classes. A read-only handle; None until a composition is loaded.
+            self._module = module
+            self._run(self._driver._load(ir, module))
         except _activation_error() as exc:
             # item 372: a component's deferred activation did not complete —
             # "loaded" would be a lie. Tear the half-loaded composition down and
