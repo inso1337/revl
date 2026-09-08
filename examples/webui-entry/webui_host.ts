@@ -1,73 +1,84 @@
-// The host shim for the webui-entry reference (roadmap item 459, issue #722).
+// Host-side setup for the webui-entry reference (roadmap item 459, issue #722).
 //
 // This is the one small piece of TypeScript that binds a revl component to the
 // Cordis WebUI service (`@cordisjs/plugin-webui`, studied in
-// docs/design/526-webui-asset-alignment.md). It exists as a REAL FILE, imported
-// by the revl program through the item-396/410 host-ref door
-// (`= @ts ref webuiAddEntry from "./webui_host.ts"`), exactly the way
-// stdlib/fs.rvl reaches backends/typescript/revl_fs_ts.ts. That is the whole
-// point of 459: the frontend binding is a normal, type-checked, source-mapped
-// module, NOT a JavaScript string carried inside revl source.
+// docs/design/526-webui-asset-alignment.md). Its job is to INSTALL the ambient
+// `webui` service onto the Cordis `Context` so a revl component that declares
+// `requires webui: WebUI` reaches it — through Cordis' own `inject`, the typed
+// coeffect boundary — rather than through a `globalThis` bridge.
 //
-// What it does: hand Cordis a WebUI ENTRY. Per Cordis (`@cordisjs/plugin-webui`
-// base/entry.ts:9) an entry is `{ dev, prod, routes }` where `dev` points at a
-// dev-mode `.ts`/`.vue` source, `prod` at a built Vite `manifest.json`, and
-// `routes` lists the client-side route patterns. All three are PATHS to external
-// asset files that a normal Vite/Vue project produces; the entry is a real
-// bundled module, so browser tooling and source maps point at the originals
-// rather than at scripts extracted back out of a revl string.
+// WHAT CHANGED FROM THE ENABLING SLICE. The first slice (#761) had the revl
+// program reach this module through a `@ts ref` host-ref door and read the
+// Cordis `Context` back out of `globalThis.__revlWebui`, the retained-embedder
+// seam `backends/typescript/revl_fs_ts.ts` documents for `globalThis.__revlFs`.
+// Design note 530 flagged that as a slice compromise: `webui` is an ambient
+// service the host provides, and reaching it through an untyped global is not a
+// first-class boundary. The architect approved the coeffect (option 1), so the
+// binding now lives where an ambient service belongs — the host `provide`s the
+// `webui` key, and the revl artifact names it as a `requires` coeffect. This
+// module is EMBEDDER SETUP the host runs once; the emitted revl artifact does
+// not import it and contains no `globalThis` reach and no host-ref door.
 //
-// Reaching `ctx`: this shim reads the Cordis `Context` from the embedder bridge
-// `globalThis.__revlWebui`, the same retained-embedder-seam convention
-// backends/typescript/revl_fs_ts.ts documents for `globalThis.__revlFs`. Making
-// the ambient `ctx.webui` binding FIRST-CLASS (a declared coeffect a revl
-// component `requires`, so the entry's published RPC surface is an enumerable,
-// typed contract rather than an untyped `data: T`) is the architect-gated
-// follow-up recorded in docs/design/530-webui-entry-surface.md. This shim is the
-// enabling slice: it proves the frontend boundary lives in files, off the
-// JS-in-revl-strings anti-pattern, using only reviewed language surface.
+// WHAT IT DOES. Register a `webui` service on the Context whose surface matches
+// the revl `service WebUI` contract (`add_entry(dev, prod, routes) -> handle`),
+// adapting each call to Cordis WebUI's real `addEntry(files, data)` (per
+// `@cordisjs/plugin-webui` base/entry.ts:9 an entry is `{ dev, prod, routes }`
+// where `dev`/`prod` point at a dev-mode source and a built Vite manifest and
+// `routes` lists the client route patterns). All three are PATHS to external
+// asset files a normal Vite/Vue project produces, so browser tooling and source
+// maps point at the originals rather than at scripts extracted from a revl
+// string. The `data` reactive-state / RPC object is published empty here; the
+// typed contract for it is design note 530, folded into item 457.
 
 import type { Context } from 'cordis'
 
 /** The Cordis WebUI entry shape (`@cordisjs/plugin-webui` base/entry.ts). */
-interface WebUIEntryFiles {
+export interface WebUIEntryFiles {
   dev: string
   prod: string
   routes: string[]
 }
 
-/** The Cordis `Context`, reached through the retained embedder bridge. Kept a
- * private helper so the single failure mode (no bridge installed) is one loud
- * message rather than an undefined-property throw deep in Cordis. */
-function revlWebuiCtx(): Context {
-  const ctx = (globalThis as { __revlWebui?: Context }).__revlWebui
-  if (!ctx) {
-    throw new Error(
-      'revl webui: no Cordis ctx bridge installed. The embedder must set ' +
-      'globalThis.__revlWebui to the plugin Context before the webui_add_entry ' +
-      'extern is first called (docs/design/530-webui-entry-surface.md).',
-    )
-  }
-  return ctx
+/** The slice of Cordis WebUI this reference drives. Typed loosely (a structural
+ * subset of `@cordisjs/plugin-webui`'s service) so the example stands alone
+ * without the plugin devDependency installed. */
+export interface CordisWebUI {
+  addEntry(files: WebUIEntryFiles, data: unknown): unknown
+}
+
+/** The revl-facing `WebUI` service surface — the exact shape `service WebUI` in
+ * console.rvl declares, and what a revl component reads as `ctx.webui`. */
+export interface RevlWebUI {
+  add_entry(devSource: string, prodManifest: string, routes: string[]): string
 }
 
 /**
- * Register a frontend entry with Cordis WebUI. `devSource` and `prodManifest`
- * are paths to EXTERNAL asset files (a real Vite/Vue project); `routes` are the
- * client route patterns the entry claims. Returns `devSource` as a stable entry
- * handle so a revl caller can bind it. No HTML/CSS/JS is embedded here; the
- * assets are referenced by path.
+ * Install the ambient `webui` service onto `ctx`, adapting the revl `WebUI`
+ * contract to Cordis WebUI's `addEntry`. Call this once during host setup,
+ * before loading the revl composition; a revl component's `requires webui:
+ * WebUI` coeffect then resolves to this service through Cordis' `inject`.
+ *
+ * `webui` is the real Cordis WebUI service (`ctx.webui` once
+ * `@cordisjs/plugin-webui` is loaded). Kept an explicit argument — rather than
+ * read back off `ctx` — so the reference has no hidden global and stands alone.
+ * Returns the Cordis disposer `ctx.provide` hands back, so the host can reclaim
+ * the service on teardown.
  */
-export function webuiAddEntry(
-  devSource: string,
-  prodManifest: string,
-  routes: string[],
-): string {
-  const ctx = revlWebuiCtx()
-  const files: WebUIEntryFiles = { dev: devSource, prod: prodManifest, routes }
-  // `data` is the reactive-state / RPC object. The enabling slice publishes an
-  // empty surface; the typed-contract version is design note 530.
-  ;(ctx as unknown as { webui: { addEntry(f: WebUIEntryFiles, d: unknown): unknown } })
-    .webui.addEntry(files, {})
-  return devSource
+export function installRevlWebui(ctx: Context, webui: CordisWebUI): () => void {
+  const service: RevlWebUI = {
+    add_entry(devSource: string, prodManifest: string, routes: string[]): string {
+      const files: WebUIEntryFiles = { dev: devSource, prod: prodManifest, routes }
+      // `data` is the reactive-state / RPC object. This slice publishes an empty
+      // surface deliberately; the typed contract is design note 530 (item 457).
+      webui.addEntry(files, {})
+      // Return the dev source as a stable entry handle a revl caller can bind.
+      return devSource
+    },
+  }
+  // Ambient service registration: the key `webui` becomes `ctx.webui` for every
+  // fiber that injects it. This is the same `ctx.provide(key, impl)` seam a revl
+  // `provide` step lowers to — the binding is a declared boundary, not a global.
+  return (ctx as unknown as {
+    provide(key: string, impl: unknown): () => void
+  }).provide('webui', service)
 }
