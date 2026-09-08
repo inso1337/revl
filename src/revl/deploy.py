@@ -1601,7 +1601,7 @@ class InProcessTransport:
         return json.loads(json.dumps(response_wire))
 
 
-#: The wire kind a :class:`StdioRunnerTransport` synthesises when the runner
+#: The wire kind a :class:`ProcessRunnerTransport` synthesises when the runner
 #: process is gone — it never comes off a runner, so `AdmitResponse.from_wire`
 #: and `CommitResponse.from_wire` both reject it, turning a dead runner into the
 #: same fail-closed :data:`LINK_TRANSPORT` refusal an unparseable reply already
@@ -1609,7 +1609,7 @@ class InProcessTransport:
 _RUNNER_GONE_KIND = "revl.deploy.runner-terminated"
 
 
-class StdioRunnerTransport:
+class ProcessRunnerTransport:
     """The orchestration channel of §1.2 over a real runner PROCESS, spoken to
     on its stdin/stdout with one newline-delimited JSON request per line and one
     reply per line — the shape :func:`deploy_admit_command` (`revl deploy-admit`)
@@ -1654,7 +1654,7 @@ class StdioRunnerTransport:
               require_conformance: bool = False,
               runtime_versions: Optional[Mapping[str, str]] = None,
               python: Optional[str] = None,
-              env: Optional[Mapping[str, str]] = None) -> "StdioRunnerTransport":
+              env: Optional[Mapping[str, str]] = None) -> "ProcessRunnerTransport":
         """Build a transport that runs the `revl deploy-admit` runner as a LOCAL
         child (`python -m revl deploy-admit ...`).
 
@@ -1677,7 +1677,7 @@ class StdioRunnerTransport:
             argv += ["--runtime-version", f"{name}={version}"]
         return cls(argv, env=env)
 
-    def __enter__(self) -> "StdioRunnerTransport":
+    def __enter__(self) -> "ProcessRunnerTransport":
         return self
 
     def __exit__(self, *exc) -> None:
