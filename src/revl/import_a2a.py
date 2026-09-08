@@ -162,6 +162,7 @@ from __future__ import annotations
 import json
 import re
 
+from . import a2a_task
 from .crossing_redirect import CROSSING_TIMEOUT, py_policy, ts_policy
 from .errors import RevlError
 from .lexer import KEYWORDS
@@ -272,10 +273,21 @@ class _Card:
     value or raises; nothing is defaulted into existence."""
 
     def __init__(self, doc: object, filename: str, *, allow_plaintext: bool,
-                 source: str = ""):
+                 source: str = "", backend: str = "ts",
+                 long_running: bool = False):
         self.filename = filename
         self.source = source
         self.allow_plaintext = allow_plaintext
+        # item 439 T1: project the four-op A2A Task lifecycle
+        # (`_start`/`_poll`/`_reply`/`_cancel`) rather than one terminal crossing
+        # per skill. The wire is `py`-only (the ts async recolour is a later
+        # slice — `import_a2a` refuses `--long-running` on `ts`). `_want_tasks`
+        # says the tier CAN carry it; `project_tasks` is the resolved decision,
+        # true when the engineer forced it (`--long-running`) or the card
+        # declares `capabilities.streaming`. When true, `streaming` is PROJECTED
+        # and so is not also recorded as "not projected".
+        self._want_tasks = backend == "py"
+        self.project_tasks = self._want_tasks and long_running
         if not isinstance(doc, dict):
             self._refuse("an Agent Card must be a JSON object",
                          hint="`revl import a2a` reads an A2A 1.0.0 Agent Card "
@@ -410,13 +422,21 @@ class _Card:
     def _capabilities(self) -> None:
         caps = self.doc.get("capabilities")
         caps = caps if isinstance(caps, dict) else {}
-        if caps.get("streaming"):
+        if caps.get("streaming") and not self.project_tasks:
+            # `message/stream` / `tasks/resubscribe` (the SSE stream, item 130's
+            # T2 sugar) are not projected here. The four-op T1 Task lifecycle
+            # (`_start`/`_poll`/`_reply`/`_cancel`) IS buildable now: import with
+            # `--long-running` on `--backend py` to project it
+            # (docs/design/439-a2a-task-lifecycle.md). Recorded, not silently
+            # dropped, when that was not asked for.
             self.unprojected.append(
                 "`capabilities.streaming` — `message/stream` and "
-                "`tasks/resubscribe` are NOT projected. Mapping an A2A Task's "
-                "lifecycle onto revl (one emission? a stream, item 130? a "
-                "session, item 250?) is item 439's open question and this "
-                "slice does not pre-empt it")
+                "`tasks/resubscribe` are NOT projected here. Mapping an A2A "
+                "Task's lifecycle onto revl was item 439's open question; its "
+                "four-op T1 answer (`_start`/`_poll`/`_reply`/`_cancel`) is "
+                "buildable now — re-import with `--long-running --backend py` to "
+                "project it. The SSE stream sugar (item 130, T2) and the ts "
+                "async recolour remain later slices")
         if caps.get("pushNotifications"):
             self.unprojected.append(
                 "`capabilities.pushNotifications` — webhook delivery is NOT "
@@ -1110,11 +1130,75 @@ class _Generator:
         provide = f"    {self.async_kw}fn {op}(message) = {extern}(message)"
         return lines, extern_decl, provide
 
+    def _task_operation(self, op: str, skill_id: str, skill: dict,
+                        in_modality: str, out_modality: str
+                        ) -> tuple[list[str], list[str], list[str]]:
+        """The four-op A2A Task-lifecycle projection of one long-running skill
+        (item 439 T1): `<op>_start` / `_poll` / `_reply` / `_cancel`, over the
+        one JSON-RPC wire `a2a_task` shares with the `remote` row.
+
+        Text-only: the handle vocabulary carries `Str` payloads (`Done(Str)` /
+        `Message(Str)`), so a file (`Bytes`) modality has no `TaskEvent` to
+        become and is refused naming the skill — the honesty line the terminal
+        wire keeps for a `DataPart`. Every return is `Untrusted[T]` (slice C3),
+        so a `Done` payload cannot reach a `Trusted[T]` sink without an
+        `endorse`. The `tasks/cancel` compensation of `_start` (item 247) is
+        `<op>_cancel`, the op the consumer registers on `_start`."""
+        if "file" in (in_modality, out_modality):
+            raise RevlError(
+                self.filename, 0,
+                f"skill {_comment_safe(json.dumps(skill_id))} is long-running "
+                f"(Task lifecycle) and declares a file (`Bytes`) modality, which "
+                f"the four-op T1 projection does not carry",
+                hint="the Task-lifecycle handle vocabulary carries `Str` "
+                     "payloads (`Done(Str)` / `Message(Str)`); a file `Part` in a "
+                     "Task feed is a later slice. Use a text modality for a "
+                     "streaming skill (item 439 T1)")
+        summary = skill.get("name") or skill.get("description")
+        lines = [f"  // skill `{_comment_safe(skill_id)}` — A2A Task lifecycle "
+                 f"(item 439 T1)"
+                 + (f": {_comment_safe(summary)}" if summary else "")]
+        lines.append("  // FOUR ops over `message/send` / `tasks/get` / "
+                     "`tasks/cancel`; every")
+        lines.append("  // return is `Untrusted[..]` (the peer is not this "
+                     "composition's trust")
+        lines.append("  // domain). `_cancel` is the best-effort `tasks/cancel` "
+                     "compensation of")
+        lines.append("  // `_start` (item 247) and an explicit op; no inverse is "
+                     "synthesized.")
+        externs: list[str] = []
+        provides: list[str] = []
+        for suffix in a2a_task.SUFFIXES:
+            name = a2a_task.op_name(op, suffix)
+            ret = a2a_task.RETURN_TYPE[suffix]
+            params = a2a_task.PARAMS[suffix]
+            sig = ", ".join(f"{n}: {t}" for n, t in params)
+            names = [n for n, _ in params]
+            lines.append(f"  emission fn {name}({sig}) -> Untrusted[{ret}]")
+            extern = f"a2a_{self.key}_{name}"
+            body = a2a_task.task_body(suffix, self.card.endpoint, skill_id,
+                                      follow_redirects=self.follow_redirects,
+                                      label=self.key)
+            externs.append(
+                f"extern emission[{self.card.net_cap}] fn {extern}({sig}) "
+                f"-> Untrusted[{ret}]\n  = @py {{\n    _args = [{', '.join(names)}]\n"
+                f"{body}}}")
+            provides.append(f"    fn {name}({', '.join(names)}) = "
+                           f"{extern}({', '.join(names)})")
+        return lines, externs, provides
+
     def emit(self) -> str:
         op_lines: list[str] = []
         externs: list[str] = []
         provides: list[str] = []
         for op, skill_id, skill, in_modality, out_modality, in_media in self.card.skills:
+            if self.card.project_tasks:
+                lines, exs, provs = self._task_operation(
+                    op, skill_id, skill, in_modality, out_modality)
+                op_lines.extend(lines)
+                externs.extend(exs)
+                provides.extend(provs)
+                continue
             lines, extern, provide = self._operation(
                 op, skill_id, skill, in_modality, out_modality, in_media)
             op_lines.extend(lines)
@@ -1122,6 +1206,11 @@ class _Generator:
             provides.append(provide)
 
         parts = [self._header()]
+        if self.card.project_tasks:
+            # The four-op projection speaks the `stdlib/a2a.rvl` vocabulary
+            # (`TaskRef`/`TaskState`/`TaskEvent`), the same types the `remote`
+            # row's projection names, so the two entry points cannot drift.
+            parts.append('use "stdlib/a2a.rvl" { TaskRef, TaskState, TaskEvent }')
         parts.append(f"service {self.service} {{\n" + "\n".join(op_lines) + "\n}")
         parts.extend(externs)
         parts.append(
@@ -1299,19 +1388,36 @@ class _Generator:
 def import_a2a(document: object, *, filename: str = "<agent-card>",
                backend: str = "ts", service: str | None = None,
                allow_plaintext: bool = False, source: str = "",
-               follow_redirects: bool = False) -> str:
+               follow_redirects: bool = False,
+               long_running: bool = False) -> str:
     """An A2A 1.0.0 Agent Card (already parsed) -> revl source.
 
     `source` is the card's raw text when the caller has it, used only to put a
     best-effort line number on a refusal; the JSON pointer in the message is
     the authoritative location either way.
+
+    `long_running` (`--long-running`) forces the four-op A2A Task-lifecycle
+    projection (item 439 T1); a card that declares `capabilities.streaming`
+    triggers it too. It is a `py`-tier wire — a network round trip suspends, and
+    the ts async recolour of the four crossings is a later slice — so it is
+    refused on `--backend ts` rather than shipped half-coloured.
     """
     if backend not in _BACKENDS:
         raise RevlError(filename, 0,
                         f"unsupported backend `{backend}`",
                         hint=f"pick one of: {', '.join(sorted(_BACKENDS))}")
+    if long_running and backend != "py":
+        raise RevlError(
+            filename, 0,
+            f"`--long-running` (the four-op A2A Task lifecycle) is bound on "
+            f"`--backend py`, not `--backend {backend}`",
+            hint="a Task-lifecycle crossing is a network round trip, which "
+                 "SUSPENDS on the ts tier; the ts async recolour of the four "
+                 "crossings is a later slice (item 439 T1). Use `--backend py`, "
+                 "or import the card without `--long-running` for the terminal "
+                 "single-crossing surface")
     card = _Card(document, filename, allow_plaintext=allow_plaintext,
-                 source=source)
+                 source=source, backend=backend, long_running=long_running)
     return _Generator(card, filename, backend, service,
                       follow_redirects=follow_redirects).emit()
 
@@ -1327,10 +1433,12 @@ def load_card(text: str, *, filename: str = "<agent-card>") -> object:
 def import_a2a_file(path: str, *, backend: str = "ts",
                     service: str | None = None,
                     allow_plaintext: bool = False,
-                    follow_redirects: bool = False) -> str:
+                    follow_redirects: bool = False,
+                    long_running: bool = False) -> str:
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
     return import_a2a(load_card(text, filename=path), filename=path,
                       backend=backend, service=service,
                       allow_plaintext=allow_plaintext, source=text,
-                      follow_redirects=follow_redirects)
+                      follow_redirects=follow_redirects,
+                      long_running=long_running)
