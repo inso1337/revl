@@ -1016,7 +1016,10 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             return f"{target}[{_string(index_node['value'])}]"
         # The index is an `Int` (bigint) and JS indexes with a `number`; TS
         # refuses a bigint index outright ("cannot be used as an index type").
-        return f"{target}[{_int_as_number(index_node, ctx)}]"
+        # A negative List index FAULTS on every tier (#549): `xs[-1]` reads
+        # `undefined` in JS, so route the read through `revlIndex`, which throws
+        # on a negative index the way go/rust/java panic and python raises.
+        return f"revlIndex({target}, {_int_as_number(index_node, ctx)})"
 
     if kind == "len":
         # `xs.length` in field position (lower.py emits `len` rather than
@@ -3645,7 +3648,35 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_SPLIT_HELPER, ""])
     if _uses_parse_int(ir):
         out.extend([_REVL_PARSE_INT_HELPER, ""])
+    if _uses_index(ir):
+        out.extend([_REVL_INDEX_HELPER, ""])
     return out
+
+
+# A negative List index FAULTS on every tier (#549, docs/stdlib-2.0.md §index):
+# `xs[-1]` reads `undefined` in JS, so guard it here to throw the way go/rust/
+# java panic and python raises. A non-negative index reads as `xs[i]` always
+# did (an out-of-range positive index is a separate, unfixed divergence).
+_REVL_INDEX_HELPER = """function revlIndex<T>(xs: T[], i: number): T {
+  if (i < 0) { throw new Error("revl: negative list index") }
+  return xs[i]
+}"""
+
+
+def _uses_index(node) -> bool:
+    """Does this IR read a List subscript `xs[i]` (routed through `revlIndex`)?
+    A string-LITERAL key is a host/`Any` property read, not a List subscript,
+    so it does not pull the helper in."""
+    if isinstance(node, dict):
+        if node.get("kind") == "index":
+            idx = node.get("index")
+            if not (isinstance(idx, dict) and idx.get("kind") == "lit"
+                    and isinstance(idx.get("value"), str)):
+                return True
+        return any(_uses_index(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_uses_index(v) for v in node)
+    return False
 
 
 def _uses_split(node) -> bool:

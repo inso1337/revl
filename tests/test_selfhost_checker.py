@@ -132,14 +132,16 @@ ACCEPTED = [
     # float literals (parser slice gained them; they infer Float, like the
     # reference's lit handling)
     "2.5", "0.5", "2.5 + 1", "1 + 2.5", "f / 2.5", "2.5 < f",
-    "s + 2.5", "x / 0.5", "(2.5 + 0.5) * x",
+    "x / 0.5", "(2.5 + 0.5) * x",
     "q",  # not in the environment: the gradual frontier's unknown
     # arithmetic
     "1 + 2", "x - y", "x * 2", "7 / 2", "x % 3",
     "f + 1", "1 + f", "f - f", "f * f", "f / f", "f % 2", "x / f", "x % f",
     "(1 + 2) * x", "x - y - z", "7 / 2 / 2",
-    # string concatenation
-    "s + s", "s + 1", "1 + s", "s + f", "s + q",
+    # string concatenation: two Strs concatenate; a Str beside an UNKNOWN
+    # operand (`q`) stays on the gradual frontier (result unknown). A Str beside
+    # a KNOWN numeric operand is refused (issue #549) — see REJECTED below.
+    "s + s", "s + q",
     # ordering (Str orders too)
     "x < y", "x <= f", "f > 1", "f >= x", "s < s", "s <= q",
     # equality
@@ -161,8 +163,12 @@ REJECTED = [
     # Bool in arithmetic (refusal-parity: `/` on Bool is the headline case)
     "flag / flag", "flag + 1", "true * false", "x + flag", "1 % flag",
     "flag / x", "x - true",
-    # Str in arithmetic (only `+` takes a Str, and only beside Str/numeric)
+    # Str in arithmetic (only `+` takes a Str, and only beside another Str)
     "s * s", "s - s", "1 % s", "s / s", "s * 2", "2 / s",
+    # Str `+` beside a KNOWN numeric operand: refused on every tier (issue
+    # #549 — `Str + Int`/`Str + Float` scattered, now a compile error). A Str
+    # beside an UNKNOWN operand stays accepted (see ACCEPTED `s + q`).
+    "s + 1", "1 + s", "s + f", "s + 2.5",
     # Bool / Str under ordering
     "flag < 1", "x < true", "flag <= flag", "true > false",
     # equality across incompatible types
