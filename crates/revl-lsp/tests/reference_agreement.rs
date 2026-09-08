@@ -298,12 +298,18 @@ fn the_gate_version_is_reachable_for_a_skew_check() {
     ];
     let replies = parse_stream(&context.run_binary(&frame_all(&messages)));
     let version = &replies[0]["result"];
-    assert_eq!(version["api"], "1");
+    assert_eq!(version["api"], "2");
     // diagnostics — the answers a green depends on — are still the reference's
     // over the whole language, so the binary's own frontier stays "reference"
     assert_eq!(version["frontier"], "reference");
     assert_eq!(version["engine"], "reference-diagnostics + native-navigation");
     assert!(version["language"].is_string(), "{version}");
+    // the distribution surface: this run pins the reference with REVL_LSP_PYTHON,
+    // which is the system fallback (not a bundled private runtime), so the shape
+    // is reported as such and there is no runtime pin to compare.
+    assert_eq!(version["embedding"], "system-python", "{version}");
+    assert_eq!(version["runtime"]["source"], "system-python", "{version}");
+    assert_eq!(version["runtime"]["pin"], Value::Null, "{version}");
     // the native engine's pin, which is what a stale-binary audit compares
     let native = &version["native"];
     assert!(

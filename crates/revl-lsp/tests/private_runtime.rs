@@ -79,6 +79,17 @@ fn a_bundled_runtime_answers_from_a_versioned_private_cache_in_isolated_mode() {
         version["result"]["embedding"], "private-runtime",
         "the bundled binary should report the private-runtime embedding: {version}"
     );
+    // The distribution surface reaches the wire: the runtime was pointed at by
+    // REVL_LSP_RUNTIME_ARCHIVE (an env source), and its versioned-cache pin — the
+    // A3 skew comparand — is the one this launch keyed on.
+    assert_eq!(
+        version["result"]["runtime"]["source"], "env",
+        "an archive named by the environment should report the env source: {version}"
+    );
+    assert_eq!(
+        version["result"]["runtime"]["pin"], "test-pin-102",
+        "the runtime pin should surface for a stale-binary audit: {version}"
+    );
 
     // Equivalence: its published diagnostics equal the reference server's, byte
     // for byte, over the same documents.
