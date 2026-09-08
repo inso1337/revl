@@ -1,0 +1,184 @@
+// The revl stdlib HTTP module (roadmap item 456, docs/design/525-exemplary-web-app.md).
+//
+// ---------------------------------------------------------------- the problem
+// Routing in the harness passes bare `Str` and reconstructs status from body
+// prose: a route hands back a plain string, and the caller decides what happened
+// by inspecting that string — an empty `""` means "nothing", a magic
+// `"::empty::"` means "handled, but no body", and anything else is application
+// output. Status codes are likewise recovered by reading the text. That is a
+// sentinel protocol carried inside a value type that cannot express the
+// distinctions it is being asked to carry, so the meaning lives in a convention
+// no compiler can check and any refactor can silently break.
+//
+// ---------------------------------------------------------------- the fix
+// A first-class typed contract. A route produces an `Outcome`, and the two
+// things the caller used to read out of prose are now read out of the type:
+//
+//   * WHETHER the route handled the request — `Handled(Response)` vs the
+//     explicit nullary `NotHandled`. A mishandled route is a typed
+//     `NotHandled`, never an empty string.
+//   * The STATUS and BODY of a handled response — fields on `Response`, and a
+//     `Body` whose emptiness is the `Empty` variant, not a `""`/`"::empty::"`
+//     stand-in.
+//
+// None of this needs new language surface: `Request`/`Response`/`Header` are
+// ordinary records and `Body`/`Outcome` are ordinary variant types, so an HTTP
+// contract is a LIBRARY, not a language feature (525 non-goals). The value of
+// pinning it here is that every route and every router shares one contract
+// instead of re-deriving a private string convention.
+//
+// ---------------------------------------------------------------- pure revl
+// Like stdlib/render.rvl and stdlib/list.rvl (and unlike value.rvl/json.rvl),
+// every declaration here is PURE revl — records, variants, `match`, and the
+// base List surface — with no `@py` block, so there is nothing to defer per
+// tier: the module compiles and runs identically on every backend the moment it
+// emits variants and the base builtins. The py tier is executed by the test
+// suite (tests/test_http_stdlib.py); the other tiers inherit for free.
+//
+// Import with a named `use`:
+//
+//     use "stdlib/http.rvl" { Request, Response, Outcome, Body, ok_text,
+//                             not_found, handled, not_handled, status_of }
+
+// ---------------------------------------------------------------- headers
+
+// One HTTP header as a name/value pair. Header sets are `List[Header]` rather
+// than a `Map[Str, Str]` because a real request may repeat a header name
+// (Set-Cookie, Accept), and order is observable on the wire.
+pub type Header = { name: Str, value: Str }
+
+// ---------------------------------------------------------------- body
+
+// A typed message body. `Empty` is the FIRST-CLASS "no body" — the thing the
+// harness spelled `""` or `"::empty::"`. `Text` and `Json` both carry a `Str`
+// payload, but the variant records the author's intent (and lets a serializer
+// pick the content type) instead of leaving a bare string whose kind must be
+// re-guessed downstream.
+pub type Body =
+    Empty
+  | Text(Str)
+  | Json(Str)
+
+// ---------------------------------------------------------------- request
+
+pub type Request = {
+  method: Str,
+  path: Str,
+  headers: List[Header],
+  body: Body,
+}
+
+// ---------------------------------------------------------------- response
+
+pub type Response = {
+  status: Int,
+  headers: List[Header],
+  body: Body,
+}
+
+// ---------------------------------------------------------------- outcome
+
+// The explicit routing outcome. `Handled` carries the response the route
+// produced; `NotHandled` is the typed "no route matched" that used to be an
+// empty string. A router folds a request across its routes and returns exactly
+// one of these — the caller never inspects prose to tell them apart.
+pub type Outcome = Handled(Response) | NotHandled
+
+// ---------------------------------------------------------------- constructors
+
+pub fn header(name: Str, value: Str) -> Header {
+  return { name: name, value: value }
+}
+
+// A bare request: no headers, empty body. Add headers/body by rebuilding the
+// record (revl records are immutable), exactly as `response` is specialised.
+pub fn request(method: Str, path: Str) -> Request {
+  return { method: method, path: path, headers: [], body: Empty }
+}
+
+pub fn response(status: Int, body: Body) -> Response {
+  return { status: status, headers: [], body: body }
+}
+
+// A 200 with a text body and the matching content type.
+pub fn ok_text(text: Str) -> Response {
+  return { status: 200,
+           headers: [header("content-type", "text/plain; charset=utf-8")],
+           body: Text(text) }
+}
+
+// A 200 with a JSON body (the payload is the already-serialized JSON string,
+// e.g. from stdlib/json.rvl `json_stringify`) and the matching content type.
+pub fn ok_json(payload: Str) -> Response {
+  return { status: 200,
+           headers: [header("content-type", "application/json")],
+           body: Json(payload) }
+}
+
+// A 404 with no body. Note this is a RESPONSE (the route ran and answered "not
+// found"), which is distinct from the routing-level `NotHandled` below (no route
+// matched at all) — a distinction the old empty-string convention could not make.
+pub fn not_found() -> Response {
+  return { status: 404, headers: [], body: Empty }
+}
+
+pub fn handled(r: Response) -> Outcome { return Handled(r) }
+
+pub fn not_handled() -> Outcome { return NotHandled }
+
+// ---------------------------------------------------------------- readers
+
+// Did a route handle the request? Read from the variant, not from `text == ""`.
+pub fn is_handled(o: Outcome) -> Bool {
+  return match o {
+    Handled(r) => true,
+    NotHandled => false,
+  }
+}
+
+// The status of a handled outcome, or `None` when nothing handled it. This is
+// the reader that replaces "parse the status out of the body prose".
+pub fn status_of(o: Outcome) -> Opt[Int] {
+  return match o {
+    Handled(r) => Some(r.status),
+    NotHandled => None,
+  }
+}
+
+// The response of a handled outcome, or `None`. Lets a caller reach headers and
+// body through the typed record rather than re-decoding a string.
+pub fn response_of(o: Outcome) -> Opt[Response] {
+  return match o {
+    Handled(r) => Some(r),
+    NotHandled => None,
+  }
+}
+
+// Is the body the first-class empty body? The typed replacement for the
+// `text == "" || text == "::empty::"` test.
+pub fn is_empty_body(b: Body) -> Bool {
+  return match b {
+    Empty => true,
+    _ => false,
+  }
+}
+
+// The body's text payload — `""` only for the genuine `Empty` case. Unlike the
+// sentinel protocol, `is_empty_body` distinguishes "empty" from "the string
+// happened to be empty" BEFORE this collapses them for display.
+pub fn body_text(b: Body) -> Str {
+  return match b {
+    Empty => "",
+    Text(s) => s,
+    Json(s) => s,
+  }
+}
+
+// Look up the first value for a header name (case-sensitive on the stored name;
+// callers normalise before storing). `None` when absent — never a sentinel.
+pub fn header_value(headers: List[Header], name: Str) -> Opt[Str] {
+  for (h of headers) {
+    if (h.name == name) { return Some(h.value) }
+  }
+  return None
+}
