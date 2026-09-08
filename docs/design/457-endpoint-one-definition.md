@@ -44,7 +44,7 @@ The chosen shape costs the grammar one production and reuses two precedents:
 
 ## The declaration
 
-```revl
+```revl sketch
 use "stdlib/http.rvl" { ApiError }
 use "stdlib/auth.rvl" { Auth, Bearer, Principal }
 
@@ -184,7 +184,7 @@ a stub on py for tests.
 
 A user-scoped store takes the principal:
 
-```revl
+```revl sketch
 service NoteStore {
   fn get(who: Principal, id: Str) -> Result[Note, ApiError]
   emission fn create(who: Principal, note: NewNote) -> Result[Note, ApiError]
@@ -236,7 +236,7 @@ bridge. The answer is the row table, not a new checker mode. A `host` row is the
 sibling of a `remote` row: a row whose provider is not revl source but the host
 runtime's own service, reached through the reviewed `@ts ref` door:
 
-```revl
+```revl sketch
 composition Notes {
   use "notes.rvl"
   host   @server provides server: Server        // Cordis ctx.server, ts tier

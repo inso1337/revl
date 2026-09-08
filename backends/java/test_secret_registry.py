@@ -148,8 +148,12 @@ def _classpath(work: Path, runner_source: str, components_source: str) -> Path:
     out = work / "out"
     out.mkdir()
     javac = [javac_gate.JAVAC, "--release", javac_gate.RELEASE, "-d", str(out)]
+    # The runner references `Estop` for the operator E-Stop seam (item 443,
+    # issue #122): `placement._build_java` compiles the shipped `Estop.java`
+    # beside the runner, so this helper does too.
+    estop = str(PLACEMENT / "Estop.java")
     result = subprocess.run(
-        javac + [str(s) for s in javac_gate.STUB_SOURCES] + [str(runner)],
+        javac + [str(s) for s in javac_gate.STUB_SOURCES] + [estop, str(runner)],
         capture_output=True, text=True, timeout=600)
     assert result.returncode == 0, result.stderr
     result = subprocess.run(
