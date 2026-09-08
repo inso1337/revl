@@ -511,9 +511,11 @@ until then the tier documents "faults with `unreachable`, no payload".
 ## stdlib cross-tier divergences (issue #549)
 
 A private review (issue #549) caught a cluster of stdlib operations whose
-emitters disagreed with the reference. Each is now closed; the ones with a
-value-or-fault verdict are asserted to AGREE on every tier in
-`tests/test_cross_tier_execution.py` (`AGREED_549`).
+emitters disagreed with the reference. Each is now closed. The ones with a
+value-or-fault verdict (`split("")`, `"+7".to_int()`, `div_trunc(Int.MIN, -1)`,
+a negative slice bound, a negative list index) are asserted to AGREE on every
+tier in `tests/test_cross_tier_execution.py` (`AGREED_549`); `Str + Int` is
+closed by uniform frontend rejection (below).
 
 - **`split("")` counted UTF-16 units on TypeScript and Java** (closed). An
   empty separator splits by code point (docs/stdlib-2.0.md §split), so an
@@ -557,10 +559,21 @@ value-or-fault verdict are asserted to AGREE on every tier in
   `_revl_index` (python) / `revlIndex` (TypeScript), each throwing on a
   negative index the way go/rust/java panic. Asserted in `AGREED_549`
   ("negative list index faults everywhere", verdict `fail`).
+- **`Str + Int` scattered across every tier** (closed by rejection). The
+  frontend accepted a mixed `Str + <non-Str>` and left the operand to the
+  tiers, which disagreed: python raised a `TypeError`, go REFUSED to compile
+  (`mismatched types`), while rust, ts and java coerced the int and rendered
+  `"n=3"`. String `+` is Str-only concatenation (docs/stdlib-2.0.md), so the
+  checker now refuses a known non-`Str` operand (numeric included) in
+  `_binop_type` with `operand of string `+` expects `Str``. That makes it a
+  compile error on every tier — the same uniform-rejection close used for
+  `List[Int].join` — rather than a runtime divergence; convert with `.to_str()`
+  first. Asserted in `tests/test_typesafety.py::test_str_plus_int_rejected`. An
+  UNKNOWN operand (the gradual frontier) is unaffected.
 
-The one remaining #549 divergence — whether the frontend should accept a mixed
-`Str + Int` at all — is closed by the sibling change that rejects it at the
-frontend (uniform compile error). Together the two changes close #549.
+With the value-or-fault divergences agreeing on every tier (`AGREED_549`) and
+`Str + Int` refused uniformly at the frontend, every #549 divergence is now
+closed — none remains pinned in `DIVERGENCES`.
 
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins
