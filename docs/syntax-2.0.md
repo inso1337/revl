@@ -928,6 +928,8 @@ decl        := ['pub'] (typedecl | fndecl | service | extern)
              | composition                                     (§4c)
 typedecl    := 'type' IDENT generics? '=' (record | variant ('|' variant)*)
 fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type] block
+methoddecl  := ['route' METHOD STRING] modifier* 'fn' IDENT '(' tparams? ')' ['->' type]
+METHOD      := 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head'   -- item 457
 component   := (unchanged from 1.x) + blockeffect + fail
 extern      := 'extern' class 'fn' sig ['undo' expr] ['compensate' expr]
                  ['config' '{' configfield (',' configfield)* '}'] hostbody+
@@ -953,6 +955,25 @@ lcstmt      := load | unload | call | 'assert' ('no_residue' | expr)   (§7.1)
 The full grammar remains small enough to include, in its entirety, in a
 model's system prompt. That property is a requirement, not an accident,
 and grammar growth that would break it needs this document amended first.
+
+**The `route` clause (item 457).** A service operation may be reached over HTTP
+by heading its declaration with `route <method> "<path>"`
+(docs/design/457-endpoint-one-definition.md). `route` is contextual: it is
+recognised only in this one leading position inside a `service` body, so the
+lexer's keyword set is untouched and a program using `route` as an ordinary name
+is unaffected. The method is one of the six verbs above, exactly
+stdlib/http.rvl's `Method` variant, so the derived route table and the typed
+`Request.method` cannot disagree; the path is a string literal. The clause costs
+the grammar one production and no new keyword outside that position. The compiler
+resolves it to a bind table (path scalars by name, a `Bearer` header credential,
+a `Request` escape hatch, query parameters on safe verbs, one record body on
+unsafe verbs) and a return classification (`T`, `Result[T, ApiError]`, or a
+handler-owned `Response`), refusing anything ambiguous while naming the operation
+and the parameter. `revl serve --http` honours the route, `revl export openapi`
+projects it, and `revl export client` builds a typed method from it. Authorization
+is deliberately NOT in the clause: it is the explicit `auth.validate` step a
+handler makes on a required `Auth` service, and neither the router, the exported
+document nor the client carries anything that could stand in for it.
 
 **Identifiers are ASCII.** `IDENT` is `[A-Za-z_][A-Za-z0-9_]*`, and the lexer
 refuses anything else by name. This is a soundness rule, not a style rule. The

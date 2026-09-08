@@ -960,6 +960,24 @@ def build_parser() -> argparse.ArgumentParser:
                             help="on rejection, print a structured diagnostic "
                                  "instead of the human rendering")
 
+    # `revl export openapi` — item 457 artifact 4: the inverse of `revl import
+    # openapi` over the subset both express. One path item per ROUTED operation;
+    # NO `security` derived. Pure IR codegen.
+    exp_openapi = exp_sub.add_parser(
+        "openapi",
+        help="generate an OpenAPI 3.1 document for a revl service's routed "
+             "operations (the reverse of `revl import openapi`; item 457). "
+             "Carries no `security` requirement — authorization is the handler's "
+             "explicit step, not a fact this document can stand in for")
+    exp_openapi.add_argument("files", nargs="+", help=".rvl source files")
+    exp_openapi.add_argument("--service", required=True, metavar="NAME",
+                             help="the service whose routed operations to export")
+    exp_openapi.add_argument("-o", "--output", default=None,
+                             help="output path (default: stdout)")
+    exp_openapi.add_argument("--json-diagnostics", action="store_true",
+                             help="on rejection, print a structured diagnostic "
+                                  "instead of the human rendering")
+
     serve = sub.add_parser(
         "serve",
         help="serve a composition's OWN provided operations, over MCP stdio "

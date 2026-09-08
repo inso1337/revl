@@ -68,6 +68,7 @@ from .taint import (
     strip_qualifiers,
 )
 from .mcp.schema import (
+    _parse_type as _schema_parse_type,
     expressibility_reason,
     fully_expressible,
     has_revl_stub,
@@ -3693,6 +3694,215 @@ def _method_validated_ir(m, types: dict, filename: str) -> dict:
     return {"validated": True, "response_schema": schema, **retry_ir}
 
 
+# ------------------------------------------------------------ item 457: routes
+
+#: the scalar surface types a path segment or a query parameter may bind to. A
+#: path template `{name}` is a single URL segment, and a query value is a single
+#: string field, so both are limited to the JSON scalars a boundary can carry as
+#: text (docs/design/457-endpoint-one-definition.md, "Binding rules").
+_ROUTE_SCALARS = ("Str", "Int", "Bool")
+
+#: the six HTTP verbs the `route` clause admits — exactly `stdlib/http.rvl`'s
+#: `Method` variant (`method_str`), so the derived route table and the typed
+#: `Request.method` cannot disagree. `get`/`head`/`delete` are the SAFE-shaped
+#: verbs whose remaining parameters bind from the query string; `post`/`put`/
+#: `patch` take a single record body.
+_ROUTE_METHODS = ("get", "post", "put", "patch", "delete", "head")
+_ROUTE_QUERY_METHODS = ("get", "head", "delete")
+_ROUTE_BODY_METHODS = ("post", "put", "patch")
+
+
+def _route_scalar(type_name: str | None) -> bool:
+    return type_name in _ROUTE_SCALARS
+
+
+def _route_opt_scalar(type_name: str | None) -> str | None:
+    """The inner scalar of `Opt[scalar]`, or `None` when `type_name` is not one."""
+    head, args = _schema_parse_type(type_name)
+    if head == "Opt" and len(args) == 1 and _route_scalar(args[0]):
+        return args[0]
+    return None
+
+
+def _route_template_names(path: str) -> list[str]:
+    """The `{name}` placeholders of a path template, in order. Raises on a
+    malformed placeholder (empty or non-identifier)."""
+    names: list[str] = []
+    for match in re.finditer(r"\{([^{}]*)\}", path):
+        names.append(match.group(1))
+    return names
+
+
+def _method_route_ir(m, types: dict, filename: str, service_name: str) -> dict:
+    """Item 457: the additive `route` IR key for a service operation that heads a
+    `route <method> "<path>"` clause, or `{}` (byte-identical) when it does not.
+
+    Resolves the bind table (docs/design/457-endpoint-one-definition.md,
+    "Binding rules") by parameter TYPE and NAME, and the return rules, refusing at
+    COMPILE TIME — naming the operation and the parameter — anything the
+    projection cannot express deterministically:
+
+      * a path `{name}` that is not a scalar parameter, or a scalar parameter the
+        template does not name;
+      * a `Bearer` / `Request` parameter appearing more than once;
+      * a non-scalar / non-`Opt[scalar]` query parameter on a safe verb;
+      * anything other than exactly one record body on an unsafe verb;
+      * a body / query / path type that is not `fully_expressible` (item 257);
+      * a `Result[T, E]` return whose `E` is not `ApiError`.
+
+    The result is `{"route": {"method", "path", "bind", "response", ["auth"]}}`.
+    """
+    route = getattr(m, "route", None)
+    if not route:
+        return {}
+    method = route["method"]
+    path = route["path"]
+    line = route.get("line", m.line)
+    where = f"routed operation `{service_name}.{m.name}`"
+
+    def refuse(message: str, hint: str | None = None):
+        raise RevlError(filename, line, message, hint=hint,
+                        code="G4", category="route")
+
+    try:
+        template = _route_template_names(path)
+    except ValueError:
+        template = []
+    for tname in template:
+        if not tname.isidentifier():
+            refuse(f"{where} has a malformed path placeholder `{{{tname}}}`",
+                   hint='a placeholder names a scalar parameter, e.g. `"/notes/{id}"`')
+
+    params = list(m.params)  # (name, type)
+    by_name = dict(params)
+    template_set = set(template)
+
+    # every template name must be a scalar parameter
+    for tname in template:
+        if tname not in by_name:
+            refuse(f"{where} names `{{{tname}}}` in its path, but has no "
+                   f"parameter `{tname}` to bind it from",
+                   hint="every path placeholder must be a parameter of the "
+                        "operation")
+        if not _route_scalar(by_name[tname]):
+            refuse(f"{where} binds path parameter `{tname}` of type "
+                   f"`{by_name[tname]}`, which is not a scalar",
+                   hint="a path segment binds a `Str`, `Int` or `Bool` only")
+
+    bind: dict[str, dict] = {}
+    body_params: list[str] = []
+    bearer_params: list[str] = []
+    request_params: list[str] = []
+    for pname, ptype in params:
+        if pname in template_set:
+            bind[pname] = {"kind": "path", "type": ptype}
+            continue
+        if ptype == "Bearer":
+            bearer_params.append(pname)
+            bind[pname] = {"kind": "header", "type": ptype}
+            continue
+        if ptype == "Request":
+            request_params.append(pname)
+            bind[pname] = {"kind": "request", "type": ptype}
+            continue
+        if method in _ROUTE_QUERY_METHODS:
+            if not (_route_scalar(ptype) or _route_opt_scalar(ptype)):
+                refuse(f"{where} binds query parameter `{pname}` of type "
+                       f"`{ptype}`, which is not a scalar or `Opt[scalar]`",
+                       hint=f"a `{method}` request has no body, so each remaining "
+                            "parameter binds from the query string and must be a "
+                            "`Str`/`Int`/`Bool` or an `Opt` of one")
+            bind[pname] = {"kind": "query", "type": ptype}
+        else:
+            body_params.append(pname)
+            bind[pname] = {"kind": "body", "type": ptype}
+
+    if len(bearer_params) > 1:
+        refuse(f"{where} declares {len(bearer_params)} `Bearer` parameters "
+               f"({', '.join(bearer_params)}); a route carries at most one",
+               hint="the bearer credential binds from the single `Authorization` "
+                    "header")
+    if len(request_params) > 1:
+        refuse(f"{where} declares {len(request_params)} `Request` parameters "
+               f"({', '.join(request_params)}); a route carries at most one")
+
+    if method in _ROUTE_BODY_METHODS:
+        if len(body_params) > 1:
+            refuse(f"{where} has {len(body_params)} body candidates "
+                   f"({', '.join(body_params)}); give the body one record type",
+                   hint=f"a `{method}` request has exactly one JSON body")
+        for pname in body_params:
+            ptype = by_name[pname]
+            spec = types.get(ptype)
+            if not spec or spec.get("kind") != "record":
+                refuse(f"{where} binds body parameter `{pname}` of type "
+                       f"`{ptype}`, which is not a record type",
+                       hint="the request body IS one record; declare the body "
+                            "parameter with a record type")
+
+    # every non-path scalar/body/query type must be fully expressible so the
+    # boundary can validate it (item 257 §3.3) — refuse, never a vacuous schema.
+    for pname, entry in bind.items():
+        if entry["kind"] in ("path", "query", "body"):
+            ptype = strip_qualifiers(entry["type"])
+            # a bare `Opt[scalar]` query is expressible via its inner scalar
+            check_type = _route_opt_scalar(ptype) or ptype
+            if entry["kind"] == "query" and _route_opt_scalar(ptype):
+                entry["optional"] = True
+                check_type = _route_opt_scalar(ptype)
+            if not fully_expressible(check_type, types):
+                reason = expressibility_reason(check_type, types) \
+                    or "is not expressible"
+                refuse(f"{where} binds `{pname}` to `{entry['type']}`, which "
+                       f"{reason}",
+                       hint="a routed boundary validates every bound input against "
+                            "an EXACT derived schema; refuse an unexpressible type "
+                            "at compile time (item 257 §3.3)")
+            entry["schema"] = json_schema_for(check_type, types, validated=True)
+
+    response = _route_response_ir(m.returns, types, refuse, where)
+
+    route_ir = {"method": method, "path": path, "bind": bind,
+                "response": response}
+    # item 457, the authorization HOOK (S1 shape): a `Bearer`-bearing operation
+    # is marked so `revl export openapi` can carry a DOCUMENTATION-ONLY
+    # `x-revl-auth: bearer` marker and NO `security` requirement. Authorization
+    # itself is never in the clause — it is the explicit `auth.validate` step the
+    # handler makes on the required `Auth` service, whose `Principal` result is
+    # the only key to user data. The `Principal`/`Auth` machinery (and the
+    # admission refusal for a handler that skips the step) is S2; this marker is
+    # the forward-compatible slot it fills, carrying no grant of its own.
+    if bearer_params:
+        route_ir["auth"] = "bearer"
+    return {"route": route_ir}
+
+
+def _route_response_ir(returns: str | None, types: dict, refuse, where: str) -> dict:
+    """The return-rule classification for a routed operation
+    (docs/design/457-endpoint-one-definition.md, "Return rules").
+
+    `T` -> `{"kind": "plain", "type": T}` (200, or 204 for `Unit`);
+    `Result[T, ApiError]` -> `{"kind": "result", "ok": T}` (Ok 200, Err status);
+    `Response` -> `{"kind": "response"}` (the handler owns the wire).
+    A `Result[T, E]` with `E != ApiError` is a compile refusal: an error a client
+    can act on needs a status."""
+    stripped = strip_qualifiers(returns) if returns else None
+    if not stripped or stripped == "Unit":
+        return {"kind": "plain", "type": "Unit"}
+    if stripped == "Response":
+        return {"kind": "response"}
+    head, args = _schema_parse_type(stripped)
+    if head == "Result" and len(args) == 2:
+        ok_type, err_type = args
+        if err_type != "ApiError":
+            refuse(f"{where} returns `Result[{ok_type}, {err_type}]`, but an "
+                   "error a client can act on needs a status",
+                   hint="return `Result[T, ApiError]` (whose `Err` carries the "
+                        "status/code/message) or a `Response` you build yourself")
+        return {"kind": "result", "ok": ok_type}
+    return {"kind": "plain", "type": stripped}
+
+
 def _lower_externs(program: Program, filename: str, types: dict,
                    fns: list | None = None) -> list:
     externs: list[dict] = []
@@ -7090,6 +7300,11 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                         # additive (byte-identical when absent). The gate refuses
                         # an unexpressible return type at compile time.
                         **_method_validated_ir(m, types, program.filename),
+                        # item 457: the `route` clause resolved to a bind table +
+                        # return classification, additive (byte-identical when the
+                        # operation heads no `route`). The gate refuses an
+                        # ill-bound path/query/body or a non-`ApiError` error type.
+                        **_method_route_ir(m, types, program.filename, name),
                     }
                     for m in svc.methods.values()
                 },
