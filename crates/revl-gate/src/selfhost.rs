@@ -1531,14 +1531,34 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
     let mut isEm = false;
     let mut isAsync = false;
-    while (((atw(&ts, j.clone(), "emission") || atw(&ts, j.clone(), "acquire")) || atw(&ts, j.clone(), "pure")) || atw(&ts, j.clone(), "async")) {
+    let mut isWit = false;
+    while (((((((atw(&ts, j.clone(), "emission") || atw(&ts, j.clone(), "acquire")) || atw(&ts, j.clone(), "pure")) || atw(&ts, j.clone(), "async")) || ati(&ts, j.clone(), "witnessed")) || ati(&ts, j.clone(), "deferred")) || atk(&ts, j.clone(), "[")) || atk(&ts, j.clone(), "(")) {
         if atw(&ts, j.clone(), "emission") {
             isEm = true;
+        }
+        if ati(&ts, j.clone(), "witnessed") {
+            isWit = true;
         }
         if atw(&ts, j.clone(), "async") {
             isAsync = true;
         }
-        j = (j).checked_add(1i64).expect("revl: Int overflow");
+        if atk(&ts, j.clone(), "[") {
+            let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
+            while ((k < ts.revl_length()) && (!atk(&ts, k.clone(), "]"))) {
+                k = (k).checked_add(1i64).expect("revl: Int overflow");
+            }
+            j = (k).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if atk(&ts, j.clone(), "(") {
+                let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
+                while ((k < ts.revl_length()) && (!atk(&ts, k.clone(), ")"))) {
+                    k = (k).checked_add(1i64).expect("revl: Int overflow");
+                }
+                j = (k).checked_add(1i64).expect("revl: Int overflow");
+            } else {
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+        }
     }
     if (!atw(&ts, j.clone(), "fn")) {
         return PStep { pg: bad_prog(pg.clone(), String::from("expected fn after extern")), i: skip_line(&ts, j.clone()) };
@@ -1558,7 +1578,7 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
     }
-    return mk_step(push_fn(pg.clone(), mk_fnd(nm.clone(), isEm, isAsync, vec![], async_slots_of(&ps.ps), async_params_of(&ps.ps), vec![], tkc(&ts, i).line)), k);
+    return mk_step(push_fn(pg.clone(), mk_fnd(nm.clone(), (isEm || isWit), isAsync, vec![], async_slots_of(&ps.ps), async_params_of(&ps.ps), vec![], tkc(&ts, i).line)), k);
 }
 
 fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {

@@ -400,17 +400,14 @@ def test_native_cache_reach_preserves_non_emitting_and_uncached_functions(admit,
 # returns "" and this test fails on the stale entry instead of quietly keeping a
 # waiver nobody rereads. Never add a line here to make a red go away — read what
 # it names first.
-NATIVE_GATE_GAPS = {
-    # `selfhost/lower.rvl`'s extern grammar knows `pure`/`acquire`/`emission`
-    # with no capability tag. It refuses the `witnessed` class (item 243)
-    # outright, and refuses a capability tag on ANY class (`witnessed[fs]`,
-    # `emission[net]`), reporting a parse error against a program the reference
-    # compiles. Its `lower_to_ir` separately drops the whole `externs` section to
-    # `null` for any extern carrying an `undo` clause — see
-    # tests/test_selfhost_lower_ir.py's EXTERN_DECL_GAP for that half. All three
-    # were invisible until item 429's coverage gate demanded a corpus case for
-    # `class=witnessed` and the case spelled them.
-    "emit_py_corpus/witnessed.rvl": "BAD|expected fn after extern",
+NATIVE_GATE_GAPS: dict[str, str] = {
+    # `selfhost/lower.rvl`'s extern grammar now knows every extern classification
+    # the reference does: `pure`/`acquire`/`emission` (reserved keywords) and the
+    # contextual `witnessed` class (item 243), each with an optional `[caps]`
+    # capability scope (item 343) and `(confined: p)` reach clause (item 373).
+    # The `witnessed.rvl` false refusal (`BAD|expected fn after extern`) is CLOSED
+    # — the gate admits it, and its `lower_to_ir` externs section was already
+    # byte-exact (tests/test_selfhost_lower_ir.py's EXTERN_DECL_GAP is empty).
 }
 
 
