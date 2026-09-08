@@ -8,6 +8,7 @@ blind byte relay and that the table shapes parse the way the conductor emits
 them.
 """
 
+import ast
 import asyncio
 import sys
 from pathlib import Path
@@ -18,6 +19,39 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import seam_relay as _relay  # noqa: E402
+
+
+def test_the_relay_imports_nothing_outside_the_standard_library():
+    """The relay runs inside the first-party runner image (`python3 -m
+    revl.seam_relay`), which carries a stock `python3` but is NOT guaranteed to
+    carry revl's own package or its third-party dependencies. So the module must
+    depend on the standard library alone; a stray `import revl.*` or a
+    third-party import would import-error the relay AT RUNTIME inside the
+    container, invisible to every other test in this suite (they run in the dev
+    environment where those modules exist). This guards it statically by walking
+    the module's own import statements — no container, no import side effects."""
+    source = (ROOT / "src" / "revl" / "seam_relay.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    stdlib = set(sys.stdlib_module_names) | {"__future__"}
+
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            # a relative import (level > 0) is an intra-package import, which is
+            # exactly the revl dependency this invariant forbids.
+            names = [node.module or ""] if node.level == 0 else ["."]
+        else:
+            continue
+        for name in names:
+            top = name.split(".", 1)[0]
+            if top not in stdlib:
+                offenders.append(name)
+
+    assert not offenders, (
+        "revl.seam_relay must import only the standard library so it runs in the "
+        f"stock-python runner image; found non-stdlib imports: {sorted(offenders)}")
 
 
 def test_load_table_parses_both_listen_shapes():
