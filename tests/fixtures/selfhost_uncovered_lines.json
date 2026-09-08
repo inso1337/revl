@@ -26,17 +26,10 @@
   ],
   "reference": {
     "go": {
-      "statements": 4235,
+      "statements": 4273,
       "uncovered": {
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
-        },
-        "Blocking component subscribe/next/merge runtime or explicit rejection of unlowered stream surfaces. _refuse_dropped_stream_component's remaining branch rejects stream-bearing components that would otherwise be skipped by pure-module routing; successful module corpus inputs contain no component stream effects.": {
-          "_flag_stream": 1,
-          "_is_stream_next": 7,
-          "_refuse_dropped_stream_component": 5,
-          "_refuse_unlowered_stream_surface": 7,
-          "_stream_head": 4
         },
         "Code-point scan-loop recognition/rendering requires Str length/charAt/charCodeAt builtin IR. Those stdlib calls and helper preambles are an explicit Go deferral; ordinary while/for and break/continue are already covered.": {
           "_go_v3_scan_read": 14,
@@ -191,6 +184,9 @@
         "Remaining constructor paths implement deferred builtin Some/None/Ok/Err layouts, or reject unknown cases/bad arity. Covered user variants take the declared-layout branch; builtin tagged preambles are not emitted by the port.": {
           "_go_v3_construct": 29
         },
+        "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return. The oracle calls _emit(ir) on module-only v3 documents.": {
+          "_emit": 105
+        },
         "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised.": {
           "_go_v3_expr": 47
         },
@@ -259,7 +255,7 @@
           "_acquire_value_go_type": 17,
           "_collect_host_calls": 10,
           "_emit_component": 85,
-          "_emit_component_step": 145,
+          "_emit_component_step": 173,
           "_emit_host_stubs": 12,
           "_emit_method_body": 81,
           "_emit_provide_impl": 37,
@@ -270,11 +266,17 @@
           "_method_returns_value": 1,
           "_needs_sync": 1
         },
-        "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return. The oracle calls _emit(ir) on module-only v3 documents.": {
-          "_emit": 102
+        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every … in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on … as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted.": {
+          "_document_holds_stream": 3,
+          "_flag_stream": 1,
+          "_flag_stream_event": 2,
+          "_is_stream_next": 7,
+          "_raw_go_ident": 3,
+          "_refuse_unlowered_stream_surface": 7,
+          "_stream_head": 4
         }
       },
-      "uncovered_statements": 3050
+      "uncovered_statements": 3084
     },
     "java": {
       "statements": 2583,
@@ -1008,7 +1010,7 @@
           "_refuse_holes.walk": 1,
           "_refuse_missing_host_root": 1
         },
-        "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) \u2014 now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered": {
+        "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) — now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered": {
           "_expr": 41,
           "_fn_call": 2,
           "_ts_builtin": 1
