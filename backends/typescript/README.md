@@ -11,7 +11,7 @@ fix (see `docs/upstream/cordis-ts-assertActive.md` and
 ## Setup + test (one command each)
 
 ```sh
-npm install     # pinned deps (cordis fork c8b94b2, vitest)
+npm install     # pinned deps (cordis fork f45630e, vitest)
 npm test        # emits test fixtures, runs R1–R5 + emitter + upstream suites
 ```
 
