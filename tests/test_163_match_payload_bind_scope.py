@@ -280,10 +280,16 @@ def test_bind_the_body_never_reads_needs_no_binder():
 
 
 def test_a_bind_read_inside_a_larger_body_keeps_its_binder():
-    """The guard. `Some(v) => v + 1` reads the bind from inside an expression,
-    so the arm keeps its one-shot lambda: dropping it would leave `v` free, and
-    binding it with a walrus would write through to the enclosing frame, which
-    is the item-163 bug the three cases above pin."""
+    """The guard, and item 436 F3's ACCEPTED residual (issue #71). `Some(v) =>
+    v + 1` reads the bind from inside an expression, so the arm keeps its
+    one-shot lambda: dropping it would leave `v` free, and binding it with a
+    walrus would write through to the enclosing frame, which is the item-163 bug
+    the three cases above pin. A walrus IS safe when `v` is bound nowhere else in
+    the function (here it is unique), and the reference emitter could take it
+    from a module-level tally; but the stateless `selfhost/emit_py.rvl` would
+    have to thread that tally through its whole `expr`/`cexpr` recursion to keep
+    byte-agreement, which #71 accepted as disproportionate to one frame per
+    match. So even the unique-bind case keeps the lambda, and this pins it."""
     out = _emit_fn(
         _UNBOUND_HDR
         + 'fn classify(n: Int) -> Int {\n'
