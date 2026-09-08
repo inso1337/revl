@@ -82,6 +82,11 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
   return BigInt(x.indexOf(v))
 }
 
+function revlIndex<T>(xs: T[], i: number): T {
+  if (i < 0) { throw new Error("revl: negative list index") }
+  return xs[i]
+}
+
 export function newTable(): Map<string, bigint> {
     return new Map()
 }
@@ -102,7 +107,7 @@ export function build(pairs: string[]): Map<string, bigint> {
     let m = new Map()
     let i = 0n
     while ((i < revlLen(pairs))) {
-      m = (() => { const c = new Map(m); c.set(pairs[Number(i)], revlLen(pairs[Number(i)])); return c })()
+      m = (() => { const c = new Map(m); c.set(revlIndex(pairs, Number(i)), revlLen(revlIndex(pairs, Number(i)))); return c })()
       i = revlI64(i + 1n)
     }
     return m

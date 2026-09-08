@@ -65,7 +65,7 @@ binding lands in two steps, and the first needs no stream at all.
 
 `stdlib/a2a.rvl` (pure revl, every tier):
 
-```revl
+```revl sketch
 pub type TaskRef   = { id: Str, context: Opt[Str] }
 pub type TaskState = Submitted | Working | InputRequired | AuthRequired
                    | Completed | Failed | Canceled | Rejected | Unknown
@@ -78,7 +78,7 @@ On `through a2a` / `through a2a_rest` and on `revl import a2a`, a skill whose
 card declares `capabilities.streaming`, or any skill the composing engineer
 marks long-running, projects four operations instead of one:
 
-```revl
+```revl sketch
 service Researcher {
   emission fn research_start(message: Str) -> Result[TaskRef, Str]
       compensate research_cancel(task)
@@ -104,7 +104,7 @@ undone.
 
 ### T2: the stream form (when 130 admits a stream-valued service operation)
 
-```revl
+```revl sketch
 service Researcher {
   emission fn research(message: Str) -> Stream[Untrusted[TaskEvent]]
 }
