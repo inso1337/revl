@@ -4408,6 +4408,11 @@ fn non_template_comps(comps: List[CompD], templates: List[Str]) -> List[CompD] {
 // A resolved provider entry: which component provides `key` in realm `rlm`.
 type Prov3 = { key: Str, rlm: Str, comp: Str }
 
+// item 186 slice 3: a manifest REQUIREMENT row `C<k` — component `C` consumes
+// key `k` (shared realm; the requirement wire carries no realm). Its only role
+// is the G3 union graph (`manifest_edges`).
+type MReq = { comp: Str, key: Str }
+
 fn find_provider(ps: List[Prov3], key: Str, rlm: Str, i: Int) -> Str {
   if (i >= ps.length()) { return "" }
   if (ps[i].key == key && ps[i].rlm == rlm) { return ps[i].comp }
@@ -4569,16 +4574,23 @@ fn dfs_iter(succ: Map[Str, List[Str]], name: Str, stack2: List[Str],
   return dfs_iter(succ, name, stack2, list, j + 1, state)
 }
 
-fn find_cycle(comps: List[CompD], ci: Int, succ: Map[Str, List[Str]],
+// item 186 slice 3: DFS seed nodes are a NAME list, not `CompD` — the union
+// graph's nodes are the running manifest's components (which have no `CompD`
+// here) FOLLOWED by the incoming live components, in that order. A cycle whose
+// entry is a manifest component is then anchored at the manifest component, so
+// `admit_ambient(X, wire(M))` names the same cycle, in the same order, as
+// `admit_src(M ++ X)` (where the manifest components are ordinary earlier-
+// declared live ones). The single-source path passes exactly the live names.
+fn find_cycle(names: List[Str], ci: Int, succ: Map[Str, List[Str]],
               state: Map[Str, Int]) -> List[Str] {
-  if (ci >= comps.length()) { return [] }
-  let name = comps[ci].name
+  if (ci >= names.length()) { return [] }
+  let name = names[ci]
   if (mget_int(state, name) == 0) {
     let r = dfs_visit(succ, name, state, [])
     if (r.cycle.length() > 0) { return r.cycle }
-    return find_cycle(comps, ci + 1, succ, r.state)
+    return find_cycle(names, ci + 1, succ, r.state)
   }
-  return find_cycle(comps, ci + 1, succ, state)
+  return find_cycle(names, ci + 1, succ, state)
 }
 
 fn arrow_join(xs: List[Str]) -> Str {
@@ -4648,10 +4660,20 @@ fn collect_routes(comps: List[CompD], ci: Int, provs: List[Prov3],
 // passes the manifest's live provisions, so the SAME link decides both G2
 // disjointness AND multi-realm ROUTE resolution against the running manifest —
 // a routed realm provided only by the manifest resolves through `g2.provs`
-// (which now carries the seed) instead of dangling. G3 edges see the manifest's
-// providers too, but the wire carries no requirements, so a cycle that closes
-// THROUGH the manifest is still out of scope (see docs/design note).
-fn link_refusals(pg: Prog, seed: List[Prov3]) -> List[Verd] {
+// (which now carries the seed) instead of dangling.
+//
+// item 186 slice 3 — G3 ACROSS THE MANIFEST. `seedReqs` is the manifest's
+// requirement table (`C<k` rows) and `seedNames` its component names in
+// wire order. Before slice 3 the wire carried provisions only, so a manifest
+// component's own `requires` contributed no edge and a dependency cycle that
+// closed THROUGH the manifest was invisible to the gate — the one soundness
+// hole in the guarantee story. Now the manifest's requirements seed edges
+// (provider -> manifest-consumer) into the SAME `succ` graph the incoming
+// components extend, and the DFS starts from the manifest nodes first, so the
+// union graph — `M`'s provider-to-consumer edges plus `X`'s — is exactly what
+// `admit_src(M ++ X)` walks, cycle trace and anchor included.
+fn link_refusals(pg: Prog, seed: List[Prov3], seedReqs: List[MReq],
+                 seedNames: List[Str]) -> List[Verd] {
   // spawn templates are runtime instances, not static composition members — they
   // take no place in the G2/G3 table or loadOrder (decision 5/6).
   let live = non_template_comps(pg.comps, spawn_templates(pg.comps))
@@ -4661,17 +4683,56 @@ fn link_refusals(pg: Prog, seed: List[Prov3]) -> List[Verd] {
   // exactly where the reference runs it: the dual EXISTENCE check on the
   // consumption side, over the same per-(key, realm) provider table.
   refs = collect_routes(live, 0, g2.provs, refs)
-  let edges = build_edges(live, 0, g2.provs, Map.empty())
+  // the manifest's own requirement edges go in FIRST (its components are the
+  // already-running, earlier-loaded ones), then the incoming components extend
+  // the graph — the edge-insertion order `admit_src(M ++ X)` produces.
+  let seedEdges = manifest_edges(seedReqs, 0, g2.provs, Map.empty())
+  let edges = build_edges(live, 0, g2.provs, seedEdges)
   if (edges.msg != "") {
     refs = refs.push(mk_verd(tagged("G3", edges.msg), edges.line))
   }
-  let cyc = find_cycle(live, 0, edges.succ, Map.empty())
+  let nodes = concat_names(seedNames, live_names(live, 0, []))
+  let cyc = find_cycle(nodes, 0, edges.succ, Map.empty())
   if (cyc.length() > 0) {
     refs = refs.push(mk_verd(
       tagged("G3", "dependency cycle: ".concat(arrow_join(cyc)).concat(" (G3)")),
       comp_line(live, cyc[0], 0)))
   }
   return refs
+}
+
+// item 186 slice 3: one edge per manifest requirement `C<k` — the running
+// component `C` consumes `k`, so its provider (in the union provision table,
+// shared realm — the wire's requirement rows carry no realm) must precede it.
+// A key `C` provides itself adds no self-edge (mirrors `route_edges` /
+// `scan_reqs`, and a self-cycle in an already-running manifest is impossible).
+fn manifest_edges(reqs: List[MReq], i: Int, provs: List[Prov3],
+                  succ: Map[Str, List[Str]]) -> Map[Str, List[Str]] {
+  if (i >= reqs.length()) { return succ }
+  let provider = find_provider(provs, reqs[i].key, "", 0)
+  if (provider == "" || provider == reqs[i].comp) {
+    return manifest_edges(reqs, i + 1, provs, succ)
+  }
+  return manifest_edges(reqs, i + 1, provs, add_edge(succ, provider, reqs[i].comp))
+}
+
+fn live_names(comps: List[CompD], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= comps.length()) { return acc }
+  return live_names(comps, i + 1, acc.push(comps[i].name))
+}
+
+// Concatenate two name lists, dropping a name from `b` already present in `a`
+// (a slice-3 manifest and the incoming text are disjoint in name, but a later
+// replacement wave lets the incoming text re-declare a manifest name, and the
+// DFS visits each node once).
+fn concat_names(a: List[Str], b: List[Str]) -> List[Str] {
+  var out = a
+  var i = 0
+  while (i < b.length()) {
+    if (!contains(a, b[i])) { out = out.push(b[i]) }
+    i += 1
+  }
+  return out
 }
 
 // ==================================================== item 384: foreign-construct redirects
@@ -5756,8 +5817,9 @@ fn collect_refusals(ts: List[Token], pg: Prog) -> List[Verd] {
   let nl = collect_nonlink(ts, pg)
   if (nl.done) { return nl.refs }
   // the G2/ROUTE/G3 link collects the rest, in that order (empty seed: a single
-  // source composes only against its own text).
-  return append_verds(nl.refs, link_refusals(pg, []))
+  // source composes only against its own text — no ambient provisions,
+  // requirements, or nodes).
+  return append_verds(nl.refs, link_refusals(pg, [], [], []))
 }
 
 pub fn admit_src(src: Str) -> Str {
@@ -5846,21 +5908,32 @@ pub fn admit_tag(src: Str) -> Str {
 //     a `realms(...)` route whose target realm is provided ONLY by the running
 //     manifest RESOLVES rather than dangling; a realm provided by neither still
 //     refuses ROUTE. This is why `admit_ambient` recomputes the link seeded (via
-//     `collect_nonlink` + `link_refusals(pg, seed)`) rather than forwarding the
-//     self-verdict wholesale — a self ROUTE refusal is composition-dependent,
+//     `collect_nonlink` + `link_refusals(pg, seed, ...)`) rather than forwarding
+//     the self-verdict wholesale — a self ROUTE refusal is composition-dependent,
 //     not internal, and the manifest can satisfy it.
+//   * SLICE 3 — G3 acyclicity across the manifest boundary, and the `!halted`
+//     header. The wire grows requirement rows (`C<k`) and a header row
+//     (`!halted`), so a dependency cycle that closes THROUGH the running
+//     manifest is finally seen (the one soundness hole in the guarantee story:
+//     before slice 3 the wire carried provisions only, so a manifest
+//     component's own `requires` added no edge and such a cycle admitted), and
+//     admission against a halted composition (item 443) refuses. The signature
+//     stays two-arg: the wire grows by TAGGED row kinds, not a third argument,
+//     so the crate signature the gate digests does not move.
 //
-// The FULL surface still behind `ambient` (service REPLACEMENT / `handoff` STATE
-// replacement that OVERRIDES a manifest provision rather than conflicting, G3
-// acyclicity across the manifest boundary — the wire carries provisions, not
-// requirements — and a reference-side ambient oracle that builds a running
-// manifest on BOTH sides) is a wave, not a slice (roadmap item 186). See
-// docs/design/186-ambient-admission.md.
+// The surface still behind the WAVE (item 186): service REPLACEMENT (`-C` rows)
+// and G2 against `M \ R`, the unmet-consumer refusal, `handoff` STATE
+// compatibility (`C=k:T` rows, blocked on the self-host type layer), and a
+// reference-side ambient oracle that builds a running manifest on BOTH sides. A
+// `-C` or `C=k:T` row in the wire therefore REFUSES here (fail-closed) rather
+// than being silently mis-admitted. See
+// docs/design/186-ambient-admission-guarantees.md.
 //
-// The manifest is the linker's already-live provision table, serialised as rows
-// "<component>/<key>/<realm>" joined by ";" (realm "" = the shared realm), e.g.
-// "Store/db/;KvA/kv/tenant_a". An empty manifest is the empty table, so
-// `admit_ambient(src, "")` == `admit_src(src)` exactly.
+// The manifest is the linker's already-live composition, serialised as rows
+// joined by ";" — provisions "<component>/<key>/<realm>" (realm "" = shared),
+// requirements "<component><<key>", and the "!halted" header — e.g.
+// "Store/db/;KvA/kv/tenant_a;Store<net". An empty manifest is the empty table,
+// so `admit_ambient(src, "")` == `admit_src(src)` exactly.
 
 // The head of `s` up to the first `sep` (one char), and the remainder past it.
 // `rest` "" when `sep` is absent — the whole of `s` is the head.
@@ -5872,23 +5945,90 @@ fn cut(s: Str, sep: Str) -> Cut {
   return { s: s.slice(0, ix), rest: s.slice(ix + 1, s.length()) }
 }
 
-// Parse the manifest wire into the same `Prov3` (`{key, rlm, comp}`) rows the
-// in-text linker builds, so `collect_g2` reads a running manifest exactly as it
-// reads the composed text. An empty row (a trailing/duplicate ";") is skipped.
-fn parse_manifest_rows(m: Str, acc: List[Prov3]) -> List[Prov3] {
-  if (m == "") { return acc }
-  let row = cut(m, ";")
-  var acc2 = acc
-  if (row.s != "") {
-    let a = cut(row.s, "/")
-    let b = cut(a.rest, "/")
-    acc2 = acc.push({ key: b.s, rlm: b.rest, comp: a.s })
-  }
-  return parse_manifest_rows(row.rest, acc2)
+// item 186: the parsed running manifest. `provs` seed G2/ROUTE (slices 1-2);
+// `reqs` seed the G3 union graph (slice 3); `mnames` are the manifest's
+// component names in wire order (the G3 DFS seed order). `halted` (the `!halted`
+// header, item 443) makes every admission refuse; `bad` (non-"") is a wire that
+// does not parse — an unknown row kind, or a `-C` / `C=k:T` row whose semantics
+// (replacement / handoff) are the deferred wave — and REFUSES admission by
+// name rather than being silently skipped (a row that parses and does nothing
+// is worse than one that refuses).
+type Manifest = { provs: List[Prov3], reqs: List[MReq], mnames: List[Str],
+                  halted: Bool, bad: Str }
+
+fn add_mname(names: List[Str], name: Str) -> List[Str] {
+  if (contains(names, name)) { return names }
+  return names.push(name)
 }
 
-fn parse_manifest(m: Str) -> List[Prov3] {
-  return parse_manifest_rows(m, [])
+fn ident_led(row: Str) -> Bool {
+  let c = row.slice(0, 1)
+  return c.is_alpha() || c == "_"
+}
+
+// Parse one manifest row into `man` by its LEADING kind marker (docs/design/
+// 186-ambient-admission-guarantees.md, "The wire"):
+//   C/k/r   provision  (landed)   -> a Prov3 row
+//   C<k     requirement (slice 3) -> an MReq row + a graph node
+//   !halted header     (slice 3)  -> the halt flag
+//   -C      replacing  (wave)     -> REFUSE (deferred)
+//   C=k:T   handoff     (wave)    -> REFUSE (deferred)
+//   anything else                 -> REFUSE (unknown row kind)
+// A `bad` already set rides through unchanged (first offending row wins).
+fn parse_row(row: Str, man: Manifest) -> Manifest {
+  if (man.bad != "") { return man }
+  if (row.slice(0, 1) == "!") {
+    if (row == "!halted") {
+      return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
+               halted: true, bad: "" }
+    }
+    return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
+             halted: man.halted,
+             bad: tagged("MANIFEST", "unrecognized manifest header row `".concat(row).concat("`")) }
+  }
+  if (row.slice(0, 1) == "-") {
+    return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
+             halted: man.halted,
+             bad: tagged("MANIFEST", "manifest replacement row `".concat(row)
+               .concat("` needs the deferred replacement wave (item 186)")) }
+  }
+  if (ident_led(row)) {
+    if (row.indexOf("=") != 0 - 1) {
+      return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
+               halted: man.halted,
+               bad: tagged("MANIFEST", "manifest handoff row `".concat(row)
+                 .concat("` needs the deferred handoff/type-layer wave (item 186)")) }
+    }
+    if (row.indexOf("<") != 0 - 1) {
+      let a = cut(row, "<")
+      return { provs: man.provs, reqs: man.reqs.push({ comp: a.s, key: a.rest }),
+               mnames: add_mname(man.mnames, a.s), halted: man.halted, bad: "" }
+    }
+    if (row.indexOf("/") != 0 - 1) {
+      let a = cut(row, "/")
+      let b = cut(a.rest, "/")
+      return { provs: man.provs.push({ key: b.s, rlm: b.rest, comp: a.s }),
+               reqs: man.reqs, mnames: add_mname(man.mnames, a.s),
+               halted: man.halted, bad: "" }
+    }
+  }
+  return { provs: man.provs, reqs: man.reqs, mnames: man.mnames,
+           halted: man.halted,
+           bad: tagged("MANIFEST", "unrecognized manifest row `".concat(row).concat("`")) }
+}
+
+// An empty row (a trailing/duplicate ";") is skipped — a provisions-only wire
+// parses exactly as slices 1-2's did.
+fn parse_manifest_rows(m: Str, man: Manifest) -> Manifest {
+  if (m == "") { return man }
+  let row = cut(m, ";")
+  let man2 = row.s != "" ? parse_row(row.s, man) : man
+  return parse_manifest_rows(row.rest, man2)
+}
+
+fn parse_manifest(m: Str) -> Manifest {
+  return parse_manifest_rows(m, { provs: [], reqs: [], mnames: [],
+                                  halted: false, bad: "" })
 }
 
 // Admit `src` against a running `manifest`. The INTERNAL refusals (a component
@@ -5901,6 +6041,17 @@ fn parse_manifest(m: Str) -> List[Prov3] {
 // refusal — internal or ambient-link — is ordered by `(line, seq)`, exactly
 // what `admit_src(manifest_text ++ src)` reports.
 pub fn admit_ambient(src: Str, manifest: Str) -> Str {
+  // the running manifest is read first: a wire that does not parse (an unknown
+  // row kind, or a replacement / handoff row whose wave has not landed) refuses
+  // by name, and a HALTED composition (item 443) refuses EVERY admission — so
+  // both dominate any verdict on `src`, exactly as the reference's session
+  // refuses `load` / `swap` after a halt before it looks at the incoming text.
+  let man = parse_manifest(manifest)
+  if (man.bad != "") { return man.bad }
+  if (man.halted) {
+    return tagged("HALTED",
+      "admission against a halted composition is refused (item 443)")
+  }
   // parse / foreign-construct / nesting refusals abort before any composition
   // reasoning, exactly as `admit_src`: a running manifest cannot rescue a text
   // that does not parse, so these ride alone with no line.
@@ -5927,9 +6078,13 @@ pub fn admit_ambient(src: Str, manifest: Str) -> Str {
   //     the manifest RESOLVES (`find_provider` reads the seeded table) instead
   //     of dangling as a ROUTE refusal, while a realm provided by NEITHER still
   //     refuses ROUTE, byte-identical to `admit_src(manifest_text ++ src)`.
+  //   * slice 3 — the manifest's requirement rows (`C<k`) seed the G3 union
+  //     graph, so a dependency cycle that closes THROUGH the running manifest
+  //     is seen, byte-identical to `admit_src(manifest_text ++ src)`.
   // Ordered against the internal refusals by `(line, seq)`, so an ambient link
   // refusal competes with an internal one exactly as in the composed text.
-  return pick_min(append_verds(nl.refs, link_refusals(pg, parse_manifest(manifest))))
+  return pick_min(append_verds(nl.refs,
+    link_refusals(pg, man.provs, man.reqs, man.mnames)))
 }
 
 // ============================================================ interchange IR
@@ -9281,6 +9436,72 @@ component Early provides db: D { provide db { fn q(s) { let x = s   return 0 } }
 component Late provides ap: D { provide ap { fn q(s) { let x = nope   return 0 } } }"""
   let v = admit_ambient(src, "OldStore/db/")
   assert v == "G2|provision conflict: key `db` is provided by both OldStore and Early (G2)"
+}
+
+// ---- slice 3: G3 acyclicity across the manifest, the `!halted` header, and
+// the tagged wire's unknown/deferred row kinds (item 186 / issue #86). The wire
+// grows requirement rows (`C<k`) and a header (`!halted`) — the signature stays
+// two-arg. See docs/design/186-ambient-admission-guarantees.md, "Exit tests".
+
+// Exit test 1: a dependency cycle that closes THROUGH the running manifest.
+// Manifest `A provides a requires b`; incoming `B provides b requires a`. The
+// cycle A -> B -> A spans the boundary and must refuse, byte-identical to the
+// single-source composition of the manifest component ++ the incoming text.
+test "a dependency cycle through the running manifest is refused (ambient G3)" {
+  let svc = "service A { fn pa() -> Int } service B { fn pb() -> Int } "
+  let a = "component A requires b: B provides a: A { provide a { fn pa() { return 0 } } } "
+  let b = "component B requires a: A provides b: B { provide b { fn pb() { return 0 } } }"
+  let v = admit_ambient(svc.concat(b), "A/a/;A<b")
+  assert v == "G3|dependency cycle: A -> B -> A (G3)"
+  assert v == admit_src(svc.concat(a).concat(b))
+}
+
+// The requirement row is LOAD-BEARING: a provisions-only manifest (today's
+// slice-1/2 wire, no `A<b`) does not see the edge back into the manifest, so
+// the same admission wrongly ADMITS. This pins that slice 3 closed the hole.
+test "without the requirement row the cross-manifest cycle is invisible" {
+  let svc = "service A { fn pa() -> Int } service B { fn pb() -> Int } "
+  let b = "component B requires a: A provides b: B { provide b { fn pb() { return 0 } } }"
+  assert admit_ambient(svc.concat(b), "A/a/") == ""
+}
+
+// Exit test 3: admission against a halted composition refuses every incoming
+// text, naming the halt — even an otherwise-clean component.
+test "admission against a halted composition is refused (item 443)" {
+  let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(clean, "!halted;A/a/")
+    == "HALTED|admission against a halted composition is refused (item 443)"
+}
+
+// Exit test 4: an unknown row kind refuses, naming the row, rather than being
+// silently skipped.
+test "an unknown manifest row kind refuses naming the row" {
+  let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(clean, "?A/a/")
+    == "MANIFEST|unrecognized manifest row `?A/a/`"
+}
+
+// The wire's deferred kinds (`-C` replacement, `C=k:T` handoff) are recognized
+// by the grammar but fail closed until their wave lands, rather than admitting
+// as if no replacement/handoff were requested.
+test "a replacement row refuses until the deferred wave lands" {
+  let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(clean, "OldStore/db/;-OldStore")
+    == "MANIFEST|manifest replacement row `-OldStore` needs the deferred replacement wave (item 186)"
+}
+
+test "a handoff row refuses until the deferred type layer lands" {
+  let clean = "service D { fn q(s: Str) -> Int } component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(clean, "OldStore=db:D")
+    == "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred handoff/type-layer wave (item 186)"
+}
+
+// A requirement row whose provider is in the incoming text (not a cycle) simply
+// composes — the manifest consumer's edge does not falsely refuse.
+test "a manifest requirement met by the incoming text composes (ambient G3)" {
+  let svc = "service D { fn q(s: Str) -> Int } "
+  let store = "component NewStore provides db: D { provide db { fn q(s) { let x = s   return 0 } } }"
+  assert admit_ambient(svc.concat(store), "OldApp<db") == ""
 }
 
 test "undeclared bare value in a method is refused (G1)" {
