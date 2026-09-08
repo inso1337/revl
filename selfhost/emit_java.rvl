@@ -2973,7 +2973,7 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, fu
   if (needs_frame) { out = out.push("        RevlFrame frame = new RevlFrame();") }
   for (local of req_locals) {
     let srvn = value_str(value_field(reqs_m, local))
-    out = out.push(`        ${srvn} ${local} = ctx.get(${srvn}.class, ${json_dumps(local)});`)
+    out = out.push(`        ${srvn} ${local} = ctx.get(ServiceKey.of(${srvn}.class, ${json_dumps(local)}));`)
   }
   out = out.push("        try {")
   // The activation body (item 238): `let-effect`/`effect`/`emit`/`if`/`fail`/
