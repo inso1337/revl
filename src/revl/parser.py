@@ -790,6 +790,40 @@ class SeamRowDecl:
 
 
 @dataclass
+class PlaceDecl:
+    """A `place` statement: `place <address> on process "<name>" [backend <b>]`
+    (item 424 residual R3, 426 §6 point 4).
+
+    Placement is STRUCTURE, not a value — it says which process (and optionally
+    which backend) a row's provider runs on, the data `placement.py` reads today
+    from a `[processes]`/`[tiers]` TOML table. R3 decides its AUTHORITY by citing
+    item 337: moving a row across a process or backend boundary moves it into a
+    different admission domain, so a third party choosing where its own row is
+    judged is 337's admission-theater one tier up. The rule that falls out:
+
+    - `place` is writable ONLY in the base composition and the operator's site
+      layer. A stack layer writing `place` is refused (`_layer_op`), and the
+      invocation overlay may not reach a placement field at all (values only,
+      never structure — `composition._apply_overlay`).
+    - the address resolves to a row or it is a REFUSAL (426 §2.4), never a
+      no-op against a vanished target.
+
+    `place`, `on`, `process` and `backend` are CONTEXTUAL keywords read only in
+    this one position, exactly as `remote`/`seam` are, so the lexer's KEYWORDS
+    set is untouched and the self-host lexer needs no sync.
+
+    This slice RECORDS the placement fact on the row (an ADMISSION fact beside
+    the wiring, like `remote`/`seam`) and enforces its authority; wiring it to
+    `placement.py`'s runtime is a separate, larger concern the row table is now
+    the seam for.
+    """
+    address: "Address"
+    process: str
+    line: int
+    backend: str | None = None    # None == the composition's default backend
+
+
+@dataclass
 class CompositionDecl:
     name: str
     rows: list[RowDecl]
@@ -805,6 +839,11 @@ class CompositionDecl:
     # forwarder is derived from an edge another row provides, so it resolves
     # AFTER the file rows (composition.py `_resolve_seams`).
     seams: list["SeamRowDecl"] = field(default_factory=list)
+    # item 424 R3: `place` statements — a row's process/backend placement. Base
+    # composition only here; a site layer's placement rides its `LayerOp`s. Kept
+    # in their own list because a `place` names an existing row rather than
+    # declaring one, so it carries no `from` path and no label of its own.
+    places: list["PlaceDecl"] = field(default_factory=list)
     # item 426 S2 (§3.1): the ordered layer stack. `stack` entries are LEVEL 1
     # peers — conflicts between them refuse — and `site` is the single LEVEL 2
     # layer, the one level at which "I decide" is expressible. Both are ordered
@@ -849,13 +888,14 @@ class LayerOp:
     over the wiring graph, not declared, so a position operation would invent a
     concept the gate does not have.
     """
-    op: str                   # "add" | "remove" | "replace" | "configure" | "resolve"
+    op: str                   # "add" | "remove" | "replace" | "configure" | "resolve" | "place"
     line: int
     address: Address | None = None
     row: RowDecl | None = None                    # add / replace
     config: list[tuple[str, object, int]] = field(default_factory=list)
     winner: Address | None = None                 # resolve
     loser: Address | None = None                  # resolve
+    place: "PlaceDecl | None" = None              # place (site layer only)
 
 
 @dataclass
@@ -3025,6 +3065,7 @@ class Parser:
         rows: list[RowDecl] = []
         remotes: list[RemoteRowDecl] = []
         seams: list[SeamRowDecl] = []
+        places: list[PlaceDecl] = []
         uses: list[tuple[str, int]] = []
         stack: list[tuple[str, int]] = []
         site: tuple[str, int] | None = None
@@ -3072,21 +3113,66 @@ class Parser:
                 self._composition_label(name, seam.label, seam.line, seen)
                 seams.append(seam)
                 continue
+            if self.at("ident", "place"):
+                # item 424 R3: a placement statement about an existing row. It
+                # names no new label (it addresses one), so it is not run through
+                # `_composition_label`. Base composition only; a stack layer that
+                # writes `place` is refused in `_layer_op`.
+                pline = self.next().line
+                places.append(self._place_spec(self._address(), pline))
+                continue
             if not self.at("ident", "row"):
                 tok = self.peek()
                 raise self.err(
                     tok.line,
-                    "expected `row`, `remote`, `seam`, `use`, `stack`, `site`, "
-                    f"or `}}` in composition {name}, found {tok.value!r}",
+                    "expected `row`, `remote`, `seam`, `place`, `use`, `stack`, "
+                    f"`site`, or `}}` in composition {name}, found {tok.value!r}",
                     hint="a composition document declares rows: "
                          '`row @label from "path.rvl" provides key`, '
                          '`remote @label provides key: Service at host("h:port")`, '
-                         'or `seam @label on key("k") observe with @observer`')
+                         '`seam @label on key("k") observe with @observer`, or '
+                         'places one: `place @label on process "p" backend rust`')
             rows.append(self.row_decl(name))
             self._composition_label(name, rows[-1].label, rows[-1].line, seen)
         self.expect("}")
         return CompositionDecl(name, rows, line, uses, stack=stack,
-                               site=site, remotes=remotes, seams=seams)
+                               site=site, remotes=remotes, seams=seams,
+                               places=places)
+
+    def _place_spec(self, address: Address, line: int) -> PlaceDecl:
+        """`<address> on process "<name>" [backend <ident>]`, with the leading
+        `place` keyword and the address already consumed (item 424 R3).
+
+        The two callers — the base composition (`composition_decl`) and the site
+        layer (`_layer_op`) — differ only in WHERE a `place` is allowed, not in
+        how it is spelled, so the tail is parsed once here.
+        """
+        if not self.at("ident", "on"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `on process \"...\"` after `place "
+                f"{address.spelling()}`, found {tok.value!r}",
+                hint='a placement names the process the row runs on: `place '
+                     f'{address.spelling()} on process "provider" backend rust`')
+        self.next()
+        if not self.at("ident", "process"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"expected `process` after `place {address.spelling()} on`, "
+                f"found {tok.value!r}",
+                hint='`place %s on process "provider"`' % address.spelling())
+        self.next()
+        process = self.expect("string", what="a process name string").value
+        if not process:
+            raise self.err(line, f"`place {address.spelling()}` names an empty "
+                                 "process")
+        backend = None
+        if self.at("ident", "backend"):
+            self.next()
+            backend = self._name(what="a backend name after `backend`")
+        return PlaceDecl(address, process, line, backend)
 
     def _composition_label(self, composition: str, label: str, line: int,
                            seen: dict[str, int]) -> None:
@@ -3378,14 +3464,37 @@ class Parser:
             self.next()
             return LayerOp("resolve", oline, address=address,
                            winner=winner, loser=self._label_address())
+        if self.at("ident", "place"):
+            oline = self.next().line
+            address = self._address()
+            if not site:
+                # item 424 R3: placement is STRUCTURE, and a stack layer may not
+                # write it. A third party that could `place` chooses which tier
+                # judges its own row, which is item 337's admission-theater one
+                # tier up (a sender controlling both gate inputs picks the
+                # question). Only the base composition and the operator's site
+                # layer may place a row.
+                raise self.err(
+                    oline,
+                    f"`place` is a STRUCTURE operation, and `{layer}` is a stack "
+                    "layer, which may not place a row",
+                    hint="moving a row across a process or backend boundary moves "
+                         "it into a different admission domain, so a stack layer "
+                         "that placed a row would choose which tier judges it — "
+                         "item 337's admission-theater one tier up (424 R3). Only "
+                         "the base composition and the site layer may `place`")
+            spec = self._place_spec(address, oline)
+            return LayerOp("place", oline, address=spec.address, place=spec)
         raise self.err(
             tok.line,
             f"expected `add`, `remove`, `replace`, `configure`"
-            f"{', `resolve`' if site else ''}, `touches`, or `}}` in layer "
-            f"`{layer}`, found {tok.value!r}",
-            hint="there are four operations and no more (426 §3.2). There is no "
-                 "positional operation: load order is derived from the wiring, "
-                 "not declared, so no layer gets to reorder anything")
+            f"{', `resolve`, `place`' if site else ''}, `touches`, or `}}` in "
+            f"layer `{layer}`, found {tok.value!r}",
+            hint="there are four operations and no more (426 §3.2)"
+                 + (", plus the site layer's `resolve` and `place`" if site else "")
+                 + ". There is no positional operation: load order is derived "
+                   "from the wiring, not declared, so no layer gets to reorder "
+                   "anything")
 
     def _layer_config_block(self, layer: str,
                             address: Address) -> list[tuple[str, object, int]]:

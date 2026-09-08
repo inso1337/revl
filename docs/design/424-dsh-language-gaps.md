@@ -1,9 +1,14 @@
 # 424: the three language-side gaps from the deepseek-harness comparison
 
-Design note for roadmap item 424. Design only, with one exception: residual R2
-below (the `granted` clause, §1.2) is BUILT, because slice A1 folds it into item
-426's S1 and S1 has landed (`docs/composition-rows.md`). Gaps (b) and (c) are
-decided here and nothing of either is implemented.
+Design note for roadmap item 424. Originally design-only; slices have since
+landed and the residual dispositions are recorded in §1.2b. For (a): residual R2
+(the `granted` clause, §1.2) is BUILT (slice A1 folds it into item 426's S1, and
+S1 has landed, `docs/composition-rows.md`); residual R3 (placement authority,
+§1.3 slice A2) is BUILT (PR #748); residual R1 is documented-DEFERRED to its
+gating item 426 §5.3; and residuals R4/R5 are ACCEPTED as out of scope. For (b)
+and (c), the decisions here are load-bearing and their buildable slices have
+landed (B1 through B4, C1 through C3), while B2's non-first-party seams and the
+`rewrite` refusal remain as recorded.
 
 Item 424 records a full crawl of DSH's reference against revl and revl-harness.
 Most of what it found is harness-side and lives on the harness roadmap. Three
@@ -89,12 +94,35 @@ add, and this note adds none.**
 Five residuals. Two are already filed by 426 itself, two are small completions,
 one is gap (b).
 
-**R1. Activation of `replace` and `remove` (filed, not blocking (a)).** 426
+**R1. Activation of `replace` and `remove` (DEFERRED, not blocking (a)).** 426
 §5.2 ships incremental admission and inherits whole-generation activation, and
 §5.3 files the `configure`-only narrowing as the highest-value follow-on.
 424(a)'s own user story is "a user overrides one row and restarts", so R1 does
 not block (a). It blocks the harness's hot-configuration story, which is a
 harness-roadmap item, not this one.
+
+**Disposition: DEFERRED, and there is nothing at the language surface to build.**
+`replace` and `remove` already parse and admit (426 landed): the operations, the
+address resolution and the incremental compile of the patched rows are all in
+the tree, and admission is incremental (426 §5.1). What R1 asks for is hot
+ACTIVATION of a patched generation without a restart, and that is a runtime
+fiber-lifecycle project, not a surface a test on the frontend could pin. The
+blocker is G7 and it is exact rather than a matter of effort:
+`Session._wire_turn` is additive-only by construction (`src/revl/mcp/session.py`
+comment at the `_wire_turn` move, "an `add` layer is incremental, no generation
+change", 426 §5.2), so a `replace`/`remove` cannot ride it and instead takes the
+whole-generation path through `_dispose_all`/`_abort_swap`. Doing it in place
+would need per-key consumer re-resolution plus a partial dispose in dependency
+order, which 426 §5.2 states outright "puts G7 at risk" and §5.3 files as a
+separate follow-on so as not to "drag fiber lifecycle into a layering item". The
+gating item is **426 §5.3** (the `configure`-only narrowing follow-on); the story
+it serves is the harness's hot-reconfiguration case, which lives on the harness
+roadmap, not on 424. C2's landing measured the same edge from the other side: a
+`remote` row registers no teardown entry, so "the LIFO replay that blocks 426 R1
+is VACUOUS" there, which is a direct confirmation that R1's cost is precisely the
+LIFO teardown-and-re-resolution G7 owns. Building it here would be an unscoped
+runtime change to G7 taken by an implementer rather than the architect, so it is
+recorded as a documented deferred residual and left for 426 §5.3.
 
 **R2. The `granted` clause has no surface (a completion, not an override).**
 426 §9.3 Part 2 decides that the reach allowlist a non-first-party row may
@@ -140,24 +168,63 @@ adversarial review already caught and named admission-theater ("a sender
 controlling both gate inputs picks the question"). Letting a stack layer place
 reintroduces it one tier up.
 
-**R4. Extension by observation is not extension by composition.** This is the
-(a)/(b) seam and it is why item 424 filed two gaps rather than one. Under 426 a
-stack layer can `replace` a row, `configure` a row, or `add` a row. An added row
-is only reachable if something in the base already `requires` its key; if
-nothing does, the added row is inert except for whatever its own activation body
-does. So 426's third-party extension story covers substitution, configuration,
-and additive self-driving rows, and it does not cover attaching behaviour to an
-existing call path. 426 §11 says so in its own out-of-scope list: "interception
-(424(b), deliberately separate: a layer changes what is composed, never what
-observes a call)". §2 below is that half.
+**R4. Extension by observation is not extension by composition (ACCEPTED, out
+of scope for (a)).** This is the (a)/(b) seam and it is why item 424 filed two
+gaps rather than one. Under 426 a stack layer can `replace` a row, `configure` a
+row, or `add` a row. An added row is only reachable if something in the base
+already `requires` its key; if nothing does, the added row is inert except for
+whatever its own activation body does. So 426's third-party extension story
+covers substitution, configuration, and additive self-driving rows, and it does
+not cover attaching behaviour to an existing call path. 426 §11 says so in its
+own out-of-scope list: "interception (424(b), deliberately separate: a layer
+changes what is composed, never what observes a call)". §2 below is that half.
 
-**R5. Re-realming another author's component (out of scope in 426, needed by
-(b)).** 426 §2.3 keeps the limitation that `isolate k in realm(...)` is declared
-in the component source, not in the composition, so a layer cannot re-realm
-somebody else's component, and calls moving `isolate` into the composition
-document "a plausible follow-on, out of scope". §2.2 below measures what that
-costs: it is the reason the only same-key interposition shape the current
-language admits is one whose body the reference driver never runs.
+**Disposition: ACCEPTED as out of scope for (a).** R4 is not a missing piece of
+(a); it is the boundary between (a) and (b), and 424 drew that boundary
+deliberately by filing (b) as its own gap. The affordance R4 names (attaching
+behaviour to an existing call path) is exactly gap (b), whose decisions are
+D-424b.1 through D-424b.9 in §2 and whose slices B1 through B4 carry it (B1
+landed as the sanctioned interposition pattern; B2 through B4 land the `seam`
+row). Nothing about R4 belongs in an (a) slice, so it closes as an accepted
+scope boundary and is tracked under (b).
+
+**R5. Re-realming another author's component (ACCEPTED, out of scope; a
+follow-on to (b)).** 426 §2.3 keeps the limitation that `isolate k in realm(...)`
+is declared in the component source, not in the composition, so a layer cannot
+re-realm somebody else's component, and calls moving `isolate` into the
+composition document "a plausible follow-on, out of scope". §2.2 below measures
+what that costs: it is the reason the only same-key interposition shape the
+current language admits is one whose body the reference driver never runs.
+
+**Disposition: ACCEPTED as out of scope, inheriting 426 §2.3's own decision.**
+R5 is not (a)'s to decide: 426 already ruled re-realming from the composition a
+deliberate non-goal and a plausible follow-on, and this note does not reopen it.
+It bears on (a) only through (b), where §2.2 records it as the measured reason
+the same-key interposition shape drops its body, and §2.6 slice B2 builds the
+`seam` row as the sanctioned same-key interposition WITHOUT re-realming (a
+synthesized forwarding provider, D-424b.3), so (b) does not need R5 either. R5
+therefore closes as an accepted out-of-scope item owned by 426 §2.3, not a
+residual (a) leaves open.
+
+### 1.2b Disposition of the five residuals
+
+Every residual (a) names is now landed, built, documented-deferred with its
+gating item, or accepted as out of scope. None is left open.
+
+| residual | what it is | disposition | evidence / reason |
+|---|---|---|---|
+| **R1** | hot ACTIVATION of `replace`/`remove` without a restart | **DEFERRED (documented), gated on 426 §5.3** | admission is incremental and already landed; hot activation is a G7 fiber-lifecycle project (`_wire_turn` is additive-only, replace/remove take the whole-generation `_dispose_all` path). Not in (a)'s "override and restart" story; owned by the harness hot-reconfiguration roadmap. |
+| **R2** | the `granted` clause surface | **BUILT** | landed as the row clause: empty default, `requires` a subset of `granted`, unwritable in a stack layer (`docs/composition-rows.md`, slice A1). |
+| **R3** | placement authority for `place` | **BUILT** | the `place` statement and its authority rules (base + site layer only; overlay may not set structure; stack layer refused) landed via PR #748, decided by citing 337 (§1.3 slice A2). |
+| **R4** | attaching behaviour to a call path | **ACCEPTED, out of scope for (a)** | this is gap (b) by construction; 424 filed (b) separately and 426 §11 lists interception as out of (a)'s scope. Tracked under (b): B1 landed, B2 through B4 land the `seam` row. |
+| **R5** | re-realming another author's component from a layer | **ACCEPTED, out of scope** | 426 §2.3 already ruled it a deliberate non-goal and a plausible follow-on; (b)'s `seam` row (B2, D-424b.3) provides same-key interposition without it, so neither (a) nor (b) needs it. |
+
+**Verdict for (a).** With R2 and R3 built, R1 documented-deferred to its gating
+item, and R4/R5 accepted as out-of-scope boundaries owned by (b) and by 426
+§2.3, gap (a) has no open residual. Combined with 426 answering (a) in full
+(§1.1), 424(a) is closed. Gaps (b) and (c) close through their own landed slices
+(B1 through B4, C1 through C3); with all three gaps resolved, item 424 / issue
+#110 closes.
 
 ### 1.3 Slices for (a)
 
