@@ -579,12 +579,6 @@ jobs:
         run: sh ci/microvm/build-kernel.sh "$PWD/guest"
       - name: build guest rootfs
         run: sh ci/microvm/build-rootfs.sh "$PWD/guest"
-      - name: DEBUG boot diagnostic (temporary)
-        continue-on-error: true
-        run: backends/python/.venv/bin/python ci/microvm/debug-boot.py
-        env:
-          REVL_MICROVM_KERNEL: ${{ github.workspace }}/guest/bzImage
-          REVL_MICROVM_ROOTFS: ${{ github.workspace }}/guest/rootfs.img
       - run: backends/python/.venv/bin/python -m pytest tests/test_sandbox_microvm_rung_411.py -q --junitxml=/tmp/microvm-junit.xml
         env:
           # the guest boot assets built above. The DRIVER reads these (the test
