@@ -2634,3 +2634,79 @@ def test_ambient_link_refusal_ordered_against_internal_refusal(admit,
     assert got == admit(composed)
     ref_tag, _ = _ref(composed)
     assert ref_tag == "G2"
+
+
+# ------------------------------------------------ item 186 slice 3: G3 across
+# the manifest, the `!halted` header, manifest_wire(ir), and oracle A extended
+# to a cross-manifest dependency cycle.
+
+# A minimal running composition M and an incoming X that closes a cycle THROUGH
+# M: M's `A` requires `b` (provided by X's `B`) and X's `B` requires `a`
+# (provided by M's `A`). The cycle A -> B -> A spans the manifest boundary.
+_G3_SVC = "service A { fn pa() -> Int } service B { fn pb() -> Int } "
+_G3_M = ("component A requires b: B provides a: A "
+         "{ provide a { fn pa() { return 0 } } } ")
+_G3_X = ("component B requires a: A provides b: B "
+         "{ provide b { fn pb() { return 0 } } }")
+
+
+def test_manifest_wire_projects_provisions_and_requirements():
+    """manifest_wire(IR(M)) renders both the provision row (`A/a/`) and the
+    requirement row (`A<b`) of the running component, so the wire carries the
+    edges the G3 union graph needs."""
+    from revl import manifest_wire
+    ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
+    wire = manifest_wire(ir)
+    rows = set(wire.split(";"))
+    assert "A/a/" in rows, wire
+    assert "A<b" in rows, wire
+
+
+def test_ambient_g3_cycle_through_manifest_oracle_A(admit, admit_ambient):
+    """Oracle A extended to G3: a cycle that closes through the running manifest
+    is refused, byte-identical on admit_ambient(X, wire(M)), admit_src(M ++ X),
+    and the reference compile of M ++ X."""
+    from revl import manifest_wire
+    ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
+    wire = manifest_wire(ir)
+    composed = _G3_SVC + _G3_M + _G3_X
+    got = admit_ambient(_G3_SVC + _G3_X, wire)
+    assert got == "G3|dependency cycle: A -> B -> A (G3)", got
+    assert got == admit(composed)
+    ref_tag, ref_msg = _ref(composed)
+    assert ref_tag == "G3"
+    assert ref_msg == got.split("|", 1)[1]
+
+
+def test_ambient_g3_requirement_row_is_load_bearing(admit_ambient):
+    """Without the requirement row (`A<b`) — the pre-slice-3 provisions-only
+    wire — the edge back into the manifest is invisible and the same admission
+    WRONGLY admits. This pins that the requirement row closed the hole."""
+    assert admit_ambient(_G3_SVC + _G3_X, "A/a/") == ""
+
+
+def test_ambient_halted_header_refuses_every_incoming(admit_ambient):
+    """A `!halted` manifest refuses admission of every X, naming the halt —
+    even a clean component that would otherwise admit (item 443)."""
+    clean = ("service D { fn q(s: Str) -> Int } component NewStore provides "
+             "db: D { provide db { fn q(s) { let x = s   return 0 } } }")
+    assert admit_ambient(clean, "!halted;A/a/") == (
+        "HALTED|admission against a halted composition is refused (item 443)")
+    # the base invariant is unmoved: the same clean component admits against an
+    # empty (non-halted) manifest.
+    assert admit_ambient(clean, "") == ""
+
+
+def test_ambient_unknown_and_deferred_row_kinds_refuse(admit_ambient):
+    """An unknown row kind refuses naming the row; the deferred wave's kinds
+    (`-C` replacement, `C=k:T` handoff) fail closed rather than mis-admitting."""
+    clean = ("service D { fn q(s: Str) -> Int } component NewStore provides "
+             "db: D { provide db { fn q(s) { let x = s   return 0 } } }")
+    assert admit_ambient(clean, "?A/a/") == (
+        "MANIFEST|unrecognized manifest row `?A/a/`")
+    assert admit_ambient(clean, "OldStore/db/;-OldStore") == (
+        "MANIFEST|manifest replacement row `-OldStore` needs the deferred "
+        "replacement wave (item 186)")
+    assert admit_ambient(clean, "OldStore=db:D") == (
+        "MANIFEST|manifest handoff row `OldStore=db:D` needs the deferred "
+        "handoff/type-layer wave (item 186)")

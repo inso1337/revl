@@ -100,10 +100,15 @@
 //! Its own fail-closed rule is the mirror of this one: it answers only what it
 //! can answer EXACTLY, and every uncertainty is an absence rather than a guess.
 //!
-//! # Layer 2 is reserved, not implemented
+//! # Layer 2: the session surface (item 334 slice 1)
 //!
-//! See [`session`]. That runtime half is roadmap item 334's deliverable; the
-//! module exists so landing it is additive.
+//! See [`session`]. [`session::Session`] is the foundational first slice of the
+//! rust host: the generation state machine, the untrusted-author admission entry
+//! (`propose`/`admit`, reusing this crate's [`admit`]), and the item-245
+//! witnessed-call recording path (`call`/`commit`/`abort`/`unload`). The ACCEPT
+//! half of `propose` (activate + health-gate + swap), the witnessed-effect
+//! runtime, the WAL, and the approver callback are the remaining slices; a
+//! candidate the native gate does not refuse is fail-closed, never waved through.
 //!
 //! # Two host obligations
 //!
