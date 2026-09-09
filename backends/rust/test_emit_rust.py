@@ -131,7 +131,7 @@ mod _revl_router_scenario {
 
     fn load(root: &cordis::Context, name: &str) -> cordis::Fiber {
         let f = _revl_load(root, name, &serde_json::Value::Null).unwrap();
-        f.wait().unwrap();
+        f.try_wait().unwrap();
         f
     }
 
@@ -2243,7 +2243,7 @@ def test_cargo_test_runs_non_string_map_values_on_the_real_runtime(tmp_path):
 fn host_map_roundtrips_int_and_list_values() {
     let root = cordis::Context::new();
     let fiber = root.plugin(counters(), ());
-    fiber.wait().unwrap();
+    fiber.try_wait().unwrap();
     let counters = root.require::<Box<dyn Counters>>("counters").unwrap();
     counters.put("a".to_string(), 7i64);
     assert_eq!(counters.get("a".to_string()), 7i64);
@@ -2252,7 +2252,7 @@ fn host_map_roundtrips_int_and_list_values() {
 
     let root2 = cordis::Context::new();
     let fiber2 = root2.plugin(tags(), ());
-    fiber2.wait().unwrap();
+    fiber2.try_wait().unwrap();
     let tags = root2.require::<Box<dyn Tags>>("tags").unwrap();
     tags.put("t".to_string(), vec!["x".to_string(), "y".to_string()]);
     assert_eq!(tags.get("t".to_string()), vec!["x".to_string(), "y".to_string()]);
@@ -2792,7 +2792,7 @@ fn witnessed_persists_on_clean_unload() {
     revl_log_clear();
     let root = cordis::Context::new();
     let fiber = root.plugin(stash_ok(), ());
-    fiber.wait().unwrap();
+    fiber.try_wait().unwrap();
     assert_eq!(revl_log_snapshot(), vec!["stash".to_string()]);
     fiber.dispose().unwrap();
     assert_eq!(revl_log_snapshot(), vec!["stash".to_string()], "clean unload wrongly replayed the witnessed inverse");
@@ -2804,7 +2804,7 @@ fn witnessed_reverts_on_abort() {
     revl_log_clear();
     let root = cordis::Context::new();
     let fiber = root.plugin(stash_abort(), ());
-    assert!(fiber.wait().is_err());
+    assert!(fiber.try_wait().is_err());
     assert_eq!(revl_log_snapshot(), vec!["stash".to_string(), "undo(1)".to_string()]);
 }
 
@@ -2815,7 +2815,7 @@ fn bracket_still_reverts_on_clean_unload() {
     revl_log_clear();
     let root = cordis::Context::new();
     let fiber = root.plugin(acq_comp(), ());
-    fiber.wait().unwrap();
+    fiber.try_wait().unwrap();
     assert_eq!(revl_log_snapshot(), vec!["stash_acq".to_string()]);
     fiber.dispose().unwrap();
     assert_eq!(revl_log_snapshot(), vec!["stash_acq".to_string(), "bracket_undo".to_string()]);
@@ -2828,7 +2828,7 @@ fn compensation_discharges_on_clean_unload() {
     revl_log_clear();
     let root = cordis::Context::new();
     let fiber = root.plugin(comp_ok(), ());
-    fiber.wait().unwrap();
+    fiber.try_wait().unwrap();
     assert_eq!(revl_log_snapshot(), vec!["insert(row)".to_string()]);
     fiber.dispose().unwrap();
     assert_eq!(revl_log_snapshot(), vec!["insert(row)".to_string()], "clean unload wrongly fired the compensation");
@@ -2842,7 +2842,7 @@ fn compensation_two_phase_abort_orders_after_bracket() {
     revl_log_clear();
     let root = cordis::Context::new();
     let fiber = root.plugin(comp_abort(), ());
-    assert!(fiber.wait().is_err());
+    assert!(fiber.try_wait().is_err());
     assert_eq!(revl_log_snapshot(), vec![
         "stash_acq".to_string(),
         "insert(row)".to_string(),
@@ -2860,7 +2860,7 @@ fn method_level_compensation_discharges_on_clean_unload() {
     revl_log_clear();
     let root = cordis::Context::new();
     let fiber = root.plugin(db_impl(), ());
-    fiber.wait().unwrap();
+    fiber.try_wait().unwrap();
     let db = root.require::<Box<dyn Db>>("db").unwrap();
     db.ex("m".to_string());
     assert_eq!(revl_log_snapshot(), vec!["insert(m)".to_string()]);
@@ -2877,7 +2877,7 @@ fn compensation_budget_skips_after_deadline() {
     std::env::set_var("REVL_COMPENSATION_BUDGET_MS", "10");
     let root = cordis::Context::new();
     let fiber = root.plugin(comp_budget(), ());
-    assert!(fiber.wait().is_err());
+    assert!(fiber.try_wait().is_err());
     let log = revl_log_snapshot();
     std::env::remove_var("REVL_COMPENSATION_BUDGET_MS");
     assert!(log.contains(&"slow_delete(b)".to_string()), "{log:?}");
@@ -3040,7 +3040,7 @@ fn per_tool_call_mutations_persist_on_clean_unload() {
 
     let root = cordis::Context::new();
     let fiber = root.plugin(agent(), ());
-    fiber.wait().unwrap();
+    fiber.try_wait().unwrap();
     let ops = root.require::<Box<dyn Ops>>("ops").unwrap();
 
     // each tool call runs the provide-method, registering ONE transactional
@@ -3069,7 +3069,7 @@ fn per_tool_call_mutations_revert_on_abort_every_call() {
 
     let root = cordis::Context::new();
     let fiber = root.plugin(agent(), ());
-    fiber.wait().unwrap();
+    fiber.try_wait().unwrap();
     let ops = root.require::<Box<dyn Ops>>("ops").unwrap();
 
     for f in &files {
@@ -3101,7 +3101,7 @@ fn no_abort_commits_the_deliverable() {
 
     let root = cordis::Context::new();
     let fiber = root.plugin(agent(), ());
-    fiber.wait().unwrap();
+    fiber.try_wait().unwrap();
     let ops = root.require::<Box<dyn Ops>>("ops").unwrap();
     for f in &files { ops.touch(f.clone()); }
 
