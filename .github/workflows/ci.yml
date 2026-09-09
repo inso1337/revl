@@ -571,7 +571,7 @@ jobs:
       # the guest kernel is a small delta over defconfig; cache it so only the
       # first run (or a config/version bump) pays the ~10min build.
       - name: cache guest kernel
-        uses: actions/cache@v4
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
         with:
           path: guest/bzImage
           key: microvm-kernel-${{ hashFiles('ci/microvm/build-kernel.sh') }}
@@ -579,6 +579,12 @@ jobs:
         run: sh ci/microvm/build-kernel.sh "$PWD/guest"
       - name: build guest rootfs
         run: sh ci/microvm/build-rootfs.sh "$PWD/guest"
+      - name: DEBUG boot diagnostic (temporary)
+        continue-on-error: true
+        run: backends/python/.venv/bin/python ci/microvm/debug-boot.py
+        env:
+          REVL_MICROVM_KERNEL: ${{ github.workspace }}/guest/bzImage
+          REVL_MICROVM_ROOTFS: ${{ github.workspace }}/guest/rootfs.img
       - run: backends/python/.venv/bin/python -m pytest tests/test_sandbox_microvm_rung_411.py -q --junitxml=/tmp/microvm-junit.xml
         env:
           # the guest boot assets built above. The DRIVER reads these (the test
