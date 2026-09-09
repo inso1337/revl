@@ -526,27 +526,25 @@ jobs:
 
   # The `microvm` isolation rung (roadmap item 411 T6): the STRONGEST rung boots
   # the confined body under its OWN kernel inside a KVM guest. That needs
-  # /dev/kvm, which GitHub-hosted runners do NOT provide (no nested virt), so
-  # this coverage cannot live in a github-hosted job the way `sandbox-container`
-  # does — the 430/445 lesson is written into sandbox_runtime.py's header.
+  # /dev/kvm, which a GitHub-hosted `ubuntu-latest` runner DOES expose today
+  # (`crw-rw---- root:kvm`) — the runner user is not in the `kvm` group, so the
+  # first step opens the device with `chmod 666`, and qemu is not preinstalled,
+  # so it is apt-installed. The guest kernel + rootfs are BUILT in the job
+  # (ci/microvm/), so the live boot runs on a free hosted runner with no
+  # self-hosted VM and no cloud spend.
   #
-  # It runs on a SELF-HOSTED, KVM-capable runner the maintainer points at the
-  # `kvm` label (azure-amd-1), and is gated behind the `REVL_MICROVM_RUNNER`
-  # repository variable so it is SKIPPED — not left pending — until that runner
-  # is attached and provisioned. DO NOT add this job to the branch-protection
-  # required checks until it is green on a real KVM runner: a required check with
-  # no runner would block the merge queue forever.
+  # It stays NON-REQUIRED (not in branch protection): the build+boot is heavier
+  # and slower than the other lanes, so it runs for signal, not as a hard merge
+  # gate. Do not add it to the required checks.
   #
   # The PLAN-LAYER microVM tests already execute in `frontend`/`backend-python`
   # (they need no hypervisor). This job is the ONE place the LIVE boot runs: the
   # driver boots a real microVM and the in-VM canary confirms the boundary from
-  # inside. Verifying that boot here is the last requirement to close item 411's
-  # microVM rung. The live test skips cleanly (via `microvm_runtime_reason`) when
+  # inside. The live test skips cleanly (via `microvm_runtime_reason`) when
   # /dev/kvm or the guest kernel+rootfs are absent, so the skip audit below fails
-  # the job if a runner opted in but cannot actually boot a microVM.
+  # the job if the boot assets did not actually come up.
   sandbox-microvm:
-    if: vars.REVL_MICROVM_RUNNER == '1'
-    runs-on: [self-hosted, linux, kvm]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -555,16 +553,39 @@ jobs:
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7 (v7.6.0)
       # the CONDUCTOR needs cordis-py, same as the container rung.
       - run: sh backends/python/setup.sh
-      # prove the accelerator is actually here before depending on it; a runner
-      # that lost /dev/kvm must be loud, never a quiet all-skip.
-      - run: test -w /dev/kvm
+      # a hosted ubuntu-latest runner exposes /dev/kvm but the runner user is not
+      # in the `kvm` group; open it so the hypervisor can. Fail loudly if the
+      # device is gone (a runner image that dropped KVM must not go quietly).
+      - name: open /dev/kvm
+        run: |
+          ls -l /dev/kvm
+          sudo chmod 666 /dev/kvm
+          test -w /dev/kvm
+      # qemu is not preinstalled; the kernel build needs the usual toolchain.
+      - name: install qemu + kernel build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 build-essential bc bison flex \
+            libelf-dev libssl-dev xz-utils e2fsprogs
+      # the guest kernel is a small delta over defconfig; cache it so only the
+      # first run (or a config/version bump) pays the ~10min build.
+      - name: cache guest kernel
+        uses: actions/cache@v4
+        with:
+          path: guest/bzImage
+          key: microvm-kernel-${{ hashFiles('ci/microvm/build-kernel.sh') }}
+      - name: build guest kernel
+        run: sh ci/microvm/build-kernel.sh "$PWD/guest"
+      - name: build guest rootfs
+        run: sh ci/microvm/build-rootfs.sh "$PWD/guest"
       - run: backends/python/.venv/bin/python -m pytest tests/test_sandbox_microvm_rung_411.py -q --junitxml=/tmp/microvm-junit.xml
         env:
-          # the guest boot assets this KVM runner provisions. The DRIVER reads
-          # these (the test does not), so they are the runner's asset contract:
-          # a kernel + rootfs carrying `sh` + `python3` (+ 9p for fs grants).
-          REVL_MICROVM_KERNEL: ${{ vars.REVL_MICROVM_KERNEL }}
-          REVL_MICROVM_ROOTFS: ${{ vars.REVL_MICROVM_ROOTFS }}
+          # the guest boot assets built above. The DRIVER reads these (the test
+          # does not), so they are the boot contract: a kernel + rootfs carrying
+          # `sh` + `python3` (+ 9p for fs grants).
+          REVL_MICROVM_KERNEL: ${{ github.workspace }}/guest/bzImage
+          REVL_MICROVM_ROOTFS: ${{ github.workspace }}/guest/rootfs.img
       - name: the live microVM boot must actually execute here
         if: always()
         run: |
@@ -578,13 +599,12 @@ jobs:
           reasons = re.findall(r'<skipped\b[^>]*?\bmessage="([^"]*)"', text)
           if reasons:
               for reason in reasons:
-                  print(f"::error::microVM test skipped on the KVM runner: {reason}")
-              print(f"::error::{len(reasons)} test(s) skipped - this runner opted "
-                    "into REVL_MICROVM_RUNNER but cannot boot a microVM. Provision "
-                    "/dev/kvm + REVL_MICROVM_KERNEL + REVL_MICROVM_ROOTFS, or unset "
-                    "the variable.")
+                  print(f"::error::microVM test skipped on the hosted runner: {reason}")
+              print(f"::error::{len(reasons)} test(s) skipped - the live microVM "
+                    "boot did not run. /dev/kvm, qemu, or the built guest "
+                    "kernel+rootfs did not come up on this runner.")
               sys.exit(1)
-          print("no microVM test skipped: the live boot executed on this KVM lane")
+          print("no microVM test skipped: the live boot executed on this hosted lane")
           PY
 
   backend-typescript:
