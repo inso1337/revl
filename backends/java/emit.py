@@ -5808,8 +5808,27 @@ def _emit_v1(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_revl_frame(ir):
         out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
+        # item 322 Slice 2: the durable WAL sink rides alongside the
+        # teardown frame, but ONLY under `--record` — off, this whole block
+        # is absent and the output is byte-identical. Mirrors `_emit_v3`'s
+        # splice: a witnessed step's `revlRecordTransactional` calls are
+        # emitted from the SHARED `_emit_witnessed_step`, so every ir_version
+        # that can reach it must also define the sink it calls (issue #812).
+        if _RECORD_MODE:
+            out.extend(["    " + line if line else line for line in _emit_record_sink()])
     for component in components:
-        out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
+        # Witnessed/compensation teardown entries (item 243/247) are resolved
+        # by `_emit_component`'s modern path from the extern declarations; a
+        # legacy-dialect document that names a witnessed extern must hand them
+        # through too, or the step is silently downgraded to a plain bracket
+        # (the inverse would replay on a COMMITTED activation). The full
+        # v3-context inputs exactly match `_emit_v3`'s call; a document that
+        # declares none of them stays byte-identical because the empty
+        # collections refresh none of the existing lookups.
+        out.extend(["    " + line if line else line for line in _emit_component(
+            component, ir.get("services") or {}, ir.get("types"),
+            ir.get("functions") or [], ir.get("externs") or [],
+            ir.get("components") or [])])
     out[stdlib_at:stdlib_at] = [
         "    " + line if line else line
         for line in _emit_stdlib_helpers(_stdlib_helpers_reached(out[stdlib_at:]))
@@ -5846,8 +5865,27 @@ def _emit_v2(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_revl_frame(ir):
         out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
+        # item 322 Slice 2: the durable WAL sink rides alongside the
+        # teardown frame, but ONLY under `--record` — off, this whole block
+        # is absent and the output is byte-identical. Mirrors `_emit_v3`'s
+        # splice: a witnessed step's `revlRecordTransactional` calls are
+        # emitted from the SHARED `_emit_witnessed_step`, so every ir_version
+        # that can reach it must also define the sink it calls (issue #812).
+        if _RECORD_MODE:
+            out.extend(["    " + line if line else line for line in _emit_record_sink()])
     for component in components:
-        out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
+        # Witnessed/compensation teardown entries (item 243/247) are resolved
+        # by `_emit_component`'s modern path from the extern declarations; a
+        # legacy-dialect document that names a witnessed extern must hand them
+        # through too, or the step is silently downgraded to a plain bracket
+        # (the inverse would replay on a COMMITTED activation). The full
+        # v3-context inputs exactly match `_emit_v3`'s call; a document that
+        # declares none of them stays byte-identical because the empty
+        # collections refresh none of the existing lookups.
+        out.extend(["    " + line if line else line for line in _emit_component(
+            component, ir.get("services") or {}, ir.get("types"),
+            ir.get("functions") or [], ir.get("externs") or [],
+            ir.get("components") or [])])
     out[stdlib_at:stdlib_at] = [
         "    " + line if line else line
         for line in _emit_stdlib_helpers(_stdlib_helpers_reached(out[stdlib_at:]))
