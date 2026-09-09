@@ -1726,7 +1726,14 @@ def microvm_vm_argv(monitor: str, *, kernel: str, rootfs: str, ctl_dir: str,
     argv = [monitor, "-machine", "microvm,accel=kvm", "-cpu", "host",
             "-m", f"{memory_mib}M", "-no-reboot", "-display", "none",
             "-kernel", kernel,
-            "-drive", f"file={rootfs},format=raw,if=virtio,readonly=on"]
+            # the read-only virtio root. The `microvm` machine has NO PCI bus, so
+            # the disk crosses as an explicit virtio-MMIO block device: the
+            # `if=virtio` drive shortcut resolves to virtio-blk-PCI, which
+            # microvm cannot host ("No 'PCI' bus found"). `if=none` + an explicit
+            # `virtio-blk-device` (the mmio transport, like the 9p devices below)
+            # is the transport that boots. root=/dev/vda is unchanged.
+            "-drive", f"file={rootfs},format=raw,if=none,id=revl-root,readonly=on",
+            "-device", "virtio-blk-device,drive=revl-root"]
     # the control share: canary in, report out over the serial console.
     argv += ["-fsdev",
              f"local,id=ctl,path={ctl_dir},security_model=none,readonly=on",
