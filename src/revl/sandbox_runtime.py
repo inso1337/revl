@@ -19,10 +19,12 @@ The ladder is `wasm-cell` -> `container` -> `microvm` (weakest to strongest).
   job on top of item 335's substrate, not a runtime driver — and an in-process
   cell shares the conductor's address space, so it is the weakest claim on the
   ladder even once it exists.
-* `microvm` needs a hypervisor (`/dev/kvm`, firecracker/qemu). Neither this
-  repository's CI runners nor a developer laptop reliably has nested
-  virtualization, so its driver could be written but never EXECUTED, which is
-  the shape this repo has been bitten by (item 430/445).
+* `microvm` needs a hypervisor (`/dev/kvm`, firecracker/qemu) and a guest
+  kernel + rootfs to boot, which a developer laptop does not usually have to
+  hand. It was chosen LAST for that reason. A GitHub-hosted `ubuntu-latest`
+  runner does expose `/dev/kvm`, so the live boot now runs there (the
+  `sandbox-microvm` job builds a small guest and boots it); the earlier
+  "no CI runner has KVM" reading was the 430/445 shape and has been corrected.
 * `container` needs a container runtime, which developer machines and
   GitHub-hosted `ubuntu-latest` runners both have. It is a real kernel-enforced
   boundary (namespaces + cgroups + a dropped capability set), and it is what the
@@ -79,10 +81,11 @@ substrate) and the `microvm` rung (the KVM guest, item 411 T6) have both landed
 their drivers below. Neither downgrades: `wasm-cell` verifies the cell substrate
 and refuses the unbuilt component-hosting step, and `microvm` gates on `/dev/kvm`
 via `microvm_runtime_reason` — refusing with a named gap wherever the accelerator
-is absent (every host in reach today), and where KVM is present booting a VM and
-confirming the boundary from inside before refusing the same unbuilt hosting
-step. Verifying that live microVM boot on a KVM-capable lane is the last
-requirement to close item 411's microVM rung.
+is absent, and where KVM is present booting a VM and confirming the boundary from
+inside before refusing the same unbuilt hosting step. That live boot runs on the
+hosted `sandbox-microvm` lane (a GitHub-hosted `ubuntu-latest` runner exposes
+`/dev/kvm`; the job builds a small guest kernel + rootfs and boots it), which is
+the last requirement to close item 411's microVM rung.
 """
 
 from __future__ import annotations
@@ -1562,8 +1565,10 @@ class WasmCellDriver:
 # "refuse, never degrade" law. Two things shape it differently:
 #
 #   * The accelerator is not portable. A microVM is a KVM guest, so it needs
-#     `/dev/kvm`; the design (and this module's header, the 430/445 lesson) is
-#     blunt that neither the CI runners nor a developer laptop reliably has it.
+#     `/dev/kvm`; a developer laptop does not usually have it, and the design
+#     (and this module's header) once read that as "no CI runner has it either",
+#     which was the 430/445 shape — a GitHub-hosted `ubuntu-latest` runner DOES
+#     expose `/dev/kvm`, and the `sandbox-microvm` job boots the live guest there.
 #     So the availability gate is `microvm_runtime_reason()`, the sibling of the
 #     wasm tier's `run_wasm.wasm_runtime_reason()` and the container rung's
 #     `docker version` probe: when it names a reason, the rung REFUSES with that
@@ -1579,10 +1584,11 @@ class WasmCellDriver:
 #
 # The live boundary this driver boots — a KVM microVM whose in-guest canary
 # confirms the arch, the read-only root, the net posture and the 9p mounts from
-# inside — is COMPLETE in code here but has never been EXECUTED, because nothing
-# in reach carries `/dev/kvm`. Verifying that boot on a KVM-capable lane is the
-# last requirement to close item 411's microVM rung (the CI job
-# `sandbox-microvm`, gated on a self-hosted KVM runner). Hosting the placement
+# inside — is EXECUTED on the `sandbox-microvm` CI job, which runs on a
+# GitHub-hosted `ubuntu-latest` runner: it exposes `/dev/kvm`, so the job opens
+# the device, installs qemu, builds a small guest kernel + rootfs, and boots it.
+# Verifying that boot is the last requirement to close item 411's microVM rung.
+# Hosting the placement
 # COMPONENT inside the confirmed VM — the in-guest py runner over a 9p root and
 # the host-mode seam relay — is the step after that, so until it lands this
 # driver, like `WasmCellDriver`, VERIFIES the boundary and then REFUSES to boot
@@ -1830,9 +1836,10 @@ class MicroVMDriver:
 
     One instance per placement run. It gates on `/dev/kvm` and a monitor via
     `microvm_runtime_reason` (refusing with the named gap wherever the
-    accelerator is absent — the state on every host in reach today), and where
-    KVM IS present it boots a microVM and CONFIRMS the boundary from inside with
-    the boot canary. Hosting the placement component inside the confirmed VM (the
+    accelerator is absent), and where KVM IS present (a GitHub-hosted
+    `ubuntu-latest` runner exposes it) it boots a microVM and CONFIRMS the
+    boundary from inside with the boot canary. Hosting the placement component
+    inside the confirmed VM (the
     in-guest py runner over a 9p root, the host-mode seam relay) is the step
     after the live boot is verified on a KVM lane, so — like `WasmCellDriver` —
     it verifies the boundary and then REFUSES to boot the component rather than
@@ -1941,14 +1948,24 @@ class MicroVMDriver:
             return {}, (f"process {pname!r}: no VM monitor to boot the in-VM canary.")
         environ = os.environ
         ctl_dir = Path(ctx.get("seam_dir") or ".") / f"revl-microvm-{pname}"
+        mounts = seam_dir_mounts(ctx) + envelope_mounts(env)
         try:
             ctl_dir.mkdir(parents=True, exist_ok=True)
             (ctl_dir / "canary.sh").write_text(
                 _canary_script(env.get("net", "none")), encoding="utf-8")
+            # The guest init learns the fs-grant shares' identity paths ONLY from
+            # here: a virtio-9p `mount_tag` is opaque and carries no path, and the
+            # boot cmdline (microvm_vm_argv) names only the control tag, so the
+            # per-share `tag -> path -> mode` map is staged alongside the canary
+            # in the same read-only control share. The init mounts each share at
+            # its path in the declared mode before the canary reads /proc/mounts.
+            (ctl_dir / "mounts").write_text(
+                "".join(f"{microvm_mount_tag(i)} {path} {mode}\n"
+                        for i, (path, mode) in enumerate(mounts)),
+                encoding="utf-8")
         except OSError as exc:  # pragma: no cover - a broken placement dir
             return {}, (f"process {pname!r}: could not stage the microVM canary "
                         f"({exc}).")
-        mounts = seam_dir_mounts(ctx) + envelope_mounts(env)
         argv = microvm_vm_argv(
             monitor, kernel=environ["REVL_MICROVM_KERNEL"],
             rootfs=environ["REVL_MICROVM_ROOTFS"], ctl_dir=str(ctl_dir),
@@ -2005,7 +2022,8 @@ def resolve_driver(rung: str) -> ContainerDriver | WasmCellDriver | MicroVMDrive
     boundary), `wasm-cell` (the in-process cell substrate) and `microvm` (the
     KVM guest). None of them ever downgrades: a rung whose boundary cannot be
     established here refuses with the named gap (the microVM rung on any host
-    without `/dev/kvm`, which is every host in reach today)."""
+    without `/dev/kvm`; a GitHub-hosted `ubuntu-latest` runner has it, so the
+    live boot runs on the `sandbox-microvm` lane)."""
     if rung == ContainerDriver.rung:
         return ContainerDriver()
     if rung == WasmCellDriver.rung:

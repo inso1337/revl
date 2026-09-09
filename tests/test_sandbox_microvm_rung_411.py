@@ -24,11 +24,12 @@ Levels:
    (the same shape the wasm tier's `wasm_runtime_reason` gate uses): a KVM guest
    is booted and the in-VM canary CONFIRMS the read-only root and the net=none
    posture from inside, and preflight refuses carrying that in-VM evidence. This
-   needs `/dev/kvm` plus a guest kernel + rootfs, which neither a GitHub-hosted
-   runner nor a developer laptop has, so it SKIPS everywhere except the
-   `sandbox-microvm` CI lane on a self-hosted KVM runner. It is stated plainly
-   rather than hidden behind a green run: verifying this live boot on a KVM lane
-   is the last requirement to close item 411's microVM rung.
+   needs `/dev/kvm` plus a guest kernel + rootfs. A GitHub-hosted `ubuntu-latest`
+   runner exposes `/dev/kvm`, so the live boot runs on the `sandbox-microvm` CI
+   lane (it opens the device, installs qemu, and builds a small guest kernel +
+   rootfs); it SKIPS on a host without KVM or without those boot assets.
+   Verifying this live boot is the last requirement to close item 411's microVM
+   rung.
 """
 
 import sys
@@ -319,10 +320,10 @@ _REASON = _sb.microvm_runtime_reason()
                     reason=f"no bootable microVM here: {_REASON}")
 def test_a_real_microvm_boots_and_confirms_the_boundary_in_vm():
     # Only on a KVM-capable lane with a guest kernel + rootfs provisioned (the
-    # `sandbox-microvm` CI job on a self-hosted runner). The driver boots a real
-    # microVM, the in-VM canary confirms the read-only root and the net=none
-    # posture from inside, and preflight refuses carrying that evidence — the
-    # live-boot milestone that closes item 411's microVM rung.
+    # `sandbox-microvm` CI job on a hosted ubuntu-latest runner). The driver
+    # boots a real microVM, the in-VM canary confirms the read-only root and the
+    # net=none posture from inside, and preflight refuses carrying that evidence
+    # — the live-boot milestone that closes item 411's microVM rung.
     driver = _sb.MicroVMDriver()
     achieved, err = driver.preflight(
         "p", _ENV_NONE, {"backend": "py", "seam_dir": "/tmp"})

@@ -71,11 +71,11 @@ NOT_REQUIRED_CHECKS = {
     # Aggregate/roots recombination job; informational over the per-tier gates
     # that are themselves required.
     "backend-roots-combined": "aggregate over already-required per-tier gates",
-    # Opt-in microVM smoke: gated on `vars.REVL_MICROVM_RUNNER == '1'` and a
-    # self-hosted [linux, kvm] runner with /dev/kvm + boot assets, so it does
-    # not run on a default PR at all. Not in branch protection; run for signal
-    # where a KVM runner is provisioned, never a hard merge gate.
-    "sandbox-microvm": "opt-in self-hosted KVM smoke; not a hard merge gate",
+    # Live microVM boot: runs on a hosted `ubuntu-latest` runner (which exposes
+    # /dev/kvm), building a small guest kernel + rootfs and booting it. Heavier
+    # and slower than the other lanes, so it is run for signal, not a hard merge
+    # gate; deliberately kept out of branch protection.
+    "sandbox-microvm": "live KVM boot on a hosted runner; not a hard merge gate",
     # Path-filter gate (item, PR #765): decides whether the frontend/cordis/
     # conformance/formal jobs run on a given PR. Pure routing over `git diff`;
     # it gates nothing itself and is never a merge blocker.
