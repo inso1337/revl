@@ -66,9 +66,68 @@ from ._paths import backends_root
 
 
 # item 443: how often an ARMED process re-reads the latch, and the status it
-# dies with. Nothing polls when no latch is armed, which is the default.
 _ESTOP_POLL = 0.05
 _ESTOP_EXIT = 75
+
+
+# ---------------------------------------------------------------------------
+# the runner's own redaction funnel (issue #814; advisory GHSA-4x4q-296m-9x9x)
+#
+# `runtime._record` funnels every host-trace event through
+# `confidential.redact_text` at ONE choke point; the bridge funnels every seam
+# reply through `seam_failure`. This runner's own log channels — the probe
+# lines, the E-Stop inventory, and any exception text this process is about to
+# print — sat OUTSIDE both funnels, so a value a declared `Secret[T]` marking
+# had registered reached the operator console verbatim on exactly the paths
+# the composition's own code never sees. The funnel reads the SAME registry
+# the runtime marks (`confidential` ships next to `runtime.py`, with the same
+# path-loaded fallback), so a marking registered anywhere in this process is
+# honoured here too: one marking, one set of remembered values, one more sink.
+#
+# `main()`'s catch-all is the same rule applied to the LAST unguarded channel:
+# an exception this process does not otherwise catch used to escape as a bare
+# traceback to stderr, which the conductor merges verbatim (stderr=STDOUT).
+# A traceback is also unreadable noise in an interleaved log; one redacted
+# line, exit non-zero, keeps the failure machine-visible without it.
+
+_FUNNEL = None
+
+
+def _funnel():
+    """The `confidential` module, imported through the same trusted-loader
+    window the runtime uses — with the path-loaded fallback for the suites
+    that load this file by absolute path."""
+    global _FUNNEL
+    if _FUNNEL is None:
+        backend_dir = str(backends_root() / "python")
+        if backend_dir not in sys.path:
+            sys.path.insert(0, backend_dir)
+        try:
+            import confidential  # noqa: PLC0415
+        except ModuleNotFoundError:  # pragma: no cover — path-loaded runner
+            import importlib.util
+            _spec = importlib.util.spec_from_file_location(
+                "confidential", os.path.join(backend_dir, "confidential.py"))
+            confidential = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(confidential)
+            sys.modules.setdefault("confidential", confidential)
+        _FUNNEL = confidential
+    return _FUNNEL
+
+
+def _redact(text: str) -> str:
+    """Registered-secret scrub for free-form text this process prints."""
+    out = _funnel().redact_text(text)
+    return out if isinstance(out, str) else text
+
+
+def _redact_call(text: str, args) -> str:
+    """The two-stage funnel (item 421 F5) for a failure text this process
+    prints on its OWN behalf: the call's own argument values first, then the
+    registered secrets — the same contract `bridge.seam_failure` gives a wire
+    reply, applied to the runner's in-process error channel."""
+    out = _funnel().redact_call_text(text, args)
+    return out if isinstance(out, str) else text
 
 
 def _estop_watch(name: str, runtime_mod, poll: float = _ESTOP_POLL) -> None:
@@ -102,13 +161,17 @@ def _estop_watch(name: str, runtime_mod, poll: float = _ESTOP_POLL) -> None:
                 "stranded": record.get("stranded") or [],
                 "resumable": False,
             }
-            print(f"[{name}] HALTED {json.dumps(inventory)}", flush=True)
+            # issue #814: the inventory's `stranded` entries carry the repr of
+            # each stranded resource (runtime._strand_registered), which can
+            # embed a connection string or handle — funnel it like every other
+            # line this process prints.
+            print(f"[{name}] HALTED {_redact(json.dumps(inventory))}", flush=True)
             sys.stdout.flush()
             os._exit(_ESTOP_EXIT)  # noqa: SLF001 — no teardown, by design
         time.sleep(poll)
 
 
-def _eval_probe(expr: str, namespace: dict):
+def _eval_probe(expr: str, namespace: dict, args_out: list | None = None):
     """Evaluate one probe: `key.method(literal, ...)` — and nothing else.
 
     A placement file is *data*, not a program. Probes are therefore parsed and
@@ -136,6 +199,11 @@ def _eval_probe(expr: str, namespace: dict):
         args = [ast.literal_eval(arg) for arg in call.args]
     except ValueError as exc:
         raise ValueError(f"probe arguments must be literals ({exc})") from exc
+    if args_out is not None:
+        # issue #814: hand the parsed literals back so the caller's error path
+        # can run the two-stage funnel (the call's own argument values first)
+        # even when the DISPATCH raises after the parse succeeded.
+        args_out.extend(args)
     target = getattr(namespace[key], method, None)
     if not callable(target):
         raise ValueError(f"{key!r} has no method {method!r}")
@@ -619,7 +687,12 @@ async def run(spec: dict, spec_path=None) -> None:
                          name="revl-estop", daemon=True).start()
 
     def log(channel: str, subject: str, detail: str = "") -> None:
-        print(f"[{name}] {channel:<6}| {subject:<16}| {detail}".rstrip(), flush=True)
+        # issue #814: this is the one choke point every console line of this
+        # process passes through — the runner-side twin of `runtime._record`'s
+        # funnel. A probe result, a repoint failure quoting a seam address, a
+        # host event interpolating a key: all scrubbed here, so a sink added
+        # to this file tomorrow reads an already-redacted line.
+        print(f"[{name}] {channel:<6}| {_redact(subject):<16}| {_redact(detail)}".rstrip(), flush=True)
 
     runtime_mod.set_trace(lambda event: log("host", event.split(" ", 1)[0],
                                             event.split(" ", 1)[1] if " " in event else ""))
@@ -830,14 +903,21 @@ async def run(spec: dict, spec_path=None) -> None:
     for key in spec.get("proxies") or {}:
         namespace[key] = root.get(key)
     for expr in spec.get("probe") or []:
+        args: list = []
         try:
-            value = _eval_probe(expr, namespace)
+            value = _eval_probe(expr, namespace, args_out=args)
             if hasattr(value, "__await__"):
                 value = await value
             await _flush()
             log("probe", expr, f"=> {value!r}")
         except Exception as exc:  # noqa: BLE001
-            log("probe", expr, f"ERROR {type(exc).__name__}: {exc}")
+            # issue #814: the probe dispatches IN-PROCESS, so `bridge.seam_failure`
+            # (the wire reply's funnel) never runs on this path — a `KeyError`
+            # quoting a secret argument used to reach the console verbatim. The
+            # two-stage funnel: this call's own literal arguments first, then
+            # the registered secrets (via `log`).
+            log("probe", expr,
+                "ERROR " + _redact_call(f"{type(exc).__name__}: {exc}", args))
 
     # 5. hold until the conductor stops us, then tear down consumers first.
     #
@@ -945,6 +1025,20 @@ def main() -> None:
         # the REFUSED line that caused it — and exit non-zero, so a refused
         # seam is machine-visible instead of a note under a green run.
         print(str(exc), flush=True)
+        raise SystemExit(1) from None
+    except Exception as exc:  # noqa: BLE001 — issue #814, the last unguarded channel
+        # An exception the load path (BootRefused) and the probe path do not
+        # catch — a raise inside an async fiber's own bookkeeping, a config
+        # hook, a serve setup — used to escape as a bare traceback to stderr,
+        # which the conductor merges verbatim: the exception MESSAGE quotes
+        # whatever the failing frame interpolated, and no funnel ever saw it.
+        # One redacted line, non-zero exit: still loud, still machine-visible,
+        # no longer an unanalysed crossing. KeyboardInterrupt/SystemExit pass
+        # through untouched (no user data in them, and the default handling is
+        # what an operator Ctrl-C expects).
+        name = spec.get("name") or "?"
+        print(f"[{name}] FATAL {_redact_call(f'{type(exc).__name__}: {exc}', ())}",
+              file=sys.stderr, flush=True)
         raise SystemExit(1) from None
 
 
