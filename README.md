@@ -195,6 +195,40 @@ mid-plan failure unwinds by inverses instead of by hand
 prints the derivation behind a rejection or a runtime transition
 ([docs/why-traces.md](docs/why-traces.md)).
 
+### Placement is an isolation boundary, not just a tier choice
+
+A component can declare an isolation boundary and a capability envelope, no
+disk, no network, or an explicit allowlist, and run inside a wasm cell, a
+container, or a microVM while still composed with the rest of the system over
+the ordinary process seam (value copy, audited crossings). The envelope is
+checked statically and enforced at runtime: a component whose declared
+capabilities exceed the sandbox grant is refused before anything launches, and
+inside the boundary the container runtime or hypervisor is the enforcer. That is
+what turns the untrusted-author and taint guarantees from checked into
+physically enforced, since an opaque host body confined to no network cannot
+exfiltrate what the audit cannot see inside it. The ladder runs from wasm cell
+(in process, weakest) through container to microVM (its own kernel, strongest),
+one capability contract at three enforcement strengths. The container rung hosts
+a component today, and the microVM rung boots a guest and confirms the boundary
+from inside, with in-guest hosting the next step
+([docs/design/411-sandbox-placement.md](docs/design/411-sandbox-placement.md)).
+
+### Deployment is a coordinated transaction, not a copy
+
+`revl deploy` admits a deployment map and drives a coordinated PREPARE then
+COMMIT across the composition's participants, so a partial failure rolls back in
+reverse commit order instead of leaving a half-applied system. When the
+deployment names an attested bundle, the receiver re-verifies the whole chain,
+from source to IR hash to artifact hash to capability policy to evidence to
+signature, by re-hashing the bytes it will actually run rather than trusting the
+attestation's own claims, and refuses to load anything whose hash, backend,
+capabilities, or policy drifted. Every effect that crosses a boundary carries a
+correlation identity for recovery and duplicate detection. The coordinated
+multi-process deploy runs today; the cross-machine leg, an ssh runner that
+speaks the same protocol behind a pinned host key, is landing, and a replicated
+write-ahead log for partition-safe distributed commit stays deferred
+([docs/deploy.md](docs/deploy.md)).
+
 ### Crash recovery is derived, not bolted on
 
 The effect accumulator is already an ordered list of actions paired with their
