@@ -36,10 +36,20 @@ sudo mount -o loop "$OUT/rootfs.img" "$mnt"
 trap 'sudo umount "$mnt" 2>/dev/null || true' EXIT
 sudo tar -C "$mnt" -xf "$OUT/rootfs.tar"
 sudo mkdir -p "$mnt/proc" "$mnt/sys" "$mnt/dev" "$mnt/tmp" "$mnt/revl-ctl" "$mnt/sbin"
-sudo cp "$INIT" "$mnt/sbin/init"
-sudo chmod 0755 "$mnt/sbin/init"
+# Alpine ships /sbin/init as a symlink into busybox (whose init then reads
+# /etc/inittab and tries to run openrc). `cp` onto that symlink would follow it
+# instead of replacing it, leaving busybox-init as PID 1. Remove it first so our
+# script becomes /sbin/init as a real regular file, and drop the inittab so no
+# stray busybox-init path can run openrc either.
+sudo rm -f "$mnt/sbin/init" "$mnt/etc/inittab"
+sudo install -m 0755 "$INIT" "$mnt/sbin/init"
 # make sure /bin/sh resolves (Alpine ships it as a busybox symlink already).
 sudo test -e "$mnt/bin/sh" || sudo ln -sf /bin/busybox "$mnt/bin/sh"
+echo "== rootfs /sbin/init =="
+sudo ls -l "$mnt/sbin/init"; sudo head -1 "$mnt/sbin/init"
+echo "== rootfs /bin/sh, /bin/busybox, python3 =="
+sudo ls -l "$mnt/bin/sh" "$mnt/bin/busybox" 2>/dev/null || true
+sudo test -x "$mnt/usr/bin/python3" && echo "python3 present" || echo "python3 MISSING"
 sudo sync
 sudo umount "$mnt"
 trap - EXIT

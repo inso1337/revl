@@ -1,9 +1,9 @@
 """TEMPORARY microVM boot diagnostic (remove before merge).
 
-Boots several qemu argv variants against the built kernel+rootfs and prints the
-full stdout(serial)+stderr for each, so we can see the real qemu error and which
-transport shape reaches CANARY=done. mounts=[] to isolate the boot from the 9p
-fs-grant share.
+Mirrors MicroVMDriver._run_probe exactly (same ctl dir, canary.sh, mounts
+manifest, argv, net=none, mounts=[("/tmp","rw")] as the real test uses) but
+prints the FULL serial console + stderr, which the driver only tails to 240
+chars. Lets us see the whole boot -> 9p mount -> canary -> poweroff in one run.
 """
 import os
 import subprocess
@@ -17,50 +17,30 @@ KERNEL = os.environ["REVL_MICROVM_KERNEL"]
 ROOTFS = os.environ["REVL_MICROVM_ROOTFS"]
 QEMU = "qemu-system-x86_64"
 
-ctl = Path("/tmp/revl-dbg-ctl")
+# the same shape the real test drives: seam_dir=/tmp, no spec_path -> one rw 9p
+# grant of /tmp (tag revl-fs-0).
+mounts = [("/tmp", "rw")]
+ctl = Path("/tmp/revl-microvm-dbg")
 ctl.mkdir(exist_ok=True)
 (ctl / "canary.sh").write_text(sb._canary_script("none"), encoding="utf-8")
-(ctl / "mounts").write_text("", encoding="utf-8")
+(ctl / "mounts").write_text(
+    "".join(f"{sb.microvm_mount_tag(i)} {p} {m}\n"
+            for i, (p, m) in enumerate(mounts)), encoding="utf-8")
 
-base = sb.microvm_vm_argv(QEMU, kernel=KERNEL, rootfs=ROOTFS,
-                          ctl_dir=str(ctl), mounts=[], net="none")
-
-
-def run(label, argv):
-    print("\n\n########## VARIANT:", label, "##########", flush=True)
-    print("ARGV:", " ".join(argv), flush=True)
-    try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=90)
-        print("RC:", p.returncode, flush=True)
-        print("----- STDOUT (serial) -----\n", p.stdout, flush=True)
-        print("----- STDERR -----\n", p.stderr, flush=True)
-        print("CANARY_DONE:", "CANARY=done" in p.stdout, flush=True)
-    except subprocess.TimeoutExpired as e:
-        print("TIMEOUT", flush=True)
-        print("----- partial STDOUT -----\n", e.stdout, flush=True)
-        print("----- partial STDERR -----\n", e.stderr, flush=True)
-
-
-# A: exact driver argv (baseline — expected to reproduce the failure).
-run("A-exact-driver-argv", list(base))
-
-# B: same but microvm with pcie=on (gives if=virtio a PCI bus).
-b = list(base)
-i = b.index("microvm,accel=kvm")
-b[i] = "microvm,accel=kvm,pcie=on"
-run("B-pcie-on", b)
-
-# C: replace `-drive ...if=virtio...` with if=none + explicit virtio-blk-device
-# (mmio blk, no PCI needed).
-c = []
-skip = False
-for tok in base:
-    if tok.startswith("file=") and "if=virtio" in tok:
-        # rebuild as if=none,id=vda0 and inject the device after.
-        newtok = tok.replace("if=virtio", "if=none,id=vda0")
-        c.append(newtok)
-        c.append("-device")
-        c.append("virtio-blk-device,drive=vda0")
-    else:
-        c.append(tok)
-run("C-virtio-blk-device-mmio", c)
+argv = sb.microvm_vm_argv(QEMU, kernel=KERNEL, rootfs=ROOTFS,
+                          ctl_dir=str(ctl), mounts=mounts, net="none")
+print("ARGV:", " ".join(argv), flush=True)
+print("MOUNTS MANIFEST:\n" + (ctl / "mounts").read_text(), flush=True)
+try:
+    p = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    print("RC:", p.returncode, flush=True)
+    print("----- STDOUT (serial) -----\n", p.stdout, flush=True)
+    print("----- STDERR -----\n", p.stderr, flush=True)
+    print("CANARY_DONE:", "CANARY=done" in p.stdout, flush=True)
+except subprocess.TimeoutExpired as e:
+    print("TIMEOUT (guest did not power off)", flush=True)
+    out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+    err = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+    print("----- partial STDOUT (serial) -----\n", out, flush=True)
+    print("----- partial STDERR -----\n", err, flush=True)
+    print("CANARY_DONE:", "CANARY=done" in out, flush=True)
