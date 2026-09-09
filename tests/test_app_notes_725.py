@@ -39,20 +39,57 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
 from revl.mcp.http_face import HttpComposedServer  # noqa: E402
+from revl.dev import DevWebUI, _preflight  # noqa: E402
 
 APP = ROOT / "examples" / "app" / "notes.rvl"
+FRONTEND = ROOT / "examples" / "app" / "frontend"
 CORDIS_PY = ROOT / "backends" / "python" / ".venv" / "bin" / "python"
 
 
+def test_dev_webui_rejects_escaping_entry_paths():
+    host = DevWebUI(ROOT / "examples" / "app")
+    for bad in ("../secrets.txt", "/etc/passwd", "..", "sub/../../x"):
+        with pytest.raises(RuntimeError):
+            host.add_entry(bad, "m", ["/notes"])
+
+
+def test_dev_webui_records_the_declared_entry():
+    host = DevWebUI(ROOT / "examples" / "app")
+    assert (
+        host.add_entry("./frontend/entry.client.ts", "m", ["/notes"])
+        == "./frontend/entry.client.ts"
+    )
+    assert host.entries == [("./frontend/entry.client.ts", "m", ("/notes",))]
+
+
+def test_dev_preflight_names_the_source_line():
+    import tempfile
+
+    broken = Path(tempfile.mkdtemp()) / "broken.rvl"
+    broken.write_text("component Broken {\n  emit nosuchfn(\n}\n")
+    assert _preflight([str(broken)]) != 0
+    assert _preflight([str(APP)]) == 0
+
+
 # --------------------------------------------------------------- frontend / IR
+
 
 def test_app_compiles_with_a_derived_route_table():
     ir = compile_files([str(APP)])
     ops = ir["services"]["NotesApi"]["methods"]
     routed = {op: m["route"] for op, m in ops.items() if m.get("route")}
-    assert (routed["get_note"]["method"], routed["get_note"]["path"]) == ("get", "/notes/{id}")
-    assert (routed["list_notes"]["method"], routed["list_notes"]["path"]) == ("get", "/notes")
-    assert (routed["create_note"]["method"], routed["create_note"]["path"]) == ("post", "/notes")
+    assert (routed["get_note"]["method"], routed["get_note"]["path"]) == (
+        "get",
+        "/notes/{id}",
+    )
+    assert (routed["list_notes"]["method"], routed["list_notes"]["path"]) == (
+        "get",
+        "/notes",
+    )
+    assert (routed["create_note"]["method"], routed["create_note"]["path"]) == (
+        "post",
+        "/notes",
+    )
     # the path scalar, the optional query and the record body are each bound and
     # given a derived schema — the validation the router runs before the handler.
     assert routed["get_note"]["bind"]["id"]["kind"] == "path"
@@ -89,8 +126,11 @@ def test_create_lowers_to_a_revertible_effect_with_the_remove_inverse():
     LIFO order on teardown/divert, residue-free."""
     ir = compile_files([str(APP)])
     comp = next(c for c in ir["components"] if c["name"] == "MemoryStore")
-    provide = next(s for s in comp["body"]
-                   if s.get("step") == "provide" and s.get("name") == "store")
+    provide = next(
+        s
+        for s in comp["body"]
+        if s.get("step") == "provide" and s.get("name") == "store"
+    )
     create = next(m for m in provide["methods"] if m["name"] == "create")
     effects = [s for s in create["body"] if s.get("step") == "effect"]
     assert len(effects) == 1, "create must be exactly one revertible effect"
@@ -115,6 +155,7 @@ def test_zero_sentinels_and_no_emitter_workarounds_in_the_app_source():
 
 
 # --------------------------------------------------------------- HTTP routing
+
 
 # The canonical-encoding result wrappers the face recognises by class NAME
 # (`Ok`/`Err`), exactly as tests/test_serve_http_routes_457.py drives them.
@@ -213,8 +254,9 @@ def test_unmatched_path_is_404():
 
 
 def test_err_maps_status_code_and_message_from_the_type():
-    face = _face(Err({"status": 404, "code": "not_found",
-                       "message": "no note with that id"}))
+    face = _face(
+        Err({"status": 404, "code": "not_found", "message": "no note with that id"})
+    )
     reply = face.dispatch_http("GET", "/notes/x", b"", {})
     assert reply.status == 404
     payload = _body(reply)
@@ -236,21 +278,57 @@ def test_manifest_lists_the_routes_and_derives_no_security():
 
 # --------------------------------------------------------------- runtime (gated)
 
+
 @pytest.mark.skipif(
     not CORDIS_PY.exists(),
-    reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)")
+    reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)",
+)
+def test_dev_once_boots_the_app_and_proves_no_residue():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [
+            str(CORDIS_PY),
+            "-P",
+            "-m",
+            "revl",
+            "dev",
+            "--once",
+            "--no-frontend",
+            str(APP),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "entry ./frontend/entry.client.ts -> /notes" in result.stdout
+    assert "no residue" in result.stdout
+
+
 def test_crud_persists_and_reverts_residue_free_on_the_runtime():
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run(
         [str(CORDIS_PY), "-m", "revl", "test", str(APP)],
-        cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS create then get returns the stored note" in result.stdout
     assert "PASS get of an absent id is a typed 404 ApiError" in result.stdout
-    assert "PASS list returns created rows and a reloaded store is empty" in result.stdout
+    assert (
+        "PASS list returns created rows and a reloaded store is empty" in result.stdout
+    )
     # the differentiated half's baseline lifecycle test (the hot-swap legs need
     # `Session.swap`, so they live in tests/test_app_hotswap_725.py, not here).
-    assert ("PASS ranker records engagement, scores by strategy, reverts "
-            "residue-free" in result.stdout)
+    assert (
+        "PASS ranker records engagement, scores by strategy, reverts "
+        "residue-free" in result.stdout
+    )
     assert "[py] pass: 4 test(s) passed" in result.stdout

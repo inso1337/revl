@@ -1153,6 +1153,22 @@ def build_parser() -> argparse.ArgumentParser:
                           "(cordis-rs / cordis4j on a JVM / cordis-wasm on wasmtime), "
                           "prove no residue, exit)")
 
+    dev = sub.add_parser(
+        "dev",
+        help="run the exemplary web app with its Vite frontend and ambient WebUI host")
+    dev.add_argument("files", nargs="*", metavar="FILE",
+                     help=".rvl app source (default: examples/app/notes.rvl)")
+    dev.add_argument("--frontend", default=None, metavar="DIR",
+                     help="Vite frontend directory (default: alongside the app source)")
+    dev.add_argument("--host", default="127.0.0.1", metavar="HOST",
+                     help="Vite bind host (default: loopback)")
+    dev.add_argument("--port", type=int, default=5173, metavar="PORT",
+                     help="Vite port (default: 5173)")
+    dev.add_argument("--once", action="store_true",
+                     help="boot the app, prove teardown has no residue, and exit")
+    dev.add_argument("--no-frontend", action="store_true",
+                     help="boot only the app host; useful for diagnosing lifecycle failures")
+
     recover = sub.add_parser(
         "recover",
         help="crash recovery: read a `revl run --wal` write-ahead log and roll "

@@ -1005,7 +1005,7 @@ class _Driver:
                  record: bool = False, trace_path: str | None = None,
                  withdraw: str | None = None, wal_path: str | None = None,
                  root_dirs: list | None = None, secrets: dict | None = None,
-                 estop_latch: str | None = None):
+                 estop_latch: str | None = None, ambient: dict | None = None):
         self.ir = ir
         self.config = config
         # item 256 Slice 1: an optional caller-supplied secret store (name ->
@@ -1023,6 +1023,12 @@ class _Driver:
         self.runtime = runtime_mod
         self.FiberState = FiberState
         self.root = Context()
+        # A host may provide a deliberately ambient capability before any revl
+        # component is loaded.  `revl dev` uses this for the WebUI coeffect: it
+        # is still a normal Cordis provision, owned and withdrawn by this driver,
+        # rather than an untracked global bridge.
+        self._ambient_services = dict(ambient or {})
+        self._ambient_disposers = []
         self.fibers: dict[str, object] = {}
         # item 628: an optional per-attempt settlement ledger. When a caller
         # (the Session's awaitable teardown) sets this to a list before driving
@@ -1103,6 +1109,11 @@ class _Driver:
         self.root.on("internal/status", self._on_fiber)
         self._baseline_hooks = self._hooks()
         self._baseline_disposables = self.root.fiber._disposables.length
+        for key, service in self._ambient_services.items():
+            # `Reflect.provide` returns the effect, whose invocation returns the
+            # disposer.  Drive that first synchronous leg now so requirements
+            # see the host provision before the first component loads.
+            self._ambient_disposers.append(self.root.reflect.provide(key, service))
         self._compensation_residue: list[dict] = []
 
     # -- backwards replay (docs/replay.md) ---------------------------------
@@ -1443,6 +1454,9 @@ class _Driver:
     async def _load(self, ir: dict, module: types.ModuleType) -> None:
         by_name = {c["name"]: c for c in _components(ir)}
         load_causes = why_runtime.load_causes(ir) if self.tracing else {}
+        # Ambient host provisions are installed above (in `__init__`); their
+        # effects join the root fiber's unload snapshot through the normal
+        # disposal registration, so no per-load driving is needed here.
         # arm the production silence observer BEFORE driving activation (#622),
         # so its background poll can interleave with each `_drive_activation`
         # await and time a provider that never reaches ACTIVE.
@@ -1752,6 +1766,21 @@ class _Driver:
                     getattr(frame, "compensation_residue", ())
                 )
             await self._flush()
+        # Ambient host provisions are owned by the driver too.  Withdraw them
+        # only after every component has released the service, preserving the
+        # same consumers-before-providers teardown discipline as revl-owned
+        # provisions.  A `FiberEffect` joins an in-flight or completed cleanup,
+        # so both paths stay no-ops when nothing is outstanding.
+        for dispose in reversed(self._ambient_disposers):
+            async def _settle(effect=dispose):
+                joined = effect._join() if hasattr(effect, "_join") else effect()
+                if hasattr(joined, "__await__") or asyncio.iscoroutine(joined):
+                    await joined
+            try:
+                await _settle()
+            except BaseException as exc:
+                self._log("swap", "ambient", f"withdraw failed: {exc}")
+        self._ambient_disposers.clear()
         await self._flush()
         # item 541: components just disposed here may have been the last live
         # users of one or more generation modules (a swap/reload predecessor, a
@@ -2114,11 +2143,15 @@ class _Driver:
         except replay.ReplayError as exc:
             self._log("refused", type(exc).__name__, str(exc))
 
-    async def hold_repl(self) -> int:
+    async def hold_repl(self, once: bool = False) -> int:
         module = self._emit_module(self.ir)
         print("== load composition ==")
         await self._load(self.ir, module)
         self._commit_wal()
+        if once:
+            print("\n== once — boot complete, tearing down ==")
+            await self._teardown()
+            return 0
         print("\n== live — call provided services (`:keys` to list, `:q` or Ctrl-D to quit) ==")
         if self.recorder is not None:
             print("   recording — `:timeline`, `:inspect k`, `:back k [!]`, "
@@ -2274,7 +2307,7 @@ def _fail(exc_text: str, stage: str, code: int = 1) -> int:
     return code
 
 
-def run_command(args) -> int:
+def run_command(args, hold_once: bool = False) -> int:
     if getattr(args, "placement", None):
         # `--placement` splits the composition across processes, each with its
         # own tier; a top-level `--backend` would name one tier for the whole
@@ -2418,13 +2451,14 @@ def run_command(args) -> int:
                      withdraw=withdraw,
                      wal_path=getattr(args, "wal", None),
                      estop_latch=getattr(args, "estop_latch", None),
-                     root_dirs=root_dirs)
+                     root_dirs=root_dirs,
+                     ambient=getattr(args, "ambient", None))
     try:
         if withdraw is not None:
             return asyncio.run(driver.withdraw_once())
         if getattr(args, "watch", False):
             return asyncio.run(driver.watch(args.files))
-        return asyncio.run(driver.hold_repl())
+        return asyncio.run(driver.hold_repl(once=hold_once))
     except ActivationError as exc:
         # item 372: a component's deferred activation did not complete — report
         # it loudly and named, rather than dropping into a REPL over a
