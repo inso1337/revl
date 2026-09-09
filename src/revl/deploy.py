@@ -2358,6 +2358,121 @@ def _first_json_object(text: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# §1.3 step 2. staging the attested bundle onto the far host (R4/R5)
+# ---------------------------------------------------------------------------
+#
+# PREPARE and COMMIT verify bytes on the RUNNER's own disk, which means the bytes
+# have to get there first. Staging is that step, and it rides the SAME pinned-
+# host-key ssh identity the runner transport uses (`scp` here, the ssh companion
+# tool): `StrictHostKeyChecking=yes` / `BatchMode=yes` forced on and the pinned
+# `UserKnownHostsFile`, none of which a caller may loosen. It is a copy, not a
+# trust anchor: nothing it moves is believed until the runner RE-HASHES it under
+# the attestation chain, so a byte that changes in transit is caught at PREPARE
+# on the far side, not here. The `scp_exe` seam mirrors `StdioRunnerTransport`'s
+# `ssh_exe` so the whole path is unit-testable through a shim, no live remote.
+
+
+class BundleStageRefused(RevlError):
+    """Staging the attested bundle onto the far host failed, fail-closed.
+
+    `host_key_failure` is set when the cause was host-key verification on the
+    stage channel — the same R4 event the runner transport marks — so a deploy
+    that could not even copy the bundle under a pinned key refuses audibly rather
+    than proceeding to a PREPARE it has nothing staged for."""
+
+    def __init__(self, message: str, *, host_key_failure: bool = False):
+        super().__init__("bundle-stage", 0, message)
+        self.host_key_failure = host_key_failure
+
+
+def stage_bundle_over_ssh(local_bundle: Path | str, *, host: str,
+                          remote_bundle: str, known_hosts: Path | str,
+                          scp_exe: str = "scp", port: Optional[int] = None,
+                          options: Sequence[str] = (),
+                          extra_args: Sequence[str] = (),
+                          timeout: float = 60.0) -> str:
+    """Copy the attested bundle DIRECTORY `local_bundle` to `remote_bundle` on
+    `host` over scp, under the pinned host key `known_hosts` (design §1.3 step 2,
+    R4/R5). Returns the remote bundle path on success; raises
+    :class:`BundleStageRefused` fail-closed on any failure.
+
+    The pin is the runner transport's pin: `StrictHostKeyChecking=yes` and
+    `BatchMode=yes` are forced on and the pinned `UserKnownHostsFile` is set, and
+    an `options` entry that would re-set either is refused rather than allowed to
+    loosen it. `scp_exe` is the injectable seam (a shim standing in for `scp`);
+    the source and destination are the LAST two argv words so a shim can read
+    them positionally regardless of the option list before them.
+
+    Staging is not a trust step: the runner re-hashes what lands (`admit` /
+    `commit_receipt`), so this never verifies bytes itself — a corruption in
+    transit is the far side's PREPARE refusal, not a check here.
+    """
+    src = Path(local_bundle)
+    if not src.is_dir():
+        raise BundleStageRefused(
+            f"the attested bundle {src} is not a directory on this host, so "
+            f"there is nothing to stage to {host!r}")
+    if not isinstance(host, str) or not host:
+        raise BundleStageRefused("staging needs a non-empty ssh host")
+    if not isinstance(remote_bundle, str) or not remote_bundle:
+        raise BundleStageRefused(
+            "staging needs a non-empty `remote_bundle` destination path on the "
+            "far host")
+    kh = Path(known_hosts)
+    if not kh.is_file():
+        raise BundleStageRefused(
+            f"the pinned known_hosts {kh} is not a readable file; refusing to "
+            "stage the bundle with no pinned host key rather than trusting the "
+            "host on first use (R4)", host_key_failure=True)
+    ok, reason = _known_hosts_pin(kh, _hostname_for_known_hosts(host), port)
+    if not ok:
+        raise BundleStageRefused(reason, host_key_failure=True)
+
+    opts: list[str] = []
+    for pinned in SSH_PINNED_OPTIONS:
+        opts += ["-o", pinned]
+    opts += ["-o", f"UserKnownHostsFile={kh}"]
+    for opt in options:
+        key = str(opt).split("=", 1)[0].strip().lower()
+        if key in _SSH_RESERVED_OPTION_KEYS:
+            raise BundleStageRefused(
+                f"the scp option {opt!r} would re-set a host-key setting the "
+                "stage step pins; it is refused rather than allowed to loosen "
+                "the pin (R4 forbids StrictHostKeyChecking=no)")
+        opts += ["-o", str(opt)]
+    if port is not None:
+        opts += ["-P", str(int(port))]
+    # `-r` recurses the bundle directory; source and destination are last so a
+    # shim reads them as argv[-2] and argv[-1].
+    argv = [scp_exe, *opts, *[str(a) for a in extra_args], "-r",
+            str(src), f"{host}:{remote_bundle}"]
+    try:
+        completed = subprocess.run(  # noqa: S603 — argv built above, no shell
+            argv, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as error:
+        raise BundleStageRefused(
+            f"the stage command {scp_exe!r} could not be launched: "
+            f"{error}") from None
+    except subprocess.TimeoutExpired:
+        raise BundleStageRefused(
+            f"staging the bundle to {host!r} did not finish within "
+            f"{timeout:.0f}s; the deploy is refused rather than left hanging"
+            ) from None
+    except OSError as error:
+        raise BundleStageRefused(
+            f"the stage command {scp_exe!r} could not be launched: "
+            f"{error}") from None
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        host_key = _looks_like_host_key_failure(completed.returncode, stderr)
+        raise BundleStageRefused(
+            f"staging the bundle to {host}:{remote_bundle} failed (scp exited "
+            f"{completed.returncode}: {stderr or '(no stderr)'})",
+            host_key_failure=bool(host_key))
+    return remote_bundle
+
+
+# ---------------------------------------------------------------------------
 # §1.4. distributed effect correlation, authenticated against the peer
 # ---------------------------------------------------------------------------
 
@@ -3731,7 +3846,18 @@ class DeployTarget:
 #: The `[deploy]` keys this build reads. An unrecognized key is refused for the
 #: same reason an unknown `via` is: an operator who writes `hostkey` meaning
 #: `host_key` must not silently get an unpinned deploy.
-DEPLOY_KEYS = ("via", "image", "host", "runner", "trust")
+#:
+#: The `via = ssh` cross-machine leg adds the fields the transport and the stage
+#: step need (design §1.3 R4/R5): `known_hosts` (the PINNED host-key file, so
+#: host-key checking is never trust-on-first-use), `host_key` (a conductor-side
+#: copy of the far host's receipt-signing key, so the conductor can VERIFY the
+#: signed admission/COMMIT receipts it gets back), `remote_bundle` (the path on
+#: the far host the attested bundle is staged to and the runner re-hashes), and
+#: `port` / `extra_args` (the runner's own trust flags, `--key`/`--host-key`/
+#: `--runtime-version`, naming files on ITS disk — S2.4). `runner` doubles as the
+#: remote `revl` command name (`StdioRunnerTransport.ssh(remote_revl=...)`).
+DEPLOY_KEYS = ("via", "image", "host", "runner", "trust",
+               "known_hosts", "host_key", "remote_bundle", "port", "extra_args")
 
 
 def parse_deploy_map(placement: Mapping) -> tuple[dict, Optional[str]]:
@@ -3892,16 +4018,27 @@ def admit_deploy_map(placement: Mapping, *,
             continue
 
         if target.boundary == BOUNDARY_MACHINE:
+            raw = target.raw or {}
+            # The cross-machine leg is now landed for `via = ssh`, but ONLY
+            # under a pinned host key: the whole point of R4 is that host-key
+            # checking is never trust-on-first-use, so an ssh target with no
+            # `known_hosts` is refused with the same machine-boundary reason as
+            # before (the missing pin is precisely half of what that reason
+            # names). A pinned target with a `host` is admitted; the transport,
+            # the stage step and the runner enforce the rest.
+            if target.via == VIA_SSH and raw.get("known_hosts") and target.host:
+                admitted[pname] = target
+                continue
             refusals.append(_map_refusal(
                 pname, "machine-boundary",
-                f"`via = {target.via}` crosses a MACHINE boundary, which this "
-                f"slice does not open. The cross-machine control plane is "
-                f"absent by design: no bundle staging, no remote `deploy-admit` "
-                f"runner, no load-measured signed COMMIT receipt for the "
-                f"conductor to compare, and no pinned SSH host key (without "
-                f"which impersonating the target costs sitting on the network "
-                f"path rather than owning the machine). Teardown across it "
-                f"promises nothing: {TEARDOWN_PROMISE[BOUNDARY_MACHINE]}"))
+                f"`via = {target.via}` crosses a MACHINE boundary. A machine "
+                f"target is only opened under a PINNED host key: `via = ssh` "
+                f"needs both a `host` and a `known_hosts` (the pinned host-key "
+                f"file), without which impersonating the target costs sitting on "
+                f"the network path rather than owning the machine — host-key "
+                f"checking is never trust-on-first-use (R4). Teardown across the "
+                f"boundary still promises nothing: "
+                f"{TEARDOWN_PROMISE[BOUNDARY_MACHINE]}"))
             continue
 
         if target.via == VIA_LOCAL:
@@ -4121,14 +4258,17 @@ def deploy_command(args) -> int:
     before any boundary opens. A refused chain refuses the whole deploy with
     nothing to roll back, and `--dry-run` runs this fallible half too.
 
-    Without `--dry-run`, the admitted map is DEPLOYED over the process boundary
-    (`via = local`): :func:`deploy_local_map` builds one participant per process
-    and drives the coordinated PREPARE/COMMIT/ABORT protocol (:func:`run_deploy`)
-    — the coordinator holds only the commit ledger and, on any COMMIT failure,
-    aborts in reverse commit order. The attested-bundle STAGING and the
-    cross-machine / container launch orchestration are following slices; because
-    admission here supplies no seam set, only a process-boundary target ever
-    reaches the COMMIT path.
+    Without `--dry-run`, the admitted map is DEPLOYED over the coordinated
+    PREPARE/COMMIT/ABORT protocol (:func:`run_deploy`), and the coordinator holds
+    only the commit ledger — on any COMMIT failure it aborts in reverse commit
+    order. A map of process-boundary targets goes through :func:`deploy_local_map`;
+    a map that admits a `via = ssh` target goes through :func:`deploy_ssh_map`,
+    which STAGES the attested `--bundle` onto each far host under its pinned host
+    key and drives the SAME protocol over :class:`StdioRunnerTransport.ssh` +
+    :class:`RemoteParticipant`. A cross-machine deploy requires `--bundle` (the
+    far host re-hashes staged bytes), and a remote the coordinator cannot settle
+    on ABORT is `unresolved`, never a false rollback. The container launch
+    orchestration remains a following slice.
     """
     try:
         placement = _load_deploy_map(args.map)
@@ -4196,13 +4336,25 @@ def deploy_command(args) -> int:
                           f"{chain.get('reason')}")
         return 0 if (verdict.ok and chain_ok) else 1
 
-    # COMMIT: drive the coordinated protocol over the map's local participants.
+    # COMMIT: drive the coordinated protocol. A map that admits a `via = ssh`
+    # target opens the cross-machine leg (stage + ssh transport); an all-local
+    # map stays on the process-boundary path. The choice is the admitted verdict,
+    # not a flag, so a map can never open a boundary it did not admit.
     from . import wal  # noqa: PLC0415 — lazy; only the COMMIT path needs a WAL dir
 
     state_dir = (Path(wal.default_wal_dir()) / "deploy"
                  / Path(args.map).stem / str(0))
-    report = deploy_local_map(placement, state_dir=state_dir,
-                              federation_id=Path(args.map).stem, generation=0)
+    has_ssh = any(t.via == VIA_SSH for t in verdict.targets.values())
+    if has_ssh:
+        report = deploy_ssh_map(
+            placement, local_bundle=bundle_arg,
+            backend=getattr(args, "backend", None) or "python",
+            state_dir=state_dir, federation_id=Path(args.map).stem, generation=0,
+            ssh_exe=getattr(args, "ssh_exe", None) or "ssh",
+            scp_exe=getattr(args, "scp_exe", None) or "scp")
+    else:
+        report = deploy_local_map(placement, state_dir=state_dir,
+                                  federation_id=Path(args.map).stem, generation=0)
     if as_json:
         print(json.dumps(report, indent=2))
     else:
@@ -4561,6 +4713,201 @@ def deploy_local_map(placement: Mapping, *, state_dir: Path | str,
                             on_event=on_event)
     finally:
         for participant in participants:
+            participant.stop()
+    return report
+
+
+# ---------------------------------------------------------------------------
+# §5d. the cross-machine (`via = ssh`) COMMIT path (roadmap item 118, toward #79)
+# ---------------------------------------------------------------------------
+#
+# `deploy_local_map` drives the coordinated protocol over the process boundary.
+# This is its cross-machine sibling: a map that admits a `via = ssh` target is
+# staged and driven over :class:`StdioRunnerTransport.ssh` + :class:`RemoteParticipant`,
+# reusing :func:`run_deploy` UNCHANGED. Nothing here is a second protocol — the
+# RemoteParticipant carries PREPARE (`request_admission`) and COMMIT
+# (`request_commit`, whose `compare_commit_receipt` gate is integral), and its
+# `abort` is the honest cross-machine one: the runner protocol has no ABORT leg,
+# so a committed remote is reported `unresolved`, never a rollback the conductor
+# did not obtain. The conductor holds only the commit ledger, exactly as for a
+# local deploy.
+#
+# The bundle is staged to each ssh host FIRST (design §1.3 step 2), over the same
+# pinned identity. A stage or a pre-flight host-key failure is a PREPARE-time
+# refusal: nothing was activated, so there is nothing to roll back — the same
+# fail-closed shape as a local participant that will not even spawn.
+
+
+def _new_challenge() -> str:
+    """A fresh orchestration-channel nonce: the runner echoes it so the conductor
+    can bind a reply to the request it sent (not a replayed earlier one)."""
+    return os.urandom(16).hex()
+
+
+def _ssh_participant(target: "DeployTarget", *, local_bundle: Path | str,
+                     backend: str, ssh_exe: str, scp_exe: str
+                     ) -> tuple[Optional["RemoteParticipant"], Optional[str]]:
+    """Stage the attested bundle onto `target`'s host under its pinned key, then
+    build the :class:`RemoteParticipant` that drives PREPARE/COMMIT over ssh.
+
+    Returns `(participant, None)` or `(None, diagnostic)`; a diagnostic is a
+    PREPARE-time REFUSAL — the boundary was not opened and nothing committed, so
+    the caller aborts the whole deploy with nothing to unwind. Every failure mode
+    (an absent field the map should have carried, an unpinned host key, a stage
+    that would not complete) refuses rather than proceeding under a boundary it
+    could not establish.
+    """
+    raw = target.raw or {}
+    host = target.host
+    known_hosts = raw.get("known_hosts")
+    if not host or not known_hosts:
+        return None, (f"target {target.process!r} is `via = ssh` but names no "
+                      f"{'host' if not host else 'known_hosts'}; a machine "
+                      f"target is only opened under a pinned host key")
+    host_key_path = raw.get("host_key")
+    if not host_key_path:
+        return None, (
+            f"target {target.process!r} names no `host_key`: the conductor needs "
+            f"a copy of the far host's receipt-signing key to VERIFY the signed "
+            f"admission and COMMIT receipts it gets back (R5). Without it a "
+            f"reply cannot be attributed to the host, so the deploy refuses "
+            f"rather than trusting an unverifiable receipt.")
+    remote_bundle = raw.get("remote_bundle")
+    if not remote_bundle:
+        return None, (
+            f"target {target.process!r} names no `remote_bundle`: the far host "
+            f"re-hashes the bytes on ITS disk, so the deploy must say where to "
+            f"stage them. A cross-machine deploy with nowhere to stage is "
+            f"refused rather than run against unstaged bytes.")
+    try:
+        host_key = Path(str(host_key_path)).read_bytes()
+    except OSError as error:
+        return None, (f"target {target.process!r}: cannot read the far host's "
+                      f"receipt key {host_key_path!r}: {error}")
+
+    port = raw.get("port")
+    port = int(port) if port is not None else None
+    remote_revl = target.runner or "revl"
+    extra_args = [str(a) for a in (raw.get("extra_args") or [])]
+
+    try:
+        transport = StdioRunnerTransport.ssh(
+            str(host), known_hosts=str(known_hosts), ssh_exe=ssh_exe,
+            remote_revl=remote_revl, port=port, extra_args=extra_args)
+    except ValueError as error:
+        return None, f"target {target.process!r}: {error}"
+
+    # Located pre-flight BEFORE staging: refuse an unpinned/wrong-host key here,
+    # so a boundary that would not verify is never even copied to.
+    try:
+        transport.verify_host_key()
+    except SshRunnerRefused as error:
+        return None, (f"target {target.process!r}: {error.message}")
+
+    # Stage over the SAME pinned identity (design §1.3 step 2).
+    try:
+        staged = stage_bundle_over_ssh(
+            local_bundle, host=str(host), remote_bundle=str(remote_bundle),
+            known_hosts=str(known_hosts), scp_exe=scp_exe, port=port)
+    except BundleStageRefused as error:
+        return None, (f"target {target.process!r}: {error.message}")
+
+    participant = RemoteParticipant(
+        target.process, transport,
+        admit_request=AdmitRequest(bundle=staged, backend=backend,
+                                   challenge=_new_challenge()),
+        commit_request=CommitRequest(bundle=staged, backend=backend,
+                                     challenge=_new_challenge()),
+        host_key=host_key)
+    return participant, None
+
+
+def deploy_ssh_map(placement: Mapping, *, local_bundle: Path | str,
+                   backend: str = "python", state_dir: Path | str,
+                   approval_path: Optional[str] = None,
+                   federation_id: str = "deploy", generation: int = 0,
+                   ssh_exe: str = "ssh", scp_exe: str = "scp",
+                   python: Optional[str] = None,
+                   on_event: Optional[Callable[[str, str, dict], None]] = None
+                   ) -> dict:
+    """Drive the coordinated PREPARE/COMMIT/ABORT protocol (:func:`run_deploy`)
+    over a deploy map that admits at least one `via = ssh` target (design §1.3,
+    the cross-machine leg toward #79).
+
+    The cross-machine sibling of :func:`deploy_local_map`. It admits the map,
+    then builds one participant per process — a :class:`RemoteParticipant` over a
+    staged, pinned ssh channel for a `via = ssh` target, and a local
+    :class:`ProcessParticipant` for a `via = local` one, so a mixed map deploys
+    as one coordinated unit — and hands the ordered list to :func:`run_deploy`,
+    unchanged. The conductor holds only the commit ledger and drives ABORT in
+    reverse commit order on any COMMIT failure; a remote it cannot settle is
+    `unresolved`, never a false rollback.
+
+    A cross-machine deploy REQUIRES an attested `local_bundle`: the bytes are
+    staged and re-hashed on the far host, and there is nothing to stage without
+    one. A staging or admission refusal is a PREPARE-time refusal (nothing
+    committed) and returns a `DEPLOY_REFUSED` report.
+    """
+    verdict = admit_deploy_map(placement)
+    if not verdict.ok:
+        return {
+            "protocol": PROTOCOL,
+            "verdict": DEPLOY_REFUSED,
+            "phase": "admit",
+            "reason": "the deploy map did not admit; no boundary was opened",
+            "refusals": [dict(r) for r in verdict.refusals],
+        }
+    if local_bundle is None:
+        return {
+            "protocol": PROTOCOL,
+            "verdict": DEPLOY_REFUSED,
+            "phase": "stage",
+            "reason": ("a cross-machine (`via = ssh`) deploy needs an attested "
+                       "`--bundle`: the far host re-hashes staged bytes, and a "
+                       "deploy with nothing to stage is refused rather than run "
+                       "against bytes it never verified."),
+        }
+
+    processes = placement.get("processes") or {}
+    state_dir = Path(state_dir)
+    participants: list[Participant] = []
+    local_started: list[ProcessParticipant] = []
+    for pname in sorted(processes):
+        pconf = processes.get(pname) or {}
+        target = verdict.targets.get(pname) or DeployTarget(
+            process=pname, via=VIA_LOCAL, raw={})
+        if target.via == VIA_SSH:
+            participant, error = _ssh_participant(
+                target, local_bundle=local_bundle, backend=backend,
+                ssh_exe=ssh_exe, scp_exe=scp_exe)
+        else:
+            components = pconf.get("components") or []
+            spec_path = _local_participant_spec(pname, components, state_dir)
+            participant, error = launch_local_participant(
+                target, spec_path=spec_path, python=python)
+            if participant is not None:
+                local_started.append(participant)
+        if error is not None:
+            for started in local_started:
+                started.stop()
+            return {
+                "protocol": PROTOCOL,
+                "verdict": DEPLOY_REFUSED,
+                "phase": "stage" if target.via == VIA_SSH else "launch",
+                "refusedBy": pname,
+                "reason": error,
+                "proof": ("a boundary that could not be established (staged / "
+                          "spawned) is a PREPARE-time refusal: nothing "
+                          "committed, so there is nothing to roll back."),
+            }
+        participants.append(participant)
+
+    try:
+        report = run_deploy(participants, approval_path=approval_path,
+                            federation_id=federation_id, generation=generation,
+                            on_event=on_event)
+    finally:
+        for participant in local_started:
             participant.stop()
     return report
 

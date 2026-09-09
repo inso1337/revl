@@ -117,18 +117,32 @@ def test_an_unknown_via_is_refused_never_read_as_local():
     assert verdict.targets == {}
 
 
-def test_a_machine_boundary_is_refused_outright_not_best_efforted():
+def test_a_machine_boundary_without_a_pinned_host_key_is_refused():
+    """The cross-machine leg is landed for `via = ssh`, but ONLY under a pinned
+    host key: an ssh target with no `known_hosts` is refused, because host-key
+    checking is never trust-on-first-use (R4), and the refusal still names the
+    teardown a machine boundary can promise — nothing."""
     verdict = deploy.admit_deploy_map(_map(
         db={"deploy": {"via": "ssh", "host": "deploy@10.0.0.5",
                        "trust": "/etc/revl/trust.d", "runner": "revl"}}))
     assert not verdict.ok
     (refusal,) = verdict.refusals
     assert refusal["rule"] == "machine-boundary"
-    # the refusal carries BOTH halves: the missing control plane, and the fact
-    # that there would be no teardown to promise across it even with one.
-    assert "pinned SSH host key" in refusal["reason"]
-    assert "load-measured signed COMMIT receipt" in refusal["reason"]
+    # the refusal names the missing pin and the teardown it cannot promise
+    assert "known_hosts" in refusal["reason"]
+    assert "trust-on-first-use" in refusal["reason"]
     assert deploy.TEARDOWN_PROMISE[deploy.BOUNDARY_MACHINE] in refusal["reason"]
+
+
+def test_a_pinned_ssh_target_is_admitted_as_a_machine_boundary():
+    """The other side of the same rule: an ssh target that DOES pin a host key
+    (and names a host) is admitted, crossing the machine boundary the transport,
+    stage step and runner then carry."""
+    verdict = deploy.admit_deploy_map(_map(
+        db={"deploy": {"via": "ssh", "host": "deploy@10.0.0.5",
+                       "known_hosts": "/etc/revl/known_hosts"}}))
+    assert verdict.ok, verdict.refusals
+    assert verdict.boundaries == {"db": deploy.BOUNDARY_MACHINE}
 
 
 def test_via_peer_is_refused_by_name_not_treated_as_local():
