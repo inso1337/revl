@@ -248,6 +248,7 @@ classify itself as `pure`, `acquire`, or `emission` before it compiles, so
 The full index is **[docs/README.md](docs/README.md)**. Start here:
 
 - **[DESIGN.md](DESIGN.md)** for the guarantees and the checked table, **[docs/vision.md](docs/vision.md)** for what this is for and the honest scope of the claims
+- **[docs/guarantees.md](docs/guarantees.md)** the guarantees and rules at a glance, with origins (decode a cited `G4`, `T2`, or `A8`)
 - **[docs/syntax-2.0.md](docs/syntax-2.0.md)** the language reference, **[docs/stdlib-2.0.md](docs/stdlib-2.0.md)** the stdlib surface
 - **[docs/guide-ai-agents.md](docs/guide-ai-agents.md)** the agent workflow, **[docs/mcp-reference.md](docs/mcp-reference.md)** every MCP verb, **[docs/commands-reference.md](docs/commands-reference.md)** every subcommand
 - **[docs/conformance.md](docs/conformance.md)** every construct against every tier, **[docs/crash-recovery.md](docs/crash-recovery.md)** the WAL and what honestly survives a crash
