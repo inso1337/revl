@@ -79,6 +79,8 @@ def _preflight(files: list[str]) -> int:
         ir = compile_files(files)
     except RevlError as exc:
         return _fail(str(exc), lifecycle.COMPILE)
+    except OSError as exc:
+        return _fail(f"cannot read app source: {exc}", lifecycle.COMPILE)
     try:
         refuse_admission(ir)
     except RevlError as exc:
@@ -135,14 +137,15 @@ def _closed_stdin():
     import sys
 
     fd = os.open(os.devnull, os.O_RDONLY)
+    new = os.fdopen(fd)
     old = sys.stdin
-    sys.stdin = os.fdopen(fd)
+    sys.stdin = new
     try:
         yield
     finally:
         sys.stdin = old
         try:
-            sys.stdin.close()
+            new.close()
         except OSError:
             pass
 
