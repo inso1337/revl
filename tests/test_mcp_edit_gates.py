@@ -187,6 +187,40 @@ def test_a_required_quarantine_refuses_the_edit_and_nothing_swaps(monkeypatch):
     assert sess.swaps == [] and sess.draft is None
 
 
+@needs_runtime
+def test_the_swap_and_ship_paths_run_the_gate_they_claim(monkeypatch,
+                                                         _fresh_session):
+    """`docs/quarantine-tier.md` names `revl_swap` and `revl_ship --apply`. The
+    ship handler fuses the stages and calls the swap handler for the last one
+    (`ship.py` hands it the same arguments), so both must ask the gate.
+    Deleting the `gate_swap` call in `server._tool_swap` fails both arms here
+    with `seen == []`."""
+    server.SESSION.sandbox = QUARANTINE
+    server.SESSION.operator = Operator(
+        "alice", (Grant(("swap", "edit", "load"), ("*",), True),))
+    assert _call("revl_load", {"source": TWO})["ok"] is True
+    seen = []
+
+    def _stub(session, arguments):
+        seen.append(arguments)
+        return {"ok": False, "admitted": False, "swapped": False,
+                "note": "the candidate did not pass a required quarantine",
+                "quarantine": {"verdict": "trapped"}}
+
+    monkeypatch.setattr(server._quarantine, "gate_swap", _stub)
+
+    swapped = _call("revl_swap", {"source": _swap_user()})
+    assert swapped["ok"] is False and swapped["swapped"] is False
+    assert swapped["quarantine"]["verdict"] == "trapped"
+
+    shipped = _call("revl_ship", {"source": _swap_user(), "apply": True})
+    assert shipped["ok"] is False and shipped["shipped"] is False
+    assert seen == [{"source": _swap_user()},
+                    {"source": _swap_user(), "apply": True}], \
+        "the gate a swap runs is not the gate revl_swap and revl_ship reach"
+    assert server.SESSION.ir is not None, "the load stands, nothing swapped"
+
+
 def test_none_of_the_gates_run_when_the_edit_still_has_holes():
     """A draft swaps nothing, so it is gated by nothing: the holes come back and
     the working buffer advances, exactly as when no lease is live."""
