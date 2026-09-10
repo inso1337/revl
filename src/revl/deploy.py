@@ -470,23 +470,43 @@ RECEIPT_DOMAIN = b"revl.deploy.receipt/v1\x00"
 DEFAULT_CLOCK_SKEW_SECONDS = 300.0
 
 
+def _load_key(path: Path | str) -> bytes:
+    """Read a raw HMAC key from a file.
+
+    `attest.load_key`'s rule, delegated to rather than restated: the key is the
+    file's bytes with one trailing newline stripped (so a `cat`- or `echo`-built
+    key file round-trips), and nothing else is assumed. docs/revl-attest.md is
+    the rule, and sharing the implementation is what makes it ONE rule instead
+    of two readings of one rule. Every key this module reads off disk (the
+    operator's `--key`, the host's `--host-key`, the far host's receipt key)
+    used to call `Path(...).read_bytes()` itself, so the same file was two
+    different keys: two `key_id`s, and a receipt MACed under one that a
+    verifier following the documented rule could not reproduce."""
+    return attest.load_key(str(path))
+
+
 def _receipt_mac(body: Mapping, host_key: bytes) -> str:
     """The receipt MAC: domain-tagged HMAC-SHA256 over the canonical body bytes
     (`body` is the receipt with its `signature` member removed).
 
-    `ensure_ascii=True` here, unlike the attestation spelling, so a lone
-    surrogate escapes rather than failing to encode. It can still meet a value
-    that will not serialize at all, which is why this raises
-    `attest.NotCanonicalizable` and :func:`verify_receipt` refuses on it."""
-    try:
-        payload = json.dumps(
-            {k: v for k, v in body.items() if k != "signature"},
-            sort_keys=True, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError, UnicodeEncodeError) as error:
-        raise attest.NotCanonicalizable(
-            f"the receipt has no canonical byte spelling: {error}") from error
-    return hmac.new(bytes(host_key), RECEIPT_DOMAIN + payload,
-                    hashlib.sha256).hexdigest()
+    The bytes are `attest._canonical_bytes`'s, the same construction
+    `attest._sign` MACs over, deferred to rather than restated (roadmap 428
+    F10's successor in this module): a verifier who canonicalizes the way
+    docs/revl-attest.md documents recomputes exactly these bytes, which is only
+    true while there is one implementation of the spelling. This used to call
+    `json.dumps` HERE, with the default `ensure_ascii=True`, so a body carrying
+    non-ASCII text (a runtime version, a nonce, a name) was `\\u`-escaped and
+    MACed to different bytes than the documented rule, and a valid receipt read
+    as invalid by anyone who followed it.
+
+    A body with no canonical byte spelling (a lone surrogate) raises
+    `attest.NotCanonicalizable`: :func:`verify_receipt` turns that into a
+    refusal, and the signing boundary (:func:`admit`, :func:`commit_receipt`)
+    lets it escape, because a body that cannot be MACed has no signature to
+    return."""
+    return hmac.new(bytes(host_key), RECEIPT_DOMAIN + attest._canonical_bytes(
+        {k: v for k, v in body.items() if k != "signature"}),
+        hashlib.sha256).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -1003,7 +1023,7 @@ def admit_bundle_chain(bundle_dir: Path | str, *,
     """
     keys: dict[str, bytes] = {}
     for path in key_paths:
-        raw = Path(path).read_bytes()
+        raw = _load_key(path)
         keys[attest.key_id(raw)] = raw
     trust = TrustStore(keys=keys, backend=backend,
                        require_gauntlet=require_gauntlet,
@@ -1499,7 +1519,7 @@ def serve_admit_request(request_wire: Mapping, *,
 
     keys: dict[str, bytes] = {}
     for path in key_paths:
-        raw = Path(path).read_bytes()
+        raw = _load_key(path)
         keys[attest.key_id(raw)] = raw
     trust = TrustStore(
         keys=keys, backend=request.backend,
@@ -4196,8 +4216,8 @@ def deploy_admit_command(args) -> int:
     host_key_path = getattr(args, "host_key", None)
     if host_key_path is not None:
         try:
-            host_key = Path(host_key_path).read_bytes()
-        except OSError as error:
+            host_key = _load_key(host_key_path)
+        except (OSError, RevlError) as error:
             print(f"error: cannot read --host-key {host_key_path!r}: {error}",
                   file=sys.stderr)
             return 1
@@ -4228,11 +4248,21 @@ def deploy_admit_command(args) -> int:
                     "the deploy-admit runner received a request line that is "
                     "not a JSON object, so nothing was served")
             else:
-                reply = serve_deploy_request(
-                    request_wire, key_paths=key_paths, host_key=host_key,
-                    require_gauntlet=require_gauntlet,
-                    require_conformance=require_conformance,
-                    runtime_versions=runtime_versions)
+                try:
+                    reply = serve_deploy_request(
+                        request_wire, key_paths=key_paths, host_key=host_key,
+                        require_gauntlet=require_gauntlet,
+                        require_conformance=require_conformance,
+                        runtime_versions=runtime_versions)
+                except (OSError, RevlError) as error:
+                    # The host's own key material is unreadable, so the host has
+                    # no trust store to admit against. Refuse audibly on the
+                    # channel (the conductor's challenge check trips) rather than
+                    # let the runner die mid-handshake and hang the exchange.
+                    reply = _refusal(
+                        LINK_TRANSPORT,
+                        f"the deploy-admit runner could not read its own key "
+                        f"material, so nothing was served: {error}")
         sys.stdout.write(json.dumps(reply, sort_keys=True) + "\n")
         sys.stdout.flush()
     return 0
@@ -4298,7 +4328,7 @@ def deploy_command(args) -> int:
                 backend=getattr(args, "backend", None) or "python",
                 require_gauntlet=getattr(args, "require_gauntlet", False),
                 require_conformance=getattr(args, "require_conformance", False))
-        except OSError as error:
+        except (OSError, RevlError) as error:
             print(f"error: cannot admit bundle {bundle_arg!r}: {error}",
                   file=sys.stderr)
             return 1
@@ -4780,8 +4810,8 @@ def _ssh_participant(target: "DeployTarget", *, local_bundle: Path | str,
             f"stage them. A cross-machine deploy with nowhere to stage is "
             f"refused rather than run against unstaged bytes.")
     try:
-        host_key = Path(str(host_key_path)).read_bytes()
-    except OSError as error:
+        host_key = _load_key(host_key_path)
+    except (OSError, RevlError) as error:
         return None, (f"target {target.process!r}: cannot read the far host's "
                       f"receipt key {host_key_path!r}: {error}")
 
