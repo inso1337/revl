@@ -63,6 +63,11 @@ an agent can survey the workspace before it acts:
 Active leases are visible even with nothing loaded — an agent can claim intent
 on a name before it boots.
 
+A lease that was **not** claimed in this session — one re-seated from a restored
+snapshot — adds `"verified": false` to the record. It still fences every other
+operator; it does not exempt its own holder. See *Self-operator is always
+allowed* below.
+
 ### 2. Advisory (default) — `revl_plan` / `revl_swap`
 
 A plan or swap that would replace a component **another operator** leases is
@@ -118,12 +123,16 @@ The refusal is **all-or-nothing**, like admission: the first target held by
 another operator refuses the whole swap.
 
 Enforcement covers **every path that swaps**, not just `revl_swap`:
-`revl_ship --apply` reaches it through the swap handler, and `revl_repair`'s
-remediation step is checked here before the loop runs. And when the swap's
-targets **cannot be derived** — a candidate that will not compile — enforcement
-fails closed and checks the swap against *every* active lease, rather than
-against none of them. A swap that cannot be scoped is exactly the swap a lease
-exists to stop.
+`revl_ship --apply` reaches it through the swap handler, `revl_repair`'s
+remediation step is checked here before the loop runs, and `revl_edit` — whose
+edits compile into the same kind of candidate swap — is checked against this
+gate and the quarantine gate before its swap runs, rather than only against
+admission. A gate that only `revl_swap` walks is not a gate; it is a gap in
+the shape of the tool an agent reaches for when the front door is closed. And
+when the swap's **targets cannot be derived** — a candidate that will not
+compile — enforcement fails closed and checks the swap against *every* active
+lease, rather than against none of them. A swap that cannot be scoped is
+exactly the swap a lease exists to stop.
 
 The advisory/enforced split is the same shape as the rest of the gate:
 advisory by default (any operator with the `swap` grant can still act), enforced
@@ -136,6 +145,17 @@ against, and swap the components she holds — the lease protects her iteration
 *from others*, it does not fence her out of her own work. Enforcement and
 advisory both compare the swap's target leases against the acting operator and
 skip the ones that operator holds.
+
+That exemption is earned by **claiming the name in this session**, not by the
+name appearing in a document. `revl_restore` re-seats the leases it finds, and
+a restored lease is indistinguishable, in the snapshot, from one the restoring
+operator typed: the document is caller-supplied input, exactly like the source
+text next to it. So a re-seated lease carries the fence and not the exemption —
+it still stops every other operator, but it will not let the operator its
+`holder` field names through the gate until that operator claims the name with
+`revl_lease`. Otherwise anyone who can call `revl_restore` could mint a lease in
+the one name the gate exempts and walk past enforcement in the same breath.
+`revl_state` marks these leases, and the refusal says which case you are in.
 
 ## The verb — `revl_lease`
 

@@ -100,9 +100,12 @@ This reuses the two authorities the composition already has:
   candidate; the admission is stamped as a bypass.
 
 `quarantine.admission_decision` returns the decision; `quarantine.gate_swap`
-enforces it inside `revl_swap`. **With no requiring policy, the gate is inert
-and the default swap path pays nothing** — quarantine is opt-in, exactly like
-the item-33 sandbox and item-61 leases it sits beside.
+enforces it on **every path that reaches a swap** — `revl_swap`, `revl_repair`'s
+remediation step, and `revl_edit`, which compiles its edits into a candidate
+swap and is gated by it and by the item-61 lease gate before that swap runs.
+**With no requiring policy, the gate is inert and the default swap path pays
+nothing** — quarantine is opt-in, exactly like the item-33 sandbox and item-61
+leases it sits beside.
 
 ```
 G4 (per component)        what may a component reach?

@@ -73,12 +73,20 @@ class Lease:
 
     ``expiry`` is an absolute wall-clock epoch: the claim is live while
     ``now < expiry`` and needs no timer to end. ``acquired`` is when it was
-    first claimed (renewals keep it, so the trace shows the whole span)."""
+    first claimed (renewals keep it, so the trace shows the whole span).
+
+    ``verified`` says this book *minted* the claim itself, through the
+    holder-checked :meth:`LeaseBook.claim`. It is ``False`` for a lease
+    re-seated from a persisted document (:meth:`LeaseBook.reinstate`), because
+    that document is caller-supplied input: it may carry a fence that protects
+    a component, but it may never mint the holder exemption only a real claim
+    earns. See :func:`check_swap`."""
 
     component: str
     holder: str
     acquired: float
     expiry: float
+    verified: bool = True
 
     def active(self, now: float) -> bool:
         return now < self.expiry
@@ -88,13 +96,18 @@ class Lease:
 
     def to_json(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
-        return {
+        out = {
             "component": self.component,
             "holder": self.holder,
             "acquired": self.acquired,
             "expiry": self.expiry,
             "expiresInSeconds": round(self.remaining(now), 3),
         }
+        # Keyed in only when it is the exceptional case, so the documented
+        # state shape is unchanged for every lease this book minted itself.
+        if not self.verified:
+            out["verified"] = False
+        return out
 
 
 class LeaseBook:
@@ -206,11 +219,18 @@ class LeaseBook:
         """Re-seat a lease at its *absolute* expiry (a persist rehydrate, item
         15). Unlike :meth:`claim` it keeps the original expiry rather than
         recomputing from a TTL, and quietly drops one already elapsed — a
-        wall-clock claim does not come back from the dead across a restart."""
+        wall-clock claim does not come back from the dead across a restart.
+
+        The re-seated lease is **unverified**, and any ``verified`` the document
+        itself carries is ignored: ``holder`` came out of a client-supplied
+        document, and claiming through here would make `revl_restore` a way to
+        mint a lease in *any* name — including the restoring operator's own,
+        which is precisely the name :func:`check_swap` exempts. The fence comes
+        back; the exemption has to be re-earned with a real :meth:`claim`."""
         now = time.time() if now is None else now
         if now >= expiry:
             return None
-        lease = Lease(component, holder, acquired, expiry)
+        lease = Lease(component, holder, acquired, expiry, verified=False)
         self._leases[component] = lease
         return lease
 
@@ -299,14 +319,20 @@ def advise(session, targets: list[str] | None,
     warnings: list[dict] = []
     for name in targets:
         lease = live.get(name)
-        if lease is None or lease.holder == me:
+        if lease is None or _exempt(lease, me):
             continue
+        unverified = not lease.verified
         warnings.append({
             "component": name,
             "leasedBy": lease.holder,
             "expiry": lease.expiry,
             "expiresInSeconds": round(lease.remaining(now), 3),
-            "message": (f"`{name}` is leased by `{lease.holder}` for another "
+            "message": (f"`{name}` came back from a restored snapshot naming "
+                        f"you as its holder, and a snapshot cannot exempt you — "
+                        f"re-claim it with `revl_lease` (component leases, "
+                        f"item 61; advisory unless policy enforces leases)"
+                        if unverified and lease.holder == me else
+                        f"`{name}` is leased by `{lease.holder}` for another "
                         f"{round(lease.remaining(now), 1)}s — your swap will "
                         f"race their iteration (component leases, item 61; "
                         f"advisory unless policy enforces leases)"),
@@ -342,19 +368,47 @@ class LeaseRefusal:
     message: str
 
 
+def _exempt(lease: Lease, me: str) -> bool:
+    """Whether ``me`` may replace a component ``lease`` fences.
+
+    The self-holder exemption ("a lease never fences out its own holder") is
+    available only to a claim this book *minted*: a lease re-seated from a
+    restored snapshot names its holder, but naming is not earning. Without this
+    a client could forge the holder field of a snapshot it supplies to
+    `revl_restore`, name itself, and walk through the very fence the restore
+    had just put back — enforcement vacuous for exactly the operator who
+    wanted in."""
+    return lease.holder == me and lease.verified
+
+
 def _refusal(holder: str, lease: Lease, now: float) -> LeaseRefusal:
-    message = (
-        f"operator `{holder}` may not replace `{lease.component}` — it is "
-        f"leased by `{lease.holder}` for another "
-        f"{round(lease.remaining(now), 1)}s and this composition's policy "
-        f"enforces leases (component leases, item 61; boundary policy, item 33)")
+    # `_exempt` refused this, so either the lease is someone else's or it names
+    # the acting operator without having been claimed here. The message has to
+    # say *which*: "leased by `alice`" is baffling when you are alice.
+    if lease.holder == holder:
+        message = (
+            f"operator `{holder}` may not replace `{lease.component}` — the "
+            f"lease came back from a restored snapshot naming `{holder}` as its "
+            f"holder, and a snapshot is caller-supplied input: it may carry a "
+            f"fence, it may not mint a claim. Re-claim the name with "
+            f"`revl_lease` to make it yours (component leases, item 61)")
+    else:
+        message = (
+            f"operator `{holder}` may not replace `{lease.component}` — it is "
+            f"leased by `{lease.holder}` for another "
+            f"{round(lease.remaining(now), 1)}s and this composition's policy "
+            f"enforces leases (component leases, item 61; boundary policy, item 33)")
+    detail = (f"leased by `{lease.holder}` until expiry"
+              if lease.verified else
+              f"leased by `{lease.holder}` until expiry, re-seated from a "
+              f"snapshot — not claimed in this session")
     why = WhyTrace(
         kind="component-lease", subject=holder, shape=CHAIN,
         steps=[
             TraceStep(holder, "operator", None, None,
                       f"attempts to replace `{lease.component}`"),
             TraceStep(lease.component, "component", None, None,
-                      f"leased by `{lease.holder}` until expiry", (lease.holder,)),
+                      detail, (lease.holder,)),
         ])
     return LeaseRefusal(holder, lease.component, lease.holder, lease.expiry,
                         why, message)
@@ -374,7 +428,11 @@ def check_swap(session, arguments: dict,
     a lease it might be replacing. Deferring instead was the bypass — a
     candidate that renamed the component it replaced derived no targets and so
     was refused by nothing, which is exactly the swap an enforced lease exists
-    to stop."""
+    to stop.
+
+    The self-holder exemption is granted only to a *verified* lease (see
+    :func:`_exempt`), so a lease re-seated from a restored snapshot refuses
+    even the operator its document names as holder."""
     if not enforced(session):
         return None
     now = time.time() if now is None else now
@@ -390,7 +448,7 @@ def check_swap(session, arguments: dict,
     active = book.active(now)
     if undecidable:
         for lease in active:
-            if lease.holder != me:
+            if not _exempt(lease, me):
                 return _refusal(me, lease, now)
         return None
     if not targets:
@@ -398,6 +456,6 @@ def check_swap(session, arguments: dict,
     live = {l.component: l for l in active}
     for name in targets:
         lease = live.get(name)
-        if lease is not None and lease.holder != me:
+        if lease is not None and not _exempt(lease, me):
             return _refusal(me, lease, now)
     return None
