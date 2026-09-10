@@ -672,6 +672,34 @@ def test_a_quorum_gated_lease_is_refused_until_the_votes_arrive(tmp_path):
     assert session._grants == []
 
 
+def test_a_lease_refusal_is_reasoned_and_names_the_route_that_answers_it(tmp_path):
+    """A refusal that does not say what would unblock it is a trap, and item 471
+    leaves this one with no caller-supplied mint at all - so the refusals must
+    carry the reason and the route, never a bare failure. The gate's refusal IS
+    the question (`ApprovalRequired` carrying the `kind='lease'` ticket, on the
+    record); the mint's refusal names the rule it answers, the composition it
+    leaves open, and the route that unblocks it: vote, then re-issue the load.
+    The last line proves the named route is the one that actually works."""
+    session, ir = _lease_harness(tmp_path)
+
+    refused = _gate(session, ir)
+    assert isinstance(refused, ApprovalRequired), "a bare failure would be a trap"
+    assert refused.ticket["kind"] == "lease"
+    assert _LEASE_CAP in refused.ticket["capabilities"]
+    assert _kinds(session) == ["quorum-open"], "the question is on the record"
+
+    with pytest.raises(SessionError) as caught:
+        session.mint_standing_grant(ticket_hash=refused.ticket["hash"], uses=3)
+    message = str(caught.value)
+    assert "require 2 of {alice, bob, carol}" in message, "the rule it answers"
+    assert "effect lease" in message, "the composition it leaves open"
+    assert "re-run the load" in message, "the route that unblocks it"
+
+    for name in ("bob", "carol"):
+        session.approve_ticket(refused.ticket["hash"], vote="approve", as_token=name)
+    assert _gate(session, ir) is None, "the named route is the one that works"
+
+
 def test_a_denied_lease_question_is_not_an_answer(tmp_path):
     """A denied decision closes the question and mints nothing, so the load is
     refused with the denial on the record rather than admitted on a decision
