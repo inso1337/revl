@@ -484,6 +484,25 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
             model.sink_kind[fn.name] = _sink_kind_for(fn.name, ())
         fn.returns = strip_qualifiers(fn.returns)
 
+    # The operations THIS unit implements. A provide body reaches the call site on
+    # its own and names the finer origin class than the declaration can (the body
+    # that forwards `read_file` knows `fs`; the declaration only knows
+    # `Untrusted`), so the declared-return source mint below stands aside wherever
+    # one exists and leaves the body's answer standing. The declaration is the
+    # mint of last resort: for the operation nothing in the unit implements — the
+    # interface-only carrier a caller holds across a unit boundary (item 426 §5).
+    # Keyed by operation name alone, because `model.sources` and the call-site
+    # resolution are both keyed that way; skipping on any implemented name is the
+    # conservative direction, and the interface-only shape has no body here at all.
+    from .parser import ProvideStmt as _ProvideStmt
+    provided_here = {
+        m.name
+        for comp in getattr(program, "components", ()) or ()
+        for step in (getattr(comp, "body", ()) or ())
+        if isinstance(step, _ProvideStmt)
+        for m in step.methods
+    }
+
     # service methods: a `Trusted[T]` param is a sink reachable through a
     # required key; qualifiers are stripped from the (name, type) tuples.
     for svc in getattr(program, "services", ()):
@@ -541,6 +560,27 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 model.sink_kind.setdefault(
                     method.name,
                     _sink_kind_for(method.name, getattr(method, "capabilities", None)))
+            # The return half of the same rule, and the direct analogue of the
+            # extern mint above: a declared `Untrusted[T]`/`Secret[T]` return is
+            # a source at the OPERATION whenever the unit does not implement it,
+            # because there the declaration is the only thing a caller is
+            # guaranteed to hold. The interface on its own — the row item 426
+            # section 5 exchanges, and all a caller ever sees for a component that
+            # lives in another unit — minted nothing, so the declared qualifier was
+            # silently discarded and the operation read as public to every sink
+            # downstream of it. Where the unit DOES implement the operation the
+            # body already answers (see `provided_here`), with a finer origin.
+            # Kept on the OUTERMOST qualifier, exactly as the extern source mint
+            # is: the wider `mentions_secret` spelling marks a confidential
+            # WITNESS position, it does not mint a source (see there).
+            if method.name not in model.sources \
+                    and method.name not in provided_here:
+                ret_qual = top_qualifier(method.returns)
+                if ret_qual == "Untrusted":
+                    model.sources[method.name] = _origin_of(
+                        getattr(method, "capabilities", None))
+                elif ret_qual == "Secret":
+                    model.sources[method.name] = CONFIDENTIAL_ORIGIN
             method.returns = strip_qualifiers(method.returns)
 
     # component config fields: a `Secret[T]` field is a declared confidential
