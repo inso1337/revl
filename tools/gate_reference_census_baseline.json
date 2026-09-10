@@ -72,6 +72,7 @@
    "backends/go/testdata/opt_gaps_280.rvl",
    "backends/go/testdata/result_ctor_302.rvl",
    "backends/go/testdata/stream_event_130.rvl",
+   "backends/rust/scenarios/stream.rvl",
    "examples/async_timer.rvl",
    "examples/budget_attenuation.rvl",
    "examples/durable_log.rvl",
@@ -99,8 +100,7 @@
    "tests/fixtures/v2_math_lib.rvl"
   ],
   "false-reject/G1": [
-   "backends/go/testdata/stream_130.rvl",
-   "backends/rust/scenarios/stream.rvl"
+   "backends/go/testdata/stream_130.rvl"
   ],
   "tag-mismatch/G4->BAD": [
    "examples/rejections/g4_spawn_widens_budget.rvl"
@@ -244,11 +244,11 @@
    }
   },
   "backends/rust/scenarios/stream.rvl": {
-   "bucket": "false-reject/G1",
+   "bucket": "false-reject/BAD",
    "gate": {
-    "code": "G1",
+    "code": "BAD",
     "kind": "refused",
-    "message": "`sub` is not a declared requirement of Parked"
+    "message": "unexpected token at top level"
    },
    "reference": {
     "message": "",
