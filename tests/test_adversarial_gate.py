@@ -247,6 +247,166 @@ component Logger {
     assert excinfo.value.code == "G5"
 
 
+_TEARDOWN_HOST = (
+    'extern emission fn hsend(k: Str) -> Int = @py { return 1 }\n'
+    'extern pure fn pure1(k: Str) -> Int = @py { return 1 }\n'
+    'fn app(f: (Str) -> Int, x: Str) -> Int = f(x)\n'
+    'fn dispatch1(f: (Str) -> Int) -> Int = f("z")\n'
+    'service Net { emission fn send(msg: Str) -> Int }\n'
+    'service Task { emission fn run(prompt: Str) -> Int }\n'
+    'service S { fn go() -> Int }\n'
+    'component NetImpl provides net: Net {\n'
+    '  provide net { fn send(msg) { emit hsend(msg)  return 1 } }\n'
+    '}\n'
+    'component Worker requires net: Net provides task: Task {\n'
+    '  provide task { fn run(prompt) { emit net.send(prompt)  return 1 } }\n'
+    '}\n'
+)
+
+
+def _teardown_host(undo: str, setup: str = "") -> str:
+    """The bracket inverse's `undo` slot, with the spawning component already in
+    place, so the only variable is how the teardown reaches the host."""
+    return _TEARDOWN_HOST + (
+        'component Sup requires net: Net provides s: S {\n'
+        '  let w = effect spawn Worker with { } undo w.dispose()\n'
+        '  provide s {\n'
+        '    fn go() {\n'
+        + (f'      {setup}\n' if setup else '')
+        + '      effect pure1("k")\n'
+        + f'      undo {undo}\n'
+        '      return 1\n'
+        '    }\n'
+        '  }\n'
+        '}\n'
+    )
+
+
+def test_a_teardown_emission_reference_in_argument_position_is_refused():
+    """The (G5) bound is on the emission REFERENCE, not on the call spelling.
+    The first version of this check only recognised an emission that was itself
+    the *callee* of a call in the undo slot, so a first-class reference handed to
+    a helper walked through: `dispatch1(w.task.run)` names no emission op in call
+    position, the helper calls it, and the emission fires during teardown, after
+    the session verdict. REFUSED with the same diagnostic the direct call gets."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_teardown_host("dispatch1(w.task.run)"))
+    assert "(G5)" in str(excinfo.value)
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_handle_reference_bound_to_a_local_is_refused():
+    """The same crossing one binding later. `let t = w.task` is a spelling
+    change, not a boundary: the `run` that would fire is the same one. A check
+    that reads the receiver off the literal call loses the reference here, so
+    this is the case that proves the fix follows the value rather than the
+    name. Admitted at baseline."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_teardown_host("dispatch1(t.run)", setup="let t = w.task"))
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_method_reference_bound_to_a_local_is_refused():
+    """The `let`-bound twin of the reference in argument position, and the shape
+    a receiver-spelling analysis loses: the slot's `undo` names no receiver, only
+    a local, and the local holds the emission METHOD itself rather than the
+    handle. The `run` that fires in teardown is the same one at the same point
+    relative to the session verdict, so the check follows the value bound at the
+    `let` instead of the name that reaches the slot."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            _teardown_host("dispatch1(r)", setup="let r = w.task.run")
+        )
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_method_reference_read_out_of_a_record_is_refused():
+    """The same value one hop further out. A record field is a read position,
+    not a boundary: `let box = { f: w.task.run }` stores the emission method and
+    `box.f` projects it back out, so the field is followed to the value it
+    holds rather than treated as the slot's own head."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            _teardown_host(
+                "dispatch1(box.f)", setup="let box = { f: w.task.run }"
+            )
+        )
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_method_reference_read_out_of_a_list_is_refused():
+    """The container twin on the list side. `let ts = [w.task.run]` holds the
+    emission method as an element and `ts[0]` indexes it back out; the index is
+    spelling, so the elements are swept the same way the record fields are."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            _teardown_host("dispatch1(ts[0])", setup="let ts = [w.task.run]")
+        )
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_method_reference_on_one_if_arm_is_refused():
+    """An `if` arm is a value slot, so a crossing on ONE arm is enough: the arm
+    the local holds is decided at run time and the teardown cannot choose. The
+    pure arm in the same expression is the honest control that keeps the refusal
+    from being about the `if` itself; the check takes the union of the arm
+    values rather than the head it reads first."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            _teardown_host(
+                "dispatch1(g)",
+                setup="let g = if (1 == 1) { w.task.run } else { pure1 }",
+            )
+        )
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_method_reference_on_one_match_arm_is_refused():
+    """The `match` twin of the `if` arm. The scrutinee is irrelevant to the
+    verdict; only the value the arm produces is, so the arms are swept as value
+    slots and a single crossing arm refuses the slot."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            _teardown_host(
+                "dispatch1(g)",
+                setup="let g = match 1 { _ => w.task.run }",
+            )
+        )
+    assert excinfo.value.code == "G5"
+
+
+def test_a_bare_teardown_handle_reference_is_refused():
+    """A first-class reference to an emission can be called anywhere a call is
+    spelled, including by a callee the gate cannot see, so the reference itself
+    is what the slot refuses rather than the call it happens to sit in. A bare
+    reference is therefore refused too, on the same reach reason: the effect's
+    inverse claims to be host-local and this value escapes into a reach the
+    inverse's own head cannot bound. Admitted at baseline."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_teardown_host("w.task.run"))
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_extern_reference_in_argument_position_is_refused():
+    """The same shape on the plain-extern side. Baseline: `app(hsend, "k")` in
+    the undo slot already refuses, but with the G4 emission-propagation
+    diagnostic, while the direct call in the same slot is judged by the teardown
+    contract and reports (G5). Both refuse, so this is attribution rather than an
+    escape: pinning it here keeps the slot judged by one guarantee, since a
+    reader who sees G4 reasonably looks for a propagation bug that is not
+    there."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_teardown_host('app(hsend, "k")'))
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_higher_order_call_over_a_pure_fn_still_compiles():
+    """The control: widening the check to a reference in argument position must
+    not sweep up honest higher-order code. `pure1` reaches no host, so passing it
+    through the same helper in the same slot stays compilable."""
+    compile_source(_teardown_host('app(pure1, "k")'))
+
+
 def test_a_forward_position_emission_is_still_surfaced_not_refused():
     """The bound above is positional, not a ban on the extern: the same
     emission on the FORWARD path is admitted and lands on the G8 audit surface
