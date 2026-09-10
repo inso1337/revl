@@ -1,0 +1,44 @@
+// REJECTED — G5: a bracket inverse may not cross a boundary, and handing the
+// crossing to a callee the gate cannot see does not exempt it
+// (docs/design/teardown-contract.md: a bracket inverse "may emit in teardown:
+// no").
+//
+// `dispatch1(w.task.run)` reads the `task` provision off the spawn handle `w`
+// and passes the `run` operation — which the service declares `emission` — as a
+// VALUE. The reference is not the callee of any call in this slot, so a check
+// that reads the slot's call heads sees a call to `dispatch1`, a pure local fn,
+// and concludes the teardown is host-local. At runtime `dispatch1` calls what it
+// was handed, so the emission fires on clean unload AND on abort, at or after
+// the session verdict: invisible to the emission fold, to the capability
+// declarations and to the approval gate, and past the point where it could be
+// rolled back.
+//
+// The accepting twin passes the same helper a PURE fn (`dispatch1(pure1)`),
+// which stays admitted. The refusing twins are the direct call in this slot
+// (`w.task.run("bye")`, g5_undo_handle_emission.rvl) and the same reference
+// reached through a let-bound handle (g5_undo_handle_ref_let.rvl). What is
+// refused is the first-class reference to a crossing, not the helper, the value
+// passing, or the handle.
+//
+// expected error:
+//   the `undo` of this bracket calls `w.task.run`, which is an emission —
+//     a bracket inverse runs in teardown and may not cross a boundary (G5)
+
+fn dispatch1(f: (Str) -> Int) -> Int { return f("z") }
+
+service Net { emission[net] fn send(msg: Str) -> Int }
+service Task { emission[net] fn run(prompt: Str) -> Int }
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+  }
+}
+
+component Sup requires net: Net {
+  let w = effect spawn Worker with { } undo w.dispose()
+  let m = effect Map.new() undo dispatch1(w.task.run)
+}

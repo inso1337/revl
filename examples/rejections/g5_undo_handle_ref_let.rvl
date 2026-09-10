@@ -1,0 +1,42 @@
+// REJECTED — G5: the same first-class crossing as g5_undo_handle_ref_arg.rvl,
+// reached one binding later, so an analysis that tracks only the literal
+// receiver spelling loses it.
+//
+// `let t = w.task` binds the spawn handle's provision to a local, and
+// `dispatch1(t.run)` hands its `run` operation — declared `emission` — to a
+// helper as a value. The local binding is a spelling change, not a boundary:
+// the `run` that fires in teardown is the same one, at the same point relative
+// to the session verdict.
+//
+// expected error:
+//   the `undo` of this bracket calls `t.run`, which is an emission —
+//     a bracket inverse runs in teardown and may not cross a boundary (G5)
+
+extern pure fn pure1(k: Str) -> Int = @py { return 1 }
+
+fn dispatch1(f: (Str) -> Int) -> Int { return f("z") }
+
+service Net { emission[net] fn send(msg: Str) -> Int }
+service Task { emission[net] fn run(prompt: Str) -> Int }
+service S { fn go() -> Int }
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+  }
+}
+
+component Sup requires net: Net provides s: S {
+  let w = effect spawn Worker with { } undo w.dispose()
+  provide s {
+    fn go() {
+      let t = w.task
+      effect pure1("k")
+      undo   dispatch1(t.run)
+      return 1
+    }
+  }
+}

@@ -7,8 +7,8 @@
 //! ([`crate::admit`]), is pure functions of their arguments. Layer 2 is
 //! stateful and address-space-bound — a live composition, an owner, a deferral
 //! queue, witnessed escrow, a WAL — with the operation set
-//! `{load, admit, propose, call, commit, abort, unload}`, and it is where the
-//! 243/244/245/246/322 guarantees (witnessed effects, session commit,
+//! `{load, admit, admit_into, propose, call, commit, abort, unload}`, and it is
+//! where the 243/244/245/246/322 guarantees (witnessed effects, session commit,
 //! approvals, six-tier crash recovery) live. `revl.gate.Gate` on py is the
 //! reference layer-2 surface this mirrors.
 //!
@@ -20,11 +20,12 @@
 //! * the GENERATION state ([`Session::load`], [`Session::generation`]): a fresh
 //!   boot installs generation 1 with a fresh item-245 owner frame;
 //! * the untrusted-author admission ENTRY ([`Session::propose`],
-//!   [`Session::admit`]): the item-334 `propose` verb's decision half wired in
-//!   the design's order — halt-dominance first, then the FORBIDDEN-GRANT rule,
-//!   then the standalone decision compile — reusing [`crate::admit`] for that
-//!   last step, so a refusal is the reference why-trace returned as DATA and the
-//!   live composition is untouched;
+//!   [`Session::admit`], [`Session::admit_into`]): the item-334 `propose`
+//!   verb's decision half wired in the design's order — halt-dominance first,
+//!   then the FORBIDDEN-GRANT rule, then the decision compile — reusing
+//!   [`crate::admit`] (and, across a composition boundary, [`crate::admit_into`])
+//!   for that last step, so a refusal is the reference why-trace returned as
+//!   DATA and the live composition is untouched;
 //! * the WITNESSED-CALL recording path ([`Session::call`], [`Session::commit`],
 //!   [`Session::abort`], [`Session::unload`]): the item-245 three-way effect
 //!   split (class (a) witnessed with a checked inverse, class (b) a deferred
@@ -55,7 +56,7 @@
 //! Until those land, [`crate::admit`] is the entitled decision this session can
 //! make, and `Session` fails closed on everything it cannot yet do.
 
-use crate::{admit, Verdict};
+use crate::{admit, admit_into, Verdict};
 use std::fmt;
 
 /// The service names that reach the decider — the admit/swap/owner-state control
@@ -424,6 +425,45 @@ impl Session {
         Ok(AdmitOutcome { admitted: false, code, message, keys: Vec::new() })
     }
 
+    /// The per-turn admission asked ACROSS the composition boundary: admit
+    /// `source` INTO the running manifest `manifest` (item 186's ambient gate,
+    /// issue #346), returning the fold's verdict as DATA. The live generation is
+    /// untouched, exactly as in [`Session::admit`].
+    ///
+    /// `manifest` is the ROW WIRE the item-186 wire defines — `C/k/r` for a
+    /// provision (`r` the realm, `""` for shared), `C<k` for a requirement,
+    /// `!halted` for a halted composition, joined by `;` — the same input
+    /// [`crate::admit_into`] takes. It is a PARAMETER and not a projection of
+    /// [`Session::live`] on purpose: a [`Composition`] carries the component
+    /// names and the keys the generation provides, and a manifest also needs the
+    /// requirements and the realms. Synthesising rows out of what this session
+    /// holds would be inventing a running composition, and an admission arm that
+    /// invents its inputs is the defect class this crate exists to prevent.
+    /// Build the wire where the composition is actually known
+    /// (`revl.manifest_wire(ir)` on py, or the wire directly).
+    ///
+    /// Wiring, in the order the rest of this surface uses: a HALT dominates
+    /// (item 443) and is checked before the candidate is judged, then the
+    /// decision itself. Requires a loaded composition (a candidate composes INTO
+    /// one). `admitted` is `false` on every outcome this tier can produce —
+    /// including the `NO_ADMISSION` decline — because the native gate issues no
+    /// admission (`revl.gate.admit_into` on py is the admitting tier).
+    pub fn admit_into(
+        &self,
+        source: &str,
+        manifest: &str,
+    ) -> Result<AdmitOutcome, SessionError> {
+        self.require_loaded("admit_into")?;
+        if let Some(reason) = &self.halted {
+            return Err(SessionError::new(
+                "HALTED",
+                format!("admit_into refused: the session was E-STOPPED ({reason})"),
+            ));
+        }
+        let (code, message) = decision_into(source, manifest);
+        Ok(AdmitOutcome { admitted: false, code, message, keys: Vec::new() })
+    }
+
     /// The item-334 `propose` verb's DECISION half: admit an AGENT-authored
     /// candidate under the untrusted-author profile, wired in the design's order.
     ///
@@ -646,19 +686,42 @@ impl ProposeOutcome {
 /// Every arm yields `admitted = false` at the call site: layer 1 issues no
 /// admission. `NoObjection` is DECLINED (fail-closed), not admitted.
 fn decision(source: &str) -> (Option<String>, Option<String>) {
-    match admit(source) {
+    declined_or(admit(source), false)
+}
+
+/// The same mapping for the manifest arm ([`admit_into`]). One difference: a
+/// no-objection there means "the union fold found nothing to refuse", which is
+/// still not an admission (the type layer has not run, and a `requires` is not
+/// resolved), so it is declined with the same `NO_ADMISSION` code and a message
+/// that names the manifest.
+fn decision_into(source: &str, manifest: &str) -> (Option<String>, Option<String>) {
+    declined_or(admit_into(source, manifest), true)
+}
+
+/// The shared fail-closed mapping: a refusal and a frontier gap pass through
+/// verbatim (the refusal IS the reference why-trace), and a no-objection becomes
+/// a decline.
+fn declined_or(verdict: Verdict, into_manifest: bool) -> (Option<String>, Option<String>) {
+    match verdict {
         Verdict::Refused { code, message } => (Some(code), Some(message)),
         Verdict::OutsideFrontier { reason } => {
             (Some(crate::FRONTIER_CODE.to_string()), Some(reason))
         }
         Verdict::NoObjection => (
             Some("NO_ADMISSION".to_string()),
-            Some(
+            Some(if into_manifest {
+                "declined: the native fold raised no objection to this candidate \
+                 against the running manifest, but this tier issues no admission \
+                 (it does not run the reference type layer, and it does not \
+                 resolve the candidate's requirements). Get a reference \
+                 admission on py before running anything."
+                    .to_string()
+            } else {
                 "declined: the native gate raised no objection, but this tier \
                  issues no admission (it does not run the reference type layer). \
                  Get a reference admission on py before running anything."
-                    .to_string(),
-            ),
+                    .to_string()
+            }),
         ),
     }
 }
@@ -819,6 +882,110 @@ component B provides s: S { provide s { fn op(x) { return x } } }";
         let out = s.admit(G2_SRC, &[]).unwrap();
         assert!(!out.admitted);
         assert_eq!(out.code.as_deref(), Some("G2"));
+    }
+
+    // A source whose only fault is AMBIENT: it re-provides `store`, which the
+    // running manifest already holds. It also requires the key it provides, so
+    // judged STANDALONE the same source is a G3 (cycle) rather than a G2
+    // (provision conflict) — which is exactly how the two arms are told apart.
+    const AMBIENT_G2_SRC: &str = "service Store { fn get(key: Str) -> Str } \
+service Cache { fn lookup(key: Str) -> Str } \
+component CacheLayer requires store: Store provides store: Store { \
+provide store { fn get(key) { return key } fn bump(n) { return n } \
+fn put(key, value) { return value } } }";
+
+    #[test]
+    fn admit_into_requires_a_loaded_base() {
+        let s = Session::new();
+        let err = s.admit_into(CLEAN_SRC, "Kv/store/").unwrap_err();
+        assert_eq!(err.code, "NOT_LOADED");
+    }
+
+    #[test]
+    fn admit_into_halt_dominates() {
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        s.estop("operator halt");
+        let err = s.admit_into(CLEAN_SRC, "Kv/store/").unwrap_err();
+        assert_eq!(err.code, "HALTED");
+    }
+
+    #[test]
+    fn admit_into_surfaces_the_ambient_refusal_as_data() {
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let out = s.admit_into(AMBIENT_G2_SRC, "Kv/store/").unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("G2"));
+        assert!(out.message.unwrap().contains("provision conflict"));
+        // The live composition is untouched.
+        assert_eq!(s.generation(), 1);
+    }
+
+    #[test]
+    fn admit_into_reads_the_manifest_it_is_given() {
+        // The SAME candidate is a G2 against a manifest that already provides
+        // `store` and a G3 when judged standalone: the parameter is read, not
+        // ignored.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let ambient = s.admit_into(AMBIENT_G2_SRC, "Kv/store/").unwrap();
+        assert_eq!(ambient.code.as_deref(), Some("G2"));
+        let standalone = s.admit_into(AMBIENT_G2_SRC, "").unwrap();
+        assert_eq!(standalone.code.as_deref(), Some("G3"));
+    }
+
+    #[test]
+    fn admit_into_fails_closed_on_a_deferred_manifest_row() {
+        // A manifest row the fold cannot honour is REFUSED, never skipped.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let out = s.admit_into(CLEAN_SRC, "Kv/store=Int").unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("MANIFEST"));
+    }
+
+    #[test]
+    fn admit_into_fails_closed_on_no_objection() {
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let out = s.admit_into(CLEAN_SRC, "Kv/store/").unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("NO_ADMISSION"));
+    }
+
+    #[test]
+    fn admit_into_fails_closed_on_a_manifest_over_the_row_bound() {
+        // The row bound reaches this door too, and it has to: `Session::admit_into`
+        // funnels into `crate::admit_into`, so the refusal shape must be the
+        // crate's own, not a session one, or an embedder driving the session
+        // surface would get a different answer for the same wire.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let wire = "A/b/;".repeat(crate::MANIFEST_ROW_LIMIT + 1);
+        let out = s.admit_into(CLEAN_SRC, &wire).unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("FRONTIER"));
+        let reason = match crate::admit_into(CLEAN_SRC, &wire) {
+            Verdict::OutsideFrontier { reason } => reason,
+            other => panic!("expected the crate's own frontier gap, got {:?}", other),
+        };
+        assert_eq!(out.message.as_deref(), Some(reason.as_str()));
+        assert!(reason.contains(&crate::MANIFEST_ROW_LIMIT.to_string()), "{}", reason);
+        // The live composition is untouched, exactly as on every other refusal.
+        assert_eq!(s.generation(), 1);
+    }
+
+    #[test]
+    fn admit_into_still_folds_a_manifest_under_the_row_bound() {
+        // Non-vacuity at this door: the SAME wire one row shorter is folded as
+        // before, so the bound is a ceiling and not a wall.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let under = "A/b/;".repeat(crate::MANIFEST_ROW_LIMIT - 1);
+        let out = s.admit_into(CLEAN_SRC, &under).unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("NO_ADMISSION"));
     }
 
     #[test]

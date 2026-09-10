@@ -6,9 +6,10 @@
 //! before that component can run: no `revl mcp serve` subprocess, no IPC, no
 //! wire, and - the half the py harness cannot claim - no Python anywhere. This
 //! program is that embed made concrete. It holds a batch of proposed
-//! candidates, calls `revl_gate::admit` on each in-process, checks the
-//! invariants a host may actually rely on, and measures the per-candidate
-//! round-trip as a distribution.
+//! candidates, calls `revl_gate::admit` on each in-process - and
+//! `revl_gate::admit_into` on the ones that are proposed against the running
+//! composition - checks the invariants a host may actually rely on, and
+//! measures the per-candidate round-trip as a distribution.
 //!
 //! # What this gate decides, and the one sentence that matters
 //!
@@ -18,6 +19,14 @@
 //! all**: the three verdicts are `Refused`, `NoObjection` and
 //! `OutsideFrontier`, and `to_json` reports `"admitted": false` on every one of
 //! them.
+//!
+//! It DOES have a manifest arm (`revl_gate::admit_into`, issue #346): the same
+//! fold over the UNION of the running composition's provisions and the
+//! candidate's. That closes the ambient half of G2/G3 - a candidate that
+//! collides with what is already running is refused here, with the fold's own
+//! why-trace - and it still issues no admission: resolving the candidate's
+//! `requires` against a live provider and type-checking it is the reference
+//! type layer, which this gate does not run.
 //!
 //! So the rust harness is NOT a translation of the py harness's claim. The py
 //! harness proves an IDENTITY (`revl.gate.admit` is the reference admission
@@ -52,13 +61,16 @@
 //!    draft with an open hole, a type error - come back as no-objections. Every
 //!    one is in the tolerated direction (a no-objection is never an admission),
 //!    and every one is a reason a host may not treat a no-objection as a green.
-//! 2. **There is no `admit_into`.** The native pipeline has no manifest
-//!    parameter, so the realistic agent shape - admit a candidate AGAINST the
-//!    running composition - is not available on rust at all. The batch carries
-//!    the py harness's `cache_layer` candidate to price that: py ADMITS it into
-//!    the running composition, and standalone (the only question this gate can
-//!    be asked) this gate raises no objection to a `requires` that resolves to
-//!    nothing.
+//! 2. **The manifest arm refuses what py refuses, and admits nothing.** The
+//!    realistic agent shape - admit a candidate AGAINST the running
+//!    composition - is available here, and the batch carries the two
+//!    candidates that price it. A candidate that re-provides a key the running
+//!    composition already holds is REFUSED here (`G2`, the same code and the
+//!    same why-trace the py gate gives). The py harness's `cache_layer`,
+//!    whose `requires` RESOLVES against the running provider, is ADMITTED by
+//!    py and gets a no-objection here: that is the half of the question this
+//!    gate does not answer, and it is reported as a gap rather than as an
+//!    agreement.
 //! 3. **The screen is not cheap, and its cost is super-linear in candidate
 //!    size.** The py in-process round-trip is tenths of a millisecond. This one
 //!    is milliseconds at 218 bytes and grows roughly with the SQUARE of the
@@ -70,8 +82,10 @@
 //! This is a COMPILE-TIME screen, not a sandbox. A component this gate refuses
 //! never runs in the embedder's process. A component it does not refuse has
 //! only been screened at the composition/guarantee layer - it has not been
-//! type-checked, admitted, or confined. `admitted` is not a thing this gate
-//! issues, and even a py admission is not "safe to run unwitnessed": the
+//! type-checked, admitted, or confined, and no manifest parameter changes that:
+//! on the manifest arm a non-refusal means "nothing in the running composition
+//! collides with this", not "this can join it". `admitted` is not a thing this
+//! gate issues, and even a py admission is not "safe to run unwitnessed": the
 //! reversible-run half is item 334.
 //!
 //! # Usage
@@ -91,7 +105,7 @@
 //! identical bytes and hold the two harnesses against each other. Nothing about
 //! the default run needs Python.
 
-use revl_gate::{admit, compile_to, gate_version, Tier, Verdict, MAX_SOURCE_BYTES};
+use revl_gate::{admit, admit_into, compile_to, gate_version, Tier, Verdict, MAX_SOURCE_BYTES};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -102,7 +116,21 @@ use std::time::Instant;
 // (`bench/inprocess_gate_harness.py`); `tests/test_inprocess_gate_rust.py`
 // asserts that equality, so a py-side edit reds the driver instead of silently
 // letting the two harnesses screen different programs.
+//
+// Two of them are also proposed AGAINST the running composition (`into:
+// Some(HELD_MANIFEST)`), which is the manifest arm of issue #346.
 // --------------------------------------------------------------------------- //
+
+/// The running composition every manifest-arm candidate is admitted INTO.
+///
+/// The same composition the py harness holds: `bench/admission_latency.py::
+/// RUNNING`, compiled and then flattened by `revl.manifest_wire` - `Kv`
+/// provides `store`, `App` provides `app` and requires `store`, joined by `;`.
+/// `tests/test_inprocess_gate_rust.py` recomputes that wire from the py
+/// harness's own `base_manifest()`, so a py-side change to the running
+/// composition reds here instead of leaving the two tiers admitting into
+/// different worlds.
+const HELD_MANIFEST: &str = "Kv/store/;App/app/;App<store";
 
 /// `bench/admission_latency.py::CANDIDATE_STANDALONE`, the py harness's
 /// `standalone_twin`: standalone-valid, `Store` inlined. py ADMITS it.
@@ -120,12 +148,44 @@ component CacheLayer requires store: Store provides cache: Cache {
 
 /// `bench/admission_latency.py::CANDIDATE`, the py harness's `cache_layer`. py
 /// ADMITS it INTO the running composition (`admit_into`) and REFUSES it
-/// standalone. Standalone is the only question this gate can be asked, and the
-/// measured answer is a no-objection: the `admit_into` gap, priced.
+/// standalone. Standalone this gate raises no objection to a `requires` that
+/// resolves to nothing; admitted INTO the held composition it still raises no
+/// objection, because the fold has nothing to refuse - `cache_layer` neither
+/// collides with `Kv`/`App` nor closes a cycle. That is the still-open half of
+/// the manifest question, priced rather than papered over: RESOLVING the
+/// `requires` and ADMITTING is the reference type layer.
 const CACHE_LAYER: &str = r#"
 service Cache { fn lookup(key: Str) -> Str }
 component CacheLayer requires store: Store provides cache: Cache {
   provide cache { fn lookup(key) = store.get(key) }
+}
+"#;
+
+/// A candidate that COLLIDES with the running composition: it provides `store`
+/// in the shared realm, which `Kv` already provides in the held manifest. Its
+/// `Store` is declared with the running provider's own surface, so the
+/// interface-drift check (a reference check this gate does not run) has nothing
+/// to say and the collision is the only verdict in play.
+///
+/// This is the manifest arm's negative exit case (issue #346): the py gate
+/// refuses it `G2` with `provision conflict: key \`store\` is provided by both
+/// Kv and Rogue (G2)`, and this gate must refuse it with the SAME code and the
+/// same sentence. It is deliberately NOT in `bench/inprocess_gate_harness.py`:
+/// the py harness's two manifest negatives exercise the A6/interface-drift
+/// refusals, which live in the type layer this gate does not run. This one is
+/// built to land on the leg the two tiers DO share.
+const AMBIENT_PROVISION_CONFLICT: &str = r#"
+service Store {
+  fn get(key: Str) -> Str
+  fn bump(n: Int) -> Int
+  emission fn put(key: Str, value: Str)
+}
+component Rogue provides store: Store {
+  provide store {
+    fn get(key) = key
+    fn bump(n) = n
+    fn put(key, value) = value
+  }
 }
 "#;
 
@@ -200,6 +260,11 @@ struct Candidate {
     /// True where this exact source also appears in
     /// `bench/inprocess_gate_harness.py`.
     shared_with_py: bool,
+    /// The running composition to admit this candidate INTO, or `None` for the
+    /// standalone question alone. `Some(rows)` adds a SECOND screen
+    /// (`revl_gate::admit_into`) whose verdict the report carries alongside the
+    /// standalone one - the manifest arm of issue #346.
+    into: Option<&'static str>,
 }
 
 fn batch() -> Vec<Candidate> {
@@ -209,54 +274,70 @@ fn batch() -> Vec<Candidate> {
             source: STANDALONE_TWIN,
             note: "standalone-valid, Store inlined; py ADMITS it",
             shared_with_py: true,
+            into: None,
         },
         Candidate {
             name: "cache_layer",
             source: CACHE_LAYER,
             note: "requires a Store not in the source; py refuses it standalone and ADMITS it into the running manifest",
             shared_with_py: true,
+            into: Some(HELD_MANIFEST),
+        },
+        Candidate {
+            name: "ambient_provision_conflict",
+            source: AMBIENT_PROVISION_CONFLICT,
+            note: "provides a key the running composition already provides; py refuses it into the manifest (G2) and ADMITS it standalone",
+            shared_with_py: false,
+            into: Some(HELD_MANIFEST),
         },
         Candidate {
             name: "incomplete_provide",
             source: INCOMPLETE_PROVIDE,
             note: "provides a service but omits a declared method; py refuses",
             shared_with_py: true,
+            into: None,
         },
         Candidate {
             name: "provision_conflict",
             source: PROVISION_CONFLICT,
             note: "two components provide the same service; py refuses (G2)",
             shared_with_py: false,
+            into: None,
         },
         Candidate {
             name: "undeclared_emission",
             source: UNDECLARED_EMISSION,
             note: "an undeclared emission is called from a body; py refuses (G4)",
             shared_with_py: false,
+            into: None,
         },
         Candidate {
             name: "syntax_error",
             source: SYNTAX_ERROR,
             note: "a genuine parse failure; py refuses",
             shared_with_py: true,
+            into: None,
         },
         Candidate {
             name: "hole_draft",
             source: HOLE_DRAFT,
             note: "a draft with an open typed hole; py refuses (T3)",
             shared_with_py: true,
+            into: None,
         },
         Candidate {
             name: "type_layer_miss",
             source: TYPE_LAYER_MISS,
             note: "a type error; py refuses (T1)",
             shared_with_py: false,
+            into: None,
         },
         Candidate {
             name: "frontier_oversized",
             source: frontier_oversized(),
             note: "a source over the size bound; py ADMITS, this gate is not entitled to decide",
             shared_with_py: false,
+            into: None,
         },
     ]
 }
@@ -273,6 +354,34 @@ fn screen(source: &str) -> (&'static str, Option<String>) {
     (verdict.kind(), verdict.code().map(|c| c.to_string()))
 }
 
+/// The manifest arm's twin: the same pair, for `admit_into` against the running
+/// composition's rows. A separate call and a separate record on purpose - the
+/// two questions have different answers and a report that merged them could not
+/// tell an agreement from a gap.
+fn screen_into(source: &str, manifest: &str) -> (&'static str, Option<String>) {
+    let verdict = admit_into(source, manifest);
+    (verdict.kind(), verdict.code().map(|c| c.to_string()))
+}
+
+/// One screened arm, standalone or manifest.
+struct Arm {
+    kind: &'static str,
+    code: Option<String>,
+    message: Option<String>,
+    json: String,
+}
+
+impl Arm {
+    fn of(verdict: &Verdict) -> Arm {
+        Arm {
+            kind: verdict.kind(),
+            code: verdict.code().map(|c| c.to_string()),
+            message: verdict.message().map(|m| m.to_string()),
+            json: verdict.to_json(),
+        }
+    }
+}
+
 struct Record {
     name: &'static str,
     note: &'static str,
@@ -282,6 +391,9 @@ struct Record {
     code: Option<String>,
     message: Option<String>,
     json: String,
+    /// The rows this candidate was admitted into, and the manifest arm's
+    /// verdict - `None` for a standalone-only candidate.
+    into: Option<(&'static str, Arm)>,
 }
 
 fn screen_batch(batch: &[Candidate]) -> Vec<Record> {
@@ -298,6 +410,9 @@ fn screen_batch(batch: &[Candidate]) -> Vec<Record> {
                 code: verdict.code().map(|c| c.to_string()),
                 message: verdict.message().map(|m| m.to_string()),
                 json: verdict.to_json(),
+                into: c
+                    .into
+                    .map(|manifest| (manifest, Arm::of(&admit_into(c.source, manifest)))),
             }
         })
         .collect()
@@ -310,38 +425,57 @@ fn screen_batch(batch: &[Candidate]) -> Vec<Record> {
 
 /// THE security clause, held over the batch: nothing a host can branch on may
 /// read as an admission. `admitted` is false on the wire for every arm, the arm
-/// itself is one of the three known names, and no arm claims otherwise.
+/// itself is one of the three known names, and no arm claims otherwise. The
+/// manifest arm is held to it too - a non-refusal there is a statement about
+/// collisions with the running composition, never an admission into it.
 fn admission_offenders(records: &[Record]) -> Vec<String> {
-    records
+    let mut bad: Vec<String> = records
         .iter()
         .filter(|r| {
             !r.json.contains("\"admitted\":false")
                 || !matches!(r.kind, "refused" | "no_objection" | "outside_frontier")
         })
         .map(|r| format!("{}: {}", r.name, r.json))
-        .collect()
+        .collect();
+    for r in records {
+        if let Some((manifest, arm)) = &r.into {
+            if !arm.json.contains("\"admitted\":false")
+                || !matches!(arm.kind, "refused" | "no_objection" | "outside_frontier")
+            {
+                bad.push(format!("{} into {}: {}", r.name, manifest, arm.json));
+            }
+        }
+    }
+    bad
 }
 
 /// The wire shape fails closed: a refusal and a frontier gap both carry a code
 /// AND a non-empty why-trace (a refusal without one is not actionable, and an
-/// unactionable refusal gets ignored); a no-objection carries neither.
+/// unactionable refusal gets ignored); a no-objection carries neither. Held on
+/// the manifest arm as well, so the two arms cannot drift apart in the shape a
+/// host parses.
 fn shape_offenders(records: &[Record]) -> Vec<String> {
     let mut bad = Vec::new();
+    let check = |label: String, kind: &str, code: &Option<String>,
+                 message: &Option<String>, bad: &mut Vec<String>| {
+        if kind == "no_objection" {
+            if code.is_some() || message.is_some() {
+                bad.push(format!("{}: a no-objection must carry no code/message", label));
+            }
+        } else {
+            if code.as_deref().unwrap_or("").is_empty() {
+                bad.push(format!("{}: {} carries no code", label, kind));
+            }
+            if message.as_deref().unwrap_or("").is_empty() {
+                bad.push(format!("{}: {} carries no why-trace", label, kind));
+            }
+        }
+    };
     for r in records {
-        match r.kind {
-            "no_objection" => {
-                if r.code.is_some() || r.message.is_some() {
-                    bad.push(format!("{}: a no-objection must carry no code/message", r.name));
-                }
-            }
-            _ => {
-                if r.code.as_deref().unwrap_or("").is_empty() {
-                    bad.push(format!("{}: {} carries no code", r.name, r.kind));
-                }
-                if r.message.as_deref().unwrap_or("").is_empty() {
-                    bad.push(format!("{}: {} carries no why-trace", r.name, r.kind));
-                }
-            }
+        check(r.name.to_string(), r.kind, &r.code, &r.message, &mut bad);
+        if let Some((manifest, arm)) = &r.into {
+            check(format!("{} (into {})", r.name, manifest), arm.kind, &arm.code,
+                  &arm.message, &mut bad);
         }
     }
     bad
@@ -368,13 +502,16 @@ fn shuffled_order(len: usize, seed: u64) -> Vec<usize> {
 /// order IN THE SAME PROCESS yields identical per-candidate verdicts. This is
 /// the property that proves the gate is stateless - if any per-process cache
 /// made screen N depend on screen N-1, a candidate's verdict would differ
-/// between the two orderings. Returns the candidates that drifted.
+/// between the two orderings. Both arms are screened: a statelessness bug that
+/// only showed up once a manifest was in play would be the worst kind here,
+/// since the manifest is the parameter being threaded. Returns the candidates
+/// that drifted.
 fn order_dependence(batch: &[Candidate]) -> Vec<String> {
-    let fixed: Vec<(&'static str, Option<String>)> =
-        batch.iter().map(|c| screen(c.source)).collect();
-    let mut shuffled: Vec<Option<(&'static str, Option<String>)>> = vec![None; batch.len()];
+    let fixed: Vec<Vec<(&'static str, Option<String>)>> =
+        batch.iter().map(screens).collect();
+    let mut shuffled: Vec<Option<Vec<(&'static str, Option<String>)>>> = vec![None; batch.len()];
     for index in shuffled_order(batch.len(), 1729) {
-        shuffled[index] = Some(screen(batch[index].source));
+        shuffled[index] = Some(screens(&batch[index]));
     }
     batch
         .iter()
@@ -388,6 +525,17 @@ fn order_dependence(batch: &[Candidate]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Every arm a candidate is screened on, in a fixed order: the standalone
+/// question first, the manifest question second when the candidate is proposed
+/// against a running composition.
+fn screens(candidate: &Candidate) -> Vec<(&'static str, Option<String>)> {
+    let mut out = vec![screen(candidate.source)];
+    if let Some(manifest) = candidate.into {
+        out.push(screen_into(candidate.source, manifest));
+    }
+    out
 }
 
 /// The fail-closed paths, from the consumer side: an oversized source is
@@ -426,9 +574,10 @@ fn fail_closed() -> FailClosed {
 /// on candidate source size, and the same knob the py twin
 /// (`make_candidate_source`) turns, so the two curves are comparable.
 ///
-/// The py twin ALSO varies the running-manifest size. There is no manifest axis
-/// here because there is no native `admit_into` - a missing capability, not a
-/// measurement shortcut.
+/// The py twin ALSO varies the running-manifest size. This harness measures the
+/// standalone screen only: the cost section below says nothing about the
+/// manifest arm, and does not get to imply that it is free. What it costs is a
+/// measurement nobody has taken here - a gap in this harness, not a claim.
 fn sized_candidate(methods: usize) -> String {
     let decls: Vec<String> = (0..methods)
         .map(|i| format!("  fn m{}(key: Str) -> Str", i))
@@ -630,11 +779,20 @@ fn stats_json(stats: &Stats) -> String {
 /// the same programs rather than on two tables that can drift apart.
 fn report_json(records: &[Record], cost: &Cost, order_drift: &[String], closed: &FailClosed) -> String {
     let version = gate_version();
+    let arm_json = |arm: &Arm| {
+        format!(
+            "{{\"verdict\":{},\"code\":{},\"message\":{},\"wire\":{}}}",
+            json_string(arm.kind),
+            arm.code.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
+            arm.message.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
+            json_string(&arm.json),
+        )
+    };
     let candidates: Vec<String> = records
         .iter()
         .map(|r| {
             format!(
-                "{{\"name\":{},\"note\":{},\"shared_with_py\":{},\"source\":{},\"verdict\":{},\"code\":{},\"message\":{},\"wire\":{}}}",
+                "{{\"name\":{},\"note\":{},\"shared_with_py\":{},\"source\":{},\"verdict\":{},\"code\":{},\"message\":{},\"wire\":{},\"manifest\":{},\"into\":{}}}",
                 json_string(r.name),
                 json_string(r.note),
                 r.shared_with_py,
@@ -643,6 +801,14 @@ fn report_json(records: &[Record], cost: &Cost, order_drift: &[String], closed: 
                 r.code.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
                 r.message.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
                 json_string(&r.json),
+                r.into
+                    .as_ref()
+                    .map(|(manifest, _)| json_string(manifest))
+                    .unwrap_or_else(|| "null".into()),
+                r.into
+                    .as_ref()
+                    .map(|(_, arm)| arm_json(arm))
+                    .unwrap_or_else(|| "null".into()),
             )
         })
         .collect();
@@ -675,6 +841,7 @@ fn report_json(records: &[Record], cost: &Cost, order_drift: &[String], closed: 
     let drift: Vec<String> = order_drift.iter().map(|d| json_string(d)).collect();
     format!(
         "{{\"gate_version\":{{\"api\":{},\"language\":{},\"frontier\":{},\"layer\":{}}},\
+\"held_manifest\":{},\
 \"candidates\":[{}],\
 \"cost\":{{\"iters\":{},\"warmup\":{},\"cells\":[{}],\"shapes\":[{}],\"representative\":{},\"representative_bytes\":{}}},\
 \"order_drift\":[{}],\
@@ -684,6 +851,7 @@ fn report_json(records: &[Record], cost: &Cost, order_drift: &[String], closed: 
         json_string(version.language),
         json_string(version.frontier),
         json_string(version.layer),
+        json_string(HELD_MANIFEST),
         candidates.join(","),
         cost.iters,
         cost.warmup,
@@ -703,11 +871,25 @@ fn report_json(records: &[Record], cost: &Cost, order_drift: &[String], closed: 
     )
 }
 
-fn verdict_cell(record: &Record) -> String {
-    match record.kind {
-        "refused" => format!("refuse ({})", record.code.as_deref().unwrap_or("?")),
+/// The arm, rendered for a human reader of the markdown report.
+fn arm_cell(kind: &str, code: Option<&str>) -> String {
+    match kind {
+        "refused" => format!("refuse ({})", code.unwrap_or("?")),
         "no_objection" => "no objection".to_string(),
         _ => "declined (FRONTIER)".to_string(),
+    }
+}
+
+fn verdict_cell(record: &Record) -> String {
+    arm_cell(record.kind, record.code.as_deref())
+}
+
+/// The manifest arm's cell: `not asked` for a candidate screened standalone
+/// only, and the arm's own verdict (never a bare "ok") otherwise.
+fn into_cell(record: &Record) -> String {
+    match &record.into {
+        None => "not asked".to_string(),
+        Some((_, arm)) => arm_cell(arm.kind, arm.code.as_deref()),
     }
 }
 
@@ -717,9 +899,10 @@ fn render_markdown(records: &[Record], cost: &Cost, order_drift: &[String], clos
         .iter()
         .map(|r| {
             format!(
-                "| `{}` | {} | {} | {} |\n",
+                "| `{}` | {} | {} | {} | {} |\n",
                 r.name,
                 verdict_cell(r),
+                into_cell(r),
                 if r.shared_with_py { "yes" } else { "no" },
                 r.note
             )
@@ -791,10 +974,33 @@ that agrees with the reference compiler on the covered corpus. A refusal is
 worth acting on. A no-objection is NOT an admission - before running anything,
 get a reference verdict (`revl compile`, or `revl.gate.admit` on py).
 
+## The manifest arm (issue #346): half of it closed here
+
+`revl_gate::admit_into(source, manifest)` is real as of issue #346: it folds
+G2/G3 over the UNION of the running composition's rows and the candidate, so a
+rust embed can ask the py loop's admitting question locally. It is a REFUSAL
+arm, not an admission arm - it still reports `"admitted": false`, and it refuses
+what the py gate refuses, with the same code and the same why-trace.
+
+What that closes and what it does not, against `held_manifest` =
+`{held}` (the py harness's `base_manifest()` wire):
+
+* **closed** - the ambient half of G2/G3: a candidate whose provides collide
+  with a RUNNING key is refused. `ambient_provision_conflict` below is the exit
+  case: py's `revl.gate.admit_into` says `G2`, this gate says `G2` with the same
+  sentence, and py's STANDALONE `admit` ADMITS the same bytes - so the manifest
+  is demonstrably being read, not ignored.
+* **still open** - requirement RESOLUTION. py's `admit_into` resolves a
+  candidate's `requires` against the running providers; the self-host fold only
+  checks disjointness, acyclicity and route realms, so it cannot. `cache_layer`
+  is that half made concrete: py ADMITS it into the running manifest, this gate
+  can only decline to object. Closing it is the self-host TYPE LAYER's job, its
+  own roadmap lane, and is deliberately NOT attempted here.
+
 ## The batch, screened in-process
 
-| candidate | verdict | shared with the py harness | note |
-|---|---|---|---|
+| candidate | standalone | into the held manifest | shared with the py harness | note |
+|---|---|---|---|---|
 {rows}
 {refused} refused, {no_objection} no-objection, {declined} declined. Every one of them
 serialises as `"admitted": false`; nothing in this batch produced anything a
@@ -803,8 +1009,8 @@ py admission gate also issues, with the same guarantee tag
 (`tests/test_inprocess_gate_rust.py`).
 
 Verdicts are order-independent: screening the batch in a fixed order and in a
-shuffled order in the same process yields identical per-candidate verdicts
-({order}), which is the property that proves the gate is stateless.
+shuffled order in the same process yields identical per-candidate verdicts on
+BOTH arms ({order}), which is the property that proves the gate is stateless.
 
 ### What the screen catches, measured
 
@@ -830,14 +1036,20 @@ declines outright (`frontier_oversized`) is the fail-closed path working: `py`
 ADMITS it, and rather than decide a construct it does not cover, the gate says
 so.
 
-### The `admit_into` gap, priced
+### The `admit_into` gap, priced - and one leg of it closed
 
-There is no native `admit_into`, so the realistic agent shape - admit a
-candidate AGAINST the running composition - is not available on rust at all.
-`cache_layer` is that gap made concrete: py ADMITS it into the running manifest,
-and the only question this gate can be asked is the standalone one, to which it
-raises no objection. A rust agent loop therefore cannot screen the case its py
-twin screens best.
+Before #346 the realistic agent shape - admit a candidate AGAINST the running
+composition - was not available on rust at all. It now is for the ambient half:
+`ambient_provision_conflict` is a candidate that is HARMLESS standalone (py
+ADMITS the same bytes) and is refused `G2` once the running composition is in
+the fold, on both arms, with the same why-trace. That is the half that closed.
+
+The other half is what `cache_layer` still prices. py's `admit_into` ADMITS it
+into the running manifest - it RESOLVES the `requires store: Store` against the
+running `Kv` provider - and the only thing this gate can say about it, with or
+without the manifest, is that it does not object. Requirement resolution is the
+self-host type layer's job, and this file is where the remaining distance is
+measured, not smoothed over.
 
 ## Fail closed
 
@@ -911,9 +1123,10 @@ start from.
 This is a COMPILE-TIME screen, not a sandbox. A component this gate refuses
 never runs in the embedder's process. A component it does not refuse has been
 screened at the composition/guarantee layer ONLY: not type-checked, not
-admitted, not confined. `admitted` is not something this gate issues, and even a
-py admission is not "safe to run unwitnessed" - the reversible-run half is item
-334.
+admitted, not confined. `admitted` is not something this gate issues - not
+standalone and not from the manifest arm, which is a refusal arm that reads the
+running composition, not an admission into it. And even a py admission is not
+"safe to run unwitnessed" - the reversible-run half is item 334.
 
 ## Re-run
 
@@ -928,15 +1141,18 @@ publishing them.
 
 A guard test, `tests/test_inprocess_gate_rust.py`, builds and runs this harness
 in CI (the `backend-rust` job), re-derives the PY verdict for each candidate's
-exact source bytes, and holds the two harnesses against each other: every rust
-refusal must be a real py refusal with the same code, no arm may read as an
-admission, the measured layer gap must still be a gap, and the py harness's own
-candidates must still be the bytes screened here.
+exact source bytes - both standalone and against the held manifest - and holds
+the two harnesses against each other: every rust refusal must be a real py
+refusal with the same code, every rust `admit_into` refusal must be a real
+`revl.gate.admit_into` refusal with the same code AND the same why-trace, no arm
+may read as an admission, the measured layer gap must still be a gap, and the py
+harness's own candidates must still be the bytes screened here.
 "#,
         api = version.api,
         language = version.language,
         frontier = version.frontier,
         layer = version.layer,
+        held = HELD_MANIFEST,
         rows = rows,
         refused = refused,
         no_objection = no_objection,
@@ -997,8 +1213,10 @@ fn main() -> ExitCode {
                     "usage: inprocess_gate_rust [--iters N] [--warmup N] [--json] [--write]\n\
                      \n\
                      the rust twin of bench/inprocess_gate_harness.py: screens a batch of\n\
-                     proposed components in-process through revl_gate::admit, checks the\n\
-                     invariants a host may rely on, and measures the round-trip."
+                     proposed components in-process through revl_gate::admit, screens the\n\
+                     manifest-aware candidates again through revl_gate::admit_into against\n\
+                     the held composition (issue #346), checks the invariants a host may\n\
+                     rely on, and measures the standalone round-trip."
                 );
                 return ExitCode::SUCCESS;
             }
@@ -1035,6 +1253,7 @@ fn main() -> ExitCode {
         version.api, version.language, version.frontier
     );
     println!("layer decided: {}", version.layer);
+    println!("held manifest: {}", HELD_MANIFEST);
     println!("\nin-process screen (revl_gate::admit, no subprocess, no IPC, no Python):");
     for r in &records {
         println!(
@@ -1044,6 +1263,18 @@ fn main() -> ExitCode {
             verdict_cell(r),
             r.note
         );
+    }
+    println!("\nagainst the held manifest (revl_gate::admit_into, issue #346):");
+    for r in &records {
+        match &r.into {
+            None => println!("  [     -] {:20} not asked", r.name),
+            Some((_, arm)) => println!(
+                "  [{}] {:20} {}",
+                if arm.kind == "refused" { "refuse" } else { "     -" },
+                r.name,
+                arm_cell(arm.kind, arm.code.as_deref())
+            ),
+        }
     }
     println!(
         "\nno arm reads as an admission: {}",

@@ -608,15 +608,15 @@
     "py": {
       "statements": 2426,
       "uncovered": {
+        "#850 added `_ComponentEmitter._extern_emit_fire` to the reference emitter and left this record off the ledger. The shipped corpus reaches the four `emission_fire` call sites, so the dispatch arm counts as covered, while the single `if` body that actually fires the extern hook is never taken: no document in the corpus declares an extern emit. services_body.rvl and witnessed.rvl pin every other shape in this region. A fixture that compiles an extern emit onto a component method is the corpus work that retires this entry.": {
+          "_ComponentEmitter._extern_emit_fire": 1
+        },
         "Activation residuals: Map.cas conditional undo belongs to component host runtime; non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). Deferred/approval/await/stream paths belong to the named runtime boundaries. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms.": {
           "_ComponentEmitter._body_step": 17
         },
         "Approval/lease runtime boundary: _approval_step renders frame.approval handles; _emit_fire renders approval_crossing with capability and callback. Neither exists in selfhost/emit_py.rvl. Representative accepted inputs are tests/test_approval_typed.py and tests/test_capability_leases.py::_SOURCE, not ordinary witnessed effects.": {
           "_ComponentEmitter._approval_step": 3,
           "_ComponentEmitter._emit_fire": 3
-        },
-        "Async extern firing needs an async body: _extern_emit_fire's `(await ...)` arm is taken only when `_in_async and not _in_arrow` and the extern is coloured or async, which is the async-coloring surface every self-host slice declares out. No corpus document is an async body firing a coloured extern, and authoring one would require porting the async slice into selfhost/emit_py.rvl before the byte-agreement oracle could stay green over it, so the single statement is recorded here rather than reached.": {
-          "_ComponentEmitter._extern_emit_fire": 1
         },
         "Async parallel planner boundary: _build_parallel_leaders skips nested/noncontiguous members and records contiguous leaders; _emission_shape distinguishes req/spawn/extern; idempotency helpers inspect service/extern/undo declarations; _group_eligible rejects unsafe compensation, approval, deferred and validated calls; _emit_parallel_group awaits tasks, flushes records, registers successful compensation then raises. The port emits sequentially. tests/test_parallel_259.py::HDR and its commutative/disjoint tests reproduce the input family.": {
           "_ComponentEmitter._build_parallel_leaders": 3,
