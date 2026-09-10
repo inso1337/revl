@@ -288,6 +288,7 @@ below; the exhaustive per-command flag reference is
 | `revl canary FILES --candidate FILE --slice REALM` | run both generations at once, successor on one realm slice; promote (`--promote-to`) or revert on evidence | [verified-canary.md](verified-canary.md) |
 | `revl repair --component C [--candidate FILE] [--plan]` | the repair loop: diagnose a fault and re-admit a fix within declared policy bounds | [repair-loop.md](repair-loop.md) |
 | `revl run FILES` | boot on a Cordis runtime, see the tier table below and the flag list | [replay.md](replay.md) · [crash-recovery.md](crash-recovery.md) |
+| `revl dev [FILES]` | run the exemplary web app under one parent process: Vite serves the frontend while the Python driver boots the composition (`--frontend`, `--host`, `--port`, `--once`, `--no-frontend`) | [commands-reference.md](commands-reference.md#revl-dev) |
 | `revl recover --wal FILE` | crash recovery: roll a WAL forward/back to a checked verdict + residue proof (`--restore`, `--json`) | [crash-recovery.md](crash-recovery.md) |
 | `revl estop` | the operator's emergency halt: stop dispatching crossings now, unwind nothing, and report what was left stranded | [commands-reference.md](commands-reference.md#revl-estop) |
 | `revl branch --wal FILE` | session branch lineage over durable WALs: the branch tree, and the fork partition of a recorded tail (`--at SEQ`) | [commands-reference.md](commands-reference.md#revl-branch) |
