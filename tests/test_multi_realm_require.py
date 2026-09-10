@@ -241,6 +241,27 @@ component RoundRobin requires db: Database provides db: Database {
     assert rr["body"] == []
 
 
+def test_every_tier_router_scenario_compiles_to_the_sanctioned_shape():
+    """Regression for the #492 miss: item 449 changed the router shape (drop the
+    discarded `provide <routed key>` body) and fixed `stdlib/router.rvl` plus the
+    py-tier test sources, but left `backends/wasm/scenarios/router.rvl` on the old
+    shape. Nothing caught it, because the wasm tests that compile that scenario
+    SKIP in CI behind the enumerated cordis-wasm pin gate (`ci.yml` "no wasm test
+    may skip in CI"), so a frontend refusal raised by the tier's own scenario was
+    invisible. This compiles every tier's router scenario where the frontend is
+    always exercised, so the next admission change cannot hide behind a skip."""
+    scenarios = sorted(ROOT.glob("backends/*/scenarios/router.rvl"))
+    assert len(scenarios) >= 4, scenarios
+    for path in scenarios:
+        ir = compile_source(path.read_text(), str(path))
+        routed = [c for c in ir["components"] if c.get("routes")]
+        assert len(routed) == 1, path
+        router = routed[0]
+        # the routed key is provided by the route proxy (G2), never by a body
+        assert router["body"] == [], path
+        assert set(router["routes"]) <= set(router["provides"]), path
+
+
 def test_routing_an_undeclared_key_is_refused():
     with pytest.raises(RevlError, match="not a declared requirement"):
         compile_source(_consumer('isolate zzz in realms("w1", "w2")'), "undecl.rvl")
