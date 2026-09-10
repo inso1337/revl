@@ -13,9 +13,9 @@ The verb set, in the order the parser declares it:
 compile  explain  grammar  adapt  doctor  scaffold  composition  layer
 audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  plan  apply  undo  canary  query  fmt  quarantine  analyze
-test  mcp  import  export  serve  run  recover  estop  branch  compare
-replay  why  metrics  trace  profile  attest  dash  repair  bundle  emit
-verify  deploy  deploy-admit  truc
+test  mcp  import  export  serve  run  dev  recover  estop  branch
+compare  replay  why  metrics  trace  profile  attest  dash  repair
+bundle  emit  verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -671,6 +671,52 @@ standard component under wasmtime, where an escape is a trap, not an incident
 ---
 
 ## Running and recovery
+
+### `revl dev`
+
+Run the exemplary web app under one parent process: Vite serves the frontend
+and the Python Cordis driver boots the `.rvl` composition (roadmap item 724).
+This is the local-development entry point; `revl run` is the same lifecycle
+without the frontend.
+
+- `files` - the `.rvl` app source (default: `examples/app/notes.rvl`).
+- `--frontend DIR` - the Vite frontend directory (default: `frontend/`
+  alongside the app source). It must exist and contain a `package.json`.
+- `--host HOST` - the Vite bind host (default: `127.0.0.1`, loopback).
+- `--port PORT` - the Vite port (default: `5173`). `0` is refused (exit 2)
+  before anything is spawned: it asks Vite to bind an arbitrary free port, so
+  the banner could not name the URL it printed.
+- `--once` - boot the app, prove teardown has no residue, and exit.
+- `--no-frontend` - boot only the app host, useful for diagnosing lifecycle
+  failures without a frontend in the way. No Vite is spawned and no banner is
+  printed, so `--port` is inert and is not validated.
+
+```bash
+revl dev                                  # examples/app/notes.rvl + its Vite frontend
+revl dev myapp.rvl --frontend web --port 5180
+revl dev --once                           # CI: boot, prove no residue, exit
+revl dev --no-frontend                    # app host only
+```
+
+The app source is compiled and admitted before Vite is spawned, so a source
+error reports with its `compile` or `admission` line and no port is bound. Vite
+is started with `npm run dev`, and `npm` must be on `PATH`.
+
+The banner names the URL the frontend is served on, so Vite is told not to
+move: the child runs with `--strictPort`. A port already in use therefore exits
+3 naming that port, instead of Vite quietly auto-incrementing to the next free
+port behind a banner that still advertises the requested one. The same exit 3
+covers a frontend whose dependencies are not installed; install them with
+`npm install --legacy-peer-deps` in the frontend directory. The app declares
+`vite ^7` while `@vitejs/plugin-vue@5.x` peers on `vite ^5 || ^6`, so plain
+`npm install` stops at `ERESOLVE`.
+
+The WebUI coeffect is a real scoped Cordis provision rather than a
+process-global bridge: the development adapter records the entry the
+composition registered, rejects an inline substitute or a path that escapes the
+app root, and is withdrawn during normal LIFO teardown. Everything else -
+compile, admission, config, boot and teardown - reuses the `revl run` driver, so
+the two commands have precisely the same semantics.
 
 ### `revl run`
 
