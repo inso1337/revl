@@ -603,6 +603,7 @@ async def run(spec: dict, spec_path=None) -> None:
         sys.path.insert(0, backend_dir)
 
     import bridge  # noqa: PLC0415
+    import confidential  # noqa: PLC0415
     import runtime as runtime_mod  # noqa: PLC0415
     from cordis import Context  # noqa: PLC0415
     from cordis.fiber import FiberState  # noqa: PLC0415
@@ -619,7 +620,19 @@ async def run(spec: dict, spec_path=None) -> None:
                          name="revl-estop", daemon=True).start()
 
     def log(channel: str, subject: str, detail: str = "") -> None:
-        print(f"[{name}] {channel:<6}| {subject:<16}| {detail}".rstrip(), flush=True)
+        # item 815: every line this process prints is its own sink, and the
+        # runner owns the `load` / `serve` / `proxy` / `fiber` / `probe`
+        # channels outright rather than routing them through `runtime._record`
+        # (which funnels only the `host` trace). A secret quoted in a probe
+        # failure reached the console verbatim: the probe that calls an extern
+        # which raises locally never crosses a seam, so `seam_failure`'s
+        # argument stage never sees it either. Scrub both halves against the
+        # registered-value funnel before assembling the line, exactly as
+        # `PlacementRunner.redactSecrets` does on the java tier. Redacting the
+        # already-redacted `host` events is idempotent (`<redacted:secret>` is
+        # not itself a registered needle).
+        print(f"[{name}] {channel:<6}| {confidential.redact_text(subject):<16}"
+              f"| {confidential.redact_text(detail)}".rstrip(), flush=True)
 
     runtime_mod.set_trace(lambda event: log("host", event.split(" ", 1)[0],
                                             event.split(" ", 1)[1] if " " in event else ""))
