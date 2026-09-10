@@ -392,11 +392,11 @@
         "backends/java/emit.py::_emit_stdlib_helpers: Residual source-group and transitive dependency emission needs builtin/len helpers, explicitly deferred; control.rvl/runtime_values.rvl reproduce missing stdlib output.": {
           "_emit_stdlib_helpers": 5
         },
-        "backends/java/emit.py::_emit_v1: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. The successful legacy component/service path is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
-          "_emit_v1": 3
+        "backends/java/emit.py::_emit_v1: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. The successful legacy component/service path is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Also the item-322-Slice-2 durable WAL sink splice behind `_RECORD_MODE`: the oracle emits with the default `emit(ir)` and never `record=True`, so the call is unreachable from the corpus by construction, and `backends/java/test_emit_java.py::test_v1_v2_witnessed_record_defines_the_sink_it_calls` exercises it directly. The self-host emitters mirror the v3 path, so v1/v2 is declared out of every self-host slice (the `_v1|_v2` group in tools/selfhost_line_coverage.py).": {
+          "_emit_v1": 4
         },
-        "backends/java/emit.py::_emit_v2: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. Legacy isolate/intercept assembly is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
-          "_emit_v2": 3
+        "backends/java/emit.py::_emit_v2: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. Legacy isolate/intercept assembly is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Also the item-322-Slice-2 durable WAL sink splice behind `_RECORD_MODE`: the oracle emits with the default `emit(ir)` and never `record=True`, so the call is unreachable from the corpus by construction, and `backends/java/test_emit_java.py::test_v1_v2_witnessed_record_defines_the_sink_it_calls` exercises it directly. The self-host emitters mirror the v3 path, so v1/v2 is declared out of every self-host slice (the `_v1|_v2` group in tools/selfhost_line_coverage.py).": {
+          "_emit_v2": 4
         },
         "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)).": {
           "_emit_v3": 15
@@ -603,7 +603,7 @@
           "emit": 2
         }
       },
-      "uncovered_statements": 940
+      "uncovered_statements": 942
     },
     "py": {
       "statements": 2414,
