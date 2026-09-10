@@ -534,6 +534,246 @@ def test_an_auto_approve_rule_still_covers_a_single_party_crossing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The lease bridge: the one route a quorum-gated `effect lease` keeps
+#
+# `_enforce_lease_gate` admits an `effect lease` only when a LIVE lease-tagged
+# standing grant covers it, and the standing-grant path above refuses to mint
+# one for a capability a multi-party rule covers, on both routes. Left there,
+# such a lease could never be acquired at all: the votes would arrive on the
+# decision graph, and nothing the gate consults would ever hear them. So the
+# gate has a route of its own, and it is not an operator mint: when the decision
+# for THAT lease ticket is SATISFIED, the gate mints the lease grant off the
+# satisfied ledger entry itself (`_satisfied_decision_for`), the mint re-derives
+# that proof (`_decision_authorizes_grant`) and accepts it only for a
+# `kind='lease'` ticket, and the entry is spent once before the boot. Refused
+# before the votes arrive, refused for a forged, spent or foreign decision, and
+# still no consent to a crossing: the grant is lease-tagged, so the predicate
+# turns it away at every class-(c) crossing.
+#
+# `Session.load()` needs the cordis runtime (absent here), so these tests drive
+# `_enforce_lease_gate` directly, exactly as the rest of the suite drives
+# `_approval_decide_call`.
+# ---------------------------------------------------------------------------
+
+_LEASE_SOURCE = (
+    'extern emission[fs.write(path="/tmp")] fn wr(sink: Str, msg: Str)'
+    " = @py {\n    with open(sink, 'a') as f: f.write('w:' + msg + '\\n')\n"
+    "    return\n}\n"
+    "service Ops { emission fn go(sink: Str, msg: Str) }\n"
+    "component Agent provides ops: Ops {\n"
+    '  let l = effect lease fs.write(path="/tmp") ttl 10m uses 3 '
+    "undo l.revoke()\n"
+    "  provide ops { fn go(sink, msg) { emit wr(sink, msg) } }\n"
+    "}\n"
+)
+
+_LEASE_CAP = 'fs.write(path="/tmp")'
+
+
+def _lease_rule(require=2, approvers=_THREE):
+    return ApprovalRule(_LEASE_CAP, None, require, tuple(approvers))
+
+
+def _lease_harness(tmp_path, *, rules=None, token="alice", name="lease.json"):
+    """`_harness` over a composition that ACQUIRES an `effect lease`. Returns the
+    session and the IR the gate walks (`_collect_lease_requests` reads the IR;
+    the class map the gate resolves the lease against is the session's own)."""
+    ir = copy.deepcopy(compile_source(_LEASE_SOURCE, "lease471.rvl"))
+    session = _harness(
+        tmp_path, source=_LEASE_SOURCE, token=token, name=name,
+        rules=[_lease_rule()] if rules is None else rules)
+    return session, ir
+
+
+def _gate(session, ir):
+    """One load's lease-gate outcome: None when the lease is ADMITTED, the
+    `ApprovalRequired` it raised when the load is refused."""
+    try:
+        session._enforce_lease_gate(ir)
+    except ApprovalRequired as caught:
+        return caught
+    return None
+
+
+def test_a_quorum_gated_lease_loads_only_after_its_own_votes(tmp_path):
+    """The lease is refused on the first load (there is no caller-supplied mint
+    for it any more), the operators' votes satisfy the question it raised, and
+    the next load mints the lease grant from THAT satisfied decision: bounded by
+    the lease's own `ttl 10m` / `uses 3`, lease-tagged, and with the decision
+    spent once before the boot. The grant is a lease handle, not consent to a
+    crossing: the crossing the lease mediates still raises its own quorum."""
+    session, ir = _lease_harness(tmp_path)
+
+    refused = _gate(session, ir)
+    assert refused is not None and refused.ticket["kind"] == "lease"
+    assert _kinds(session) == ["quorum-open"]
+    lease_ticket = refused.ticket
+
+    assert session.approve_ticket(lease_ticket["hash"], vote="approve",
+                                  as_token="bob")["counted"] == 1
+    assert _gate(session, ir) is not None, "one vote is not two"
+    voted = session.approve_ticket(lease_ticket["hash"], vote="approve",
+                                   as_token="carol")
+    assert voted["outcome"] == "satisfied"
+    for route in ({"ticket_hash": lease_ticket["hash"], "uses": 3},
+                  {"capability": _LEASE_CAP, "uses": 3}):
+        with pytest.raises(SessionError, match="standing grant"):
+            session.mint_standing_grant(**route)
+    assert session._grants == [], "a satisfied decision is still not a public mint"
+
+    assert _gate(session, ir) is None, "the satisfied decision is the answer"
+    (grant,) = session._grants
+    assert grant["lease"] is True and grant["kind"] == "standing-grant"
+    assert grant["remainingUses"] == 3, "the lease's own `uses 3`"
+    assert grant["expiresAt"] is not None, "the lease's own `ttl 10m`"
+    assert grant["component"] == lease_ticket["component"]
+    assert session._live_lease_grant("Agent", _LEASE_CAP) is grant
+    assert grant["expiresAt"] - grant["grantedAt"] == 600_000, "ttl 10m"
+    (entry,) = session._ledger
+    assert entry["consumed"] is True, "the decision is spent before the boot"
+    granted = [record for record in _records(session)
+               if record["record"] == "approval-granted"]
+    assert [row["quorum"]["satisfiedBy"] for row in granted
+            if row.get("quorum")] == ["votes"], "the answer stays on the record"
+    assert granted[-1]["remainingUses"] == 3, "the lease handle, once"
+    assert _kinds(session) == ["quorum-open", "quorum-vote", "quorum-vote",
+                               "quorum-satisfied", "approval-granted",
+                               "approval-granted", "approval-consumed"]
+
+    assert _gate(session, ir) is None, "a retry re-uses the same live handle"
+    assert len(session._grants) == 1
+
+    with pytest.raises(ApprovalRequired) as crossing:
+        session._approval_decide_call("ops", "go", ["/tmp", "a"])
+    assert crossing.value.ticket["hash"] != lease_ticket["hash"]
+    assert session._find_standing_grant(crossing.value.ticket) is None
+
+
+def test_a_quorum_gated_lease_is_refused_until_the_votes_arrive(tmp_path):
+    """The refusal the lease gate has always had, now stated as the invariant it
+    is: with zero votes, and with the votes counted but short of the rule, no
+    route mints the lease and the load stays refused with the question open."""
+    session, ir = _lease_harness(tmp_path)
+
+    for stage, votes in (("no votes", ()), ("one vote", ("bob",))):
+        for name in votes:
+            session.approve_ticket(_gate(session, ir).ticket["hash"],
+                                   vote="approve", as_token=name)
+        refused = _gate(session, ir)
+        assert refused is not None, f"admitted with {stage}"
+        assert refused.ticket["kind"] == "lease"
+    assert session._grants == []
+    assert _kinds(session) == ["quorum-open", "quorum-vote"]
+
+    with pytest.raises(SessionError, match="standing grant"):
+        session.mint_standing_grant(ticket_hash=refused.ticket["hash"], uses=3)
+    with pytest.raises(SessionError, match="standing grant"):
+        session.mint_standing_grant(capability=_LEASE_CAP, uses=3)
+    assert session._grants == []
+
+
+def test_a_denied_lease_question_is_not_an_answer(tmp_path):
+    """A denied decision closes the question and mints nothing, so the load is
+    refused with the denial on the record rather than admitted on a decision
+    that says no."""
+    session, ir = _lease_harness(tmp_path)
+    ticket = _gate(session, ir).ticket
+
+    denied = session.approve_ticket(ticket["hash"], vote="deny", as_token="bob")
+    assert denied.get("outcome") is None or denied["outcome"] != "satisfied"
+    assert _gate(session, ir) is not None
+    assert session._grants == []
+    assert "quorum-denied" in _kinds(session)
+
+
+def test_a_spent_lease_decision_answers_only_once(tmp_path):
+    """The bridge spends the decision that admitted the lease. With that spend
+    recorded and the handle gone (a revoke, or a generation change), the next
+    load is refused and re-asks: the same decision cannot boot two leases."""
+    session, ir = _lease_harness(tmp_path)
+    ticket = _gate(session, ir).ticket
+    for name in ("bob", "carol"):
+        session.approve_ticket(ticket["hash"], vote="approve", as_token=name)
+    assert _gate(session, ir) is None
+    assert session._ledger[0]["consumed"] is True
+
+    session._grants.clear()
+    refused = _gate(session, ir)
+    assert refused is not None and refused.ticket["kind"] == "lease"
+    assert session._grants == []
+    assert _kinds(session)[-1] == "quorum-open", "the refused load re-asks"
+
+
+def test_the_lease_bridge_refuses_a_forged_or_foreign_decision(tmp_path):
+    """The proof is re-derived inside the mint, never trusted: a COPY of the
+    satisfied entry, a decision for some other ticket, and a decision whose
+    record is not the entry's own all fail the mint, so no caller can hand the
+    bridge an answer it did not earn."""
+    session, ir = _lease_harness(tmp_path)
+    lease_ticket = _gate(session, ir).ticket
+    for name in ("bob", "carol"):
+        session.approve_ticket(lease_ticket["hash"], vote="approve", as_token=name)
+    (entry,) = session._ledger
+    record = session._quorums[entry["requestId"]]
+    assert session._satisfied_decision_for(lease_ticket) is entry
+
+    assert session._decision_authorizes_grant(entry, lease_ticket["hash"]) is True
+    for forged in (dict(entry),                    # a copy of the proof
+                   {**entry, "hash": "other"},     # another ticket's entry
+                   None,                           # no proof at all
+                   record):                        # the decision, not the entry
+        assert session._decision_authorizes_grant(forged,
+                                                  lease_ticket["hash"]) is False
+        with pytest.raises(SessionError, match="standing grant"):
+            session._mint_grant(ticket_hash=lease_ticket["hash"], decision=forged)
+    assert session._grants == []
+
+    # A decision whose record is not satisfied is not an answer either, even
+    # though the entry itself is the live one for this ticket.
+    record["outcome"] = None
+    assert session._satisfied_decision_for(lease_ticket) is None
+    record["outcome"] = "satisfied"
+    assert session._satisfied_decision_for(lease_ticket) is entry
+
+
+def test_the_lease_bridge_is_scoped_to_lease_tickets(tmp_path):
+    """The exception is the LEASE acquisition, not "a satisfied decision may
+    mint a grant". A genuinely satisfied quorum on an ordinary class-(c) crossing
+    still refuses the mint: that crossing is answered by the decision itself,
+    single-use at its one call, and never by a standing grant."""
+    session = _harness(tmp_path)
+    ticket = _ticket(session)
+    for name in ("bob", "carol"):
+        session.approve_ticket(ticket["hash"], vote="approve", as_token=name)
+    (entry,) = session._ledger
+    assert session._satisfied_decision_for(ticket) is entry
+
+    assert session._decision_authorizes_grant(entry, ticket["hash"]) is False
+    with pytest.raises(SessionError, match="standing grant"):
+        session._mint_grant(ticket_hash=ticket["hash"], decision=entry)
+    assert session._grants == []
+    assert _cross(session) is None, "and the decision itself still admits it"
+
+
+def test_a_lease_decision_does_not_outlive_the_ticket_it_answered(tmp_path):
+    """A ticket hash names a question, and the answer belongs to the session
+    that asked it. When the outstanding-ticket table is replaced (a swap), the
+    lease ticket is gone rather than stale: the load raises a fresh ticket and
+    the satisfied decision behind the old one admits nothing."""
+    session, ir = _lease_harness(tmp_path)
+    lease_ticket = _gate(session, ir).ticket
+    for name in ("bob", "carol"):
+        session.approve_ticket(lease_ticket["hash"], vote="approve", as_token=name)
+    assert session._satisfied_decision_for(lease_ticket) is not None, \
+        "there IS a satisfied answer for this ticket"
+
+    session._tickets = {}
+    refused = _gate(session, ir)
+    assert refused is not None and refused.ticket["kind"] == "lease"
+    assert session._grants == []
+
+
+# ---------------------------------------------------------------------------
 # Vote binding: exact ticket, candidate, plan and target
 # ---------------------------------------------------------------------------
 

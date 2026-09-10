@@ -4631,6 +4631,20 @@ class Session:
             The one prompt moves from the first crossing to the acquisition — the
             item-248 economics (3 prompts to 1), never to 0.
 
+        Roadmap item 471: when a covering rule of the lease's capability names
+        approvers or demands more than one, that operator mint does not exist —
+        a multi-party rule is answered by votes, so `mint_standing_grant` refuses
+        on both routes, and the ticket alone would close nothing (the answer
+        arrives over TIME, on the decision graph, not on the operator's call).
+        The acquisition then has exactly one route, taken here and nowhere else:
+        when the decision for THAT ticket is satisfied, this gate mints the lease
+        grant off the satisfied ledger entry itself (`_satisfied_decision_for`)
+        and spends it once. Before the votes arrive — and for a decision that is
+        absent, lapsed, spent or bound to another ticket — the lease is REFUSED
+        exactly as it always was, so the rule is never widened, and a lease this
+        session never issued a ticket for is refused too (a generation change
+        clears the outstanding-ticket table: that ticket is gone, not stale).
+
         Inert for every composition with no lease step, so byte-identity holds."""
         leases = _collect_lease_requests(ir)
         if not leases:
@@ -4651,6 +4665,18 @@ class Session:
             if self._live_lease_grant(component, cap) is not None:
                 continue  # already minted from an approved ticket (retry / pre-mint)
             ticket = self._build_lease_ticket(lz)
+            # roadmap item 471: the lease's own votes are the answer. The mint
+            # is taken from the LIVE satisfied decision for THIS ticket and from
+            # nothing else (see the docstring). `in self._tickets` is the other
+            # half of the binding: the mint is the retry of the load this
+            # session already asked about, never a replay of a decision that
+            # outlived the ticket it answered (a swap replaces the table).
+            decision = (self._satisfied_decision_for(ticket)
+                        if ticket["hash"] in self._tickets else None)
+            if decision is not None:
+                self._mint_grant(ticket_hash=ticket["hash"], decision=decision)
+                self._consume_approval(decision)  # consume-before-fire (Dec. 3)
+                continue
             self._issue_ticket(ticket)
             raise ApprovalRequired(ticket)
 
@@ -4715,6 +4741,66 @@ class Session:
             if _cap_covers(g["capability"], capability):
                 return g
         return None
+
+    def _satisfied_decision_for(self, ticket: dict) -> dict | None:
+        """The PROOF that lets a multi-party `kind='lease'` crossing boot: the
+        live ledger entry this session already minted from a SATISFIED decision
+        for `ticket` ITSELF, or None (`roadmap item 471` round 2).
+
+        This is the one route a quorum-gated `effect lease` has, and it is a
+        narrower route than the operator mint it replaces, bound four ways:
+
+          * the entry is the live, unconsumed, unexpired ledger entry for this
+            ticket's hash, reach-closure candidate hash and component
+            (`_find_standing_approval`) — a stale entry from a swapped
+            generation computes a different candidate hash and fails there;
+          * the decision filed under the entry's OWN round-scoped `requestId` is
+            closed as `satisfied`, by `votes` or by `override` — an open question
+            and a denied or expired one are not an answer;
+          * that decision's own hash/candidate/component are the entry's, so no
+            decision can be paired with an entry it did not mint;
+          * it is SPENT once, by the caller (`_enforce_lease_gate` consumes it
+            before boot), so the same decision cannot boot a second lease.
+
+        What it does NOT do: satisfy a crossing. The grant the gate mints from
+        this entry is lease-tagged and `_find_standing_grant` still refuses a
+        multi-party ticket, so no class-(c) crossing is ever admitted by it —
+        the lease grant is the acquisition's handle, nothing more."""
+        entry = self._find_standing_approval(ticket)
+        if entry is None:
+            return None
+        record = self._quorums.get(entry.get("requestId"))
+        if record is None or record.get("outcome") != "satisfied":
+            return None
+        if record.get("satisfiedBy") not in ("votes", "override"):
+            return None
+        if (record.get("hash"), record.get("candidateHash"),
+                record.get("component")) != (entry["hash"],
+                                             entry["candidateHash"],
+                                             entry["component"]):
+            return None
+        return entry
+
+    def _decision_authorizes_grant(self, decision: dict | None,
+                                   ticket_hash: str | None) -> bool:
+        """Whether `decision` is the proof that lets THIS mint pass the
+        `_mint_standing_grant` refusal for a multi-party rule (item 471, round
+        2). True only for the lease bridge: an exact, identity-checked satisfied
+        decision for THIS `kind='lease'` ticket, re-derived here rather than
+        trusted.
+
+        `decision` is never caller-supplied — the public `mint_standing_grant`
+        passes none, so no operator request can take this route — and a copy, a
+        stale or already-spent entry, an entry minted for another ticket, a
+        non-lease ticket and a decision that is not satisfied all fail. The
+        predicate `_multi_party_rules` stays load-bearing: this narrows WHO may
+        ask, never WHICH rules bind."""
+        if decision is None or ticket_hash is None:
+            return False
+        ticket = self._tickets.get(ticket_hash)
+        if ticket is None or ticket.get("kind") != "lease":
+            return False
+        return self._satisfied_decision_for(ticket) is decision
 
     def _runtime_lease_acquire(self, component: str, capability: str,
                                ttl_ms, uses) -> str | None:
@@ -4881,6 +4967,14 @@ class Session:
     # bound, and `_auto_rule_covers` refuses to cover. See its docstring for the
     # full call-site list, including why `_find_standing_approval` is not one.
     #
+    # The one path that does NOT end in a refusal is an `effect lease` under a
+    # multi-party rule: its acquisition has no operator mint left (the predicate
+    # refuses it), so `_enforce_lease_gate` retries it against the DECISION
+    # instead — the lease grant is minted off the satisfied ledger entry for
+    # that very lease ticket, once, and spent before boot. Refused before the
+    # votes arrive, and never a class-(c) admission: the grant is lease-tagged,
+    # so the same predicate still turns it away at every crossing.
+    #
     # What is new is the decision graph `self._quorums` keeps and the `quorum-*`
     # WAL records it writes: who was asked, who voted, which votes were refused
     # and why, and how the decision closed. The graph is keyed by the round-scoped
@@ -4912,7 +5006,18 @@ class Session:
             `capability=`), so no such grant can ever exist, and
             `_find_standing_grant` refuses to match one (`_live_grant_for`, its
             only grant primitive, is therefore never reachable for such a
-            ticket either);
+            ticket either). The one request that is NOT refused is the lease
+            bridge below, and it is not an operator request at all;
+          * the LEASE path (item 294): an `effect lease` gated by a multi-party
+            rule is not widened either — there is no caller-supplied mint left
+            for its gate to admit on, so its acquisition is forced onto the vote
+            path (`_enforce_lease_gate`). The single route it keeps is the answer
+            the operators give: once the decision for THAT lease ticket is
+            satisfied, the gate mints the lease grant itself, off that decision
+            and nothing else (`_satisfied_decision_for`), and `_mint_grant`
+            accepts the mint only when `_decision_authorizes_grant` re-derives
+            the same proof for that very hash, for a `kind='lease'` ticket, and
+            spends it once (`_consume_approval`);
           * the DISTILLED AUTO-APPROVE path: `_auto_rule_covers`, and through it
             `_find_auto_approve`.
 
@@ -5133,8 +5238,13 @@ class Session:
           unidentifiable one);
         * the PROPOSER's own vote is refused, so a quorum can never be closed by
           the operator who asked for the crossing (separation of duties);
-        * a second vote from an approver who already voted is refused, so one
-          human cannot supply two of the N;
+        * a second vote asserted under a name that already voted is refused, so
+          one NAME supplies one vote toward the N. What that does NOT close is
+          the caller-asserted identity itself: `as_token` is a string the caller
+          supplies, not a verified credential, so one operator can assert several
+          of the rule's names. Decision 5 of `docs/design/471-quorum-approval.md`
+          states that bound, and binding the name to a credential is the
+          transport item that closes it;
         * a vote against a question that is already decided, escalated, revoked,
           or past its deadline is refused;
         * a vote whose question no longer matches the live candidate is refused,
@@ -6009,7 +6119,28 @@ class Session:
         Roadmap item 471: refused outright when the crossing's covering rule
         names approvers or demands more than one, on BOTH routes. Such a rule is
         answered by votes, and one operator's standing authority is not N
-        distinct named approvers (`_multi_party_rules`)."""
+        distinct named approvers (`_multi_party_rules`).
+
+        The ONE route such a rule keeps is the `kind='lease'` ticket an
+        `effect lease` raised: the lease gate mints that grant itself, off the
+        SATISFIED decision for that very ticket (`_decision_authorizes_grant`),
+        and never off anything an operator sent. This verb passes no `decision`,
+        so the public mint can never take that route."""
+        return self._mint_grant(ticket_hash=ticket_hash, capability=capability,
+                                uses=uses, ttl_ms=ttl_ms)
+
+    def _mint_grant(self, *, ticket_hash: str | None = None,
+                    capability: str | None = None, uses: int | None = None,
+                    ttl_ms: int | None = None,
+                    decision: dict | None = None) -> dict:
+        """The ONE implementation behind the standing-grant mint.
+
+        `decision` is the item-471 lease bridge and is deliberately NOT part of
+        the public signature: it is the live, satisfied ledger entry for a
+        multi-party `kind='lease'` ticket, passed only by `_enforce_lease_gate`,
+        and it is re-verified here rather than trusted
+        (`_decision_authorizes_grant`). Every other caller passes nothing, so a
+        multi-party rule refuses them exactly as it did before the bridge."""
         if uses is not None:
             if not isinstance(uses, int) or isinstance(uses, bool) or uses < 1:
                 raise SessionError(
@@ -6119,8 +6250,19 @@ class Session:
         # no votes at all and leave the question it gated unanswered in the
         # durable graph. `_multi_party_rules` is the single predicate every
         # admission path consults.
+        #
+        # The refusal has exactly ONE exception, and it is not an operator
+        # request: `decision` is the satisfied decision for the multi-party
+        # `kind='lease'` ticket whose acquisition this session is retrying, and
+        # `_decision_authorizes_grant` re-derives that proof from the live
+        # ledger and the decision graph before letting the mint through. Without
+        # it, an `effect lease` under a multi-party rule could never be acquired
+        # at all — the votes would have no consumable answer — so the exception
+        # is what re-admits the lease WITHOUT widening the rule: the authority
+        # is still the N votes, and the grant it produces is lease-tagged, so
+        # `_find_standing_grant` still refuses it at every class-(c) crossing.
         rules = self._multi_party_rules({"capabilities": shape_caps})
-        if rules:
+        if rules and not self._decision_authorizes_grant(decision, ticket_hash):
             raise SessionError(
                 f"cannot mint a standing grant for `{component}`: the approval "
                 f"rule covering this crossing demands {rules[0].quorum_text()}, "
@@ -6128,8 +6270,12 @@ class Session:
                 f"standing grant (roadmap item 471, separation of duties). A "
                 f"standing grant is one operator's authority recorded once, so "
                 f"it would admit the crossing with zero votes. Cast a vote "
-                f"instead with `revl_approve(hash=…, vote=…, asToken=…)`, or "
-                f"approve each crossing single-use once the quorum is met")
+                f"instead with `revl_approve(hash=…, vote=…, asToken=…)`, then "
+                f"re-issue the refused crossing: the satisfied decision IS its "
+                f"approval, spent single-use there. That is also the only route "
+                f"a quorum-gated `effect lease` has — re-run the load that "
+                f"raised the lease ticket and its grant is minted from the "
+                f"satisfied decision itself, once the votes are in")
 
         # item 416c: a resource dimension declared `Secret[T]` binds to the
         # REDACTED placeholder (approval.bind_resource_scope), never the real
