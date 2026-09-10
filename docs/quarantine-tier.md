@@ -100,9 +100,14 @@ This reuses the two authorities the composition already has:
   candidate; the admission is stamped as a bypass.
 
 `quarantine.admission_decision` returns the decision; `quarantine.gate_swap`
-enforces it on **every path that reaches a swap** — `revl_swap`, `revl_repair`'s
+enforces it on **every path that swaps a component candidate** — `revl_swap`,
+`revl_ship --apply` (which reaches it through the swap handler), `revl_repair`'s
 remediation step, and `revl_edit`, which compiles its edits into a candidate
 swap and is gated by it and by the item-61 lease gate before that swap runs.
+Generation replay is outside that claim: `revl_undo` and `revl_rollback`
+re-admit a retained generation and reach `Session.swap` with neither this gate
+nor the lease check, under the operator's `undo` authority instead.
+
 **With no requiring policy, the gate is inert and the default swap path pays
 nothing** — quarantine is opt-in, exactly like the item-33 sandbox and item-61
 leases it sits beside.

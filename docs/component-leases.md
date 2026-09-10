@@ -122,17 +122,22 @@ composition is left **untouched**:
 The refusal is **all-or-nothing**, like admission: the first target held by
 another operator refuses the whole swap.
 
-Enforcement covers **every path that swaps**, not just `revl_swap`:
-`revl_ship --apply` reaches it through the swap handler, `revl_repair`'s
-remediation step is checked here before the loop runs, and `revl_edit` — whose
-edits compile into the same kind of candidate swap — is checked against this
-gate and the quarantine gate before its swap runs, rather than only against
-admission. A gate that only `revl_swap` walks is not a gate; it is a gap in
-the shape of the tool an agent reaches for when the front door is closed. And
+Enforcement covers **every path that swaps a component candidate**, not just
+`revl_swap`: `revl_ship --apply` reaches it through the swap handler,
+`revl_repair`'s remediation step is checked here before the loop runs, and
+`revl_edit` — whose edits compile into the same kind of candidate swap — is
+checked against this gate and the quarantine gate before its swap runs, rather
+than only against admission. A gate that only `revl_swap` walks is not a gate;
+it is a gap in the shape of the tool an agent reaches for when the front door
+is closed. And
 when the swap's **targets cannot be derived** — a candidate that will not
 compile — enforcement fails closed and checks the swap against *every* active
 lease, rather than against none of them. A swap that cannot be scoped is
 exactly the swap a lease exists to stop.
+
+Generation replay is outside that claim: `revl_undo` and `revl_rollback`
+re-admit a retained generation and reach `Session.swap` with neither this check
+nor the quarantine gate, under the operator's `undo` authority instead.
 
 The advisory/enforced split is the same shape as the rest of the gate:
 advisory by default (any operator with the `swap` grant can still act), enforced
