@@ -52,6 +52,13 @@ Re-admission is never bypassed: every form ends at ``compile_source`` /
 human's ``revl compile`` and the existing ``revl_swap`` run — so a patch that
 would violate a guarantee is refused with its structured diagnostic, exactly as
 a full-source swap of the same bytes would be.
+
+Nor is it bypassed by the *acting* gates. A patch that compiles clean is
+hot-swapped in, so an edit is a swap by another name: an enforced component
+lease and a required quarantine are checked on the patched source before
+anything swaps, exactly as ``revl_swap`` checks them on a resent document. Only
+one of the three gates ran here before, which made `revl_edit` a way around the
+other two.
 """
 
 from __future__ import annotations
@@ -295,8 +302,9 @@ def apply_edit(session, arguments: dict) -> dict:
 
     Returns the admission verdict / open holes / diagnostic — never the whole
     source. Mirrors `revl_swap`'s gate exactly (admit against the running
-    composition, then recompile the whole composition), so a patch that breaks
-    a guarantee is refused with its diagnostic and the running system is
+    composition, then recompile the whole composition, then the acting gates —
+    an enforced component lease and a required quarantine), so a patch that
+    breaks a guarantee is refused with its diagnostic and the running system is
     untouched — the gate is not bypassed by editing rather than swapping.
     """
     from .session import SessionError  # noqa: PLC0415 — avoid an import cycle
@@ -359,7 +367,28 @@ def apply_edit(session, arguments: dict) -> dict:
         return rejected
 
     # (4) admitted and hole-free: hot-swap the whole recompiled composition in,
-    # exactly as revl_swap does on a full-source resend.
+    # exactly as revl_swap does on a full-source resend — which means it has to
+    # answer to exactly what a full-source resend answers to. Two of those gates
+    # were wired only into `server._tool_swap` (and `_tool_repair`), so an
+    # enforced component lease and a required quarantine were both bypassable by
+    # *editing* rather than swapping: same component, same replacement, a
+    # different verb. Both run here, after the candidate is known to be
+    # admissible and before anything is swapped, so a refusal leaves the running
+    # composition and the working buffer exactly as they were.
+    from . import server as _srv  # noqa: PLC0415 — lazy, avoids an import cycle
+
+    # The gate sees the PATCHED source set in the shape a swap carries it, so
+    # the lease derivation scopes the edit's real replacement targets (and falls
+    # back to the whole composition, i.e. fails closed, when they cannot be
+    # derived).
+    gate_arguments = {**vs, "replacing": list(replacing)}
+    refusal = _srv._leases.check_swap(session, gate_arguments)
+    if refusal is not None:
+        return _srv._refused_by_lease(refusal)
+    quarantined = _srv._quarantine.gate_swap(session, gate_arguments)
+    if quarantined is not None:  # required quarantine: not proved, not swapped
+        return {**quarantined, "edited": False, "applied": applied}
+
     state = session.swap(ir, origin=_origin_from(vs))
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
