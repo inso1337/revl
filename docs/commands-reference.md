@@ -932,7 +932,9 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
   over the tests collected from the full compilation — the input files are never
   narrowed, because a single component file does not compile standalone. A
   filter that matches fewer than all collected tests is announced, and a filter
-  matching nothing exits nonzero rather than reporting a false "0 passed".
+  matching nothing exits `2` rather than reporting a false "0 passed".
+  `--filter`/`--list` cannot be combined with `--sweep`, `--schedule-seed(s)`,
+  or `--mock-requires` (exit `2`).
 - `--list` - print the name of every collected `test` block and run nothing.
   This answers "which tests does this compilation actually collect?" without
   executing anything.
