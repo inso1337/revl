@@ -31,6 +31,23 @@ boot. It is `selfhost/lower.rvl`'s `admit_src` — the native lex / parse /
 composition-guarantee chain — compiled to rust through the reference rust
 backend.
 
+`admit_into` is the same gate across a composition boundary: the verdict on a
+candidate once it is admitted INTO a RUNNING composition (item 186).
+
+```rust
+use revl_gate::{admit_into, Verdict};
+
+// The running composition, in item 186's row wire: `Kv` provides `store`,
+// `App` provides `app` and requires `store`.
+let running = "Kv/store/;App/app/;App<store";
+
+match admit_into(candidate, running) {
+    Verdict::Refused { code, message } => reject(code, message),
+    Verdict::NoObjection => ask_the_reference(candidate),
+    Verdict::OutsideFrontier { reason } => ask_the_reference(candidate),
+}
+```
+
 The crate builds with no Python on the machine. That is why the generated source
 is committed rather than produced at install time (items 336 and 338 depend on
 it).
@@ -80,7 +97,10 @@ crate returns it whenever:
   the deeply-recursive native front end ABORTS, and an abort cannot be turned
   back into a refusal);
 * the native gate panics while deciding (caught via `catch_unwind`);
-* the native gate returns a verdict wire shape this crate does not recognise.
+* the native gate returns a verdict wire shape this crate does not recognise;
+* in `admit_into`, the manifest wire is longer than the bound the gate will
+  decide (the fold parses the manifest with the same front end), or the fold
+  returns a shape this crate does not recognise.
 
 ### The generated frontier table at this generation
 
@@ -93,21 +113,56 @@ the drift gate.
 * Reference stdlib builtins the self-host does not lower as builtins:
   (none at this generation)
 
+## The manifest arm (issue #346)
+
+`admit_into(source, manifest)` asks a different question from `admit`: not "is
+this text well formed on its own", but "does this text compose with the
+composition that is ALREADY RUNNING". `source` is decided against the UNION of
+the manifest and the incoming text, so a key the running composition already
+holds conflicts (`G2`), a route into a realm the union does not provide dangles
+(`G2`), and a dependency cycle spanning the manifest boundary is a cycle
+(`G3`). The decision is the native fold `selfhost/lower.rvl::admit_ambient`,
+compiled to rust like `admit`, and the manifest arrives as item 186's row wire
+(`docs/design/186-ambient-admission-guarantees.md`): `C/k/r` for a provision
+(`r` the realm, `""` for shared), `C<k` for a requirement, `!halted` for a
+halted composition, joined by `;`. The empty manifest is the empty composition,
+so `admit_into(source, "")` is `admit(source)` byte for byte — the arm
+generalises `admit` rather than re-implementing it.
+
+Two honest limits, both fail-closed:
+
+* **It closes the `G2`/`G3` legs and nothing else.** The reference TYPE layer is
+  its own lane (the self-host compiler has no type layer yet), so a
+  type-incorrect candidate is a no-objection here, exactly as in `admit`. This
+  arm does not RESOLVE the requirements a candidate declares either; it checks
+  them for disjointness and acyclicity. The reference remains the only tier that
+  admits.
+* **A row it cannot honour is REFUSED, never skipped.** The wire reserves row
+  kinds for waves that have not landed — replacement (`-C`) and handoff
+  (`C=k:T`), both of which need the type layer. Those rows come back as a
+  `MANIFEST` refusal. Ignoring a row would be the wave-through this crate exists
+  to prevent.
+
 ## What is deliberately absent
 
-* **`admit_into`.** Admission INTO a running composition spans a manifest
-  (G2/G3 over the live composition). The self-host pipeline has no manifest
-  parameter, and a stub that ignored one would be the wave-through this crate
-  exists to prevent. Use `revl.gate.admit_into` on py.
 * **`compile_to` output.** Exported, and it refuses unconditionally: the
   self-host emitters still carry `@py`-only helper externs and do not emit to
   rust. Stage 4's lane.
+* **The reference type layer.** Still absent, in `admit` and in `admit_into`
+  alike: neither arm issues an admission. That lane is the type layer's, not the
+  manifest parameter's.
+* **The deferred manifest rows.** Replacement and handoff rows are refused, for
+  the reason in the section above: they need the type layer.
 * **Layer 2 (the session surface).** `revl_gate::session::Session` is item 334's
   foundational first slice: the generation state machine, the untrusted-author
-  admission entry (`propose`/`admit`), and the item-245 witnessed-call recording
-  path (`call`/`commit`/`abort`/`unload`). The accept-and-swap half, the
-  witnessed-effect runtime, the WAL and the approver callback are later slices;
-  a candidate the native gate does not refuse is fail-closed, never admitted.
+  admission entry (`propose`/`admit`/`admit_into`), and the item-245
+  witnessed-call recording path (`call`/`commit`/`abort`/`unload`). The
+  accept-and-swap half, the witnessed-effect runtime, the WAL and the approver
+  callback are later slices; a candidate the native gate does not refuse is
+  fail-closed, never admitted. `Session::admit_into` takes the manifest wire as
+  a PARAMETER, not as a projection of the loaded composition: a manifest also
+  needs requirements and realms, and synthesising rows out of what the session
+  holds would be inventing a running composition.
 
 ## Host obligations
 
@@ -152,7 +207,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:5244e0e9a01f64a2"
+    // frontier "selfhost-admit:019e01b8fb177e01"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
