@@ -26,7 +26,7 @@ an ASSERTED choice with a reason, not an oversight. If branch protection is ever
 updated, update REQUIRED_CHECKS to match and this file documents the new intent.
 
 NOTE on the "13 required checks" figure in ci.yml's merge-queue comment: this
-partition marks 11 jobs required and 5 non-required. The two are reconciled at
+partition marks 11 jobs required and 7 non-required. The two are reconciled at
 the branch-protection settings, which are out of tree; whichever is stale, this
 test at least makes the job-name side of the contract explicit and drift-proof.
 It reads ci.yml as text, so it needs no PyYAML (not a declared dependency) and
@@ -80,6 +80,14 @@ NOT_REQUIRED_CHECKS = {
     # conformance/formal jobs run on a given PR. Pure routing over `git diff`;
     # it gates nothing itself and is never a merge blocker.
     "changes": "path-filter router for the gated frontend jobs; not a gate",
+    # Issue #854: the unconditional owner of root-suite coverage. `frontend` and
+    # `frontend-cordis` are the fast path for the 3-version matrix, and a diff
+    # that misses the fast-path filter used to leave the root suite collected by
+    # no job at all. This one runs the selection `tools/affected_tests.py`
+    # computes, on one interpreter, for every diff. Kept out of branch
+    # protection on purpose: promoting it is a branch-protection change, out of
+    # tree, and it is coverage insurance rather than the gate itself.
+    "root-suite-affected": "issue #854 unconditional root-suite coverage; promotion is a branch-protection change, out of tree",
 }
 
 
