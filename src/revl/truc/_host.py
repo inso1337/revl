@@ -14,6 +14,17 @@ The one exception that must live here is the gate itself (`admit`): it calls
 same call docs/registry.md §4 names as the install step ("fetched source
 enters a composition only through compile_files"). truc cannot hold a
 different opinion from revl about admissibility: same process, same compiler.
+
+There is a second exception, and it is the same kind of exception: the NAME a
+truc is added or removed under. A truc name becomes a directory
+(`trucs/<name>`) and a `truc.toml` key, so the jail the whole project rests on
+is the name itself — and every other check on the add/rm path (index
+membership, source hash, the gate, the planner's empty-guard) is *content*
+based, which means `trucs/../../..` is a perfectly well-formed plan for a
+perfectly well-formed registry row. `_vendor_dir` is where a name stops being
+a string and has to be a directory *inside* `trucs/`, so that is where the
+shape is checked. The plan is still the whole decision — the check only
+refuses to let a name mean something other than what "this truc" means.
 """
 
 from __future__ import annotations
@@ -23,6 +34,86 @@ import hashlib
 import json
 import os
 import pathlib
+import re
+
+#: The names TOML lets us write bare. Anything else is quoted, which is what
+#: keeps `pg_database = { registry = "local" }` spelled the way the docs and
+#: every hand-written project already spell it.
+_TOML_BARE_KEY = re.compile(r"\A[A-Za-z0-9_-]+\Z")
+
+
+class TrucNameRefusal(ValueError):
+    """A name that cannot name a directory inside the project's `trucs/`.
+
+    A `ValueError` rather than a silent no-op because there is nothing sensible
+    to do with `../../etc`: the name never meant a truc, so the only honest
+    answer is to leave the disk alone and say why. Nothing on the add/rm path
+    duplicates this check, which is exactly why it is here (and not only in the
+    planner, which a caller can bypass): vendoring or deleting
+    `trucs/<name>` is the write, so the write is where the shape is enforced.
+    """
+
+
+def _name_refusal(name: object, what: str = "truc") -> str:
+    """Why `name` cannot be a truc (or registry) name, or "" when it can. Never
+    raises, so a caller that wants to REPORT rather than refuse can reuse it.
+
+    The rule is the registry's own (`registry._unsafe_name_reason`), called
+    rather than copied: a truc name IS a component name — a truc is a component
+    vendored into a project — so a second, stricter grammar here would silently
+    refuse a component the registry legitimately published, and a second, looser
+    one would let `trucs/<name>` mean something the registry would never have
+    written. Both grammars are "one path segment in a flat namespace", so
+    reusing the registry's is also what makes the reading side safe: the path
+    this check guards is one the same rule produced.
+    """
+    if not isinstance(name, str) or not name:
+        return f"a {what} name must be a non-empty string, not {name!r}"
+    from ..registry import _unsafe_name_reason  # noqa: PLC0415, the registry's rule verbatim
+    reason = _unsafe_name_reason(name)
+    if not reason:
+        return ""
+    if what != "truc":
+        return (f"refusing the {what} name {name!r}: {reason}. A {what} name is "
+                f"one key in `[registries]` of `truc.toml`.")
+    return (
+        f"refusing the truc name {name!r}: {reason}. A truc name is one "
+        f"directory under the project's `trucs/` and one key in `truc.toml`, "
+        f"so `trucs/{name}` is not a directory this project owns — and a truc "
+        f"is only ever a truc inside it.")
+
+
+def _check_name(name: object, what: str = "truc") -> str:
+    """`name`, or raise `TrucNameRefusal`. Called before ANY path is derived
+    from a name, on both the reading and the writing side."""
+    reason = _name_refusal(name, what)
+    if reason:
+        raise TrucNameRefusal(reason)
+    return name  # type: ignore[return-value] — narrowed by the check above
+
+
+def _vendor_dir(project_dir: str, name: str) -> pathlib.Path:
+    """The one directory `name` is allowed to name: `<project>/trucs/<name>`.
+
+    Two checks, in the order the jail needs them: the name must be one plain
+    segment (above), and neither it nor `trucs/` itself may be a symlink. The
+    link check exists for the same reason `_launcher._contained_path` walks
+    every segment before compiling a stage-0 component — `mkdir(exist_ok=True)`
+    and `write_text` both FOLLOW a link, so `trucs/evil -> /etc` would turn
+    "vendor a truc" into a write outside the project, and `rmtree` would at
+    best die on it. The trust claim is that the bytes truc owns are the bytes
+    under `trucs/`; a link is bytes truc does not own.
+    """
+    _check_name(name)
+    root = pathlib.Path(project_dir, "trucs")
+    for rel, path in (("trucs", root), (f"trucs/{name}", root / name)):
+        if path.is_symlink():
+            raise TrucNameRefusal(
+                f"refusing to touch `{rel}`: it is a symlink to "
+                f"{os.readlink(path)!r}, and a truc's bytes are the ones under "
+                f"the project's own `trucs/` directory. Remove the link (or "
+                f"vendor the truc into the project) and re-run.")
+    return root / name
 
 
 def sha256_hex(data: str) -> str:
@@ -65,7 +156,13 @@ def index_row(registry: str, name: str) -> str:
     planner (which navigates a list/record cleanly but has no Map `.get`).
     "" when the name is not in the index — the planner reads that as "unknown
     component" and refuses. `name` is echoed into the row so a list of rows
-    stays self-identifying (the lock is a list, not a name-keyed object)."""
+    stays self-identifying (the lock is a list, not a name-keyed object).
+
+    The name is checked before it is used as a key AND before `entry_read` /
+    `commit_add` are ever reached with it: `components/<name>` is a path, and a
+    registry row naming a path is not the row a truc could be vendored from.
+    """
+    _check_name(name)
     idx = json.loads(pathlib.Path(registry, "index.json").read_text(encoding="utf-8"))
     row = (idx.get("components") or {}).get(name)
     if row is None:
@@ -79,6 +176,7 @@ def index_row(registry: str, name: str) -> str:
 def entry_read(registry: str, name: str) -> str:
     """One registry entry, bundled as JSON: `component.rvl` + `manifest.json`
     (+ `dossier.json` when present). A truc *is* this triple, vendored."""
+    _check_name(name)
     base = pathlib.Path(registry, "components", name)
     src = base / "component.rvl"
     if not src.exists():
@@ -153,6 +251,7 @@ def read_sources(project_dir: str, spec_json: str) -> str:
         entry.append({"path": ap, "source": txt})
     vendored = []
     for name in spec.get("trucs") or []:
+        _check_name(name)
         ap = os.path.abspath(os.path.join(project_dir, "trucs", name, "component.rvl"))
         src = pathlib.Path(ap).read_text(encoding="utf-8")
         vendored.append({"name": name, "path": ap, "source": src})
@@ -357,15 +456,17 @@ def commit_add(project_dir: str, plan_json: str) -> str:
         return "skipped"
     plan = json.loads(plan_json)
     add = plan["lockAdd"]
-    name = add["name"]
-    reg_name = add["registry"]
+    name = _check_name(add["name"])
+    reg_name = _check_name(add["registry"], "registry")
 
     manifest = json.loads(toml_manifest(project_dir))
     reg_abs = (manifest.get("registries") or {}).get(reg_name) or manifest.get("registry")
 
-    # fetch is a copy: vendor the registry entry dir verbatim (§5).
+    # fetch is a copy: vendor the registry entry dir verbatim (§5). `_vendor_dir`
+    # is the jail: the destination is inside this project's `trucs/`, or the
+    # plan does not get to write at all.
     src_dir = pathlib.Path(reg_abs, "components", name)
-    dst_dir = pathlib.Path(project_dir, "trucs", name)
+    dst_dir = _vendor_dir(project_dir, name)
     dst_dir.mkdir(parents=True, exist_ok=True)
     for fname in ("component.rvl", "manifest.json", "dossier.json"):
         sp = src_dir / fname
@@ -403,18 +504,155 @@ def commit_add(project_dir: str, plan_json: str) -> str:
     return "committed"
 
 
+#: TOML's single-character basic-string escapes, and their inverses. Only these
+#: are spelled out; every other character TOML forbids raw (the rest of C0 and
+#: DEL) is written `\uXXXX`, and everything else is written verbatim.
+_TOML_ESCAPES = {"\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f",
+                 "\r": "\\r", '"': '\\"', "\\": "\\\\"}
+_TOML_UNESCAPES = {escaped[1:]: raw for raw, escaped in _TOML_ESCAPES.items()}
+
+
+def _toml_string(text: str) -> str:
+    """`text` as a TOML basic string, escapes and all.
+
+    Written out rather than borrowed from `json.dumps`, which is a *near* miss:
+    JSON and TOML agree on every character except the astral planes, where JSON
+    emits a surrogate pair (`\\ud83d\\ude00`) and TOML forbids the escape
+    outright. An emoji in a name is enough to make the difference load-bearing,
+    and the failure mode is the one this file exists to prevent — a
+    `truc.toml` that no longer parses.
+    """
+    out: list[str] = []
+    for ch in text:
+        escaped = _TOML_ESCAPES.get(ch)
+        if escaped is not None:
+            out.append(escaped)
+        elif ch < " " or ch == "\x7f":
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def _toml_unstring(literal: str) -> str:
+    """The text a TOML basic string was written from — `\\uXXXX`, `\\n` and the
+    rest read back. Tolerant on purpose: this reads a `truc.toml` the project
+    does not fully control, so an escape it did not write is kept verbatim
+    rather than raised on, and no input can make it fall over."""
+    body = literal[1:-1]
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\" or i + 1 >= len(body):
+            out.append(ch)
+            i += 1
+            continue
+        marker = body[i + 1]
+        if marker in _TOML_UNESCAPES:
+            out.append(_TOML_UNESCAPES[marker])
+            i += 2
+        elif marker in ("u", "U"):
+            width = 4 if marker == "u" else 8
+            digits = body[i + 2:i + 2 + width]
+            if len(digits) != width:
+                out.append(ch)
+                i += 1
+                continue
+            try:
+                out.append(chr(int(digits, 16)))
+            except ValueError:
+                out.append(body[i:i + 2 + width])
+            i += 2 + width
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _toml_key(name: str) -> str:
+    """`name` spelled as a TOML key: bare when it can be, quoted when it must.
+
+    A bare TOML key admits `A-Za-z0-9_-` and nothing else, so a name carrying a
+    dot — legal as a component name, illegal bare — is written quoted. Quoting
+    is not cosmetic: interpolating a name bare is what produced a `truc.toml`
+    that no longer parses, which bricked the project — neither `assemble` nor
+    even the remediating `rm` could read it back.
+    """
+    return name if _TOML_BARE_KEY.match(name) else _toml_string(name)
+
+
+def _toml_key_token(text: str) -> str:
+    """The key text at the head of a `key = value` line — quotes included — or
+    "" when the line is not an assignment.
+
+    A quoted key is delimited by its CLOSING quote rather than by the first `=`,
+    because a quoted key is allowed to contain both an `=` and the other quote
+    character. Splitting on `=` instead is what makes a name like `a=b` an
+    un-removable key: the line reads `"a=b" = { … }`, the split yields `"a`, and
+    the `rm` that should drop the key never recognizes it."""
+    if text[:1] == "#":
+        # A comment is not an assignment, however much it reads like one. A
+        # commented-out `# pg_database = 1` would otherwise report the key
+        # `# pg_database` — a name truc never wrote, and one that shadows a real
+        # `# pg_database` truc, whose key IS spellable and so is quoted.
+        return ""
+    if text[:1] in ("'", '"'):
+        quote = text[0]
+        i = 1
+        while i < len(text):
+            if quote == '"' and text[i] == "\\":
+                i += 2  # an escaped character inside a basic string
+                continue
+            if text[i] == quote:
+                break
+            i += 1
+        else:
+            return ""  # unterminated: not an assignment we can read
+        if text[i + 1:].lstrip()[:1] != "=":
+            return ""
+        return text[:i + 1]
+    head = text.split("=", 1)
+    return head[0].strip() if len(head) == 2 else ""
+
+
+def _toml_key_of(line: str) -> str:
+    """The name of one `key = value` line, unquoted and unescaped. "" when the
+    line is not an assignment. Every spelling is read back — bare, basic and
+    literal — because a `truc.toml` written by an older truc (or by hand) is
+    still a project someone has to be able to `rm` their way out of."""
+    token = _toml_key_token(line.strip())
+    if not token:
+        return ""
+    if token[0] == '"':
+        return _toml_unstring(token)
+    if token[0] == "'":
+        return token[1:-1]
+    return token
+
+
 def _toml_add_truc(project_dir: str, name: str, registry: str) -> None:
     """Append `<name> = { registry = "<registry>" }` under `[trucs]`.
 
     A minimal, honest string edit — there is no revl TOML serializer, and
     writing one is not truc's job (docs/design/truc-architecture.md §4.3).
-    Idempotent: a name already present is left as-is."""
+    Idempotent: a name already present under `[trucs]` is left as-is. Both the
+    key and the registry VALUE are escaped by `_toml_key`/`_toml_string` rather
+    than interpolated raw: this runs after the write to `trucs/` and after the
+    lock row, so a name that came out of here as invalid TOML would leave the
+    project half-updated and unreadable — the failure mode is not "the edit
+    looked wrong", it is "no `truc` verb can read truc.toml any more"."""
     p = pathlib.Path(project_dir, "truc.toml")
     text = p.read_text(encoding="utf-8")
-    line = f'{name} = {{ registry = "{registry}" }}'
-    # already present? (a bare `name = ` at a line start under [trucs])
+    line = f'{_toml_key(name)} = {{ registry = {_toml_string(registry)} }}'
+    # already present? (the name as a key under [trucs], in either spelling)
+    section = ""
     for existing in text.splitlines():
-        if existing.strip().startswith(f"{name} ") or existing.strip().startswith(f"{name}="):
+        stripped = existing.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped
+            continue
+        if section == "[trucs]" and _toml_key_of(stripped) == name:
             return
     if "[trucs]" in text:
         lines = text.splitlines()
@@ -447,12 +685,12 @@ def commit_rm(project_dir: str, plan_json: str) -> str:
     if not plan_json:
         return "skipped"
     plan = json.loads(plan_json)
-    name = plan["name"]
+    name = _check_name(plan["name"])
 
     # un-vendor: the whole registry-entry mirror under trucs/<name>/ (§5).
     import shutil  # noqa: PLC0415 — stdlib, only needed on the rm path
 
-    vendor = pathlib.Path(project_dir, "trucs", name)
+    vendor = _vendor_dir(project_dir, name)
     if vendor.exists():
         shutil.rmtree(vendor)
 
@@ -475,7 +713,8 @@ def _toml_rm_truc(project_dir: str, name: str) -> None:
     revl TOML serializer, §4.3). Scoped to the `[trucs]` section and matched on
     the exact key so a name that is a prefix of another — or a same-named key in
     a different table — is never touched. A name that is not present is left
-    as-is (idempotent)."""
+    as-is (idempotent). The key is unquoted before it is compared, so the
+    `rm` of a dotted name finds the quoted key its `add` wrote."""
     p = pathlib.Path(project_dir, "truc.toml")
     text = p.read_text(encoding="utf-8")
     out: list[str] = []
@@ -486,10 +725,8 @@ def _toml_rm_truc(project_dir: str, name: str) -> None:
             section = stripped
             out.append(ln)
             continue
-        if section == "[trucs]" and "=" in stripped:
-            key = stripped.split("=", 1)[0].strip()
-            if key == name:
-                continue
+        if section == "[trucs]" and _toml_key_of(stripped) == name:
+            continue
         out.append(ln)
     new = "\n".join(out)
     if text.endswith("\n") and not new.endswith("\n"):
