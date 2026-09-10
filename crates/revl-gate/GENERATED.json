@@ -11,7 +11,7 @@
     "src/revl/typecheck.py",
     "tools/build_gate_crate.py"
   ],
-  "frontier": "selfhost-admit:5244e0e9a01f64a2",
+  "frontier": "selfhost-admit:a41bb145714e1d7a",
   "frontier_excluded_builtins": [],
   "frontier_excluded_keywords": [],
   "gate_api_version": "1.0.0",
@@ -40,16 +40,17 @@
   "issues_admissions": false,
   "language_version": "2.0.0",
   "layer": "1 (verdict surface), admit-only",
+  "manifest_arm": "revl_gate::admit_into(source, manifest) \u2014 the item-186 ambient gate as a binding: the union fold's G2/G3 legs. Refuses the deferred manifest rows (replacement `-C`, handoff `C=k:T`) rather than skipping them, and issues no admission.",
   "max_source_bytes": 262144,
   "navigation_surface": "revl_gate::symbols \u2014 declarations and their lines; issues no verdicts",
-  "note": "Regenerate with `python3 tools/build_gate_crate.py`. The source_digest is a pure function of digest_inputs, not a git sha, so `--check` can verify the committed crate against the tree it was generated from. `issues_admissions` is false by construction: this gate decides the composition/guarantee layer, not the reference type layer, so its non-refusing arm is `no_objection` and never an admission.",
+  "note": "Regenerate with `python3 tools/build_gate_crate.py`. The source_digest is a pure function of digest_inputs, not a git sha, so `--check` can verify the committed crate against the tree it was generated from. `issues_admissions` is false by construction: this gate decides the composition/guarantee layer, not the reference type layer, so its non-refusing arm is `no_objection` and never an admission \u2014 across the manifest boundary too (issue #346).",
   "selfhost_closure": [
     "selfhost/lexer.rvl",
     "selfhost/parser.rvl",
     "selfhost/lower.rvl"
   ],
   "selfhost_root": "selfhost/lower.rvl",
-  "source_digest": "5244e0e9a01f64a277969427cf91839e6be5ab09bbf833f0d068f44ee183f159",
+  "source_digest": "a41bb145714e1d7a0bea3d072284f2a212c6421786280cd511fffdb3f686791c",
   "symbols_api_version": "0.1.0",
   "verdict_arms": [
     "refused",

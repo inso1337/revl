@@ -1196,10 +1196,152 @@ def mock_requires_command(ir: dict) -> int:
     return 1 if failures else 0
 
 
+# --------------------------------------------------------------------------- #
+# Selection and collection (issue #843).                                        #
+# --------------------------------------------------------------------------- #
+#
+# `revl test` had exactly one mode: run every `test` block the compilation
+# collects and report one aggregate count plus the failures. That answers "is
+# the suite green" and nothing else. It cannot answer "which tests does this
+# compilation actually collect" (the half of the liveness question that had no
+# answer at all), and it cannot answer "did the test I just wrote execute"
+# without sabotaging an assertion and watching the global count move: slow, and
+# unsafe as routine practice, because a deliberately broken assertion is
+# exactly the edit that gets committed by accident.
+#
+# `--list` answers the first, `--filter` the second. Both are SELECTION AND
+# REPORTING ONLY: the same units run with the same verdicts, the checker is not
+# consulted differently, and a command line carrying neither flag behaves as it
+# did before. An empty selection is never a silent green -- it exits 2 with a
+# message -- because that is precisely the ambiguity the issue is about: a
+# green run over zero tests is indistinguishable from a green run over tests
+# that all passed.
+
+#: The IR sections that carry *named* test units, with the source keyword that
+#: names them, in the order the py reference tier runs them.
+_NAMED_TEST_SECTIONS = (("test", "tests"),
+                        ("fault test", "fault_tests"),
+                        ("prop test", "prop_tests"))
+
+
+def collected_tests(ir: dict) -> list:
+    """Every named test unit this compilation collects, as ``(kind, name)``.
+
+    ``kind`` is the source keyword; a ``lifecycle test`` is a ``test``. A name
+    collected twice is returned twice -- two files of one composition may
+    declare the same test name and neither the runner nor this listing can tell
+    them apart, so it does not pretend to.
+
+    The verified-effect round trips (docs/verified-effect.md) are keyed by
+    *component*, not by a test name, so they sit outside the selection surface:
+    ``--list`` does not name them and ``--filter`` does not select them. They
+    keep running, which is what "selection and reporting only" means for a
+    check with no name to select.
+    """
+    units: list = []
+    for kind, section in _NAMED_TEST_SECTIONS:
+        for unit in ir.get(section) or []:
+            name = unit.get("name")
+            if name is not None:
+                units.append((kind, name))
+    return units
+
+
+def select_tests(ir: dict, pattern: str) -> dict:
+    """*ir* pruned to the named test units whose name contains *pattern*.
+
+    A plain substring match, deliberately, not a regex: a regex is a second
+    language for the same job, and an accidentally special character (``.``,
+    ``(``, ``|``) would silently select a different set than the author read.
+
+    The IR's test sections are pruned, rather than a runner's output filtered,
+    so every tier runner and every mode that reads a test section honours the
+    same selection -- ``--mock-requires`` runs the `tests` section's lifecycle
+    blocks and therefore selects them too. The input IR is not mutated.
+    """
+    kept = {name for _kind, name in collected_tests(ir) if pattern in name}
+    pruned = dict(ir)
+    for _kind, section in _NAMED_TEST_SECTIONS:
+        if pruned.get(section):
+            pruned[section] = [
+                unit for unit in pruned[section] if unit.get("name") in kept]
+    return pruned
+
+
+def tier_verdict_for_selection(ir: dict, tier: str, pattern) -> "tuple[str, str] | None":
+    """The verdict for *tier* when an active ``--filter`` left it nothing to run.
+
+    ``None`` means the tier HAS a selected unit to execute and the caller runs
+    it normally. A string is the ``(outcome, message)`` the tier reports
+    instead.
+
+    The pruning `select_tests` does is over named units of every kind, and each
+    tier then runs the kinds it runs: the py reference tier runs all of them,
+    an emitter tier lowers the `tests` section only. So a filter that keeps only
+    `prop test` / `fault test` units -- exactly what filtering a property by
+    name does in a file whose plain tests do not match -- hands an emitter tier
+    a document with no test to run and, in a file that declares nothing else, no
+    content at all. Handing that document to the emitter is a hard, misleading
+    "emitter refused" failure for a command that asked for nothing on that tier,
+    and on wasm it was not even that: the pure-test path found no test, no
+    lifecycle test followed, and the tier reported the empty document as
+    ``pass`` (issue #843).
+
+    So a tier the SELECTION emptied reports the same skip its own note already
+    documents -- `prop test` / `fault test` are py-tier-only -- instead of
+    reaching an emitter with nothing to emit. That is a by-design tier skip, not
+    a toolchain absence (`Absent`), so `REVL_REQUIRE_TIERS` does not flip it:
+    the tier is present and refuses nothing, it simply has no selected unit.
+    """
+    if pattern is None or tier == "py" or (ir.get("tests") or []):
+        return None
+    notes = _fault_note(ir, tier)
+    skipped = notes.lstrip("; ")
+    return ("skip", f"--filter {pattern!r} selected no test unit for the {tier} "
+                    f"tier; {skipped or 'nothing was left to run'}")
+
+
+def _empty_selection(ir: dict, pattern) -> int:
+    """Report an empty selection on stderr; the exit code is 2 (a usage error).
+
+    ``--list`` and ``--filter`` both end here, so "nothing was collected" and
+    "nothing matched" read the same however you asked, and neither can be
+    mistaken for a run: 2 is never 1 (a test FAILED) and never 0 (everything
+    was fine).
+    """
+    total = len(collected_tests(ir))
+    if total == 0:
+        print("error: this compilation collects no test units, so there is "
+              "nothing to list or select; nothing ran", file=sys.stderr)
+    else:
+        print(f"error: --filter {pattern!r} matched none of the {total} "
+              f"collected test unit(s); nothing ran", file=sys.stderr)
+    return 2
+
+
+def list_command(ir: dict, pattern=None) -> int:
+    """`revl test --list`: print the collected test names; execute nothing.
+
+    Compiling the sources IS the collection, so this needs no toolchain and
+    runs no tier: no emit, no runner, no interpreter. That is the point -- it
+    answers "which tests does this compilation collect" without paying for a
+    run, and it is the liveness proof an aggregate pass count cannot give.
+    """
+    units = collected_tests(ir)
+    if pattern is not None:
+        units = [(kind, name) for kind, name in units if pattern in name]
+    if not units:
+        return _empty_selection(ir, pattern)
+    for _kind, name in units:
+        print(name)
+    print(f"{len(units)} test(s) collected")
+    return 0
+
+
 def test_command(ir: dict, backend: str, sweep: bool = False,
                  mock_requires: bool = False, schedule_seed=None,
-                 schedule_seeds: int = None, name_filter: str = None,
-                 list_only: bool = False, verbose: bool = False,
+                 schedule_seeds: int = None, list_tests: bool = False,
+                 filter_pattern=None, verbose: bool = False,
                  report: str = None) -> int:
     """Run the document's `test` blocks on the chosen tier(s); exit code.
 
@@ -1214,26 +1356,47 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     seeded interleaving sweep (py tier only; roadmap item 295,
     docs/design/295-schedule-testing.md).
 
-    ``name_filter`` selects the `test` (and `lifecycle test`) blocks whose name
-    contains the given substring. Selection happens over the tests *collected*
-    from the full compilation — the input files are never narrowed, because a
-    single component file does not compile standalone (issue #843). A filter
-    that matches nothing exits ``2`` (usage error), as does combining
-    ``--filter``/``--list`` with ``--sweep``/``--schedule-*``/``--mock-requires``.
+    With ``list_tests`` set, print the collected test names and execute nothing
+    (issue #843); the mode flags above do not apply to a listing.
 
-    ``list_only`` prints each collected test name and runs nothing. ``verbose``
-    adds a per-test duration to the py tier's one-line-per-test output;
-    ``report`` ("json"|"tap") emits a machine-readable per-test report on the
-    py tier instead of the human summary.
+    With ``filter_pattern`` set, run only the collected test units whose name
+    contains it (a plain substring). The selection is pruned on the IR, so every
+    tier and every mode that reads a test section runs the same set. A filter
+    that selects nothing is a usage error (exit 2), never a silent green; a
+    filter that selects only units the requested tier does not run -- `prop
+    test` and `fault test` are py-tier-only -- makes that tier report a `skip`
+    with the reason (exit 0: nothing was expected to run there) instead of
+    handing the emitter a document with nothing to emit, or reporting an empty
+    document as a pass (`tier_verdict_for_selection`). `--mock-requires` runs
+    lifecycle test units and therefore honours the selection; `--sweep` and
+    `--schedule-*` do not run named units at all, so combining them with a
+    filter is also a usage error rather than a filter that quietly does
+    nothing.
+
+    ``verbose`` (the `-v` observe verb, issue #843) appends a per-test duration
+    to the py tier's one-line-per-test output; ``report`` (``"json"`` or
+    ``"tap"``) emits a machine-readable per-test report on the py tier instead
+    of the human summary. Both apply to the py reference tier only.
     """
-    if (name_filter is not None or list_only) and (sweep or mock_requires
-            or schedule_seed is not None or schedule_seeds is not None):
-        mode = ("--sweep" if sweep else "--mock-requires" if mock_requires
-                else "--schedule-seed/--schedule-seeds")
-        print(f"[filter] --filter/--list select `test` blocks and cannot be "
-              f"combined with {mode}; drop {mode} to select or list tests",
-              file=sys.stderr)
-        return 2
+    if list_tests:
+        return list_command(ir, filter_pattern)
+
+    if filter_pattern is not None:
+        if not any(filter_pattern in name for _kind, name in collected_tests(ir)):
+            return _empty_selection(ir, filter_pattern)
+        if sweep or schedule_seed is not None or schedule_seeds is not None:
+            # `--sweep` sweeps every top-level body step of every component and
+            # `--schedule-*` every interleaving; neither runs named test units,
+            # so a filter over test names cannot select inside them. Refusing
+            # is the honest answer: a filter that appeared to select while the
+            # whole sweep ran anyway is exactly the silent mismatch #843 is
+            # about.
+            print("error: --filter selects test units by name, and --sweep / "
+                  "--schedule-* sweep the composition's steps or interleavings "
+                  "rather than running named units; run them separately "
+                  "(issue #843)", file=sys.stderr)
+            return 2
+        ir = select_tests(ir, filter_pattern)
 
     if schedule_seed is not None or schedule_seeds is not None:
         if backend not in ("py", "all"):
@@ -1256,37 +1419,10 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
                   f"--sweep` to sweep every runtime (docs/fault-tests.md)")
         return sweep_command(ir)
 
-    # Selection + observation (issue #843). Selection is over the tests
-    # *collected* from the full compilation: the input files are never
-    # narrowed, because in this project a single component file does not
-    # compile standalone.
-    tests = ir.get("tests") or []
-    if name_filter is not None:
-        matches = [t for t in tests if name_filter in (t.get("name") or "")]
-        if not matches:
-            print(f"[filter] no test matched {name_filter!r} "
-                  f"({len(tests)} test(s) collected)", file=sys.stderr)
-            return 2
-        # A partial match is also reported so a filtered run is never a silent
-        # subset — "matched 2 of 4" is the proof that selection happened.
-        print(f"[filter] matched {len(matches)} of {len(tests)} test(s)",
-              file=sys.stderr)
-        run_ir = {**ir, "tests": matches}
-    else:
-        run_ir = ir
-
-    if list_only:
-        names = [t.get("name") for t in (run_ir.get("tests") or [])]
-        if names:
-            print("\n".join(names))
-        else:
-            print("no tests collected")
-        return 0
-
     from .fault import prop_units, roundtrip_units  # noqa: PLC0415 — no cordis to find them
 
-    if (not (run_ir.get("tests") or []) and not (run_ir.get("fault_tests") or [])
-            and not roundtrip_units(run_ir) and not prop_units(run_ir)):
+    if (not (ir.get("tests") or []) and not (ir.get("fault_tests") or [])
+            and not roundtrip_units(ir) and not prop_units(ir)):
         print("no tests to run")
         return 0
 
@@ -1298,7 +1434,10 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     if backend == "all":
         verdicts = {"pass": 0, "skip": 0, "fail": 0}
         for name, runner in RUNNERS.items():
-            outcome, message = runner(run_ir)
+            # A tier the selection emptied skips with its own reason rather
+            # than being handed a document with no unit it runs (#843).
+            verdict = tier_verdict_for_selection(ir, name, filter_pattern)
+            outcome, message = verdict if verdict is not None else runner(ir)
             verdicts[outcome] += 1
             print(f"[{name}] {_TAG[outcome]}: {message}")
         summary = (f"summary: {verdicts['pass']} pass, "
@@ -1311,16 +1450,25 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
         print("all tiers passed")
         return 0
 
+    verdict = tier_verdict_for_selection(ir, backend, filter_pattern)
+    if verdict is not None:
+        # Nothing the selection keeps runs on this tier, so nothing was
+        # expected to run here: report that (a skip, with the reason) instead of
+        # failing the run or, on wasm, reporting an empty document as a pass.
+        outcome, message = verdict
+        print(f"[{backend}] {_TAG[outcome]}: {message}")
+        return 0
     if backend == "py":
-        outcome, message = RUNNERS["py"](run_ir, verbose=verbose, report=report)
+        if verbose or report:
+            outcome, message = RUNNERS["py"](ir, verbose=verbose, report=report)
+        else:
+            outcome, message = RUNNERS["py"](ir)
+        if report is not None:
+            # run_py already printed the machine-readable report; do not follow
+            # it with the human `[py] ...` summary line.
+            return 0 if outcome == "pass" else 1
     else:
-        outcome, message = RUNNERS[backend](run_ir)
-
-    if report is not None and backend == "py":
-        # run_py already printed the machine-readable report; do not follow it
-        # with the human `[py] ...` summary line.
-        return 0 if outcome == "pass" else 1
-
+        outcome, message = RUNNERS[backend](ir)
     if outcome == "pass":
         print(f"[{backend}] pass: {message}")
         return 0

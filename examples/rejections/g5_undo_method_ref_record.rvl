@@ -1,0 +1,42 @@
+// REJECTED — G5: the crossing does not stop being one by being put in a record
+// field first.
+//
+// `let box = { f: w.task.run }` carries the `run` operation — declared
+// `emission` — as a field value, and `dispatch1(box.f)` projects it back out and
+// hands it to the helper. The record is a container, not a boundary: the value
+// that reaches the helper is the same method reference, read one field later, so
+// the emission fires in teardown at or after the session verdict exactly as it
+// does when the local holds the method directly.
+//
+// expected error:
+//   the `undo` of this bracket calls `w.task.run`, which is an emission —
+//     a bracket inverse runs in teardown and may not cross a boundary (G5)
+
+extern pure fn pure1(k: Str) -> Int = @py { return 1 }
+
+fn dispatch1(f: (Str) -> Int) -> Int { return f("z") }
+
+service Net { emission[net] fn send(msg: Str) -> Int }
+service Task { emission[net] fn run(prompt: Str) -> Int }
+service S { fn go() -> Int }
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+  }
+}
+
+component Sup requires net: Net provides s: S {
+  let w = effect spawn Worker with { } undo w.dispose()
+  provide s {
+    fn go() {
+      let box = { f: w.task.run }
+      effect pure1("k")
+      undo   dispatch1(box.f)
+      return 1
+    }
+  }
+}
