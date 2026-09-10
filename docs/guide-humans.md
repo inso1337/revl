@@ -282,7 +282,7 @@ below; the exhaustive per-command flag reference is
 | `revl query emitted-between --timeline F --from X --to Y` | which emissions crossed between two steps of a recorded run | [queries.md](queries.md) |
 | `revl query touched COMPONENT` | everything a component touched (`--trace` lifecycle JSONL, `--timeline` replay recording) | [queries.md](queries.md) |
 | `revl fmt FILES` | canonical formatting (IR-equivalence gated); `--migrate` rewrites 1.x `$`, `--check` for CI | [fmt.md](fmt.md) |
-| `revl test FILES` | run `test`/`prop test`/`fault test`/`lifecycle test` blocks; `--backend {py,ts,rust,java,wasm,go,all}`, `--sweep` fault sweep | [prop-test.md](prop-test.md) · [fault-tests.md](fault-tests.md) |
+| `revl test FILES` | run `test`/`prop test`/`fault test`/`lifecycle test` blocks; `--backend {py,ts,rust,java,wasm,go,all}`, `--sweep` fault sweep, `--list` to collect without running, `--filter PATTERN` to select by name | [prop-test.md](prop-test.md) · [fault-tests.md](fault-tests.md) |
 | `revl quarantine FILES [--service NAME] [--policy POLICY]` | grade a candidate with the gauntlet, then run its lifecycle + fault battery inside the wasm sandbox where an escape is a trap | [quarantine-tier.md](quarantine-tier.md) |
 | `revl canary FILES --candidate FILE --slice REALM` | run both generations at once, successor on one realm slice; promote (`--promote-to`) or revert on evidence | [verified-canary.md](verified-canary.md) |
 | `revl repair --component C [--candidate FILE] [--plan]` | the repair loop: diagnose a fault and re-admit a fix within declared policy bounds | [repair-loop.md](repair-loop.md) |
