@@ -215,7 +215,17 @@ def _recompile(sources: dict) -> dict:
 def _restore_leases(session, docs) -> None:
     """Re-seat persisted component leases (item 61) at their absolute expiry,
     dropping any already elapsed. Best-effort: a malformed entry is skipped,
-    never fatal to the restore."""
+    never fatal to the restore.
+
+    The re-seated leases are **unverified** — `LeaseBook.reinstate` refuses the
+    holder exemption a real claim earns, and ignores any `verified` the
+    document carries. These `docs` came out of a client-supplied snapshot, so
+    treating `holder` as authoritative would let a client name *itself* and
+    walk straight through the fence the restore had just put back: enforcement
+    vacuous for exactly the operator who wanted in (same caller-supplied-input
+    rule the path jail applies to `snapshot.sources.files`,
+    `server._jail_refusal`). The fence is restored; the exemption is re-earned
+    with a real `revl_lease` claim."""
     book = getattr(session, "leases", None)
     if book is None:
         return
