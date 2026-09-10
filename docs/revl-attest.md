@@ -302,10 +302,10 @@ member, and compared:
 
 - every artifact digest, so the verifier says *which* document moved;
 - every member of every status row: the status, the map's own status cell it was
-  read out of, that cell's name, the gap cell, the registered theorem names and
-  the contentless findings;
+  read out of, that cell's name, the gap cell, the theorem count, the oracle cell,
+  the registered theorem names and the contentless findings;
 - every caveat, quoted from the artifacts;
-- every requirement, including the `check` recorded behind it;
+- every requirement, both the `detail` and the `check` recorded behind it;
 - the whole proof model: the pinned toolchain, the manifest digest and the
   manifest pins;
 - the checker identity, `checker.compiler` and `checker.ruleset`, against
