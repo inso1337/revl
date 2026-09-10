@@ -16,6 +16,8 @@ These fixtures are synthetic. They touch no git and no network.
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -641,3 +643,94 @@ def test_require_issue_leaves_untracked_sections_alone():
     text = ("## " + gate.UNTRACKED_SECTIONS[0] + "\n\n"
             "3. **AN ITEM OF RECORD.** Built long ago, cites no issue.\n")
     assert gate.issue_findings(text) == []
+
+
+# --------------------------------------------------------------------------
+# (sha path against a SHALLOW checkout) Unlike every fixture above, these two
+# touch real git, on purpose: the defect this pair pins is that a depth-1 CI
+# checkout holds none of the cited commits, and the sha pass silently skipped
+# them all, so the gate reported OK having examined nothing. They stay offline
+# (a `file://` origin), so they are fast and hermetic.
+#
+# The shape is the squash-merge fall-through from the issue: a commit lands on
+# a side branch, its pristine sha never becomes reachable from `main`, and the
+# roadmap keeps citing that sha. A full clone sees the commit (via the side
+# branch) and reports it; a `--depth 1` clone of `main` does not.
+# --------------------------------------------------------------------------
+CHECK_SCRIPT = Path(__file__).resolve().parent.parent / "tools" / "check_roadmap_markers.py"
+
+# The exact invocation the CI `lint` job runs (ci.yml), plus the flag list the
+# script needs to reach the same code path.
+CI_INVOCATION = [
+    "--check-contradiction", "--check-delegation", "--check-duplicate-headers",
+    "--check-orphan", "--require-issue", "--head-branch", "",
+]
+
+ROADMAP_DONE = "## Done (dependency order as built)\n\n"
+
+
+def _git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True)
+    assert proc.returncode == 0, f"git {' '.join(args)}: {proc.stderr}"
+    return proc.stdout.strip()
+
+
+def _run_gate(checkout: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(checkout / "tools" / "check_roadmap_markers.py"),
+         *CI_INVOCATION],
+        capture_output=True, text=True, cwd=str(checkout))
+
+
+def _make_origin(tmp_path: Path) -> tuple[Path, str]:
+    """A repo whose roadmap cites a commit that is real but not on main."""
+    origin = tmp_path / "origin"
+    (origin / "tools").mkdir(parents=True)
+    (origin / "docs").mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "test@example.com")
+    _git(origin, "config", "user.name", "Test")
+    shutil.copyfile(CHECK_SCRIPT, origin / "tools" / "check_roadmap_markers.py")
+    (origin / "docs" / "v2.0-roadmap.md").write_text(ROADMAP_DONE)
+    _git(origin, "add", ".")
+    _git(origin, "commit", "-q", "-m", "init")
+    _git(origin, "checkout", "-q", "-b", "side")
+    (origin / "side.txt").write_text("x\n")
+    _git(origin, "add", "side.txt")
+    _git(origin, "commit", "-q", "-m", "side work")
+    side_sha = _git(origin, "rev-parse", "HEAD")
+    _git(origin, "checkout", "-q", "main")
+    (origin / "docs" / "v2.0-roadmap.md").write_text(
+        ROADMAP_DONE + f"1. ✅ **A landed item.** Fixed on `{side_sha}`.\n")
+    _git(origin, "add", "docs/v2.0-roadmap.md")
+    _git(origin, "commit", "-q", "-m", "roadmap cites a rebased-away sha")
+    return origin, side_sha
+
+
+def test_shallow_checkout_cannot_report_ok_on_unseen_history(tmp_path):
+    """The defect: a depth-1 clone must not print OK while a citation is
+    unresolved. Before the fix it exited 0 with zero findings; now the sha path
+    deepens the checkout and reports the citation (or fails loudly)."""
+    origin, side_sha = _make_origin(tmp_path)
+    shallow = tmp_path / "shallow"
+    _git(tmp_path, "clone", "--quiet", "--depth", "1", "--branch", "main",
+         f"file://{origin}", str(shallow))
+    assert _git(shallow, "rev-parse", "--is-shallow-repository") == "true"
+    proc = _run_gate(shallow)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "roadmap markers OK" not in proc.stdout
+    assert "cites commit" in proc.stdout and side_sha in proc.stdout
+
+
+def test_deep_checkout_reports_the_same_citation(tmp_path):
+    """The control: a full clone at the same tree still reports the citation,
+    unchanged by the shallow-only fix."""
+    origin, side_sha = _make_origin(tmp_path)
+    deep = tmp_path / "deep"
+    _git(tmp_path, "clone", "--quiet", f"file://{origin}", str(deep))
+    assert _git(deep, "rev-parse", "--is-shallow-repository") == "false"
+    proc = _run_gate(deep)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "cites commit" in proc.stdout
+    assert side_sha in proc.stdout
