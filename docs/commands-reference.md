@@ -345,6 +345,16 @@ wrote every effect record is unscoped and the recorded action set is empty. The
 command reports those records as withheld, and exits non-zero on them, rather
 than printing an empty diff as a clean change.
 
+`--history` is the crash-recovery artefact, so a history that cannot be read
+whole is exactly the shape that artefact is expected to have, and it is withheld
+the same way rather than read as a run that took no actions. A torn tail (the
+crash itself) and a recording that never reached its `activation-complete`
+record are both reported as a finding with no record count, and both exit
+non-zero; this is the reading `revl branch` already gives a torn tail
+(`branch.py` reports it as a `torn-tail` finding, and the command exits `1` on
+findings and residue). A file that is not a recording at all, such as a text
+file or an empty one, reaches the same finding.
+
 - `OLD` - the boundary policy in force (required).
 - `NEW` - the boundary policy to simulate (required).
 - `--history FILE` - the write-ahead log to read (required).
@@ -353,8 +363,9 @@ than printing an empty diff as a clean change.
 - `--json` - machine-readable output.
 
 Exit status follows the widening: `1` when the change newly allows a recorded
-action, leaves one undecided, or withholds a record it could not name, and `0`
-when it only narrows or changes nothing and every record was named.
+action, leaves one undecided, or withholds a record it could not name (including
+every record of a history it could not read whole), and `0` when it only narrows
+or changes nothing and every record was named.
 
 ```bash
 revl simulate policy-diff prod.policy next.policy --history run.wal

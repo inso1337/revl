@@ -324,7 +324,9 @@ def build_parser() -> argparse.ArgumentParser:
     # read decide by facts a WAL does not carry, so a pair whose surface moves
     # on one of them is undecided with the leg named, and no writer records the
     # declared scope at all, which makes the action set of a recorder-written
-    # WAL empty and those records withheld rather than clean. It never admits,
+    # WAL empty and those records withheld rather than clean; a history it could
+    # not read whole (a torn tail, or a recording that never committed) is
+    # withheld the same way. It never admits,
     # refuses or mutates, and it is not `revl audit --diff` (that gate compares
     # two audit graphs for authority drift, with no policy on the path).
     simulate_cmd = sub.add_parser(
@@ -339,7 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
              "carries: the newly allowed and newly denied action sets plus a "
              "blast radius bounded by that action set, with a pair whose leg "
              "surface moves reported undecided and a record no writer scoped "
-             "withheld")
+             "withheld (as is a history read only in part)")
     sim_policy.add_argument(
         "old", metavar="OLD",
         help="the earlier boundary policy (DSL or JSON)")
