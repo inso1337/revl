@@ -1098,7 +1098,10 @@ def _tool_approve(arguments: dict) -> dict:
         or proactively against a `capability`.
 
     Gated by the `approve` verb (item 55), so an operator profile scopes who may
-    say yes."""
+    say yes. Item 471: the standing-grant shape is refused outright when the
+    crossing's covering approval rule names approvers or demands a quorum. Such a
+    rule is answered by votes, and one operator's standing authority is not N
+    distinct named approvers (`Session.mint_standing_grant`)."""
     ticket_hash = arguments.get("hash")
     capability = arguments.get("capability")
     uses = arguments.get("uses")

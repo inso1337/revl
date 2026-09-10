@@ -128,6 +128,41 @@ eligible set, so a rule naming `{alice, bob}` with `require 2` and proposed by
 `alice` leaves one eligible approver and is refused at `_issue_ticket`. That is
 separation of duties applied to the policy rather than to a single vote.
 
+**No admission path may widen the rule.** Force the vote path at `_issue_ticket`
+and stop there, and the quorum is bypassable: `_approval_decide_call` consults
+three earlier paths before it issues a ticket, and each of them is ONE operator's
+authority recorded once, not N distinct named approvers.
+
+  * `_find_standing_approval` - an already-minted approval for the exact
+    candidate, which is how a SATISFIED quorum's ledger entry is spent. This one
+    must keep admitting; refusing it would deadlock the question it answers.
+  * `_find_standing_grant` - the item 344 session-scoped grant, minted by
+    `revl_approve(hash=<ticket>, uses=N)` or
+    `revl_approve(capability=<cap>, uses=N)`.
+  * `_find_auto_approve` - the item 251 distilled / hand-written rule that
+    auto-approves a capability without prompting at all.
+
+Both of the last two used to admit a quorum-gated crossing with zero votes and
+left the question it opened unanswered beside a consumed crossing, which is the
+one thing this design says is worse than no path at all. The invariant is
+therefore carried by ONE predicate, `Session._multi_party_rules(ticket)`, which
+returns every covering rule for the ticket's capabilities for which
+`rule.names_approvers() or rule.is_quorum()` holds. It is the only place that
+spelling lives, and all three paths that can create or match consent consult it:
+
+| call site | what it does with it |
+| --- | --- |
+| `mint_standing_grant` (both routes) | refuses to mint: no grant for such a crossing can exist |
+| `_find_standing_grant` | refuses to match: a grant minted before the rule was bound cannot spend through it |
+| `_auto_rule_covers` | refuses to cover: a distilled rule cannot make the quorum rule decorative |
+| `_ticket_approval_shape` | delegates to it, so the crossing-time refusal in the paragraph above shares the one predicate |
+
+`_find_standing_approval` is deliberately NOT gated by it, for the reason above:
+it is the second half of the vote path, not a bypass of it. The rule that
+`require 1 of {a, b}` is refused too, and not only `require N of {...}` with N
+greater than one: naming approvers at all is a statement about WHO may answer,
+which one operator's standing authority is not a substitute for.
+
 ## Decision 2: the vote protocol
 
 A ticket whose rule demands a quorum cannot be answered by a bare
@@ -185,10 +220,28 @@ single-party approval is. The receipt-shaped artifact the item names belongs
 with the admission-time consumer of that ledger entry, which is Slice 2.
 
 `quorum_state(hash)` is the read-only reader over the graph: it reports the
-question, the votes, the refusals and the outcome, and it is how a test or an
-operator inspects a decision without mutating it.
+question, the votes, the refusals and the outcome, without mutating it. Honest
+bound: it has no caller outside `tests/test_471_quorum_approval.py` and is NOT
+reachable from the transport, so it is how a TEST inspects a decision, not how an
+operator does. Nothing wires it to a verb in this slice; the design note names it
+because the graph it reads is part of the design, not because a shipped tool
+exposes it.
 
 ## Decision 4: denial, timeout, escalation, revocation, and the override
+
+**Reachability, stated once for the whole decision.** Two of the four paths below
+are shipped end to end and two are design only. *Denial* and *timeout* are part
+of the vote path, which the transport reaches: `revl_approve(hash=...,
+vote="deny")` denies and the ticket's own ttl times the question out. *Escalation*,
+*revocation* and the *emergency override* are session methods
+(`escalate_ticket`, `revoke_ticket`, `override_ticket`) with NO verb and NO tool
+behind them: `revl_override` does not exist in this tree, the three names appear
+only in `tests/test_471_quorum_approval.py` and in their own definitions, and an
+operator on the wire cannot reach any of them. What this decision pins is the
+PROTOCOL and its records, which is what the suite exercises; the operator verbs
+(their own tools, hence their own doc surface and verb gating) are Slice 2. The
+one operator-facing string that used to claim otherwise, the
+`how_to_resolve` field `escalate_ticket` returns, now says exactly that.
 
 **Denial.** An approver saying NO is a `deny` vote, recorded as `quorum-vote`
 with `vote: "deny"`. A denial does not close the question by itself: it closes it
@@ -264,7 +317,16 @@ approval, and records the decision graph in the WAL." Pinned by
 _and_one_does_not`, `test_the_proposer_can_never_satisfy_quorum_alone`,
 `test_a_single_vote_never_admits_a_quorum_ticket`, `test_the_minted_approval_is
 _bound_to_the_candidate_hash`, and `test_quorum_state_reports_the_graph_and_the
-_refusals`.
+_refusals`. The "no admission path may widen the rule" invariant of Decision 1 is
+pinned by `test_a_quorum_gated_crossing_cannot_be_widened_into_a_standing_grant`,
+`test_a_quorum_gated_capability_cannot_be_minted_proactively`,
+`test_a_rule_that_only_names_approvers_also_refuses_a_standing_grant`,
+`test_a_grant_minted_before_the_rule_was_bound_does_not_cover_it`,
+`test_an_auto_approve_rule_never_covers_a_quorum_gated_crossing` and
+`test_the_standing_grant_refusal_reaches_the_transport`, with
+`test_a_single_party_crossing_still_takes_a_standing_grant` and
+`test_an_auto_approve_rule_still_covers_a_single_party_crossing` holding the
+other side of the line.
 
 ## Relates to
 

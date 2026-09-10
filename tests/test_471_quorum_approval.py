@@ -60,7 +60,8 @@ from revl.compiler import compile_source                       # noqa: E402
 from revl.mcp import operator as op                            # noqa: E402
 from revl.mcp.approval import ApprovalRequired, ClassMap       # noqa: E402
 from revl.mcp.session import Session, SessionError             # noqa: E402
-from revl.policy import ApprovalRule, Policy, PolicyError      # noqa: E402
+from revl.policy import ApprovalRule, AutoApproveRule, Policy  # noqa: E402
+from revl.policy import PolicyError, TAINT_FOLD_ORIGINS        # noqa: E402
 from revl.policy import parse_policy                           # noqa: E402
 
 # The one crossing the whole suite turns on: `shout` is class (c), reaching the
@@ -374,6 +375,162 @@ def test_a_crossing_reaching_rules_with_different_approver_sets_is_refused(
     assert session._class_map is not None
     with pytest.raises(SessionError, match="different approver sets"):
         session._approval_decide_call("ops", "shout", ["sink.log", "a"])
+
+
+# ---------------------------------------------------------------------------
+# No admission path may bypass the quorum
+#
+# `_issue_ticket` forces the vote path for a multi-party rule, but a standing
+# grant and a distilled auto-approve rule are consulted BEFORE it
+# (`_approval_decide_call` tries `_find_standing_approval`, then
+# `_find_standing_grant`, then `_find_auto_approve`, and only then issues the
+# ticket). Each of those is ONE operator's authority recorded once, so each is
+# a way to admit a quorum-gated crossing with zero votes unless the rule is
+# consulted there too. These tests pin that, in both directions: the bypass is
+# refused, and the ordinary single-party paths still work.
+#
+# The single load-bearing predicate is `Session._multi_party_rules`; the tests
+# below cover all three paths that consult it (mint, match, cover) plus the
+# transport.
+# ---------------------------------------------------------------------------
+
+def test_a_quorum_gated_crossing_cannot_be_widened_into_a_standing_grant(quorum):
+    """`revl_approve(hash=<quorum ticket>, uses=N)` is one operator saying "yes,
+    N times" to a question that demands two DISTINCT people. Refused at the
+    mint, so no grant exists for the crossing to match, the crossing is still
+    refused, and the durable graph has no granted/consumed pair beside it: the
+    question stays open for the votes that can actually answer it."""
+    ticket = _ticket(quorum)
+    with pytest.raises(SessionError, match="standing grant") as caught:
+        quorum.mint_standing_grant(ticket_hash=ticket["hash"], uses=2)
+    assert "require 2 of {alice, bob, carol}" in str(caught.value)
+
+    assert quorum._grants == []
+    assert _cross(quorum) is not None
+    assert _kinds(quorum) == ["quorum-open"]
+    state = quorum.quorum_state(ticket["hash"])
+    assert state["outcome"] is None and state["counted"] == 0
+
+
+def test_a_quorum_gated_capability_cannot_be_minted_proactively(quorum):
+    """The same mint answered against a `capability` instead of a ticket is the
+    same refusal: naming the crossing proactively must not be a way around the
+    rule that covers it."""
+    with pytest.raises(SessionError, match="standing grant"):
+        quorum.mint_standing_grant(capability="announce", uses=2)
+    assert quorum._grants == []
+    assert _cross(quorum) is not None
+    assert _kinds(quorum) == ["quorum-open"]
+
+
+def test_a_rule_that_only_names_approvers_also_refuses_a_standing_grant(tmp_path):
+    """`require 1 of {a, b}` is "either of these two humans", not "anyone": the
+    rule restricts WHO may answer, so one operator's standing authority is not a
+    substitute for it either. Both mint routes refuse."""
+    session = _harness(tmp_path, rules=[ApprovalRule("announce", None, 1,
+                                                     ("alice", "bob"))])
+    ticket = _ticket(session)
+    with pytest.raises(SessionError, match="standing grant"):
+        session.mint_standing_grant(ticket_hash=ticket["hash"], uses=2)
+    with pytest.raises(SessionError, match="standing grant"):
+        session.mint_standing_grant(capability="announce", uses=2)
+    assert session._grants == []
+
+
+def test_a_grant_minted_before_the_rule_was_bound_does_not_cover_it(tmp_path):
+    """A grant is session-scoped consent to a crossing, not consent to a RULE.
+    Rebinding a policy that now gates the crossing behind named approvers must
+    not let the earlier grant spend through it: `_find_standing_grant` consults
+    the same predicate, so the crossing prompts and the grant is left unspent
+    for whatever it still legitimately covers."""
+    session = _harness(tmp_path, rules=[ApprovalRule("announce")])
+    ticket = _ticket(session)
+    grant = session.mint_standing_grant(ticket_hash=ticket["hash"], uses=2)
+    assert grant["granted"] is True
+    assert _cross(session) is None                # the grant admits it
+
+    session._tickets.pop(ticket["hash"], None)
+    session.sandbox = Policy(approval_rules=(_quorum(),))
+    again = _ticket(session)
+    assert session._find_standing_grant(again) is None
+
+    (standing,) = session._grants
+    before = standing["remainingUses"]
+    assert _cross(session) is not None, "the rule owns the crossing, not the grant"
+    assert standing["remainingUses"] == before, "the grant must not be spent"
+
+
+def test_an_auto_approve_rule_never_covers_a_quorum_gated_crossing(tmp_path):
+    """A distilled (or hand-written) `AutoApproveRule` covering the same
+    capability would otherwise make the quorum rule decorative: the first call
+    would be admitted without ever raising a ticket. It raises the ticket and the
+    rule is not spent."""
+    session = _harness(tmp_path)
+    session.sandbox = Policy(
+        approval_rules=(_quorum(),),
+        auto_approve_rules=(AutoApproveRule(
+            component="Agent", caps=("announce",),
+            admitting=TAINT_FOLD_ORIGINS, uses=5),),
+    )
+    session._install_auto_approve_rules()
+    assert session._auto_rules
+
+    with pytest.raises(ApprovalRequired):
+        session._approval_decide_call("ops", "shout", ["sink.log", "a"])
+    assert _kinds(session) == ["quorum-open"]
+    (rule,) = session._auto_rules
+    assert rule["remainingUses"] == 5 and rule["consumed"] is False
+
+
+def test_the_standing_grant_refusal_reaches_the_transport(tmp_path, monkeypatch):
+    """The refusal is a `revl_approve` answer and not an in-process exception
+    only: the tool reports it as a refusal instead of minting."""
+    from revl.mcp import server
+
+    session = _harness(tmp_path)
+    monkeypatch.setattr(server, "SESSION", session)
+    ticket = _ticket(session)
+
+    by_hash = server._tool_approve({"hash": ticket["hash"], "uses": 2})
+    assert by_hash["ok"] is False
+    assert "standing grant" in by_hash["diagnostics"][0]["message"]
+    by_cap = server._tool_approve({"capability": "announce", "uses": 2})
+    assert by_cap["ok"] is False
+    assert "standing grant" in by_cap["diagnostics"][0]["message"]
+    assert session._grants == []
+    assert _cross(session) is not None
+
+
+def test_a_single_party_crossing_still_takes_a_standing_grant(tmp_path):
+    """The control. A rule that names no approvers and demands one is exactly
+    what item 344's standing grant is for, so both mint routes still work and the
+    grant still admits the crossing, spending one use."""
+    session = _harness(tmp_path, rules=[ApprovalRule("announce")])
+    ticket = _ticket(session)
+    session.mint_standing_grant(ticket_hash=ticket["hash"], uses=2)
+    assert _cross(session) is None
+    (grant,) = session._grants
+    assert grant["remainingUses"] == 1
+
+    other = _harness(tmp_path)
+    other.sandbox = Policy(approval_rules=(ApprovalRule("announce"),))
+    other.mint_standing_grant(capability="announce", uses=2)
+    assert _cross(other) is None
+
+
+def test_an_auto_approve_rule_still_covers_a_single_party_crossing(tmp_path):
+    """The other control: item 251's auto-approve path is untouched where the
+    rule names no approvers and demands no quorum."""
+    session = _harness(tmp_path, rules=[ApprovalRule("announce")])
+    session.sandbox = Policy(
+        approval_rules=(ApprovalRule("announce"),),
+        auto_approve_rules=(AutoApproveRule(
+            component="Agent", caps=("announce",),
+            admitting=TAINT_FOLD_ORIGINS, uses=5),),
+    )
+    session._install_auto_approve_rules()
+    assert _cross(session) is None
+    assert _kinds(session) == ["approval-consumed"]
 
 
 # ---------------------------------------------------------------------------
