@@ -31,7 +31,7 @@ jobs:
     runs-on: [self-hosted, linux, arm64]
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - name: install revl + run frontend/self-host oracles (arm64, uv py3.11)
         run: |
           export PATH="$HOME/.local/bin:$PATH"
