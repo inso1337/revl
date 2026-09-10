@@ -837,6 +837,97 @@ def test_a_deeply_nested_source_is_refused_rather_than_aborting(
         verdict["message"])
 
 
+# ------------------------------------------------------------ manifest row bound
+#
+# The manifest is not a string the gate can scan and be done with: it is a
+# `;`-separated wire that the fold consumes ONE STACK FRAME PER ROW, so the size
+# bound above is not a bound on the fold. Measured against the crate as it was
+# before this bound existed: `"A/b/;" * 20000` is 100 KB, well under
+# `MAX_SOURCE_BYTES`, and took the process down with `fatal runtime error: stack
+# overflow` (exit 134, `Abort trap: 6`) on a stock 8 MiB main thread; `";" * 2700`
+# is 2.7 KB and took a 1 MiB thread down, which is the wasm module's default
+# because the component build sets no `stack-size`; and the DEBUG profile the
+# crate's own `cargo test` runs under went down at 20 000 rows too. A rust stack
+# overflow ABORTS, and `catch_unwind` cannot turn an abort back into a verdict,
+# so an embedder got no answer, no log and no process.
+# `MANIFEST_ROW_LIMIT` counts the rows ahead of the parser and declines the wire
+# with the same `outside_frontier` / `FRONTIER` shape the size bound uses.
+#
+# The wires below are deliberately INERT (`A/b/` names nothing a running
+# composition could hold), so a wire under the bound stays `no_objection` and
+# no probe here can pass by way of some unrelated refusal.
+
+ROW_BOUND_PROBE_SOURCE = "fn id(x: Int) -> Int { return x }"
+
+
+def _generated_manifest_row_limit() -> int:
+    """The row bound the crate was GENERATED with, read out of `src/frontier.rs`
+    for the same reason `_generated_frontier` reads the lexical tables: a probe
+    derived from the bound cannot outlive the bound it probes."""
+    src = (CRATE / "src" / "frontier.rs").read_text(encoding="utf-8")
+    match = re.search(r"MANIFEST_ROW_LIMIT: usize = (\d+);", src)
+    assert match, "the crate ships no manifest row bound in `src/frontier.rs`"
+    return int(match.group(1))
+
+
+def test_a_manifest_over_the_row_bound_is_declined_not_decided(consumer):
+    """The refusal that keeps the fold from taking the host down, proven from
+    the consumer side. The wire is a few KB, so the size bound cannot be what
+    declines it."""
+    limit = _generated_manifest_row_limit()
+    meta = json.loads((CRATE / "GENERATED.json").read_text(encoding="utf-8"))
+    manifest = ";".join(["A/b/"] * (limit + 1))
+    assert len(manifest) < meta["max_source_bytes"] // 10, (
+        "the point of this probe is that it is far below the size bound")
+    verdict = _crate_into_verdicts(consumer, [ROW_BOUND_PROBE_SOURCE],
+                                   manifest)[0]
+    assert verdict["admitted"] is False
+    assert verdict["verdict"] == "outside_frontier", (
+        f"expected the fold to be declined by the row bound, got "
+        f"{verdict['verdict']} ({verdict['message']!r})")
+    assert verdict["code"] == "FRONTIER"
+    # The refusal names the bound and the count, rather than describing a
+    # resource failure an embedder could not act on.
+    assert str(limit) in verdict["message"], verdict["message"]
+    assert str(limit + 1) in verdict["message"], verdict["message"]
+    assert "row" in verdict["message"], verdict["message"]
+
+
+def test_a_manifest_that_used_to_take_the_host_down_is_declined_not_risked(
+        consumer):
+    """The unreduced wire: the row count the pre-fix crate aborted on. It has to
+    come back as a verdict, because there is no recovering from the alternative
+    - a refused manifest costs a denial, an aborted one costs the process."""
+    limit = _generated_manifest_row_limit()
+    rows = 20_500
+    assert rows > limit
+    manifest = ";".join(["A/b/"] * rows)
+    assert len(manifest) < json.loads(
+        (CRATE / "GENERATED.json").read_text(encoding="utf-8"))["max_source_bytes"]
+    verdict = _crate_into_verdicts(consumer, [ROW_BOUND_PROBE_SOURCE],
+                                   manifest)[0]
+    assert verdict["admitted"] is False
+    assert verdict["verdict"] == "outside_frontier", verdict
+    assert verdict["code"] == "FRONTIER"
+    assert str(rows) in verdict["message"], verdict["message"]
+
+
+def test_a_manifest_at_or_under_the_row_bound_is_still_folded(consumer):
+    """Non-vacuity in the other direction: a ceiling, not a wall. The wire at
+    the bound is decided exactly as an empty manifest is, which is the standalone
+    gate - so an embedder that hands over a large-but-bounded composition does
+    not lose the arm."""
+    limit = _generated_manifest_row_limit()
+    for rows, label in ((limit, "at the bound"), (limit // 2, "under the bound")):
+        manifest = ";".join(["A/b/"] * rows)
+        verdict = _crate_into_verdicts(consumer, [ROW_BOUND_PROBE_SOURCE],
+                                       manifest)[0]
+        assert verdict["admitted"] is False, label
+        assert verdict["verdict"] == "no_objection", (
+            f"{rows} rows ({label}) must still be folded, got {verdict}")
+        assert verdict["code"] is None, label
+
+
 def test_ill_formed_sources_are_refused_not_waved_through(consumer):
     """The native front end refuses what it cannot parse; nothing in the shim
     may soften that into a wave-through. Checked against the reference rather

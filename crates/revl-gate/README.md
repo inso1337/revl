@@ -99,8 +99,12 @@ crate returns it whenever:
 * the native gate panics while deciding (caught via `catch_unwind`);
 * the native gate returns a verdict wire shape this crate does not recognise;
 * in `admit_into`, the manifest wire is longer than the bound the gate will
-  decide (the fold parses the manifest with the same front end), or the fold
-  returns a shape this crate does not recognise.
+  decide, or carries more `;`-separated rows than the gate will fold, or the
+  fold returns a shape this crate does not recognise. Both manifest limits are
+  checked BEFORE the wire reaches the parser, because the byte bound is not a
+  row bound: the fold consumes one stack frame per row, so 2 700 rows of
+  `A/b/;` are 13 KB and still take a 1 MiB stack down. The row half of the pair
+  is `revl_gate::MANIFEST_ROW_LIMIT`.
 
 ### The generated frontier table at this generation
 
@@ -207,7 +211,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:019e01b8fb177e01"
+    // frontier "selfhost-admit:a41bb145714e1d7a"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the

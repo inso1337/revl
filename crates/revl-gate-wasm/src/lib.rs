@@ -34,6 +34,15 @@
 //! is loud, and it is not a verdict, so it is still not a false admission — but
 //! a host must treat a trap as "no verdict was reached" and fail closed on it.
 //!
+//! The crate's resource bounds ARE reachable here, and that is the difference
+//! between a refusal and a trap: a source over `MAX_SOURCE_BYTES` and a manifest
+//! over `MANIFEST_ROW_LIMIT` are declined inside `revl_gate` before the wire
+//! reaches the fold, so neither door can be walked into with an input that
+//! exhausts the stack. It matters most on this target: the fold recurses one
+//! stack frame per manifest row, the component build sets no `stack-size` (so
+//! the toolchain default applies), and a stack exhaustion here is an abort no
+//! host can observe as a verdict.
+//!
 //! # `unsafe`
 //!
 //! Not forbidden at the crate level, and that is not an oversight: the

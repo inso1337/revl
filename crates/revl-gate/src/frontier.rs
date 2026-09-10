@@ -17,13 +17,24 @@
 
 /// The identifier `gate_version().frontier` reports. Two gates with different
 /// ids cover different surfaces and their agreement means nothing.
-pub const FRONTIER_ID: &str = "selfhost-admit:019e01b8fb177e01";
+pub const FRONTIER_ID: &str = "selfhost-admit:a41bb145714e1d7a";
 
 /// Sources above this many bytes are refused rather than decided: the emitted
 /// parser/checker are deeply recursive and a stack exhaustion ABORTS, which no
 /// `catch_unwind` can turn back into a refusal. A bound no corpus program comes
 /// near keeps the fail-closed promise honest.
 pub const MAX_SOURCE_BYTES: usize = 262144;
+
+/// Manifest row wires above this many `;`-separated rows are refused rather
+/// than folded, for the same reason [`MAX_SOURCE_BYTES`] refuses a source: the
+/// fold recurses one stack frame per row and a stack exhaustion ABORTS, which
+/// no `catch_unwind` can turn back into a refusal. The two limits are NOT the
+/// same kind of bound: the byte limit above does not bound the manifest, since
+/// 2_700 rows of `A/b/;` are 13 KB and already overflow a 1 MiB stack, and both
+/// limits are checked before the wire reaches the parser so an embedder cannot
+/// spend the host on either side of the door. A manifest wire no corpus comes
+/// near keeps the fail-closed promise honest.
+pub const MANIFEST_ROW_LIMIT: usize = 512;
 
 /// Reference language keywords the self-host front end does not lex.
 /// Derived as `revl.lexer.KEYWORDS - selfhost/lexer.rvl::keywords()`.

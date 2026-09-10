@@ -60,7 +60,12 @@ mistaking a no-objection for an admission.
 `admit-into` is the crate's manifest arm (item 186's ambient gate, issue #346)
 carried to the edge: the union fold's G2/G3 legs, over the item-186 row wire.
 It issues no admission either, and a manifest row the landed wave does not cover
-is refused rather than skipped.
+is refused rather than skipped. The crate's resource bounds are the crate's, not
+yours: a source over `MAX_SOURCE_BYTES` and a manifest over
+`MANIFEST_ROW_LIMIT` are declined inside `revl_gate`, before the wire reaches the
+fold, which matters most here: the fold recurses one stack frame per manifest
+row, and on wasm a stack exhaustion is an abort no host can catch, so a row bound
+tuned for a native thread would not be a bound at all.
 
 `admit-artifact` (design cut B) is exported so the shape is fixed and its
 arrival is additive, and it fails closed today: the item-289 chain's `declared
@@ -341,6 +346,15 @@ LIB_TEMPLATE = r'''//! `revl-gate-wasm` — the revl admission gate as a WASI-P2
 //! is loud, and it is not a verdict, so it is still not a false admission — but
 //! a host must treat a trap as "no verdict was reached" and fail closed on it.
 //!
+//! The crate's resource bounds ARE reachable here, and that is the difference
+//! between a refusal and a trap: a source over `MAX_SOURCE_BYTES` and a manifest
+//! over `MANIFEST_ROW_LIMIT` are declined inside `revl_gate` before the wire
+//! reaches the fold, so neither door can be walked into with an input that
+//! exhausts the stack. It matters most on this target: the fold recurses one
+//! stack frame per manifest row, the component build sets no `stack-size` (so
+//! the toolchain default applies), and a stack exhaustion here is an abort no
+//! host can observe as a verdict.
+//!
 //! # `unsafe`
 //!
 //! Not forbidden at the crate level, and that is not an oversight: the
@@ -535,6 +549,14 @@ cross-boundary acyclicity — and nothing else, and it issues no admission eithe
 A manifest row this wave does not cover (a replacement `-C`, a handoff
 `C=k:T`) comes back as a `MANIFEST` refusal rather than being skipped.
 
+The crate's resource bounds cross the component boundary with it, which is the
+point: a source over `MAX_SOURCE_BYTES` and a manifest over
+`MANIFEST_ROW_LIMIT` are declined inside `revl_gate`, ahead of the fold, so
+neither door can be walked into with an input that exhausts the stack. On this
+target that difference is a refusal instead of a trap: the fold recurses one
+stack frame per manifest row, the build sets no `stack-size`, and a stack
+exhaustion in a wasm component is an abort no host can read as a verdict.
+
 In a browser or node, `jco transpile revl_gate.wasm` produces the JS shim:
 
 ```js
@@ -568,7 +590,11 @@ empty-import property is the load-bearing one.
   not catch, and a native gate panic traps the instance instead of returning
   `outside-frontier`. A trap is loud and it is not a verdict, so it is still not
   a false admission — but a host must treat a trap as "no verdict was reached"
-  and fail closed on it.
+  and fail closed on it. The crate's resource bounds are NOT a host obligation
+  of this kind: a source over `MAX_SOURCE_BYTES` and a manifest over
+  `MANIFEST_ROW_LIMIT` are declined inside `revl_gate`, ahead of the fold, so no
+  argument a host can hand to `admit-into` reaches the stack exhaustion the row
+  bound exists for.
 * **A verdict is a decision, not an enforcement.** The gate returns a verdict;
   the browser's loader, the worker's dispatcher or the CDN's serving path is the
   code that must refuse to instantiate, execute or serve on a refusal. A gate
