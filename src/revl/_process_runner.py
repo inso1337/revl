@@ -130,6 +130,27 @@ def _redact_call(text: str, args) -> str:
     return out if isinstance(out, str) else text
 
 
+def _funnel_line(text: str) -> None:
+    """Emit one free-form console line through the same registry funnel.
+
+    issue #814: `run()`'s `log()` funnels the CHANNEL-format lines (`probe`,
+    `host`, `serve`, ...), but three more kinds of line are matched
+    STRUCTURALLY by the conductor instead of carrying channel fields, so they
+    cannot be composed by `log()`:
+
+      * `[name] UP` and `[name] DOWN`: compared exactly by `placement.pump`,
+      * `[name] HALTED <json>`: `startswith` plus `json.loads` (item 443,
+        printed by `_estop_watch`),
+      * `[name] REPOINTED <key> -> <socket>`: matched by `_re_repoint`.
+
+    They are composed here instead. The scrub is identity for a line holding
+    none of the registered secrets, so the bytes the conductor's parser sees
+    are unchanged unless the line really carried one. The residue report is
+    parsed by nobody; it goes through here with the rest.
+    """
+    print(_redact(text), flush=True)
+
+
 def _estop_watch(name: str, runtime_mod, poll: float = _ESTOP_POLL) -> None:
     """The child half of the operator E-Stop (docs/design/443-estop.md).
 
@@ -165,7 +186,7 @@ def _estop_watch(name: str, runtime_mod, poll: float = _ESTOP_POLL) -> None:
             # each stranded resource (runtime._strand_registered), which can
             # embed a connection string or handle — funnel it like every other
             # line this process prints.
-            print(f"[{name}] HALTED {_redact(json.dumps(inventory))}", flush=True)
+            _funnel_line(f"[{name}] HALTED {json.dumps(inventory)}")
             sys.stdout.flush()
             os._exit(_ESTOP_EXIT)  # noqa: SLF001 — no teardown, by design
         time.sleep(poll)
@@ -687,11 +708,17 @@ async def run(spec: dict, spec_path=None) -> None:
                          name="revl-estop", daemon=True).start()
 
     def log(channel: str, subject: str, detail: str = "") -> None:
-        # issue #814: this is the one choke point every console line of this
-        # process passes through — the runner-side twin of `runtime._record`'s
-        # funnel. A probe result, a repoint failure quoting a seam address, a
-        # host event interpolating a key: all scrubbed here, so a sink added
-        # to this file tomorrow reads an already-redacted line.
+        # issue #814: the funnel for every CHANNEL-format console line this
+        # process prints -- the runner-side twin of `runtime._record`'s funnel.
+        # A probe result, a repoint failure quoting a seam address, a host
+        # event interpolating a key: all scrubbed here, so a sink added to this
+        # file tomorrow reads an already-redacted line. The lines the conductor
+        # matches STRUCTURALLY (`UP`, `DOWN`, `REPOINTED`, the item 443 HALTED
+        # inventory) carry no channel fields to pad and go through
+        # `_funnel_line` instead, as does the residue report, which nobody
+        # parses. Three `print` calls and no others: this one,
+        # `_funnel_line`'s, and `main()`'s FATAL line (which runs
+        # `_redact_call`). Nothing in this file reaches a console unscrubbed.
         print(f"[{name}] {channel:<6}| {_redact(subject):<16}| {_redact(detail)}".rstrip(), flush=True)
 
     runtime_mod.set_trace(lambda event: log("host", event.split(" ", 1)[0],
@@ -947,7 +974,7 @@ async def run(spec: dict, spec_path=None) -> None:
         except (NotImplementedError, RuntimeError):  # pragma: no cover (non-unix)
             pass
 
-    print(f"[{name}] UP", flush=True)
+    _funnel_line(f"[{name}] UP")
 
     # A control channel on stdin: the conductor pushes `repoint` commands here
     # to migrate a proxy to a successor provider (`revl swap`). Runs on a
@@ -972,8 +999,8 @@ async def run(spec: dict, spec_path=None) -> None:
                 # the peer-death withdrawal `bridge._Client` drives.
                 if _apply_repoint(cmd, clients, spec["files"], running_ir, log=log,
                                   anchor=anchor):
-                    print(f"[{name}] REPOINTED {cmd.get('key')} -> "
-                          f"{cmd.get('socket')}", flush=True)
+                    _funnel_line(f"[{name}] REPOINTED {cmd.get('key')} -> "
+                                 f"{cmd.get('socket')}")
 
     threading.Thread(target=control_reader, name="revl-control", daemon=True).start()
 
@@ -1006,8 +1033,8 @@ async def run(spec: dict, spec_path=None) -> None:
     detail = (f"registry={root.registry.size} provisions={sorted(root.reflect.store)} "
               f"disposables={root.fiber._disposables.length}/{baseline_disposables}")
     verdict = "no residue" if all(checks.values()) else "RESIDUE LEFT"
-    print(f"[{name}] residue {verdict} | {detail}", flush=True)
-    print(f"[{name}] DOWN", flush=True)
+    _funnel_line(f"[{name}] residue {verdict} | {detail}")
+    _funnel_line(f"[{name}] DOWN")
 
 
 def main() -> None:
@@ -1024,7 +1051,7 @@ def main() -> None:
         # On stdout, so it lands in the conductor's interleaved trace next to
         # the REFUSED line that caused it — and exit non-zero, so a refused
         # seam is machine-visible instead of a note under a green run.
-        print(str(exc), flush=True)
+        _funnel_line(str(exc))
         raise SystemExit(1) from None
     except Exception as exc:  # noqa: BLE001 — issue #814, the last unguarded channel
         # An exception the load path (BootRefused) and the probe path do not
