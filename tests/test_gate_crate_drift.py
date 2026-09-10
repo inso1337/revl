@@ -124,27 +124,35 @@ def test_the_gate_api_semver_is_one_surface_across_wheel_and_crate():
 
 def test_the_crate_is_admit_only_and_says_so():
     """Stage 3 is admit-only. `compile_to` is exported but fails closed (Stage
-    4), `admit_into` does not exist at all (manifest-spanning admission has no
-    self-host path, and a stub that ignored the manifest would be the exact
-    wave-through the crate exists to prevent), and layer 2 is item 334 slice 1:
-    a real `Session` state machine that still issues NO admission (the accept
-    half is a later slice, so a candidate the native gate does not refuse is
-    fail-closed, never waved through)."""
+    4); `admit_into` exists (issue #346) but is a REFUSAL arm too - it folds the
+    G2/G3 legs over the union of a running manifest's rows and the candidate, and
+    still issues no admission, so it is not the wave-through a manifest-ignoring
+    stub would be. Layer 2 is item 334 slice 1: a real `Session` state machine
+    that still issues NO admission (the accept half is a later slice, so a
+    candidate the native gate does not refuse is fail-closed, never waved
+    through)."""
     lib_rs = (CRATE / "src" / "lib.rs").read_text(encoding="utf-8")
     assert "pub fn admit(source: &str) -> Verdict" in lib_rs
     assert "pub fn compile_to(" in lib_rs
-    assert "fn admit_into" not in lib_rs, (
-        "the crate must not ship an `admit_into`: there is no manifest-spanning "
-        "admission on the self-host path and a fake one would wave programs "
-        "through")
+    assert "pub fn admit_into(source: &str, manifest: &str) -> Verdict" in lib_rs, (
+        "the crate must ship a real manifest-aware `admit_into` (issue #346): the "
+        "shape a rust embed screens a proposal AGAINST the running composition")
+    # And it must be the REAL fold, not a stub that ignores its argument: the
+    # binding hands the manifest to the self-host `admit_ambient`, and a binding
+    # that dropped it would be the manifest-ignoring wave-through this crate
+    # exists to prevent.
+    assert "selfhost::admit_ambient(" in lib_rs, (
+        "`admit_into` must call the self-host ambient fold, not re-derive a "
+        "standalone verdict and call it a manifest answer")
     assert "pub mod session;" in lib_rs
     session_rs = (CRATE / "src" / "session.rs").read_text(encoding="utf-8")
     # Item 334 slice 1: the session is a real state machine now, not an empty
     # reservation. It carries the generation state, the untrusted-author
-    # admission entry, and the item-245 witnessed-call recording path.
+    # admission entry, the item-245 witnessed-call recording path, and (issue
+    # #346) the manifest-aware admission entry.
     assert "pub struct Session" in session_rs, \
         "item 334 slice 1 ships a real `Session`, not a reserved empty module"
-    for verb in ("fn load(", "fn propose(", "fn admit(", "fn call(",
+    for verb in ("fn load(", "fn propose(", "fn admit(", "fn admit_into(", "fn call(",
                  "fn commit(", "fn abort(", "fn unload("):
         assert verb in session_rs, f"session.rs must ship `{verb}...` (item 334 slice 1)"
     # But slice 1 still issues NO admission: layer 1 has no `Admitted` arm and
@@ -226,6 +234,13 @@ def test_the_covered_layer_is_stated_identically_everywhere():
     meta = json.loads((CRATE / "GENERATED.json").read_text(encoding="utf-8"))
     assert meta["issues_admissions"] is False
     assert meta["verdict_arms"] == ["refused", "no_objection", "outside_frontier"]
+    # The manifest arm (issue #346) did not add an arm: `admit_into` returns one
+    # of the same three, so `issues_admissions` stays false and the provenance
+    # says which surface answers the manifest question rather than implying a new
+    # power. A new arm here would be the admission this crate may not issue.
+    assert "admit_into" in meta["manifest_arm"]
+    assert "issues no admission" in meta["manifest_arm"]
+    assert "manifest" in meta["note"]
     assert meta["covered_layer"] == GEN.COVERED_LAYER
     assert "NOT the reference type layer" in GEN.COVERED_LAYER
     lib_rs = (CRATE / "src" / "lib.rs").read_text(encoding="utf-8")

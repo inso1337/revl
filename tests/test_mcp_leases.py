@@ -142,6 +142,17 @@ def test_document_surfaces_holder_component_and_expiry():
                     "expiresInSeconds": 90.0}]
 
 
+def test_document_flags_a_lease_that_was_not_claimed_here():
+    """The one lease whose provenance an agent cannot assume from the shape:
+    a re-seated one says so, in the state it is read from."""
+    book = LeaseBook()
+    book.claim("UserCache", "alice", ttl=90, now=1000.0)
+    book.reinstate("UserCache", "alice", 1000.0, 1090.0, now=1000.0)
+    assert book.document(now=1000.0)[0]["verified"] is False
+    book.claim("UserCache", "alice", ttl=90, now=1000.0)
+    assert "verified" not in book.document(now=1000.0)[0]
+
+
 # ---------------------------------------------------------------- advisory
 
 

@@ -11,11 +11,11 @@ The verb set, in the order the parser declares it:
 <!-- docgen:cli-verbs begin -->
 ```text
 compile  explain  grammar  adapt  doctor  scaffold  composition  layer
-audit  goal  policy  diff  changelog  version  contract  erase-report
-plan  apply  undo  canary  query  fmt  quarantine  analyze  test  mcp
-import  export  serve  run  recover  estop  branch  compare  replay  why
-metrics  trace  profile  attest  dash  repair  bundle  emit  verify
-deploy  deploy-admit  truc
+audit  goal  policy  simulate  diff  changelog  version  contract
+erase-report  plan  apply  undo  canary  query  fmt  quarantine  analyze
+test  mcp  import  export  serve  run  recover  estop  branch  compare
+replay  why  metrics  trace  profile  attest  dash  repair  bundle  emit
+verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -305,6 +305,72 @@ DSL.
 revl policy evaluate prod.policy app.rvl
 revl policy evaluate prod.policy app.rvl --json --component Billing
 revl policy evaluate local.policy app.rvl --recompute
+```
+
+### `revl simulate`
+
+Simulate a change against a recorded run (roadmap item 468). `simulate` has
+one subcommand, `policy-diff`, which reads two boundary policies and one
+write-ahead log and computes the newly-allowed and newly-denied action sets the
+change would have made over the crossings that run actually recorded, plus a
+blast-radius summary bounded by that recorded action set.
+
+This is not `revl audit --diff`, which re-audits a generation and fails when it
+adds boundary crossings but keeps no policy on its path. It is also not
+`revl policy evaluate`, which answers the policy-only question over a whole
+composition, over the capabilities the composition declares rather than the
+ones a run took. `simulate policy-diff` answers what the change would have done
+to the actions this run took, and it refuses to answer what one recorded run
+cannot say. An action the run never took is invisible here however widely the
+new policy opens it; an effect record whose step carried no capability scope is
+withheld rather than resolved to the label it recorded; and a realm-scoped rule
+stays undecided until the compiled composition supplies the component's realms.
+
+An action is a recorded effect record whose scope names a capability, and the
+capability verdict is the gate's own: the diff calls the same
+`policy.capability_verdict` the admission refuses by, over the two legs that
+predicate reads, the deny-lists and the closed allow-lists. The admission
+refuses a crossing on more legs than those two, and the diff reads none of the
+rest: the agent-sandbox allow-list, the taint-flow tier, the approval and
+declassify rules, the declaration-strength floors, the evidence bundle and the
+recovery surface all decide by facts a WAL does not carry. Every leg is named in
+the report and in `--json`, and a recorded pair whose surface moves on one of
+them is reported undecided with the leg named, never as unchanged, so a widening
+on a leg this diff cannot read is not reported clean.
+
+No writer in this tree records the declared scope, so that definition is the
+whole of the action channel: `scope.caps` reaches a record only where a timeline
+step was annotated by hand, and the recorder never annotates, so on a WAL a run
+wrote every effect record is unscoped and the recorded action set is empty. The
+command reports those records as withheld, and exits non-zero on them, rather
+than printing an empty diff as a clean change.
+
+`--history` is the crash-recovery artefact, so a history that cannot be read
+whole is exactly the shape that artefact is expected to have, and it is withheld
+the same way rather than read as a run that took no actions. A torn tail (the
+crash itself) and a recording that never reached its `activation-complete`
+record are both reported as a finding with no record count, and both exit
+non-zero; this is the reading `revl branch` already gives a torn tail
+(`branch.py` reports it as a `torn-tail` finding, and the command exits `1` on
+findings and residue). A file that is not a recording at all, such as a text
+file or an empty one, reaches the same finding.
+
+- `OLD` - the boundary policy in force (required).
+- `NEW` - the boundary policy to simulate (required).
+- `--history FILE` - the write-ahead log to read (required).
+- `--composition FILE ...` - compile these composition sources and take each
+  component's realms from them; without one a realm-scoped rule is undecided.
+- `--json` - machine-readable output.
+
+Exit status follows the widening: `1` when the change newly allows a recorded
+action, leaves one undecided, or withholds a record it could not name (including
+every record of a history it could not read whole), and `0` when it only narrows
+or changes nothing and every record was named.
+
+```bash
+revl simulate policy-diff prod.policy next.policy --history run.wal
+revl simulate policy-diff prod.policy next.policy --history run.wal --json
+revl simulate policy-diff loose.policy tight.policy --history run.wal --composition app.rvl
 ```
 
 ### `revl audit`
@@ -917,6 +983,27 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 - `FILES` (required).
 - `--backend {py, ts, rust, java, wasm, go, all}` - tier to run the blocks on
   (default: `py`); `all` runs every tier whose toolchain is present.
+- `--list` - print every test name the compilation collects (plain `test`,
+  `prop test` and `fault test` units, in the order the py tier runs them) and
+  execute nothing: no tier runner, no emit, no runtime. A query, so the mode
+  flags below do not apply to it; with `--filter`, list only the selection.
+  Listing a compilation that collects no test units exits 2.
+- `--filter PATTERN` - run only the collected test units whose name *contains*
+  `PATTERN`. A plain substring, not a regex. A `PATTERN` that selects nothing
+  exits 2 with a message on stderr: an empty selection is never a silent green.
+  The selection is applied to the IR, so every tier and every mode that reads a
+  test section honours it, and `--mock-requires` (which runs `lifecycle test`
+  units by name) honours it too. A tier the selection leaves with no unit it
+  runs (`prop test` and `fault test` are py-tier-only) reports `skip` with that
+  reason and exits 0: nothing was expected to run there, which is never printed
+  as a pass. `--sweep` and `--schedule-*` sweep steps and interleavings rather
+  than named units, so combining them with `--filter` exits 2 instead of
+  filtering nothing.
+- `-v`, `--verbose` - append a per-test duration to each one-line `PASS`/`FAIL`
+  (py tier only).
+- `--report {json,tap}` - emit a machine-readable per-test report (name, status,
+  duration) in JSON or TAP form instead of the human per-test lines. Verdicts
+  and exit codes are unchanged; py tier only.
 - `--sweep` - fault sweep: inject failure at every step of every component and
   check L-Raise / no-residue / LIFO / siblings at each (py tier). With
   `--backend all`, sweep every runtime whose toolchain is present and assert
@@ -927,21 +1014,6 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 - `--mock-requires` - run every `lifecycle test` in mock world: each unmet
   `requires` is filled by an auto-generated mock provider, so a consumer boots
   with zero real providers (py tier; [auto-mocks.md](auto-mocks.md)).
-- `--filter SUBSTRING` - run only the collected `test` blocks whose name contains
-  `SUBSTRING` (case-sensitive substring match, not a regex). Selection happens
-  over the tests collected from the full compilation — the input files are never
-  narrowed, because a single component file does not compile standalone. A
-  filter that matches fewer than all collected tests is announced, and a filter
-  matching nothing exits `2` rather than reporting a false "0 passed".
-  `--filter`/`--list` cannot be combined with `--sweep`, `--schedule-seed(s)`,
-  or `--mock-requires` (exit `2`).
-- `--list` - print the name of every collected `test` block and run nothing.
-  This answers "which tests does this compilation actually collect?" without
-  executing anything.
-- `-v`, `--verbose` - append a per-test duration to each one-line `PASS`/`FAIL`.
-- `--report {json,tap}` - emit a machine-readable per-test report (name, status,
-  duration) in JSON or TAP form instead of the human per-test lines. Verdicts
-  and exit codes are unchanged; py tier only.
 
 ---
 

@@ -7,7 +7,7 @@ buys and, just as load-bearing, what it does not. Produced by
 `bench/inprocess_gate_rust` (`cargo run --release --manifest-path
 bench/inprocess_gate_rust/Cargo.toml -- --write`).
 
-Gate surface: `api=1.0.0`, `language=2.0.0`, `frontier=selfhost-admit:4f0ef40735311b13`.
+Gate surface: `api=1.0.0`, `language=2.0.0`, `frontier=selfhost-admit:019e01b8fb177e01`.
 Layer decided: composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer.
 
 ## This gate issues no admissions - read this before wiring it in
@@ -25,29 +25,53 @@ that agrees with the reference compiler on the covered corpus. A refusal is
 worth acting on. A no-objection is NOT an admission - before running anything,
 get a reference verdict (`revl compile`, or `revl.gate.admit` on py).
 
+## The manifest arm (issue #346): half of it closed here
+
+`revl_gate::admit_into(source, manifest)` is real as of issue #346: it folds
+G2/G3 over the UNION of the running composition's rows and the candidate, so a
+rust embed can ask the py loop's admitting question locally. It is a REFUSAL
+arm, not an admission arm - it still reports `"admitted": false`, and it refuses
+what the py gate refuses, with the same code and the same why-trace.
+
+What that closes and what it does not, against `held_manifest` =
+`Kv/store/;App/app/;App<store` (the py harness's `base_manifest()` wire):
+
+* **closed** - the ambient half of G2/G3: a candidate whose provides collide
+  with a RUNNING key is refused. `ambient_provision_conflict` below is the exit
+  case: py's `revl.gate.admit_into` says `G2`, this gate says `G2` with the same
+  sentence, and py's STANDALONE `admit` ADMITS the same bytes - so the manifest
+  is demonstrably being read, not ignored.
+* **still open** - requirement RESOLUTION. py's `admit_into` resolves a
+  candidate's `requires` against the running providers; the self-host fold only
+  checks disjointness, acyclicity and route realms, so it cannot. `cache_layer`
+  is that half made concrete: py ADMITS it into the running manifest, this gate
+  can only decline to object. Closing it is the self-host TYPE LAYER's job, its
+  own roadmap lane, and is deliberately NOT attempted here.
+
 ## The batch, screened in-process
 
-| candidate | verdict | shared with the py harness | note |
-|---|---|---|---|
-| `standalone_twin` | no objection | yes | standalone-valid, Store inlined; py ADMITS it |
-| `cache_layer` | no objection | yes | requires a Store not in the source; py refuses it standalone and ADMITS it into the running manifest |
-| `incomplete_provide` | no objection | yes | provides a service but omits a declared method; py refuses |
-| `provision_conflict` | refuse (G2) | no | two components provide the same service; py refuses (G2) |
-| `undeclared_emission` | refuse (G4) | no | an undeclared emission is called from a body; py refuses (G4) |
-| `syntax_error` | no objection | yes | a genuine parse failure; py refuses |
-| `hole_draft` | no objection | yes | a draft with an open typed hole; py refuses (T3) |
-| `type_layer_miss` | no objection | no | a type error; py refuses (T1) |
-| `frontier_oversized` | declined (FRONTIER) | no | a source over the size bound; py ADMITS, this gate is not entitled to decide |
+| candidate | standalone | into the held manifest | shared with the py harness | note |
+|---|---|---|---|---|
+| `standalone_twin` | no objection | not asked | yes | standalone-valid, Store inlined; py ADMITS it |
+| `cache_layer` | no objection | no objection | yes | requires a Store not in the source; py refuses it standalone and ADMITS it into the running manifest |
+| `ambient_provision_conflict` | no objection | refuse (G2) | no | provides a key the running composition already provides; py refuses it into the manifest (G2) and ADMITS it standalone |
+| `incomplete_provide` | no objection | not asked | yes | provides a service but omits a declared method; py refuses |
+| `provision_conflict` | refuse (G2) | not asked | no | two components provide the same service; py refuses (G2) |
+| `undeclared_emission` | refuse (G4) | not asked | no | an undeclared emission is called from a body; py refuses (G4) |
+| `syntax_error` | no objection | not asked | yes | a genuine parse failure; py refuses |
+| `hole_draft` | no objection | not asked | yes | a draft with an open typed hole; py refuses (T3) |
+| `type_layer_miss` | no objection | not asked | no | a type error; py refuses (T1) |
+| `frontier_oversized` | declined (FRONTIER) | not asked | no | a source over the size bound; py ADMITS, this gate is not entitled to decide |
 
-2 refused, 6 no-objection, 1 declined. Every one of them
+2 refused, 7 no-objection, 1 declined. Every one of them
 serialises as `"admitted": false`; nothing in this batch produced anything a
 host could read as an admission, and every refusal it did issue is a refusal the
 py admission gate also issues, with the same guarantee tag
 (`tests/test_inprocess_gate_rust.py`).
 
 Verdicts are order-independent: screening the batch in a fixed order and in a
-shuffled order in the same process yields identical per-candidate verdicts
-(holds), which is the property that proves the gate is stateless.
+shuffled order in the same process yields identical per-candidate verdicts on
+BOTH arms (holds), which is the property that proves the gate is stateless.
 
 ### What the screen catches, measured
 
@@ -73,14 +97,20 @@ declines outright (`frontier_oversized`) is the fail-closed path working: `py`
 ADMITS it, and rather than decide a construct it does not cover, the gate says
 so.
 
-### The `admit_into` gap, priced
+### The `admit_into` gap, priced - and one leg of it closed
 
-There is no native `admit_into`, so the realistic agent shape - admit a
-candidate AGAINST the running composition - is not available on rust at all.
-`cache_layer` is that gap made concrete: py ADMITS it into the running manifest,
-and the only question this gate can be asked is the standalone one, to which it
-raises no objection. A rust agent loop therefore cannot screen the case its py
-twin screens best.
+Before #346 the realistic agent shape - admit a candidate AGAINST the running
+composition - was not available on rust at all. It now is for the ambient half:
+`ambient_provision_conflict` is a candidate that is HARMLESS standalone (py
+ADMITS the same bytes) and is refused `G2` once the running composition is in
+the fold, on both arms, with the same why-trace. That is the half that closed.
+
+The other half is what `cache_layer` still prices. py's `admit_into` ADMITS it
+into the running manifest - it RESOLVES the `requires store: Store` against the
+running `Kv` provider - and the only thing this gate can say about it, with or
+without the manifest, is that it does not object. Requirement resolution is the
+self-host type layer's job, and this file is where the remaining distance is
+measured, not smoothed over.
 
 ## Fail closed
 
@@ -103,18 +133,18 @@ I/O, no network, no toolchain, no Python, no process hop. Nothing else is in it.
 
 | candidate size | bytes | median (ms) | p90 (ms) | p99 (ms) | samples |
 |---|---|---|---|---|---|
-| small (3 methods) | 218 | 15.121 | 28.961 | 40.367 | 25 |
-| medium (12 methods) | 636 | 153.932 | 476.228 | 711.150 | 25 |
-| large (48 methods) | 2364 | 4605.023 | 6588.335 | 7698.322 | 25 |
+| small (3 methods) | 218 | 0.711 | 1.348 | 7.802 | 25 |
+| medium (12 methods) | 636 | 5.183 | 9.193 | 11.694 | 25 |
+| large (48 methods) | 2364 | 71.082 | 107.075 | 224.205 | 25 |
 
 The representative scenario (the py harness's `standalone_twin`, 276 B)
-measured median **18.021 ms** (p90 65.085 ms, p99 78.938 ms,
+measured median **0.754 ms** (p90 0.807 ms, p99 0.871 ms,
 n=25).
 
 **This does not inherit the py headline, and it must not be reported as if it
 did.** The py in-process round-trip is tenths of a millisecond and grows roughly
 with candidate size. This one starts in the milliseconds and grows far faster
-than the source does: 10.8x the bytes costs 305x the time
+than the source does: 10.8x the bytes costs 100x the time
 across the size cells, which is quadratic-shaped, not linear. At a few kilobytes
 - an ordinary model-authored component - a single screen costs on the order of a
 second. An agent loop that screens every candidate inline would feel that.
@@ -127,12 +157,12 @@ would be flat across these rows; it is not.
 
 | shape | bytes | verdict | median (ms) | samples |
 |---|---|---|---|---|
-| declaration-heavy | 1212 | no_objection | 744.803 | 6 |
-| statement-heavy | 1214 | no_objection | 417.577 | 6 |
-| comment-padded | 1248 | no_objection | 9.398 | 6 |
+| declaration-heavy | 1212 | no_objection | 16.014 | 6 |
+| statement-heavy | 1214 | no_objection | 15.327 | 6 |
+| comment-padded | 1248 | no_objection | 0.709 | 6 |
 
 The comment-padded shape - the same byte count, a fraction of the tokens - is
-roughly 79x cheaper than the declaration-heavy one, while the
+roughly 23x cheaper than the declaration-heavy one, while the
 statement-heavy shape, which carries ONE declaration and a body full of
 statements, costs the same order as the declaration-heavy one. So the cost
 tracks TOKENS: it lives in the emitted lexer/parser, not in the composition gate
@@ -160,9 +190,10 @@ start from.
 This is a COMPILE-TIME screen, not a sandbox. A component this gate refuses
 never runs in the embedder's process. A component it does not refuse has been
 screened at the composition/guarantee layer ONLY: not type-checked, not
-admitted, not confined. `admitted` is not something this gate issues, and even a
-py admission is not "safe to run unwitnessed" - the reversible-run half is item
-334.
+admitted, not confined. `admitted` is not something this gate issues - not
+standalone and not from the manifest arm, which is a refusal arm that reads the
+running composition, not an admission into it. And even a py admission is not
+"safe to run unwitnessed" - the reversible-run half is item 334.
 
 ## Re-run
 
@@ -177,7 +208,9 @@ publishing them.
 
 A guard test, `tests/test_inprocess_gate_rust.py`, builds and runs this harness
 in CI (the `backend-rust` job), re-derives the PY verdict for each candidate's
-exact source bytes, and holds the two harnesses against each other: every rust
-refusal must be a real py refusal with the same code, no arm may read as an
-admission, the measured layer gap must still be a gap, and the py harness's own
-candidates must still be the bytes screened here.
+exact source bytes - both standalone and against the held manifest - and holds
+the two harnesses against each other: every rust refusal must be a real py
+refusal with the same code, every rust `admit_into` refusal must be a real
+`revl.gate.admit_into` refusal with the same code AND the same why-trace, no arm
+may read as an admission, the measured layer gap must still be a gap, and the py
+harness's own candidates must still be the bytes screened here.

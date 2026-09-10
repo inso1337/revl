@@ -80,22 +80,61 @@ def _run_test(args, ir: dict) -> int:
                         mock_requires=getattr(args, "mock_requires", False),
                         schedule_seed=getattr(args, "schedule_seed", None),
                         schedule_seeds=getattr(args, "schedule_seeds", None),
-                        name_filter=getattr(args, "filter", None),
-                        list_only=getattr(args, "list", False),
+                        list_tests=getattr(args, "list_tests", False),
+                        filter_pattern=getattr(args, "filter", None),
                         verbose=getattr(args, "verbose", False),
                         report=getattr(args, "report", None))
 
 
 def _run_erase_report(args, ir: dict) -> int:
-    """`revl erase-report --realm R` — right-to-erasure evidence (docs/erase-report.md)."""
+    """`revl erase-report --realm R`: right-to-erasure evidence (docs/erase-report.md).
+
+    With `--receipt-key` (or an exported REVL_ERASURE_KEY* ), the report is
+    SIGNED: a portable receipt naming every replica the erasure reaches rides
+    inside the document under `receipt` (roadmap item 472, src/revl/
+    erasure_receipt.py). Without a key the document is byte-identical to the
+    report this command always produced.
+
+    Asking for a receipt that cannot be signed (a key no route can resolve, a
+    `--receipt-signer` whose bytes are not UTF-8 text) is an error: a message on
+    stderr and exit 1, with no document printed, because a receipt that does not
+    exist must not be printed as one."""
+    from . import attest  # noqa: PLC0415 — only for attest's signing refusals
+    from . import erasure_receipt  # noqa: PLC0415
     from .erase_report import build_report, render  # noqa: PLC0415
+
     report_doc = build_report(
         ir, args.realm,
         prove_residue=not getattr(args, "no_residue_proof", False))
+    key_path = getattr(args, "receipt_key", None)
+    receipt = None
+    if report_doc.get("ok") and (key_path or erasure_receipt.key_from_env()):
+        # A key this process cannot resolve, a key whose bytes are not UTF-8
+        # text, and a name the canonical spelling cannot carry are the same
+        # class of answer as any other unresolved input: a message on stderr and
+        # a nonzero exit before the document is printed, which is what every
+        # other verb here does. Letting any of them escape the handler made a
+        # missing key or an undecodable --receipt-signer a traceback rather than
+        # an answer an operator can act on (issue #824 review, #851 review).
+        # `attest.NotCanonicalizable` is a `ValueError`, not a `RevlError`, so it
+        # has to be named here: the same pair `deploy.py` catches. A receipt that
+        # was never produced prints no report, and the run can be retried without
+        # the key.
+        try:
+            receipt = erasure_receipt.make_receipt(
+                report_doc, erasure_receipt.resolve_key(key_path), ir=ir,
+                signer=getattr(args, "receipt_signer", None))
+        except (RevlError, attest.NotCanonicalizable) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        report_doc["receipt"] = receipt
     if args.json:
         print(json.dumps(report_doc, indent=2))
     else:
         print(render(report_doc))
+        if receipt is not None:
+            print()
+            print(erasure_receipt.render_receipt(receipt))
     if not report_doc.get("ok"):
         return 1
     # a proven state-gone + untouched other realms is a clean report;
@@ -224,6 +263,77 @@ def _run_policy(args) -> int:
     else:
         print(render_explain(result))
     return 1 if result["refused"] else 0
+
+
+def _run_simulate(args) -> int:
+    """`revl simulate policy-diff OLD NEW --history RUN.wal` (item 468 / issue
+    #820) — the bounded preview a policy change over recorded history opens.
+
+    Reads the action set out of one WAL, decides each recorded action under OLD
+    and under NEW through the two legs `policy.capability_verdict` reads (the
+    deny-lists and the closed allow-lists), and prints the newly allowed set, the
+    newly denied set, and a blast radius bounded by the recorded action set
+    rather than by a number this command invents.
+
+    The admission refuses a crossing on more legs than those two: the
+    agent-sandbox allow-list, the taint-flow tier, the approval and declassify
+    rules, the declaration-strength floors, the evidence bundle and the recovery
+    surface decide by facts a WAL does not carry. `policy_diff.LEGS` names every
+    leg with the fact it reads, a recorded pair whose surface moves on one of
+    them is reported undecided with the leg named rather than unchanged, and no
+    writer records the declared capability scope at all, so the action set of a
+    WAL a recorder wrote is empty and those records are withheld instead of
+    printing as a clean diff.
+
+    Never admits, refuses or mutates. Exit 0 when the change newly allows no
+    recorded crossing, leaves none undecided and withholds none; 1 when any of
+    those is true, so a preview that could not decide an action, could not name
+    one, or could not read the history whole (a torn tail, or a recording that
+    never reached its `activation-complete` record) does not report the change
+    clean; 2 on a usage, parse or read error."""
+    from .policy import PolicyError, component_realms, load_policy
+    from .policy_diff import PolicyDiffError, diff, load_history, render, widened
+
+    if args.simulate_command != "policy-diff":
+        print(f"error: unknown simulate verb `{args.simulate_command}`",
+              file=sys.stderr)
+        return 2
+    try:
+        old = load_policy(args.old)
+    except (PolicyError, RevlError, OSError) as error:
+        print(f"error: cannot read policy `{args.old}`: {error}", file=sys.stderr)
+        return 2
+    try:
+        new = load_policy(args.new)
+    except (PolicyError, RevlError, OSError) as error:
+        print(f"error: cannot read policy `{args.new}`: {error}", file=sys.stderr)
+        return 2
+
+    # A realm-scoped rule decides an action by the realms its component joins,
+    # and the WAL records none. The composition is the only source of them, so
+    # an action a realm rule selects is undecided without `--composition`.
+    realms: dict = {}
+    if args.composition:
+        try:
+            manifest = compile_files(args.composition).get("manifest") or {}
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        for entry in manifest.get("components") or []:
+            realms[entry.get("name")] = component_realms(manifest,
+                                                         entry.get("name"))
+    try:
+        wal = load_history(args.history)
+    except PolicyDiffError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    result = diff(old, new, wal, realms=realms, label=args.history)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(render(result))
+    return 1 if widened(result) else 0
 
 
 def _run_goal(args, ir: dict) -> int:
@@ -812,6 +922,15 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
     print(f"COMPOSITION  {table.name}  (origin `{table.origin}`, "
           f"{len(table.rows)} rows)")
     print(f"             {table.source}")
+    if table.slo:
+        # item 473: the declared SLO contract is a composition-level promise, so
+        # it is printed with the composition's identity rather than among the
+        # rows. Absent for every composition that declares no `slo` block, so
+        # this panel changes no existing output.
+        print()
+        print("SLO")
+        for key, (value, line) in table.slo.items():
+            print(f"  {key:<24} {value}   (declared at line {line})")
     print()
     print("ROWS")
     for row in table.rows:
@@ -1083,6 +1202,11 @@ def main(argv: list[str] | None = None) -> int:
     # history query.
     if args.command == "policy":
         return _run_policy(args)
+
+    # `revl simulate` (item 468) also reads its own inputs (two policies and a
+    # recorded WAL), so it is routed before the shared compile step too.
+    if args.command == "simulate":
+        return _run_simulate(args)
 
     try:
         profile = None

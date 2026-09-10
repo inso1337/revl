@@ -881,6 +881,48 @@ class PlaceDecl:
     backend: str | None = None    # None == the composition's default backend
 
 
+# --- item 473 (issue #825): the composition SLO contract ---------------------
+#
+# A composition may declare ONE `slo { ... }` block naming the service-level
+# objectives the rollout must hold. The datum set is a CLOSED registry, and each
+# datum carries a VALUE KIND that fixes how its literal is read and what its
+# canonical unit is. The unit is chosen HERE, at parse time, so it can never be
+# re-read differently downstream: a duration is funnelled through the same
+# `_duration_literal` the `cache ... ttl` and `liveness` surfaces use (a bare
+# number is SECONDS), a percentage is written bare (a bare number is PERCENT,
+# the same "unit is implied by the slot" discipline), and a task count is a
+# plain integer.
+#
+# The IR keys carry the unit in the NAME (`p95_latency_ms`, `success_rate_pct`)
+# because the value is a contract a rollout decision reads, not a rendered line:
+# an unlabelled `250` cannot be told from 250 seconds once it leaves the file.
+SLO_DATUMS: dict[str, str] = {
+    "p95_latency": "duration",
+    "success_rate": "percent",
+    "recovery_time": "duration",
+    "approval_wait": "duration",
+    "max_pending_tasks": "count",
+}
+
+# The IR key each datum is carried under: the source name plus its canonical
+# unit, so the contract document states its own units.
+SLO_IR_KEYS: dict[str, str] = {
+    "p95_latency": "p95_latency_ms",
+    "success_rate": "success_rate_pct",
+    "recovery_time": "recovery_time_ms",
+    "approval_wait": "approval_wait_ms",
+    "max_pending_tasks": "max_pending_tasks",
+}
+
+# The ceiling parameter (item 260, section 3.1) each gateable datum is BACKED
+# by. A datum absent from this map has no declaration-owned bound in this language# version, so it is admitted as a contract the runtime must measure and is not
+# statically gated. See `composition._check_slo_bounds`.
+SLO_BACKED_BY: dict[str, str] = {
+    "p95_latency": "time",
+    "max_pending_tasks": "calls",
+}
+
+
 @dataclass
 class CompositionDecl:
     name: str
@@ -913,6 +955,12 @@ class CompositionDecl:
     # lists in a file, which is what makes the fold reproducible (§3.3).
     stack: list[tuple[str, int]] = field(default_factory=list)
     site: tuple[str, int] | None = None
+    # item 473 (issue #825): the declared SLO contract, as `(datum, canonical
+    # value, line)` in declaration order, the canonical value being milliseconds
+    # for a duration, percent for `success_rate`, tasks for `max_pending_tasks`.
+    # Empty for every composition that declares no `slo` block, so a program
+    # without one parses, resolves and emits byte-identically to before.
+    slo: list[tuple[str, int | float, int]] = field(default_factory=list)
 
 
 # --- item 426 S2: layers and the fold ---------------------------------------
@@ -3162,6 +3210,7 @@ class Parser:
         uses: list[tuple[str, int]] = []
         stack: list[tuple[str, int]] = []
         site: tuple[str, int] | None = None
+        slo: list[tuple[str, int | float, int]] = []
         seen: dict[str, int] = {}
         while True:
             self._skip_semis()
@@ -3222,25 +3271,146 @@ class Parser:
                 pline = self.next().line
                 places.append(self._place_spec(self._address(), pline))
                 continue
+            if self.at("ident", "slo"):
+                # item 473 (issue #825): the composition-level SLO contract.
+                # Contextual, like `stack`/`site`/`place` above: recognised only
+                # in this clause-head slot, so `slo` stays an ordinary name
+                # everywhere else and the lexer's KEYWORDS set is untouched.
+                sline = self.next().line
+                if slo:
+                    raise self.err(
+                        sline,
+                        f"composition {name} declares a second `slo` block",
+                        hint="a composition carries exactly ONE SLO contract: "
+                             "the datums are distinct keys, so two blocks could "
+                             "only disagree")
+                slo = self._slo_block(name, sline)
+                continue
             if not self.at("ident", "row"):
                 tok = self.peek()
                 raise self.err(
                     tok.line,
-                    "expected `row`, `remote`, `host`, `seam`, `place`, `use`, "
-                    f"`stack`, `site`, or `}}` in composition {name}, found "
-                    f"{tok.value!r}",
+                    "expected `slo`, `row`, `remote`, `host`, `seam`, `place`, "
+                    f"`use`, `stack`, `site`, or `}}` in composition {name}, "
+                    f"found {tok.value!r}",
                     hint="a composition document declares rows: "
                          '`row @label from "path.rvl" provides key`, '
                          '`remote @label provides key: Service at host("h:port")`, '
                          '`host @label provides key: Service`, '
                          '`seam @label on key("k") observe with @observer`, or '
-                         'places one: `place @label on process "p" backend rust`')
+                         'places one: `place @label on process "p" backend rust`. '
+                         'It may also declare the service-level objectives the '
+                         'rollout must hold: `slo { p95_latency: 250ms, '
+                         'success_rate: 99.5 }`')
             rows.append(self.row_decl(name))
             self._composition_label(name, rows[-1].label, rows[-1].line, seen)
         self.expect("}")
         return CompositionDecl(name, rows, line, uses, stack=stack,
                                site=site, remotes=remotes, hosts=hosts,
-                               seams=seams, places=places)
+                               seams=seams, places=places, slo=slo)
+
+    def _slo_block(self, composition: str,
+                   line: int) -> list[tuple[str, int | float, int]]:
+        """`slo { <datum>: <value> (, <datum>: <value>)* }`, the composition's
+        SLO contract (roadmap item 473, issue #825). The leading `slo` is
+        already consumed.
+
+        The datum set is a CLOSED registry (`SLO_DATUMS`): an unknown datum is a
+        refusal listing the registry rather than a silently ignored line, since a
+        contract that quietly drops a target is worse than no contract. Each
+        datum's literal is read by its VALUE KIND, so the unit is fixed at the
+        surface (milliseconds, percent, tasks) and a bare number can never be
+        reinterpreted later. The block itself is refused when it declares
+        nothing, and a datum is refused when it is declared twice: both are
+        promises the document does not actually make.
+        """
+        self.expect("{")
+        out: list[tuple[str, int | float, int]] = []
+        seen: set[str] = set()
+        while not self.at("}"):
+            dline = self.peek().line
+            datum = self._name(what="an SLO datum name")
+            if datum not in SLO_DATUMS:
+                known = ", ".join(f"`{n}`" for n in SLO_DATUMS)
+                raise self.err(
+                    dline,
+                    f"unknown SLO datum `{datum}` in composition {composition}",
+                    hint=f"the SLO contract is a CLOSED registry (item 473): "
+                         f"{known}. A datum outside it would be a target "
+                         "nothing ever reads")
+            if datum in seen:
+                raise self.err(
+                    dline,
+                    f"duplicate SLO datum `{datum}` in composition "
+                    f"{composition}",
+                    hint="each datum appears once: a second `{}` either repeats "
+                         "the same promise or contradicts the first, and neither "
+                         "is a contract".format(datum))
+            seen.add(datum)
+            self.expect(":")
+            out.append((datum, self._slo_value(datum, dline), dline))
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        if not out:
+            raise self.err(
+                line,
+                f"`slo {{ }}` in composition {composition} declares no target",
+                hint="a composition that promises nothing should declare no "
+                     "`slo` block at all; an empty one reads as a contract and "
+                     "holds none (item 473)")
+        return out
+
+    def _slo_value(self, datum: str, line: int) -> int | float:
+        """The literal of one SLO datum, canonicalized by its value kind and
+        checked against its domain. Every refusal here is a target the
+        composition could never hold, so none of them is a style opinion: a
+        non-positive duration (or task count) can never expire, and a rate
+        outside `(0, 100]` is not a percentage."""
+        kind = SLO_DATUMS[datum]
+        if kind == "duration":
+            value = self._duration_literal(what=f"a `{datum}` duration")
+            if value <= 0:
+                raise self.err(
+                    line,
+                    f"`{datum}` must be a positive duration",
+                    hint="the target is an upper bound on elapsed time, so a "
+                         "non-positive one can never hold; give a real bound "
+                         "(item 473)")
+            return value
+        if kind == "percent":
+            tok = self.peek()
+            if tok.kind not in ("int", "float"):
+                raise self.err(
+                    tok.line,
+                    f"expected a `{datum}` percentage, found {tok.value!r}",
+                    hint="a rate is written bare and read as a percentage: "
+                         "`success_rate: 99.5` is 99.5 percent")
+            self.next()
+            value = float(tok.value)
+            if not 0 < value <= 100:
+                raise self.err(
+                    line,
+                    f"`{datum}` must be within (0, 100], found "
+                    f"{tok.value!r} percent",
+                    hint="a success rate is a percentage of crossings, so a "
+                         "value outside (0, 100] is not one (item 473)")
+            return value
+        tok = self.peek()
+        if tok.kind != "int":
+            raise self.err(
+                tok.line,
+                f"expected a `{datum}` task count, found {tok.value!r}",
+                hint="the pending-task target is a whole number of tasks")
+        self.next()
+        if tok.value <= 0:
+            raise self.err(
+                line,
+                f"`{datum}` must be a positive task count, found "
+                f"{tok.value!r}",
+                hint="a ceiling of zero tasks admits no crossing at all; drop "
+                     "the target or give a real bound (item 473)")
+        return tok.value
 
     def _place_spec(self, address: Address, line: int) -> PlaceDecl:
         """`<address> on process "<name>" [backend <ident>]`, with the leading

@@ -36,9 +36,26 @@ cannot issue an admission cannot commit that defect.
 ## The interface
 
 `wit/gate.wit` is the whole surface: `admit`, `admit-json`,
-`admit-artifact` (declines today), `gate-version`.
+`admit-into`, `admit-into-json`, `admit-artifact` (declines today),
+`gate-version`.
 
     wasmtime run --invoke 'admit-json("fn f() -> Int { return 1 }")' revl_gate.wasm
+
+`admit-into` is `admit` asked across a composition boundary (item 186): the
+verdict on a candidate once it is admitted INTO a RUNNING composition, handed
+over as the item-186 row wire (`"Kv/store/;App/app/;App<store"`). It closes the
+union fold's `G2`/`G3` legs — provision disjointness, realm routes,
+cross-boundary acyclicity — and nothing else, and it issues no admission either.
+A manifest row this wave does not cover (a replacement `-C`, a handoff
+`C=k:T`) comes back as a `MANIFEST` refusal rather than being skipped.
+
+The crate's resource bounds cross the component boundary with it, which is the
+point: a source over `MAX_SOURCE_BYTES` and a manifest over
+`MANIFEST_ROW_LIMIT` are declined inside `revl_gate`, ahead of the fold, so
+neither door can be walked into with an input that exhausts the stack. On this
+target that difference is a refusal instead of a trap: the fold recurses one
+stack frame per manifest row, the build sets no `stack-size`, and a stack
+exhaustion in a wasm component is an abort no host can read as a verdict.
 
 In a browser or node, `jco transpile revl_gate.wasm` produces the JS shim:
 
@@ -73,7 +90,11 @@ empty-import property is the load-bearing one.
   not catch, and a native gate panic traps the instance instead of returning
   `outside-frontier`. A trap is loud and it is not a verdict, so it is still not
   a false admission — but a host must treat a trap as "no verdict was reached"
-  and fail closed on it.
+  and fail closed on it. The crate's resource bounds are NOT a host obligation
+  of this kind: a source over `MAX_SOURCE_BYTES` and a manifest over
+  `MANIFEST_ROW_LIMIT` are declined inside `revl_gate`, ahead of the fold, so no
+  argument a host can hand to `admit-into` reaches the stack exhaustion the row
+  bound exists for.
 * **A verdict is a decision, not an enforcement.** The gate returns a verdict;
   the browser's loader, the worker's dispatcher or the CDN's serving path is the
   code that must refuse to instantiate, execute or serve on a refusal. A gate
