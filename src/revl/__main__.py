@@ -79,7 +79,9 @@ def _run_test(args, ir: dict) -> int:
     return test_command(ir, args.backend, sweep=getattr(args, "sweep", False),
                         mock_requires=getattr(args, "mock_requires", False),
                         schedule_seed=getattr(args, "schedule_seed", None),
-                        schedule_seeds=getattr(args, "schedule_seeds", None))
+                        schedule_seeds=getattr(args, "schedule_seeds", None),
+                        list_tests=getattr(args, "list_tests", False),
+                        filter_pattern=getattr(args, "filter", None))
 
 
 def _run_erase_report(args, ir: dict) -> int:
