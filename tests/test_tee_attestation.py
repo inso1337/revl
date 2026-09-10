@@ -234,12 +234,37 @@ def test_proof_the_attester_key_does_not_vouch_for_is_refused():
     assert not ok and "signature mismatch" in reason
 
 
+def test_a_proof_with_no_peer_key_is_refused():
+    """The separation is the load-bearing gate, so a caller that names no peer
+    key cannot be shown to have passed it. ``None`` and the empty key are refused
+    explicitly rather than compared against an empty key, which would have made
+    the comparison vacuously false and admitted the proof."""
+    for absent in (None, b"", bytearray()):
+        ok, reason = admits(make_proof(), peer_key=absent)
+        assert not ok, absent
+        assert "no peer key" in reason, absent
+
+
+def test_a_proof_with_a_non_bytes_peer_key_is_refused():
+    """A key of the wrong TYPE is absent, not comparable: the old
+    ``bytes(key or b"")`` comparison raised on a ``str``."""
+    ok, reason = admits(make_proof(), peer_key="pool-shared-secret")
+    assert not ok and "no peer key" in reason
+
+
 def test_receipt_signed_with_the_peers_own_key_is_refused():
     self_signed = sign_result_receipt(
         ResultReceipt(PEER_ID, BUNDLE, NONCE, tee.result_identity(RESULT),
                       tee.stamp(NOW)), PEER_KEY)
     ok, reason = accepts(self_signed, enclave_key=PEER_KEY)
     assert not ok and "peer's own offer key" in reason
+
+
+def test_a_receipt_with_no_peer_key_is_refused():
+    for absent in (None, b"", bytearray()):
+        ok, reason = accepts(make_receipt(), peer_key=absent)
+        assert not ok, absent
+        assert "no peer key" in reason, absent
 
 
 # --------------------------------------------------------- tampered proofs
