@@ -306,6 +306,19 @@ class Git:
             )
         self._remote_heads = None
 
+    def ensure_history(self) -> None:
+        """Deepen a shallow checkout once so cited commits are resolvable.
+
+        A depth-1 CI checkout holds only the tip, so `is_commit` answers "no"
+        for every cited sha and `sha_findings` would report OK having examined
+        nothing. `fetch` deepens (`--unshallow`) the checkout to the object
+        database a long-lived clone already has. A deep checkout needs no such
+        fetch, so calling this there is a no-op and leaves its output and exit
+        code unchanged.
+        """
+        if self.is_shallow():
+            self.fetch()
+
     def rev(self, ref: str) -> str | None:
         code, out = self.run("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
         return out or None if code == 0 else None
@@ -590,6 +603,11 @@ def sha_findings(text: str, git: Git) -> list[str]:
     the roadmap pins foreign repos the same way (`inso1337/cordis-py@... 1c5e6f1`,
     the cordis-wasm B3 commit), and `ed25519` is a valid hex string. This gate
     can only speak for this repository's history.
+
+    That leniency is only honest when the history is actually present. The
+    caller (`main`) deepens a shallow checkout before this runs, so "not a
+    commit" here means "not a commit even with the full history", never "not
+    fetched yet". See `Git.ensure_history`.
     """
     findings: list[str] = []
     seen: set[str] = set()
@@ -1720,6 +1738,23 @@ def main(argv: list[str] | None = None) -> int:
     if git.base_rev() is None:
         print(f"error: base ref {args.base!r} is not resolvable. Fetch it, or "
               f"pass --base with a ref that exists.", file=sys.stderr)
+        return 2
+
+    # The sha pass can only judge a citation it can see. A depth-1 checkout
+    # holds none of the cited commits, so `is_commit` would answer "no" for all
+    # of them and the pass would report OK having examined nothing. Deepen the
+    # checkout first; if the history still is not there (fetch failed, or
+    # --no-fetch forbade it), the gate must not lie and says so loudly instead.
+    git.ensure_history()
+    if git.is_shallow():
+        print(
+            "error: this checkout is shallow and its history could not be "
+            "fetched, so the commits the roadmap cites cannot be verified. "
+            "This gate will not report OK on a history it could not see. "
+            "Deepen the checkout (`git fetch --unshallow`) or run where the "
+            "network is reachable, then re-run.",
+            file=sys.stderr,
+        )
         return 2
 
     dirs = repo_dirs(ROOT)
