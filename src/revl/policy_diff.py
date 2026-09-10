@@ -304,7 +304,7 @@ def _could_cover_declassify(pattern: str) -> bool:
 def _teardown_rows(policy) -> tuple:
     """The teardown floor ONE policy carries, as the driver computes it.
 
-    `policy.py:1689-1691` does not read the rule list: it reduces it to the
+    `policy.py:1696-1697` does not read the rule list: it reduces it to the
     STRONGEST floor (`max(..., key=_REGISTER_RANK.get)`) and the leg then refuses
     an entry below that one number, so two rule lists with the same strongest
     floor read the same requirement here and a rule added UNDER the floor is not
@@ -315,6 +315,25 @@ def _teardown_rows(policy) -> tuple:
     from .lower import _REGISTER_RANK  # noqa: PLC0415
     return (max((rule.strength for rule in policy.teardown_rules),
                 key=lambda strength: _REGISTER_RANK.get(strength, 0)),)
+
+
+def _approval_rows(policy, token: str) -> tuple:
+    """The ONE approval rule the ordinary approval leg reads for this token, as
+    the driver computes it.
+
+    `policy.py:2414` reads `policy.approval_rule_for(token)`, which is the
+    FIRST rule whose glob covers the token (`policy.py:587-594`), and the gate
+    refuses on that rule existing. A covering rule BELOW the first one is
+    shadowed for this token: the gate returns the same rule with the same ttl, so
+    the leg reads nothing that changed and listing every covering rule would move
+    the pair on a change the gate never sees. `_could_cover_declassify` above is
+    deliberately the WIDER test because there the tokens are `declassify.<origin>`
+    for origins the diff does not carry, so every rule that could be the first
+    one for some origin has to stay in."""
+    rule = policy.approval_rule_for(token)
+    if rule is None:
+        return ()
+    return _rows(((rule.pattern, rule.ttl_ms),))
 
 
 def _evidence_rows(policy, name: str, token: str, realms) -> tuple:
@@ -362,9 +381,9 @@ def leg_surfaces(policy, name: str, token: str, realms) -> dict:
     selects with, named in the comment above it, because a row keyed on a
     different operand is a leg that silently never moves: `declassify` selects on
     the component and reads origins, `declassify-approval` selects in the
-    `declassify.` token namespace, `approval` selects on the capability token,
-    and the two are not the same expression even though both read one policy
-    field."""
+    `declassify.` token namespace, `approval` selects on the capability token and
+    reads the first rule that covers it, and the last two are not the same
+    expression even though both read one policy field."""
     return {
         "mcp-sandbox": policy.mcp_allow is None
                        or _policy._allowed(token, policy.mcp_allow),
@@ -391,19 +410,18 @@ def leg_surfaces(policy, name: str, token: str, realms) -> dict:
         "declassify-approval": _rows((rule.pattern, rule.ttl_ms)
                                      for rule in policy.approval_rules
                                      if _could_cover_declassify(rule.pattern)),
-        # `policy.py:2414` is `approval_rule_for(token)`, so this leg and the one
-        # above read the SAME policy field through two DIFFERENT token operands
-        # (`token` here, `declassify.<origin>` there). The rows coincide only when
-        # an approval rule can cover both, which is why the rows are derived
-        # separately rather than shared.
-        "approval": _rows((rule.pattern, rule.ttl_ms)
-                          for rule in policy.approval_rules
-                          if rule.covers(token)),
+        # `policy.py:2414` is `approval_rule_for(token)`: the FIRST approval
+        # rule whose glob covers the pair's token, or `None`, and the gate refuses
+        # on that rule existing (and reports the ttl it carries). The row is that
+        # expression and not the list of every covering rule, because a covering
+        # rule below the first one is shadowed for this token and the gate reads
+        # the same rule either way.
+        "approval": _approval_rows(policy, token),
         "register": _rows((rule.capability, rule.at_least)
                           for rule in policy.register_rules
                           if _policy._matches_any(token, (rule.capability,))),
         "evidence": _rows(_evidence_rows(policy, name, token, realms)),
-        # the floor `policy.py:1689-1691` reduces the rules to, not the rule list
+        # the floor `policy.py:1696-1697` reduces the rules to, not the rule list
         "teardown": _teardown_rows(policy),
         "tenant": (policy.tenants_isolated,),
     }

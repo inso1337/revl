@@ -608,7 +608,7 @@ def test_a_realm_scoped_declassify_rule_follows_the_same_selector():
 
 
 def test_the_teardown_leg_reads_the_floor_the_gate_reduces_the_rules_to():
-    """`policy.py:1689-1691` reduces the teardown rules to the STRONGEST floor
+    """`policy.py:1696-1697` reduces the teardown rules to the STRONGEST floor
     and refuses on that one number, so a weaker rule added under an unchanged
     floor is not a fact this leg reads: the same requirement decides the same
     pair, and naming it undecided here would be answering a question the gate
@@ -654,6 +654,33 @@ def test_the_evidence_leg_reads_the_component_glob_and_the_origin_it_names():
                          + "component * requires evidence [attestation valid]\n")
     assert policy_diff.moved_legs(registry, plain, "AgentX", "net", None) \
         == ("evidence",)
+
+
+def test_the_approval_leg_reads_the_first_rule_that_covers_the_token():
+    """`policy.py:2414` is `approval_rule_for(token)`, which is the FIRST
+    covering rule and not the list of them (`policy.py:587-594`). A rule added
+    BELOW the first one is shadowed for this token: the gate reads the same rule
+    with the same ttl and decides the same way, so the leg must not move here.
+    The declassify-approval row above is deliberately the wider test, because
+    there the tokens are `declassify.<origin>` for origins no WAL-less diff
+    carries."""
+    base = parse_policy(_LEG_BASE)
+    wildcard = parse_policy(_LEG_BASE + "capability * requires approval\n")
+    shadowed = parse_policy(_LEG_BASE + "capability * requires approval\n"
+                        + "capability net requires approval ttl 5m\n")
+    # the rule below the first one is shadowed: the driver returns the `*` rule
+    # with its ttl either way, so nothing this leg reads moved
+    assert policy_diff.moved_legs(wildcard, shadowed, "AgentX", "net", None) == ()
+    # the FIRST covering rule moving its ttl is the leg moving
+    first = parse_policy(_LEG_BASE + "capability net requires approval\n")
+    assert policy_diff.moved_legs(
+    first, parse_policy(_LEG_BASE + "capability net requires approval ttl 5m\n"),
+    "AgentX", "net", None) == ("approval",)
+    # a wildcard arms BOTH approval rows at once, because `*` is the first rule
+    # for `net` AND could be the first rule for a `declassify.<origin>` token:
+    # the two legs read two namespaces and the rows say so
+    assert policy_diff.moved_legs(base, wildcard, "AgentX", "net", None) \
+    == ("declassify-approval", "approval")
 
 
 # ---------------------------------------------------------------------------
