@@ -109,6 +109,26 @@ SKIPPABLE_DIFFS = (
     ("docs/arithmetic.md", "docs/status.md", "README.md"),
 )
 
+# The self-host oracles that guard a tier's REFERENCE emitter, keyed by the tier
+# directory. `backends/<tier>/emit.py` is the file each `selfhost/emit_*.rvl`
+# port is held byte-identical to; the two entries in the second tuple load the
+# reference emitter of EVERY tier (`tools/selfhost_differential_survey.py` builds
+# the paths at runtime) or measure every self-host line, so they are guarded by
+# any tier's emitter. A `backends/<tier>/**` diff must select these, or degrade
+# to the whole `tests/` tree. Before the fix for #850 it selected none of them.
+_REFERENCE_ORACLE = {
+    "python": "tests/test_selfhost_emit_py.py",
+    "typescript": "tests/test_selfhost_emit_ts.py",
+    "go": "tests/test_selfhost_emit_go.py",
+    "java": "tests/test_selfhost_emit_java.py",
+    "rust": "tests/test_selfhost_emit_rust.py",
+    "wasm": "tests/test_selfhost_emit_wasm.py",
+}
+_REFERENCE_ORACLE_ALWAYS = (
+    "tests/test_selfhost_line_coverage.py",
+    "tests/test_selfhost_differential_survey.py",
+)
+
 # Only used to keep the scan from blessing every job as a root-suite runner.
 # Each of these runs its OWN tier's tests, never the root suite.
 _NOT_ROOT_SUITE = ("backend-python", "backend-java", "backend-go", "backend-rust")
@@ -520,6 +540,28 @@ def test_the_job_runs_the_suite_even_when_the_selection_is_empty():
     )
 
 
+def test_a_failed_selection_degrades_to_the_whole_tree():
+    """The other half of the same fail-safe: a selector that EXITS non-zero must
+    not be read as "nothing to do" either. The failure path has to substitute the
+    FULL selection before the node list is read, so the only two outcomes of this
+    job stay "ran the suite" and "failed", never "ran nothing"."""
+    jobs = _jobs()
+    script = _script(_steps(jobs, JOB))
+    assert re.search(
+        r"if ! out=\$\(.*?tools/affected_tests\.py.*?;\s*then\b.*?PYTEST tests/",
+        script,
+        re.S,
+    ), (
+        f"{JOB} does not replace a failed `tools/affected_tests.py` run with the "
+        "FULL `tests/` selection; a selector that errors would otherwise leave "
+        "an empty node list, which is the same hole as an empty diff"
+    )
+    assert "|| true" not in script, (
+        f"{JOB} swallows a failing command with `|| true`, so a real selection "
+        "failure would be read as an empty (passing) run"
+    )
+
+
 def test_the_selector_decides_what_the_job_runs():
     """One notion of "affected", not two. The job must invoke the existing
     selector, and must not name a second one."""
@@ -609,6 +651,78 @@ def test_the_selector_returns_a_non_empty_selection_for_every_fixture():
         "selection: a base ref the selector cannot resolve reaches it as no "
         "changed files at all"
     )
+
+
+# --- the `backends/**` shape, at the selector ----------------------------- #
+def test_a_backends_only_diff_selects_the_selfhost_reference_oracles():
+    """Why the #850 diff is covered even before the routing fix, and why the
+    selector had to be repaired as well.
+
+    `backends/<tier>/emit.py` is the reference emitter its `selfhost/emit_*.rvl`
+    port must stay byte-identical to. The oracles that assert that reach the file
+    in different ways: `tests/test_selfhost_emit_py.py` names it in prose, and
+    `tests/test_selfhost_line_coverage.py` names it too, but
+    `tests/test_selfhost_differential_survey.py` builds
+    `backends/<tier>/emit.py` at runtime and never spells out a tier, so the
+    selector's text heuristic missed it. This asserts the selector's own answer
+    for each tier's emitter, independently of the workflow: the oracle nodes must
+    be in it, or the selection must have degraded to the whole tree."""
+    missing_on_disk = [
+        node
+        for node in list(_REFERENCE_ORACLE.values()) + list(_REFERENCE_ORACLE_ALWAYS)
+        if not (ROOT / node).is_file()
+    ]
+    assert not missing_on_disk, (
+        f"the oracle nodes this test pins do not exist: {missing_on_disk}, so "
+        "the loop below would be vacuous"
+    )
+    for tier, oracle in _REFERENCE_ORACLE.items():
+        diff = (f"backends/{tier}/emit.py",)
+        result = at.select(list(diff), ROOT)
+        selected = result["pytest"]
+        if selected == ["tests/"]:
+            continue  # the fail-safe FULL answer covers every oracle by name
+        for node in (oracle,) + _REFERENCE_ORACLE_ALWAYS:
+            assert node in selected, (
+                f"{node} guards {diff[0]} and tools/affected_tests.py does not "
+                f"select it: reason={result['reason']!r}, "
+                f"selected={len(selected)} nodes. That is the #850 hole inside "
+                "the selector: the guard is real, the file it guards is real, and "
+                "nothing connects them"
+            )
+
+
+def test_the_incident_file_selects_all_three_tests_main_is_red_on():
+    """The named incident, not a generalisation of it. `e6067cd1` put `main` red
+    on three tests; a change to the reference emitter it touched must select all
+    three, so a `backends/python/emit.py`-only pull request cannot reach `main`
+    with them uncollected again."""
+    red_on_main = (
+        "tests/test_selfhost_emit_py.py",
+        "tests/test_selfhost_line_coverage.py",
+        "tests/test_selfhost_differential_survey.py",
+    )
+    emitter = "backends/python/emit.py"
+    assert emitter in PR_850_DIFF, (
+        f"the #850 fixture no longer names {emitter}, so this test has stopped "
+        "covering the incident it exists for"
+    )
+    diffs = [
+        [path] for path in PR_850_DIFF if path.startswith("backends/")
+    ]
+    diffs.append([emitter])
+    diffs.append(list(PR_850_DIFF))
+    for diff in diffs:
+        result = at.select(diff, ROOT)
+        selected = result["pytest"]
+        if selected == ["tests/"]:
+            continue  # the fail-safe FULL answer covers every oracle by name
+        for node in red_on_main:
+            assert node in selected, (
+                f"{diff} does not select {node}: reason={result['reason']!r}. "
+                "This is the #850 change set; if this is the only thing standing "
+                "between the diff and an uncollected regression, it has to hold"
+            )
 
 
 # --- the cost decision the fix must not break ------------------------------ #
