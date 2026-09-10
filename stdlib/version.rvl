@@ -53,6 +53,13 @@
 //        `contexts`, `context_ok`, `escape_for`, `scan`, `render` and
 //        `render_one`. It picks the escaper from each hole's declared insertion
 //        context and refuses raw or wrongly-contextual insertion.
+//   7 -> adds `stdlib/framing.rvl` (issue #867): the canonical HTTP request
+//        framing primitive -- `FramingRefusal`, `body_length`, `status_for`,
+//        `reason_of`, `is_too_large`, `message_of`, `header_values` and
+//        `header_count`. Same reason as item 104: a component that VENDORS the
+//        stdlib under the old stamp predates `body_length`, so its author is
+//        still hand-rolling `Content-Length`, which is the defect the module
+//        exists to remove.
 pub fn stdlib_version() -> Str {
-  return "6"
+  return "7"
 }
