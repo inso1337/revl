@@ -315,6 +315,50 @@ def build_parser() -> argparse.ArgumentParser:
                                "facet is marked `recomputed` vs `published` "
                                "(item 290 §4)")
 
+    # item 468 / issue #820: `revl simulate policy-diff OLD NEW --history WAL`
+    # — the bounded preview a policy change over recorded history opens. It
+    # reads the action set out of a WAL (the crossings the run declared through
+    # `scope.caps`), decides each one through the two legs the capability
+    # verdict reads, and prints the newly allowed and newly denied sets with a
+    # blast radius bounded by the recorded action set itself. The legs it cannot
+    # read decide by facts a WAL does not carry, so a pair whose surface moves
+    # on one of them is undecided with the leg named, and no writer records the
+    # declared scope at all, which makes the action set of a recorder-written
+    # WAL empty and those records withheld rather than clean; a history it could
+    # not read whole (a torn tail, or a recording that never committed) is
+    # withheld the same way. It never admits,
+    # refuses or mutates, and it is not `revl audit --diff` (that gate compares
+    # two audit graphs for authority drift, with no policy on the path).
+    simulate_cmd = sub.add_parser(
+        "simulate",
+        help="preview what a change would have done to recorded history "
+             "(item 468)")
+    simulate_sub = simulate_cmd.add_subparsers(dest="simulate_command",
+                                               required=True)
+    sim_policy = simulate_sub.add_parser(
+        "policy-diff",
+        help="diff two boundary policies over the actions one recorded WAL "
+             "carries: the newly allowed and newly denied action sets plus a "
+             "blast radius bounded by that action set, with a pair whose leg "
+             "surface moves reported undecided and a record no writer scoped "
+             "withheld (as is a history read only in part)")
+    sim_policy.add_argument(
+        "old", metavar="OLD",
+        help="the earlier boundary policy (DSL or JSON)")
+    sim_policy.add_argument(
+        "new", metavar="NEW",
+        help="the later boundary policy, in the same accepted forms as OLD")
+    sim_policy.add_argument(
+        "--history", metavar="RUN.wal", required=True,
+        help="the recorded history to diff the policies over (a WAL)")
+    sim_policy.add_argument(
+        "--composition", action="append", default=[], metavar="PROGRAM.rvl",
+        help="the composition the run was compiled from (repeatable). Supplying "
+             "it resolves the realms a realm-scoped rule decides by; without it "
+             "every action such a rule selects is reported undecided")
+    sim_policy.add_argument("--json", action="store_true",
+                            help="machine-readable diff an agent can consume")
+
     diff_cmd = sub.add_parser(
         "diff",
         help="semantic composition diff: the IR-level structural delta between "
@@ -434,6 +478,17 @@ def build_parser() -> argparse.ArgumentParser:
     erase.add_argument("--no-residue-proof", action="store_true",
                        help="skip the runtime teardown proof (static sections "
                             "only; use where the cordis runtime is unavailable)")
+    erase.add_argument("--receipt-key", default=None, metavar="PATH",
+                       dest="receipt_key",
+                       help="sign a portable erasure receipt over this report "
+                            "and embed it under `receipt` (roadmap item 472). "
+                            "Falls back to REVL_ERASURE_KEY_FILE (a path) or "
+                            "REVL_ERASURE_KEY (the secret); never hardcoded "
+                            "(docs/design/472-retention-erasure-receipts.md)")
+    erase.add_argument("--receipt-signer", default=None, metavar="NAME",
+                       dest="receipt_signer",
+                       help="the identity to record as the receipt's issuer, "
+                            "so a verifier can tell who requested the erasure")
 
     plan_cmd = sub.add_parser(
         "plan", help="dry run for admission: the delta a swap would produce, without applying it")
@@ -625,6 +680,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     test = sub.add_parser("test", help="compile and run `test` blocks")
     test.add_argument("files", nargs="+")
+    # selection and reporting (issue #843): `--list` answers "which tests does
+    # this compilation collect" (the half of the liveness question that had no
+    # answer at all) and `--filter` gives a targeted inner loop without
+    # compiling a reduced file set, which is not viable in a composition whose
+    # components do not stand alone. Both are selection only: no guarantee is
+    # weakened and a command line without them is unchanged.
+    test.add_argument(
+        "--list", action="store_true", dest="list_tests",
+        help="print every collected test name and execute nothing; a query, so "
+             "the mode flags (--sweep / --mock-requires / --schedule-*) do not "
+             "apply to it. Combined with --filter, list only the selection "
+             "(issue #843)")
+    test.add_argument(
+        "--filter", metavar="PATTERN", default=None,
+        help="run only the collected test units whose name contains PATTERN "
+             "(a plain substring, not a regex); a PATTERN that selects nothing "
+             "exits 2 with a message, never a silent green; a tier the "
+             "selection leaves with no unit it runs (prop test / fault test "
+             "are py-tier-only) reports a skip with the reason, never a pass "
+             "(issue #843)")
     test.add_argument("--backend", default="py",
                       choices=("py", "ts", "rust", "java", "wasm", "go", "all"),
                       help="tier to run the `test` blocks on (default: py); "

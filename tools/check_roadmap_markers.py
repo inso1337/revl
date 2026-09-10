@@ -23,7 +23,14 @@ Three things fail the gate:
   2. A marker names a branch that no longer exists on the remote. A reader
      cannot follow it, so the marker points at nothing.
   3. A marker cites a commit sha that is a commit in THIS repo but is not
-     reachable from the base ref.
+     reachable from the base ref. This is the one rule that needs HISTORY to
+     answer, and a CI checkout does not have it: `actions/checkout` clones at
+     depth 1, so it holds one commit and none of the commits the roadmap
+     cites. The lane used to fall into the "not a commit in this repo, ignore
+     it" case for every citation and print OK having examined nothing. It now
+     deepens a shallow checkout once before it judges, and reports how many
+     citations it resolved and how many it could not. See `citation_audit`
+     and `citation_unexamined_report`.
 
 A fourth fails it only in the PULL REQUEST context, under `--head-branch`:
 
@@ -35,8 +42,19 @@ A fourth fails it only in the PULL REQUEST context, under `--head-branch`:
      `fix/x`") is a historical statement that survives the deletion and does
      NOT fail: only the in-flight phrasing does. See `self_branch_findings`.
 
-WHAT THIS GATE CANNOT KNOW, and will not pretend to know. It cannot tell
-whether a landed branch actually CLOSED the finding its marker is attached to.
+WHAT THIS GATE CANNOT KNOW, and will not pretend to know. A backticked hex
+token that is not a commit in this repository is NOT judged: the roadmap pins
+foreign repos in the same shape (`inso1337/cordis-py@... 1c5e6f1`, the
+cordis-wasm B3 commit) and `ed25519` is a valid hex string. That rule is sound
+for a COMPLETE history and meaningless for a SHALLOW one, because there "not a
+commit here" means "not in this checkout" rather than "not in this project".
+The two are separated and the shallow one is reported with a count, so this
+gate cannot print "all consistent with origin/main" while having resolved zero
+citations. A shallow checkout is deepened once, before any verdict, to try to
+make the complete case true.
+
+WHAT THIS GATE CANNOT KNOW, continued. It cannot tell whether a landed branch
+actually CLOSED the finding its marker is attached to.
 A branch merges for many reasons: it can fix one instance of a defect and leave
 forty-seven exposed, it can de-collide one pair of test roots while the suite
 still dies at collection, it can be a partial slice, or it can be reverted
@@ -146,7 +164,10 @@ Usage:
     python3 tools/check_roadmap_markers.py --roadmap <path>
 
 Exit status is 0 when every marker agrees with git, 1 when any does not, and
-2 when the environment cannot answer the question (no git, no base ref).
+2 when the environment cannot answer the question (no git, no base ref). A
+commit citation the checkout could not examine does NOT fail the gate and is
+NOT reported as OK either: it exits 0 with a report that names the count it
+could not examine and why. See `citation_unexamined_report`.
 """
 from __future__ import annotations
 
@@ -205,7 +226,9 @@ BASELINE_NAMESPACES = frozenset({
 
 # A backticked hex token. Foreign-repo pins (cordis-py, cordis-wasm, stc-go)
 # are spelled the same way, so a token that is not a commit in THIS repo is
-# ignored rather than guessed at: see _sha_findings.
+# ignored rather than guessed at on a COMPLETE history: see citation_audit,
+# which also has to tell that case apart from a shallow checkout that simply
+# cannot see the commit.
 SHA_RE = re.compile(r"`([0-9a-f]{7,40})`")
 
 # `use "stdlib/x.rvl"`, `docs/design/foo.md`, `backends/python/emit.py:279`.
@@ -283,6 +306,38 @@ class Git:
 
     def is_shallow(self) -> bool:
         return self.run("rev-parse", "--is-shallow-repository")[1] == "true"
+
+    def complete_history(self) -> bool:
+        """True when this checkout holds the repository's whole history.
+
+        `is_commit` answers False for two unrelated reasons and the difference
+        decides what the sha pass is allowed to say. With a COMPLETE history it
+        means "not a commit in this repository": a pin to another repo
+        (`inso1337/cordis-py@... 1c5e6f1`) or a hex token that is not a sha at
+        all (`ed25519`). With a SHALLOW one it means "not in this checkout",
+        which is a fact about the clone and says nothing about the roadmap. CI
+        checks out at depth 1, which is exactly the second case for every
+        citation at once.
+        """
+        return not self.is_shallow()
+
+    def ensure_full_history(self) -> bool:
+        """True when the history is complete, deepening a shallow checkout.
+
+        BOUNDED: `fetch` runs at most once per process (`Git.fetched`). A
+        per-citation `git fetch origin <sha>` is not an option, and that is a
+        property of the roadmap rather than a preference: it cites ABBREVIATED
+        shas (`542bbad`), and git cannot fetch a ref it cannot spell. Measured
+        against the real remote, `git fetch --depth 1 origin 542bbad` answers
+        `fatal: couldn't find remote ref 542bbad`, while the same fetch with
+        the full 40 characters succeeds. Expanding the abbreviation needs the
+        very object we are trying to obtain, so the unit of deepening is the
+        history, not the citation.
+        """
+        if self.complete_history():
+            return True
+        self.fetch()
+        return self.complete_history()
 
     def fetch(self) -> None:
         """Fetch every remote head once, deepening a shallow clone.
@@ -583,34 +638,153 @@ def self_branch_findings(markers: list[dict], branch: str) -> list[str]:
     return findings
 
 
-def sha_findings(text: str, git: Git) -> list[str]:
-    """Shas cited in the roadmap that are commits here but not on the base ref.
+def cited_shas(text: str) -> list[tuple[int, str]]:
+    """Backticked hex tokens, unique, each with the first line it appears on."""
+    out: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for m in SHA_RE.finditer(line):
+            sha = m.group(1)
+            if sha in seen:
+                continue
+            seen.add(sha)
+            out.append((lineno, sha))
+    return out
+
+
+def citation_audit(text: str, git: Git) -> dict:
+    """Judge the roadmap's commit citations, and say what could not be judged.
 
     A hex token that is not a commit in this repo is IGNORED, not guessed at:
     the roadmap pins foreign repos the same way (`inso1337/cordis-py@... 1c5e6f1`,
     the cordis-wasm B3 commit), and `ed25519` is a valid hex string. This gate
     can only speak for this repository's history.
+
+    That rule is sound for a COMPLETE history and backwards for a SHALLOW one,
+    where "not a commit here" means "not in this checkout". A depth-1 CI
+    checkout holds one commit, so EVERY citation lands in the ignore case and
+    the old code printed `roadmap markers OK` having resolved zero citations.
+    It could not tell that apart from a roadmap whose citations are all
+    foreign pins, which is the false green this function exists to remove. The
+    shape was measured on 2026-09-10 in a real `--depth 1` clone of this repo:
+    the file cites 86 unique hex tokens, the old gate resolved 0 of them and
+    printed a bare OK with exit 0.
+
+    So the two admissions are kept apart. Before any verdict, a shallow
+    checkout is deepened once (see `Git.ensure_full_history`), which is what
+    makes CI answer the question instead of declining it. Whatever is still
+    unresolved after that is reported as `unexamined` with a count, so a bare
+    OK is impossible in both cases. Nothing here reports an unexamined
+    citation as a finding: an unexamined citation is not a contradiction, and
+    calling it one would fail `lint` on every checkout that is short of
+    history.
+
+    Returns the counts `main` prints plus the findings it exits on. A finding
+    is only ever produced from a COMPLETE history, where "sha is here and is
+    not an ancestor of the base ref" is a statement about the roadmap.
     """
+    tokens = cited_shas(text)
+    full = git.ensure_full_history() if tokens else True
+    reachable = 0
     findings: list[str] = []
-    seen: set[str] = set()
-    for lineno, line in enumerate(text.splitlines(), 1):
-        for m in SHA_RE.finditer(line):
-            sha = m.group(1)
-            if sha in seen or not git.is_commit(sha):
-                continue
-            seen.add(sha)
-            if git.ok("merge-base", "--is-ancestor", sha, git.base):
-                continue
-            refs = git.containing_refs(sha) or ["(no origin branch)"]
-            findings.append(
-                f"L{lineno}: cites commit `{sha}`, which is NOT reachable from "
-                f"{git.base}.\n"
-                f"    reachable from: {', '.join(refs[:5])}\n"
-                f"    Either the work is not on main and the text should not imply "
-                f"it is, or the commit was rebased away and the sha needs replacing "
-                f"with the one that landed."
-            )
-    return findings
+    foreign: list[str] = []
+    unexamined: list[str] = []
+    for lineno, sha in tokens:
+        if not git.is_commit(sha):
+            (foreign if full else unexamined).append(sha)
+            continue
+        if git.ok("merge-base", "--is-ancestor", sha, git.base):
+            reachable += 1
+            continue
+        if not full:
+            # The object is here but the ancestry is not: a shallow boundary
+            # grafts its commits as roots, so "not an ancestor" is an artefact
+            # of the truncation and not a contradiction in the roadmap.
+            # Measured on 2026-09-10 against the real repo: a 10-root shallow
+            # clone of it reported 76 citations unreachable, and all 76 are
+            # ancestors of origin/main in a complete clone. Never report an
+            # artefact as a finding.
+            unexamined.append(sha)
+            continue
+        refs = git.containing_refs(sha) or ["(no origin branch)"]
+        findings.append(
+            f"L{lineno}: cites commit `{sha}`, which is NOT reachable from "
+            f"{git.base}.\n"
+            f"    reachable from: {', '.join(refs[:5])}\n"
+            f"    Either the work is not on main and the text should not imply "
+            f"it is, or the commit was rebased away and the sha needs replacing "
+            f"with the one that landed."
+        )
+    return {
+        "total": len(tokens),
+        "reachable": reachable,
+        "findings": findings,
+        "foreign": foreign,
+        "unexamined": unexamined,
+        "full_history": full,
+    }
+
+
+def citation_coverage(audit: dict, roadmap: Path, base: str) -> str:
+    """The sentence that turns OK into a claim about the citations.
+
+    Printed on every run that passes the sha lane, so `checked` of `total`
+    cannot be mistaken for a full check. The zero in that number is the bug
+    this exists for: a depth-1 CI checkout resolved zero citations and still
+    printed OK.
+    """
+    total = audit["total"]
+    if not total:
+        return f"Checked 0 commit citations: {roadmap.name} cites no hex token."
+    checked = audit["reachable"] + len(audit["findings"])
+    lines = [
+        f"Checked {checked} of the {total} commit citation(s) in "
+        f"{roadmap.name}: {audit['reachable']} reachable from {base}, "
+        f"{len(audit['findings'])} not.",
+    ]
+    if audit["foreign"]:
+        lines.append(
+            f"  The other {len(audit['foreign'])} backticked hex token(s) are "
+            f"not commits in this repository and are not judged: the roadmap "
+            f"pins foreign repos in the same shape (`inso1337/cordis-py@... "
+            f"1c5e6f1`) and `ed25519` is a valid hex string."
+        )
+    return "\n".join(lines)
+
+
+def citation_unexamined_report(audit: dict, roadmap: Path, base: str,
+                               scanned: int) -> str:
+    """What to print instead of OK when citations could not be examined.
+
+    Deliberately NOT a finding and deliberately not the word OK: an
+    unexamined citation is an admission about the checkout, not a
+    contradiction in the roadmap, and this text exists so the gate cannot
+    claim consistency it never established.
+    """
+    n = len(audit["unexamined"])
+    return (
+        f"roadmap markers NOT FULLY CHECKED: {scanned} in-progress marker(s) "
+        f"with a named branch.\n"
+        f"\n"
+        f"{n} of the {audit['total']} commit citation(s) in {roadmap.name} "
+        f"could NOT be examined against {base}.\n"
+        f"This checkout is SHALLOW (`git rev-parse --is-shallow-repository` "
+        f"answers true), so it holds a truncated history, and that history "
+        f"could not be deepened here (`git fetch --unshallow`, suppressed by "
+        f"--no-fetch or failed by the network).\n"
+        f"\n"
+        f"In a shallow checkout an unexamined citation cannot be told apart "
+        f"from a pin to another repository, so the sha-reachability lane is "
+        f"DECLINING TO ANSWER rather than reporting a contradiction. That is "
+        f"not a pass: nothing here says any citation is reachable from "
+        f"{base}.\n"
+        f"Deepen the clone (`git fetch --unshallow origin`) or drop --no-fetch "
+        f"and re-run. CI's `lint` job has the network, so it deepens and "
+        f"judges every citation.\n"
+        f"\n"
+        f"This gate checked that the markers do not CONTRADICT git. It did NOT "
+        f"check the commit citations."
+    )
 
 
 def items(text: str) -> list[dict]:
@@ -1658,7 +1832,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="ref the roadmap's claims are measured against "
                          f"(default {DEFAULT_BASE})")
     ap.add_argument("--no-fetch", action="store_true",
-                    help="never touch the network; verdicts may be stale")
+                    help="never touch the network; verdicts may be stale. Also "
+                         "declines the one deepening the commit-citation check "
+                         "uses on a shallow checkout, so that check then "
+                         "reports how many citations it could not examine "
+                         "instead of how many are reachable.")
     ap.add_argument("--head-branch", default="",
                     help="the PR's own head branch. ALSO fail when an "
                          "in-progress marker names THIS branch: merging "
@@ -1728,7 +1906,10 @@ def main(argv: list[str] | None = None) -> int:
     namespaces |= {h.split("/", 1)[0] for h in heads if "/" in h}
     namespaces -= dirs
     markers = collect_markers(text, dirs, namespaces, heads)
-    findings = branch_findings(markers, git) + sha_findings(text, git)
+    # The sha audit runs FIRST so that its one bounded deepening happens before
+    # any ancestry claim is made about a branch marker too.
+    audit = citation_audit(text, git)
+    findings = branch_findings(markers, git) + audit["findings"]
     # PR context only. `--head-branch` is passed as `github.head_ref`, which is
     # empty on a push to main, so main gets the same run it always got.
     head_branch = args.head_branch.strip()
@@ -1769,9 +1950,14 @@ def main(argv: list[str] | None = None) -> int:
         print(note)
 
     scanned = len(_dedupe(markers))
+    coverage = citation_coverage(audit, roadmap, args.base)
     if not findings:
+        if audit["unexamined"]:
+            print(citation_unexamined_report(audit, roadmap, args.base, scanned))
+            return 0
         print(f"roadmap markers OK: {scanned} in-progress marker(s) with a named "
               f"branch, all consistent with {args.base}.")
+        print(coverage)
         print("This gate checked that the markers do not CONTRADICT git. It did "
               "not, and cannot, check that any landed branch actually closed the "
               "finding it is attached to.")
@@ -1781,6 +1967,14 @@ def main(argv: list[str] | None = None) -> int:
           f"({scanned} in-progress marker(s) named a branch)\n")
     for f in findings:
         print(f"  - {f}\n")
+    print(coverage + "\n")
+    if audit["unexamined"]:
+        print(
+            f"NOTE: {len(audit['unexamined'])} of {audit['total']} commit "
+            f"citation(s) could not be examined in this SHALLOW checkout, so the "
+            f"count above understates what this run judged. Deepen the clone "
+            f"(`git fetch --unshallow origin`) or drop --no-fetch and re-run.\n"
+        )
     print(
         "The roadmap's prose contradicts git. Fix the PROSE, not this gate.\n"
         "\n"

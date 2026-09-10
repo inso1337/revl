@@ -1,0 +1,41 @@
+// REJECTED — G5: the same crossing carried in a list and read out by index.
+//
+// `let ts = [w.task.run]` puts the `run` operation — declared `emission` — in a
+// list, and `dispatch1(ts[0])` projects it back out. The container and the index
+// are both spelling: the method reference that reaches the helper is the one the
+// slot's `undo` fires in teardown. A walk that reads the `undo` expression's own
+// nodes sees an index into a local and no emission, which is why the check has
+// to follow the value into the elements, not just into the local's own value.
+//
+// expected error:
+//   the `undo` of this bracket calls `w.task.run`, which is an emission —
+//     a bracket inverse runs in teardown and may not cross a boundary (G5)
+
+extern pure fn pure1(k: Str) -> Int = @py { return 1 }
+
+fn dispatch1(f: (Str) -> Int) -> Int { return f("z") }
+
+service Net { emission[net] fn send(msg: Str) -> Int }
+service Task { emission[net] fn run(prompt: Str) -> Int }
+service S { fn go() -> Int }
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+  }
+}
+
+component Sup requires net: Net provides s: S {
+  let w = effect spawn Worker with { } undo w.dispose()
+  provide s {
+    fn go() {
+      let ts = [w.task.run]
+      effect pure1("k")
+      undo   dispatch1(ts[0])
+      return 1
+    }
+  }
+}

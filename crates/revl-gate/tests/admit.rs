@@ -9,7 +9,10 @@
 //! only the crate gets the refusals, and — the load-bearing half — that no
 //! input path produces something a caller could read as an admission.
 
-use revl_gate::{admit, compile_to, gate_version, Tier, Verdict, MAX_SOURCE_BYTES};
+use revl_gate::{
+    admit, admit_into, compile_to, gate_version, Tier, Verdict, MANIFEST_ROW_LIMIT,
+    MAX_SOURCE_BYTES,
+};
 
 // ------------------------------------------------------ refusals that agree
 
@@ -140,6 +143,51 @@ fn a_frontier_gap_reads_as_not_admitted_on_the_wire() {
     assert_eq!(verdict.code(), Some("FRONTIER"));
     assert_eq!(verdict.kind(), "outside_frontier");
     assert!(verdict.to_json().contains("\"admitted\":false"));
+}
+
+// The size bound is not a ROW bound either. `admit_into` hands its manifest to
+// the fold, and the fold consumes one stack frame per `;`-separated row before
+// it decides anything: 2_700 rows of `A/b/;` are 13 KB, far under
+// MAX_SOURCE_BYTES, and ABORT a 1 MiB stack, while the 8 MiB default goes down
+// at ~20_000 rows. A rust stack overflow aborts, which `catch_unwind` cannot
+// turn back into a verdict, so the row count is bounded ahead of the parser.
+// The probes read the bound out of the crate rather than restating it, for the
+// same reason `frontier_probe` is generated.
+
+#[test]
+fn a_manifest_over_the_row_bound_is_declined_rather_than_risked() {
+    // The always-live trigger, and the one this bound exists for.
+    let wire = "A/b/;".repeat(MANIFEST_ROW_LIMIT + 1);
+    assert!(wire.len() < MAX_SOURCE_BYTES / 10);
+    let verdict = admit_into("fn id(x: Int) -> Int { return x }", &wire);
+    assert!(verdict.is_undecided());
+    assert_eq!(verdict.code(), Some("FRONTIER"));
+    assert_eq!(verdict.kind(), "outside_frontier");
+    assert!(verdict.to_json().contains("\"admitted\":false"));
+    match verdict {
+        Verdict::OutsideFrontier { reason } => {
+            // The refusal states the bound rather than describing a resource
+            // failure: an embedder has to be able to act on it.
+            assert!(reason.contains(&MANIFEST_ROW_LIMIT.to_string()), "{}", reason);
+            assert!(reason.contains("row"), "{}", reason);
+        }
+        other => panic!("a row count over the bound must not be decided, got {:?}", other),
+    }
+}
+
+#[test]
+fn a_manifest_under_the_row_bound_is_still_folded() {
+    // Non-vacuity in the other direction: a ceiling, not a wall. The wire below
+    // the bound is decided exactly as it was before the bound existed.
+    let under = "A/b/;".repeat(MANIFEST_ROW_LIMIT - 1);
+    let verdict = admit_into("fn id(x: Int) -> Int { return x }", &under);
+    assert_ne!(verdict.kind(), "outside_frontier", "{:?}", verdict);
+    assert_eq!(verdict, Verdict::NoObjection);
+    // And the empty manifest is still the standalone gate, byte for byte.
+    assert_eq!(
+        admit_into("fn id(x: Int) -> Int { return x }", ""),
+        admit("fn id(x: Int) -> Int { return x }")
+    );
 }
 
 // The front end is recursive descent, so nesting costs stack. The byte bound

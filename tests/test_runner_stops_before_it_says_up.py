@@ -34,7 +34,10 @@ from revl import _process_runner  # noqa: E402
 def test_the_stop_handlers_are_installed_before_the_up_line():
     src = inspect.getsource(_process_runner.run)
     handler = src.index("add_signal_handler")
-    up = src.index('print(f"[{name}] UP"')
+    # issue #814 routed the `UP` line through `_funnel_line` (the registry
+    # scrub the conductor's `[name] UP` exact-string match still has to see),
+    # so the line is pinned by its own text literal, not by the sink it uses.
+    up = src.index('f"[{name}] UP"')
     assert handler < up, (
         "`[name] UP` is printed before SIGTERM is handled: the conductor stops "
         "the placement the instant it reads that line, so a signal in the "
@@ -46,7 +49,7 @@ def test_both_stop_signals_are_covered():
     event, and a teardown that only survives one of the two is half a
     guarantee."""
     src = inspect.getsource(_process_runner.run)
-    handler_block = src[:src.index('print(f"[{name}] UP"')]
+    handler_block = src[:src.index('f"[{name}] UP"')]
     assert "signal.SIGTERM" in handler_block
     assert "signal.SIGINT" in handler_block
 

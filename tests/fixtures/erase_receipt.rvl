@@ -1,0 +1,79 @@
+// Fixture for tests/test_erasure_receipt.py: roadmap item 472's erasure
+// half: the signed erasure receipt over one realm's erase report.
+//
+// Realm `vault` is the whole scope of the receipt, and it crosses the boundary
+// in each of the three irreversible-plus-revertible shapes a replica row can
+// carry, so one fixture pins the whole disposition vocabulary:
+//
+//   stash      : a `witnessed` extern, action class (a): revertible, and its
+//                registered inverse `unstash` is the row's named channel
+//   put        : an emission extern that OWNS its reversal through a declared
+//                `compensate` slot (item 254's shape, commit 4413fc8), so
+//                `restore` offsets it and the row reads `compensated`
+//   leak       : a bare emission: nothing was done about it, and the row names
+//                no inverse because the declaration names none
+//   index.add  : a plain in-process service emission, so the realm's crossing
+//                set is not only network traffic
+//
+// Realm `other` crosses the boundary too, in the same composition. Its crossing
+// must never appear in a receipt for `vault`: the receipt's scope is the realm
+// that was measured, and a receipt that named another realm's replica would be
+// evidence about something nobody asked to erase.
+
+type Witness = { path: Str }
+type FsError = { code: Str }
+
+extern pure fn unstash(w: Witness) -> Unit = @py {
+    return
+}
+
+extern witnessed[fs] fn stash(path: Str) -> Result[Witness, FsError] undo idempotent unstash(result) = @py {
+    return Ok({'path': path})
+}
+
+extern emission[net.vault_api] fn put(body: Str) -> Int
+  compensate restore()
+  = @py { return 1 }
+
+extern emission[net.vault_api] fn restore() -> Int = @py { return 0 }
+
+extern emission[net.vault_api] fn leak(body: Str) -> Int = @py { return 2 }
+
+service Index {
+  emission fn add(doc: Str)
+}
+
+component Vault provides index: Index {
+  isolate index in realm("vault")
+  let cells = effect Map.new() undo cells.drop()
+  provide index {
+    fn add(doc) {
+      effect cells.insert("last", doc)
+      undo   cells.remove("last")
+    }
+  }
+}
+
+component VaultApp requires index: Index {
+  isolate index in realm("vault")
+  effect stash("residency-record")
+  emit put("record")
+  emit leak("stray")
+  emit index.add("doc")
+}
+
+component OtherIndex provides index: Index {
+  isolate index in realm("other")
+  let cells = effect Map.new() undo cells.drop()
+  provide index {
+    fn add(doc) {
+      effect cells.insert("other", doc)
+      undo   cells.remove("other")
+    }
+  }
+}
+
+component OtherApp requires index: Index {
+  isolate index in realm("other")
+  emit index.add("elsewhere")
+}

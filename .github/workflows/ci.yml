@@ -220,6 +220,19 @@ jobs:
       # pass closed the seven landed-branch markers, and the three that survived
       # it (items 392 and 406 naming deleted branches, item 425 F3 citing a sha
       # only on an unmerged branch) were reworded in this same commit.
+      #
+      # issue #876: the sha arm of that check needs HISTORY, and
+      # `actions/checkout` clones at depth 1, where there is none. Every
+      # citation was therefore unresolved, every one fell through the "a hex
+      # token that is not a commit in this repo is ignored" case, and the gate
+      # printed `roadmap markers OK` having resolved ZERO of the roadmap's 86
+      # unique citations: a green gate on the repo's own admission gate. The
+      # tool now deepens a shallow checkout once (`git fetch --unshallow`,
+      # measured 2026-09-10 at 3m41s and 14 MB -> 76 MB) and prints how many
+      # citations it resolved, or the count it could NOT examine instead of
+      # printing OK. Do not shorten the checkout to speed this job up: a
+      # truncated checkout is exactly the case the gate now reports, and it
+      # reports it rather than passing.
       # A (contradiction), B (delegation), C (orphan) and E (duplicate
       # headers) are all ON, and all four are GREEN on main as of this merge.
       # C joins the line here: every open or delegated finding in the file now

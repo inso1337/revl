@@ -365,8 +365,15 @@ def test_a_genuine_seam3_entry_is_not_gated_and_never_causes_a_boot_refusal(tmp_
     assert "Seam 3" in result.stdout, trace          # recognized, not gated
     assert "REFUSED (admission)" not in trace, trace
     assert "BOOT REFUSED" not in trace, trace
-    # it got as far as actually trying to reach the peer -- it WAS wired
-    assert "_connect" in trace or "OSError" in trace, trace
+    # it got as far as actually trying to reach the peer -- it WAS wired.
+    # The runner's catch-all (issue #814) now prints ONE redacted line instead
+    # of letting a bare traceback escape to stderr, so the connect is
+    # identified by the exception class rather than by the `_connect` frame a
+    # traceback used to show. A Unix-socket connect to a path no peer is
+    # listening on is exactly `FileNotFoundError` (Errno 2), which is an
+    # OSError; the older two signals are kept for the traceback case.
+    assert ("_connect" in trace or "OSError" in trace
+            or "FileNotFoundError" in trace), trace
 
 
 # ---------------------------------------------------------------------------
