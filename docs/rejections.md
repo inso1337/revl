@@ -54,6 +54,7 @@ to the diagnostic; see docs/why-traces.md.
 | T1 | declared types are checked | checker |
 | T2 | absence is Opt[T]; `null` has no type | checker |
 | T3 | a hole is an obligation: it checks, but it never runs (docs/holes.md) | admission gate |
+| T-UNRESOLVED | a type this compilation does not declare is refused as unresolved, never reported as a mismatch it cannot check | checker |
 <!-- docgen:guarantees end -->
 
 ## G1 — declared access
@@ -513,6 +514,33 @@ Fix, two designed surfaces (roadmap item 380):
   the shape, and `value_opt(v, "kind")` / `value_has(v, "kind")` /
   `value_field_or(v, "kind", d)` read a field tolerantly by string key (which
   also sidesteps the reserved-word-key mangle that started items 279/299).
+
+## T-UNRESOLVED, a type this compilation does not declare
+
+A named type is checked against its declaration: `Row` means the shape the
+`type Row = {...}` in this compilation gives it. When the declaration is not
+part of this compilation, there is nothing to check against, and the frontend
+says so instead of pretending it checked. It does not report a mismatch: a
+record literal whose fields all match the declared shape would make the
+diagnostic a false statement about a correct program.
+
+```revl reject T-UNRESOLVED
+pub fn make_row() -> Row {
+  return { name: "x", n: 1 }
+}
+```
+
+```
+this function's return expects `Row`, got `{n: Int, name: Str}`; `Row` has no declaration in this compilation
+```
+
+Fix: declare `Row` in this compilation, or pass the file that declares it in
+the same compile invocation (`revl compile a.rvl b.rvl`), which is the whole
+program and checks clean. Only a record literal reaching an unresolvable
+nominal name is reported this way. A scalar meeting a name that does not
+resolve is still `T1`, because the opaque-name contract of
+[docs/generics.md](generics.md) and the arrow-annotation hygiene rule
+(`examples/rejections/t35_...`) depend on that reading.
 
 ## Everything else
 
