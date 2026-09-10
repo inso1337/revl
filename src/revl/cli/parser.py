@@ -669,6 +669,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     test = sub.add_parser("test", help="compile and run `test` blocks")
     test.add_argument("files", nargs="+")
+    # selection and reporting (issue #843): `--list` answers "which tests does
+    # this compilation collect" (the half of the liveness question that had no
+    # answer at all) and `--filter` gives a targeted inner loop without
+    # compiling a reduced file set, which is not viable in a composition whose
+    # components do not stand alone. Both are selection only: no guarantee is
+    # weakened and a command line without them is unchanged.
+    test.add_argument(
+        "--list", action="store_true", dest="list_tests",
+        help="print every collected test name and execute nothing; a query, so "
+             "the mode flags (--sweep / --mock-requires / --schedule-*) do not "
+             "apply to it. Combined with --filter, list only the selection "
+             "(issue #843)")
+    test.add_argument(
+        "--filter", metavar="PATTERN", default=None,
+        help="run only the collected test units whose name contains PATTERN "
+             "(a plain substring, not a regex); a PATTERN that selects nothing "
+             "exits 2 with a message, never a silent green; a tier the "
+             "selection leaves with no unit it runs (prop test / fault test "
+             "are py-tier-only) reports a skip with the reason, never a pass "
+             "(issue #843)")
     test.add_argument("--backend", default="py",
                       choices=("py", "ts", "rust", "java", "wasm", "go", "all"),
                       help="tier to run the `test` blocks on (default: py); "
