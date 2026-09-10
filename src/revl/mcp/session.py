@@ -4874,7 +4874,12 @@ class Session:
     # unchanged. A standing grant and a distilled auto-approve rule are
     # DELIBERATELY not consulted for a multi-party ticket: each of those is one
     # operator's authority recorded once, and one operator's authority is not N
-    # distinct humans.
+    # distinct humans. That exclusion is enforced in ONE place, the
+    # `_multi_party_rules` predicate, and NOT by three guards a fourth admission
+    # path could miss: `mint_standing_grant` refuses to mint (both routes),
+    # `_find_standing_grant` refuses to match a grant minted before the rule was
+    # bound, and `_auto_rule_covers` refuses to cover. See its docstring for the
+    # full call-site list, including why `_find_standing_approval` is not one.
     #
     # What is new is the decision graph `self._quorums` keeps and the `quorum-*`
     # WAL records it writes: who was asked, who voted, which votes were refused
@@ -4882,6 +4887,46 @@ class Session:
     # `requestId` the ledger mints against, because a ticket hash names a QUESTION
     # (see `_issue_ticket`) and the next asking of that question owes its own
     # quorum rather than inheriting the last one's votes.
+
+    def _multi_party_rules(self, ticket: dict) -> list:
+        """THE item-471 predicate: every covering policy rule that DENIES
+        single-party authority over this crossing, or `[]` when every covering
+        rule is answerable by one operator's standing yes (`roadmap item 471`).
+
+        A rule denies it when it names the operators who may answer at all
+        (`require 1 of {a, b}` is "either of these two humans"), when it demands
+        more than one distinct approver (`require 2 of {a, b, c}`), or both. A
+        rule that names approvers is answered by those humans' votes; a rule that
+        demands several is answered by several distinct ones. Either way it is
+        NOT a question one operator's standing authority can answer.
+
+        This is the only predicate that decides it, and every admission path
+        consults THIS method rather than re-spelling the condition, so a fourth
+        path cannot be added that quietly forgets it:
+
+          * the VOTE path: `_ticket_approval_shape`, and through it
+            `_issue_ticket`, `approve_ticket`, `override_ticket`,
+            `escalate_ticket`, `revoke_ticket` and `quorum_state`;
+          * the STANDING-GRANT path: `mint_standing_grant` refuses the mint on
+            BOTH ways of naming what is granted (`ticket_hash=` and
+            `capability=`), so no such grant can ever exist, and
+            `_find_standing_grant` refuses to match one (`_live_grant_for`, its
+            only grant primitive, is therefore never reachable for such a
+            ticket either);
+          * the DISTILLED AUTO-APPROVE path: `_auto_rule_covers`, and through it
+            `_find_auto_approve`.
+
+        `_find_standing_approval` is deliberately NOT among the call sites: it is
+        how an ALREADY SATISFIED quorum's ledger entry is spent at its one
+        crossing, so gating it would deadlock the very vote path this predicate
+        protects."""
+        if self.sandbox is None \
+                or getattr(self.sandbox, "approval_rule_for", None) is None:
+            return []
+        return [rule for rule in (
+            self.sandbox.approval_rule_for(cap)
+            for cap in ticket.get("capabilities") or [])
+            if rule is not None and (rule.names_approvers() or rule.is_quorum())]
 
     def _ticket_approval_shape(self, ticket: dict):
         """The bound policy's multi-party shape for this ticket, or None when the
@@ -4893,16 +4938,7 @@ class Session:
         than silently answered against one of the two rules: "which humans does
         this need" must have one answer or none (item 246's refuse-don't-degrade,
         applied to the multi-party clause)."""
-        if self.sandbox is None \
-                or getattr(self.sandbox, "approval_rule_for", None) is None:
-            return None
-        shapes = []
-        for cap in ticket.get("capabilities") or []:
-            rule = self.sandbox.approval_rule_for(cap)
-            if rule is None:
-                continue
-            if rule.names_approvers() or rule.is_quorum():
-                shapes.append(rule)
+        shapes = self._multi_party_rules(ticket)
         if not shapes:
             return None
         distinct = {(rule.require, rule.approvers) for rule in shapes}
@@ -4911,7 +4947,7 @@ class Session:
                 f"`{cap}` needs {rule.quorum_text()}"
                 for cap, rule in ((c, self.sandbox.approval_rule_for(c))
                                   for c in ticket.get("capabilities") or ())
-                if rule is not None and (rule.names_approvers() or rule.is_quorum()))
+                if rule in shapes)
             raise SessionError(
                 f"cannot decide `{ticket.get('component')}`: this crossing "
                 f"reaches capabilities whose approval rules name different "
@@ -5282,9 +5318,13 @@ class Session:
         overridable.
 
         A reason is required and a missing one is refused: an override without a
-        stated reason is an unattributable act, and the profile gate that decides
-        WHO may override is the `override` operator verb (`revl_override`), so an
-        operator whose profile lacks that grant never reaches here."""
+        stated reason is an unattributable act. NOTE (honest bound, see
+        `docs/design/471-quorum-approval.md` Decision 4): this method is NOT
+        reachable from the MCP transport in this slice. There is no `revl_override`
+        tool, and the `override` / `escalate` / `revoke` / `quorum_state` entries
+        are called only from `tests/test_471_quorum_approval.py`. Who may override
+        in process is therefore the caller, and the operator-verb gate the design
+        note assigns to it lands with the Slice 2 verbs."""
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
@@ -5414,9 +5454,10 @@ class Session:
                 "component": ticket["component"], "requestId": record["requestId"],
                 "by": actor, "counted": self._counted(record),
                 "require": record["require"], "outcome": "escalated",
-                "how_to_resolve": ("the vote path is closed; only revl_override "
-                                   "(the `override` operator verb) can still admit "
-                                   "this crossing")}
+                "how_to_resolve": ("the vote path is closed and the crossing "
+                                   "stays refused: no verb reachable from the "
+                                   "transport can still admit it (the `override` "
+                                   "operator verb is Slice 2, design only)")}
 
     def revoke_ticket(self, ticket_hash: str, *, reason: str | None = None,
                       as_token: str | None = None) -> dict:
@@ -5734,6 +5775,13 @@ class Session:
         class_c = ticket.get("classCCapabilities") or []
         if not class_c:
             return None  # no class-(c) capability to cover (fail-closed)
+        # roadmap item 471: a rule that names approvers, or demands more than one,
+        # is answered by VOTES and by nothing else. One operator's standing grant
+        # is not N distinct named approvers, so it never covers such a crossing
+        # (`_multi_party_rules` is the single predicate, and this is the only
+        # grant primitive: `_live_grant_for` is reached from nowhere else).
+        if self._multi_party_rules(ticket):
+            return None
         now = self._now_ms()
         grants: list[dict] = []
         seen: set[int] = set()
@@ -5863,6 +5911,12 @@ class Session:
         if self._auto_rule_suspended(entry):
             entry["suspended"] = True
             return False
+        # roadmap item 471: a rule carrying the multi-party clause is answered by
+        # VOTES and by nothing else, so no distilled rule covers a crossing it
+        # gates (`_multi_party_rules` is the single predicate). Checked AFTER the
+        # H1 suspend above so a grown glob is still latched as suspended.
+        if self._multi_party_rules(ticket):
+            return False
         if entry["realm"] is not None \
                 and entry["realm"] != ticket.get("realm", ""):
             return False
@@ -5950,7 +6004,12 @@ class Session:
         Bounded by construction: at least one of `uses`, `ttl_ms`, or a policy
         `requires approval ttl` rule must bound the grant — an unbounded standing
         grant is refused. Gated (in the mcp verb dispatch) by the `approve`
-        operator verb, exactly as `approve_ticket`."""
+        operator verb, exactly as `approve_ticket`.
+
+        Roadmap item 471: refused outright when the crossing's covering rule
+        names approvers or demands more than one, on BOTH routes. Such a rule is
+        answered by votes, and one operator's standing authority is not N
+        distinct named approvers (`_multi_party_rules`)."""
         if uses is not None:
             if not isinstance(uses, int) or isinstance(uses, bool) or uses < 1:
                 raise SessionError(
@@ -5966,6 +6025,9 @@ class Session:
         candidate_hash: str | None = None
         policy_ttl: int | None = None
         is_lease = False
+        # the capabilities whose covering rules decide whether this crossing may
+        # be answered by one operator's standing authority at all (item 471).
+        shape_caps: list = []
 
         if ticket_hash is not None:
             ticket = self._tickets.get(ticket_hash)
@@ -6019,6 +6081,7 @@ class Session:
             component = ticket["component"]
             candidate_hash = ticket["candidateHash"]
             policy_ttl = self._ticket_ttl_ms(ticket)
+            shape_caps = ticket.get("capabilities") or []
         elif capability is not None:
             if self._class_map is None:
                 raise SessionError(
@@ -6040,11 +6103,33 @@ class Session:
                     f"rather than an ambiguous proactive grant")
             component = targets[0]["component"]
             candidate_hash = targets[0]["candidateHash"]
+            shape_caps = targets[0].get("capabilities") or []
         else:
             raise SessionError(
                 "provide a `capability` (+ `uses`/`ttlMs`) to mint a standing "
                 "grant, or a ticket `hash` to mint one from an outstanding "
                 "class-(c) ticket")
+
+        # roadmap item 471: the mint is refused HERE, at the source, for BOTH
+        # ways of naming what is granted (an outstanding ticket and a proactive
+        # capability), so that no standing grant for a quorum-gated crossing can
+        # ever exist for a later crossing to match. A standing grant is ONE
+        # operator's authority recorded once (item 344), and one operator is not
+        # N distinct named approvers; honouring it would admit the crossing with
+        # no votes at all and leave the question it gated unanswered in the
+        # durable graph. `_multi_party_rules` is the single predicate every
+        # admission path consults.
+        rules = self._multi_party_rules({"capabilities": shape_caps})
+        if rules:
+            raise SessionError(
+                f"cannot mint a standing grant for `{component}`: the approval "
+                f"rule covering this crossing demands {rules[0].quorum_text()}, "
+                f"and a multi-party rule is answered by votes, never by a "
+                f"standing grant (roadmap item 471, separation of duties). A "
+                f"standing grant is one operator's authority recorded once, so "
+                f"it would admit the crossing with zero votes. Cast a vote "
+                f"instead with `revl_approve(hash=…, vote=…, asToken=…)`, or "
+                f"approve each crossing single-use once the quorum is met")
 
         # item 416c: a resource dimension declared `Secret[T]` binds to the
         # REDACTED placeholder (approval.bind_resource_scope), never the real
