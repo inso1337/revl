@@ -21,6 +21,8 @@ import re
 import sys
 from pathlib import Path, PurePosixPath
 
+from ._host import TrucNameRefusal
+
 _HERE = Path(__file__).resolve().parent
 
 #: The bootstrap lock format truc will boot from. Bumped from 0 (a bare file
@@ -231,6 +233,14 @@ def main(argv: list[str] | None = None) -> int:
     except (SessionError, RevlError) as error:
         print(f"truc: {error}", file=sys.stderr)
         code = 70
+    except TrucNameRefusal as error:
+        # Raised from a host body while it executes a plan, so the launcher is
+        # the first place that can phrase it — the planner never sees the name,
+        # which is the whole reason the host checks it. Reported in the shape a
+        # planner refusal takes (one line on stderr, exit 1) because that is
+        # what it is from the operator's side: truc refused, disk untouched.
+        print(f"truc: refused — {error}", file=sys.stderr)
+        code = 1
     finally:
         try:
             if session.loaded:
