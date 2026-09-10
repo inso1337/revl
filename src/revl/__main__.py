@@ -222,6 +222,77 @@ def _run_policy(args) -> int:
     return 1 if result["refused"] else 0
 
 
+def _run_simulate(args) -> int:
+    """`revl simulate policy-diff OLD NEW --history RUN.wal` (item 468 / issue
+    #820) — the bounded preview a policy change over recorded history opens.
+
+    Reads the action set out of one WAL, decides each recorded action under OLD
+    and under NEW through the two legs `policy.capability_verdict` reads (the
+    deny-lists and the closed allow-lists), and prints the newly allowed set, the
+    newly denied set, and a blast radius bounded by the recorded action set
+    rather than by a number this command invents.
+
+    The admission refuses a crossing on more legs than those two: the
+    agent-sandbox allow-list, the taint-flow tier, the approval and declassify
+    rules, the declaration-strength floors, the evidence bundle and the recovery
+    surface decide by facts a WAL does not carry. `policy_diff.LEGS` names every
+    leg with the fact it reads, a recorded pair whose surface moves on one of
+    them is reported undecided with the leg named rather than unchanged, and no
+    writer records the declared capability scope at all, so the action set of a
+    WAL a recorder wrote is empty and those records are withheld instead of
+    printing as a clean diff.
+
+    Never admits, refuses or mutates. Exit 0 when the change newly allows no
+    recorded crossing, leaves none undecided and withholds none; 1 when any of
+    those is true, so a preview that could not decide an action, could not name
+    one, or could not read the history whole (a torn tail, or a recording that
+    never reached its `activation-complete` record) does not report the change
+    clean; 2 on a usage, parse or read error."""
+    from .policy import PolicyError, component_realms, load_policy
+    from .policy_diff import PolicyDiffError, diff, load_history, render, widened
+
+    if args.simulate_command != "policy-diff":
+        print(f"error: unknown simulate verb `{args.simulate_command}`",
+              file=sys.stderr)
+        return 2
+    try:
+        old = load_policy(args.old)
+    except (PolicyError, RevlError, OSError) as error:
+        print(f"error: cannot read policy `{args.old}`: {error}", file=sys.stderr)
+        return 2
+    try:
+        new = load_policy(args.new)
+    except (PolicyError, RevlError, OSError) as error:
+        print(f"error: cannot read policy `{args.new}`: {error}", file=sys.stderr)
+        return 2
+
+    # A realm-scoped rule decides an action by the realms its component joins,
+    # and the WAL records none. The composition is the only source of them, so
+    # an action a realm rule selects is undecided without `--composition`.
+    realms: dict = {}
+    if args.composition:
+        try:
+            manifest = compile_files(args.composition).get("manifest") or {}
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        for entry in manifest.get("components") or []:
+            realms[entry.get("name")] = component_realms(manifest,
+                                                         entry.get("name"))
+    try:
+        wal = load_history(args.history)
+    except PolicyDiffError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    result = diff(old, new, wal, realms=realms, label=args.history)
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(render(result))
+    return 1 if widened(result) else 0
+
+
 def _run_goal(args, ir: dict) -> int:
     """`revl goal audit` — the blind-spot report (item 441 / issue #120, S2).
 
@@ -1088,6 +1159,11 @@ def main(argv: list[str] | None = None) -> int:
     # history query.
     if args.command == "policy":
         return _run_policy(args)
+
+    # `revl simulate` (item 468) also reads its own inputs (two policies and a
+    # recorded WAL), so it is routed before the shared compile step too.
+    if args.command == "simulate":
+        return _run_simulate(args)
 
     try:
         profile = None

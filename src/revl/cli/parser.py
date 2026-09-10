@@ -315,6 +315,50 @@ def build_parser() -> argparse.ArgumentParser:
                                "facet is marked `recomputed` vs `published` "
                                "(item 290 §4)")
 
+    # item 468 / issue #820: `revl simulate policy-diff OLD NEW --history WAL`
+    # — the bounded preview a policy change over recorded history opens. It
+    # reads the action set out of a WAL (the crossings the run declared through
+    # `scope.caps`), decides each one through the two legs the capability
+    # verdict reads, and prints the newly allowed and newly denied sets with a
+    # blast radius bounded by the recorded action set itself. The legs it cannot
+    # read decide by facts a WAL does not carry, so a pair whose surface moves
+    # on one of them is undecided with the leg named, and no writer records the
+    # declared scope at all, which makes the action set of a recorder-written
+    # WAL empty and those records withheld rather than clean; a history it could
+    # not read whole (a torn tail, or a recording that never committed) is
+    # withheld the same way. It never admits,
+    # refuses or mutates, and it is not `revl audit --diff` (that gate compares
+    # two audit graphs for authority drift, with no policy on the path).
+    simulate_cmd = sub.add_parser(
+        "simulate",
+        help="preview what a change would have done to recorded history "
+             "(item 468)")
+    simulate_sub = simulate_cmd.add_subparsers(dest="simulate_command",
+                                               required=True)
+    sim_policy = simulate_sub.add_parser(
+        "policy-diff",
+        help="diff two boundary policies over the actions one recorded WAL "
+             "carries: the newly allowed and newly denied action sets plus a "
+             "blast radius bounded by that action set, with a pair whose leg "
+             "surface moves reported undecided and a record no writer scoped "
+             "withheld (as is a history read only in part)")
+    sim_policy.add_argument(
+        "old", metavar="OLD",
+        help="the earlier boundary policy (DSL or JSON)")
+    sim_policy.add_argument(
+        "new", metavar="NEW",
+        help="the later boundary policy, in the same accepted forms as OLD")
+    sim_policy.add_argument(
+        "--history", metavar="RUN.wal", required=True,
+        help="the recorded history to diff the policies over (a WAL)")
+    sim_policy.add_argument(
+        "--composition", action="append", default=[], metavar="PROGRAM.rvl",
+        help="the composition the run was compiled from (repeatable). Supplying "
+             "it resolves the realms a realm-scoped rule decides by; without it "
+             "every action such a rule selects is reported undecided")
+    sim_policy.add_argument("--json", action="store_true",
+                            help="machine-readable diff an agent can consume")
+
     diff_cmd = sub.add_parser(
         "diff",
         help="semantic composition diff: the IR-level structural delta between "
