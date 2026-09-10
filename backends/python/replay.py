@@ -1719,6 +1719,22 @@ REFERENT_OUTLIVES = "outlives-process"           # a file, a durable handle
 REFERENT_IN_PROCESS = "in-process"               # a Map, a registry — dies with us
 REFERENT_UNKNOWN = "unknown"                      # cannot be told; must be proven
 
+#: The record kinds of the multi-party decision graph (roadmap item 471), the
+#: closed set :meth:`WriteAheadLog.record_quorum_event` accepts. Reading them is
+#: the audit's job and needs no reader: they are consent facts, so a recovery
+#: pass skips them exactly as it skips ``approval-granted``.
+_QUORUM_RECORDS = frozenset({
+    "quorum-open",       # the question entered voting
+    "quorum-vote",       # one counted vote
+    "quorum-refused",    # a vote or attempt that was NOT counted, with its reason
+    "quorum-satisfied",  # the decision that admits (by votes, or by override)
+    "quorum-denied",     # the decision that refuses
+    "quorum-expired",    # the deadline passed undecided
+    "quorum-escalated",  # the question was handed up
+    "quorum-revoked",    # the request or a vote was withdrawn
+    "quorum-override",   # an emergency override closed it, as ITSELF, not as votes
+})
+
 #: A coarse, *stated* policy mapping an acquired resource's type name to whether
 #: its referent outlives the process.  The language cannot know this in general
 #: (that is the honest bound — docs/crash-recovery.md §"boundary is the cargo");
@@ -2269,6 +2285,48 @@ class WriteAheadLog:
         crossing prompts again (fail-closed) and the audit tells an operator's cut
         from a natural lapse. Consumes no seq."""
         record = {"record": "distillation-revoked", **entry}
+        self._write(record)
+        return record
+
+    def record_quorum_event(self, kind: str, entry: dict) -> dict:
+        """Append one record of the MULTI-PARTY decision graph (roadmap item 471).
+
+        A `require N of {a, b, c}` rule turns a class-(c) crossing into a
+        question several humans answer, so the audit has to say WHO voted, on
+        WHICH question, and HOW the decision closed - not just that some yes
+        eventually authorized a fire. The eight kinds are one family with one
+        shape (`{"record": <kind>, **entry}`), which is why they share a writer
+        and why `kind` is validated against a closed set (a typo must not write a
+        record no reader knows):
+
+        * ``quorum-open`` - the question entered voting: the required count, the
+          named approver set, the proposer, the ticket hash and candidate hash it
+          is bound to, and the deadline the votes are bound to.
+        * ``quorum-vote`` - one COUNTED vote, by one operator, with its vote id.
+        * ``quorum-refused`` - a vote (or an escalate/override attempt) that was
+          NOT counted, with the reason: duplicate voter, closed decision, expired,
+          not in the approver set, a stale candidate, or a self-approval.
+        * ``quorum-satisfied`` - the decision that admits, carrying ``counted``,
+          ``require`` and ``satisfiedBy`` (``votes`` or ``override``), so an
+          emergency override is legible as an override and can never be mistaken
+          for a quorum of votes.
+        * ``quorum-denied`` - the decision that refuses, when enough approvers
+          voted no that no further vote could reach the count.
+        * ``quorum-expired`` - the timeout: the deadline passed with the question
+          undecided, so no later vote can be counted against it.
+        * ``quorum-escalated`` - an operator handed the question up (the vote
+          path closes; only the override path can still admit it).
+        * ``quorum-revoked`` - the request or a vote was withdrawn.
+
+        Consumes no seq: like ``approval-granted`` these name consent facts (who
+        was asked, who answered, what was decided), not effects. The effect is
+        still the one ``approval-consumed`` + emission pair the decision
+        authorizes, so a decision on disk always has its authority behind it."""
+        if kind not in _QUORUM_RECORDS:
+            raise ValueError(
+                f"unknown quorum record kind {kind!r} - expected one of "
+                f"{', '.join(sorted(_QUORUM_RECORDS))}")
+        record = {"record": kind, **entry}
         self._write(record)
         return record
 
