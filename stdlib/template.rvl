@@ -42,9 +42,13 @@
 //   * control flow and autoescaping inheritance (`{{if}}`, `{{for}}`, blocks,
 //     includes, layout inheritance, a per-directory default context). Every
 //     hole is explicit and flat.
-//   * source positions. A hole records its BYTE OFFSETS (`start`/`end`) so a
-//     later stage can map generated output back to the template, but nothing
-//     maps those offsets to line/column yet.
+//   * source positions. A hole records its `start`/`end` offsets into the
+//     template so a later stage can map generated output back to it, but
+//     nothing maps those offsets to line/column yet. The unit is CODEPOINTS,
+//     not bytes: it is the same unit `length`/`slice`/`charCodeAt` use, so
+//     `tpl.slice(hole.start, hole.end)` is exactly the hole text on every tier.
+//     A reader who assumes bytes and writes `tpl.encode()[start:end]` silently
+//     mis-slices every template with a non-ASCII character before a hole.
 //   * HTML parsing. Context is INTENT, written by the template author (`html` /
 //     `script` / `uri`), not inferred from markup. The module never tries to
 //     find where an attribute or a script element ends.

