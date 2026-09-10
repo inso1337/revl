@@ -2,6 +2,7 @@
 
 ```
 revl erase-report <files…> --realm <r> [--json] [--no-residue-proof]
+                              [--receipt-key PATH] [--receipt-signer NAME]
 ```
 
 A right-to-erasure request asks an operator to prove a tenant's data is gone.
@@ -94,6 +95,37 @@ gate on the MAJOR version and ignore members it does not recognise.
 Exit code: `0` for a clean report; `1` for an unknown realm, an unproven
 teardown (residue left), or a breached other realm. A **bare crossing does not
 fail** the command — it is enumerated by design, not treated as an error.
+
+## The signed receipt (`--receipt-key`)
+
+A report is a document a reader decides to believe. A **receipt** is a document
+a reader can *check*. With `--receipt-key PATH` (or an exported
+`REVL_ERASURE_KEY_FILE` / `REVL_ERASURE_KEY`), the report is signed and the
+receipt rides inside it under `receipt`, in the append-only spirit of every
+other member this toolchain adds. Without a key the document is byte-identical
+to the report this command always produced: the receipt is opt-in.
+
+The receipt names **every replica the erasure reaches**, one row per crossing
+token the report itself enumerated, each carrying the disposition the report
+already assigned it (`revertible`, `compensated`, `unresolved`, `bare`, plus a
+single in-process row reading `reclaimed` or `unproven`), the capability scope
+the crossing ran under, and the declared channel through which that crossing
+can be reversed or offset: an `undo` inverse for a revertible row, a
+`compensate` callee for a compensated or unresolved one, and nothing for a bare
+crossing because the declaration names nothing. The rows come from the G8
+surface above, so a replica the report did not enumerate cannot appear, and a
+receipt for one realm can never name another realm's crossing.
+
+The receipt also carries the canonical sha256 of the report it was issued over,
+so a report edited after issue stops verifying against its own receipt, and it
+is signed with an HMAC-SHA256 domain-separated from `revl attest` and
+`revl deploy`: three signed protocols, three domains, one construction. It
+proves the measurement is unaltered, that every replica the compiler can see is
+named, and that the holder of the signing key issued it. It does **not** prove
+that anything was erased, that an offset landed, or that no copy exists outside
+the boundary, and it says so in its own signed scope header, because that gap is
+the point (see docs/design/472-retention-erasure-receipts.md for the full
+measurement, including what item 472's retention half would still need).
 
 ## Related
 

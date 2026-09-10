@@ -434,6 +434,17 @@ def build_parser() -> argparse.ArgumentParser:
     erase.add_argument("--no-residue-proof", action="store_true",
                        help="skip the runtime teardown proof (static sections "
                             "only; use where the cordis runtime is unavailable)")
+    erase.add_argument("--receipt-key", default=None, metavar="PATH",
+                       dest="receipt_key",
+                       help="sign a portable erasure receipt over this report "
+                            "and embed it under `receipt` (roadmap item 472). "
+                            "Falls back to REVL_ERASURE_KEY_FILE (a path) or "
+                            "REVL_ERASURE_KEY (the secret); never hardcoded "
+                            "(docs/design/472-retention-erasure-receipts.md)")
+    erase.add_argument("--receipt-signer", default=None, metavar="NAME",
+                       dest="receipt_signer",
+                       help="the identity to record as the receipt's issuer, "
+                            "so a verifier can tell who requested the erasure")
 
     plan_cmd = sub.add_parser(
         "plan", help="dry run for admission: the delta a swap would produce, without applying it")
