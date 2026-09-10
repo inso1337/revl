@@ -389,7 +389,10 @@ votes, admitted after, lease-tagged and bounded by the lease's own ttl and uses)
 `test_a_spent_lease_decision_answers_only_once`,
 `test_the_lease_bridge_refuses_a_forged_or_foreign_decision`,
 `test_the_lease_bridge_is_scoped_to_lease_tickets` and
-`test_a_lease_decision_does_not_outlive_the_ticket_it_answered`.
+`test_a_lease_decision_does_not_outlive_the_ticket_it_answered`, with
+`test_a_lease_refusal_is_reasoned_and_names_the_route_that_answers_it` pinning
+that the refusals carry the rule, the composition they leave open and the route
+that unblocks them rather than failing bare.
 `tests/test_capability_leases.py` cannot be exercised here (it is
 `needs_cordis`-gated and the cordis runtime is absent), so the lease lifecycle is
 driven in-process through `_enforce_lease_gate` rather than through `load()`.
