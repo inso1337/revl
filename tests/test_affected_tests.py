@@ -8,6 +8,8 @@ stdlib module picks only the tests that touch its public API.
 from __future__ import annotations
 
 import importlib.util
+import io
+import tokenize
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -362,6 +364,29 @@ def test_test_importers_ignores_prefix_siblings():
     )
 
 
+def bench_dependants(root: Path) -> set[str]:
+    """The test modules that read a `bench/` path in code, comments excluded.
+
+    A comment cannot read an artifact, and counting one reds the whole root
+    suite for a prose cross-reference: #860 added such a mention to
+    `tests/test_gate_crate_admit.py` and this consistency check went red on
+    main. Only mentions that survive comment stripping are dependants.
+    """
+    found = set()
+    for p in sorted((root / "tests").glob("test_*.py")):
+        text = p.read_text(encoding="utf-8")
+        try:
+            tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+            mentions = any(
+                t.type != tokenize.COMMENT and "bench/" in t.string for t in tokens
+            )
+        except (tokenize.TokenError, IndentationError, SyntaxError):
+            mentions = "bench/" in text
+        if mentions:
+            found.add(f"tests/{p.name}")
+    return found
+
+
 def test_bench_dependent_tests_is_the_actual_set_of_bench_readers():
     """`bench/` selects BENCH_DEPENDENT_TESTS instead of the FULL gate, so that
     tuple has to BE the set of test modules that depend on a bench artifact.
@@ -375,11 +400,7 @@ def test_bench_dependent_tests_is_the_actual_set_of_bench_readers():
     from tools.affected_tests import BENCH_DEPENDENT_TESTS
 
     root = Path(__file__).resolve().parent.parent
-    actual = {
-        f"tests/{p.name}"
-        for p in sorted((root / "tests").glob("test_*.py"))
-        if "bench/" in p.read_text(encoding="utf-8")
-    }
+    actual = bench_dependants(root)
     declared = set(BENCH_DEPENDENT_TESTS)
 
     assert declared == actual, (
@@ -389,3 +410,18 @@ def test_bench_dependent_tests_is_the_actual_set_of_bench_readers():
         f"  stale entries (no longer mention bench/): {sorted(declared - actual)}\n"
         "Update tools/affected_tests.py::BENCH_DEPENDENT_TESTS."
     )
+
+
+def test_a_comment_mentioning_bench_is_not_a_bench_dependant(tmp_path):
+    """Pin the comment exclusion directly. It is the whole difference between a
+    prose cross-reference reding main and not: #860 added one and this file's
+    sibling check went red on main."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_prose.py").write_text(
+        "# reads bench/results/latency.json\nVALUE = 1\n", encoding="utf-8"
+    )
+    (tests / "test_reader.py").write_text(
+        'PATH = "bench/results/latency.json"\n', encoding="utf-8"
+    )
+    assert bench_dependants(tmp_path) == {"tests/test_reader.py"}
