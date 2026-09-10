@@ -253,7 +253,7 @@ def test_list_never_reaches_a_tier_runner(monkeypatch, capsys):
 
 
 def test_list_covers_every_named_test_section(tmp_path):
-    """The listing spans `test`, `prop test` and `fault test` — the whole
+    """The listing spans `test`, `prop test` and `fault test`: the whole
     surface `--filter` can select over, not just the plain `test` blocks."""
     source = _write_rvl(
         tmp_path, "x.rvl",
@@ -301,7 +301,7 @@ def test_filter_runs_only_the_selection(tmp_path):
 def test_filter_selects_the_units_every_tier_receives(monkeypatch):
     """The selection is applied to the IR before the dispatch, so "only the
     selected tests run" holds for every tier and every mode that reads a test
-    section — not just the py tier whose verdict lines we can read back."""
+    section, not just the py tier whose verdict lines we can read back."""
     seen = []
 
     def _recording(ir):
@@ -362,7 +362,7 @@ def test_filter_refuses_the_modes_that_do_not_run_named_units(tmp_path):
 
 def test_no_new_flags_keeps_the_aggregate_output_and_exit_codes(tmp_path):
     """Backwards compatibility, pinned: without `--list` / `--filter` the run is
-    the same run — same verdict lines, same aggregate line, same exit codes."""
+    the same run: same verdict lines, same aggregate line, same exit codes."""
     source = _write_rvl(tmp_path, "x.rvl", _THREE)
 
     result = _cli(tmp_path, str(source))
