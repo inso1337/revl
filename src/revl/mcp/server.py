@@ -1105,14 +1105,24 @@ def _tool_approve(arguments: dict) -> dict:
         or proactively against a `capability`.
 
     Gated by the `approve` verb (item 55), so an operator profile scopes who may
-    say yes."""
+    say yes. Item 471: the standing-grant shape is refused outright when the
+    crossing's covering approval rule names approvers or demands a quorum. Such a
+    rule is answered by votes, and one operator's standing authority is not N
+    distinct named approvers (`Session.mint_standing_grant`)."""
     ticket_hash = arguments.get("hash")
     capability = arguments.get("capability")
     uses = arguments.get("uses")
     ttl_ms = arguments.get("ttlMs")
+    vote = arguments.get("vote")
+    as_token = arguments.get("asToken")
     # item 344: any of `capability`/`uses`/`ttlMs` selects the standing-grant
     # path; a bare `hash` keeps the Slice-1 single-use behaviour byte-for-byte.
     if capability is not None or uses is not None or ttl_ms is not None:
+        if as_token is not None or (vote is not None and vote != "approve"):
+            return _session_error(
+                "item 471: a standing grant is minted by ONE operator, so `vote` "
+                "and `asToken` do not apply to it. Cast a quorum vote against a "
+                "ticket `hash` instead")
         try:
             return {"ok": True, **SESSION.mint_standing_grant(
                 ticket_hash=ticket_hash, capability=capability,
@@ -1124,7 +1134,8 @@ def _tool_approve(arguments: dict) -> dict:
                               "approvalRequired response — or a `capability` "
                               "(+ `uses`/`ttlMs`) to mint a standing grant")
     try:
-        return {"ok": True, **SESSION.approve_ticket(ticket_hash)}
+        return {"ok": True, **SESSION.approve_ticket(
+            ticket_hash, vote=vote or "approve", as_token=as_token)}
     except SessionError as error:
         return _session_error(str(error))
 
@@ -2620,7 +2631,27 @@ TOOLS = [
                 "ttlMs": {"type": "integer", "minimum": 1,
                           "description": "item 344: how long (ms) the standing "
                                          "grant stays live; checked at the "
-                                         "crossing against the session clock"}},
+                                         "crossing against the session clock"},
+                "vote": {"type": "string", "enum": ["approve", "deny"],
+                         "description": "item 471: a ticket whose rule demands a "
+                                        "QUORUM takes votes, not a yes/no, so it "
+                                        "refuses a bare `hash`. Cast `approve` or "
+                                        "`deny` here; the question admits only "
+                                        "once the rule's count is reached by "
+                                        "distinct named approvers"},
+                "asToken": {"type": "string",
+                            "description": "item 471: the token of the operator "
+                                           "casting this vote when it is not the "
+                                           "session's bound operator. It must be "
+                                           "one of the rule's named approvers; a "
+                                           "vote from the proposer or from a name "
+                                           "the rule does not carry is refused and "
+                                           "recorded. The name is asserted by the "
+                                           "caller, not verified against a "
+                                           "credential: it binds the NAME that "
+                                           "voted, not the human who sent it "
+                                           "(Decision 5 of the item 471 design "
+                                           "note)"}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_approve,

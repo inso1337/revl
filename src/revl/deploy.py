@@ -470,23 +470,63 @@ RECEIPT_DOMAIN = b"revl.deploy.receipt/v1\x00"
 DEFAULT_CLOCK_SKEW_SECONDS = 300.0
 
 
+class _HostKeyMaterialError(RevlError):
+    """A key file the HOST itself owns could not be read.
+
+    Distinct from a bare :class:`RevlError` because the two send an operator to
+    different machines. This one is the deploy-admit runner's OWN trust
+    configuration — the `--key` files on the command line that invoked it, which
+    the request never carries (design S2.4). A plain `RevlError` out of
+    :func:`serve_deploy_request` is instead a fault in the bundle the CONDUCTOR
+    staged (most concretely `attest.load_attestation` on the bundle's own
+    `attestation.json`), which is fixed on the conductor's disk, not the
+    runner's. The runner's fail-closed reply names which of the two it was, so
+    the two are not confusable at the point the reason is written."""
+
+    def __init__(self, path: Path | str, cause: BaseException) -> None:
+        # `attest.load_key` reports as a `RevlError`, whose rendering already
+        # carries the path; take its plain message so it is not printed twice.
+        detail = getattr(cause, "message", None) or str(cause)
+        super().__init__(str(path), 0, detail)
+
+
+def _load_key(path: Path | str) -> bytes:
+    """Read a raw HMAC key from a file.
+
+    `attest.load_key`'s rule, delegated to rather than restated: the key is the
+    file's bytes with one trailing newline stripped (so a `cat`- or `echo`-built
+    key file round-trips), and nothing else is assumed. docs/revl-attest.md is
+    the rule, and sharing the implementation is what makes it ONE rule instead
+    of two readings of one rule. Every key this module reads off disk (the
+    operator's `--key`, the host's `--host-key`, the far host's receipt key)
+    used to call `Path(...).read_bytes()` itself, so the same file was two
+    different keys: two `key_id`s, and a receipt MACed under one that a
+    verifier following the documented rule could not reproduce."""
+    return attest.load_key(str(path))
+
+
 def _receipt_mac(body: Mapping, host_key: bytes) -> str:
     """The receipt MAC: domain-tagged HMAC-SHA256 over the canonical body bytes
     (`body` is the receipt with its `signature` member removed).
 
-    `ensure_ascii=True` here, unlike the attestation spelling, so a lone
-    surrogate escapes rather than failing to encode. It can still meet a value
-    that will not serialize at all, which is why this raises
-    `attest.NotCanonicalizable` and :func:`verify_receipt` refuses on it."""
-    try:
-        payload = json.dumps(
-            {k: v for k, v in body.items() if k != "signature"},
-            sort_keys=True, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError, UnicodeEncodeError) as error:
-        raise attest.NotCanonicalizable(
-            f"the receipt has no canonical byte spelling: {error}") from error
-    return hmac.new(bytes(host_key), RECEIPT_DOMAIN + payload,
-                    hashlib.sha256).hexdigest()
+    The bytes are `attest._canonical_bytes`'s, the same construction
+    `attest._sign` MACs over, deferred to rather than restated (roadmap 428
+    F10's successor in this module): a verifier who canonicalizes the way
+    docs/revl-attest.md documents recomputes exactly these bytes, which is only
+    true while there is one implementation of the spelling. This used to call
+    `json.dumps` HERE, with the default `ensure_ascii=True`, so a body carrying
+    non-ASCII text (a runtime version, a nonce, a name) was `\\u`-escaped and
+    MACed to different bytes than the documented rule, and a valid receipt read
+    as invalid by anyone who followed it.
+
+    A body with no canonical byte spelling (a lone surrogate) raises
+    `attest.NotCanonicalizable`: :func:`verify_receipt` turns that into a
+    refusal, and the signing boundary (:func:`admit`, :func:`commit_receipt`)
+    lets it escape, because a body that cannot be MACed has no signature to
+    return."""
+    return hmac.new(bytes(host_key), RECEIPT_DOMAIN + attest._canonical_bytes(
+        {k: v for k, v in body.items() if k != "signature"}),
+        hashlib.sha256).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -1003,7 +1043,7 @@ def admit_bundle_chain(bundle_dir: Path | str, *,
     """
     keys: dict[str, bytes] = {}
     for path in key_paths:
-        raw = Path(path).read_bytes()
+        raw = _load_key(path)
         keys[attest.key_id(raw)] = raw
     trust = TrustStore(keys=keys, backend=backend,
                        require_gauntlet=require_gauntlet,
@@ -1484,6 +1524,11 @@ def serve_admit_request(request_wire: Mapping, *,
     A malformed request fails CLOSED to a :data:`LINK_TRANSPORT` REFUSE (the
     same shape :func:`admit` uses for a bad chain), because a runner that could
     not parse what it was asked to admit must refuse, never admit on a guess.
+
+    A `key_paths` file this runner cannot read is raised as
+    :class:`_HostKeyMaterialError`, the one failure on this path that is the
+    runner's OWN configuration rather than the conductor's staged bundle — the
+    runner's outer loop attributes the two differently (:func:`deploy_admit_command`).
     """
     try:
         request = AdmitRequest.from_wire(request_wire)
@@ -1499,7 +1544,10 @@ def serve_admit_request(request_wire: Mapping, *,
 
     keys: dict[str, bytes] = {}
     for path in key_paths:
-        raw = Path(path).read_bytes()
+        try:
+            raw = _load_key(path)
+        except (OSError, RevlError) as error:
+            raise _HostKeyMaterialError(path, error) from error
         keys[attest.key_id(raw)] = raw
     trust = TrustStore(
         keys=keys, backend=request.backend,
@@ -4188,16 +4236,25 @@ def deploy_admit_command(args) -> int:
 
     A line that is not a JSON object is answered with a fail-closed
     :data:`LINK_TRANSPORT` refusal rather than skipped: a runner that could not
-    read what it was asked must refuse audibly, so the conductor's challenge check
-    trips instead of the exchange hanging.
+    read what it was asked must refuse audibly, so the conductor fails closed on
+    a reply it cannot tie to its request instead of the exchange hanging.
+
+    The reason names the failure that actually occurred. Only a key file this
+    runner owns (`--key`) is reported as unreadable key material
+    (:class:`_HostKeyMaterialError`); everything else out of
+    :func:`serve_deploy_request` — a corrupt staged bundle the CONDUCTOR
+    supplied, most concretely `attest.load_attestation` on the bundle's own
+    `attestation.json` — is reported as what it is, because the two faults are
+    fixed on different machines and one wording for both sends an operator to
+    debug the host when the conductor's bytes are wrong.
     """
     key_paths = list(getattr(args, "key", None) or [])
     host_key = None
     host_key_path = getattr(args, "host_key", None)
     if host_key_path is not None:
         try:
-            host_key = Path(host_key_path).read_bytes()
-        except OSError as error:
+            host_key = _load_key(host_key_path)
+        except (OSError, RevlError) as error:
             print(f"error: cannot read --host-key {host_key_path!r}: {error}",
                   file=sys.stderr)
             return 1
@@ -4228,11 +4285,36 @@ def deploy_admit_command(args) -> int:
                     "the deploy-admit runner received a request line that is "
                     "not a JSON object, so nothing was served")
             else:
-                reply = serve_deploy_request(
-                    request_wire, key_paths=key_paths, host_key=host_key,
-                    require_gauntlet=require_gauntlet,
-                    require_conformance=require_conformance,
-                    runtime_versions=runtime_versions)
+                try:
+                    reply = serve_deploy_request(
+                        request_wire, key_paths=key_paths, host_key=host_key,
+                        require_gauntlet=require_gauntlet,
+                        require_conformance=require_conformance,
+                        runtime_versions=runtime_versions)
+                except _HostKeyMaterialError as error:
+                    # A `--key` file on THIS command line is unreadable, so the
+                    # host has no trust store to admit against. The runner's own
+                    # configuration, never anything the request carried.
+                    reply = _refusal(
+                        LINK_TRANSPORT,
+                        f"the deploy-admit runner could not read its own key "
+                        f"material, so nothing was served: {error}")
+                except (OSError, RevlError) as error:
+                    # Everything else: the request could not be SERVED, and the
+                    # error names the path it failed on. Most often the staged
+                    # bundle is unreadable — bytes the CONDUCTOR supplied, so
+                    # blaming the runner's key material would send an operator
+                    # to the wrong machine.
+                    reply = _refusal(
+                        LINK_TRANSPORT,
+                        f"the deploy-admit runner could not serve the request, "
+                        f"so nothing was served: {error}")
+                # Either way the reply is a fail-closed LINK_TRANSPORT refusal:
+                # it is a RECEIPT_KIND record with no `challenge`, so the
+                # conductor's `AdmitResponse.from_wire` rejects it on the kind
+                # guard and `request_admission` fails closed on a reply it
+                # cannot tie to its request. One line in, one line out — the
+                # exchange never hangs.
         sys.stdout.write(json.dumps(reply, sort_keys=True) + "\n")
         sys.stdout.flush()
     return 0
@@ -4298,7 +4380,7 @@ def deploy_command(args) -> int:
                 backend=getattr(args, "backend", None) or "python",
                 require_gauntlet=getattr(args, "require_gauntlet", False),
                 require_conformance=getattr(args, "require_conformance", False))
-        except OSError as error:
+        except (OSError, RevlError) as error:
             print(f"error: cannot admit bundle {bundle_arg!r}: {error}",
                   file=sys.stderr)
             return 1
@@ -4780,8 +4862,8 @@ def _ssh_participant(target: "DeployTarget", *, local_bundle: Path | str,
             f"stage them. A cross-machine deploy with nowhere to stage is "
             f"refused rather than run against unstaged bytes.")
     try:
-        host_key = Path(str(host_key_path)).read_bytes()
-    except OSError as error:
+        host_key = _load_key(host_key_path)
+    except (OSError, RevlError) as error:
         return None, (f"target {target.process!r}: cannot read the far host's "
                       f"receipt key {host_key_path!r}: {error}")
 
