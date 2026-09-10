@@ -46,7 +46,9 @@ proven in-bounds.
 from __future__ import annotations
 
 import json
+import re
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 
@@ -117,7 +119,8 @@ def _parse_ttl(text: str) -> int:
 
 @dataclass(frozen=True)
 class ApprovalRule:
-    """A ``capability C requires approval [ttl D]`` rule (item 246, Slice 2).
+    """A ``capability C requires approval [ttl D] [require N of {a, b, c}]`` rule
+    (item 246, Slice 2; roadmap item 471 adds the quorum clause).
 
     The operator-owned floor: a capability whose crossing needs a human `yes`,
     minted as a typed `Approval[C]` (the language surface) or a per-call ticket
@@ -125,12 +128,86 @@ class ApprovalRule:
     lives in the boundary policy the operator writes, not the source. `pattern`
     is a glob over capability tokens (the same tokens `may reach` constrains);
     `ttl_ms` is the approval's lifetime, defaulted at the crossing when None.
-    """
+
+    `require`/`approvers` are the multi-party half (roadmap item 471). A rule
+    that names approvers admits only votes attributed to those operators, and
+    `require > 1` additionally demands that many DISTINCT approvers cast a vote
+    bound to one ticket before any approval is minted. Both default to the
+    single-party shape (`require=1`, no named approvers), so every rule written
+    before item 471 parses and behaves byte-identically; the fields are appended
+    after `ttl_ms` with defaults because the DSL and JSON parse sites construct
+    this type positionally."""
+
     pattern: str
     ttl_ms: int | None = None
+    require: int = 1
+    approvers: tuple[str, ...] = ()
 
     def covers(self, token: str) -> bool:
         return fnmatchcase(token, self.pattern)
+
+    def is_quorum(self) -> bool:
+        """True when this rule demands MORE THAN ONE distinct approver, which is
+        the property that makes a ticket unanswerable by a single `yes`."""
+        return self.require > 1
+
+    def names_approvers(self) -> bool:
+        """True when this rule restricts who may answer at all. A rule may name
+        approvers without demanding several of them (`require 1 of {a, b}` is
+        "either human may say yes"); the two clauses are independent."""
+        return bool(self.approvers)
+
+    def quorum_text(self) -> str:
+        """The clause as the operator wrote it, for refusal messages, so a
+        refusal quotes the rule the policy actually carries."""
+        return f"require {self.require} of {{{', '.join(self.approvers)}}}"
+
+
+_QUORUM_CLAUSE = re.compile(r"require\s+(\d+)\s+of\s*\{([^}]*)\}",
+                            re.IGNORECASE)
+
+
+def _parse_approvers(names: Iterable[str]) -> tuple[str, ...]:
+    """The approver list of a `require N of {…}` clause (DSL) or `of` key
+    (JSON). Refuses an empty list, a duplicate name and a wildcard: a duplicate
+    would let one approver supply two of the N votes, and a glob would make the
+    set of counted identities depend on a pattern rather than on named
+    operators."""
+    names = tuple(part.strip() for part in names if part.strip())
+    if not names:
+        raise ValueError("the `require N of {…}` clause names no approver")
+    seen = set()
+    for name in names:
+        if any(ch.isspace() for ch in name) or "{" in name or "}" in name:
+            raise ValueError(
+                f"malformed approver {name!r}: approver names are operator "
+                f"tokens separated by commas")
+        if name == "*":
+            raise ValueError(
+                "an approver set cannot be `*`: a quorum counts NAMED "
+                "operators, and a wildcard would make the count unattributable")
+        if name in seen:
+            raise ValueError(
+                f"duplicate approver {name!r}: a repeated name would let one "
+                f"operator supply two votes")
+        seen.add(name)
+    return names
+
+
+def _parse_quorum(require_text: str, approvers: tuple[str, ...]) -> int:
+    """The N of a `require N of {…}` clause, checked against its list."""
+    if not require_text.isdigit() or int(require_text) < 1:
+        raise ValueError(
+            f"malformed quorum size {require_text!r}: expected `require <N> of "
+            f"{{a, b}}` with N a positive integer (0 of anything is not a "
+            f"quorum)")
+    require = int(require_text)
+    if require > len(approvers):
+        raise ValueError(
+            f"`require {require} of {{{', '.join(approvers)}}}` can never be "
+            f"satisfied: only {len(approvers)} approver"
+            f"{'' if len(approvers) == 1 else 's'} may vote")
+    return require
 
 
 @dataclass(frozen=True)
@@ -952,8 +1029,10 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                                   f"expected `component <glob>` or `realm <name>`")
             continue
         # the approval gate (item 246, Slice 2): `capability <glob> requires
-        # approval [ttl <D>]`. Operator-owned — an author cannot waive it by
-        # omission, so the requirement lives here, not in the source (Decision 3).
+        # approval [ttl <D>] [require <N> of {a, b, c}]`. Operator-owned: an
+        # author cannot waive it by omission, so the requirement lives here, not
+        # in the source (Decision 3). The optional quorum clause is roadmap item
+        # 471; when absent the rule keeps the single-approver shape.
         if "requires approval" in low:
             head, _, tail = line.partition(" requires approval")
             parts = head.split()
@@ -961,21 +1040,32 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
                 raise PolicyError(source, lineno,
                                   f"a `requires approval` rule names one "
                                   f"capability glob: `capability <glob> requires "
-                                  f"approval [ttl <D>]`, got {raw.strip()!r}")
+                                  f"approval [ttl <D>] [require <N> of {{a, b}}]`, "
+                                  f"got {raw.strip()!r}")
             ttl_ms = None
+            require, approvers = 1, ()
             rest = tail.strip()
+            match = _QUORUM_CLAUSE.search(rest)
+            if match:
+                try:
+                    approvers = _parse_approvers(match.group(2).split(","))
+                    require = _parse_quorum(match.group(1), approvers)
+                except ValueError as exc:
+                    raise PolicyError(source, lineno, str(exc))
+                rest = (rest[: match.start()] + " " + rest[match.end():]).strip()
             if rest:
                 ttl_parts = rest.split()
                 if len(ttl_parts) != 2 or ttl_parts[0].lower() != "ttl":
                     raise PolicyError(source, lineno,
                                       f"unexpected trailer after `requires "
-                                      f"approval`: {rest!r} — only `ttl <D>` is "
-                                      f"allowed")
+                                      f"approval`: {rest!r}, only `ttl <D>` and "
+                                      f"`require <N> of {{a, b}}` are allowed")
                 try:
                     ttl_ms = _parse_ttl(ttl_parts[1])
                 except ValueError as exc:
                     raise PolicyError(source, lineno, str(exc))
-            approval_rules.append(ApprovalRule(parts[1], ttl_ms))
+            approval_rules.append(
+                ApprovalRule(parts[1], ttl_ms, require, approvers))
             continue
         # the quarantine tier (item 45): require an untrusted candidate to prove
         # itself in the wasm sandbox before it may be admitted to a hosted tier
@@ -1085,7 +1175,29 @@ def _parse_json(text: str, source: str | None) -> Policy:
                 ttl_ms = _parse_ttl(str(entry["ttl"]))
             except ValueError as exc:
                 raise PolicyError(source, 1, str(exc))
-        approval_rules.append(ApprovalRule(cap, ttl_ms))
+        require, approvers = 1, ()
+        raw_of = entry.get("of")
+        raw_require = entry.get("require")
+        if raw_of is not None or raw_require is not None:
+            # roadmap item 471. The two keys are written together or not at all:
+            # defaulting a missing `require` to the length of `of` would turn a
+            # typo into a unanimous quorum, so an incomplete clause is refused.
+            if raw_of is None or raw_require is None:
+                raise PolicyError(source, 1,
+                                  "an approval quorum needs both `require` and "
+                                  "`of`: {\"require\": 2, \"of\": [\"a\", "
+                                  "\"b\"]}")
+            if not isinstance(raw_of, list) or not all(
+                    isinstance(name, str) for name in raw_of):
+                raise PolicyError(source, 1,
+                                  "the `of` approver list must be a list of "
+                                  "operator names")
+            try:
+                approvers = _parse_approvers(raw_of)
+                require = _parse_quorum(str(raw_require), approvers)
+            except ValueError as exc:
+                raise PolicyError(source, 1, str(exc))
+        approval_rules.append(ApprovalRule(cap, ttl_ms, require, approvers))
     declassify_rules: list[Rule] = []
     for entry in doc.get("declassify") or []:
         sel = entry.get("component") or entry.get("realm")
@@ -1305,6 +1417,32 @@ def _allowed(token: str, allow: tuple[str, ...]) -> bool:
     if token == UNBOUNDED:
         return UNBOUNDED in allow
     return _matches_any(token, allow)
+
+
+def _deny_matches(token: str, patterns: tuple[str, ...]) -> bool:
+    """Whether a deny rule's patterns refuse one crossing, including the
+    `UNBOUNDED` clause the capability leg has always carried. Named (item 468)
+    so the gate, the `revl policy evaluate` dry-run and the recorded-history
+    diff read one predicate rather than three spellings of it."""
+    return _matches_any(token, patterns) or \
+        (token == UNBOUNDED and UNBOUNDED in patterns)
+
+
+def capability_verdict(policy: Policy, name: str, realms: frozenset[str],
+                       token: str) -> str:
+    """`"allow"` or `"deny"` for one component reaching one capability token,
+    from the same predicates the capability leg of `evaluate` reads: every deny
+    rule first (deny wins), then the closed allow-list a component or realm rule
+    opens. A component no allow rule selects is unconstrained, which is what
+    `_allow_for` returning None means. The caller owns what "undecided" is: a
+    realm-scoped rule needs `realms`, which only a compiled composition has."""
+    for rule in _deny_for(policy, name, realms):
+        if _deny_matches(token, rule.patterns):
+            return "deny"
+    allow = _allow_for(policy, name, realms)
+    if allow is not None and not _allowed(token, allow):
+        return "deny"
+    return "allow"
 
 
 def _location(manifest: dict, name: str) -> tuple[str | None, int | None]:
@@ -1918,8 +2056,7 @@ def evaluate(policy: Policy, audit: dict,
         for r in reach:
             # deny-lists refuse regardless of any allow (deny wins)
             for rule in denies:
-                if _matches_any(r.token, rule.patterns) or \
-                        (r.token == UNBOUNDED and UNBOUNDED in rule.patterns):
+                if _deny_matches(r.token, rule.patterns):
                     violations.append(
                         _deny_violation(manifest, name, r, rule, profile))
             # a closed component/realm allow-list

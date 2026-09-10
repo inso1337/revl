@@ -63,14 +63,35 @@ crate ships NO admission at all:
   on (an overflow ABORTS, and an abort cannot be turned back into a refusal);
 * a native gate panic -> `Verdict::OutsideFrontier`, caught;
 * a wire string that is not `""` and carries no `|` -> `Verdict::OutsideFrontier`;
-* `compile_to` -> `Verdict::OutsideFrontier` unconditionally (Stage 4);
-* `admit_into` -> not defined at all; manifest-spanning admission does not exist
-  on the self-host path and a fake would be worse than its absence.
+* `compile_to` -> `Verdict::OutsideFrontier` unconditionally (Stage 4).
 
 A crate that cannot issue an admission cannot commit the false-admit defect.
 What it does buy is the sound direction: a local, in-process, Python-free
 REFUSAL that byte-agrees with the reference on the covered corpus
 (`tests/test_gate_crate_admit.py`).
+
+The manifest arm (issue #346)
+-----------------------------
+The missing layer above is the TYPE layer, and it is its own lane. It is not
+the only way to reach an admission question, though: item 186's ambient gate
+asks a different one — given a RUNNING composition plus an incoming text, what
+does the composition/guarantee layer say about the UNION? `selfhost/lower.rvl`
+answers that today (`admit_ambient(src, manifest)`, pinned against
+`admit_src(manifest ++ src)` in `tests/test_selfhost_lower.py`) and
+`selfhost/compile.rvl` already threads a manifest through its own `admit_into`.
+What was missing on rust was the BINDING, so a rust embed could not ask the
+question the py loop (`bench/inprocess_gate_harness.py`) already asks.
+
+`admit_into(source, manifest)` is therefore a real arm, not a stub: both inputs
+go to the native fold and what that fold decides is what the crate reports. It
+closes the G2/G3 legs of ambient admission — provision disjointness, route
+realms, cross-manifest acyclicity — and NOTHING ELSE. The manifest wire carries
+the two row kinds the landed wave covers (provision `C/k/r`, requirement `C<k`)
+plus the `!halted` header; every OTHER row kind the wire reserves, the
+replacement (`-C`) and handoff (`C=k:T`) rows, is REFUSED as `MANIFEST` rather
+than ignored, because those waves land with the type layer. It issues no
+admission either: a fold verdict is mapped through the same admission-free arms,
+so `to_json` still emits `"admitted": false` everywhere.
 
 Usage
 -----
@@ -131,6 +152,20 @@ CRATE_VERSION = "0.1.0"
 # a bound that no corpus program comes near is the honest way to keep the
 # fail-closed promise true.
 MAX_SOURCE_BYTES = 256 * 1024
+
+# A manifest row wire is folded by `parse_manifest_rows` (`selfhost/lower.rvl`),
+# which recurses ONE STACK FRAME PER `;`-SEPARATED ROW. The byte bound above is
+# therefore not a stack bound, and the manifest arm proved it: 2_700 rows of
+# `A/b/;` are 13 KB, far under MAX_SOURCE_BYTES, and abort a 1 MiB stack, while
+# 20_100 rows (100 KB) abort an 8 MiB one. Measured release thresholds are
+# ~2_600 rows on 1 MiB and ~20_000 rows on 8 MiB. This is the bound that
+# actually bounds the fold: it is checked BEFORE the wire reaches the parser,
+# and it is set under half the smallest measured threshold (the wasm crate sets
+# no `stack-size`, so the toolchain's 1 MiB default is the floor and it cannot
+# be measured in this tree, since wasm32-unknown-unknown is not installed),
+# because a stack exhaustion ABORTS and no `catch_unwind` can turn an abort back
+# into a refusal.
+MANIFEST_ROW_LIMIT = 512
 
 # What the native gate actually decides, in one line, stamped into the crate's
 # `COVERED_LAYER`, its README and its provenance so the three cannot disagree.
@@ -354,6 +389,17 @@ pub const FRONTIER_ID: &str = "@FRONTIER_ID@";
 /// near keeps the fail-closed promise honest.
 pub const MAX_SOURCE_BYTES: usize = @MAX_SOURCE_BYTES@;
 
+/// Manifest row wires above this many `;`-separated rows are refused rather
+/// than folded, for the same reason [`MAX_SOURCE_BYTES`] refuses a source: the
+/// fold recurses one stack frame per row and a stack exhaustion ABORTS, which
+/// no `catch_unwind` can turn back into a refusal. The two limits are NOT the
+/// same kind of bound: the byte limit above does not bound the manifest, since
+/// 2_700 rows of `A/b/;` are 13 KB and already overflow a 1 MiB stack, and both
+/// limits are checked before the wire reaches the parser so an embedder cannot
+/// spend the host on either side of the door. A manifest wire no corpus comes
+/// near keeps the fail-closed promise honest.
+pub const MANIFEST_ROW_LIMIT: usize = @MANIFEST_ROW_LIMIT@;
+
 @EXCLUDED_KEYWORDS@
 @EXCLUDED_BUILTINS@
 
@@ -496,7 +542,9 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //! argument — no disk, no clock, no live state, no cordis runtime boot —
 //! returning the self-host compiler's verdict on a STANDALONE program. It is
 //! `selfhost/lower.rvl::admit_src` (lex -> parse -> the composition/guarantee
-//! gate) compiled to rust through the reference rust backend.
+//! gate) compiled to rust through the reference rust backend. [`admit_into`] is
+//! the same gate reached across a composition boundary: the verdict on `source`
+//! once it is admitted INTO a RUNNING manifest (item 186).
 //!
 //! ```no_run
 //! use revl_gate::{admit, Verdict};
@@ -557,14 +605,60 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //!   back into a refusal;
 //! * the native gate panics while deciding (caught via `catch_unwind`);
 //! * the native gate returns a verdict wire shape this crate does not
-//!   recognise.
+//!   recognise;
+//! * in [`admit_into`], the manifest wire is longer than [`MAX_SOURCE_BYTES`],
+//!   or carries more than [`MANIFEST_ROW_LIMIT`] `;`-separated rows, or the
+//!   fold's answer is a shape this crate does not recognise. Both manifest
+//!   limits are checked before the wire reaches the parser, because the fold
+//!   consumes one stack frame per row: the byte limit on its own is NOT a bound
+//!   on the fold's stack use, and a stack exhaustion aborts rather than
+//!   refusing.
 //!
-//! # Standalone-only
+//! # The manifest arm (issue #346)
 //!
-//! There is no `admit_into`. Admission INTO a running composition spans a
-//! manifest (G2/G3 over the live composition), which the self-host pipeline has
-//! no parameter for; a stub that ignored the manifest would be exactly the
-//! wave-through this crate exists to prevent. Use `revl.gate.admit_into` on py.
+//! [`admit_into(source, manifest)`](admit_into) answers a different question
+//! from [`admit`]: not "is this text well formed on its own", but "does this
+//! text compose with the composition that is ALREADY RUNNING". `source` is
+//! decided against the union of the manifest and the incoming text, so a key the
+//! running composition already holds conflicts (G2), a route into a realm the
+//! union does not provide dangles (G2), and a dependency cycle that spans the
+//! manifest boundary is a cycle (G3). The manifest arrives as item 186's row
+//! wire (`docs/design/186-ambient-admission-guarantees.md`), and the fold is
+//! `selfhost/lower.rvl::admit_ambient`, compiled to rust like [`admit`].
+//!
+//! What this arm decides is the G2/G3 legs of ambient admission and nothing
+//! else. The wire has room for row kinds the landed wave does not carry —
+//! replacement (`-C`) and handoff (`C=k:T`), both of which need the type layer —
+//! and those rows are REFUSED as `MANIFEST` rather than skipped, because a row
+//! this gate cannot honour is exactly where a stub that ignored its inputs would
+//! wave a program through. An empty `manifest` (`""`) is the empty composition,
+//! which makes [`admit_into`] byte-identical to [`admit`]: the arm is a
+//! generalisation, not a second implementation.
+//!
+//! ```no_run
+//! use revl_gate::{admit_into, Verdict};
+//!
+//! // `Kv/store/` is a provision the running composition already holds.
+//! let running = "Kv/store/;App/app/;App<store";
+//! let candidate = "service Store { fn get(k: Str) -> Str } \
+//!                  component CacheLayer provides store: Store { \
+//!                    provide store { fn get(k) { return k } } }";
+//! match admit_into(candidate, running) {
+//!     // A refusal the reference agrees with: this candidate re-provides `store`.
+//!     Verdict::Refused { code, message } => println!("refused ({}): {}", code, message),
+//!     // NOT an admission. See "This gate issues no admissions" above.
+//!     Verdict::NoObjection => println!("nothing this gate can refuse"),
+//!     // The gate declined to decide at all: a row it cannot honour, a frontier
+//!     // gap, or an aborted fold. Fail closed.
+//!     Verdict::OutsideFrontier { reason } => println!("undecided: {}", reason),
+//! }
+//! ```
+//!
+//! Like [`admit`], this arm NEVER admits. It does not run the reference type
+//! layer, so a type-incorrect candidate lands on `NoObjection`; and the
+//! requirements a candidate declares are checked for disjointness and
+//! acyclicity, not resolved. Use `revl.gate.admit_into` on py when the decision
+//! must be an admission.
 //!
 //! # `compile_to` is Stage 4
 //!
@@ -618,7 +712,7 @@ pub mod ir;
 pub mod session;
 pub mod symbols;
 
-pub use frontier::{FRONTIER_ID, MAX_SOURCE_BYTES};
+pub use frontier::{FRONTIER_ID, MANIFEST_ROW_LIMIT, MAX_SOURCE_BYTES};
 pub use ir::{check_ir_boundary, IrRefusal, KNOWN_IR_FIELDS, KNOWN_IR_REVISIONS};
 
 /// The semver of the GATE SURFACE itself (`gate_version().api`). Bumped by
@@ -784,6 +878,100 @@ pub fn admit(source: &str) -> Verdict {
     verdict_from_wire(&wire)
 }
 
+/// Rows in a manifest wire, counted the way the fold consumes it: one segment
+/// per `;` boundary plus the trailing one, so `A/b/;` is two rows. The empty
+/// wire is the empty composition, not one empty row.
+fn manifest_rows(manifest: &str) -> usize {
+    if manifest.is_empty() {
+        return 0;
+    }
+    manifest.matches(';').count() + 1
+}
+
+/// The native gate's verdict for `source` once it is admitted INTO the running
+/// composition `manifest` (item 186's ambient gate; issue #346).
+///
+/// `manifest` is the row wire (`docs/design/186-ambient-admission-guarantees.md`):
+/// `C/k/r` for a provision (`r` is the realm, `""` for shared), `C<k` for a
+/// requirement, `!halted` for a halted composition, joined by `;`. The empty
+/// string is the empty composition, so `admit_into(source, "")` is
+/// `admit(source)` byte for byte — this arm generalises [`admit`] rather than
+/// re-implementing it.
+///
+/// The decision is the native fold `selfhost/lower.rvl::admit_ambient`,
+/// compiled to rust like [`admit`]: the incoming text is decided as the
+/// standalone gate decides it, and then the LINK is recomputed over the UNION
+/// of the manifest and the incoming text. That union is where a key the running
+/// composition already holds surfaces (G2 provision conflict), where a route
+/// into a realm the union does not provide dangles (G2), and where a dependency
+/// cycle spanning the manifest boundary is a cycle (G3). Refusals come out
+/// ordered exactly as the single-source composition of `manifest ++ source`
+/// orders them.
+///
+/// What this arm does NOT decide, stated here rather than discovered later:
+///
+/// * the reference TYPE layer — a type-incorrect candidate is
+///   [`Verdict::NoObjection`] here, exactly as it is in [`admit`];
+/// * the row kinds the wire reserves for the deferred waves — a replacement row
+///   (`-C`) or a handoff row (`C=k:T`) is REFUSED with the fold's own `MANIFEST`
+///   code, never skipped. Skipping a row this gate cannot honour is the
+///   wave-through this crate exists to prevent;
+/// * it does not RESOLVE the requirements a candidate declares; it checks them
+///   for disjointness and acyclicity. A `requires` the union does not provide is
+///   a no-objection, and the reference is the only tier that decides it.
+///
+/// As with [`admit`], no input produces an admission: the arm is
+/// `Refused` / `NoObjection` / `OutsideFrontier` like the rest of the surface.
+pub fn admit_into(source: &str, manifest: &str) -> Verdict {
+    if let Some(reason) = frontier::scan(source) {
+        return Verdict::OutsideFrontier { reason };
+    }
+    // The fold parses the manifest with the same deeply-recursive front end, so
+    // the bound that guards the source guards the wire too — and a manifest over
+    // it is declined rather than risked.
+    if manifest.len() > MAX_SOURCE_BYTES {
+        return Verdict::OutsideFrontier {
+            reason: format!(
+                "manifest is {} bytes, above the {}-byte bound this gate will decide (the native front end is deeply recursive and an overflow aborts rather than refusing); ask the reference `revl` toolchain",
+                manifest.len(),
+                MAX_SOURCE_BYTES
+            ),
+        };
+    }
+    // A byte bound is not a stack bound: `selfhost::admit_ambient` fans the wire
+    // into `parse_manifest_rows`, which recurses ONE FRAME PER ROW, so a 13 KB
+    // wire of empty rows overflows a 1 MiB stack. Measured on a release build:
+    // 2_700 rows abort a 1 MiB stack, 20_100 rows (100 KB) abort the 8 MiB
+    // default. Counted and refused HERE, ahead of the parser, because an
+    // overflow aborts and `catch_unwind` below cannot see it.
+    let rows = manifest_rows(manifest);
+    if rows > MANIFEST_ROW_LIMIT {
+        return Verdict::OutsideFrontier {
+            reason: format!(
+                "manifest carries {} rows, above the {}-row bound this gate will fold (the fold recurses one stack frame per row, so the byte bound is not a bound on its stack use, and an overflow aborts rather than refusing); ask the reference `revl` toolchain",
+                rows,
+                MANIFEST_ROW_LIMIT
+            ),
+        };
+    }
+    let owned = source.to_string();
+    let wire_rows = manifest.to_string();
+    // Same contract as `admit`: the emitted stages are total over the surface
+    // they were written for, and "written for" is the thing this crate refuses
+    // to assume. An abort must become a refusal to decide, not a verdict.
+    let wire = match std::panic::catch_unwind(move || selfhost::admit_ambient(owned, wire_rows)) {
+        Ok(wire) => wire,
+        Err(_) => {
+            return Verdict::OutsideFrontier {
+                reason: String::from(
+                    "the native fold aborted while admitting this source into the running manifest, so no verdict was reached; this is a frontier gap — ask the reference `revl` toolchain",
+                ),
+            }
+        }
+    };
+    verdict_from_wire(&wire)
+}
+
 /// Parse the self-host gate's internal `"<TAG>|<message>"` protocol into the
 /// structured verdict, message verbatim, splitting at the FIRST `|` only so a
 /// message carrying `|` survives intact.
@@ -908,6 +1096,214 @@ mod wire_tests {
     fn json_escapes_a_quote_and_a_newline() {
         assert_eq!(json_string("a\"b\nc"), "\"a\\\"b\\nc\"");
     }
+
+    // The manifest arm (issue #346).
+
+    /// The running composition the ambient tests admit into: `Kv` provides
+    /// `store`, `App` provides `app` and requires `store`.
+    const RUNNING: &str = "Kv/store/;App/app/;App<store";
+
+    /// A component that re-provides `store`, the key `Kv` already holds.
+    const AMBIENT_CONFLICT: &str = "service Cache { fn lookup(key: Str) -> Str }\n\
+component CacheLayer requires store: Store provides store: Store {\n\
+  provide store {\n\
+    fn get(key) = key\n\
+    fn bump(n) = n\n\
+    fn put(key, value) = value\n\
+  }\n\
+}\n";
+
+    #[test]
+    fn an_empty_manifest_is_the_standalone_gate() {
+        for source in [
+            "fn id(x: Int) -> Int { return x }",
+            AMBIENT_CONFLICT,
+            "component X provides { fn = }",
+        ] {
+            assert_eq!(
+                admit_into(source, ""),
+                admit(source),
+                "an empty manifest must be the empty composition, decided exactly as the standalone gate decides it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_manifest_arm_refuses_an_ambient_provision_conflict() {
+        match admit_into(AMBIENT_CONFLICT, RUNNING) {
+            Verdict::Refused { code, message } => {
+                assert_eq!(code, "G2");
+                assert!(message.contains("provision conflict"), "{}", message);
+                assert!(message.contains("Kv") && message.contains("CacheLayer"), "{}", message);
+            }
+            other => panic!("expected an ambient G2 refusal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn the_manifest_arm_reads_the_manifest_rather_than_ignoring_it() {
+        // The same bytes ask a DIFFERENT question without the running
+        // composition: standalone, the candidate requires a key it provides
+        // itself (G3). A stub that ignored its manifest argument could not
+        // produce two different codes here.
+        match admit(AMBIENT_CONFLICT) {
+            Verdict::Refused { code, .. } => assert_eq!(code, "G3"),
+            other => panic!("expected a standalone G3 refusal, got {:?}", other),
+        }
+        match admit_into(AMBIENT_CONFLICT, "Kv/store/") {
+            Verdict::Refused { code, .. } => assert_eq!(code, "G2"),
+            other => panic!("expected an ambient G2 refusal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_halted_composition_refuses_every_admission() {
+        match admit_into("fn id(x: Int) -> Int { return x }", "Kv/store/;!halted") {
+            Verdict::Refused { code, .. } => assert_eq!(code, "HALTED"),
+            other => panic!("a halted composition must refuse, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_deferred_manifest_row_is_refused_not_skipped() {
+        // Replacement (item 186) belongs to a wave this crate has not landed, and
+        // a row it cannot honour is REFUSED rather than dropped: skipping a row
+        // is the wave-through this crate exists to prevent.
+        for rows in [
+            "Kv/store/;-Kv/store/",
+            "Kv/store/;Kv/store=Int",
+            "!paused",
+        ] {
+            match admit_into("fn id(x: Int) -> Int { return x }", rows) {
+                Verdict::Refused { code, .. } => assert_eq!(code, "MANIFEST"),
+                other => panic!("expected a MANIFEST refusal for {:?}, got {:?}", rows, other),
+            }
+        }
+    }
+
+    #[test]
+    fn the_manifest_arm_never_admits() {
+        let arms = [
+            admit_into("fn id(x: Int) -> Int { return x }", RUNNING),
+            admit_into(AMBIENT_CONFLICT, RUNNING),
+            admit_into(AMBIENT_CONFLICT, "!halted"),
+            admit_into("fn id(x: Int) -> Int { return x }", ""),
+        ];
+        for arm in arms {
+            assert!(
+                arm.to_json().contains("\"admitted\":false"),
+                "{} must serialise as not admitted: {}",
+                arm.kind(),
+                arm.to_json()
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_manifest_row_is_refused_rather_than_skipped() {
+        // A row shape the wire does not define: refused as MANIFEST (a real
+        // refusal), never skipped over.
+        match admit_into("fn id(x: Int) -> Int { return x }", "!wat") {
+            Verdict::Refused { code, .. } => assert_eq!(code, "MANIFEST"),
+            other => panic!("expected a MANIFEST refusal, got {:?}", other),
+        }
+    }
+
+    // The row bound (the manifest half of the fail-closed story: the byte bound
+    // above is not a stack bound).
+
+    fn is_row_bound_refusal(verdict: &Verdict) -> bool {
+        match verdict {
+            Verdict::OutsideFrontier { reason } => {
+                reason.contains("row") && reason.contains(&MANIFEST_ROW_LIMIT.to_string())
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn manifest_rows_counts_the_segments_the_fold_folds() {
+        // The count has to be the one the fold actually walks, or the bound
+        // bounds nothing: `parse_manifest_rows` consumes a segment per `;` and
+        // one more for the tail, and the empty wire is the empty composition
+        // rather than one empty row.
+        assert_eq!(manifest_rows(""), 0);
+        assert_eq!(manifest_rows("A/b/"), 1);
+        assert_eq!(manifest_rows("A/b/;"), 2);
+        assert_eq!(manifest_rows("A/b/;B/c/"), 2);
+        assert_eq!(manifest_rows("A/b/;B/c/;"), 3);
+        assert_eq!(manifest_rows("!halted;"), 2);
+    }
+
+    #[test]
+    fn a_manifest_over_the_row_bound_is_a_gap_and_not_an_abort() {
+        let wire = "A/b/;".repeat(MANIFEST_ROW_LIMIT + 1);
+        // The point of the case, and the false claim this bound retires: the
+        // wire is a few KB, far under MAX_SOURCE_BYTES, and it used to ABORT a
+        // 1 MiB stack inside the fold (2_700 rows of it, measured).
+        assert!(wire.len() < MAX_SOURCE_BYTES / 10);
+        assert_eq!(manifest_rows(&wire), MANIFEST_ROW_LIMIT + 2);
+        let verdict = admit_into("fn id(x: Int) -> Int { return x }", &wire);
+        assert!(
+            is_row_bound_refusal(&verdict),
+            "a manifest this long must be declined by the row bound, not folded: {:?}",
+            verdict,
+        );
+        assert!(verdict.is_undecided());
+        assert_eq!(verdict.code(), Some("FRONTIER"));
+        assert!(verdict.to_json().contains("\"admitted\":false"));
+    }
+
+    #[test]
+    fn the_row_bound_is_checked_before_the_wire_is_folded() {
+        // Rows the fold REFUSES (a deferred replacement row, code MANIFEST)
+        // repeated past the row bound. Reading MANIFEST here would mean the
+        // parser had already walked the wire, which is the stack the bound
+        // exists to keep: the answer must be the row bound's.
+        let wire = "Kv/store/;-Kv/store/;".repeat(MANIFEST_ROW_LIMIT + 1);
+        let verdict = admit_into("fn id(x: Int) -> Int { return x }", &wire);
+        assert!(
+            is_row_bound_refusal(&verdict),
+            "the row bound must be checked before the fold, got {:?}",
+            verdict,
+        );
+    }
+
+    #[test]
+    fn a_manifest_under_the_row_bound_is_still_folded() {
+        // Non-vacuity in the other direction: a ceiling, not a wall. The wire
+        // below the bound is folded exactly as it was before the bound existed,
+        // and a conflict in it is still found.
+        let under = "A/b/;".repeat(MANIFEST_ROW_LIMIT - 1);
+        assert!(manifest_rows(&under) <= MANIFEST_ROW_LIMIT);
+        let verdict = admit_into("fn id(x: Int) -> Int { return x }", &under);
+        assert!(
+            !is_row_bound_refusal(&verdict),
+            "a manifest under the bound must still be decided: {:?}",
+            verdict,
+        );
+        assert_eq!(verdict, Verdict::NoObjection);
+        assert_eq!(admit_into("fn id(x: Int) -> Int { return x }", ""), verdict);
+    }
+
+    #[test]
+    fn a_manifest_at_the_row_bound_is_still_folded() {
+        // The boundary itself, from both sides: MANIFEST_ROW_LIMIT rows are
+        // folded, MANIFEST_ROW_LIMIT + 1 rows are refused. Without this pair
+        // the bound could be off by a whole wire.
+        let at = "A/b/;".repeat(MANIFEST_ROW_LIMIT - 1);
+        assert_eq!(manifest_rows(&at), MANIFEST_ROW_LIMIT);
+        let over = format!("{}A/b/;", at);
+        assert_eq!(manifest_rows(&over), MANIFEST_ROW_LIMIT + 1);
+        assert_eq!(
+            admit_into("fn id(x: Int) -> Int { return x }", &at),
+            Verdict::NoObjection
+        );
+        assert!(is_row_bound_refusal(&admit_into(
+            "fn id(x: Int) -> Int { return x }",
+            &over
+        )));
+    }
 }
 '''
 
@@ -921,8 +1317,8 @@ SESSION_RS = r'''//! Layer 2, the session surface — item 334 slice 1, the foun
 //! ([`crate::admit`]), is pure functions of their arguments. Layer 2 is
 //! stateful and address-space-bound — a live composition, an owner, a deferral
 //! queue, witnessed escrow, a WAL — with the operation set
-//! `{load, admit, propose, call, commit, abort, unload}`, and it is where the
-//! 243/244/245/246/322 guarantees (witnessed effects, session commit,
+//! `{load, admit, admit_into, propose, call, commit, abort, unload}`, and it is
+//! where the 243/244/245/246/322 guarantees (witnessed effects, session commit,
 //! approvals, six-tier crash recovery) live. `revl.gate.Gate` on py is the
 //! reference layer-2 surface this mirrors.
 //!
@@ -934,11 +1330,12 @@ SESSION_RS = r'''//! Layer 2, the session surface — item 334 slice 1, the foun
 //! * the GENERATION state ([`Session::load`], [`Session::generation`]): a fresh
 //!   boot installs generation 1 with a fresh item-245 owner frame;
 //! * the untrusted-author admission ENTRY ([`Session::propose`],
-//!   [`Session::admit`]): the item-334 `propose` verb's decision half wired in
-//!   the design's order — halt-dominance first, then the FORBIDDEN-GRANT rule,
-//!   then the standalone decision compile — reusing [`crate::admit`] for that
-//!   last step, so a refusal is the reference why-trace returned as DATA and the
-//!   live composition is untouched;
+//!   [`Session::admit`], [`Session::admit_into`]): the item-334 `propose`
+//!   verb's decision half wired in the design's order — halt-dominance first,
+//!   then the FORBIDDEN-GRANT rule, then the decision compile — reusing
+//!   [`crate::admit`] (and, across a composition boundary, [`crate::admit_into`])
+//!   for that last step, so a refusal is the reference why-trace returned as
+//!   DATA and the live composition is untouched;
 //! * the WITNESSED-CALL recording path ([`Session::call`], [`Session::commit`],
 //!   [`Session::abort`], [`Session::unload`]): the item-245 three-way effect
 //!   split (class (a) witnessed with a checked inverse, class (b) a deferred
@@ -969,7 +1366,7 @@ SESSION_RS = r'''//! Layer 2, the session surface — item 334 slice 1, the foun
 //! Until those land, [`crate::admit`] is the entitled decision this session can
 //! make, and `Session` fails closed on everything it cannot yet do.
 
-use crate::{admit, Verdict};
+use crate::{admit, admit_into, Verdict};
 use std::fmt;
 
 /// The service names that reach the decider — the admit/swap/owner-state control
@@ -1338,6 +1735,45 @@ impl Session {
         Ok(AdmitOutcome { admitted: false, code, message, keys: Vec::new() })
     }
 
+    /// The per-turn admission asked ACROSS the composition boundary: admit
+    /// `source` INTO the running manifest `manifest` (item 186's ambient gate,
+    /// issue #346), returning the fold's verdict as DATA. The live generation is
+    /// untouched, exactly as in [`Session::admit`].
+    ///
+    /// `manifest` is the ROW WIRE the item-186 wire defines — `C/k/r` for a
+    /// provision (`r` the realm, `""` for shared), `C<k` for a requirement,
+    /// `!halted` for a halted composition, joined by `;` — the same input
+    /// [`crate::admit_into`] takes. It is a PARAMETER and not a projection of
+    /// [`Session::live`] on purpose: a [`Composition`] carries the component
+    /// names and the keys the generation provides, and a manifest also needs the
+    /// requirements and the realms. Synthesising rows out of what this session
+    /// holds would be inventing a running composition, and an admission arm that
+    /// invents its inputs is the defect class this crate exists to prevent.
+    /// Build the wire where the composition is actually known
+    /// (`revl.manifest_wire(ir)` on py, or the wire directly).
+    ///
+    /// Wiring, in the order the rest of this surface uses: a HALT dominates
+    /// (item 443) and is checked before the candidate is judged, then the
+    /// decision itself. Requires a loaded composition (a candidate composes INTO
+    /// one). `admitted` is `false` on every outcome this tier can produce —
+    /// including the `NO_ADMISSION` decline — because the native gate issues no
+    /// admission (`revl.gate.admit_into` on py is the admitting tier).
+    pub fn admit_into(
+        &self,
+        source: &str,
+        manifest: &str,
+    ) -> Result<AdmitOutcome, SessionError> {
+        self.require_loaded("admit_into")?;
+        if let Some(reason) = &self.halted {
+            return Err(SessionError::new(
+                "HALTED",
+                format!("admit_into refused: the session was E-STOPPED ({reason})"),
+            ));
+        }
+        let (code, message) = decision_into(source, manifest);
+        Ok(AdmitOutcome { admitted: false, code, message, keys: Vec::new() })
+    }
+
     /// The item-334 `propose` verb's DECISION half: admit an AGENT-authored
     /// candidate under the untrusted-author profile, wired in the design's order.
     ///
@@ -1560,19 +1996,42 @@ impl ProposeOutcome {
 /// Every arm yields `admitted = false` at the call site: layer 1 issues no
 /// admission. `NoObjection` is DECLINED (fail-closed), not admitted.
 fn decision(source: &str) -> (Option<String>, Option<String>) {
-    match admit(source) {
+    declined_or(admit(source), false)
+}
+
+/// The same mapping for the manifest arm ([`admit_into`]). One difference: a
+/// no-objection there means "the union fold found nothing to refuse", which is
+/// still not an admission (the type layer has not run, and a `requires` is not
+/// resolved), so it is declined with the same `NO_ADMISSION` code and a message
+/// that names the manifest.
+fn decision_into(source: &str, manifest: &str) -> (Option<String>, Option<String>) {
+    declined_or(admit_into(source, manifest), true)
+}
+
+/// The shared fail-closed mapping: a refusal and a frontier gap pass through
+/// verbatim (the refusal IS the reference why-trace), and a no-objection becomes
+/// a decline.
+fn declined_or(verdict: Verdict, into_manifest: bool) -> (Option<String>, Option<String>) {
+    match verdict {
         Verdict::Refused { code, message } => (Some(code), Some(message)),
         Verdict::OutsideFrontier { reason } => {
             (Some(crate::FRONTIER_CODE.to_string()), Some(reason))
         }
         Verdict::NoObjection => (
             Some("NO_ADMISSION".to_string()),
-            Some(
+            Some(if into_manifest {
+                "declined: the native fold raised no objection to this candidate \
+                 against the running manifest, but this tier issues no admission \
+                 (it does not run the reference type layer, and it does not \
+                 resolve the candidate's requirements). Get a reference \
+                 admission on py before running anything."
+                    .to_string()
+            } else {
                 "declined: the native gate raised no objection, but this tier \
                  issues no admission (it does not run the reference type layer). \
                  Get a reference admission on py before running anything."
-                    .to_string(),
-            ),
+                    .to_string()
+            }),
         ),
     }
 }
@@ -1733,6 +2192,110 @@ component B provides s: S { provide s { fn op(x) { return x } } }";
         let out = s.admit(G2_SRC, &[]).unwrap();
         assert!(!out.admitted);
         assert_eq!(out.code.as_deref(), Some("G2"));
+    }
+
+    // A source whose only fault is AMBIENT: it re-provides `store`, which the
+    // running manifest already holds. It also requires the key it provides, so
+    // judged STANDALONE the same source is a G3 (cycle) rather than a G2
+    // (provision conflict) — which is exactly how the two arms are told apart.
+    const AMBIENT_G2_SRC: &str = "service Store { fn get(key: Str) -> Str } \
+service Cache { fn lookup(key: Str) -> Str } \
+component CacheLayer requires store: Store provides store: Store { \
+provide store { fn get(key) { return key } fn bump(n) { return n } \
+fn put(key, value) { return value } } }";
+
+    #[test]
+    fn admit_into_requires_a_loaded_base() {
+        let s = Session::new();
+        let err = s.admit_into(CLEAN_SRC, "Kv/store/").unwrap_err();
+        assert_eq!(err.code, "NOT_LOADED");
+    }
+
+    #[test]
+    fn admit_into_halt_dominates() {
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        s.estop("operator halt");
+        let err = s.admit_into(CLEAN_SRC, "Kv/store/").unwrap_err();
+        assert_eq!(err.code, "HALTED");
+    }
+
+    #[test]
+    fn admit_into_surfaces_the_ambient_refusal_as_data() {
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let out = s.admit_into(AMBIENT_G2_SRC, "Kv/store/").unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("G2"));
+        assert!(out.message.unwrap().contains("provision conflict"));
+        // The live composition is untouched.
+        assert_eq!(s.generation(), 1);
+    }
+
+    #[test]
+    fn admit_into_reads_the_manifest_it_is_given() {
+        // The SAME candidate is a G2 against a manifest that already provides
+        // `store` and a G3 when judged standalone: the parameter is read, not
+        // ignored.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let ambient = s.admit_into(AMBIENT_G2_SRC, "Kv/store/").unwrap();
+        assert_eq!(ambient.code.as_deref(), Some("G2"));
+        let standalone = s.admit_into(AMBIENT_G2_SRC, "").unwrap();
+        assert_eq!(standalone.code.as_deref(), Some("G3"));
+    }
+
+    #[test]
+    fn admit_into_fails_closed_on_a_deferred_manifest_row() {
+        // A manifest row the fold cannot honour is REFUSED, never skipped.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let out = s.admit_into(CLEAN_SRC, "Kv/store=Int").unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("MANIFEST"));
+    }
+
+    #[test]
+    fn admit_into_fails_closed_on_no_objection() {
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let out = s.admit_into(CLEAN_SRC, "Kv/store/").unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("NO_ADMISSION"));
+    }
+
+    #[test]
+    fn admit_into_fails_closed_on_a_manifest_over_the_row_bound() {
+        // The row bound reaches this door too, and it has to: `Session::admit_into`
+        // funnels into `crate::admit_into`, so the refusal shape must be the
+        // crate's own, not a session one, or an embedder driving the session
+        // surface would get a different answer for the same wire.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let wire = "A/b/;".repeat(crate::MANIFEST_ROW_LIMIT + 1);
+        let out = s.admit_into(CLEAN_SRC, &wire).unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("FRONTIER"));
+        let reason = match crate::admit_into(CLEAN_SRC, &wire) {
+            Verdict::OutsideFrontier { reason } => reason,
+            other => panic!("expected the crate's own frontier gap, got {:?}", other),
+        };
+        assert_eq!(out.message.as_deref(), Some(reason.as_str()));
+        assert!(reason.contains(&crate::MANIFEST_ROW_LIMIT.to_string()), "{}", reason);
+        // The live composition is untouched, exactly as on every other refusal.
+        assert_eq!(s.generation(), 1);
+    }
+
+    #[test]
+    fn admit_into_still_folds_a_manifest_under_the_row_bound() {
+        // Non-vacuity at this door: the SAME wire one row shorter is folded as
+        // before, so the bound is a ceiling and not a wall.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let under = "A/b/;".repeat(crate::MANIFEST_ROW_LIMIT - 1);
+        let out = s.admit_into(CLEAN_SRC, &under).unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("NO_ADMISSION"));
     }
 
     #[test]
@@ -1896,7 +2459,10 @@ TESTS_ADMIT_RS = r'''//! The crate's own agreement + fail-closed tests (`cargo t
 //! only the crate gets the refusals, and — the load-bearing half — that no
 //! input path produces something a caller could read as an admission.
 
-use revl_gate::{admit, compile_to, gate_version, Tier, Verdict, MAX_SOURCE_BYTES};
+use revl_gate::{
+    admit, admit_into, compile_to, gate_version, Tier, Verdict, MANIFEST_ROW_LIMIT,
+    MAX_SOURCE_BYTES,
+};
 
 // ------------------------------------------------------ refusals that agree
 
@@ -2027,6 +2593,51 @@ fn a_frontier_gap_reads_as_not_admitted_on_the_wire() {
     assert_eq!(verdict.code(), Some("FRONTIER"));
     assert_eq!(verdict.kind(), "outside_frontier");
     assert!(verdict.to_json().contains("\"admitted\":false"));
+}
+
+// The size bound is not a ROW bound either. `admit_into` hands its manifest to
+// the fold, and the fold consumes one stack frame per `;`-separated row before
+// it decides anything: 2_700 rows of `A/b/;` are 13 KB, far under
+// MAX_SOURCE_BYTES, and ABORT a 1 MiB stack, while the 8 MiB default goes down
+// at ~20_000 rows. A rust stack overflow aborts, which `catch_unwind` cannot
+// turn back into a verdict, so the row count is bounded ahead of the parser.
+// The probes read the bound out of the crate rather than restating it, for the
+// same reason `frontier_probe` is generated.
+
+#[test]
+fn a_manifest_over_the_row_bound_is_declined_rather_than_risked() {
+    // The always-live trigger, and the one this bound exists for.
+    let wire = "A/b/;".repeat(MANIFEST_ROW_LIMIT + 1);
+    assert!(wire.len() < MAX_SOURCE_BYTES / 10);
+    let verdict = admit_into("fn id(x: Int) -> Int { return x }", &wire);
+    assert!(verdict.is_undecided());
+    assert_eq!(verdict.code(), Some("FRONTIER"));
+    assert_eq!(verdict.kind(), "outside_frontier");
+    assert!(verdict.to_json().contains("\"admitted\":false"));
+    match verdict {
+        Verdict::OutsideFrontier { reason } => {
+            // The refusal states the bound rather than describing a resource
+            // failure: an embedder has to be able to act on it.
+            assert!(reason.contains(&MANIFEST_ROW_LIMIT.to_string()), "{}", reason);
+            assert!(reason.contains("row"), "{}", reason);
+        }
+        other => panic!("a row count over the bound must not be decided, got {:?}", other),
+    }
+}
+
+#[test]
+fn a_manifest_under_the_row_bound_is_still_folded() {
+    // Non-vacuity in the other direction: a ceiling, not a wall. The wire below
+    // the bound is decided exactly as it was before the bound existed.
+    let under = "A/b/;".repeat(MANIFEST_ROW_LIMIT - 1);
+    let verdict = admit_into("fn id(x: Int) -> Int { return x }", &under);
+    assert_ne!(verdict.kind(), "outside_frontier", "{:?}", verdict);
+    assert_eq!(verdict, Verdict::NoObjection);
+    // And the empty manifest is still the standalone gate, byte for byte.
+    assert_eq!(
+        admit_into("fn id(x: Int) -> Int { return x }", ""),
+        admit("fn id(x: Int) -> Int { return x }")
+    );
 }
 
 // The front end is recursive descent, so nesting costs stack. The byte bound
@@ -2901,6 +3512,23 @@ boot. It is `selfhost/lower.rvl`'s `admit_src` — the native lex / parse /
 composition-guarantee chain — compiled to rust through the reference rust
 backend.
 
+`admit_into` is the same gate across a composition boundary: the verdict on a
+candidate once it is admitted INTO a RUNNING composition (item 186).
+
+```rust
+use revl_gate::{admit_into, Verdict};
+
+// The running composition, in item 186's row wire: `Kv` provides `store`,
+// `App` provides `app` and requires `store`.
+let running = "Kv/store/;App/app/;App<store";
+
+match admit_into(candidate, running) {
+    Verdict::Refused { code, message } => reject(code, message),
+    Verdict::NoObjection => ask_the_reference(candidate),
+    Verdict::OutsideFrontier { reason } => ask_the_reference(candidate),
+}
+```
+
 The crate builds with no Python on the machine. That is why the generated source
 is committed rather than produced at install time (items 336 and 338 depend on
 it).
@@ -2950,7 +3578,14 @@ crate returns it whenever:
   the deeply-recursive native front end ABORTS, and an abort cannot be turned
   back into a refusal);
 * the native gate panics while deciding (caught via `catch_unwind`);
-* the native gate returns a verdict wire shape this crate does not recognise.
+* the native gate returns a verdict wire shape this crate does not recognise;
+* in `admit_into`, the manifest wire is longer than the bound the gate will
+  decide, or carries more `;`-separated rows than the gate will fold, or the
+  fold returns a shape this crate does not recognise. Both manifest limits are
+  checked BEFORE the wire reaches the parser, because the byte bound is not a
+  row bound: the fold consumes one stack frame per row, so 2 700 rows of
+  `A/b/;` are 13 KB and still take a 1 MiB stack down. The row half of the pair
+  is `revl_gate::MANIFEST_ROW_LIMIT`.
 
 ### The generated frontier table at this generation
 
@@ -2963,21 +3598,56 @@ the drift gate.
 * Reference stdlib builtins the self-host does not lower as builtins:
   @BUILTIN_LINE@
 
+## The manifest arm (issue #346)
+
+`admit_into(source, manifest)` asks a different question from `admit`: not "is
+this text well formed on its own", but "does this text compose with the
+composition that is ALREADY RUNNING". `source` is decided against the UNION of
+the manifest and the incoming text, so a key the running composition already
+holds conflicts (`G2`), a route into a realm the union does not provide dangles
+(`G2`), and a dependency cycle spanning the manifest boundary is a cycle
+(`G3`). The decision is the native fold `selfhost/lower.rvl::admit_ambient`,
+compiled to rust like `admit`, and the manifest arrives as item 186's row wire
+(`docs/design/186-ambient-admission-guarantees.md`): `C/k/r` for a provision
+(`r` the realm, `""` for shared), `C<k` for a requirement, `!halted` for a
+halted composition, joined by `;`. The empty manifest is the empty composition,
+so `admit_into(source, "")` is `admit(source)` byte for byte — the arm
+generalises `admit` rather than re-implementing it.
+
+Two honest limits, both fail-closed:
+
+* **It closes the `G2`/`G3` legs and nothing else.** The reference TYPE layer is
+  its own lane (the self-host compiler has no type layer yet), so a
+  type-incorrect candidate is a no-objection here, exactly as in `admit`. This
+  arm does not RESOLVE the requirements a candidate declares either; it checks
+  them for disjointness and acyclicity. The reference remains the only tier that
+  admits.
+* **A row it cannot honour is REFUSED, never skipped.** The wire reserves row
+  kinds for waves that have not landed — replacement (`-C`) and handoff
+  (`C=k:T`), both of which need the type layer. Those rows come back as a
+  `MANIFEST` refusal. Ignoring a row would be the wave-through this crate exists
+  to prevent.
+
 ## What is deliberately absent
 
-* **`admit_into`.** Admission INTO a running composition spans a manifest
-  (G2/G3 over the live composition). The self-host pipeline has no manifest
-  parameter, and a stub that ignored one would be the wave-through this crate
-  exists to prevent. Use `revl.gate.admit_into` on py.
 * **`compile_to` output.** Exported, and it refuses unconditionally: the
   self-host emitters still carry `@py`-only helper externs and do not emit to
   rust. Stage 4's lane.
+* **The reference type layer.** Still absent, in `admit` and in `admit_into`
+  alike: neither arm issues an admission. That lane is the type layer's, not the
+  manifest parameter's.
+* **The deferred manifest rows.** Replacement and handoff rows are refused, for
+  the reason in the section above: they need the type layer.
 * **Layer 2 (the session surface).** `revl_gate::session::Session` is item 334's
   foundational first slice: the generation state machine, the untrusted-author
-  admission entry (`propose`/`admit`), and the item-245 witnessed-call recording
-  path (`call`/`commit`/`abort`/`unload`). The accept-and-swap half, the
-  witnessed-effect runtime, the WAL and the approver callback are later slices;
-  a candidate the native gate does not refuse is fail-closed, never admitted.
+  admission entry (`propose`/`admit`/`admit_into`), and the item-245
+  witnessed-call recording path (`call`/`commit`/`abort`/`unload`). The
+  accept-and-swap half, the witnessed-effect runtime, the WAL and the approver
+  callback are later slices; a candidate the native gate does not refuse is
+  fail-closed, never admitted. `Session::admit_into` takes the manifest wire as
+  a PARAMETER, not as a projection of the loaded composition: a manifest also
+  needs requirements and realms, and synthesising rows out of what the session
+  holds would be inventing a running composition.
 
 ## Host obligations
 
@@ -3412,13 +4082,20 @@ def render_generated_json(digest: str, fid: str, language: str,
         "covered_layer": COVERED_LAYER,
         "issues_admissions": False,
         "verdict_arms": ["refused", "no_objection", "outside_frontier"],
+        "manifest_arm": (
+            "revl_gate::admit_into(source, manifest) — the item-186 ambient gate "
+            "as a binding: the union fold's G2/G3 legs. Refuses the deferred "
+            "manifest rows (replacement `-C`, handoff `C=k:T`) rather than "
+            "skipping them, and issues no admission."
+        ),
         "note": ("Regenerate with `python3 tools/build_gate_crate.py`. The "
                  "source_digest is a pure function of digest_inputs, not a git "
                  "sha, so `--check` can verify the committed crate against the "
                  "tree it was generated from. `issues_admissions` is false by "
                  "construction: this gate decides the composition/guarantee "
                  "layer, not the reference type layer, so its non-refusing arm "
-                 "is `no_objection` and never an admission."),
+                 "is `no_objection` and never an admission — across the manifest "
+                 "boundary too (issue #346)."),
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
@@ -3460,6 +4137,7 @@ def render(tables: dict[str, list[str]], digest: str, fid: str, language: str,
         "src/frontier.rs": (FRONTIER_RS_TEMPLATE
                             .replace("@FRONTIER_ID@", fid)
                             .replace("@MAX_SOURCE_BYTES@", str(MAX_SOURCE_BYTES))
+                            .replace("@MANIFEST_ROW_LIMIT@", str(MANIFEST_ROW_LIMIT))
                             .replace("@EXCLUDED_KEYWORDS@", _rust_str_array(
                                 "EXCLUDED_KEYWORDS", tables["keywords"],
                                 "/// Reference language keywords the self-host front end does not lex.\n"

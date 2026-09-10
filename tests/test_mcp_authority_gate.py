@@ -48,6 +48,7 @@ from revl.mcp import leases as _leases  # noqa: E402
 from revl.mcp import operator as _operator  # noqa: E402
 from revl.mcp import server  # noqa: E402
 from revl.mcp.operator import decide, parse_profile  # noqa: E402
+from revl.policy import parse_policy  # noqa: E402
 
 
 # ---------------------------------------------------------------- harness
@@ -87,6 +88,9 @@ PATCHED = "fn size() = 1".join(TWO_REALM.rsplit("fn size() = 0", 1))
 # measures the admission refusal instead.
 AGENT_AUTHORED = "\n".join(line for line in TWO_REALM.splitlines()
                            if "isolate" not in line) + "\n"
+
+# the boundary policy that makes the quarantine gate anything but a no-op
+QUARANTINE = parse_policy("quarantine required")
 
 
 class _EnforcingPolicy:
@@ -355,6 +359,59 @@ def test_revl_repair_respects_an_enforced_lease(live, monkeypatch):
     assert payload["lease"] == {"component": "TenantBCache", "heldBy": "alice",
                                 "expiry": payload["lease"]["expiry"],
                                 "operator": payload["lease"]["operator"]}
+
+
+def test_revl_repair_hands_the_quarantine_gate_the_swap_it_performs(monkeypatch):
+    """The quarantine gate is asked about the swap the remediation will actually
+    perform, in the shape it reads a swap in — the candidate under `candidate`,
+    scoped to the component being repaired. Deleting the `gate_swap` call in
+    `server._tool_repair` fails here with `[] == [arguments]`."""
+    monkeypatch.setattr(server.SESSION, "sandbox", QUARANTINE)
+    seen = []
+
+    def _spy(session, arguments):
+        seen.append(arguments)
+        return {"ok": False, "admitted": False, "swapped": False,
+                "note": "the candidate did not pass a required quarantine",
+                "quarantine": {"verdict": "trapped"}}
+
+    monkeypatch.setattr(server._quarantine, "gate_swap", _spy)
+
+    payload = _call("revl_repair", {"component": "TenantBCache",
+                                    "candidate": {"source": AGENT_AUTHORED}})
+    assert payload["ok"] is False and payload["swapped"] is False
+    assert payload["quarantine"]["verdict"] == "trapped"
+    assert seen == [{"source": AGENT_AUTHORED, "files": None, "modules": None,
+                     "replacing": ["TenantBCache"]}]
+
+
+def test_a_required_quarantine_refuses_the_repair_and_nothing_swaps(
+        monkeypatch, tmp_path):
+    """No stub: the real `quarantine.gate_swap` refuses the repair's remediation
+    swap before the loop runs, with the quarantine payload rather than the
+    loop's own incident. The candidate is one the untrusted-author profile
+    rejects, so the verdict is deterministic here and no substrate is needed.
+
+    The repair path is the one an agent reaches for when a component has
+    already faulted, so a required quarantine that stopped `revl_swap` and let
+    `revl_repair` through would be bypassable by naming the remediation
+    "repair"."""
+    monkeypatch.setattr(server.SESSION, "sandbox", QUARANTINE)
+
+    payload = _call("revl_repair", {
+        "component": "TenantBCache",
+        "candidate": {"source": _host_reaching_source(tmp_path / "marker"),
+                      "modules": _MODULES},
+        "trace": [{"channel": "fault", "subject": "TenantBCache",
+                   "detail": "boom"}],
+    })
+    assert payload["ok"] is False, "the loop ran anyway"
+    assert payload["swapped"] is False
+    assert payload["quarantine"]["verdict"] == "rejected"
+    assert payload.get("incident") is None, \
+        "the quarantine refusal must be reached before the loop's own verdict"
+    assert "REVL" in _text(payload["diagnostics"])
+    assert not (tmp_path / "marker").exists()
 
 
 # ============================================================================

@@ -129,6 +129,11 @@ A missing key is an error, so no secret is ever assumed or committed. The
 attestation records only a non-secret `key_id` (a truncated SHA-256 of the key),
 so a verifier can tell *which* key it needs without the key being present.
 
+`deploy` reads every key file it opens (`--key`, `deploy-admit --host-key`, a
+`[deploy].host_key` receipt key) by this same rule, through
+`attest.load_key` rather than a second reading of it, so one key file is one
+`key_id` and one MAC whichever verb loaded it.
+
 *Future work — asymmetric signatures.* An Ed25519 upgrade would let untrusted
 parties verify with only a public key. The envelope already carries a `sign_alg`
 member for that migration; today its only accepted value is `hmac-sha256`, and

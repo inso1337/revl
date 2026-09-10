@@ -57,6 +57,16 @@ therefore reports `admitted: false` on every arm and carries the arm name in
 triple reads this gate as "never admits" — the fail-closed reading — rather than
 mistaking a no-objection for an admission.
 
+`admit-into` is the crate's manifest arm (item 186's ambient gate, issue #346)
+carried to the edge: the union fold's G2/G3 legs, over the item-186 row wire.
+It issues no admission either, and a manifest row the landed wave does not cover
+is refused rather than skipped. The crate's resource bounds are the crate's, not
+yours: a source over `MAX_SOURCE_BYTES` and a manifest over
+`MANIFEST_ROW_LIMIT` are declined inside `revl_gate`, before the wire reaches the
+fold, which matters most here: the fold recurses one stack frame per manifest
+row, and on wasm a stack exhaustion is an abort no host can catch, so a row bound
+tuned for a native thread would not be a bound at all.
+
 `admit-artifact` (design cut B) is exported so the shape is fixed and its
 arrival is additive, and it fails closed today: the item-289 chain's `declared
 caps` leg reads the G8 boundary projection, which the reference derives with a
@@ -208,6 +218,24 @@ world %(world)s {
   /// a re-encoding that could paper over a difference.
   export admit-json: func(source: string) -> string;
 
+  /// The same frontier-scoped admission as `admit`, asked ACROSS a composition
+  /// boundary (item 186's ambient gate): the verdict on `source` once it is
+  /// admitted INTO the RUNNING composition `manifest` (the item-186 row wire —
+  /// `C/k/r` provision, `C<k` requirement, `!halted`, joined by `;`; `""` is
+  /// the empty composition and makes this byte-identical to `admit`).
+  ///
+  /// This closes the union fold's G2/G3 legs — provision disjointness, realm
+  /// routes, cross-boundary acyclicity — and nothing else, and it still issues
+  /// no admission. A manifest row the landed wave does not cover (a replacement
+  /// `-C`, a handoff `C=k:T`) is REFUSED with `MANIFEST` rather than skipped: a
+  /// row this gate cannot honour is exactly where a wave-through would hide.
+  export admit-into: func(source: string, manifest: string) -> verdict;
+
+  /// The same verdict as `admit-into`, serialized in the item-332 wire shape —
+  /// byte-identical to the rust crate's `Verdict::to_json`, one serializer for
+  /// both tiers.
+  export admit-into-json: func(source: string, manifest: string) -> string;
+
   /// Artifact admission: the item-289 least-authority chain over a compiled IR
   /// and a policy, with the artifact's own import-section capabilities.
   ///
@@ -318,6 +346,15 @@ LIB_TEMPLATE = r'''//! `revl-gate-wasm` — the revl admission gate as a WASI-P2
 //! is loud, and it is not a verdict, so it is still not a false admission — but
 //! a host must treat a trap as "no verdict was reached" and fail closed on it.
 //!
+//! The crate's resource bounds ARE reachable here, and that is the difference
+//! between a refusal and a trap: a source over `MAX_SOURCE_BYTES` and a manifest
+//! over `MANIFEST_ROW_LIMIT` are declined inside `revl_gate` before the wire
+//! reaches the fold, so neither door can be walked into with an input that
+//! exhausts the stack. It matters most on this target: the fold recurses one
+//! stack frame per manifest row, the component build sets no `stack-size` (so
+//! the toolchain default applies), and a stack exhaustion here is an abort no
+//! host can observe as a verdict.
+//!
 //! # `unsafe`
 //!
 //! Not forbidden at the crate level, and that is not an oversight: the
@@ -352,6 +389,18 @@ impl Guest for Gate {
     /// crate's `Verdict::to_json`. One serializer, two tiers.
     fn admit_json(source: String) -> String {
         revl_gate::admit(&source).to_json()
+    }
+
+    /// The verdict for `source` admitted INTO the running composition
+    /// `manifest` (item 186's ambient gate; issue #346), as the world's record.
+    /// The union fold's G2/G3 legs, and still no admission.
+    fn admit_into(source: String, manifest: String) -> Verdict {
+        lift(revl_gate::admit_into(&source, &manifest))
+    }
+
+    /// The same verdict, in the item-332 wire shape.
+    fn admit_into_json(source: String, manifest: String) -> String {
+        revl_gate::admit_into(&source, &manifest).to_json()
     }
 
     /// Item-289 artifact admission — declines, and says why.
@@ -487,9 +536,26 @@ cannot issue an admission cannot commit that defect.
 ## The interface
 
 `wit/%(world)s.wit` is the whole surface: `admit`, `admit-json`,
-`admit-artifact` (declines today), `gate-version`.
+`admit-into`, `admit-into-json`, `admit-artifact` (declines today),
+`gate-version`.
 
     wasmtime run --invoke 'admit-json("fn f() -> Int { return 1 }")' revl_gate.wasm
+
+`admit-into` is `admit` asked across a composition boundary (item 186): the
+verdict on a candidate once it is admitted INTO a RUNNING composition, handed
+over as the item-186 row wire (`"Kv/store/;App/app/;App<store"`). It closes the
+union fold's `G2`/`G3` legs — provision disjointness, realm routes,
+cross-boundary acyclicity — and nothing else, and it issues no admission either.
+A manifest row this wave does not cover (a replacement `-C`, a handoff
+`C=k:T`) comes back as a `MANIFEST` refusal rather than being skipped.
+
+The crate's resource bounds cross the component boundary with it, which is the
+point: a source over `MAX_SOURCE_BYTES` and a manifest over
+`MANIFEST_ROW_LIMIT` are declined inside `revl_gate`, ahead of the fold, so
+neither door can be walked into with an input that exhausts the stack. On this
+target that difference is a refusal instead of a trap: the fold recurses one
+stack frame per manifest row, the build sets no `stack-size`, and a stack
+exhaustion in a wasm component is an abort no host can read as a verdict.
 
 In a browser or node, `jco transpile revl_gate.wasm` produces the JS shim:
 
@@ -524,7 +590,11 @@ empty-import property is the load-bearing one.
   not catch, and a native gate panic traps the instance instead of returning
   `outside-frontier`. A trap is loud and it is not a verdict, so it is still not
   a false admission — but a host must treat a trap as "no verdict was reached"
-  and fail closed on it.
+  and fail closed on it. The crate's resource bounds are NOT a host obligation
+  of this kind: a source over `MAX_SOURCE_BYTES` and a manifest over
+  `MANIFEST_ROW_LIMIT` are declined inside `revl_gate`, ahead of the fold, so no
+  argument a host can hand to `admit-into` reaches the stack exhaustion the row
+  bound exists for.
 * **A verdict is a decision, not an enforcement.** The gate returns a verdict;
   the browser's loader, the worker's dispatcher or the CDN's serving path is the
   code that must refuse to instantiate, execute or serve on a refusal. A gate
@@ -590,7 +660,8 @@ def render_generated_json(digest: str, meta: dict) -> str:
         "wit_bindgen": WIT_BINDGEN_REQ,
         "target": WASM_TARGET,
         "empty_imports": True,
-        "exports": ["admit", "admit-json", "admit-artifact", "gate-version"],
+        "exports": ["admit", "admit-json", "admit-into", "admit-into-json",
+                    "admit-artifact", "gate-version"],
         "unavailable_exports": {
             "admit-artifact": "the item-289 chain's declared-caps leg is the G8 "
                               "boundary projection, which has no native port "

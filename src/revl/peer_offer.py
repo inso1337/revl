@@ -47,15 +47,35 @@ would hand it — is computed with the very ``cap_order.covers_set`` the
 authority-monotonicity invariant uses. So the dispatcher never offers a peer a
 grant the peer's own advertised ceiling does not cover, and the invariant
 guarantees that ceiling is itself covered by the delegating composition.
+
+The seam to attested TEE placement (#475, issue #827)
+-----------------------------------------------------
+An :class:`Attestation` facet is ASSERTED by the peer and signed with the peer's
+own key, so it says what the peer claims, not what the peer is: whoever holds the
+offer key can claim any region, any hardware, any trust level. A slot whose
+requirements include a trusted execution environment therefore cannot be
+enforced by reading the offer's own words, and an ``attestation`` member saying
+so is decoration. Such a slot carries a typed
+:class:`~revl.tee_attestation.TeeRequirement` and the offer carries a
+``tee_proof`` member: enclave evidence signed by whoever quotes the enclave,
+naming the approved bundle, the permitted measurement, the region, the network
+posture and this placement's challenge. :func:`offer_eligible` refuses every
+offer without one, so the acceptance path for an attested placement is
+unreachable by assertion. The probe runs immediately after the offer's own
+signature verifies and only ever refuses, so a slot that demands nothing pays a
+single ``is None`` and a slot that demands everything can never be satisfied by
+the peer typing a word.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping, Optional
+from datetime import datetime
+from typing import Mapping, MutableSet, Optional
 
 from . import cap_order
 from .attest import NotCanonicalizable, _canonical_bytes, key_id
+from .tee_attestation import TeeRequirement, tee_admits
 
 # The peer-offer envelope identity (mirrors `attest`'s kind/version idea: a
 # self-identifying tag plus a MAJOR.MINOR line, additive within a MAJOR).
@@ -170,11 +190,19 @@ class PeerOffer:
     ``grant_ceiling`` is the MOST authority the peer will ever accept, spelled in
     ``cap_order``'s grammar. The dispatcher (Primitive 2) may hand this peer only
     a grant this ceiling COVERS (`cap_order.covers_set` empty), which is the seam
-    to the monotonicity invariant (Primitive 3)."""
+    to the monotonicity invariant (Primitive 3).
+
+    ``tee_proof`` is the optional enclave evidence (a record signed by whoever
+    quotes the enclave, see ``revl.tee_attestation``) that a slot demanding
+    ``attested_tee`` requires. It rides INSIDE the signed body, so removing it
+    from a signed offer breaks the offer's own signature and the peer cannot drop
+    a proof it has already presented.
+    """
 
     peer_id: str
     attestation: Attestation
     grant_ceiling: tuple[str, ...] = ()
+    tee_proof: Optional[Mapping] = None
 
     def __post_init__(self) -> None:
         if not self.peer_id:
@@ -183,6 +211,10 @@ class PeerOffer:
         # at match time where it might read as "covers nothing" and be skipped.
         for cap in self.grant_ceiling:
             cap_order.parse_cap(cap)
+        if self.tee_proof is not None and not isinstance(self.tee_proof, Mapping):
+            raise OfferError(
+                f"tee_proof must be an enclave evidence object or absent, got "
+                f"{type(self.tee_proof).__name__}")
 
     def ceiling_caps(self) -> list[cap_order.Cap]:
         return [cap_order.parse_cap(c) for c in self.grant_ceiling]
@@ -191,8 +223,9 @@ class PeerOffer:
         """The signed body of the offer — every member EXCEPT the signature, in
         a shape whose canonical bytes are a pure function of the offer's
         content. ``grant_ceiling`` is sorted so member order never changes the
-        signature."""
-        return {
+        signature. ``tee_proof`` is omitted when absent, which keeps the bytes of
+        an offer that makes no TEE claim identical to a pre-#475 offer."""
+        body = {
             "kind": OFFER_KIND,
             "version": OFFER_VERSION,
             "peer_id": self.peer_id,
@@ -200,6 +233,9 @@ class PeerOffer:
             "grant_ceiling": sorted(self.grant_ceiling),
             "sign_alg": SIGN_ALG,
         }
+        if self.tee_proof is not None:
+            body["tee_proof"] = dict(self.tee_proof)
+        return body
 
 
 def _sign(body: Mapping, key: bytes) -> str:
@@ -277,6 +313,14 @@ def _validate_envelope(record: Mapping) -> str:
     except cap_order.CapError as error:
         return f"envelope refused: grant_ceiling has an unparseable capability ({error})"
 
+    # A #475 enclave proof is carried, not interpreted, here: whether it satisfies
+    # a placement is `tee_admits`, which needs the slot and the attester key. All
+    # this envelope fixes is that the member is an object when present, so a
+    # string can never be read as "some proof was offered".
+    proof = record.get("tee_proof")
+    if proof is not None and not isinstance(proof, Mapping):
+        return f"envelope refused: tee_proof is not an object ({proof!r})"
+
     kid = record.get("key_id")
     import re  # noqa: PLC0415
     if not isinstance(kid, str) or not re.fullmatch(r"[0-9a-f]{16}", kid):
@@ -324,7 +368,15 @@ class PlacementSlot:
     ``trust_floor`` is the minimum trust level (`trust >= floor`). ``regions`` /
     ``hardware`` are the allowed discrete sets — ``None`` means "any". ``need`` is
     the minimum resource offer. ``grant`` / ``budgets`` are the authority the slot
-    hands the peer; an eligible peer's ``grant_ceiling`` must COVER ``grant``."""
+    hands the peer; an eligible peer's ``grant_ceiling`` must COVER ``grant``.
+
+    ``attested_tee`` is the typed requirement to run inside an approved enclave
+    in a permitted region with the outbound network forbidden
+    (:class:`~revl.tee_attestation.TeeRequirement`), or ``None`` when the slot
+    makes no such demand. Unlike the facets above it is NOT compared against the
+    offer's own words: a floor on ``trust`` is satisfied by the peer typing a
+    word into a signed record, so a slot that needs a confidential worker must
+    require evidence it cannot author."""
 
     trust_floor: str = "verified"
     regions: Optional[frozenset[str]] = None
@@ -332,30 +384,66 @@ class PlacementSlot:
     need: ResourceNeed = field(default_factory=ResourceNeed)
     grant: tuple[str, ...] = ()
     budgets: Mapping[str, int] = field(default_factory=dict)
+    attested_tee: Optional[TeeRequirement] = None
 
     def grant_caps(self) -> list[cap_order.Cap]:
         return [cap_order.parse_cap(c) for c in self.grant]
 
 
-def offer_eligible(record: Mapping, slot: PlacementSlot, key: bytes
-                   ) -> tuple[bool, str]:
+def offer_eligible(record: Mapping, slot: PlacementSlot, key: bytes, *,
+                   attester_key: Optional[bytes] = None,
+                   tee_ledger: Optional[MutableSet[tuple[str, str]]] = None,
+                   now: Optional[datetime] = None) -> tuple[bool, str]:
     """Is a signed offer ELIGIBLE for ``slot``? Returns ``(eligible, reason)``.
 
-    Three gates, in order (design "Matching against placement constraints"):
+    Gates, in order:
 
-    (a) the signature verifies (:func:`verify_offer`) — no unsigned or tampered
-        offer is ever considered;
+    (a) **provenance, both halves** — the signature verifies
+        (:func:`verify_offer`), proving WHO is speaking, and, when the slot
+        demands an attested TEE, the offer's enclave evidence is admitted by
+        :func:`~revl.tee_attestation.tee_admits`, proving WHAT is running. The
+        second half runs only for a validly signed offer, so no third party can
+        burn a peer's challenge nonce with junk, and it only ever REFUSES: an
+        asserted ``trust: attested`` never reaches the accept path;
     (b) the attested facets satisfy the slot: ``trust`` at or above the floor,
         ``region``/``hardware`` in the allowed sets, resources at or above need;
     (c) the offer's ``grant_ceiling`` COVERS the grant the slot would hand it,
         under ``cap_order.covers_set`` — the peer never receives a grant its own
         advertised ceiling does not cover. This is the seam to Primitive 3.
 
+    ``attester_key`` is the key that must verify an enclave evidence: the
+    attestation authority's, which the peer does not hold. It is required when
+    (and only used when) ``slot.attested_tee`` is set. ``tee_ledger`` is the
+    caller's ``(nonce, peer_id)`` admission ledger, which :func:`tee_admits`
+    consumes on success; without it a demanding slot refuses rather than accept a
+    proof it cannot check for replay.
+
     Never raises: an unparseable slot grant is reported as ineligible, so a
     caller iterating candidate peers cannot be crashed by one bad slot."""
     ok, reason = verify_offer(record, key)
     if not ok:
         return False, f"signature: {reason}"
+
+    # Gate (a), second half: a signed offer proves WHO is speaking, which is all a
+    # placement needs until it needs a confidential worker. This runs only for a
+    # validly signed offer, so junk cannot burn a peer's challenge nonce, and it
+    # only ever refuses, so `trust: attested` typed into a signed record is not a
+    # path to the accept side of a slot that demands attested hardware.
+    if slot.attested_tee is not None:
+        proof = record.get("tee_proof")
+        if not isinstance(proof, Mapping):
+            return False, ("attestation: the slot requires an attested TEE but the "
+                           "offer carries no enclave evidence, so there is nothing "
+                           "to check the requirement against")
+        admitted, reason = tee_admits(
+            proof, slot.attested_tee,
+            peer_id=record.get("peer_id", ""),
+            peer_key=key,
+            attester_key=attester_key,
+            now=now,
+            replay_ledger=tee_ledger)
+        if not admitted:
+            return False, f"attestation: {reason}"
 
     att = record["attestation"]
     if _trust_rank(att["trust"]) < _trust_rank(slot.trust_floor):

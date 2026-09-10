@@ -267,6 +267,7 @@ below; the exhaustive per-command flag reference is
 | `revl layer check FILE` | the same folded row table with each row's LAYER provenance, so an overlay's origin is visible (`--json`, `--set`) | [composition-layers.md](composition-layers.md) |
 | `revl adapt NEED CANDIDATE` | can this candidate service stand in for the required one, and `--emit` the adapter that makes it so | [commands-reference.md](commands-reference.md#revl-adapt) |
 | `revl policy evaluate POLICY FILES` | dry-run a boundary policy: per rule, which clauses pass or fail and why (fact against threshold) | [boundary-policy.md](boundary-policy.md) |
+| `revl simulate policy-diff OLD NEW --history WAL` | the newly-allowed and newly-denied action sets a policy change would have made over the crossings one recorded run took, with a blast radius bounded by that action set and a non-zero status whenever a crossing cannot be decided or named (`--composition`, `--json`) | [commands-reference.md](commands-reference.md#revl-simulate) |
 | `revl audit FILES` | manifest + G8 boundary surface (`--json`); `--diff PREV.json` is the authority-drift gate, `--accept`/`--accept-all` acknowledge added crossings | [interchange-format.md](interchange-format.md) · [audit-diff.md](audit-diff.md) |
 | `revl goal audit FILES` | the termination-contract blind-spot report: the class-(c) capabilities the run reaches that no criterion in its contract observes (`--json`) | [441-goal-contracts.md](design/441-goal-contracts.md) |
 | `revl analyze FILES` | Petri-net reachability liveness: derive a net from the composition and report any reachable deadlock, naming the stranded activation (report-only; `--ir`, `--json`) | [analyze-liveness.md](analyze-liveness.md) |
@@ -282,11 +283,12 @@ below; the exhaustive per-command flag reference is
 | `revl query emitted-between --timeline F --from X --to Y` | which emissions crossed between two steps of a recorded run | [queries.md](queries.md) |
 | `revl query touched COMPONENT` | everything a component touched (`--trace` lifecycle JSONL, `--timeline` replay recording) | [queries.md](queries.md) |
 | `revl fmt FILES` | canonical formatting (IR-equivalence gated); `--migrate` rewrites 1.x `$`, `--check` for CI | [fmt.md](fmt.md) |
-| `revl test FILES` | run `test`/`prop test`/`fault test`/`lifecycle test` blocks; `--backend {py,ts,rust,java,wasm,go,all}`, `--sweep` fault sweep | [prop-test.md](prop-test.md) · [fault-tests.md](fault-tests.md) |
+| `revl test FILES` | run `test`/`prop test`/`fault test`/`lifecycle test` blocks; `--backend {py,ts,rust,java,wasm,go,all}`, `--sweep` fault sweep, `--list` to collect without running, `--filter PATTERN` to select by name | [prop-test.md](prop-test.md) · [fault-tests.md](fault-tests.md) |
 | `revl quarantine FILES [--service NAME] [--policy POLICY]` | grade a candidate with the gauntlet, then run its lifecycle + fault battery inside the wasm sandbox where an escape is a trap | [quarantine-tier.md](quarantine-tier.md) |
 | `revl canary FILES --candidate FILE --slice REALM` | run both generations at once, successor on one realm slice; promote (`--promote-to`) or revert on evidence | [verified-canary.md](verified-canary.md) |
 | `revl repair --component C [--candidate FILE] [--plan]` | the repair loop: diagnose a fault and re-admit a fix within declared policy bounds | [repair-loop.md](repair-loop.md) |
 | `revl run FILES` | boot on a Cordis runtime, see the tier table below and the flag list | [replay.md](replay.md) · [crash-recovery.md](crash-recovery.md) |
+| `revl dev [FILES]` | run the exemplary web app under one parent process: Vite serves the frontend while the Python driver boots the composition (`--frontend`, `--host`, `--port`, `--once`, `--no-frontend`) | [commands-reference.md](commands-reference.md#revl-dev) |
 | `revl recover --wal FILE` | crash recovery: roll a WAL forward/back to a checked verdict + residue proof (`--restore`, `--json`) | [crash-recovery.md](crash-recovery.md) |
 | `revl estop` | the operator's emergency halt: stop dispatching crossings now, unwind nothing, and report what was left stranded | [commands-reference.md](commands-reference.md#revl-estop) |
 | `revl branch --wal FILE` | session branch lineage over durable WALs: the branch tree, and the fork partition of a recorded tail (`--at SEQ`) | [commands-reference.md](commands-reference.md#revl-branch) |
