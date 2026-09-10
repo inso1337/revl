@@ -682,6 +682,51 @@ class _ComponentEmitter:
                 funcs.append(f"{head}\n    {inner})")
         return funcs
 
+    def _route_provides(self) -> list[str]:
+        """item 449: the PROVIDE half of a routed key, generated from `routes`.
+
+        A `routes`-carrying component is realized as a routing proxy, so item
+        449 refuses a hand-written `provide <routed key> { ... }` body: the
+        proxy is the one provider of the key downstream (G2) and that body was
+        silently discarded at load. The proxy still has to PRESENT that
+        provider, so its exports are synthesized here off the `routes` IR
+        instead of off a body: one `provide:<key>.<op>` per op of the routed
+        service, whose body is exactly what the old passthrough body lowered to,
+        namely the generated `$route_<key>_<op>` dispatch. That dispatch
+        re-resolves a live realm through `route:<key>.live` and forwards
+        strictly to that realm's provider, so a withdrawn realm drops out and
+        its calls go to the survivors. Emits nothing for a routes-less program,
+        and nothing for a routed key the component does not provide (a router
+        may route a key it does not itself present).
+        """
+        funcs: list[str] = []
+        for key in sorted(self.routes):
+            if key not in self.provides:
+                continue
+            service = self.services.get(self.requires[key])
+            methods = (service or {}).get("methods") or {}
+            where = f"{self.name}: routed provide {key}"
+            for op, spec in methods.items():
+                mname = _ident(op, f"{where}: method")
+                param_types, return_type = self._route_op_spec(key, mname, where)
+                decl: list[str] = []
+                args: list[str] = []
+                for i, ptype in enumerate(param_types):
+                    pname = _ident((spec.get("params") or [])[i].get("name"),
+                                   f"{where}: param")
+                    decl.append(f"(param $p_{pname} {_wasm_ty(ptype)})")
+                    args.append(f"(local.get $p_{pname})")
+                if return_type is not None:
+                    decl.append(f"(result {_wasm_ty(return_type)})")
+                target = f"$route_{key}_{mname}"
+                call = (f"(call {target} {' '.join(args)})" if args
+                        else f"(call {target})")
+                header = (f'(func (export '
+                          f'"{_wat_string(self._provide_prefix(key) + "." + mname)}") '
+                          + " ".join(decl)).rstrip()
+                funcs.append(f"  {header}\n    {call})")
+        return funcs
+
     # -- expressions ---------------------------------------------------------
 
     #: kinds the component path lowers itself, straight to i32 instructions.
@@ -1458,6 +1503,11 @@ class _ComponentEmitter:
             # inverse (i32, the default `_local_decl` width). Only present when
             # the component actually has a method-body witnessed effect.
             self.activation_locals.append("__mw_dcell")
+        # item 449: the PROVIDE half of a routed key runs first. A key this
+        # component both routes and provides is presented by a generated export
+        # (there is no hand-authored body left to lower), and synthesizing it is
+        # what registers the routed ops the helpers and imports below need.
+        provide_funcs.extend(self._route_provides())
         # item 173: the routed-require selector + dispatch helpers, appended as
         # ordinary internal funcs. Populates `self.globals` (route cursor /
         # served counts), which `_module` renders below — so it must run before
