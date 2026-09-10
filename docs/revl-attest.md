@@ -154,7 +154,9 @@ Three failure modes, reported distinctly:
 - **signature mismatch**, the HMAC does not match. The key is wrong, or a member
   of the attestation was altered after signing, or the record belongs to another
   protocol domain (a deploy receipt). Checked first: it proves the record is
-  authentic before its contents are read.
+  authentic before its contents are read. A `signature` that is not ASCII is
+  refused with its own reason rather than compared: the MAC is hex, so it could
+  never have matched, and `hmac.compare_digest` raises on such an input.
 - **envelope refused**, the record is authentic but is not an attestation of the
   shape this build accepts: a mislabelled `sign_alg`, a verdict other than
   `admitted`, a `version` other than `2.0`, a guarantee list naming codes the
@@ -268,7 +270,7 @@ like `--verify` it is a **check**: exit `0` when valid, nonzero when not.
 | `requirements`  | what each status rests on: the guarantee rows of the non-vacuity registry, the registry itself, the map, the axioms gate and its axiom policy, the model pin, the oracle census, the injection table and the mutation sweep |
 | `caveats`       | the qualifications the artifacts record, quoted rather than summarised |
 | `artifacts`     | one entry per formal artifact with its sha256, so a verifier on another machine can say *which* document moved |
-| `as_of_commit`, `checker`, `timestamp`, `sign_alg`, `signer`, `key_id`, `signature` | the attestation members, unchanged in meaning |
+| `as_of_commit`, `checker`, `timestamp`, `sign_alg`, `signer`, `key_id`, `signature` | the attestation members, unchanged in meaning in the envelope, checked as follows at verify time: `checker` against the identity this build resolves, `key_id` against the key the record is checked with, `as_of_commit` against this repository's history, and `timestamp` / `signer` recorded rather than re-derived (below) |
 
 The status member is made of the document's prose, not of a constant in this
 repository. A row whose status cell this build cannot place (`rule proved;
@@ -291,20 +293,47 @@ authenticity is not authority. This is the same boundary as section 3, carried
 into a wider envelope.
 
 **The evidence is the formal artifacts, not the certificate.** At verify time
-`revl attest CERT --verify-certificate` re-derives every status, every
-requirement and every caveat from the artifacts on the verifying machine,
-`formal/STATUS.md`, `formal/scripts/nonvacuity.tsv` and
-`formal/scripts/run_gate.sh`, and compares them with what was signed. It never
-reads a status *out of* the document it is checking, and it never reads a
-status out of the key. A certificate therefore cannot assert coverage the tree
-does not have, and it cannot drop a caveat the tree records: both are
-re-derived and both are refusals when they do not match. Verification fails
-closed on an unknown guarantee name, a missing or duplicated status row, a
-caveat the artifacts still record, a requirement the artifacts no longer
-support, an unknown requirement kind, a malformed envelope, a subject hash that
-is not a digest, and, with `--against`, a composition whose hash differs from
-the `subject` hash. Each refusal names which of the key, the envelope and the
-evidence failed.
+`revl attest CERT --verify-certificate` re-derives the evidence from the
+artifacts on the verifying machine, `formal/STATUS.md`,
+`formal/scripts/nonvacuity.tsv` and `formal/scripts/run_gate.sh`, and compares
+it with what was signed. It never reads a status *out of* the document it is
+checking, and it never reads a status out of the key. Re-derived member by
+member, and compared:
+
+- every artifact digest, so the verifier says *which* document moved;
+- every member of every status row: the status, the map's own status cell it was
+  read out of, that cell's name, the gap cell, the registered theorem names and
+  the contentless findings;
+- every caveat, quoted from the artifacts;
+- every requirement, including the `check` recorded behind it;
+- the whole proof model: the pinned toolchain, the manifest digest and the
+  manifest pins;
+- the checker identity, `checker.compiler` and `checker.ruleset`, against
+  `attest.checker_identity()`;
+- the subject's source digest, when the file the `subject` names is readable
+  here;
+- the commit the record names, as a revision of this repository's history;
+- `key_id`, against the key the record is being checked with.
+
+A certificate therefore cannot assert coverage the tree does not have, cannot
+drop a caveat the tree records, and cannot restate a gap, a theorem list, a
+requirement's reason or a toolchain pin the tree no longer supports: each of
+those is an evidence mismatch when it does not match. Verification fails closed
+on an unknown guarantee name, a missing or duplicated status row, a caveat the
+artifacts still record, a requirement the artifacts no longer support, an
+unknown requirement kind, a malformed envelope, a subject hash that is not a
+digest, a signature that is not ASCII, and, with `--against`, a composition
+whose hash differs from the `subject` hash. Each refusal names which of the key,
+the envelope and the evidence failed.
+
+Two signed members are **not** re-derived: `timestamp` and `signer`. They are
+statements about the signing *event* rather than about the tree, so the
+verifying machine has nothing to re-derive them from. They stay inside the MAC,
+so neither can be edited after signing, and no successful verification can be
+read as a claim about them: the success reason always ends `recorded rather than
+re-derived here: timestamp, signer`. The same tail names any member a particular
+run could not reach, such as the subject's source file when the machine
+verifying does not hold it.
 
 **The secret never appears in `argv`.** `--key PATH` names a key *file*;
 `REVL_ATTEST_KEY_FILE` names one too, and `REVL_ATTEST_KEY` carries the bytes in
@@ -324,6 +353,21 @@ revision has no mistakes, and it does not establish that the prose in
 `formal/STATUS.md` is an accurate description of the development. It records
 what the status document says, honestly, including the rows that say the
 coverage is not there.
+
+Two signed members are outside that re-derivation by construction, and a reader
+who needs an argument about them needs an argument this document does not make:
+`timestamp` is whatever the signing process wrote, and `signer` is a free-text
+label with no proven identity behind it (the key is the identity). Neither is
+checked against anything, because there is nothing on the verifying machine to
+check them against; both are inside MAC, so both are at least un-editable after
+signing, and both are named on every successful verification so that a green
+result is not read as a claim about them. The `subject.filename` member is
+re-derived only as far as its *content*: the verifier hashes the file the member
+names and compares that digest, so a record pointing at another file with other
+bytes is refused, while a copy of the same bytes under a different path verifies.
+`as_of_commit` is checked as a revision of this repository's history rather than
+as an equality with `HEAD`, so a checkout that has legitimately moved forward
+still verifies while a commit this history does not contain is refused.
 
 `--formal DIR` names the formal package to read instead of the one found from
 the working directory, `$REVL_FORMAL_DIR`, or the ancestors of the installed
