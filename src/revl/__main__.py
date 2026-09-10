@@ -227,15 +227,28 @@ def _run_simulate(args) -> int:
     #820) — the bounded preview a policy change over recorded history opens.
 
     Reads the action set out of one WAL, decides each recorded action under OLD
-    and under NEW through `policy.capability_verdict` (the capability leg of the
-    gate's own predicate), and prints the newly allowed set, the newly denied
-    set, and a blast radius bounded by the recorded action set rather than by a
-    number this command invents. Never admits, refuses or mutates: exit 0 when
-    nothing recorded becomes newly allowed and nothing is left undecided, 1 when
-    either is true (a preview that could not decide an action does not report
-    the change clean), 2 on a usage, parse or read error."""
+    and under NEW through the two legs `policy.capability_verdict` reads (the
+    deny-lists and the closed allow-lists), and prints the newly allowed set, the
+    newly denied set, and a blast radius bounded by the recorded action set
+    rather than by a number this command invents.
+
+    The admission refuses a crossing on more legs than those two: the
+    agent-sandbox allow-list, the taint-flow tier, the approval and declassify
+    rules, the declaration-strength floors, the evidence bundle and the recovery
+    surface decide by facts a WAL does not carry. `policy_diff.LEGS` names every
+    leg with the fact it reads, a recorded pair whose surface moves on one of
+    them is reported undecided with the leg named rather than unchanged, and no
+    writer records the declared capability scope at all, so the action set of a
+    WAL a recorder wrote is empty and those records are withheld instead of
+    printing as a clean diff.
+
+    Never admits, refuses or mutates. Exit 0 when the change newly allows no
+    recorded crossing, leaves none undecided and withholds none; 1 when any of
+    those is true, so a preview that could not decide an action, or could not
+    name one, does not report the change clean; 2 on a usage, parse or read
+    error."""
     from .policy import PolicyError, component_realms, load_policy
-    from .policy_diff import PolicyDiffError, diff, load_history, render
+    from .policy_diff import PolicyDiffError, diff, load_history, render, widened
 
     if args.simulate_command != "policy-diff":
         print(f"error: unknown simulate verb `{args.simulate_command}`",
@@ -243,9 +256,13 @@ def _run_simulate(args) -> int:
         return 2
     try:
         old = load_policy(args.old)
+    except (PolicyError, RevlError, OSError) as error:
+        print(f"error: cannot read policy `{args.old}`: {error}", file=sys.stderr)
+        return 2
+    try:
         new = load_policy(args.new)
-    except (PolicyError, RevlError) as error:
-        print(f"error: {error}", file=sys.stderr)
+    except (PolicyError, RevlError, OSError) as error:
+        print(f"error: cannot read policy `{args.new}`: {error}", file=sys.stderr)
         return 2
 
     # A realm-scoped rule decides an action by the realms its component joins,
@@ -272,7 +289,7 @@ def _run_simulate(args) -> int:
         print(json.dumps(result, indent=2))
     else:
         print(render(result))
-    return 1 if (result["newlyAllowed"] or result["undecided"]) else 0
+    return 1 if widened(result) else 0
 
 
 def _run_goal(args, ir: dict) -> int:
