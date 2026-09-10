@@ -28,6 +28,7 @@ import importlib.util
 import json
 import os
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,15 @@ _ROOT = Path(__file__).resolve().parents[1]
 _BACKEND = _ROOT / "backends" / "python"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+# `emit` and `runtime` are imported under their canonical names on purpose: an
+# emitted module does `from runtime import Frame`, so an aliased copy would be a
+# *different* module and this test would exercise nothing (see test_replay).
+import emit as py_emit  # noqa: E402
 import replay  # noqa: E402
+import runtime  # noqa: E402,F401
+
+from revl import branch as branch_mod  # noqa: E402
+from revl.wal import read_wal  # noqa: E402
 
 needs_cordis = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,
@@ -118,12 +127,20 @@ def test_outbound_scoped_inverse_forces_clean_false_in_the_fork_report():
 
 def test_unknown_capability_token_reads_as_crossing():
     """Fail-safe: an inverse whose scope names a token that is not provably
-    host-confined is enumerated, never run (the honest direction)."""
+    host-confined is enumerated, never run (the honest direction).
+
+    Item 872 added the ABSENT case to this rule. It used to be the exception —
+    `None` read as host-confined, so the one input no recorder could vouch for
+    was the one assumed safe, while an unknown *token* was already enumerated.
+    The direction is now uniform: unproven crosses."""
     assert replay.scope_host_confined({"caps": ["mail"]}) is False
     assert replay.scope_host_confined({"caps": ["fs", "net"]}) is False
     assert replay.scope_host_confined({"confined": True}) is True
     assert replay.scope_host_confined({"sandbox": True}) is True
-    assert replay.scope_host_confined(None) is True
+    # an ABSENT scope is UNPROVEN, never "declared nothing": the recorder states
+    # the latter explicitly as `{"caps": []}`, which is the next assertion.
+    assert replay.scope_host_confined(None) is False
+    assert replay.scope_host_confined({"caps": []}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -438,3 +455,109 @@ def test_fork_refuses_a_non_idempotent_span(tmp_path):
     tl.annotate_step(2, undo_idempotent=False)   # the fs effect, declared non-idempotent
     with pytest.raises(SessionError, match="non-idempotent"):
         session.fork(at=1)
+
+
+# ---------------------------------------------------------------------------
+# item 872 — the declared scope is DURABLE, and an unrecorded scope crosses
+#
+# Every scope assertion above threads `scope=` in BY HAND: `_mk(..., scope=...)`
+# builds a Step and the test reads it back. That is precisely why the fail-open
+# below went unnoticed — no production path ever wrote the field, so the tests
+# proved the CLASSIFIER and never the RECORDING.
+#
+# These two drive a real run instead. No Step is constructed, no `scope` is
+# assigned: the reference emitter, the real `replay.Recorder` and the real
+# write-ahead log produce the timeline, and the only stand-in is the cordis
+# context (`test_replay.FakeContext`, the protocol-faithful fake the replay
+# suite already trusts), which is why this needs no cordis venv.
+# ---------------------------------------------------------------------------
+
+_SCOPE_SOURCE = '''
+type W = { p: Str }
+type NetW = { url: Str }
+type E = { code: Str }
+extern pure fn unstash(w: W) -> Unit = @py { return }
+extern pure fn unput(w: NetW) -> Unit = @py { return }
+extern witnessed[fs] fn stash(p: Str) -> Result[W, E] undo unstash(result) = @py {
+    return Ok({'p': p})
+}
+extern witnessed[net] fn put(url: Str) -> Result[NetW, E] undo unput(result) = @py {
+    return Ok({'url': url})
+}
+component Agent {
+  effect stash("a.txt")
+  effect put("https://example.test/x")
+}
+'''
+
+_EMITTED = "<scope872-emitted>"
+
+
+def _record_a_real_run(tmp_path, name):
+    """source -> IR -> emitted module -> WAL open across -> a recorded run.
+
+    The log is opened BEFORE the composition activates, so every step of the run
+    reaches it: `open_wal` rebinds only the live timelines, and a log opened
+    after activation would be durable in name only for the steps already taken.
+    It is closed at the end of the run through the one teardown point
+    (`close_wal`, issue #536) rather than left to the garbage collector.
+    """
+    from test_replay import FakeContext, _Root
+
+    ir = compile_source(_SCOPE_SOURCE, "<scope872>.rvl")
+    source = py_emit.emit(ir)
+    module = types.ModuleType("revl_scope872_emitted")
+    sys.modules[module.__name__] = module
+    exec(compile(source, _EMITTED, "exec"), module.__dict__)
+
+    recorder = replay.Recorder(ir)
+    recorder.register_source(_EMITTED, source)
+    recorder.instrument(module, ir)
+    path = tmp_path / name
+    recorder.open_wal(str(path), generation=1)
+    order = (ir.get("manifest") or {}).get("loadOrder") or []
+    for component in order:
+        getattr(module, component)["apply"](FakeContext(_Root()), {})
+    recorder.close_wal()
+    return recorder, path
+
+
+def test_a_recorded_run_enumerates_its_outbound_effect_instead_of_firing_it(tmp_path):
+    """item 872. The outbound `witnessed[net]` effect of a REAL run is enumerated
+    in `wouldCrossOnRewind` and NEVER fired, while the host-confined `witnessed[fs]`
+    effect beside it still runs (CRITICAL 2, driven end to end rather than
+    hand-annotated).
+
+    RED on the tree before item 872: `Timeline.annotate_step` was the only writer
+    of `Step.scope` and had no production caller, so both effects recorded
+    `scope=None`, `scope_host_confined(None)` said True, and the outbound inverse
+    FIRED — `inversesRan` had both, `wouldCrossOnRewind` was empty.
+    """
+    recorder, _ = _record_a_real_run(tmp_path, "live.wal")
+    timeline = recorder.timeline("Agent")
+    effects = [s for s in timeline.steps if s.kind == replay.KIND_EFFECT]
+    assert [s.scope for s in effects] == [{"caps": ["fs"]}, {"caps": ["net"]}]
+
+    doc = _run(timeline.step_back(-1, compensate=False))
+
+    assert [e["index"] for e in doc["inversesRan"]] == [0], "the fs inverse runs"
+    assert [(e["index"], e["scope"]) for e in doc["wouldCrossOnRewind"]] == [
+        (1, {"caps": ["net"]})], "the outbound inverse is enumerated, not fired"
+
+
+def test_a_recorded_run_makes_the_declared_scope_durable_and_readable(tmp_path):
+    """item 872, the durability half. The declaration reaches the WAL under the
+    key the writer already had (`"scope"`), so the offline reader — a process
+    that never saw the run — names the same actions the live rewind does. Before
+    item 872 the key was absent from every record a real run wrote, and the
+    offline classifier could therefore name nothing.
+    """
+    _, path = _record_a_real_run(tmp_path, "durable.wal")
+
+    effects = [r for r in read_wal(str(path))["records"] if r.get("kind") == "effect"]
+    assert [r.get("scope") for r in effects] == [{"caps": ["fs"]}, {"caps": ["net"]}]
+
+    doc = branch_mod.partition(str(path), -1)
+    assert [e.get("scope") for e in doc["wouldRewind"]] == [{"caps": ["fs"]}]
+    assert [e.get("scope") for e in doc["wouldCrossOnRewind"]] == [{"caps": ["net"]}]
+    assert doc["residue"]["clean"] is False

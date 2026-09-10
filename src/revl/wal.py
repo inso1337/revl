@@ -50,12 +50,15 @@ The record schema a durable WAL speaks (all a tier must emit to be recoverable):
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sys
 import tempfile
 import warnings
 from dataclasses import dataclass
+
+from ._paths import backends_root
 
 #: The on-disk WAL format version. Bump only on a breaking schema change; the
 #: header carries it so a reader can refuse a version it does not understand.
@@ -118,25 +121,55 @@ KINDS = (KIND_EFFECT, KIND_PROVISION, KIND_EMISSION, KIND_COMPENSATION,
          KIND_BOUNDARY, KIND_HINGE, KIND_OPAQUE)
 
 #: The capability tokens an inverse may declare and still be provably
-#: HOST-CONFINED, so a fork rewind may run it. Byte-identical to
-#: ``replay.HOST_CONFINED_CAPS``; item 250 Decision 2 says why `fs` is the only
-#: one.
-HOST_CONFINED_CAPS = frozenset({"fs"})
+#: HOST-CONFINED, so a fork rewind may run it. Item 250 Decision 2 says why `fs`
+#: is the only one. Item 872: this is no longer a second COPY of the rule —
+#: ``HOST_CONFINED_CAPS`` and :func:`scope_host_confined` below are handed
+#: straight out of the py backend, where the live fork and the recorder that
+#: writes the scope both live, so there is exactly one definition and the two
+#: cannot drift.
+#
+# The backend is loaded by FILE through the shared `backends/` resolver (the way
+# `revl.test` and `revl.gate` load a tier's emitter), never by requiring a
+# backend on `sys.path`, so this reader keeps the property item 322 gave it: it
+# reads a WAL with no cordis runtime and no backend importable. The py backend
+# is written to be loadable that way (`replay.py` has the same fallback for its
+# own sibling), and it imports no cordis at module scope.
+#
+# The delegation is lazy (module `__getattr__`): a caller that only reads or
+# writes WAL lines never pays for loading an emitter-size module.
+_PY_REPLAY = None
 
 
-def scope_host_confined(scope) -> bool:
-    """Whether a recorded capability SCOPE is provably host-confined (item 250,
-    Decision 2). Behaviourally identical to ``replay.scope_host_confined``: an
-    unknown token reads as CROSSING, the fail-safe direction — the honest move is
-    to enumerate an inverse, never to run one."""
-    if scope is None:
-        return True
-    if scope.get("sandbox") or scope.get("confined"):
-        return True
-    caps = tuple(scope.get("caps") or ())
-    if not caps:
-        return True
-    return all(cap in HOST_CONFINED_CAPS for cap in caps)
+def _py_replay():
+    """The py backend module that owns the single definition of the scope gate."""
+    global _PY_REPLAY
+    if _PY_REPLAY is None:
+        module = sys.modules.get("replay")
+        if module is None or not hasattr(module, "scope_host_confined"):
+            spec = importlib.util.spec_from_file_location(
+                "replay", backends_root() / "python" / "replay.py")
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            # Adopt the name the backend uses for itself, but only when nothing
+            # else holds it, so a later `import replay` resolves to this same
+            # copy. `replay.py` does the same for its `confidential` sibling.
+            sys.modules.setdefault("replay", module)
+        _PY_REPLAY = module
+    return _PY_REPLAY
+
+
+def __getattr__(name: str):
+    """Expose the backend's scope gate under this module's name (item 872).
+
+    An unknown token already read as CROSSING; an ABSENT scope read as confined,
+    so the one input no recorder could vouch for was the one assumed safe. Both
+    copies of this fail-open rule are now one definition, which is why these two
+    names — the gate and its token set — are the only attributes resolved here.
+    """
+    if name in ("HOST_CONFINED_CAPS", "scope_host_confined"):
+        return getattr(_py_replay(), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ---------------------------------------------------------------------------

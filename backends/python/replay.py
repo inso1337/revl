@@ -191,16 +191,25 @@ def scope_host_confined(scope: Optional[dict]) -> bool:
     (item 250, Decision 2). The fork rewind runs an inverse ONLY when this is
     true; anything else is enumerated, never fired.
 
-    `None` is "no declared boundary-crossing capability" — an ordinary in-process
-    effect, host-confined by construction — so every pre-250 step reads confined
-    and the default rewind is byte-identical. A scope with an explicit `confined`
-    (item 373 reach) or `sandbox` (item 411 envelope) flag is host-confined. A
-    scope carrying `caps` is confined ONLY when every token is in
-    :data:`HOST_CONFINED_CAPS`; a single outbound token (network/IPC/...) makes it
-    cross, and an UNKNOWN token also reads as crossing (fail-safe: the honest
-    direction is to enumerate, never to run)."""
+    `None` is an *ABSENT* scope: nothing durable says what the step declared, so
+    the effect is UNPROVEN and reads as CROSSING. It does NOT mean "no declared
+    boundary-crossing capability" — the recorder states that case explicitly as
+    `{"caps": []}` (:func:`_declared_scope`, item 872), so an absent scope can
+    only be a record written before item 872, or by something that did not state
+    what it observed. Reading it as confined was a fail-OPEN inversion: an
+    UNKNOWN *token* already reads as crossing, while a *missing* scope read as
+    confined, so the one input no recorder could vouch for was the one assumed
+    safe (issue 872). Every pre-872 WAL therefore has its witnessed effects
+    enumerated by a fork rewind rather than fired.
+
+    A scope with an explicit `confined` (item 373 reach) or `sandbox` (item 411
+    envelope) flag is host-confined. A scope carrying `caps` is confined ONLY
+    when every token is in :data:`HOST_CONFINED_CAPS`; a single outbound token
+    (network/IPC/...) makes it cross, an empty `caps` list (a declaration of no
+    capability) is confined, and an UNKNOWN token also reads as crossing
+    (fail-safe: the honest direction is to enumerate, never to run)."""
     if scope is None:
-        return True
+        return False
     if scope.get("sandbox") or scope.get("confined"):
         return True
     caps = tuple(scope.get("caps") or ())
@@ -318,6 +327,35 @@ def _code_site(value: Any) -> tuple:
     return code.co_filename, code.co_firstlineno
 
 
+#: item 872: the scope the recorder records for an effect whose source declared
+#: no boundary-crossing capability at all. Spelled out as an empty capability
+#: LIST rather than left absent so that "no capability" stays distinguishable
+#: from "nothing durable says" — see :func:`scope_host_confined`.
+NO_DECLARED_CAPABILITIES = {"caps": []}
+
+
+def _declared_scope(entry: Any) -> dict:
+    """The capability scope the RECORDER observed for one yielded inverse.
+
+    Item 872: the declared ``witnessed[caps]`` set reached the runtime only as
+    the emitter's ``transactional(...)`` registration, was never written to the
+    WAL, and so every record a real run wrote carried no ``scope`` key at all.
+    The registration now carries the declaration (``Frame.transactional(scope=
+    ...)``) and lands on the registered entry, which is exactly what the
+    recorder holds at :meth:`Timeline.record_yield` (``_unguarded`` follows
+    ``_revl_entry`` down to it), so the scope can be read from where the
+    declaration is known instead of being re-derived from source text.
+
+    A declaration is `{"caps": [...]}`; a source that declares nothing yields
+    :data:`NO_DECLARED_CAPABILITIES`. The result is always a fresh dict, so a
+    step can never mutate what an entry holds.
+    """
+    declared = getattr(entry, "scope", None)
+    if isinstance(declared, dict) and declared:
+        return dict(declared)
+    return dict(NO_DECLARED_CAPABILITIES)
+
+
 # ---------------------------------------------------------------------------
 # one recorded step
 # ---------------------------------------------------------------------------
@@ -356,12 +394,14 @@ class Step:
         # item 250 (session branching): the recorded CAPABILITY SCOPE of a
         # boundary-crossing inverse, the axis the scope-gated fork rewind keys on
         # (docs/design/250-session-branching.md, Decision 2). A dict of the shape
-        # `{"caps": (token, ...), "confined": bool, "sandbox": bool}` or None. None
-        # means "no declared boundary-crossing capability" — an in-process effect,
-        # host-confined by construction — so every pre-250 step reads host-confined
-        # and the default rewind is byte-identical. Set by the recorder/runtime (or
-        # a test) after `record_yield` classifies the step; the emitter is
-        # untouched, so a step carries a scope only when one is threaded in.
+        # `{"caps": [token, ...], "confined": bool, "sandbox": bool}` or None.
+        # item 872: the RECORDER stamps this for every effect it classifies,
+        # from the inverse's own registration (the emitter's declared
+        # `witnessed[caps]` set, threaded through `Frame.transactional`), so a
+        # scope of `{"caps": []}` means the source declared no boundary-crossing
+        # capability and an ABSENT scope means nothing durable said — which
+        # reads as crossing (see `scope_host_confined`). Annotation after
+        # `record_yield` is only for a caller building steps by hand.
         self.scope: Optional[dict] = None
         # item 250 / item 309: whether the author DECLARED this inverse
         # idempotent-total. None = not declared (every pre-309 step); True =
@@ -625,6 +665,15 @@ class Timeline:
                 if file is None:
                     step.note = ("a disposer with no python code object — origin "
                                  "unknown to the recorder")
+                # item 872: record what the source DECLARED about this effect's
+                # capability scope, read from the registered inverse itself
+                # rather than re-derived from source text (a witnessed step's
+                # activation body is emitted into the transaction runtime, so it
+                # has no code site to match: `file`/`lineno` above are None).
+                # Only KIND_EFFECT consults a scope (the fork rewind's
+                # `_step_back_scoped` and the offline partition in
+                # `revl.branch`), so this is the one kind that must state it.
+                step.scope = _declared_scope(entry)
 
         step.undo = _once(step, value)
         self._wal_append(step)

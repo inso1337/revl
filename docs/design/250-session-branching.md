@@ -225,10 +225,22 @@ rewind PUTs to a remote endpoint mid-fork, with no commit and no prompt: the
 identical catastrophe as CRITICAL 1, only reached through a `KIND_EFFECT` step
 the draft ran unconditionally.
 
-So the rewind is gated on DATA the parser already records, not on KIND. The
-capability scope of a witnessed extern is recorded at parse time as
-`witnessed[caps]` (src/revl/parser.py: the declared token, not the extern name,
-is the crossing's capability, and it joins the authority namespace). Slice 1
+So the rewind is gated on DATA the runtime records, not on KIND. The capability
+scope of a witnessed extern is DECLARED at parse time as `witnessed[caps]`
+(src/revl/parser.py: the declared token, not the extern name, is the crossing's
+capability, and it joins the authority namespace). Since item 872 that
+declaration is also what REACHES the rewind, instead of stalling at the
+declaration: the emitter stamps the declared set onto the witnessed step's
+`transactional(...)` / `transactional_method(...)` registration, the runtime
+carries it on the registered entry (`Frame.transactional(scope=...)`), and
+`Timeline.record_yield` copies it onto the step's recorded `scope` — the same
+field the py WAL writer already had a `"scope"` key for, so the fork's live
+verdict and an offline reader of the same WAL are reading one stamp. Before item
+872 no production path wrote that field at all, and an ABSENT scope read as
+host-confined: an unproven input assumed safe while an unknown cap token was
+already enumerated. That fail-open inversion is issue 872; the absent case now
+reads as CROSSING, and `{"caps": []}` is the recorder's explicit statement that
+the source declared no boundary-crossing capability. Slice 1
 adds a rewind mode (a `compensate=False` flag on `Timeline.step_back`, off by
 default so every existing caller and golden is byte-identical) whose rule is:
 
@@ -709,11 +721,15 @@ survive the process, then builds the two read surfaces on top.
 The honesty line Slice 2 holds: an offline reader never RUNS anything. It has no
 live component, no workspace handle and no fiber, so the only verbs it offers are
 *enumerate* and *compare*, and `compare` refuses to invent a divergence point for
-two WALs whose durable records do not relate them. It also states its one blind
-spot on every partition document: over a WAL written before these inputs became
-durable, an absent `scope` cannot be distinguished from a scope that was never
-written down (both read as host-confined, which is exactly what the live
-classifier does with `None`).
+two WALs whose durable records do not relate them. It also states one blind spot
+on every partition document: an absent `scope` is UNPROVEN, so it cannot be
+distinguished from a scope that was never written down, and the reader resolves
+that the SAFE way — enumerate the step, never offer it as rewindable. On a WAL
+written before these inputs became durable (which is every WAL written before
+item 872) that means every effect the WAL records is enumerated, so such a tail
+can never be reported as clean. The direction is the same one the LIVE classifier
+takes with a scope of `None`, so the offline partition agrees with the live one
+on an old WAL exactly as it does on a new one.
 
 The headline test is that the offline classifier reproduces the LIVE partition,
 bucket for bucket, over a timeline touching all seven kinds. Without that pin the
