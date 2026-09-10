@@ -1307,6 +1307,32 @@ def _allowed(token: str, allow: tuple[str, ...]) -> bool:
     return _matches_any(token, allow)
 
 
+def _deny_matches(token: str, patterns: tuple[str, ...]) -> bool:
+    """Whether a deny rule's patterns refuse one crossing, including the
+    `UNBOUNDED` clause the capability leg has always carried. Named (item 468)
+    so the gate, the `revl policy evaluate` dry-run and the recorded-history
+    diff read one predicate rather than three spellings of it."""
+    return _matches_any(token, patterns) or \
+        (token == UNBOUNDED and UNBOUNDED in patterns)
+
+
+def capability_verdict(policy: Policy, name: str, realms: frozenset[str],
+                       token: str) -> str:
+    """`"allow"` or `"deny"` for one component reaching one capability token,
+    from the same predicates the capability leg of `evaluate` reads: every deny
+    rule first (deny wins), then the closed allow-list a component or realm rule
+    opens. A component no allow rule selects is unconstrained, which is what
+    `_allow_for` returning None means. The caller owns what "undecided" is: a
+    realm-scoped rule needs `realms`, which only a compiled composition has."""
+    for rule in _deny_for(policy, name, realms):
+        if _deny_matches(token, rule.patterns):
+            return "deny"
+    allow = _allow_for(policy, name, realms)
+    if allow is not None and not _allowed(token, allow):
+        return "deny"
+    return "allow"
+
+
 def _location(manifest: dict, name: str) -> tuple[str | None, int | None]:
     for entry in manifest.get("components") or []:
         if entry.get("name") == name:
@@ -1918,8 +1944,7 @@ def evaluate(policy: Policy, audit: dict,
         for r in reach:
             # deny-lists refuse regardless of any allow (deny wins)
             for rule in denies:
-                if _matches_any(r.token, rule.patterns) or \
-                        (r.token == UNBOUNDED and UNBOUNDED in rule.patterns):
+                if _deny_matches(r.token, rule.patterns):
                     violations.append(
                         _deny_violation(manifest, name, r, rule, profile))
             # a closed component/realm allow-list
