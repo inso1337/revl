@@ -524,3 +524,96 @@ def test_the_third_column_is_in_the_teardown_contract_and_the_model():
                     "estop_strands_everything", "halt_ambiguity_is_at_most_one",
                     "halt_books_are_total"):
         assert f"theorem {theorem}" in g7
+
+
+# -- the inventory is printed RAW, so nothing reaching it may hold a value ----
+#
+# Issue #815, item 6 of the item-421 audit's gap list. The child process prints
+# its own inventory line itself:
+#
+#     print(f"[{name}] HALTED {json.dumps(inventory)}", flush=True)
+#     (src/revl/_process_runner.py, the latch watcher)
+#
+# That print is the runner's own console channel, not the `_record` trace, so it
+# passes through NEITHER stage of the 421 scrub contract: no argument scrub (the
+# halt is not a call) and no value registry (nothing redacts here). `json.dumps`
+# takes the dict verbatim, so the invariant is not "the line is scrubbed" — it
+# is that nothing reaching the line carries a value. The only field that could
+# is `referent`, and the only producer for a RESOURCE is `repr(resource)`.
+#
+# So these two tests pin the invariant at the level where it is enforceable:
+# every shipped resource that registers with an activation has a repr that
+# names the resource and not what it is holding. `Pool` is the near miss — it
+# keeps the url it was opened with in `self.url`, exactly the field an author
+# would mark `Secret[Str]`, and the reprs in this module ARE written as
+# "debugging aids" (`# pragma: no cover`), which is how `f"<pool {self.url}>"`
+# lands in a later commit. If that happens, the inventory line carries the
+# credential to the operator console, and these tests are what says so.
+
+ESTOP_CANARY = "SEKRIT-ESTOP-INVENTORY-815-6a1c"
+
+
+def _activating(frame):
+    """A context manager that makes `frame` the acquiring activation, so
+    `Map.new()` / `Pool(...)` register as ITS stateful resources (`_Closable`
+    calls `_register_resource`; a bare resource in a test is not tracked)."""
+    class _Ctx:
+        def __enter__(self):
+            rt._ACTIVATING.append(frame)
+            return frame
+
+        def __exit__(self, *_exc):
+            rt._ACTIVATING.pop()
+            return False
+    return _Ctx()
+
+
+def _frame_holding_a_value():
+    """A live frame whose own resources hold the canary: a Map keyed by it (the
+    shipped `user_cache` idiom) and a Pool opened on it (a credentialed url)."""
+    frame = _frame("Ops")
+    with _activating(frame):
+        store = rt.Map.new()
+        store.insert(ESTOP_CANARY, "value-for-" + ESTOP_CANARY)
+        pool = rt.Pool(ESTOP_CANARY, 2)
+    assert frame._resources == [store, pool]
+    return frame, store, pool
+
+
+def test_the_halt_inventory_line_carries_no_value_a_resource_is_holding():
+    """The raw child line, built the way the runner builds it, with a canary in
+    the frame's resources. Non-vacuous both ways: the line really is printed and
+    really does name the stranded resources, so the absence is not emptiness."""
+    frame, store, pool = _frame_holding_a_value()
+    halt = rt.estop("runaway loop", operator="alice")
+    line = f"[{frame.name}] HALTED {json.dumps(halt)}"
+
+    # the sink fired and names what it stranded (else "absent" means "nothing")
+    assert line.startswith("[Ops] HALTED {")
+    assert "estop-stranded" in line
+    assert store._tag in line and pool._tag in line
+    assert '"referent"' in line
+    # ...and what it names carries neither the key nor the value
+    assert ESTOP_CANARY not in line
+    assert "value-for-" not in line
+    # the identifier columns are still useful, so the line stays readable
+    assert '"component": "Ops"' in line
+    assert '"reason": "runaway loop"' in line
+
+
+def test_no_shipped_resource_reprs_what_it_holds():
+    """The invariant the test above depends on, asserted directly and at the
+    resource — where a future `__repr__` would break it. Both resources DO hold
+    the canary (asserted), and neither repr says so."""
+    _, store, pool = _frame_holding_a_value()
+    # the values really are held: this is what makes the reprs' silence mean
+    # something rather than meaning "the test put nothing in"
+    assert store.data == {ESTOP_CANARY: "value-for-" + ESTOP_CANARY}
+    assert pool.url == ESTOP_CANARY
+
+    for resource in (store, pool):
+        rendered = repr(resource)
+        assert ESTOP_CANARY not in rendered, rendered
+        # a repr is still expected to NAME the resource (the `_tag` column of
+        # the inventory comes from it), so this is not "no repr at all"
+        assert resource._tag in rendered or type(resource).__name__ in rendered

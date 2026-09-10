@@ -2108,3 +2108,138 @@ def test_crashproof_scenario_matches_the_emitter():
     assert emit.emit(_crashproof_ir(), "revl", record=True) == committed, (
         "backends/java/scenarios/crashproof/revl/Components.java drifted from "
         "the emitter. " + _TAIL.format(t="java"))
+
+
+# -- declared Secret[T]: the emitter ends (issue #815, item 8) ---------------
+#
+# Item 8 of the item-421 audit's gap list: `test_emit_java.py` contained no
+# secret-related test at all, so every java secret assertion lived in
+# test_secret_registry.py — which tests the RUNNER's registry in isolation and
+# never the emitter that has to call into it. The emitter's own docstring
+# (backends/java/emit.py, `_SECRET_PREAMBLE`) claims three ends and says the
+# machinery is absent without a declaration; nothing asserted either. These
+# four tests do, and they run everywhere: `_emit` routes through
+# `javac_gate.compile_check`, a no-op without a JDK, so the text assertions
+# hold on the frontend job too (and `tests/test_java_javac_gate_runs_in_ci.py`
+# is what keeps that no-op honest in CI).
+
+JAVA_LEAKY = """
+extern emission[vault.mint] fn mint_token(u: Str) -> Secret[Str]
+  = @java { return u; }
+
+extern emission[db.write] fn strict_write(sql: Secret[Str]) -> Int
+  = @java { throw new java.util.NoSuchElementException(sql); }
+
+service Database { emission fn execute(sql: Secret[Str]) -> Int }
+service Cache { emission fn put(u: Str) -> Int }
+
+component PgDatabase provides db: Database {
+  config { url: Str = "pg://main", api_key: Secret[Str] = "SEKRIT-CANARY-815-JAVA" }
+
+  provide db {
+    fn execute(sql) {
+      emit strict_write(sql)
+      return 1
+    }
+  }
+}
+
+component UserCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  emit db.execute("SEED-815") compensate db.execute("UNSEED-815")
+
+  provide cache {
+    fn put(u) {
+      let t = emit mint_token(u)
+      // The bracket's inverse has to stay host-local (G5): `store.remove(t)`
+      // would make teardown depend on the value mint_token returned across a
+      // boundary, so the key is a literal and the secret rides as the value.
+      effect store.insert("CACHE-815", t)
+      undo   store.remove("CACHE-815")
+      emit db.execute(t)
+      return 1
+    }
+  }
+}
+"""
+
+
+def test_a_secret_document_registers_all_three_ends():
+    """The origin (a `Secret[Str]` return), the receiver (a `Secret[Str]`
+    provide-method parameter) and the config field (the operator-supplied value)
+    each register their value — and they register it by CALLING the emitted
+    registry, which is the only thing that makes `test_secret_registry.py`'s
+    isolated unit reachable from a generated program."""
+    src = _emit(compile_source(JAVA_LEAKY))
+
+    # the origin: the extern's public name registers what its body returned,
+    # and the verbatim @java body keeps its signature under a private name
+    assert "return revlSecretResult(_revl_secret_mint_token(u));" in src
+    assert "private static String _revl_secret_mint_token(String u)" in src
+    # a `Secret[T]` EXTERN PARAMETER is not a receiver (the service is), so it
+    # must NOT register: registering every value that passes through an extern
+    # would scrub ordinary data. Only the declared receivers register.
+    assert "revlMarkSecret(u);" not in src
+
+    # the receiver: the method that declared `Secret[Str]` in the service
+    assert "public long execute(String sql) {" in src
+    assert "revlMarkSecret(sql);" in src
+
+    # the config field: at load. Twice, because the value arrives through EITHER
+    # constructor — the parameterised one the runner instantiates from
+    # `[config.<Comp>]`, and the no-arg one where the declared default stands —
+    # and a registration only at the read site would miss the one that is used.
+    assert src.count("revlMarkSecret(this.api_key);") == 2
+
+
+def test_a_secret_document_scrubs_the_wal_and_the_console_marker():
+    """The two sinks this tier keeps, from the emitter's side. Both read through
+    `revlRedactText`, and the marker must equal the py tier's — a polyglot
+    composition redacts to the SAME `<redacted:secret>` whichever tier wrote the
+    line, so these are two halves of one constant."""
+    src = _emit(compile_source(JAVA_LEAKY), record=True)
+
+    assert 'public static final String REVL_REDACTED_SECRET = "<redacted:secret>";' in src
+    # the WAL is plaintext at rest: a descriptor argument is scrubbed before it
+    # is stringified into the record
+    assert "call.append(revlWalStr(revlRedactText(args[i])));" in src
+    assert "public static String revlRedactText(String text)" in src
+    # ...and the same constant the runtime registry scrubs to on the py tier,
+    # loaded by path so no import machinery is shared between the tiers
+    spec = importlib.util.spec_from_file_location(
+        "revl_java_marker_py_confidential", ROOT / "backends" / "python" / "confidential.py")
+    py_confidential = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(py_confidential)
+    assert emit._REDACTED_SECRET == py_confidential.REDACTED
+
+
+def test_a_document_that_declares_no_secret_carries_none_of_the_machinery():
+    """The emitter's partition claim, asserted instead of trusted: the registry
+    block is emitted only in `_SECRET_MODE`, so a document with no declaration
+    is byte-identical to before item 421. `user_cache` is the shipped golden
+    document, so this is that claim against real emitted output."""
+    src = _emit(_ir("user_cache"))
+    for token in ("revlMarkSecret", "revlSecretResult", "revlRedactText",
+                  "REVL_REDACTED_SECRET", "revlSecretValues"):
+        assert token not in src, token
+    # ...and for a frame-bearing document in record mode, where the WAL sink IS
+    # emitted: still none of it, because only the declaration gates the block.
+    frame_src = _emit(_crashproof_ir(), record=True)
+    for token in ("revlMarkSecret", "revlSecretResult", "REVL_REDACTED_SECRET"):
+        assert token not in frame_src, token
+    # presence in the secret document keeps the absences above non-vacuous: the
+    # tokens are exactly the ones JAVA_LEAKY emits
+    secret_src = _emit(compile_source(JAVA_LEAKY))
+    assert "revlMarkSecret" in secret_src and "revlSecretResult" in secret_src
+
+
+def test_the_wal_arg_is_unwrapped_without_a_secret_declaration():
+    """The other side of the record-mode branch (`_emit_record_sink`): with no
+    `Secret[T]` the argument goes to the WAL verbatim, which is what keeps the
+    default output byte-identical. Without this, a refactor that made the scrub
+    unconditional would pass every test above. The sink is only emitted when
+    the document carries a teardown frame, so the fixture is one that has one —
+    otherwise both assertions here would pass on emptiness."""
+    src = _emit(_crashproof_ir(), record=True)
+    assert "call.append(revlWalStr(args[i]));" in src   # the sink itself is on
+    assert "revlRedactText(args[i])" not in src
