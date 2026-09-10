@@ -1,0 +1,43 @@
+// REJECTED — G5: the same crossing one more binding later, so the local the
+// slot names was never in the same expression as the provision read.
+//
+// `let s = r` is a spelling change, not a boundary: following the value through
+// a chain of locals is the same question as following it through one, and this
+// file pins the transitive case so an analysis that resolves only the slot's
+// own names (or only one hop of them) cannot pass by resolving `r` and stopping.
+// `dispatch1(s)` hands the helper the same `run` operation, and it fires in
+// teardown, at or after the session verdict.
+//
+// expected error:
+//   the `undo` of this bracket calls `w.task.run`, which is an emission —
+//     a bracket inverse runs in teardown and may not cross a boundary (G5)
+
+extern pure fn pure1(k: Str) -> Int = @py { return 1 }
+
+fn dispatch1(f: (Str) -> Int) -> Int { return f("z") }
+
+service Net { emission[net] fn send(msg: Str) -> Int }
+service Task { emission[net] fn run(prompt: Str) -> Int }
+service S { fn go() -> Int }
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+  }
+}
+
+component Sup requires net: Net provides s: S {
+  let w = effect spawn Worker with { } undo w.dispose()
+  provide s {
+    fn go() {
+      let r = w.task.run
+      let s = r
+      effect pure1("k")
+      undo   dispatch1(s)
+      return 1
+    }
+  }
+}

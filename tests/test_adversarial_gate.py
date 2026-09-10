@@ -306,6 +306,75 @@ def test_a_teardown_handle_reference_bound_to_a_local_is_refused():
     assert excinfo.value.code == "G5"
 
 
+def test_a_teardown_method_reference_bound_to_a_local_is_refused():
+    """The `let`-bound twin of the reference in argument position, and the shape
+    a receiver-spelling analysis loses: the slot's `undo` names no receiver, only
+    a local, and the local holds the emission METHOD itself rather than the
+    handle. The `run` that fires in teardown is the same one at the same point
+    relative to the session verdict, so the check follows the value bound at the
+    `let` instead of the name that reaches the slot."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            _teardown_host("dispatch1(r)", setup="let r = w.task.run")
+        )
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_method_reference_read_out_of_a_record_is_refused():
+    """The same value one hop further out. A record field is a read position,
+    not a boundary: `let box = { f: w.task.run }` stores the emission method and
+    `box.f` projects it back out, so the field is followed to the value it
+    holds rather than treated as the slot's own head."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            _teardown_host(
+                "dispatch1(box.f)", setup="let box = { f: w.task.run }"
+            )
+        )
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_method_reference_read_out_of_a_list_is_refused():
+    """The container twin on the list side. `let ts = [w.task.run]` holds the
+    emission method as an element and `ts[0]` indexes it back out; the index is
+    spelling, so the elements are swept the same way the record fields are."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            _teardown_host("dispatch1(ts[0])", setup="let ts = [w.task.run]")
+        )
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_method_reference_on_one_if_arm_is_refused():
+    """An `if` arm is a value slot, so a crossing on ONE arm is enough: the arm
+    the local holds is decided at run time and the teardown cannot choose. The
+    pure arm in the same expression is the honest control that keeps the refusal
+    from being about the `if` itself; the check takes the union of the arm
+    values rather than the head it reads first."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            _teardown_host(
+                "dispatch1(g)",
+                setup="let g = if (1 == 1) { w.task.run } else { pure1 }",
+            )
+        )
+    assert excinfo.value.code == "G5"
+
+
+def test_a_teardown_method_reference_on_one_match_arm_is_refused():
+    """The `match` twin of the `if` arm. The scrutinee is irrelevant to the
+    verdict; only the value the arm produces is, so the arms are swept as value
+    slots and a single crossing arm refuses the slot."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            _teardown_host(
+                "dispatch1(g)",
+                setup="let g = match 1 { _ => w.task.run }",
+            )
+        )
+    assert excinfo.value.code == "G5"
+
+
 def test_a_bare_teardown_handle_reference_is_refused():
     """A first-class reference to an emission can be called anywhere a call is
     spelled, including by a callee the gate cannot see, so the reference itself
