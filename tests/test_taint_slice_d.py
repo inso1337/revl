@@ -563,3 +563,27 @@ def test_non_strict_compile_against_the_manifest_is_byte_identical():
     compile_source(turn, "turn.rvl",
                    manifest=copy.deepcopy(_tools_manifest()),
                    profile=None)  # must not raise
+
+
+# --- D1/D3 derivation vs. a DECLARED operation return -------------------------
+
+def test_an_interface_only_operation_return_is_a_source_under_strict_mode():
+    """The derivation here reads a contract's CAPABILITY scope; an operation that
+    declares its own `Untrusted[T]` return needs no derivation. With the
+    providing component absent the declaration is all the caller holds, so the
+    reply is still a source under strict mode and the derived shell sink refuses
+    it. An UNSCOPED operation takes the same `input` fallback an unscoped extern
+    takes, so the origin token does not depend on the derivation being on."""
+    src = (
+        "extern emission[shell] fn run(cmd: Str) = @py { return }\n"
+        "service Reader { emission fn read(p: Str) -> Untrusted[Str] }\n"
+        "service Ops { emission fn go(p: Str) }\n"
+        "component L requires r: Reader provides ops: Ops {\n"
+        "  provide ops { fn go(p) { let d = emit r.read(p)  emit run(d) } }\n"
+        "}\n")
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "strict_out_of_unit.rvl", profile=_strict())
+    err = excinfo.value
+    assert classify(err)["code"] == "G9"
+    assert "input" in err.message  # the unscoped-contract fallback origin
+    assert "read() -> run" in str(err)
