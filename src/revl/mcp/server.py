@@ -951,11 +951,15 @@ def _tool_undo(arguments: dict) -> dict:
     """Return to an earlier generation through the retained history (item 65).
 
     With no `to`, undoes to generation N−1; `to` names any still-retained
-    generation. The undo is admitted through the SAME gate a swap runs: a
-    target the current checker rejects is a refusal *result* (the running
-    composition is untouched), never a bypass. The dossier — what unloads, what
-    state drops, and the interim boundary crossings no undo can un-emit — rides
-    along either way (docs/generation-history.md)."""
+    generation. The undo is admitted through the same *admission* gate a swap's
+    candidate passes — the checker — so a target the current checker rejects is
+    a refusal *result* (the running composition is untouched), never a bypass.
+    The acting gates a swap also runs (the item-61 lease check and the item-45
+    quarantine gate) do not apply here: an undo replays a generation this
+    session already holds rather than swapping a new candidate into the running
+    composition. The dossier — what unloads, what state drops, and the interim
+    boundary crossings no undo can un-emit — rides along either way
+    (docs/generation-history.md)."""
     if not SESSION.loaded:
         return _session_error("nothing is loaded — call revl_load first")
     try:
@@ -1266,11 +1270,21 @@ def _tool_repair(arguments: dict) -> dict:
     # repair is a swap; under a policy that enforces leases it may no more
     # replace a component another operator holds than `revl_swap` may. Skipped
     # for the `apply:false` rehearsal, which swaps nothing.
+    #
+    # The quarantine tier (item 45) rides along for the same reason and in the
+    # same place: its gate is wired where a swap happens, and the remediation
+    # step is a swap. A required quarantine that stopped `revl_swap` and let
+    # `revl_repair` through would be bypassable by naming the remediation
+    # "repair" — the verb an agent reaches for when a component has already
+    # faulted. Both gates are inert without the policy that arms them.
     if _operator.composed_applies("revl_repair", arguments):
-        refusal = _leases.check_swap(
-            SESSION, _operator.swap_arguments("revl_repair", arguments))
+        swap_arguments = _operator.swap_arguments("revl_repair", arguments)
+        refusal = _leases.check_swap(SESSION, swap_arguments)
         if refusal is not None:
             return _refused_by_lease(refusal)
+        quarantined = _quarantine.gate_swap(SESSION, swap_arguments)
+        if quarantined is not None:
+            return quarantined
     return _repair.run_repair(SESSION, arguments)
 
 

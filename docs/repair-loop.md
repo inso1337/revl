@@ -123,9 +123,12 @@ token is recorded alongside, so "on whose authority" is answerable either way.
 The self-repair policy is the loop's *own* bound, not a substitute for the
 session's. A repair remediates by swapping, so unless `apply: false` makes it a
 rehearsal it is gated as `swap`: the bound operator must hold the `swap` grant
-over the component ([operator capabilities](operator-capabilities.md)), and an
+over the component ([operator capabilities](operator-capabilities.md)), an
 enforced lease another operator holds on that component refuses it
-([component leases](component-leases.md)). The candidate is agent-supplied
+([component leases](component-leases.md)), and under a policy that requires
+quarantine the candidate is graded and sandboxed first, so one that does not
+pass is refused before the swap
+([the quarantine tier](quarantine-tier.md)). The candidate is agent-supplied
 source and compiles under the session's authoring trust like any other, so a
 candidate `revl_check` would refuse is graded `rejected` rather than gauntleted
 and swapped.

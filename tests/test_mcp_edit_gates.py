@@ -4,10 +4,16 @@ exempt the operator its own document names.
 An edit that compiles clean is hot-swapped in, so an edit *is* a swap: the
 same component replaced, the same running composition mutated, a different
 verb on the wire. `docs/component-leases.md` says enforcement covers "every
-path that swaps, not just `revl_swap`", and `docs/quarantine-tier.md` says a
-required quarantine gates admission to a hosted tier. Both were wired only into
-`server._tool_swap` (and `_tool_repair`), so `revl_edit` was a way around an
-enforced lease and around a required quarantine.
+path that swaps a component candidate, not just `revl_swap`", and
+`docs/quarantine-tier.md` says a required quarantine gates admission to a
+hosted tier. Both were wired only into `server._tool_swap` — the lease check
+was also in `server._tool_repair`, the quarantine gate was not — so `revl_edit`
+was a way around an enforced lease and around a required quarantine.
+`_tool_repair` now carries both, so the two documents speak for it too; the
+guards that would fail if that copy were deleted are in
+`tests/test_mcp_authority_gate.py`:
+`test_revl_repair_hands_the_quarantine_gate_the_swap_it_performs` and
+`test_a_required_quarantine_refuses_the_repair_and_nothing_swaps`.
 
 The restore half is the same shape of mistake one layer down: `_restore_leases`
 re-seated the `holder` field of a *client-supplied* snapshot as authoritative,
