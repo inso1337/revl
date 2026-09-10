@@ -255,6 +255,77 @@ def test_witnessed_effect_routes_through_revl_frame_transactional():
     assert "frame.bracket(" not in out
 
 
+_WITNESSED_SRC = (
+    "type Stash = { path: Str }\n"
+    "type FsError = { code: Str }\n"
+    "extern pure fn unstash(w: Stash) -> Unit = @java { return; } = @py { return }\n"
+    "extern witnessed[fs] fn stash() -> Result[Stash, FsError] undo unstash(result)"
+    " = @java { return new RevlResult.Ok<>(new Stash(\"p\")); }"
+    " = @py { return Ok({'path': 'p'}) }\n"
+    "component C {\n"
+    "  effect stash()\n"
+    "}\n"
+)
+
+
+def _witnessed_ir(version: int) -> dict:
+    ir = compile_source(_WITNESSED_SRC)
+    ir["ir_version"] = version
+    return ir
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_v1_v2_witnessed_record_defines_the_sink_it_calls(version):
+    """issue #812: a legacy-dialect document that names a witnessed extern
+    must route the step through the SHARED `_emit_witnessed_step` (which emits
+    `revlRecordTransactional` under `--record`) AND define the WAL sink that
+    call targets. Before the fix, v1/v2 never handed the extern declarations
+    to `_emit_component`, so the step was silently downgraded to a plain
+    bracket under record mode — and the sink was spliced only by `_emit_v3`,
+    so the moment the externs flowed the recorded call had no definition."""
+    rv = emit.emit(_witnessed_ir(version), record=True)
+    # the witnessed step registers via the frame (commit-discharged inverse)…
+    assert "frame.transactional(" in rv, rv
+    # …not as a plain bracket, whose inverse would replay on a COMMITTED
+    # activation (the downgrade this issue fixes).
+    assert "Disposables.of(() -> unstash" not in rv, rv
+    # the record exit writes the descriptor…
+    assert "revlRecordTransactional(" in rv, rv
+    # …and the unit defines the sink it calls (the #812 javac failure).
+    assert "public static void revlRecordTransactional" in rv, rv
+    assert "public static void revlRecordDischarge" in rv, rv
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_v1_v2_witnessed_record_off_stays_sink_free(version):
+    """issue #812: without `--record` a v1/v2 witnessed document must still
+    get the witnessed (frame.transactional) semantics but emit NO WAL — sink
+    and descriptor both absent, so the default output stays byte-identical
+    to the pre-feature form."""
+    rv = emit.emit(_witnessed_ir(version), record=False)
+    assert "frame.transactional(" in rv, rv
+    assert "revlRecordTransactional" not in rv, rv
+    assert "public static void revlRecordTransactional" not in rv, rv
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_v1_v2_non_witnessed_record_emits_no_frame(version):
+    """issue #812: the record splice is gated on `_uses_revl_frame`, so a
+    legacy-dialect document with NO witnessed/compensation extern still emits
+    no RevlFrame and no WAL sink — the byte-identity floor holds."""
+    plain = {
+        "ir_version": version,
+        "services": {},
+        "components": [{
+            "name": "C", "requires": [], "provides": [],
+            "body": [{"step": "emit", "expr": {"kind": "lit", "value": 1}}],
+        }],
+    }
+    off = emit.emit(plain, record=False)
+    on = emit.emit(plain, record=True)
+    assert on == off, "record must not change a frame-less document"
+    assert "RevlFrame" not in on
+    assert "revlRecordTransactional" not in on
 def test_method_body_witnessed_routes_through_transactional_method():
     """item 318 (the per-tool-call H1 seam): a witnessed effect inside a
     PROVIDE-METHOD body registers the extern's DECLARED inverse into the
