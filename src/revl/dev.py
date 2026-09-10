@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,8 +102,15 @@ def _start_vite(frontend: Path, host: str, port: int) -> subprocess.Popen[str]:
     # Vite itself gives the actionable dependency diagnostic if npm install has
     # not yet been run.  Keeping its output attached makes that diagnosis part
     # of the single command rather than a hidden child-process failure.
+    #
+    # `--strictPort` is what makes the banner truthful: without it Vite answers
+    # an occupied port by auto-incrementing to the next free one, so the child
+    # stays alive and `revl dev` would advertise a port that belongs to some
+    # other process while the composition is served somewhere else.  With it,
+    # Vite exits instead of moving and the boot check below reports the port
+    # failure on the URL `revl dev` was asked to serve.
     return subprocess.Popen(
-        [npm, "run", "dev", "--", "--host", host, "--port", str(port)],
+        [npm, "run", "dev", "--", "--host", host, "--port", str(port), "--strictPort"],
         cwd=frontend,
         text=True,
     )
@@ -163,11 +171,23 @@ def dev_command(args) -> int:
     frontend = _frontend_dir(args, app)
     vite: subprocess.Popen[str] | None = None
     if not args.no_frontend:
+        # `--port 0` means "bind any free port" to Vite, and only the OS knows
+        # which one it picked, so no banner could state where the frontend is
+        # served.  Unlike the plainly invalid ports (-1, 99999), which Vite
+        # rejects on boot and the fatal boot path reports, 0 is a port whose
+        # meaning the command cannot vouch for, so it is refused as a usage
+        # error before any child is spawned.  With `--no-frontend` there is no
+        # Vite and no banner, so the flag stays inert exactly as it was.
+        if args.port == 0:
+            print("error: --port 0 asks Vite to bind an arbitrary free port, so "
+                  "`revl dev` could not name the URL it printed; pass the port "
+                  "you want (default 5173), or --no-frontend to skip Vite",
+                  file=sys.stderr)
+            return 2
         try:
             vite = _start_vite(frontend, args.host, args.port)
         except RuntimeError as exc:
             return _fail(str(exc), lifecycle.BOOT, code=3)
-        print(f"== dev frontend — http://{args.host}:{args.port} ==", flush=True)
         if _vite_dead(vite):
             out, _ = vite.communicate(timeout=10)
             vite = None
@@ -175,10 +195,14 @@ def dev_command(args) -> int:
             hint = f"\n{tail}" if tail else ""
             return _fail(
                 f"vite exited during boot (port {args.port} in use, or run "
-                f"`npm install` in {frontend}){hint}",
+                f"`npm install --legacy-peer-deps` in {frontend}){hint}",
                 lifecycle.BOOT,
                 code=3,
             )
+        # Only now that the child has survived its boot does the URL become a
+        # statement about anything: a Vite that died, or moved to another port,
+        # never reaches this line.
+        print(f"== dev frontend — http://{args.host}:{args.port} ==", flush=True)
 
     # Re-use the normal lifecycle driver so run/dev have precisely the same
     # compile, admission, config, boot and teardown semantics.  Only the scoped
