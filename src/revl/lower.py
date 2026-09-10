@@ -3028,17 +3028,40 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
         in_scope = set(getattr(env, "params", None) or {}) \
             | set(getattr(env, "locals", None) or {})
 
+    def _field_boundary(e):
+        """`(spelling, "emission")` when the AST field expression `e` READS an
+        `emission` service operation — `net.send`, `w.task.run` — else None.
+
+        One resolution for both positions: `w.task.run(…)` and `f(w.task.run)`
+        name the same operation, so the arm that reads the call reads the
+        reference too. A reference the receiver may dispatch is a crossing one
+        indirection later, exactly as `_method_emissions` judges the same
+        shape in a method body (the G4 arm spells its verdict "passed as a
+        function value"); a rule that only saw the called form was a way
+        around the rule."""
+        if env is None or not isinstance(e, ExprField):
+            return None
+        if isinstance(e.target, ExprVar):
+            op = _service_emission_op(e.target.name, e.name, env)
+            if op is not None:
+                return op, "emission"
+        found = _handle_provision_op(e, env)
+        if found is not None and getattr(found[1], "emission", False):
+            return found[0], "emission"
+        return None
+
     def _walk(e, _seen=()):
         if e is None:
             return
-        if isinstance(e, ExprVar) and e.name in emitting_fns \
-                and e.name not in extern_class:
+        if isinstance(e, ExprVar) and e.name in emitting_fns:
             # a first-class reference in VALUE position: the callee it names may
             # be dispatched by whoever receives it, so it reaches what it names,
             # one indirection later (the same verdict `_method_emissions` gives
-            # this shape).
+            # this shape, and it is the same set — `emitting_fns` holds the
+            # emission externs too, so `f(hsend)` and `f(emit_wrapper)` are one
+            # rule, not two).
             chain = _emission_chain(e.name, emitting_witness)
-            refuse(e, e.name, extern_class.get(chain[-1]), chain)
+            refuse(e, e.name, extern_class.get(chain[-1]) or "emission", chain)
         if isinstance(e, ExprCall):
             callee = e.callee
             if isinstance(callee, ExprVar):
@@ -3058,18 +3081,19 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
                         and name not in emitting_fns and name in in_scope:
                     refuse_opaque(e, name)
             elif env is not None and isinstance(callee, ExprField):
-                op = None
-                if isinstance(callee.target, ExprVar):
-                    op = _service_emission_op(callee.target.name, callee.name, env)
-                if op is not None:
-                    refuse(e, op, "emission", [op])
-                else:
-                    found = _handle_provision_op(callee, env)
-                    if found is not None and getattr(found[1], "emission", False):
-                        refuse(e, found[0], "emission", [found[0]])
+                hit = _field_boundary(callee)
+                if hit is not None:
+                    refuse(e, hit[0], hit[1], [hit[0]])
             for a in e.args:
                 _walk(a, _seen)
             return
+        if isinstance(e, ExprField):
+            # the same read, NOT called: `undo dispatch1(w.task.run)`. Nothing
+            # about the crossing changed — the receiver dispatches the value it
+            # was handed — so it is refused here with the same diagnostic.
+            hit = _field_boundary(e)
+            if hit is not None:
+                refuse(e, hit[0], hit[1], [hit[0]])
         if isinstance(e, ExprArrow):
             _walk(e.body, _seen)
             return
