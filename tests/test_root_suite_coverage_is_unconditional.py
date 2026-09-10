@@ -1,29 +1,38 @@
-"""#854: a diff that misses the fast path must still run the root suite.
+"""#854: the root suite is skipped only for a docs-only diff, never by default.
 
 `.github/workflows/ci.yml` owns the root `pytest tests/` suite in two places,
-`frontend` and `frontend-cordis`, and both are routed through the `changes`
-job's fast-path filter (`^(src/revl/|selfhost/|stdlib/)`). A pull request whose
-diff touches no language source therefore selected no job that ran the root
-suite, and both jobs reported `skipping`, which branch protection cannot tell
-apart from `success`.
+`frontend` and `frontend-cordis`, and both were routed through the `changes`
+job's fast-path filter. That filter was a DENY-list,
+`^(src/revl/|selfhost/|stdlib/)`, an enumeration of what counts as a language
+change, so any path its author had not thought of silently disabled the entire
+root suite and both jobs reported `skipping`, which branch protection cannot
+tell apart from `success`.
 
-That is not hypothetical. PR #845 added a guard test to
-`tests/test_multi_realm_require.py`, edited the item-429 ledger at
-`tests/fixtures/selfhost_uncovered_lines.json` and changed
-`tools/selfhost_line_coverage.py`: nothing collected the new test and nothing
-evaluated the ledger it edited, which is the same mechanism that let a Java
-ledger drift land on `main`.
+That is not hypothetical, and the file below is the case that proved it: PR #850
+(`e6067cd1`) changed only `backends/python/emit.py`, `backends/python/replay.py`,
+`backends/python/runtime.py` and `tests/test_crash_recovery.py`. None matched,
+the suite was skipped, the PR merged green, and `backends/python/emit.py` is the
+REFERENCE emitter that `tests/test_selfhost_emit_py.py` holds byte-identical to
+its revl twin `selfhost/emit_py.rvl`. The twin was never ported, nothing
+collected the test that says so, and `main` has been red on
+`test_selfhosted_emitter_is_byte_identical[../policy_agents.rvl]` ever since.
+PR #845 is the same shape without the aftermath: a guard test added to
+`tests/test_multi_realm_require.py`, the item-429 ledger at
+`tests/fixtures/selfhost_uncovered_lines.json` edited, and
+`tools/selfhost_line_coverage.py` changed, with nothing collecting any of it.
 
-The fix is an unconditional job (`root-suite-affected`) that runs the selection
-`tools/affected_tests.py` already computes. The assertions below read ci.yml's
-own routing and are written to hold whether or not someone later widens the
-fast-path regex:
+So the filter is inverted. What is left of the fast path is an ALLOW-list
+(`SKIP_RE`) of paths that cannot affect the suite -- documentation, and nothing
+else -- and every other path, including every path no one has enumerated yet,
+runs the matrix. The assertions below read ci.yml's own routing:
 
-  * some job runs the root suite for a `tests/` + `tools/` + fixtures-only diff,
-    and that job cannot report `skipping`;
-  * the existing selector, and only it, decides what that job runs;
-  * the 3-version matrix stays on the fast path, so a documentation-only diff
-    does not pay for it.
+  * every suite-relevant diff, and the real #850 change set first among them,
+    selects a job that runs the root suite;
+  * the allow-list admits documentation and rejects everything else, so a
+    documentation-only diff still skips the 3-version matrix;
+  * an ungated job (`root-suite-affected`) runs the selection
+    `tools/affected_tests.py` already computes and cannot report `skipping`, so
+    coverage does not depend on the allow-list being complete.
 
 Hermetic: one real YAML parse of the workflow plus control assertions that keep
 the scan from passing vacuously.
@@ -55,13 +64,25 @@ JOB = "root-suite-affected"
 # conditional root-suite runner, which is the shape #854 exists to remove.
 MATRIX_JOBS = ("frontend", "frontend-cordis")
 
-# Diff classes that selected NO job running the root suite before #854. The
-# first, second and third entries are PR #845's own change set, the worked
-# example in the issue; the fourth is that change set as a whole; the fifth is
-# the un-mapped `tests/` shape the issue names. All of them are paths the
-# selector maps to FULL (an un-mapped file, or a tool with no same-named
-# covering test), which is the fail-safe the new job leans on.
-FAST_PATH_INVISIBLE_DIFFS = (
+# The real change set of PR #850 (`e6067cd1`), the merge that put `main` red
+# because the root suite was skipped. `backends/python/emit.py` is the reference
+# twin of `selfhost/emit_py.rvl`; the diff is the fixture that matters, and the
+# fast path must not classify it as skippable.
+PR_850_DIFF = (
+    "backends/python/emit.py",
+    "backends/python/replay.py",
+    "backends/python/runtime.py",
+    "tests/test_crash_recovery.py",
+)
+
+# Diffs that must select a job which runs the root suite: PR #845's own change
+# set (entries 1 to 3), that set as a whole (entry 4), the un-mapped `tests/`
+# shape the issue names (entry 5), one path per other directory the suite owns
+# but the old deny-list did not enumerate (entries 6 to 10), and PR #850 (entry
+# 11). The paths the old filter could see (`src/revl/`, `selfhost/`, `stdlib/`)
+# are deliberately last: they were never the hole, so if the model only passes
+# on those, it has proved nothing.
+SUITE_RELEVANT_DIFFS = (
     ("tests/test_multi_realm_require.py",),
     ("tests/fixtures/selfhost_uncovered_lines.json",),
     ("tools/selfhost_line_coverage.py",),
@@ -71,6 +92,21 @@ FAST_PATH_INVISIBLE_DIFFS = (
         "tests/fixtures/selfhost_uncovered_lines.json",
     ),
     ("tests/foo.py",),
+    ("backends/wasm/emit.py",),
+    ("backends/python/runtime.py",),
+    ("crates/revl-gate/src/lib.rs",),
+    ("tests/conftest.py",),
+    ("pyproject.toml",),
+    PR_850_DIFF,
+    ("src/revl/typecheck.py",),
+)
+
+# Diff classes the fast path may legitimately skip: documentation only. Both are
+# one path or a few, so the allow-list cannot pass this by matching everything.
+SKIPPABLE_DIFFS = (
+    ("docs/arithmetic.md",),
+    ("README.md",),
+    ("docs/arithmetic.md", "docs/status.md", "README.md"),
 )
 
 # Only used to keep the scan from blessing every job as a root-suite runner.
@@ -131,24 +167,78 @@ def _needs(spec):
     return tuple(raw)
 
 
-def _fast_path_pattern(jobs):
-    """The `changes` job's keep-pattern, read out of the workflow itself."""
+def _allow_list(jobs):
+    """(pattern, negated) of the `changes` job's allow-list, or (None, False).
+
+    Two readings have to agree for the model to be trustworthy: the pattern has
+    to be declared where the job can see it (a `SKIP_RE` env var), and the diff
+    has to be filtered with it NEGATED (`grep -Ev`, i.e. "paths that are not on
+    the list"). If the negation disappears, the sense of the filter has been
+    inverted back into a deny-list, which is the bug.
+    """
+    pattern = None
+    negated = False
     for step in _steps(jobs, "changes"):
-        run = step.get("run") or ""
-        found = re.search(r"grep\s+-E\S*\s+'([^']*)'", run)
-        if found:
-            return found.group(1)
-    raise AssertionError(
-        "the `changes` job no longer contains a `grep -E '<pattern>'` filter; "
-        "this file reads that filter to model job selection, so update it "
-        "deliberately rather than letting the model go stale"
+        env = step.get("env") or {}
+        if isinstance(env, dict) and env.get("SKIP_RE"):
+            pattern = str(env["SKIP_RE"])
+            negated = bool(
+                re.search(
+                    r"grep\s+-E\S*v\S*\s+\"\$SKIP_RE\"", step.get("run") or ""
+                )
+            )
+    return pattern, negated
+
+
+# The pre-#854 filter shape: a single quoted pattern handed to `grep -E`, whose
+# matches run the suite. Read only so that a reverted workflow is modelled as it
+# behaves; nothing asserts that this shape is present.
+_LEGACY_DENY_LIST = re.compile(r"grep\s+-E\S*\s+'([^']*)'")
+
+
+def _skip_re(jobs):
+    """The compiled allow-list, asserting the fix's shape is intact."""
+    pattern, negated = _allow_list(jobs)
+    assert pattern is not None, (
+        "the `changes` job no longer declares a `SKIP_RE` allow-list; this file "
+        "reads that list to model job selection, so update it deliberately "
+        "rather than letting the model go stale"
     )
+    assert negated, (
+        "the `changes` job declares SKIP_RE but does not apply it to the diff "
+        "with `grep -Ev`; without the negation the list selects the paths that "
+        "RUN the suite instead of the paths that SKIP it, which is the deny-list "
+        "shape #854 removed"
+    )
+    return re.compile(pattern)
 
 
-def _visible_to_fast_path(jobs, paths):
-    """Whether the fast-path filter can see any of `paths`."""
-    keep = re.compile(_fast_path_pattern(jobs))
-    return any(keep.match(p) for p in paths)
+def _matrix_skippable(jobs, paths):
+    """Whether the fast path classifies this diff as suite-skippable.
+
+    Mirrors the shell: the allow-list is applied to every changed path, and the
+    diff is skippable only when it is non-empty and nothing survives the filter.
+    An empty diff therefore takes the matrix, which is the job's own fail-safe.
+
+    A workflow still carrying the legacy DENY-list is modelled as it behaves --
+    paths matching it RUN the suite, so a diff it does not match is skipped --
+    which is what makes the behavioural assertions in this file fail with the
+    ROUTING fact rather than with a complaint about the filter's shape when the
+    fix is reverted.
+    """
+    if not paths:
+        return False
+    pattern, _ = _allow_list(jobs)
+    if pattern is not None:
+        return all(re.match(pattern, p) for p in paths)
+    for step in _steps(jobs, "changes"):
+        found = _LEGACY_DENY_LIST.search(step.get("run") or "")
+        if found:
+            return not any(re.match(found.group(1), p) for p in paths)
+    raise AssertionError(
+        "the `changes` job has no diff filter at all, so it cannot be modelled; "
+        "if the fast path was removed deliberately, delete this file with it"
+    )
 
 
 def _python_versions(spec):
@@ -251,11 +341,11 @@ def _selected_jobs(diff, jobs):
     `needs` was itself skipped, which is the closure GitHub applies. This is the
     same reading of the topology that `tests/test_affected_tests.py` uses.
     """
-    fast_path = _visible_to_fast_path(jobs, diff)
+    skippable = _matrix_skippable(jobs, diff)
     skipped = {
         job
         for job, spec in jobs.items()
-        if not fast_path and _routed_on_the_fast_path(spec)
+        if skippable and _routed_on_the_fast_path(spec)
     }
     changed = True
     while changed:
@@ -303,30 +393,92 @@ def test_the_root_suite_detector_discriminates():
     )
 
 
-def test_a_diff_that_misses_the_fast_path_still_runs_the_root_suite():
-    """PR #845's shape: no language source, so the fast path stays cold, and the
-    root suite still has to run somewhere."""
+def test_every_suite_relevant_diff_selects_a_root_suite_runner():
+    """The property #854 is about, over the whole fixture table: a diff the root
+    suite can observe selects a job that runs it. PR #845's shape, PR #850's
+    shape, one path per other owned directory, and the language-source paths the
+    old filter already caught."""
     jobs = _jobs()
     runners = _root_suite_jobs(jobs)
     assert runners, "no job in ci.yml runs the root suite at all"
-    for diff in FAST_PATH_INVISIBLE_DIFFS:
+    for diff in SUITE_RELEVANT_DIFFS:
         selected = _selected_jobs(diff, jobs)
         hits = sorted(selected & runners)
+        assert not _matrix_skippable(jobs, diff), (
+            "the fast path classifies this diff as suite-skippable:\n"
+            + _report(diff, selected)
+        )
         assert hits, (
             "no selected job runs the root suite:\n" + _report(diff, selected)
-        )
-        # Anti-vacuity: a model that selects everything models nothing. At least
-        # one job must be skipped for these diffs, and the detector must not have
-        # counted a tier-local suite as the root suite.
-        assert set(jobs) - selected, (
-            "this model claims every job runs for every diff, which is not a "
-            "model of ci.yml's routing, so the check above proves nothing:\n"
-            + _report(diff, selected)
         )
         assert JOB in selected, (
             f"{JOB!r} is not selected for a diff of {list(diff)}:\n"
             + _report(diff, selected)
         )
+
+
+def test_the_backends_only_diff_that_broke_main_selects_the_matrix():
+    """The real incident, as a fixture, and the regression test for it.
+
+    PR #850 (`e6067cd1`) changed only `backends/python/emit.py`,
+    `backends/python/replay.py`, `backends/python/runtime.py` and
+    `tests/test_crash_recovery.py`. The deny-list matched none of them, so
+    `frontend` and `frontend-cordis` both reported `skipping`, the root suite
+    never ran, and the PR merged green while `backends/python/emit.py` (the
+    REFERENCE emitter that `tests/test_selfhost_emit_py.py` holds byte-identical
+    to `selfhost/emit_py.rvl`) was left un-ported. `main` has been red on
+    `test_selfhosted_emitter_is_byte_identical[../policy_agents.rvl]` since.
+
+    So: this exact change set must not be classified as suite-skippable, and it
+    must select both matrix jobs.
+    """
+    jobs = _jobs()
+    selected = _selected_jobs(PR_850_DIFF, jobs)
+    assert not _matrix_skippable(jobs, PR_850_DIFF), (
+        "PR #850's change set is still classified as skippable by the fast "
+        "path, so the only jobs that collect the selfhost emitter twin check "
+        "would be skipped again:\n" + _report(PR_850_DIFF, selected)
+    )
+    missing = sorted(set(MATRIX_JOBS) - selected)
+    assert not missing, (
+        f"{missing} are not selected for PR #850's change set; before the fix "
+        "the diff matched nothing in `^(src/revl/|selfhost/|stdlib/)` and both "
+        "reported skipping:\n" + _report(PR_850_DIFF, selected)
+    )
+    assert sorted(selected & _root_suite_jobs(jobs)), (
+        "PR #850's change set selects no root-suite runner:\n"
+        + _report(PR_850_DIFF, selected)
+    )
+
+
+def test_the_fast_path_allow_list_admits_documentation_and_nothing_else():
+    """The shape of the fix, asserted in both directions so neither can pass
+    vacuously: every fixture path the fast path claims to skip must match the
+    allow-list, and every fixture path the suite can observe must miss it.
+
+    The second direction is the one that matters. Adding a path to this list is
+    the claim "the root suite cannot observe this file", and #854 exists because
+    the previous filter made the opposite claim by omission -- anything not
+    enumerated was treated as unobservable, including, for real,
+    `backends/python/emit.py`.
+    """
+    jobs = _jobs()
+    keep = _skip_re(jobs)
+    for diff in SKIPPABLE_DIFFS:
+        for path in diff:
+            assert keep.match(path), (
+                f"{path!r} does not match the fast-path allow-list "
+                f"{keep.pattern!r}, so a documentation-only diff touching it "
+                "pays for the 3-version matrix"
+            )
+    for diff in SUITE_RELEVANT_DIFFS:
+        for path in diff:
+            assert not keep.match(path), (
+                f"{path!r} matches the fast-path allow-list {keep.pattern!r}, "
+                "so a diff touching only it would skip the root suite. The "
+                "allow-list may name only paths whose effect on the suite has "
+                "been proven absent, file by file."
+            )
 
 
 def test_the_unconditional_job_cannot_report_skipping():
@@ -411,12 +563,16 @@ def test_the_job_installs_what_the_root_suite_needs():
 
 
 # --- the selector really is a fail-safe for these diffs -------------------- #
-def test_the_selector_returns_a_non_empty_selection_for_the_pr_845_shape():
-    """Why the new job is safe: it never turns these diffs into "run nothing".
-    A modified test maps to itself (so it is collected), a `tools/` script with
-    no same-named covering test and an un-mapped path fall back to FULL, and the
-    diff #845 actually shipped is FULL for both reasons."""
-    for diff in FAST_PATH_INVISIBLE_DIFFS:
+def test_the_selector_returns_a_non_empty_selection_for_every_fixture():
+    """Why the ungated job is safe: it never turns any of these diffs into "run
+    nothing". A modified test maps to itself (so it is collected), a `tools/`
+    script with no same-named covering test and an un-mapped path (`tests/foo.py`,
+    `pyproject.toml`, `crates/**`) fall back to FULL, a tier change maps to that
+    tier's tests, and a documentation-only diff maps to the one root-suite test
+    that reads documentation. The diff #845 actually shipped is FULL, and so is
+    the empty changed-set the selector is reached with when a base ref will not
+    resolve."""
+    for diff in SUITE_RELEVANT_DIFFS:
         result = at.select(list(diff), ROOT)
         assert result["pytest"], (
             f"tools/affected_tests.py selects nothing for {list(diff)}: "
@@ -433,7 +589,16 @@ def test_the_selector_returns_a_non_empty_selection_for_the_pr_845_shape():
                     f"the selector drops {path!r} from a narrow selection: "
                     f"pytest={result['pytest']!r}"
                 )
-    pr_845 = FAST_PATH_INVISIBLE_DIFFS[3]
+    for diff in SKIPPABLE_DIFFS:
+        result = at.select(list(diff), ROOT)
+        assert result["pytest"] == ["tests/test_doc_examples.py"], (
+            f"a documentation-only diff is not mapped to the doc-example sweep: "
+            f"pytest={result['pytest']!r} reason={result['reason']!r}. If this "
+            "changed, re-cost the fast path: documentation-only pull requests "
+            "still skip the matrix, so this selection is the only thing that "
+            "collects them"
+        )
+    pr_845 = SUITE_RELEVANT_DIFFS[3]
     combined = at.select(list(pr_845), ROOT)
     assert combined["full"] is True and "tests/" in combined["pytest"], (
         f"PR #845's own change set is not a FULL selection: {combined!r}"
@@ -446,40 +611,57 @@ def test_the_selector_returns_a_non_empty_selection_for_the_pr_845_shape():
     )
 
 
-# --- the cost decision is unchanged ---------------------------------------- #
+# --- the cost decision the fix must not break ------------------------------ #
 def test_a_documentation_only_diff_does_not_pay_for_the_matrix():
-    """#854's constraint: the fix buys coverage without pulling the 3-version
-    matrix into documentation-only pull requests, which are most of the cheap
-    tail of the uncollected class."""
+    """#854's hard constraint: the fix buys coverage without pulling the
+    3-version matrix into documentation-only pull requests. This is also the
+    anti-vacuity control for the selection model: it shows the model can skip a
+    job, so "everything ran" is a statement about the diff and not about a model
+    that never skips anything."""
     jobs = _jobs()
-    doc_only = ("docs/arithmetic.md",)
-    assert not _visible_to_fast_path(jobs, doc_only), (
-        "docs/ is visible to the fast-path filter, so this assertion no longer "
-        "describes a documentation-only pull request"
-    )
-    selected = _selected_jobs(doc_only, jobs)
-    heavy = sorted({"frontend", "frontend-cordis", "conformance", "formal"} & selected)
-    assert not heavy, (
-        f"a documentation-only diff now selects {heavy}, so the fix moved the "
-        "3-version matrix onto docs-only pull requests:\n" + _report(doc_only, selected)
-    )
-    assert JOB in selected, (
-        "a documentation-only diff selects no root-suite job at all, which "
-        "leaves the docs-example test uncollected:\n" + _report(doc_only, selected)
-    )
+    for diff in SKIPPABLE_DIFFS:
+        assert _matrix_skippable(jobs, diff), (
+            f"{list(diff)} is not classified skippable, so the fast path is dead "
+            "and documentation-only pull requests pay for the matrix"
+        )
+        selected = _selected_jobs(diff, jobs)
+        heavy = sorted(
+            {"frontend", "frontend-cordis", "conformance", "formal"} & selected
+        )
+        assert not heavy, (
+            f"a documentation-only diff now selects {heavy}, so the fix moved "
+            "the 3-version matrix onto docs-only pull requests:\n"
+            + _report(diff, selected)
+        )
+        assert JOB in selected, (
+            "a documentation-only diff selects no root-suite job at all, which "
+            "leaves the docs-example test uncollected:\n" + _report(diff, selected)
+        )
+        assert set(jobs) - selected, (
+            "this model claims every job runs for every diff, so it is not a "
+            "model of ci.yml's routing and nothing above proves anything:\n"
+            + _report(diff, selected)
+        )
+    # ... but the allow-list is documentation only, so the matrix is the default
+    # again for anything the suite can observe.
+    for diff in SUITE_RELEVANT_DIFFS:
+        assert not _matrix_skippable(jobs, diff), (
+            f"{list(diff)} is classified suite-skippable, so the matrix is not "
+            "the default\n" + _report(diff, _selected_jobs(diff, jobs))
+        )
 
 
 def test_the_matrix_jobs_are_still_routed_on_the_fast_path():
     """The companion to the test above: the matrix is still gated, and only the
-    matrix jobs and their dependants carry that gate."""
+    matrix jobs carry that gate. The 3-version matrix stays expensive, which is
+    why the ungated job below exists rather than the gate being removed."""
     jobs = _jobs()
     routed = {j for j, spec in jobs.items() if _routed_on_the_fast_path(spec)}
     assert routed == set(MATRIX_JOBS), (
         f"the jobs gated on needs.changes.outputs.frontend are {sorted(routed)}, "
-        f"not {sorted(MATRIX_JOBS)}. Widening that gate is the alternative #854 "
-        "rejected: it pulls the 3-version matrix onto every pull request that "
-        "touches the root suite's owned paths. If that is now the intent, change "
-        "this pin deliberately and re-cost it."
+        f"not {sorted(MATRIX_JOBS)}. Removing that gate would put the 3-version "
+        "matrix plus cordis-py on documentation-only pull requests; if that is "
+        "now the intent, change this pin deliberately and re-cost it."
     )
     assert JOB not in routed, (
         f"{JOB} is routed on the fast-path filter, which is the bug #854 fixes"
