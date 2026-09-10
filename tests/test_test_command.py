@@ -376,3 +376,117 @@ def test_no_new_flags_keeps_the_aggregate_output_and_exit_codes(tmp_path):
     assert result.returncode == 0
     assert result.stdout.splitlines()[:2] == ["PASS passes",
                                              "[py] pass: 1 test(s) passed"]
+
+
+_PROP_AND_TEST = ('prop test "identity holds" (a: Int) { assert a + 0 == a }\n'
+                  'test "add works" { assert 1 + 1 == 2 }\n')
+
+
+def test_filter_of_a_prop_name_is_a_tier_skip_not_an_emit_failure(tmp_path):
+    """A `--filter` that keeps only `prop test` units prunes the IR's `tests`
+    section, and `prop test` runs on the py reference tier only. Every emitter
+    tier therefore has no unit left, and used to be handed a document with
+    nothing in it at all: "emitter refused: IR document has no components,
+    types, functions, externs, or tests", exit 1, on a file that passes every
+    tier unfiltered (issue #843). The tier reports the skip its own prop note
+    already documents instead."""
+    source = _write_rvl(tmp_path, "x.rvl", _PROP_AND_TEST)
+
+    for tier in ("ts", "rust", "java", "go", "wasm"):
+        run = _cli(tmp_path, str(source), "--backend", tier,
+                   "--filter", "identity holds")
+        output = run.stdout + run.stderr
+        assert run.returncode == 0, output
+        assert (f"[{tier}] skip: --filter 'identity holds' selected no test unit "
+                f"for the {tier} tier; 1 prop test(s) skipped (py tier only)"
+                ) in run.stdout, output
+        assert "emitter refused" not in output, output
+        assert f"[{tier}] fail" not in output, output
+
+    # and the tier that DOES run the selection keeps its verdict
+    py = _cli(tmp_path, str(source), "--backend", "py", "--filter", "identity holds")
+    assert py.returncode == 0, py.stdout + py.stderr
+    assert "[py] pass: 1 of 1 prop test(s) held" in py.stdout
+
+
+def test_filter_that_leaves_a_tier_nothing_never_prints_pass(tmp_path):
+    """The wasm false green. Pruning the plain tests left the pure-test path
+    with no test to emit and no lifecycle test to drive, and the tier printed
+    `pass: no tests emitted by the backend` and exited 0 for a run that executed
+    nothing, while the unfiltered run of the same file prints `pass: wasmtime: 1
+    test(s) passed`. A run that executes nothing on a tier is a skip, never a
+    pass (issue #843)."""
+    source = _write_rvl(tmp_path, "x.rvl", _PROP_AND_TEST)
+
+    result = _cli(tmp_path, str(source), "--backend", "wasm",
+                  "--filter", "identity holds")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[wasm] pass" not in result.stdout
+    assert "no tests emitted by the backend" not in result.stdout
+    assert "[wasm] skip: --filter 'identity holds' selected no test unit " \
+           "for the wasm tier" in result.stdout
+
+
+def test_a_selection_a_tier_cannot_run_never_reaches_that_runner(monkeypatch, capsys):
+    """The skip is decided before the dispatch, so the emitter is never handed
+    the empty document and the tier's toolchain is never even consulted: the
+    runner is the thing that refused."""
+    calls = []
+
+    def _forbidden(_ir):
+        calls.append("ran")
+        raise AssertionError("a tier with no selected unit must not run")
+
+    for name in ("ts", "rust", "java", "go", "wasm"):
+        monkeypatch.setitem(test_module.RUNNERS, name, _forbidden)
+
+    ir = compile_source(_PROP_AND_TEST)
+    for name in ("ts", "rust", "java", "go", "wasm"):
+        assert test_module.test_command(ir, name, filter_pattern="identity holds") == 0
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "[rust] skip: --filter 'identity holds' selected no test unit for the " \
+           "rust tier; 1 prop test(s) skipped (py tier only)" in out
+
+    # the py reference tier DOES run the selection, and is the only one that does
+    def _py(_ir):
+        calls.append("py")
+        return ("pass", "1 of 1 prop test(s) held")
+
+    monkeypatch.setitem(test_module.RUNNERS, "py", _py)
+    assert test_module.test_command(ir, "py", filter_pattern="identity holds") == 0
+    assert calls == ["py"]
+
+
+def test_all_with_a_prop_only_selection_summarises_skips_not_failures(tmp_path):
+    """`--backend all` is the portability assertion: on a prop-only selection
+    the py tier runs the property and every emitter tier skips with the reason,
+    so nothing failed and the run is not the `3 failed` exit 1 it used to be."""
+    source = _write_rvl(tmp_path, "x.rvl", _PROP_AND_TEST)
+
+    result = _cli(tmp_path, str(source), "--backend", "all",
+                  "--filter", "identity holds")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[py] pass: 1 of 1 prop test(s) held" in result.stdout
+    assert "summary: 1 pass, 5 skipped, 0 failed" in result.stdout
+    assert "all tiers passed" in result.stdout
+    assert "tier(s) failed" not in (result.stdout + result.stderr)
+
+
+def test_a_prop_only_document_without_a_filter_is_dispatched_unchanged(monkeypatch):
+    """The fix is about the path a FILTER creates, not about prop-only files:
+    without `--filter` the tier gate is off, so every tier is still handed
+    exactly the IR the compilation produced and reports its own verdict."""
+    seen = []
+
+    def _recording(ir):
+        seen.append(sorted(unit["name"] for unit in ir.get("tests") or []))
+        return ("pass", "ok")
+
+    for name in ("ts", "rust", "java", "go", "wasm"):
+        monkeypatch.setitem(test_module.RUNNERS, name, _recording)
+
+    ir = compile_source('prop test "identity holds" (a: Int) { assert a + 0 == a }\n')
+    for name in ("ts", "rust", "java", "go", "wasm"):
+        assert test_module.test_command(ir, name) == 0
+    assert seen == [[]] * 5

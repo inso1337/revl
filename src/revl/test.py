@@ -1218,6 +1218,39 @@ def select_tests(ir: dict, pattern: str) -> dict:
     return pruned
 
 
+def tier_verdict_for_selection(ir: dict, tier: str, pattern) -> "tuple[str, str] | None":
+    """The verdict for *tier* when an active ``--filter`` left it nothing to run.
+
+    ``None`` means the tier HAS a selected unit to execute and the caller runs
+    it normally. A string is the ``(outcome, message)`` the tier reports
+    instead.
+
+    The pruning `select_tests` does is over named units of every kind, and each
+    tier then runs the kinds it runs: the py reference tier runs all of them,
+    an emitter tier lowers the `tests` section only. So a filter that keeps only
+    `prop test` / `fault test` units -- exactly what filtering a property by
+    name does in a file whose plain tests do not match -- hands an emitter tier
+    a document with no test to run and, in a file that declares nothing else, no
+    content at all. Handing that document to the emitter is a hard, misleading
+    "emitter refused" failure for a command that asked for nothing on that tier,
+    and on wasm it was not even that: the pure-test path found no test, no
+    lifecycle test followed, and the tier reported the empty document as
+    ``pass`` (issue #843).
+
+    So a tier the SELECTION emptied reports the same skip its own note already
+    documents -- `prop test` / `fault test` are py-tier-only -- instead of
+    reaching an emitter with nothing to emit. That is a by-design tier skip, not
+    a toolchain absence (`Absent`), so `REVL_REQUIRE_TIERS` does not flip it:
+    the tier is present and refuses nothing, it simply has no selected unit.
+    """
+    if pattern is None or tier == "py" or (ir.get("tests") or []):
+        return None
+    notes = _fault_note(ir, tier)
+    skipped = notes.lstrip("; ")
+    return ("skip", f"--filter {pattern!r} selected no test unit for the {tier} "
+                    f"tier; {skipped or 'nothing was left to run'}")
+
+
 def _empty_selection(ir: dict, pattern) -> int:
     """Report an empty selection on stderr; the exit code is 2 (a usage error).
 
@@ -1276,8 +1309,14 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     (issue #843); the mode flags above do not apply to a listing.
 
     With ``filter_pattern`` set, run only the collected test units whose name
-    contains it (a plain substring, any tier). A filter that selects nothing is
-    a usage error (exit 2), never a silent green. `--mock-requires` runs
+    contains it (a plain substring). The selection is pruned on the IR, so every
+    tier and every mode that reads a test section runs the same set. A filter
+    that selects nothing is a usage error (exit 2), never a silent green; a
+    filter that selects only units the requested tier does not run -- `prop
+    test` and `fault test` are py-tier-only -- makes that tier report a `skip`
+    with the reason (exit 0: nothing was expected to run there) instead of
+    handing the emitter a document with nothing to emit, or reporting an empty
+    document as a pass (`tier_verdict_for_selection`). `--mock-requires` runs
     lifecycle test units and therefore honours the selection; `--sweep` and
     `--schedule-*` do not run named units at all, so combining them with a
     filter is also a usage error rather than a filter that quietly does
@@ -1334,7 +1373,10 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     if backend == "all":
         verdicts = {"pass": 0, "skip": 0, "fail": 0}
         for name, runner in RUNNERS.items():
-            outcome, message = runner(ir)
+            # A tier the selection emptied skips with its own reason rather
+            # than being handed a document with no unit it runs (#843).
+            verdict = tier_verdict_for_selection(ir, name, filter_pattern)
+            outcome, message = verdict if verdict is not None else runner(ir)
             verdicts[outcome] += 1
             print(f"[{name}] {_TAG[outcome]}: {message}")
         summary = (f"summary: {verdicts['pass']} pass, "
@@ -1347,6 +1389,14 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
         print("all tiers passed")
         return 0
 
+    verdict = tier_verdict_for_selection(ir, backend, filter_pattern)
+    if verdict is not None:
+        # Nothing the selection keeps runs on this tier, so nothing was
+        # expected to run here: report that (a skip, with the reason) instead of
+        # failing the run or, on wasm, reporting an empty document as a pass.
+        outcome, message = verdict
+        print(f"[{backend}] {_TAG[outcome]}: {message}")
+        return 0
     outcome, message = RUNNERS[backend](ir)
     if outcome == "pass":
         print(f"[{backend}] pass: {message}")

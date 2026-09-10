@@ -641,7 +641,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--filter", metavar="PATTERN", default=None,
         help="run only the collected test units whose name contains PATTERN "
              "(a plain substring, not a regex); a PATTERN that selects nothing "
-             "exits 2 with a message, never a silent green (issue #843)")
+             "exits 2 with a message, never a silent green; a tier the "
+             "selection leaves with no unit it runs (prop test / fault test "
+             "are py-tier-only) reports a skip with the reason, never a pass "
+             "(issue #843)")
     test.add_argument("--backend", default="py",
                       choices=("py", "ts", "rust", "java", "wasm", "go", "all"),
                       help="tier to run the `test` blocks on (default: py); "
