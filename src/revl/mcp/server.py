@@ -2470,7 +2470,12 @@ TOOLS = [
                                            "one of the rule's named approvers; a "
                                            "vote from the proposer or from a name "
                                            "the rule does not carry is refused and "
-                                           "recorded"}},
+                                           "recorded. The name is asserted by the "
+                                           "caller, not verified against a "
+                                           "credential: it binds the NAME that "
+                                           "voted, not the human who sent it "
+                                           "(Decision 5 of the item 471 design "
+                                           "note)"}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_approve,

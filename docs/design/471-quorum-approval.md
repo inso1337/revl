@@ -148,7 +148,7 @@ one thing this design says is worse than no path at all. The invariant is
 therefore carried by ONE predicate, `Session._multi_party_rules(ticket)`, which
 returns every covering rule for the ticket's capabilities for which
 `rule.names_approvers() or rule.is_quorum()` holds. It is the only place that
-spelling lives, and all three paths that can create or match consent consult it:
+spelling lives, and every path that can create or match consent consults it:
 
 | call site | what it does with it |
 | --- | --- |
@@ -162,6 +162,39 @@ it is the second half of the vote path, not a bypass of it. The rule that
 `require 1 of {a, b}` is refused too, and not only `require N of {...}` with N
 greater than one: naming approvers at all is a statement about WHO may answer,
 which one operator's standing authority is not a substitute for.
+
+**The one kind the predicate forces onto the vote path: a lease ticket.** An
+`effect lease` is acquired BEFORE any crossing fires, and `_enforce_lease_gate`
+admits it only when a live lease-tagged standing grant covers it. Left there, a
+`require N of {...}` rule over the leased capability would make the composition
+unloadable rather than merely unauthorised: the mint is refused on both routes, so
+no grant could exist, and no vote could ever reach the gate. The lease ticket is
+therefore the one kind whose acquisition the predicate pushes onto the vote path,
+and it keeps exactly one route of its own, taken in `_enforce_lease_gate` and
+nowhere else:
+
+  * the gate reads the decision for THAT lease ticket
+    (`_satisfied_decision_for`) and mints the lease grant from the satisfied
+    ledger entry itself, spending that entry once before the boot. The proof is
+    re-derived inside the mint (`_decision_authorizes_grant`), never trusted: a
+    copy of the entry, an entry for another ticket, a decision that is not
+    `satisfied` by `votes` or `override`, a decision whose own hash, candidate
+    hash or component is not the entry's, and a ticket the session no longer has
+    outstanding all fail it;
+  * `decision` is not a parameter of the public `mint_standing_grant`, so no
+    operator request can take this route — `revl_approve(hash=<lease ticket>,
+    uses=N)` and `revl_approve(capability=<leased capability>, uses=N)` both
+    refuse, exactly as they do for a crossing;
+  * the grant the gate mints is lease-tagged, and `_find_standing_grant` still
+    refuses a multi-party ticket, so the lease handle admits no class-(c)
+    crossing. The authority is still the N votes; the exception narrows WHO may
+    ask, never WHICH rules bind.
+
+One thing the invariant does not say, and the code does not do: it does not make
+the lease gate independent of the rule. Before the votes arrive, and for a
+decision that is absent, lapsed, denied, spent or bound to another ticket, the
+lease load is REFUSED with the question open, exactly as it was before this
+slice — the acquisition has a route, it does not have a bypass.
 
 ## Decision 2: the vote protocol
 
@@ -286,12 +319,34 @@ transport, so a session cannot gather distinct approver tokens over the wire.
 
 What this design guarantees is therefore the protocol and its record, not the
 transport of a second human: the count is of distinct NAMED approvers, so a
-repeated vote from one name can never satisfy a quorum, and the set is bound to
-the rule rather than to whatever the caller claims. The identity of a cast is
-supplied as `as_token`, which is how the suite drives the second and later votes,
-and the design note says so rather than pretending the wire had two people on it.
-Making several operators addressable within one session is a transport item
-(operator profiles and the item 55 verb grammar), not this one.
+repeated vote from one name can never satisfy a quorum, and the eligible set is
+the rule's own approver names, so a name the rule does not name is refused rather
+than counted. The identity of a cast is supplied as `as_token`, which is how the
+suite drives the second and later votes, and the design note says so rather than
+pretending the wire had two people on it.
+
+**`as_token` is caller-asserted, and that is the bound this slice does not
+close.** It is a NAME, not a proof of possession: nothing in `_cast_vote` (nor in
+`_tool_approve`, which forwards the property) verifies that the caller is the
+operator it names. One bound operator can therefore satisfy a
+`require 2 of {alice, bob, carol}` rule by asserting several of the rule's names
+(`as_token="bob"`, then `as_token="carol"`), and the crossing is admitted. What
+IS refused, and correctly, is every way of counting the same one name twice: a
+second cast asserted under a name that already voted is refused as
+`duplicate-voter`, and a differently-cased spelling is not one of the rule's
+names at all, so it is refused as `unknown-approver` — neither can carry the
+count, because the eligible set is compared literally. The self-quorum is a
+self-asserted identity, not a miscount.
+
+The bound is disclosed rather than papered over, and the minimal fix for a future
+round is to bind the identity to a credential: have each operator hold a token
+the session verifies (the operator profiles the slice plan already names as the
+transport item), resolve `as_token` through that binding, and record the
+authenticated subject on the `quorum-vote` row instead of reading the string the
+caller supplied. Until then, `as_token` is what it says it is: the name of a
+cast, asserted by the caller. Making several operators addressable within one
+session is a transport item (operator profiles and the item 55 verb grammar), not
+this one.
 
 ## Slice plan
 
@@ -326,7 +381,18 @@ pinned by `test_a_quorum_gated_crossing_cannot_be_widened_into_a_standing_grant`
 `test_the_standing_grant_refusal_reaches_the_transport`, with
 `test_a_single_party_crossing_still_takes_a_standing_grant` and
 `test_an_auto_approve_rule_still_covers_a_single_party_crossing` holding the
-other side of the line.
+other side of the line. The lease kind's one route is pinned by
+`test_a_quorum_gated_lease_loads_only_after_its_own_votes` (refused before the
+votes, admitted after, lease-tagged and bounded by the lease's own ttl and uses),
+`test_a_quorum_gated_lease_is_refused_until_the_votes_arrive`,
+`test_a_denied_lease_question_is_not_an_answer`,
+`test_a_spent_lease_decision_answers_only_once`,
+`test_the_lease_bridge_refuses_a_forged_or_foreign_decision`,
+`test_the_lease_bridge_is_scoped_to_lease_tickets` and
+`test_a_lease_decision_does_not_outlive_the_ticket_it_answered`.
+`tests/test_capability_leases.py` cannot be exercised here (it is
+`needs_cordis`-gated and the cordis runtime is absent), so the lease lifecycle is
+driven in-process through `_enforce_lease_gate` rather than through `load()`.
 
 ## Relates to
 
