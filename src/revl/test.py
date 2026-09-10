@@ -1218,13 +1218,23 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     contains the given substring. Selection happens over the tests *collected*
     from the full compilation — the input files are never narrowed, because a
     single component file does not compile standalone (issue #843). A filter
-    that matches nothing exits non-zero.
+    that matches nothing exits ``2`` (usage error), as does combining
+    ``--filter``/``--list`` with ``--sweep``/``--schedule-*``/``--mock-requires``.
 
     ``list_only`` prints each collected test name and runs nothing. ``verbose``
     adds a per-test duration to the py tier's one-line-per-test output;
     ``report`` ("json"|"tap") emits a machine-readable per-test report on the
     py tier instead of the human summary.
     """
+    if (name_filter is not None or list_only) and (sweep or mock_requires
+            or schedule_seed is not None or schedule_seeds is not None):
+        mode = ("--sweep" if sweep else "--mock-requires" if mock_requires
+                else "--schedule-seed/--schedule-seeds")
+        print(f"[filter] --filter/--list select `test` blocks and cannot be "
+              f"combined with {mode}; drop {mode} to select or list tests",
+              file=sys.stderr)
+        return 2
+
     if schedule_seed is not None or schedule_seeds is not None:
         if backend not in ("py", "all"):
             print(f"[schedule] note: schedule testing runs on the py reference "
@@ -1256,7 +1266,7 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
         if not matches:
             print(f"[filter] no test matched {name_filter!r} "
                   f"({len(tests)} test(s) collected)", file=sys.stderr)
-            return 1
+            return 2
         # A partial match is also reported so a filtered run is never a silent
         # subset — "matched 2 of 4" is the proof that selection happened.
         print(f"[filter] matched {len(matches)} of {len(tests)} test(s)",

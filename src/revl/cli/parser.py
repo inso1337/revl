@@ -660,8 +660,9 @@ def build_parser() -> argparse.ArgumentParser:
                            "Matching is over the tests collected from the full "
                            "compilation — the input files are never narrowed, "
                            "because a single component file does not compile "
-                           "standalone. A filter that matches no test exits "
-                           "non-zero.")
+                           "standalone. A filter that matches no test exits 2 "
+                           "(usage error), as does combining --filter/--list "
+                           "with --sweep/--schedule-*/--mock-requires.")
     test.add_argument("--list", action="store_true",
                       help="print each collected `test` name (one per line) and "
                            "run nothing; answers 'which tests does this "

@@ -254,12 +254,32 @@ def test_filter_runs_only_matching_tests_and_announces_subset(tmp_path):
 def test_filter_zero_matches_is_loud_and_exits_nonzero(tmp_path):
     source = _write_rvl(tmp_path, "mixed.rvl", _MIXED)
     result = _cli(tmp_path, str(source), "--filter", "does-not-exist")
-    assert result.returncode == 1
+    assert result.returncode == 2  # usage error, not a green run
     assert "no test matched 'does-not-exist'" in result.stderr
     assert "4 test(s) collected" in result.stderr
     # never masquerade as a green run of zero tests
     assert "0 passed" not in result.stdout
     assert "PASS" not in result.stdout
+
+
+def test_filter_with_sweep_schedule_or_mock_requires_is_refused(tmp_path):
+    source = _write_rvl(tmp_path, "mixed.rvl", _MIXED)
+    for extra in (("--sweep",), ("--schedule-seeds", "2"),
+                  ("--mock-requires",)):
+        result = _cli(tmp_path, str(source), "--filter", "one", *extra)
+        assert result.returncode == 2, (extra, result.stderr)
+        assert "cannot be combined with" in result.stderr
+        assert "PASS" not in result.stdout
+
+
+def test_list_with_sweep_schedule_or_mock_requires_is_refused(tmp_path):
+    source = _write_rvl(tmp_path, "mixed.rvl", _MIXED)
+    for extra in (("--sweep",), ("--schedule-seed", "1"),
+                  ("--mock-requires",)):
+        result = _cli(tmp_path, str(source), "--list", *extra)
+        assert result.returncode == 2, (extra, result.stderr)
+        assert "cannot be combined with" in result.stderr
+        assert result.stdout == ""
 
 
 def test_filter_composes_with_list(tmp_path):
