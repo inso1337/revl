@@ -315,6 +315,18 @@ REJECTIONS = {
         "untrusted value (fs) flows into a shell command at argument 1 of `run`",
     "g9_spawn_config_launders_taint.rvl":
         "untrusted value (fs) flows into a shell command at argument 1 of `run`",
+    # The RETURN half of the same carrier, where the providing component is in
+    # a different unit: the operation DECLARATION is then all the caller holds,
+    # and a declared `Untrusted[T]` return was stripped without minting an
+    # origin, so the reply read as public. Refused at the sink the same way the
+    # in-unit hand-off already was (item 426 section 5 exchanges the interface).
+    "g9_service_return_launders_taint.rvl":
+        "untrusted value (fs) flows into a shell command at argument 1 of `run`",
+    # ...and its confidential twin: a declared `Secret[T]` return mints
+    # `confidential` at the operation, so a caller whose `Vault` is not in the
+    # unit can no longer disclose the token into an ordinary sink.
+    "gsecret_service_return_discloses.rvl":
+        "a Secret[T] value flows into an extern host call (a disclosure sink)",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     # roadmap item 129: closures capture BY VALUE (syntax-2.0 §3.5). A closure
     # that ASSIGNS to a captured binding is reference capture, which would break

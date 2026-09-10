@@ -1,0 +1,36 @@
+// REJECTED — G9: a declared `Untrusted[T]` return carries taint across a
+// component boundary even when the unit that provides the operation is not
+// present.
+//
+// `r` is a REQUIRED key with no providing component here, so the operation
+// DECLARATION is the whole of what this composition holds — the shape a layer
+// exchanges with another composition (item 426 section 5), and the shape every
+// caller sees for a component built in a different unit. The declared
+// `Untrusted[Str]` return used to be stripped to `Str` and minted nothing, so
+// `read` read as a source of CLEAN data and the reply reached a `Trusted[Str]`
+// shell sink uninterrupted.
+//
+// The equivalent hand-off is already refused when the provider is in the unit:
+// there the origin also arrives from the body, which is why the two agree and
+// why nothing here is a new rule — an operation's declared return is treated
+// exactly as an extern's declared return already was.
+//
+// expected error:
+//   untrusted value (fs) flows into a shell command at argument 1 of `run`
+
+extern emission[fs] fn read_file(p: Str) -> Untrusted[Str] = @py { return "" }
+extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }
+
+service Reader { emission[fs] fn read(p: Str) -> Untrusted[Str] }
+
+service Ops { emission fn go(p: Str) }
+
+component L requires r: Reader provides ops: Ops {
+  provide ops {
+    fn go(p) {
+      let d = emit r.read(p)
+      emit run(d)
+      return
+    }
+  }
+}
