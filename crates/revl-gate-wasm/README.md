@@ -36,9 +36,18 @@ cannot issue an admission cannot commit that defect.
 ## The interface
 
 `wit/gate.wit` is the whole surface: `admit`, `admit-json`,
-`admit-artifact` (declines today), `gate-version`.
+`admit-into`, `admit-into-json`, `admit-artifact` (declines today),
+`gate-version`.
 
     wasmtime run --invoke 'admit-json("fn f() -> Int { return 1 }")' revl_gate.wasm
+
+`admit-into` is `admit` asked across a composition boundary (item 186): the
+verdict on a candidate once it is admitted INTO a RUNNING composition, handed
+over as the item-186 row wire (`"Kv/store/;App/app/;App<store"`). It closes the
+union fold's `G2`/`G3` legs — provision disjointness, realm routes,
+cross-boundary acyclicity — and nothing else, and it issues no admission either.
+A manifest row this wave does not cover (a replacement `-C`, a handoff
+`C=k:T`) comes back as a `MANIFEST` refusal rather than being skipped.
 
 In a browser or node, `jco transpile revl_gate.wasm` produces the JS shim:
 

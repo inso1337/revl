@@ -10,17 +10,19 @@
   "exports": [
     "admit",
     "admit-json",
+    "admit-into",
+    "admit-into-json",
     "admit-artifact",
     "gate-version"
   ],
-  "frontier": "selfhost-admit:5244e0e9a01f64a2",
+  "frontier": "selfhost-admit:019e01b8fb177e01",
   "gate_api_version": "1.0.0",
   "generator": "tools/build_gate_wasm.py",
   "issues_admissions": false,
   "language_version": "2.0.0",
   "layer": "1 (verdict surface), refusal-only",
   "note": "Regenerate with `python3 tools/build_gate_wasm.py`. The crate SOURCE is committed and drift-gated; the .wasm artifact is not, because a rust binary is byte-reproducible only against one exact toolchain. `issues_admissions` is false by construction: this is `crates/revl-gate` packaged for wasm, and that gate decides the composition/guarantee layer and not the reference type layer.",
-  "source_digest": "6691ff2638106065f217a8c4c4c19d7a8e694cac04598274d3d2ec0a68c1c77b",
+  "source_digest": "0d72dc90211d41a275bde6fe2783d1b66d5afe475075fa1fca10c5864a90f674",
   "target": "wasm32-unknown-unknown",
   "unavailable_exports": {
     "admit-artifact": "the item-289 chain's declared-caps leg is the G8 boundary projection, which has no native port (design slice 3)"

@@ -57,6 +57,11 @@ therefore reports `admitted: false` on every arm and carries the arm name in
 triple reads this gate as "never admits" — the fail-closed reading — rather than
 mistaking a no-objection for an admission.
 
+`admit-into` is the crate's manifest arm (item 186's ambient gate, issue #346)
+carried to the edge: the union fold's G2/G3 legs, over the item-186 row wire.
+It issues no admission either, and a manifest row the landed wave does not cover
+is refused rather than skipped.
+
 `admit-artifact` (design cut B) is exported so the shape is fixed and its
 arrival is additive, and it fails closed today: the item-289 chain's `declared
 caps` leg reads the G8 boundary projection, which the reference derives with a
@@ -208,6 +213,24 @@ world %(world)s {
   /// a re-encoding that could paper over a difference.
   export admit-json: func(source: string) -> string;
 
+  /// The same frontier-scoped admission as `admit`, asked ACROSS a composition
+  /// boundary (item 186's ambient gate): the verdict on `source` once it is
+  /// admitted INTO the RUNNING composition `manifest` (the item-186 row wire —
+  /// `C/k/r` provision, `C<k` requirement, `!halted`, joined by `;`; `""` is
+  /// the empty composition and makes this byte-identical to `admit`).
+  ///
+  /// This closes the union fold's G2/G3 legs — provision disjointness, realm
+  /// routes, cross-boundary acyclicity — and nothing else, and it still issues
+  /// no admission. A manifest row the landed wave does not cover (a replacement
+  /// `-C`, a handoff `C=k:T`) is REFUSED with `MANIFEST` rather than skipped: a
+  /// row this gate cannot honour is exactly where a wave-through would hide.
+  export admit-into: func(source: string, manifest: string) -> verdict;
+
+  /// The same verdict as `admit-into`, serialized in the item-332 wire shape —
+  /// byte-identical to the rust crate's `Verdict::to_json`, one serializer for
+  /// both tiers.
+  export admit-into-json: func(source: string, manifest: string) -> string;
+
   /// Artifact admission: the item-289 least-authority chain over a compiled IR
   /// and a policy, with the artifact's own import-section capabilities.
   ///
@@ -354,6 +377,18 @@ impl Guest for Gate {
         revl_gate::admit(&source).to_json()
     }
 
+    /// The verdict for `source` admitted INTO the running composition
+    /// `manifest` (item 186's ambient gate; issue #346), as the world's record.
+    /// The union fold's G2/G3 legs, and still no admission.
+    fn admit_into(source: String, manifest: String) -> Verdict {
+        lift(revl_gate::admit_into(&source, &manifest))
+    }
+
+    /// The same verdict, in the item-332 wire shape.
+    fn admit_into_json(source: String, manifest: String) -> String {
+        revl_gate::admit_into(&source, &manifest).to_json()
+    }
+
     /// Item-289 artifact admission — declines, and says why.
     ///
     /// The chain is `host imports subset-of declared caps subset-of
@@ -487,9 +522,18 @@ cannot issue an admission cannot commit that defect.
 ## The interface
 
 `wit/%(world)s.wit` is the whole surface: `admit`, `admit-json`,
-`admit-artifact` (declines today), `gate-version`.
+`admit-into`, `admit-into-json`, `admit-artifact` (declines today),
+`gate-version`.
 
     wasmtime run --invoke 'admit-json("fn f() -> Int { return 1 }")' revl_gate.wasm
+
+`admit-into` is `admit` asked across a composition boundary (item 186): the
+verdict on a candidate once it is admitted INTO a RUNNING composition, handed
+over as the item-186 row wire (`"Kv/store/;App/app/;App<store"`). It closes the
+union fold's `G2`/`G3` legs — provision disjointness, realm routes,
+cross-boundary acyclicity — and nothing else, and it issues no admission either.
+A manifest row this wave does not cover (a replacement `-C`, a handoff
+`C=k:T`) comes back as a `MANIFEST` refusal rather than being skipped.
 
 In a browser or node, `jco transpile revl_gate.wasm` produces the JS shim:
 
@@ -590,7 +634,8 @@ def render_generated_json(digest: str, meta: dict) -> str:
         "wit_bindgen": WIT_BINDGEN_REQ,
         "target": WASM_TARGET,
         "empty_imports": True,
-        "exports": ["admit", "admit-json", "admit-artifact", "gate-version"],
+        "exports": ["admit", "admit-json", "admit-into", "admit-into-json",
+                    "admit-artifact", "gate-version"],
         "unavailable_exports": {
             "admit-artifact": "the item-289 chain's declared-caps leg is the G8 "
                               "boundary projection, which has no native port "

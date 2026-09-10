@@ -70,6 +70,18 @@ impl Guest for Gate {
         revl_gate::admit(&source).to_json()
     }
 
+    /// The verdict for `source` admitted INTO the running composition
+    /// `manifest` (item 186's ambient gate; issue #346), as the world's record.
+    /// The union fold's G2/G3 legs, and still no admission.
+    fn admit_into(source: String, manifest: String) -> Verdict {
+        lift(revl_gate::admit_into(&source, &manifest))
+    }
+
+    /// The same verdict, in the item-332 wire shape.
+    fn admit_into_json(source: String, manifest: String) -> String {
+        revl_gate::admit_into(&source, &manifest).to_json()
+    }
+
     /// Item-289 artifact admission — declines, and says why.
     ///
     /// The chain is `host imports subset-of declared caps subset-of
