@@ -421,6 +421,15 @@ in the `lint` CI job) now fails when a marker contradicts git. Four rules:
      fine and does not trip it: ``LANDED SO FAR (`fix/391-selfhost-parity`)``
      stays true after the branch is gone, and that is the whole difference.
 
+   Rule 3 of `tools/check_roadmap_markers.py` (a cited sha must be a commit in
+   this repo and reachable from the base ref) is the one check that needs
+   HISTORY rather than the file alone, so it says out loud what it managed to
+   look at. On a shallow checkout it deepens the clone once (`--no-fetch`
+   declines) and prints `Checked N of the M commit citation(s) ...`; if it
+   still cannot examine every citation it says so and says how many, and does
+   not print `roadmap markers OK`. Do not read that sentence as a finding
+   against your roadmap: it is a statement about the checkout.
+
 4. **Security findings go to private GitHub Security Advisories, never public
    issues.** See [SECURITY.md](SECURITY.md). This repository is public and the
    roadmap already carries working reproducers, so this is a going-forward rule,
