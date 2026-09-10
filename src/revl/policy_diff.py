@@ -10,16 +10,29 @@ own action set rather than a number this module invents.
 What it cannot say matters as much as what it can, so each limit is a field
 rather than a caveat in prose:
 
-* A WAL names a capability only where the recorded scope declares one. An
-  effect record with no scope reads as no declared crossing, exactly as the live
-  classifier reads it, and is never resolved to the label it recorded; a WAL
-  written before that scope became durable cannot say whether the scope was
-  absent or never written down (see :data:`revl.branch.SCOPE_NOTE` for the same
-  blind spot on the fork's classifier).
+* No writer in this tree records the declared capability scope. `scope.caps`
+  reaches a record only where a timeline step was annotated BY HAND
+  (`Timeline.annotate_step`), and the live recorder path (`Timeline.attach_wal`
+  plus `Timeline.record_emission`) never annotates, so every effect record a run
+  writes carries no scope and the recorded action set is EMPTY. That is not a
+  legacy shape, it is the shape of every WAL a recorder writes today, so an
+  unscoped record is withheld from the verdict and the diff refuses to report a
+  change over it as clean instead of printing an empty diff (see
+  :data:`revl.branch.SCOPE_NOTE` for the same blind spot on the fork's
+  classifier).
 * A realm-scoped rule decides an action by the realms its component joins, and
   the WAL records no realms. Those actions are undecided unless the caller
   supplies the composition the run was compiled from, and an undecided action is
   never reported as allowed or denied.
+* The capability verdict reads two of the legs an admission is refused by: the
+  deny-lists and the closed allow-lists. The agent-sandbox allow-list, the
+  taint-flow tier, the approval and declassify rules, the declaration-strength
+  floors, the evidence bundle and the recovery surface decide by facts a WAL
+  does not carry either, so `LEGS` names each one with the fact it reads and a
+  pair whose surface MOVES on one of them is undecided with the leg named. An
+  `unchanged` there would be the one wrong answer this surface can give, because
+  the admission it previews could then refuse or admit the crossing while the
+  preview said nothing happened.
 * The bound is history, not traffic. This is a preview over what happened, and
   the reason a widening action that the run never took cannot appear here.
 """
@@ -51,15 +64,72 @@ NOT_ANSWERABLE = (
             "over a whole composition, and `revl audit --diff` answers whether "
             "the generation itself widened"},
     {"axis": "unrecorded scope",
-     "why": "an effect record whose step carried no capability scope cannot be "
-            "named from the WAL alone, so it is counted as unscoped rather than "
-            "resolved to the label it recorded, and a WAL written before that "
-            "field became durable cannot say whether the scope was empty or "
-            "never written down"},
+     "why": "no writer records the declared capability scope, so every effect "
+            "record a run writes is unscoped, the recorded action set is empty "
+            "and a change can hide inside a record whose capability the WAL does "
+            "not carry; the diff withholds those records from its verdict and "
+            "does not report the change clean while one is present"},
+    {"axis": "legs outside the diff",
+     "why": "an admission is refused on more legs than the two this diff reads; "
+            "`legs` names each one with the fact it decides by, and a recorded "
+            "pair whose surface moves on an unmodelled leg is undecided with the "
+            "leg named rather than reported unchanged"},
     {"axis": "realms without a composition",
      "why": "a realm-scoped rule needs the component's realms, which only the "
             "compiled composition holds; without --composition every action such "
             "a policy would decide is undecided"},
+)
+
+
+@dataclass(frozen=True)
+class Leg:
+    """One leg an admission is refused on, and whether this diff reads it.
+
+    `state` is `compared` for the two legs the capability verdict decides, the
+    deny-lists and the closed allow-lists, and `unmodelled` for every other leg
+    the gate refuses by. `decides` is the fact the leg reads, which is what makes
+    a moved surface on an unmodelled leg a fact the WAL does not carry."""
+
+    leg: str
+    state: str
+    decides: str
+
+
+#: Every leg `revl.policy.evaluate` can refuse a crossing on, named by the
+#: `Violation.kind` the gate mints, so a leg added to the gate is a leg missing
+#: from this table (and
+#: `test_the_legs_the_gate_refuses_by_are_enumerated_in_the_artifact` reads the
+#: gate's own source to say so). `capability_verdict` reads the first two and
+#: nothing else reads the rest: a pair whose surface moves on one of them is
+#: undecided, because the same recording and the same audit could then be
+#: admitted differently by the gate while this preview reported no change.
+LEGS = (
+    Leg("capability", "compared",
+        "the closed allow-list a component or realm rule opens"),
+    Leg("deny", "compared",
+        "the deny-lists a `may not reach` rule writes over the token"),
+    Leg("mcp-sandbox", "unmodelled",
+        "the agent-sandbox allow-list, which decides the crossings of a "
+        "component admitted through the MCP session and which a WAL does not "
+        "name"),
+    Leg("taint-flow", "unmodelled",
+        "the taint reaches of the component and the reach approvals covering "
+        "them, which are audit facts"),
+    Leg("declassify", "unmodelled",
+        "the origins the component declassified, which are audit facts"),
+    Leg("declassify-approval", "unmodelled",
+        "the approval edge an endorse must carry, which is an audit fact"),
+    Leg("approval", "unmodelled",
+        "the approval edges threaded onto the composition, which an IR carries "
+        "and a WAL does not"),
+    Leg("register", "unmodelled",
+        "the declared register of the token, a declaration fact"),
+    Leg("evidence", "unmodelled",
+        "the evidence bundle the composition carries for a component"),
+    Leg("teardown", "unmodelled",
+        "the recovery surface a composition carries"),
+    Leg("tenant", "unmodelled",
+        "the realms of every other tenant and the reach it shares"),
 )
 
 
@@ -112,9 +182,10 @@ def recorded_actions(wal: dict) -> dict:
     one place a WAL names a capability. A scope the reader classifies as
     host-confined is not a crossing and is counted apart, and an effect record
     with no scope at all is counted as unscoped, which is what the live
-    classifier reads an absent scope as too. The two are counted separately
-    because the WAL cannot tell them apart: a pre-item-250 record that never had
-    its scope written down is indistinguishable from a step that declared none
+    classifier reads an absent scope as too. Nothing in this tree writes a
+    declared scope into a record a run produces (`Timeline.annotate_step` is the
+    only writer of `Step.scope` and the recorder never calls it), so on a WAL a
+    recorder wrote the action set is empty and every effect record is unscoped
     (see :data:`revl.branch.SCOPE_NOTE`)."""
     by_key: dict = {}
     unscoped: list = []
@@ -170,22 +241,118 @@ def _decided_by_realms(policy) -> bool:
 def verdict(policy, name: str, token: str, realms: Optional[frozenset]) -> str:
     """Whether one policy allows, denies or cannot decide one crossing.
 
-    The decision itself is `revl.policy.capability_verdict`, the same predicate
-    the capability leg of the gate reads, so the diff cannot disagree with the
-    admission it previews. This wraps it with the one thing the gate can answer
-    and the WAL alone cannot: a realm-scoped rule decides by the realms its
-    component joins, and an unknown `realms` makes every action such a policy
-    selects undecided rather than silently allowed."""
+    The decision itself is `revl.policy.capability_verdict`, the two legs of the
+    gate this diff reads (the deny-lists and the closed allow-lists). This wraps
+    it with the one thing the gate can answer and the WAL alone cannot: a
+    realm-scoped rule decides by the realms its component joins, and an unknown
+    `realms` makes every action such a policy selects undecided rather than
+    silently allowed. Every OTHER leg the gate refuses by is invisible here, so
+    `moved_legs` is what keeps a pair whose unmodelled leg surface moved from
+    being read as decided (`LEGS`)."""
     if realms is None and _decided_by_realms(policy):
         return UNDECIDED
     return _policy.capability_verdict(
         policy, name, realms if realms is not None else frozenset(), token)
 
 
+def _rows(values) -> tuple:
+    """One leg surface, made comparable: sorted, stringified, hashable. Two
+    policies with equal rows read the same fact for this pair, so this leg cannot
+    be why the pair moved over the same recording and the same audit."""
+    return tuple(sorted(str(value) for value in values))
+
+
+def _could_select(rule, name: str, realms: Optional[frozenset]) -> bool:
+    """Whether one component-scoped rule could select this component. With no
+    realms in hand a realm-scoped rule is INCLUDED rather than excluded: a rule
+    that might decide the pair must not pass unnoticed because the caller did not
+    hand the composition over."""
+    if realms is None and rule.scope == "realm":
+        return True
+    return rule.selects(name, realms if realms is not None else frozenset())
+
+
+def _evidence_rows(policy, name: str, token: str, realms) -> tuple:
+    """The evidence clauses of one policy that could grade this pair.
+
+    An evidence rule is fail-closed over a conjunction of facets, so its surface
+    is the facets and their thresholds, not the rule text: raising a threshold
+    under an unchanged rule is exactly the kind of widening a diff of the rule
+    text would miss."""
+    rows = []
+    for rule in policy.evidence_rules:
+        if rule.scope == "capability":
+            selected = _policy._matches_any(token, (rule.selector,))
+        elif rule.scope == "component":
+            selected = _could_select(rule, name, realms)
+        else:
+            selected = True
+        if selected:
+            rows.append((rule.scope, rule.selector, rule.origin, rule.require,
+                         rule.self_attested))
+    return tuple(rows)
+
+
+def leg_surfaces(policy, name: str, token: str, realms) -> dict:
+    """What every unmodelled leg reads out of ONE policy for ONE recorded pair.
+
+    A surface has to carry everything the leg reads: the rules that select this
+    component and this token, and their thresholds and patterns, because a rule
+    changed under the same name is what a diff of the rule text misses. An entry
+    that says the leg does not arm for this pair is the empty row, and the
+    sandbox entry folds the unarmed policy into the allowed case, since an
+    unarmed policy refuses nothing here and neither does an armed one whose list
+    carries the token."""
+    return {
+        "mcp-sandbox": policy.mcp_allow is None
+                       or _policy._allowed(token, policy.mcp_allow),
+        "taint-flow": _rows((rule.origin, rule.patterns, rule.without_approval)
+                            for rule in policy.taint_flow_rules
+                            if _policy._matches_any(token, rule.patterns)),
+        "declassify": _rows((rule.selector, rule.patterns)
+                            for rule in policy.declassify_rules
+                            if _could_select(rule, name, realms)
+                            and _policy._matches_any(token, rule.patterns)),
+        "declassify-approval": _rows((rule.pattern, rule.ttl_ms)
+                                     for rule in policy.approval_rules
+                                     if rule.covers(token)),
+        "approval": _rows((rule.pattern, rule.ttl_ms)
+                          for rule in policy.approval_rules
+                          if rule.covers(token)),
+        "register": _rows((rule.capability, rule.at_least)
+                          for rule in policy.register_rules
+                          if _policy._matches_any(token, (rule.capability,))),
+        "evidence": _rows(_evidence_rows(policy, name, token, realms)),
+        "teardown": _rows((rule.strength,) for rule in policy.teardown_rules),
+        "tenant": (policy.tenants_isolated,),
+    }
+
+
+def moved_legs(old, new, name: str, token: str, realms) -> tuple:
+    """The unmodelled legs whose surface moves for one recorded pair.
+
+    Only a leg that MOVED is named. A leg reading the same surface in both
+    policies decides this pair identically over the same recording and the same
+    audit, so it cannot be the reason the pair changed, and naming it would bury
+    the leg that can be."""
+    before = leg_surfaces(old, name, token, realms)
+    after = leg_surfaces(new, name, token, realms)
+    return tuple(leg.leg for leg in LEGS
+                 if leg.state != "compared" and before[leg.leg] != after[leg.leg])
+
+
 def _pair(old, new, action: Action, realms) -> dict:
     before = verdict(old, action.component, action.token, realms)
     after = verdict(new, action.component, action.token, realms)
+    legs = moved_legs(old, new, action.component, action.token, realms)
+    reasons = []
     if before == UNDECIDED or after == UNDECIDED:
+        reasons.append("a realm-scoped rule decides this crossing by realms the "
+                       "WAL does not record")
+    if legs:
+        reasons.append("the change moves the %s leg, which decides by a fact a "
+                       "WAL does not carry" % ", ".join(legs))
+    if reasons:
         move = UNDECIDED
     elif before != after:
         move = ALLOW if after == ALLOW else DENY
@@ -193,8 +360,9 @@ def _pair(old, new, action: Action, realms) -> dict:
         move = "unchanged"
     return {"component": action.component, "token": action.token,
             "resource": action.resource, "before": before, "after": after,
-            "move": move, "witnesses": [{"seq": seq, "label": label}
-                                        for seq, label in action.witnesses]}
+            "move": move, "legs": list(legs), "reason": "; ".join(reasons),
+            "witnesses": [{"seq": seq, "label": label}
+                          for seq, label in action.witnesses]}
 
 
 def _blast_radius(moves: list, cells: dict, recorded: dict) -> dict:
@@ -238,6 +406,28 @@ def _blast_radius(moves: list, cells: dict, recorded: dict) -> dict:
     }
 
 
+def _withheld(recorded: dict) -> list:
+    """The records the diff could not name, and why, as the artifact's own field.
+
+    A record the diff cannot name is not a record it decided: whatever crossing
+    it carried could hide a widening the report would otherwise print as clean,
+    which is why a non-empty `withheld` puts the exit status where a widening
+    does."""
+    out = []
+    if recorded["unscoped"]:
+        out.append({
+            "axis": "unrecorded scope",
+            "records": len(recorded["unscoped"]),
+            "why": "no writer records the declared capability scope: `scope.caps` "
+                   "reaches a record only where a timeline step was annotated by "
+                   "hand (`Timeline.annotate_step`) and the live recorder path "
+                   "(`Timeline.attach_wal` plus `record_emission`) never "
+                   "annotates, so the recorded action set of a real run is empty "
+                   "and a change can hide behind every one of these records",
+        })
+    return out
+
+
 def diff(old, new, wal: dict, *, realms: Optional[dict] = None, label: str = "") -> dict:
     """The diff of two policies over the recorded actions of one WAL.
 
@@ -267,9 +457,22 @@ def diff(old, new, wal: dict, *, realms: Optional[dict] = None, label: str = "")
         "newlyDenied": [m for m in moves if m["move"] == DENY],
         "undecided": [m for m in moves if m["move"] == UNDECIDED],
         "unscoped": recorded["unscoped"],
+        "withheld": _withheld(recorded),
+        "legs": [{"leg": leg.leg, "state": leg.state, "decides": leg.decides}
+                 for leg in LEGS],
         "blastRadius": _blast_radius(moves, recorded["byToken"], recorded),
         "notAnswerable": list(NOT_ANSWERABLE),
     }
+
+
+def widened(doc: dict) -> bool:
+    """Whether one diff document says the change cannot be called clean.
+
+    True when the change newly allows a recorded crossing, leaves one undecided,
+    or could not name one at all. The CLI and any caller that gates on this
+    document read THIS function rather than re-deriving the condition, so the
+    widened cases and the exit status cannot drift apart."""
+    return bool(doc["newlyAllowed"] or doc["undecided"] or doc["withheld"])
 
 
 def load_history(path: str) -> dict:
@@ -284,12 +487,15 @@ def load_history(path: str) -> dict:
 
 
 def render(doc: dict) -> str:
-    """The human view: the two sets, then the bound they open."""
+    """The human view: the two sets, the bound they open, and the legs."""
     lines = ["policy diff over " + (doc["history"] or "(unidentified WAL)")]
     counts = ("  actions    %d recorded  %d newly allowed  %d newly denied  %d undecided"
               % (len(doc["moves"]), len(doc["newlyAllowed"]),
                  len(doc["newlyDenied"]), len(doc["undecided"])))
     lines.append(counts)
+    for entry in doc["withheld"]:
+        lines.append("  withheld   %s over %d record(s): %s"
+                     % (entry["axis"], entry["records"], entry["why"]))
     for title, moves in (("NEWLY ALLOWED", doc["newlyAllowed"]),
                          ("NEWLY DENIED", doc["newlyDenied"])):
         lines.append("")
@@ -303,13 +509,16 @@ def render(doc: dict) -> str:
                             move["after"], len(move["witnesses"])))
     if doc["undecided"]:
         lines.append("")
-        lines.append("  UNDECIDED (a realm-scoped rule needs the composition):")
+        lines.append("  UNDECIDED (never read as allowed or denied):")
         for move in doc["undecided"]:
-            lines.append("    %-18s %-24s" % (move["component"], move["token"]))
+            lines.append("    %-18s %-24s was %s, now %s: %s"
+                         % (move["component"], move["token"], move["before"],
+                            move["after"], move["reason"]))
     if doc["unscoped"]:
         lines.append("")
-        lines.append("  UNSCOPED (a recorded step with no capability scope, read "
-                     "as no declared crossing):")
+        lines.append("  UNSCOPED (recorded effect records carrying no capability "
+                     "scope; nothing in this tree writes one, so these are the "
+                     "crossings the diff cannot name):")
         for entry in doc["unscoped"]:
             lines.append("    %-18s %-24s seq %s"
                          % (entry["component"], entry["label"], entry["seq"]))
@@ -333,6 +542,15 @@ def render(doc: dict) -> str:
                          % (name, ", ".join(str(v) for v in values)))
     else:
         lines.append("    ceiling    none named by the opened actions")
+    compared = [leg["leg"] for leg in doc["legs"] if leg["state"] == "compared"]
+    lines += ["", "  legs       compared here: %s" % ", ".join(compared),
+              "             a change that moves one of these leaves the pair "
+              "undecided:"]
+    for leg in doc["legs"]:
+        if leg["state"] != "compared":
+            lines.append("    %-20s %s" % (leg["leg"], leg["decides"]))
+    lines.append("")
+    lines.append("  cannot say (an axis this surface has no answer for at all):")
     for entry in doc["notAnswerable"]:
         lines.append("    cannot say %-24s %s" % (entry["axis"], entry["why"]))
     return "\n".join(lines)

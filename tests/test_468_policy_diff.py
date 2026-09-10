@@ -10,10 +10,20 @@ Every test here attacks a way that could be faked.
 * The blast radius must be BOUNDED BY THE RECORDED ACTION SET, so the bound has
   to move when that set moves and has to name the records the diff could not
   classify rather than swallowing them.
-* The verdict must be the GATE's verdict. `test_the_diff_agrees_with_the_gate`
-  runs `policy.evaluate` over the assembled boundary graph and requires the two
-  to refuse exactly the same component/capability pairs, because a preview that
-  can disagree with the admission it previews is worse than no preview.
+* The verdict must agree with the gate on every leg the diff READS, and must
+  refuse to answer on the legs it does not.
+  `test_the_diff_agrees_with_the_gate` runs `policy.evaluate` over the assembled
+  boundary graph and requires the two to refuse the same component/capability
+  pairs on the capability and deny legs.
+  `test_the_sandbox_leg_is_never_reported_unchanged` and
+  `test_the_taint_leg_is_never_reported_unchanged` pin the other direction: a
+  pair the gate decides on a leg outside this diff is reported undecided with
+  the leg named, because a preview that answers where it cannot see is worse
+  than no preview.
+* A record the diff cannot name must not be called clean.
+  `test_a_wal_a_recorder_wrote_is_withheld_not_reported_clean` writes a WAL
+  through the recorder, where no scope is recorded, and requires the withheld
+  records to reach the exit status.
 * The undecided case must be reported, never resolved. A realm-scoped rule needs
   the component's realms, which only the compiled composition holds.
 """
@@ -74,6 +84,22 @@ def _policy(tmp_path, name, text):
     target = tmp_path / name
     target.write_text(text, encoding="utf-8")
     return load_policy(str(target))
+
+
+def _recorder_wal(tmp_path, component, *crossings, name="recorded.wal"):
+    """One WAL written the way a RUN writes it: through the recorder's own path
+    (`Timeline.attach_wal` plus `Timeline.record_emission`), which is what
+    `_wrap_apply` drives. Nothing here touches `Step.scope`, because nothing in
+    the recorder does, and that absence is the case under test."""
+    path = str(tmp_path / name)
+    wal = replay.WriteAheadLog(path, ir={}, generation=1).open()
+    timeline = replay.Timeline(component)
+    timeline.attach_wal(wal, ir={})
+    for key, method in crossings:
+        timeline.record_emission(key, method, (), None, (None, None))
+    wal.commit_activation(components=[component])
+    wal.close()
+    return path
 
 
 def _write(tmp_path, name, text):
@@ -236,6 +262,52 @@ def test_a_step_with_no_recorded_scope_is_not_an_action(tmp_path):
     assert radius["confinedRecords"] == 1
     assert radius["recordedActions"] == 1
     assert "UNSCOPED" in policy_diff.render(result)
+    # a record the diff cannot name is a fact the WAL does not carry, so it is
+    # withheld and the diff does not call the change clean over it
+    assert [entry["axis"] for entry in result["withheld"]] == ["unrecorded scope"]
+    assert result["withheld"][0]["records"] == 1
+    assert policy_diff.widened(result)
+
+
+def test_a_wal_a_recorder_wrote_is_withheld_not_reported_clean(tmp_path, capsys):
+    """The reproducer that made this surface honest. A WAL written through the
+    RECORDER carries no scope, because no writer in this tree records the
+    declared one, so the action set is empty. A recorded `net.push` then crosses
+    under a change that newly permits `net` for the component that took it, and
+    printing "0 newly allowed" with exit 0 would be the one wrong answer this
+    command can give: the diff withholds the untokenised records, names the
+    withholding and its reason, and the exit status follows it."""
+    from revl.__main__ import main
+
+    history = _recorder_wal(tmp_path, "AgentLeak", ("llm", "ask"), ("net", "push"))
+    wal = read_wal(history)
+    assert wal["records"], "the recorder must have written records"
+    assert [record for record in wal["records"]
+            if record.get("record") == "effect"], "an emission is an effect record"
+    assert all("scope" not in record for record in wal["records"]
+               if record.get("record") == "effect"), \
+        "a writer now records the declared scope, so the withheld case changed"
+
+    narrow = _policy(tmp_path, "rec-n.policy", NARROW)
+    wide = _policy(tmp_path, "rec-w.policy", WIDE)
+    result = policy_diff.diff(narrow, wide, wal, label=history)
+    assert result["moves"] == [], "an unscoped record is not a nameable action"
+    assert result["newlyAllowed"] == []
+    assert [entry["axis"] for entry in result["withheld"]] == ["unrecorded scope"]
+    assert result["withheld"][0]["records"] == 2
+    assert "no writer records the declared capability scope" \
+        in result["withheld"][0]["why"]
+    assert policy_diff.widened(result), "a record it cannot name is not clean"
+
+    assert main(["simulate", "policy-diff", str(tmp_path / "rec-n.policy"),
+                 str(tmp_path / "rec-w.policy"), "--history", history]) == 1
+    out = capsys.readouterr().out
+    assert "withheld" in out and "unrecorded scope" in out
+    assert main(["simulate", "policy-diff", str(tmp_path / "rec-n.policy"),
+                 str(tmp_path / "rec-w.policy"), "--history", history,
+                 "--json"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    assert document["withheld"][0]["records"] == 2
 
 
 # ===========================================================================
@@ -280,15 +352,166 @@ def test_a_realm_rule_does_not_touch_a_component_it_does_not_select(tmp_path):
 
 
 # ===========================================================================
+# the legs the diff does not read
+# ===========================================================================
+
+
+def test_the_sandbox_leg_is_never_reported_unchanged(tmp_path, capsys):
+    """Recipe: an MCP-admitted component whose crossing the agent sandbox
+    refuses under OLD and admits under NEW, with the capability legs unchanged
+    either side. `evaluate` decides the pair on the sandbox leg, so a diff that
+    printed `unchanged` would be reporting a widening it cannot see as no
+    change. The pair is undecided, the leg is named, and the exit status follows.
+
+    The scope is assigned by hand because the recorder records none; the
+    withheld test above owns that gap, and this test needs a NAMEABLE action to
+    pin the leg."""
+    from revl.__main__ import main
+    from revl.audit_diff import audit_report
+    from revl.compiler import compile_source
+
+    audit = audit_report(compile_source(
+        "extern emission[net] fn push(body: Str) = @py { return }\n"
+        "component AgentX { emit push(\"hello\") }\n", "sandbox_agent.rvl"))
+    history = _wal(tmp_path, ("AgentX", [("emission", "net.push", ["net"])]),
+                   name="sandbox.wal")
+    old = _policy(tmp_path, "old-sandbox.policy",
+                  "component Agent* may reach llm, kv, net\nmcp may reach llm, kv\n")
+    new = _policy(tmp_path, "new-sandbox.policy",
+                  "component Agent* may reach llm, kv, net\n"
+                  "mcp may reach llm, kv, net\n")
+    assert [v.kind for v in evaluate(old, audit,
+                                     mcp_components={"AgentX"})] == ["mcp-sandbox"]
+    assert evaluate(new, audit, mcp_components={"AgentX"}) == []
+
+    result = policy_diff.diff(old, new, read_wal(history))
+    move = result["moves"][0]
+    assert move["before"] == "allow" and move["after"] == "allow"
+    assert move["move"] == "undecided", \
+        "the sandbox leg decides this pair and the diff does not read it"
+    assert move["legs"] == ["mcp-sandbox"]
+    assert "mcp-sandbox" in move["reason"]
+    assert result["newlyAllowed"] == []
+    assert policy_diff.widened(result)
+
+    assert main(["simulate", "policy-diff", str(tmp_path / "old-sandbox.policy"),
+                 str(tmp_path / "new-sandbox.policy"),
+                 "--history", history]) == 1
+    assert "mcp-sandbox" in capsys.readouterr().out
+
+
+def test_the_taint_leg_is_never_reported_unchanged(tmp_path, capsys):
+    """Recipe: a component that carries `web` taint to an emission and whose
+    policy refuses that flow under OLD and permits it under NEW. `evaluate`
+    decides the pair on the taint-flow leg over audit facts a WAL does not
+    carry, so the pair is undecided and the leg is named. The token that flow
+    does not reach (`web`) stays decidable, because the leg cannot decide it."""
+    from revl.__main__ import main
+    from revl.audit_diff import audit_report
+    from revl.compiler import compile_source
+
+    audit = audit_report(compile_source(
+        "extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py "
+        "{ return \"\" }\n"
+        "service Sink { emission[net] fn send(body: Str) }\n"
+        "service Ops { emission fn go(url: Str) }\n"
+        "component Backend provides s: Sink { provide s { fn send(body) { } } }\n"
+        "component AgentX requires s: Sink provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go(url) { let page = emit fetch(url)  emit s.send(page) }\n"
+        "  }\n"
+        "}\n", "taint_agent.rvl"))
+    history = _wal(tmp_path,
+                   ("AgentX", [("emission", "web.fetch", ["web"]),
+                               ("emission", "net.send", ["net"])]),
+                   name="taint.wal")
+    old = _policy(tmp_path, "old-taint.policy", "web-taint may not reach net\n")
+    new = _policy(tmp_path, "new-taint.policy", "model-taint may not reach fs\n")
+    assert [v.kind for v in evaluate(old, audit)] == ["taint-flow"]
+    assert evaluate(new, audit) == []
+
+    result = policy_diff.diff(old, new, read_wal(history))
+    by_token = {m["token"]: m for m in result["moves"]}
+    assert by_token["net"]["move"] == "undecided", \
+        "the taint leg decides this pair and the diff does not read it"
+    assert by_token["net"]["legs"] == ["taint-flow"]
+    assert by_token["web"]["move"] == "unchanged", \
+        "the leg cannot decide a pair its pattern does not reach"
+    assert result["newlyAllowed"] == []
+    assert policy_diff.widened(result)
+
+    assert main(["simulate", "policy-diff", str(tmp_path / "old-taint.policy"),
+                 str(tmp_path / "new-taint.policy"),
+                 "--history", history]) == 1
+    assert "taint-flow" in capsys.readouterr().out
+
+
+def test_a_leg_the_change_does_not_move_leaves_the_pair_decidable(tmp_path):
+    """The leg check is not a blanket undecided. When both policies read the
+    same surface on every unmodelled leg, the pair is still decided by the
+    capability legs and no leg is named."""
+    old = _policy(tmp_path, "leg-o.policy",
+                  "component Agent* may reach llm, kv\nmcp may reach llm, kv\n")
+    new = _policy(tmp_path, "leg-n.policy",
+                  "component Agent* may reach llm, kv, net\nmcp may reach llm, kv\n")
+    wal = read_wal(_wal(tmp_path, ("AgentLeak",
+                                   [("emission", "net.push", ["net"])])))
+    result = policy_diff.diff(old, new, wal)
+    assert [(m["token"], m["move"]) for m in result["newlyAllowed"]] == [("net",
+                                                                        "allow")]
+    assert result["undecided"] == []
+    assert result["withheld"] == []
+
+
+def test_the_legs_the_gate_refuses_by_are_enumerated_in_the_artifact(tmp_path):
+    """The leg table has to cover the GATE, not the gate's documentation. Read
+    `policy.py` and take every `Violation.kind` it mints, including the two the
+    allow-violation helper is handed, and require `LEGS` to name each one: a leg
+    added to the gate and missing here is a pair the diff would report as
+    unchanged while the admission decides it."""
+    import ast
+
+    source = (ROOT / "src" / "revl" / "policy.py").read_text(encoding="utf-8")
+    minted = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None)
+        if name == "Violation" and node.args \
+                and isinstance(node.args[0], ast.Constant):
+            minted.add(node.args[0].value)
+        elif name == "_allow_violation":
+            minted.update(arg.value for arg in node.args
+                          if isinstance(arg, ast.Constant)
+                          and isinstance(arg.value, str))
+    assert len(minted) >= 5, minted
+    legs = {leg.leg for leg in policy_diff.LEGS}
+    assert minted <= legs, "the gate refuses on a leg the diff does not name"
+    assert "capability" in minted and "deny" in minted, minted
+
+    wal = read_wal(_wal(tmp_path, ("C", [("emission", "llm.ask", ["llm"])])))
+    document = policy_diff.diff(_policy(tmp_path, "e-o.policy",
+                                        "component * may reach llm\n"),
+                                _policy(tmp_path, "e-n.policy",
+                                        "component * may reach llm\n"), wal)
+    assert {entry["leg"] for entry in document["legs"]} == legs
+    assert {entry["leg"] for entry in document["legs"]
+            if entry["state"] == "compared"} == {"capability", "deny"}
+    assert "compared here: capability, deny" in policy_diff.render(document)
+
+
+# ===========================================================================
 # the one comparison site
 # ===========================================================================
 
 
 def test_the_diff_agrees_with_the_gate(tmp_path):
     """`policy.evaluate` is the admission decision and this diff is a preview of
-    it, so over the same boundary graph the two must refuse exactly the same
-    component/capability pairs. The WAL is built from the graph's own reach, so
-    every pair the gate can see is an action the diff decides."""
+    it, so on the legs the diff reads the two must refuse the same
+    component/capability pairs. Those legs are the deny-lists and the closed
+    allow-lists; the gate refuses on more than those, it is handed no
+    `mcp_components` here so the sandbox leg is not in play, and the tests above
+    pin that a pair the other legs decide is named rather than answered."""
     from revl.audit_diff import audit_report
     from revl.compiler import compile_files
 
@@ -355,6 +578,11 @@ def test_the_cli_exits_one_on_a_widening_and_zero_on_a_narrowing(tmp_path,
     assert main(["simulate", "policy-diff", narrow, wide,
                  "--history", str(tmp_path / "absent.wal")]) == 2
     assert "cannot read WAL" in capsys.readouterr().err
+
+    # an unreadable policy is the caller's mistake, not a traceback
+    assert main(["simulate", "policy-diff", str(tmp_path / "absent.policy"),
+                 str(tmp_path / "absent.policy"), "--history", history]) == 2
+    assert "cannot read" in capsys.readouterr().err
 
     # the composition resolves the realms a realm-scoped rule decides by
     tenants = _wal(tmp_path, ("TenantAJob", [("emission", "bus.publish",

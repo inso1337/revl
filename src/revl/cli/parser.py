@@ -318,9 +318,13 @@ def build_parser() -> argparse.ArgumentParser:
     # item 468 / issue #820: `revl simulate policy-diff OLD NEW --history WAL`
     # — the bounded preview a policy change over recorded history opens. It
     # reads the action set out of a WAL (the crossings the run declared through
-    # `scope.caps`), decides each one through the same capability predicate the
-    # gate reads, and prints the newly allowed and newly denied sets with a
-    # blast radius bounded by the recorded action set itself. It never admits,
+    # `scope.caps`), decides each one through the two legs the capability
+    # verdict reads, and prints the newly allowed and newly denied sets with a
+    # blast radius bounded by the recorded action set itself. The legs it cannot
+    # read decide by facts a WAL does not carry, so a pair whose surface moves
+    # on one of them is undecided with the leg named, and no writer records the
+    # declared scope at all, which makes the action set of a recorder-written
+    # WAL empty and those records withheld rather than clean. It never admits,
     # refuses or mutates, and it is not `revl audit --diff` (that gate compares
     # two audit graphs for authority drift, with no policy on the path).
     simulate_cmd = sub.add_parser(
@@ -333,7 +337,9 @@ def build_parser() -> argparse.ArgumentParser:
         "policy-diff",
         help="diff two boundary policies over the actions one recorded WAL "
              "carries: the newly allowed and newly denied action sets plus a "
-             "blast radius bounded by that action set")
+             "blast radius bounded by that action set, with a pair whose leg "
+             "surface moves reported undecided and a record no writer scoped "
+             "withheld")
     sim_policy.add_argument(
         "old", metavar="OLD",
         help="the earlier boundary policy (DSL or JSON)")

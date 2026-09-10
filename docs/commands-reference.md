@@ -323,14 +323,27 @@ ones a run took. `simulate policy-diff` answers what the change would have done
 to the actions this run took, and it refuses to answer what one recorded run
 cannot say. An action the run never took is invisible here however widely the
 new policy opens it; an effect record whose step carried no capability scope is
-counted as unscoped rather than resolved to the label it recorded; and a
-realm-scoped rule stays undecided until the compiled composition supplies the
-component's realms.
+withheld rather than resolved to the label it recorded; and a realm-scoped rule
+stays undecided until the compiled composition supplies the component's realms.
 
-An action is a recorded effect record whose scope names a capability, and each
-verdict is the gate's own verdict: the diff calls the same
-`policy.capability_verdict` the admission refuses by, so a preview that could
-disagree with the admission it previews is not possible.
+An action is a recorded effect record whose scope names a capability, and the
+capability verdict is the gate's own: the diff calls the same
+`policy.capability_verdict` the admission refuses by, over the two legs that
+predicate reads, the deny-lists and the closed allow-lists. The admission
+refuses a crossing on more legs than those two, and the diff reads none of the
+rest: the agent-sandbox allow-list, the taint-flow tier, the approval and
+declassify rules, the declaration-strength floors, the evidence bundle and the
+recovery surface all decide by facts a WAL does not carry. Every leg is named in
+the report and in `--json`, and a recorded pair whose surface moves on one of
+them is reported undecided with the leg named, never as unchanged, so a widening
+on a leg this diff cannot read is not reported clean.
+
+No writer in this tree records the declared scope, so that definition is the
+whole of the action channel: `scope.caps` reaches a record only where a timeline
+step was annotated by hand, and the recorder never annotates, so on a WAL a run
+wrote every effect record is unscoped and the recorded action set is empty. The
+command reports those records as withheld, and exits non-zero on them, rather
+than printing an empty diff as a clean change.
 
 - `OLD` - the boundary policy in force (required).
 - `NEW` - the boundary policy to simulate (required).
@@ -340,8 +353,8 @@ disagree with the admission it previews is not possible.
 - `--json` - machine-readable output.
 
 Exit status follows the widening: `1` when the change newly allows a recorded
-action or leaves one undecided, and `0` when it only narrows or changes
-nothing.
+action, leaves one undecided, or withholds a record it could not name, and `0`
+when it only narrows or changes nothing and every record was named.
 
 ```bash
 revl simulate policy-diff prod.policy next.policy --history run.wal
