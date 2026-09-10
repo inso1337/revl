@@ -28,6 +28,8 @@ crossing must never appear in `vault`'s receipt. The runtime no-residue proof
 needs the cordis backend, so those assertions are guarded with `_has_runtime`.
 """
 
+import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -207,6 +209,137 @@ def test_proven_teardown_reads_reclaimed(vault_ir):
     assert receipt["inProcess"]["disposition"] == "reclaimed"
 
 
+# The proof's own tri-state, as `erase_report._prove_no_residue` builds it: a
+# passing R4 teardown, and a teardown that RAN and left residue behind (the case
+# `revl erase-report` exits 1 on). A third reading, no proof at all, is
+# `prove_residue=False` below. The two hard cases are stubbed at the report's own
+# seam so they are testable without the cordis runtime.
+PASSING_PROOF = {"available": True, "proven": True,
+                 "checks": {"registry": True, "provisions": True,
+                            "effects": True, "listeners": True},
+                 "detail": {}}
+FAILING_PROOF = {"available": True, "proven": False,
+                 "checks": {"registry": False, "provisions": True,
+                            "effects": True, "listeners": True},
+                 "detail": {"registrySize": 1}}
+
+
+def _report_over_proof(vault_ir, monkeypatch, proof):
+    """A report whose R4 proof is `proof`, or the skipped proof when it is
+    None. Goes through `build_report`, so `inProcessStateGone` is assembled by
+    the code that assembles it rather than by the test."""
+    if proof is None:
+        return erase_report.build_report(vault_ir, "vault", prove_residue=False)
+    monkeypatch.setattr(erase_report, "_prove_no_residue", lambda ir: dict(proof))
+    return erase_report.build_report(vault_ir, "vault", prove_residue=True)
+
+
+@pytest.mark.parametrize("proof,disposition,proven", [
+    (PASSING_PROOF, "reclaimed", True),
+    (None, "unproven", None),
+    (FAILING_PROOF, "residue", False),
+])
+def test_each_reading_of_the_proof_signs_its_own_disposition(
+        monkeypatch, vault_ir, proof, disposition, proven):
+    # `proven: False` (the teardown ran and residue survived) and `proven: None`
+    # (no proof was taken) are opposite facts about the realm. A receipt that
+    # signed both as `unproven` could not tell "it is still there" from "nobody
+    # looked", so each reading signs its own disposition and the evidence it
+    # rests on travels inside the same signed row.
+    report = _report_over_proof(vault_ir, monkeypatch, proof)
+    receipt = erasure_receipt.make_receipt(report, KEY, ir=vault_ir, now=NOW)
+    row = receipt["inProcess"]
+    assert row["disposition"] == disposition
+    assert row["proven"] is proven
+    assert receipt["summary"]["byDisposition"][disposition] == 1
+    assert erasure_receipt.verify_receipt(receipt, KEY) == (True, "")
+
+
+def test_the_three_proof_readings_do_not_share_a_disposition(monkeypatch,
+                                                             vault_ir):
+    # any two readings of the proof are two different signed documents, which is
+    # what "derivable from the signed body alone" has to mean: a reader cannot
+    # be shown one reading and check another.
+    signatures = []
+    for proof in (PASSING_PROOF, None, FAILING_PROOF):
+        report = _report_over_proof(vault_ir, monkeypatch, proof)
+        signatures.append(erasure_receipt.make_receipt(
+            report, KEY, ir=vault_ir, now=NOW)["signature"])
+    assert len(set(signatures)) == 3
+    assert erasure_receipt.IN_PROCESS_DISPOSITIONS == \
+        ("reclaimed", "unproven", "residue")
+
+
+def test_the_signed_row_carries_why_it_is_not_reclaimed(monkeypatch, vault_ir):
+    # a verifier holding only the receipt must be able to see which it is
+    # holding: the reason a proof was never taken, or the residue checks that
+    # failed. Both live inside the signed row, so both travel with the receipt.
+    skipped = erasure_receipt.make_receipt(
+        _report_over_proof(vault_ir, monkeypatch, None), KEY, ir=vault_ir,
+        now=NOW)["inProcess"]
+    assert skipped["available"] is False
+    assert skipped["reason"] == "runtime proof skipped"
+    assert skipped["failedChecks"] == []
+
+    residue = erasure_receipt.make_receipt(
+        _report_over_proof(vault_ir, monkeypatch, FAILING_PROOF), KEY, ir=vault_ir,
+        now=NOW)["inProcess"]
+    assert residue["available"] is True
+    assert residue["reason"] is None
+    assert residue["failedChecks"] == ["registry"]
+
+    text = erasure_receipt.render_receipt(erasure_receipt.make_receipt(
+        _report_over_proof(vault_ir, monkeypatch, FAILING_PROOF), KEY, ir=vault_ir,
+        now=NOW))
+    assert "residue" in text and "registry" in text
+
+
+def test_a_receipt_cannot_claim_reclaimed_over_residue_evidence(monkeypatch,
+                                                               vault_ir):
+    # the disposition and the proof reading it summarises are checked against
+    # each other, so a body whose row says `reclaimed` while its evidence says
+    # `proven: False` is refused rather than printed VALID.
+    receipt = erasure_receipt.make_receipt(
+        _report_over_proof(vault_ir, monkeypatch, FAILING_PROOF), KEY,
+        ir=vault_ir, now=NOW)
+    lying = json.loads(json.dumps(receipt))
+    lying["inProcess"]["disposition"] = "reclaimed"
+    ok, why = erasure_receipt.verify_receipt(lying, KEY)
+    assert not ok and "inProcess.disposition" in why
+    # and rewriting the evidence to match the lie breaks the signature instead:
+    # the pair cannot be moved together either.
+    rewritten = json.loads(json.dumps(receipt))
+    rewritten["inProcess"]["disposition"] = "reclaimed"
+    rewritten["inProcess"]["proven"] = True
+    ok, why = erasure_receipt.verify_receipt(rewritten, KEY)
+    assert not ok and "does not match the signature" in why
+    assert erasure_receipt.verify_receipt(receipt, KEY) == (True, "")
+    # a residue receipt cannot be re-read as "not measured" either
+    shrugged = json.loads(json.dumps(receipt))
+    shrugged["inProcess"]["disposition"] = "unproven"
+    ok, why = erasure_receipt.verify_receipt(shrugged, KEY)
+    assert not ok and "inProcess.disposition" in why
+
+
+def test_a_row_cannot_read_reclaimed_without_a_standing_proof(monkeypatch,
+                                                             vault_ir):
+    # `reclaimed` is entailed by `proven: true` rather than chosen freely, so a
+    # row that claims it over a proof that was never taken is refused, and so is
+    # a row whose `proven` is not a proof reading at all.
+    receipt = erasure_receipt.make_receipt(
+        _report_over_proof(vault_ir, monkeypatch, None), KEY, ir=vault_ir,
+        now=NOW)
+    assert receipt["inProcess"]["proven"] is None
+    free = json.loads(json.dumps(receipt))
+    free["inProcess"]["disposition"] = "reclaimed"
+    ok, why = erasure_receipt.verify_receipt(free, KEY)
+    assert not ok and "inProcess.disposition" in why
+    odd = json.loads(json.dumps(receipt))
+    odd["inProcess"]["proven"] = "yes"
+    ok, why = erasure_receipt.verify_receipt(odd, KEY)
+    assert not ok and "inProcess.proven" in why
+
+
 # ------------------------------------------------------ the signature
 
 def test_receipt_round_trips_against_its_key_and_its_report(report, receipt):
@@ -302,6 +435,33 @@ def test_signing_is_deterministic_given_now(report, vault_ir):
     assert later["signature"] != first["signature"]
 
 
+def test_a_non_ascii_signer_recomputes_the_bytes_a_verifier_would(report,
+                                                                  vault_ir):
+    # `signer` is free text, so a receipt can carry a name that is not ASCII.
+    # The canonical bytes are `attest._canonical_bytes`'s, so a verifier who
+    # canonicalises the way docs/revl-attest.md documents recomputes exactly the
+    # bytes the signer MACed. A second reading of the construction (escaping the
+    # non-ASCII name) hashed different bytes, and every such receipt was
+    # reported invalid by anyone who followed the documentation.
+    signer = "Jos\u00e9 M\u00fcller"
+    receipt = erasure_receipt.make_receipt(
+        report, KEY, ir=vault_ir, now=NOW, signer=signer)
+    assert receipt["signer"] == signer
+    assert erasure_receipt.verify_receipt(receipt, KEY) == (True, "")
+    body = {k: v for k, v in receipt.items() if k != "signature"}
+    canonical = attest._canonical_bytes(body)
+    assert erasure_receipt._mac(body, KEY) == hmac.new(
+        KEY, erasure_receipt.RECEIPT_DOMAIN + canonical,
+        hashlib.sha256).hexdigest()
+    # the two spellings really do differ here, which is what made the divergence
+    # observable to a third party, and only to a third party
+    assert canonical != json.dumps(body, sort_keys=True, ensure_ascii=True,
+                                   separators=(",", ":")).encode("utf-8")
+    # a receipt that travelled through JSON is the same receipt
+    assert erasure_receipt.verify_receipt(json.loads(json.dumps(receipt)), KEY) \
+        == (True, "")
+
+
 def test_an_unknown_realm_is_never_signed(vault_ir):
     bad = erase_report.build_report(vault_ir, "ghost", prove_residue=False)
     assert bad["ok"] is False
@@ -341,6 +501,25 @@ def test_key_fingerprints_are_domain_separated():
     # an erasure key fingerprint and an attestation fingerprint of the same
     # bytes are different strings, so a key id can never be cross-read.
     assert erasure_receipt.key_id(KEY) != attest.key_id(KEY)
+
+
+def test_a_key_file_means_the_same_thing_to_both_protocols(tmp_path, report,
+                                                           vault_ir):
+    # The key file rule is `attest`'s, not a second reading of it. A key written
+    # with `echo` carries a trailing newline; reading it verbatim made the same
+    # file two different keys, so the same receipt MACed twice and fingerprinted
+    # twice depending on which protocol resolved it.
+    key_file = tmp_path / "receipt.key"
+    key_file.write_bytes(KEY + b"\n")
+    assert erasure_receipt.load_key(str(key_file)) == attest.load_key(
+        str(key_file)) == KEY
+    assert erasure_receipt.resolve_key(str(key_file)) == KEY
+    assert erasure_receipt.key_id(erasure_receipt.resolve_key(str(key_file))) \
+        == erasure_receipt.key_id(KEY)
+    receipt = erasure_receipt.make_receipt(
+        report, erasure_receipt.resolve_key(str(key_file)), ir=vault_ir, now=NOW)
+    assert erasure_receipt.verify_receipt(
+        receipt, attest.resolve_key(str(key_file))) == (True, "")
 
 
 # ---------------------------------------------------------------- the CLI
@@ -393,6 +572,20 @@ def test_cli_resolves_the_key_from_the_environment(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["receipt"]["key_id"] == \
         erasure_receipt.key_id(KEY)
+
+
+def test_cli_reports_an_unreadable_receipt_key_rather_than_crashing(tmp_path):
+    # every other verb answers a file it cannot read with a message on stderr
+    # and a nonzero exit. This one let the error escape as a traceback out of
+    # the receipt construction, which is not an answer an operator can act on.
+    missing = tmp_path / "definitely-missing.key"
+    proc = _cli("--realm", "vault", "--json", "--no-residue-proof",
+                "--receipt-key", str(missing))
+    assert "Traceback" not in proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert proc.stderr.startswith("error: "), proc.stderr
+    assert "definitely-missing.key" in proc.stderr
+    assert proc.stdout == ""
 
 
 # ------------------------------------------------------------ the honest scope

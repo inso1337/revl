@@ -99,9 +99,18 @@ def _run_erase_report(args, ir: dict) -> int:
     key_path = getattr(args, "receipt_key", None)
     receipt = None
     if report_doc.get("ok") and (key_path or erasure_receipt.key_from_env()):
-        receipt = erasure_receipt.make_receipt(
-            report_doc, erasure_receipt.resolve_key(key_path), ir=ir,
-            signer=getattr(args, "receipt_signer", None))
+        # A key this process cannot resolve is the same class of answer as any
+        # other unresolved input: a message on stderr and a nonzero exit, which
+        # is what every other verb here does. Letting it escape the handler made
+        # a missing key a traceback rather than an answer an operator can act
+        # on, before the document was printed either way (issue #824 review).
+        try:
+            receipt = erasure_receipt.make_receipt(
+                report_doc, erasure_receipt.resolve_key(key_path), ir=ir,
+                signer=getattr(args, "receipt_signer", None))
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
         report_doc["receipt"] = receipt
     if args.json:
         print(json.dumps(report_doc, indent=2))

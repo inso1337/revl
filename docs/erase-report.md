@@ -108,24 +108,38 @@ to the report this command always produced: the receipt is opt-in.
 The receipt names **every replica the erasure reaches**, one row per crossing
 token the report itself enumerated, each carrying the disposition the report
 already assigned it (`revertible`, `compensated`, `unresolved`, `bare`, plus a
-single in-process row reading `reclaimed` or `unproven`), the capability scope
-the crossing ran under, and the declared channel through which that crossing
-can be reversed or offset: an `undo` inverse for a revertible row, a
-`compensate` callee for a compensated or unresolved one, and nothing for a bare
-crossing because the declaration names nothing. The rows come from the G8
+single in-process row reading `reclaimed`, `residue` or `unproven`), the
+capability scope the crossing ran under, and the declared channel through which
+that crossing can be reversed or offset: an `undo` inverse for a revertible row,
+a `compensate` callee for a compensated or unresolved one, and nothing for a
+bare crossing because the declaration names nothing. The rows come from the G8
 surface above, so a replica the report did not enumerate cannot appear, and a
 receipt for one realm can never name another realm's crossing.
+
+The in-process row is the only erasure claim in the receipt, and it keeps the
+report's own tri-state rather than collapsing it: `reclaimed` when the R4
+no-residue proof stands, `residue` when the proof ran and left something behind
+(the reading this command exits `1` on), and `unproven` when no proof was taken.
+The row carries the evidence its disposition summarises, inside the signed body:
+the proof's availability, the reason it was never taken, and the checks that did
+not hold. The verifier re-checks the disposition against that evidence, so a
+receipt whose row claims `reclaimed` over a failed proof is refused even if its
+MAC is intact.
 
 The receipt also carries the canonical sha256 of the report it was issued over,
 so a report edited after issue stops verifying against its own receipt, and it
 is signed with an HMAC-SHA256 domain-separated from `revl attest` and
-`revl deploy`: three signed protocols, three domains, one construction. It
-proves the measurement is unaltered, that every replica the compiler can see is
-named, and that the holder of the signing key issued it. It does **not** prove
-that anything was erased, that an offset landed, or that no copy exists outside
-the boundary, and it says so in its own signed scope header, because that gap is
-the point (see docs/design/472-retention-erasure-receipts.md for the full
-measurement, including what item 472's retention half would still need).
+`revl deploy`: three signed protocols, three domains, one construction. The
+canonical bytes and the key file rule are `revl attest`'s, called rather than
+copied (`attest._canonical_bytes`, `attest.load_key`), so a verifier who
+reconstructs them the way docs/revl-attest.md documents recomputes identical
+bytes and the same key. It proves the measurement is unaltered, that every
+replica the compiler can see is named, and that the holder of the signing key
+issued it. It does **not** prove that anything was erased, that an offset
+landed, or that no copy exists outside the boundary, and it says so in its own
+signed scope header, because that gap is the point (see
+docs/design/472-retention-erasure-receipts.md for the full measurement,
+including what item 472's retention half would still need).
 
 ## Related
 
