@@ -263,7 +263,11 @@ def test_emitted_body_matches_slice2a_shape_from_source():
     emit = _emit_backend()
     body = emit.emit(_ir("StashOk"))
     assert "isinstance(_revl_wit1, Ok)" in body
-    assert "_revl_frame.transactional((lambda result: unstash(result)), _revl_wit1.value)" in body
+    # item 872: the registration also carries the DECLARED `witnessed[fs]` set,
+    # which the recorder copies onto the step's scope so the scope-gated fork
+    # rewind reads the declaration instead of an absence.
+    assert ("_revl_frame.transactional((lambda result: unstash(result)), "
+            "_revl_wit1.value, scope={'caps': ['fs']})") in body
     assert "yield lambda:" not in body
 
 
