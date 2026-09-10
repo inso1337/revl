@@ -41,8 +41,8 @@ import os
 from .admit_profile import AdmissionProfile
 from .errors import RevlError
 from .lower import _config_default_type
-from .parser import (Address, CompositionDecl, IsolateStmt, LayerDecl,
-                     PlaceDecl, Program, RowDecl, parse_file)
+from .parser import (SLO_IR_KEYS, Address, CompositionDecl, IsolateStmt,
+                     LayerDecl, PlaceDecl, Program, RowDecl, parse_file)
 from .synthesize import (
     HOST_SHIMS, OBSERVER_METHOD, cap_token, check_address, check_remotable,
     synthesize_provider)
@@ -233,9 +233,9 @@ class RowTable:
     """The resolved base composition: rows, plus the file list `compile_files`
     takes. The composition is source of truth for semantics (426 decision 7)."""
 
-    __slots__ = ("name", "origin", "source", "rows", "uses", "sources")
+    __slots__ = ("name", "origin", "source", "rows", "uses", "sources", "slo")
 
-    def __init__(self, name, origin, source, rows, uses, sources=None):
+    def __init__(self, name, origin, source, rows, uses, sources=None, slo=None):
         self.name = name
         self.origin = origin
         self.source = source
@@ -246,14 +246,31 @@ class RowTable:
         # already takes an in-memory `sources` map, so a synthesized provider is
         # compiled exactly like a file one and `_link` checks it identically.
         self.sources = sources or {}
+        # item 473 (issue #825): the declared SLO contract as
+        # `<unit-bearing ir key> -> (value, line)`. Empty for every composition
+        # that declares no `slo` block, which is why the block is absent from
+        # the IR of every composition that does not use the feature.
+        self.slo = slo or {}
 
     def to_ir(self) -> dict:
-        return {
+        out = {
             "composition": self.name,
             "origin": self.origin,
             "source": self.source,
             "rows": [row.to_ir() for row in self.rows],
         }
+        # Additive and conditional, the `liveness`/`cache` discipline: a
+        # composition with no `slo` block emits the S1 document byte for byte.
+        if self.slo:
+            out["slo"] = {k: v[0] for k, v in self.slo.items()}
+        return out
+
+    def slo_contract(self) -> dict:
+        """The SLO contract as a stable, order-independent document: datum name
+        to `{"target": value, "line": n}`. `to_ir` flattens it to the value
+        because the IR is the machine surface; this is the shape a reader (a
+        rollout panel, a report) wants (item 473)."""
+        return {k: {"target": v[0], "line": v[1]} for k, v in self.slo.items()}
 
     def wiring(self) -> dict:
         """The rename-invariant projection: label -> what the row claims and
@@ -1180,6 +1197,111 @@ def _resolve_seam(seam, catalog: dict, rows: list["Row"], decl: CompositionDecl,
     )
 
 
+# --------------------------------------------------- item 473: the SLO gate
+#
+# The composition-level SLO contract (roadmap item 473, issue #825). A `slo`
+# block names the service-level objectives the rollout must hold. Two of its
+# datums are BACKED by a ceiling the language already declares (item 260,
+# `emission[...]`): `p95_latency` by `time`, `max_pending_tasks` by `calls`.
+# Those are the datums a rollout can be REFUSED on, because the composition's
+# own declaration is the prediction: a provider declaring
+# `emission[net(time="2s")]` says a crossing on that route may take up to two
+# seconds, so an objective demanding `p95_latency: 250ms` is a rollout the
+# composition has already predicted it will breach. The check is therefore
+# "target >= every declared ceiling of the backing parameter", and it reads the
+# ceiling the same way item 260's own gate does, through `cap_order`.
+#
+# The remaining datums (`success_rate`, `recovery_time`, `approval_wait`) have
+# NO declaration-owned bound in this language version: nothing in the tree
+# declares a success rate, a recovery time, or an approval wait (there is no
+# `approval_wait` datum anywhere and no generation receipt to tie one to). They
+# are admitted as the CONTRACT, carried into the IR verbatim, and NOT
+# statically gated, because gating them would mean inventing the quantity
+# rather than reading one. The runtime half of item 473 (a live monitor that
+# diverts to a fallback provider, pauses the rollout, or e-stops on a measured
+# breach) has no sink in this tree and is a declared left-out; see
+# docs/design/473-slo-rollout-gate.md.
+
+
+def _slo_ceilings(rows: list["Row"], uses: list[str], sources: dict,
+                  root: str) -> list[tuple[str, str, int, str]]:
+    """Every declared `emission[...]` ceiling the composition's own sources
+    carry, as `(route token, ceiling parameter, value, source)`.
+
+    Read out of the parse tree the way `_declares_calls_ceiling` (lower.py)
+    reads them: `cap_order.parse_cap` plus `split_ceilings`, so a ceiling
+    written `requests=100`/`time="2s"` is the same `calls=100`/`time=2000` here
+    as it is at the item 260 gate. A SYNTHESIZED provider is read from the
+    in-memory map rather than from disk, because nothing was written there
+    (item 424 C2). A source that will not parse is skipped: this is the
+    resolution surface and a parse failure is that source's own refusal, raised
+    by the compile with its own why-trace, not duplicated here.
+    """
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    from .parser import Parser  # noqa: PLC0415 - lazy, avoids a slow import
+
+    out: list[tuple[str, str, int, str]] = []
+    for rel in dict.fromkeys([*uses, *(r.source for r in rows)]):
+        text = sources.get(rel)
+        try:
+            program = (Parser(text, rel).parse() if text is not None
+                       else parse_file(os.path.join(root, rel)))
+        except RevlError:
+            continue
+        for svc in program.services:
+            for method in svc.methods.values():
+                for capstr in (method.capabilities or ()):
+                    try:
+                        cap = cap_order.parse_cap(capstr)
+                        _, ceils = cap_order.split_ceilings(cap)
+                    except cap_order.CapError:
+                        continue
+                    for param, value in ceils.items():
+                        out.append((cap.token, param, value, rel))
+    return out
+
+
+def _check_slo_bounds(decl: CompositionDecl, doc: str, rows: list["Row"],
+                      uses: list[str], sources: dict, root: str) -> dict:
+    """Gate the declared SLO contract against the ceilings the composition
+    itself declares (item 473, issue #825), returning the contract keyed by its
+    unit-bearing IR name.
+
+    INERT unless the document declares a `slo` block, so every composition that
+    does not use the feature resolves, folds and emits byte-identically to
+    before. The refusal is a G4 like item 260's budget refusal, because it IS
+    the same quantity: the declared crossing ceiling against the objective the
+    composition promises to hold over it. A datum the language cannot bound is
+    not a gate, it is a promise the IR records.
+    """
+    if not decl.slo:
+        return {}
+    from .parser import SLO_BACKED_BY  # noqa: PLC0415 - lazy, avoids a cycle
+
+    ceilings = _slo_ceilings(rows, uses, sources, root)
+    for datum, target, line in decl.slo:
+        param = SLO_BACKED_BY.get(datum)
+        if param is None:
+            continue
+        for route, cparam, value, rel in ceilings:
+            if cparam != param or target >= value:
+                continue
+            raise RevlError(
+                doc, line,
+                f"composition {decl.name} promises `{datum}: {target}` but its "
+                f"own `{route}` declaration caps `{param}={value}`",
+                hint=f"`{rel}` declares an emission ceiling of {value} on the "
+                     f"`{route}` route, so the composition has already "
+                     "predicted a crossing that breaches this objective: a "
+                     f"rollout carrying it would be refused on arrival (item "
+                     f"473). Raise the `{datum}` target to at least {value}, or "
+                     f"lower the declared `{param}` ceiling",
+                code="G4", category="slo",
+            )
+    return {SLO_IR_KEYS[datum]: (value, line)
+            for datum, value, line in decl.slo}
+
+
 def resolve(decl: CompositionDecl, doc_path: str,
             root: str | None = None) -> RowTable:
     """Resolve one composition declaration into its row table.
@@ -1211,8 +1333,12 @@ def resolve(decl: CompositionDecl, doc_path: str,
     sources.update(_resolve_hosts(decl, doc, origin, root, uses, rows))
     sources.update(_resolve_seams(decl, doc, origin, root, uses, rows))
     _check_disjoint(rows, decl.name, doc)
+    # item 473: the SLO contract is gated HERE, after every source the
+    # composition names is known (rows, synthesized remotes/hosts/seams), and
+    # before the table is built, so a refused rollout never produces a table.
+    slo = _check_slo_bounds(decl, doc, rows, uses, sources, root)
     return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
-                    sources)
+                    sources, slo)
 
 
 # ------------------------------------------------------------------- the fold
@@ -1545,8 +1671,12 @@ def fold(decl: CompositionDecl, doc_path: str, root: str | None = None,
     sources.update(_resolve_hosts(decl, doc, origin, root, uses, rows))
 
     _check_disjoint(rows, decl.name, doc)
+    # item 473: the same gate `resolve` runs, over the FOLDED rows, so a layer
+    # that adds a wider ceiling is gated against the base document's contract
+    # and a layer cannot widen its way out of it.
+    slo = _check_slo_bounds(decl, doc, rows, uses, sources, root)
     return RowTable(decl.name, origin, _relative(doc_path, root), rows, uses,
-                    sources)
+                    sources, slo)
 
 
 def _reject_granted(layer: LayerDecl, rowdecl: RowDecl) -> None:

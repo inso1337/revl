@@ -468,6 +468,58 @@ the self-host lexer, and put a second copy of the reserved-word set on every
 backend that re-derives it — for no gain, since the parse position is
 unambiguous.
 
+## `slo`: the rollout contract
+
+`slo { ... }` declares the service-level objectives the rollout has to hold. It
+is roadmap item 473's contract; the design note is
+[design/473-slo-rollout-gate.md](design/473-slo-rollout-gate.md).
+
+```revl
+composition Shop {
+  use "services.rvl"
+
+  slo { p95_latency: 250ms, success_rate: 99.5 }
+
+  row @checkout from "consumer.rvl" provides checkout
+}
+```
+
+The datum set is closed, and each datum fixes its own unit:
+
+| datum | unit | gated against |
+|---|---|---|
+| `p95_latency` | duration | the tightest declared `emission[..(time=..)]` ceiling |
+| `success_rate` | percent, may be fractional | nothing yet |
+| `recovery_time` | duration | nothing yet |
+| `approval_wait` | duration | nothing yet |
+| `max_pending_tasks` | count | the tightest declared `emission[..(calls=..)]` ceiling |
+
+`max_pending_tasks: 100` is a count and `p95_latency: 250ms` is a duration: a
+duration datum given a count unit is refused rather than guessed at. A bare
+number is seconds, like every other duration in the language.
+
+**A rollout that cannot meet its own contract is refused at compile time.** For
+each gated datum the composition's declared ceilings are the promise the
+providers already made, so an SLO STRICTER than its ceiling is a `G4` refusal
+naming the datum, the target, the ceiling and the line. An SLO exactly AT the
+ceiling resolves: the provider already agreed to that bound.
+
+```text
+shop.rvl:4: composition Shop promises `p95_latency: 250` but its own `net` declaration caps `time=2000`
+  `services.rvl` declares an emission ceiling of 2000 on the `net` route, so the
+  composition has already predicted a crossing that breaches this objective: a
+  rollout carrying it would be refused on arrival (item 473). Raise the
+  `p95_latency` target to at least 2000, or lower the declared `time` ceiling
+```
+
+The gate runs on the base composition and on a `fold`, so a layer cannot widen
+an SLO past the ceilings underneath it. It is inert unless a composition
+declares `slo`, so a program that writes none is unchanged in behaviour and in
+its IR. The three datums with no source in the tree are parsed, carried and
+printed, and not gated: nothing declares a value to compare them against, and
+the observed half of the item (a live breach diverting to a fallback provider,
+pausing or latching an e-stop) is a runtime design of its own.
+
 ## What lands in the IR
 
 `revl composition --admit` (and `revl.composition.compile_composition`) put the
@@ -592,6 +644,7 @@ patch the rows this document defines.
 | incremental admission | admitting a resolved delta through `admit_into` with a `replacing` withdrawal set, so the cost is one compile of the patched rows | the fold |
 | confinement | non-first-party rows compiled under the untrusted-author profile, and the per-root profile split in `compile_files` that makes a mixed-trust delta expressible in one call | roadmap 425 F1's decision |
 | the authority panel | crossing tokens re-keyed by row label, a `config:` token carrying a value digest, a fail-closed headline, and a printed blind-spots block | confinement, and roadmap 428 F3 |
+| the SLO runtime | the observed half of item 473: a live breach diverting to a fallback provider, pausing or latching an e-stop, with a receipt on the running generation | a generation receipt and an `slo` trace event, neither of which exists |
 | distribution | a layer is a truc, the `[trucs]` origin namespace becomes real, the pin becomes mandatory | roadmap 428 F3 |
 
 `open` (which fields a third-party layer may `configure`, §8.6) and `reach` (the
