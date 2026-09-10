@@ -56,17 +56,24 @@ missing is the **consumer** of the escapers and the resolution of an asset
 `stdlib/template.rvl` closes gap 2 and the template half of gap 3, with the
 escaping being the security-relevant part.
 
-A template writes the context of every insertion site next to the site:
+A template writes the context of every insertion site next to the site. A
+template is an ordinary `Str`, so one function returning three of them is a
+whole program:
 
 ```revl
-'<h1>{{html:title}}</h1>'
-'<script>boot("{{script:token}}");</script>'
-'<a href="/n/{{uri:slug}}">open</a>'
+fn page_templates() -> List[Str] {
+  return [
+    '<h1>{{html:title}}</h1>',
+    '<script>boot("{{script:token}}");</script>',
+    '<a href="/n/{{uri:slug}}">open</a>',
+  ]
+}
 ```
 
-`scan` turns that into `Hole` records, `escape_for` is the context to escaper
-table, and `render` binds a `List[Binding]` to the holes and escapes each value
-for its own hole's context. The properties that make it worth landing:
+`scan` turns a template into `Hole` records, `escape_for` is the context to
+escaper table, and `render` binds a `List[Binding]` to the holes and escapes
+each value for its own hole's context. The properties that make it worth
+landing:
 
 - **The escaping rule is chosen by the insertion context.** `html` uses the
   entity encoder, `script` the JS string-literal encoder that closes the
