@@ -241,6 +241,8 @@ def test_initialize_and_tools_list():
                           "revl_edit",
                           # one intent, one call: fused ship (docs/token-economy.md, item 50)
                           "revl_ship",
+                          # the cross-machine deploy verb (docs/deploy.md, item 476)
+                          "revl_deploy",
                           # the proving ground (docs/gauntlet.md)
                           "revl_gauntlet",
                           # the quarantine tier (docs/quarantine-tier.md)
