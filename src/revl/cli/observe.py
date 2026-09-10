@@ -264,7 +264,12 @@ def _run_attest(args) -> int:
     document with no source to check, both exit nonzero. Verify mode is a check:
     it exits nonzero when the attestation is invalid (bad signature/key,
     tampered, an envelope this build does not accept, or — with --against — the
-    composition changed)."""
+    composition changed).
+
+    `--certificate` and `--verify-certificate` are the same verb over the
+    wider envelope (item 474): a signed component certificate that carries the
+    recorded per-guarantee coverage, its boundaries and its caveats beside the
+    admitted verdict."""
     from .. import attest as _attest  # noqa: PLC0415
     from ..composition_diff import load_composition  # noqa: PLC0415 — READ-ONLY IR loader
 
@@ -273,6 +278,19 @@ def _run_attest(args) -> int:
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+
+    if getattr(args, "certificate", False) or getattr(args, "verify_certificate", False):
+        if args.verify:
+            print("error: --verify checks an attestation; use "
+                  "--verify-certificate for a component certificate",
+                  file=sys.stderr)
+            return 1
+        if getattr(args, "certificate", False) and args.verify_certificate:
+            print("error: --certificate signs a component certificate and "
+                  "--verify-certificate checks one; give exactly one of them",
+                  file=sys.stderr)
+            return 1
+        return _run_certificate(args, key, load_composition)
 
     if args.verify:
         try:
@@ -320,6 +338,69 @@ def _run_attest(args) -> int:
         print(json.dumps(att, indent=2))
     else:
         print(_attest.render_attestation(att))
+    return 0
+
+
+def _run_certificate(args, key: bytes, load_composition) -> int:
+    """The certificate modes of `revl attest` (item 474, issue #826).
+
+    Sign mode runs the same gate the attestation runs, and then reads the
+    recorded proof state out of the formal package, so the record it signs
+    states what the composition's guarantees rest on rather than only that the
+    composition was admitted. Verify mode re-derives that state from the
+    artifacts on this machine: it never reads a status out of the document it
+    is checking, which is what makes the coverage claim checkable rather than
+    merely signed."""
+    from .. import attest as _attest  # noqa: PLC0415
+    from .. import cert as _cert  # noqa: PLC0415
+
+    formal = getattr(args, "formal", None)
+
+    if args.verify_certificate:
+        try:
+            document = _cert.load_certificate(args.target)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        ir = None
+        if args.against:
+            try:
+                ir = load_composition(args.against)
+            except RevlError as error:
+                print(f"error: cannot load composition {args.against}: {error}",
+                      file=sys.stderr)
+                return 1
+        ok, reason = _cert.verify_certificate(document, key, against=ir,
+                                              formal=formal)
+        if args.json:
+            print(json.dumps({"valid": ok, "reason": reason,
+                              "kind": document.get("kind"),
+                              "composition_hash": (document.get("subject")
+                                                   or {}).get("composition_hash"),
+                              "checked_composition": bool(ir)}, indent=2))
+        else:
+            print(_cert.render_verify(ok, reason, document))
+        return 0 if ok else 1
+
+    verdict = _attest.run_gate(paths=[args.target])
+    if not verdict.admitted:
+        print(f"error: nothing to certify for {args.target}: {verdict.reason}",
+              file=sys.stderr)
+        return 1
+    import os  # noqa: PLC0415 — lazy: localized to this handler
+    signer = args.signer or os.environ.get(_attest.SIGNER_ENV)
+    try:
+        document = _cert.make_certificate(verdict.ir, key, verdict=verdict,
+                                          source_path=args.target,
+                                          formal=formal, signer=signer)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(document, indent=2))
+    else:
+        print(_cert.render_certificate(document))
     return 0
 
 

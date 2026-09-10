@@ -5,8 +5,10 @@ that **this exact** composition passed — so a downstream consumer can confirm 
 without re-running revl.*
 
 Implementation: `src/revl/attest.py` (the pure attestation model, signing,
-verification, the loaders and renders), `src/revl/__main__.py` (`revl attest`),
-`tests/test_attest.py`. Roadmap item 127.
+verification, the loaders and renders), `src/revl/cert.py` (the component
+certificate of section 7), `src/revl/__main__.py` (`revl attest`),
+`tests/test_attest.py`. Roadmap item 127; the certificate envelope is roadmap
+item 474 (issue #826) and is documented in section 7.
 
 ---
 
@@ -207,3 +209,139 @@ and ship it). `revl attest ATT --verify --json` prints the verdict:
   `checker_identity()`, the guarantee derivation and the checker identity.
 - `resolve_key(path, *, env=None)` / `load_key(path)` / `load_attestation(path)`
   — the IO helpers.
+
+`src/revl/cert.py` (the component certificate of section 7):
+
+- `formal_state(formal=None) -> dict`, the recorded proof state read out of the
+  formal package: the per-guarantee rows, the requirements, the caveats, the
+  proof model and the artifact digests.
+- `make_certificate(ir, key, *, verdict, source_path, formal=None, now=None,
+  signer=None) -> dict`, the signed envelope; raises without an admitted
+  `GateVerdict` whose hash matches `ir`, without the source file, or when the
+  formal package does not back a status it would have to state.
+- `verify_certificate(cert, key, *, against=None, formal=None) -> (ok, reason)`,
+  which re-derives the evidence and never raises.
+- `load_certificate(path)` / `render_certificate(cert)` /
+  `render_verify(ok, reason, cert)`, the IO helper and the two renders.
+- `guarantee_map(text, *, source)` / `status_of(cell, *, source, code)` /
+  `registry(text, *, source)`, the readers that turn `formal/STATUS.md` and
+  `formal/scripts/nonvacuity.tsv` into the coverage table.
+
+## 7. Component certificates
+
+Roadmap item 474, issue #826. An attestation (sections 1 to 5) says that a
+composition was admitted. A *component certificate* says that **and** what the
+composition's guarantees rest on, because "the gate admitted it" and "this is
+how far the proof goes" are two different claims and a record that carries only
+the first reads as a green check.
+
+```
+$ revl attest service.rvl --certificate --key ci-signer.key
+certificate: admitted  (revl.component-certificate v1.0)
+  subject:   service.rvl  (source 6edb64a9969e, ir c38dc4f80f98)
+  proof:     leanprover/lean4:v4.33.1  (as of 267862fb455a)
+  checker:   revl 2.0.0, ruleset 3e202568c8a0
+  signed:    2026-09-10T04:17:27+00:00  (hmac-sha256, key a03904d368b21d03)
+  evidence:  26 requirements over 9 guarantees
+  coverage:
+    G1 partial  partial
+    G2 proved   full
+    ...
+    G9 partial  rule proved; **coverage unproved and unstatable**
+  caveats:
+    G1: partial, `declared_only_access` is real and witnessed, ...
+    G9: partial, `Flow` starts from a path that is *given*. ...
+  signature: 60f2ba1f7a8240ae0431a04b1a96ab07f3a23d1339ad1a361b9151d9d52ddd3c
+```
+
+`revl attest CERT --verify-certificate [--against COMPOSITION]` checks one, and
+like `--verify` it is a **check**: exit `0` when valid, nonzero when not.
+
+### What a certificate carries
+
+| member          | meaning                                                          |
+| --------------- | ---------------------------------------------------------------- |
+| `kind` / `version` | `revl.component-certificate` / `1.0`, the envelope identity   |
+| `subject`       | the file, its source sha256 and its canonical IR hash            |
+| `proof_model`   | the pinned Lean toolchain, a digest of the lake manifest and the pinned manifest dependencies, so "checked against v4.33.1" is a statement a reader can re-derive rather than take on trust |
+| `statuses`      | one row per catalogued guarantee: the status this build reads out of `formal/STATUS.md`, the map's own status cell verbatim and the map's own gap cell verbatim |
+| `requirements`  | what each status rests on: the guarantee rows of the non-vacuity registry, the registry itself, the map, the axioms gate and its axiom policy, the model pin, the oracle census, the injection table and the mutation sweep |
+| `caveats`       | the qualifications the artifacts record, quoted rather than summarised |
+| `artifacts`     | one entry per formal artifact with its sha256, so a verifier on another machine can say *which* document moved |
+| `as_of_commit`, `checker`, `timestamp`, `sign_alg`, `signer`, `key_id`, `signature` | the attestation members, unchanged in meaning |
+
+The status member is made of the document's prose, not of a constant in this
+repository. A row whose status cell this build cannot place (`rule proved;
+coverage unproved and unstatable` is placed as `partial`, with the cell carried
+beside it) is a refusal rather than a rounding, and a `partial` row whose gap
+cell is empty is a refusal too, so a certificate cannot report a weaker
+guarantee with no reason attached.
+
+### The trust boundary
+
+A certificate is an attestation, and an attestation is only as good as what it
+is a statement *about*. The three statements below are the boundary, and a
+reader who takes the coverage table for more than them has misread it.
+
+**The key proves authorship, not honesty.** The HMAC shows that whoever holds
+the shared secret produced this record. Under a symmetric algorithm every
+verifier is already a key holder, so a signer can sign any claim it likes. The
+signature is checked first, and then what the record *says* is checked, because
+authenticity is not authority. This is the same boundary as section 3, carried
+into a wider envelope.
+
+**The evidence is the formal artifacts, not the certificate.** At verify time
+`revl attest CERT --verify-certificate` re-derives every status, every
+requirement and every caveat from the artifacts on the verifying machine,
+`formal/STATUS.md`, `formal/scripts/nonvacuity.tsv` and
+`formal/scripts/run_gate.sh`, and compares them with what was signed. It never
+reads a status *out of* the document it is checking, and it never reads a
+status out of the key. A certificate therefore cannot assert coverage the tree
+does not have, and it cannot drop a caveat the tree records: both are
+re-derived and both are refusals when they do not match. Verification fails
+closed on an unknown guarantee name, a missing or duplicated status row, a
+caveat the artifacts still record, a requirement the artifacts no longer
+support, an unknown requirement kind, a malformed envelope, a subject hash that
+is not a digest, and, with `--against`, a composition whose hash differs from
+the `subject` hash. Each refusal names which of the key, the envelope and the
+evidence failed.
+
+**The secret never appears in `argv`.** `--key PATH` names a key *file*;
+`REVL_ATTEST_KEY_FILE` names one too, and `REVL_ATTEST_KEY` carries the bytes in
+the environment of the process rather than on the command line. There is no
+default key, so a certificate that anyone who can type the command could sign
+does not exist. A process listing of a signing run shows the path and not the
+secret.
+
+What the boundary does **not** cover, stated rather than left to be inferred:
+the verifier trusts the `formal/` artifacts it reads at verify time. It checks
+that they are the revision this certificate was signed over, by digest, so a
+reader who trusts the package on their disk and the recorded commit learns that
+the certificate was signed against *that* revision. If the package on disk is
+not the one that was signed over, verification fails; the failure says which
+artifact moved. It does not establish that the Lean development in that
+revision has no mistakes, and it does not establish that the prose in
+`formal/STATUS.md` is an accurate description of the development. It records
+what the status document says, honestly, including the rows that say the
+coverage is not there.
+
+`--formal DIR` names the formal package to read instead of the one found from
+the working directory, `$REVL_FORMAL_DIR`, or the ancestors of the installed
+module. A named directory that holds no `STATUS.md` is refused rather than
+silently falling back to a package found elsewhere, because a certificate over
+the wrong package would be a coverage claim about a document the caller did not
+name. The same flag is available in both modes, so a verifier can check a
+certificate against a package it checked out itself.
+
+**Domain separation.** The certificate MAC carries
+`b"revl.component-certificate/v1\x00"` under the same key as the attestation
+MAC, which carries `b"revl.attestation/v2\x00"`. Neither document verifies as
+the other, which is what keeps "this was admitted" and "this is how far the
+proof goes" from being interchangeable.
+
+**What this does not replace.** `revl attest` without `--certificate` is
+unchanged, byte for byte, and a certificate is not an attestation with extra
+fields: the envelope is a different shape and its own `--verify` refuses it.
+The certificate is also not the gate. It is built from a `GateVerdict` the same
+way, so a composition the frontend refuses is never certified, and a
+pre-compiled IR document has no source to run the gate over and is refused too.

@@ -1310,6 +1310,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="an optional signer label recorded in (and signed into) the "
              "attestation; falls back to the REVL_ATTEST_SIGNER env var")
     attest_cmd.add_argument(
+        "--certificate", action="store_true",
+        help="sign a component certificate instead of an attestation (item "
+             "474): the same admitted verdict, plus the recorded per-guarantee "
+             "coverage, the proof model, the runtime evidence and the caveats, "
+             "all read out of the formal package (docs/revl-attest.md)")
+    attest_cmd.add_argument(
+        "--verify-certificate", action="store_true",
+        help="verify mode for a component certificate: TARGET is a "
+             "certificate JSON, checked against its key and re-derived from "
+             "the formal artifacts on this machine. Exits nonzero if it is "
+             "invalid, if a guarantee's status moved, or if the composition "
+             "changed with --against")
+    attest_cmd.add_argument(
+        "--formal", metavar="DIR", default=None,
+        help="the formal package to read the per-guarantee evidence from "
+             "(defaults to REVL_FORMAL_DIR, then `formal/` in the working "
+             "directory or above this one)")
+    attest_cmd.add_argument(
         "--json", action="store_true",
         help="machine-readable output: the attestation document, or the "
              "verify verdict as JSON")
