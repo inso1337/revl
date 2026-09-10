@@ -2,6 +2,7 @@
 
 ```
 revl erase-report <files…> --realm <r> [--json] [--no-residue-proof]
+                              [--receipt-key PATH] [--receipt-signer NAME]
 ```
 
 A right-to-erasure request asks an operator to prove a tenant's data is gone.
@@ -94,6 +95,63 @@ gate on the MAJOR version and ignore members it does not recognise.
 Exit code: `0` for a clean report; `1` for an unknown realm, an unproven
 teardown (residue left), or a breached other realm. A **bare crossing does not
 fail** the command — it is enumerated by design, not treated as an error.
+
+## The signed receipt (`--receipt-key`)
+
+A report is a document a reader decides to believe. A **receipt** is a document
+a reader can *check*. With `--receipt-key PATH` (or an exported
+`REVL_ERASURE_KEY_FILE` / `REVL_ERASURE_KEY`), the report is signed and the
+receipt rides inside it under `receipt`, in the append-only spirit of every
+other member this toolchain adds. Without a key the document is byte-identical
+to the report this command always produced: the receipt is opt-in.
+
+The receipt names **every replica the erasure reaches**, one row per crossing
+token the report itself enumerated, each carrying the disposition the report
+already assigned it (`revertible`, `compensated`, `unresolved`, `bare`, plus a
+single in-process row reading `reclaimed`, `residue` or `unproven`), the
+capability scope the crossing ran under, and the declared channel through which
+that crossing can be reversed or offset: an `undo` inverse for a revertible row,
+a `compensate` callee for a compensated or unresolved one, and nothing for a
+bare crossing because the declaration names nothing. The rows come from the G8
+surface above, so a replica the report did not enumerate cannot appear, and a
+receipt for one realm can never name another realm's crossing.
+
+The in-process row is the only erasure claim in the receipt, and it keeps the
+report's own tri-state rather than collapsing it: `reclaimed` when the R4
+no-residue proof stands, `residue` when the proof ran and left something behind
+(the reading this command exits `1` on), and `unproven` when no proof was taken.
+The row carries the evidence its disposition summarises, inside the signed body:
+the proof's availability, the reason it was never taken, and the checks that did
+not hold. The verifier re-checks the disposition against that evidence, so a
+receipt whose row claims `reclaimed` over a failed proof is refused even if its
+MAC is intact; it also checks the row against the `summary.byDisposition` tally
+that counts it, so a `residue` row cannot sit directly above `summary: reclaimed
+1` in the same signed document.
+
+Asking for a receipt that cannot be signed is an error rather than a crash or a
+guess. Three inputs are refused with `error: ...` on stderr and exit `1`, with
+no document on stdout, because the artifact the run was asked for does not
+exist: a `--receipt-key` file the process cannot read, a `REVL_ERASURE_KEY`
+value whose bytes are not UTF-8 (export the secret as a file instead, which
+carries any bytes), and a `--receipt-signer` name with no UTF-8 spelling. A
+signer name that is text but not ASCII, such as `José Müller`, is signed like
+any other name. The report on its own is always one flag away: drop the key and
+the command prints exactly the report it always printed.
+
+The receipt also carries the canonical sha256 of the report it was issued over,
+so a report edited after issue stops verifying against its own receipt, and it
+is signed with an HMAC-SHA256 domain-separated from `revl attest` and
+`revl deploy`: three signed protocols, three domains, one construction. The
+canonical bytes and the key file rule are `revl attest`'s, called rather than
+copied (`attest._canonical_bytes`, `attest.load_key`), so a verifier who
+reconstructs them the way docs/revl-attest.md documents recomputes identical
+bytes and the same key. It proves the measurement is unaltered, that every
+replica the compiler can see is named, and that the holder of the signing key
+issued it. It does **not** prove that anything was erased, that an offset
+landed, or that no copy exists outside the boundary, and it says so in its own
+signed scope header, because that gap is the point (see
+docs/design/472-retention-erasure-receipts.md for the full measurement,
+including what item 472's retention half would still need).
 
 ## Related
 
