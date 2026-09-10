@@ -94,7 +94,13 @@ domain-tagged HMAC-SHA256 (`SIGN_DOMAIN = b"revl.attestation/v2\x00"`,
 for its admission receipt (`RECEIPT_DOMAIN = b"revl.deploy.receipt/v1\x00"`,
 `_receipt_mac`). Two protocols, one construction, two domains. A third signing
 story would be a third thing to get wrong, so the erasure receipt is the same
-construction with its own domain tag.
+construction with its own domain tag, and it says so by CALLING the same code:
+`erasure_receipt._mac` MACs `attest._canonical_bytes(body)` and
+`erasure_receipt.load_key` is `attest.load_key`. The bytes and the key file rule
+have one implementation, which is what makes a verifier's reconstruction from
+docs/revl-attest.md exact rather than merely similar. (Review of the first
+revision of this note found the opposite: the receipt restated both rules, and
+both restatements had drifted. See "Corrections" below.)
 
 ## The slice that lands with this note
 
@@ -118,9 +124,22 @@ crossing is `revertible`; a crossing whose token is in the report's
 attached is `compensated`; anything else is `bare`. `reclaimed` is reserved for
 the in-process row and is read only off the R4 no-residue proof
 (`inProcessStateGone.proven`), so the one erasure claim in the document is the
-one the runtime actually proved. An unavailable or skipped proof reads
-`unproven`, which is the honest reading of "we did not measure it" and never of
-"it is still there".
+one the runtime actually proved.
+
+The in-process row keeps the same discipline on the two readings that are NOT
+`reclaimed`, because the proof is a tri-state and collapsing it would sign two
+opposite facts as one word. `proven` true is `reclaimed`; `proven` false (the
+teardown ran and the R4 proof found residue, the case `revl erase-report` exits
+1 on) is `residue`; `proven` null (no proof was taken) is `unproven`, the honest
+reading of "we did not measure it" and never of "it is still there". The row
+carries the evidence its disposition summarises, inside the signed body: the
+proof's `available`, its `reason` when it was never taken, and `failedChecks`,
+the checks that did not hold. `_envelope` re-checks the disposition against
+`proven`, so a body claiming `reclaimed` over `proven: false` is refused by the
+checker rather than accepted on the strength of its MAC. The unsigned text
+report distinguished these cases from the start; this makes the SIGNED artifact
+carry the same distinction, which is what a verifier who holds only the receipt
+needs.
 
 **A named channel only when the declaration names one.** `_inverse()` reads the
 extern's `undo` clause for a revertible row and its `compensate` clause for a
@@ -139,13 +158,66 @@ whole reason for the hash.
 **The signature is domain separated, and the key is never assumed.** The MAC is
 HMAC-SHA256 over `b"revl.erasure-receipt/v1\x00"` plus the canonical body, so an
 erasure receipt does not verify as an attestation and an attestation does not
-verify as a receipt even under the same key. The key resolves from
-`--receipt-key PATH`, then `REVL_ERASURE_KEY_FILE` (a path), then
-`REVL_ERASURE_KEY` (the secret). Deliberately not `REVL_ATTEST_KEY`: a
+verify as a receipt even under the same key. The canonical body is
+`attest._canonical_bytes`'s bytes, `sort_keys=True` with compact separators and
+`ensure_ascii=False`, so non-ASCII text (a `--receipt-signer` name, say) is
+emitted as UTF-8 and a third-party verifier following docs/revl-attest.md
+recomputes the identical bytes. The key file rule is `attest.load_key`'s, called
+rather than copied: one trailing newline is stripped, so a key written with
+`echo` resolves to the same bytes and the same receipt `key_id` in both
+protocols; the erasure key fingerprint is separately domain tagged
+(`KEY_ID_DOMAIN`), so the two protocols can never cross-read a fingerprint. The
+key resolves from `--receipt-key PATH`, then `REVL_ERASURE_KEY_FILE` (a path),
+then `REVL_ERASURE_KEY` (the secret). Deliberately not `REVL_ATTEST_KEY`: a
 deploy-time attestation key must never silently become an erasure signing key.
 A missing key is an error, never a hardcoded default. A run that supplies no key
 gets the report this command always produced, byte-identical, so the receipt is
 opt-in and nothing that consumes the report today is disturbed.
+
+## Corrections after review
+
+An independent review of the first revision found three defects in the receipt
+and one in the CLI, all now fixed and each pinned by a test in
+`tests/test_erasure_receipt.py`. They are recorded here because a design note
+that describes a construction the code does not implement is worse than no
+note.
+
+1. **`proven: false` and `proven: null` signed the same disposition.** The
+   unsigned text report distinguished "the teardown ran and left residue" (exit
+   1) from "the proof was skipped", but the receipt signed both as `unproven`,
+   and the distinguishing field sat outside the signed row. The disposition is
+   now the tri-state above, the row carries the evidence it summarises, and
+   `_envelope` checks the mapping from `proven` to the disposition in both
+   directions (a row that claims `reclaimed` over `proven: null` is refused
+   too). A receipt issued by the first revision whose proof failed therefore
+   stops verifying, which is the intended reading of a document that cannot say
+   which of two opposite facts it recorded.
+   `RECEIPT_VERSION` stays `1.0`: the change ADDS a vocabulary value and adds
+   row members, so it is additive by the rule in
+   `src/revl/erasure_receipt.py:66-68`, and no external verifier holds a receipt
+   yet. A removed or re-shaped member would be the MAJOR case.
+2. **The key file rule had drifted from `attest`.** This module read the key
+   verbatim while `attest.load_key` strips a trailing newline, so the same
+   `cat`-created file was two different keys and the same receipt MACed and
+   fingerprinted twice depending on the protocol that resolved it. It now calls
+   `attest.load_key`.
+3. **The canonical bytes had drifted from `attest`.** This module escaped
+   non-ASCII (`ensure_ascii=True`) where `attest._canonical_bytes` emits UTF-8,
+   so a receipt signed by a non-ASCII name failed third-party verification
+   while self-verifying here. It now calls `attest._canonical_bytes`.
+4. **A key path the process cannot read crashed the CLI.** `--receipt-key` with
+   a missing file raised out of the receipt construction as a traceback, unlike
+   every other verb. The construction is now inside the handler and answers with
+   `error: ...` on stderr and exit 1.
+
+Not fixed here, and reported instead: `deploy._receipt_mac`
+(`src/revl/deploy.py:473-489`) still canonicalizes with `ensure_ascii=True`, and
+`deploy` reads its `--host-key` and far-host receipt key files without
+`attest.load_key`'s newline rule (`src/revl/deploy.py:4195-4203`,
+`src/revl/deploy.py:4783-4788`). That is a third, separately written reading of
+both rules, and it is pre-existing and documented as deliberate in `deploy`'s
+own docstrings rather than introduced by this item, so it is out of this
+change's scope and deserves its own issue.
 
 ## What a receipt proves and what it does not
 

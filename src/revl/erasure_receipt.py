@@ -35,9 +35,12 @@ a gate verdict, `deploy` (item 478) MACs an admission receipt, and this signs an
 erasure report. They share the canonical serialization and the HMAC-SHA256
 construction because a second signing story is a second thing to get wrong, and
 they carry distinct domain tags because without one a receipt verified as an
-attestation. The key is resolved from `--key`, `REVL_ERASURE_KEY_FILE`, then
-`REVL_ERASURE_KEY`, never hardcoded: a missing key is an error, so a receipt is
-never signed with a secret the tree assumed.
+attestation. "Shared" is meant literally here: this module calls
+`attest._canonical_bytes` and `attest.load_key` rather than re-deriving either,
+so the byte spelling and the key file rule have one implementation. The key is
+resolved from `--receipt-key`, `REVL_ERASURE_KEY_FILE`, then `REVL_ERASURE_KEY`,
+never hardcoded: a missing key is an error, so a receipt is never signed with a
+secret the tree assumed.
 
 WHAT THE RETENTION HALF IS NOT. Item 472 also asks for a `Retained[T]` type
 whose value past its retention deadline is refused at a persistence sink. That
@@ -53,7 +56,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 from typing import Mapping, Optional
 
 from . import attest
@@ -86,12 +88,17 @@ KEY_ID_DOMAIN = b"revl-erasure-keyid\x00"
 # a second account of the same fact.
 DISPOSITIONS = ("revertible", "compensated", "unresolved", "bare")
 
-# The statuses the realm's OWN in-process row can carry: `reclaimed` only when
-# the R4 no-residue proof stands, and `unproven` when the proof was not run,
-# which is the honest reading of "we did not measure it" and never of "it is
-# still there". Kept APART from DISPOSITIONS so the envelope check for a
-# boundary row cannot be satisfied by an in-process state, and vice versa.
-IN_PROCESS_DISPOSITIONS = ("reclaimed", "unproven")
+# The statuses the realm's OWN in-process row can carry. The R4 no-residue
+# proof is a tri-state and the row is too, one disposition per reading:
+# `reclaimed` when the proof stands, `residue` when the proof RAN and left
+# something behind (the reading `revl erase-report` exits 1 on), and `unproven`
+# when no proof was taken, which is the honest reading of "we did not measure
+# it" and never of "it is still there". `proven: False` and `proven: null` are
+# opposite facts, so signing them as one word would let a receipt be re-read as
+# the other; `_envelope` checks the disposition against the row's own evidence.
+# Kept APART from DISPOSITIONS so the envelope check for a boundary row cannot
+# be satisfied by an in-process state, and vice versa.
+IN_PROCESS_DISPOSITIONS = ("reclaimed", "unproven", "residue")
 
 # Every disposition a replica row of either shape can carry, in render order.
 ALL_DISPOSITIONS = DISPOSITIONS + IN_PROCESS_DISPOSITIONS
@@ -117,7 +124,9 @@ SCOPE = {
         "that anything was erased. A crossing names the boundary a value left "
         "through; what the other side did with it is not a fact this system "
         "holds. The in-process row is the only erasure claim here, and it reads "
-        "`reclaimed` only when the R4 no-residue proof stands.",
+        "`reclaimed` only when the R4 no-residue proof stands, `residue` when "
+        "the proof ran and left something behind, and `unproven` when no proof "
+        "was taken.",
         "copies the system cannot see. A replica made outside revl's boundary "
         "was never a crossing, so it is never a row. The scope of any erasure "
         "receipt is the replicas the issuing system knows about.",
@@ -144,21 +153,16 @@ _BUCKETS = (
 # ------------------------------------------------------------------- the key
 
 def load_key(path) -> bytes:
-    """Read a signing key from a file. The file's bytes are the key, verbatim:
-    no decoding, no trimming, so the same file always resolves to the same key
-    (docs/revl-attest.md's rule, kept here so two protocols cannot disagree on
-    what a key file means)."""
-    from pathlib import Path  # noqa: PLC0415
+    """Read a signing key from a file.
 
-    try:
-        data = Path(path).read_bytes()
-    except OSError as error:
-        raise RevlError("<erase-receipt>", 0,
-                        f"cannot read the signing key {path}: {error}") from error
-    if not data:
-        raise RevlError("<erase-receipt>", 0,
-                        f"the signing key {path} is empty")
-    return data
+    `attest.load_key`'s rule, delegated to rather than restated: the key is the
+    file's bytes with one trailing newline stripped (so a key written with
+    `echo` round-trips), and nothing else is assumed. docs/revl-attest.md is the
+    rule; sharing the implementation is what makes it one rule instead of two
+    readings of one rule. Two implementations of a key file meant the same
+    `cat`-created file was two different keys, so the same receipt MACed and
+    fingerprinted twice depending on which protocol resolved it."""
+    return attest.load_key(str(path))
 
 
 def key_from_env(env=None) -> bool:
@@ -272,21 +276,41 @@ def replicas(report: Mapping, ir: Optional[dict] = None) -> list[dict]:
 
 def in_process(report: Mapping) -> dict:
     """The realm's own copy: the in-process state the R4 no-residue proof
-    covers. It is a replica like any other and gets a row like any other, with
-    `reclaimed` only when the proof stands. An unavailable or failing proof
-    reads `unproven`, which is the honest reading of "we did not measure it"
-    and never of "it is still there"."""
+    covers. It is a replica like any other and gets a row like any other, one
+    disposition per reading of the proof: `reclaimed` when the proof stands,
+    `residue` when the proof ran and left something behind, `unproven` when it
+    was not taken.
+
+    The disposition is DERIVED from the row's own signed members (`proven`, and
+    the reason or the failed checks it carries), so "it is still there" and
+    "nobody looked" are different signed documents rather than one word two
+    readers have to agree about. `_envelope` re-checks the pair, so a body
+    claiming `reclaimed` over `proven: False` is refused even if it is MACed."""
     state = (report or {}).get("inProcessStateGone") or {}
+    proof = state.get("noResidueProof") or {}
     proven = state.get("proven")
+    if proven is True:
+        disposition = "reclaimed"
+    elif proven is False:
+        disposition = "residue"
+    else:
+        disposition = "unproven"
     return {
         "replica": f"memory://{(report or {}).get('realm')}",
         "boundary": "in-process",
         "component": None,
         "capabilities": [],
-        "disposition": "reclaimed" if proven else "unproven",
+        "disposition": disposition,
         "inverse": None,
         "provisionsErased": list(state.get("provisionsErased") or []),
         "proven": proven,
+        # why it is not `reclaimed`, inside the signed body: the proof's own
+        # availability and reason, and the checks that did not hold.
+        "available": proof.get("available"),
+        "reason": proof.get("reason"),
+        "failedChecks": sorted(
+            name for name, held in (proof.get("checks") or {}).items()
+            if not held),
     }
 
 
@@ -356,19 +380,20 @@ def _mac(body: Mapping, key: bytes) -> str:
     """The receipt MAC: domain-tagged HMAC-SHA256 over the canonical body bytes
     (`body` is the receipt with its `signature` member removed).
 
+    The bytes are `attest._canonical_bytes`'s, the same construction
+    `attest._sign` and `deploy._receipt_mac` MAC over, deferred to rather than
+    restated: a verifier who canonicalizes the way docs/revl-attest.md
+    documents recomputes exactly these bytes, which is only true while there is
+    one implementation of the spelling. In particular non-ASCII text is emitted
+    as UTF-8 rather than `\\u`-escaped, so a receipt signed by a name like
+    "Jose Muller" still verifies outside this module.
+
     A body with no canonical byte spelling raises
     `attest.NotCanonicalizable`, which `verify_receipt` turns into a refusal
     rather than a crash, the same contract `deploy._receipt_mac` keeps."""
-    try:
-        payload = json.dumps(
-            {k: v for k, v in body.items() if k != SIGNATURE_FIELD},
-            sort_keys=True, ensure_ascii=True,
-            separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError, UnicodeEncodeError) as error:
-        raise attest.NotCanonicalizable(
-            f"the receipt has no canonical byte spelling: {error}") from error
-    return hmac.new(bytes(key), RECEIPT_DOMAIN + payload,
-                    hashlib.sha256).hexdigest()
+    return hmac.new(bytes(key), RECEIPT_DOMAIN + attest._canonical_bytes(
+        {k: v for k, v in body.items() if k != SIGNATURE_FIELD}),
+        hashlib.sha256).hexdigest()
 
 
 def make_receipt(report: Mapping, key: bytes, *, ir: Optional[dict] = None,
@@ -444,6 +469,21 @@ def _envelope(receipt: Mapping) -> str:
                       state)
     if state.get("disposition") not in IN_PROCESS_DISPOSITIONS:
         return reason("inProcess.disposition", IN_PROCESS_DISPOSITIONS,
+                      state.get("disposition"))
+    # The disposition is a summary of the row's OWN evidence, so the two are
+    # checked against each other: the mapping from the proof reading to the
+    # disposition is total, so `reclaimed` is not a free choice a forger can
+    # pair with a proof that was never taken, and `proven` has to BE one of the
+    # three readings. A row remembered as `unproven` while its own `proven` says
+    # `false` is refused here rather than printed VALID.
+    proven = state.get("proven")
+    expected = ("reclaimed" if proven is True else
+                "residue" if proven is False else
+                "unproven" if proven is None else None)
+    if expected is None:
+        return reason("inProcess.proven", "true, false or null", proven)
+    if state.get("disposition") != expected:
+        return reason("inProcess.disposition", expected,
                       state.get("disposition"))
     return ""
 
@@ -521,11 +561,22 @@ def render_receipt(receipt: Mapping) -> str:
     out += [f"    - {line}" for line in scope.get("doesNotProve") or []]
     out.append(f"    ({scope.get('reference', '')})")
     state = receipt.get("inProcess") or {}
+    # an auditor reading the rendered view must see WHY it is not `reclaimed`:
+    # the checks that did not hold, or the reason no proof was taken. Both are
+    # signed members of the row, so this is the row speaking, not the renderer.
+    note = ""
+    if state.get("disposition") != "reclaimed":
+        failed = state.get("failedChecks") or []
+        if failed:
+            note = f"; checks failed: {', '.join(failed)}"
+        elif state.get("reason"):
+            note = f"; not measured: {state['reason']}"
     out += [
         "",
         f"  [in-process] {state.get('replica')}: "
         f"{state.get('disposition')}"
-        f" ({len(state.get('provisionsErased') or [])} provision(s) erased)",
+        f" ({len(state.get('provisionsErased') or [])} provision(s) erased"
+        f"{note})",
     ]
     rows = receipt.get("replicas") or []
     out.append("")
