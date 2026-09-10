@@ -136,9 +136,10 @@ plus one step, and the user-facing statement of it lives in
   `cert.verify_certificate` re-derives the evidence from the package on the
   verifying machine and compares it with what was signed, member by member: the
   artifact digests; every member of every status row (the status, the status
-  cell it was read out of, that cell's name, the gap, the registered theorem
-  names, the contentless findings); every caveat; every requirement with the
-  `check` recorded behind it; the proof model pins; the checker identity; the
+  cell it was read out of, that cell's name, the gap, the theorem count, the
+  oracle cell, the registered theorem names, the contentless findings); every
+  caveat; every requirement with both the `detail` and the `check` recorded
+  behind it; the proof model pins; the checker identity; the
   subject's source digest; the commit, as a revision of this history; and
   `key_id`, against the key in hand. It never reads a status out of the document
   it is checking. An attacker who holds the key can edit the record and re-sign
@@ -148,8 +149,10 @@ plus one step, and the user-facing statement of it lives in
   caveat set is re-derived, and a forged artifact digest is caught because the
   digests are re-derived too. The same sweep catches a rewritten status cell, a
   rewritten or emptied gap, a renamed guarantee, an unregistered theorem, a
-  dropped contentless finding, a rewritten requirement `check`, a rewritten
-  toolchain pin and a forged key fingerprint.
+  rewritten theorem count or oracle cell, a dropped contentless finding, a
+  rewritten requirement `detail` or `check`, a forged toolchain pin or manifest
+  pin, a rewritten checker version or ruleset digest, a commit this history does
+  not contain, a forged subject digest and a forged key fingerprint.
 - **It fails closed.** `verify_certificate` never raises: a malformed document
   is `(False, reason)` with the reason naming which of the key, the envelope and
   the evidence failed. Unknown guarantee names, unknown requirement kinds,
