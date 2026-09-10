@@ -137,8 +137,8 @@ def test_funnel_line_scrubs_a_registered_secret(capsys):
 
 def test_funnel_line_is_identity_for_the_four_parsed_lines(capsys):
     """`_funnel_line` composes the lines `placement.pump` parses. For a line
-    holding no registered secret it must emit the SAME bytes — exact compare
-    `text == f"[{name}] UP"` — so the emitted line is captured, not `_redact`'s
+    holding no registered secret it must emit the SAME bytes (exact compare
+    `text == f"[{name}] UP"`), so the emitted line is captured, not `_redact`'s
     return value."""
     runner._funnel().register_secret_value(CANARY)
     for line in ("[only] UP",
