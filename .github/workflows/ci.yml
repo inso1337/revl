@@ -94,6 +94,14 @@ jobs:
   # It uses only the already-pinned `actions/checkout` (no new third-party
   # action) and a `git diff` against the PR base, and inherits the workflow's
   # `contents: read` floor -- it opens nothing and writes no check.
+  #
+  # Issue #854: this output is a COST decision about the 3-version matrix, and
+  # nothing may depend on it for COVERAGE. Both jobs that ran the root `tests/`
+  # suite used to gate on it, so a PR whose diff missed this regex selected no
+  # job that ran that suite at all and reported `skipping` in the merge box,
+  # which branch protection reads as success. `root-suite-affected` below is now
+  # the ungated owner of that coverage, which is why the regex is left exactly
+  # as it was: see that job's comment for the measurement behind the choice.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -447,6 +455,131 @@ jobs:
       # future failure needs excluding, enumerate it here with a reason and add
       # it to 430 rather than narrowing the path above.
       - run: backends/python/.venv/bin/python -m pytest tests/ -q
+
+  # Issue #854. The root `tests/` suite ran in exactly two jobs, `frontend` and
+  # `frontend-cordis`, and BOTH gated on `changes.outputs.frontend`, which is
+  # 'true' only when the diff touches `src/revl/`, `selfhost/` or `stdlib/`. A PR
+  # whose diff touches only `tests/`, `tools/`, `tests/fixtures/`, `backends/`,
+  # `crates/` or `docs/` therefore selected NO job that ran the suite: both jobs
+  # reported `skipping`, and a skipped check is indistinguishable from a passing
+  # one in the merge box. PR #845 is the worked example (a new guard test in
+  # `tests/test_multi_realm_require.py` plus an edit to
+  # `tests/fixtures/selfhost_uncovered_lines.json`, collected and evaluated by
+  # nothing), and the same hole is how a java ledger drift landed on `main`
+  # before #837 repaired it after the fact.
+  #
+  # This job closes that by being UNGATED: it has no `if:`, so on every event and
+  # for every diff it reports a real pass or a real failure and never
+  # `skipping`. It invents no second notion of "affected" either: it runs the
+  # selection `tools/affected_tests.py` already computes and `make pre-merge
+  # --affected` already consumes, so the narrow-versus-FULL decision keeps one
+  # owner. On a tests-only diff that selection is the changed test file plus the
+  # tests that import it; on `tests/fixtures/**`, or on any compile-reachable
+  # change, it is the selector's documented fail-safe, the whole root suite.
+  #
+  # That fail-safe is why `frontend` keeps the 3-version matrix and its fast
+  # path, rather than the fast-path regex being widened (direction 1 of the
+  # issue). Measured over the last 40 merged PRs: 15 touch a language source,
+  # which is the fast-path population today; 23 touch a path this suite owns but
+  # no language source, which is the coverage hole; 7 touch nothing but
+  # documentation. Adding `tests/` and `tools/` to the regex would take the
+  # matrix population from 15/40 to 28/40, and adding `docs/` or `*.md` to it to
+  # 36/40, pulling the matrix, every `backend-*` job, `conformance` and `formal`
+  # into most PRs -- while still leaving `backends/**` and `crates/**`
+  # uncollected unless docs-only PRs are swallowed with them, which the issue
+  # forbids. One always-on interpreter buys the coverage without that, and a job
+  # that never evaluates its `if:` can never report `skipping`.
+  #
+  # Deliberate limits, so the next reader does not have to infer them: the gates
+  # the selector also names are left to the jobs that own them (`ruff` runs
+  # ungated in `lint`; `conformance` and `formal` have their own jobs; the
+  # site-wheel gate must never run on a PR, see
+  # tests/test_site_wheel_gate_runs_in_ci.py), and there is no cordis-py runtime
+  # on this interpreter, so the runtime-guarded half of the suite skips here
+  # exactly as it does in `frontend`. The cordis half of a diff that misses the
+  # regex is therefore still unmeasured, which is a strictly smaller hole than
+  # #854 (nothing at all), and closing it means installing the runtime here,
+  # which duplicates `frontend-cordis` rather than selecting for it.
+  root-suite-affected:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # full history so the PR base and the previous push tip are both real
+          # locally; the explicit base fetch below is the belt-and-braces guard
+          # that a shallow checkout still works, the same shape `changes` uses.
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      # `.[test]` carries pytest and PyYAML, which the workflow-reading tests in
+      # this suite import, and it installs `revl` itself.
+      - run: pip install -e ".[test]"
+      # `tests/` carries cross-tier probes that EXECUTE emitted Go and Java, and
+      # they decide whether to run from whether a toolchain answers on PATH. The
+      # runner's preinstalled ones are not the pinned versions, so without these
+      # two pins the selector's own fail-safe FULL selection would measure the
+      # wrong toolchain and red on it. Same pins, same versions, same reason as
+      # `frontend` (which needed them for exactly these probes).
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26"
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961  # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - id: select
+        env:
+          # a branch name is attacker-controllable text, so it reaches the shell
+          # through env: and never as interpolated source, the same rule the
+          # `changes` job and the roadmap-marker step in `lint` follow.
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # A merge_group, schedule, dispatch or workflow_call event has no
+          # diff to narrow against, and the selector maps an empty changed-set
+          # to the FULL selection on its own, which is the wanted answer there.
+          base_arg=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin \
+              "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+            base_arg="--base origin/${BASE_REF}"
+          elif [ -n "${BEFORE_SHA}" ] \
+               && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            base_arg="--base ${BEFORE_SHA}"
+          fi
+          # A base ref the selector cannot resolve yields an empty changed-set,
+          # which it turns into FULL itself, and an outright failure is caught
+          # here rather than read as "nothing to do": an empty node list that
+          # came out of a FAILED selection must never mean "skip the suite".
+          # `make pre-merge` wraps the same call the same way.
+          if ! out=$(python3 tools/affected_tests.py --format machine $base_arg); then
+            out=$(printf 'FULL 1\nREASON the selector exited non-zero -> full\nPYTEST tests/')
+          fi
+          printf '%s\n' "$out"
+          nodes=$(printf '%s\n' "$out" | sed -n 's/^PYTEST //p')
+          if [ -z "$nodes" ]; then
+            # An empty node list must never mean "run nothing", which is the same
+            # hole one level down. The selector's own FULL answer is `tests/`, so
+            # an empty list degrades to precisely that.
+            nodes="tests/"
+            echo "affected selection: empty node list -> tests/ (fail safe)"
+          else
+            echo "affected selection: pytest $nodes"
+          fi
+          echo "pytest=$nodes" >> "$GITHUB_OUTPUT"
+      - name: root suite (affected nodes)
+        env:
+          # diff paths are the author's, and this list is derived from them, so
+          # it arrives as a variable and is only ever word-split into pytest
+          # arguments; it is never re-parsed as shell source.
+          SEL_PYTEST: ${{ steps.select.outputs.pytest }}
+        run: |
+          set -euo pipefail
+          set -f
+          pytest $SEL_PYTEST -q
 
   # The `container` isolation rung (roadmap item 411 Slice 2) launches a REAL
   # container: a sandboxed process runs inside a boundary whose confinement
