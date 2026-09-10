@@ -308,6 +308,10 @@ def test_dev_once_boots_the_app_and_proves_no_residue():
     assert "no residue" in result.stdout
 
 
+@pytest.mark.skipif(
+    not CORDIS_PY.exists(),
+    reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)",
+)
 def test_crud_persists_and_reverts_residue_free_on_the_runtime():
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
