@@ -99,8 +99,19 @@ func main() {
 		name = "proc"
 	}
 	log := func(channel, subject, detail string) {
-		fmt.Printf("[%s] %-6s| %-16s| %s\n", name, channel, subject,
-			strings.TrimRight(detail, " "))
+		// item 421 F5 — the runner's single log choke point. Probe results,
+		// probe failures and load failures are formatted here from values the
+		// runtime holds, and none of them passes through the in-process funnels
+		// (the emitted hostRecord scrub covers the trace, not this line) or the
+		// seam funnel (a probe dispatches in-process, so SeamFailure never runs).
+		// Scrubbing the WHOLE rendered line -- channel, subject and detail --
+		// covers the channel instead of each printer, and is the identity for a
+		// marking-free placement, which installs no scrub. The banner lines
+		// (`UP`, `DOWN`, `NO-RESIDUE`, the E-Stop inventory) are deliberately not
+		// scrubbed: they are conductor protocol carrying only the spec's process
+		// name, and mangling one would desynchronise the conductor.
+		fmt.Println(bridge.ScrubText(fmt.Sprintf("[%s] %-6s| %-16s| %s", name,
+			channel, subject, strings.TrimRight(detail, " "))))
 	}
 
 	// item 443 / issue #122: publish the spec latch to the ambient variable the
