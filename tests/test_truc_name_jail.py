@@ -141,6 +141,89 @@ def test_vendor_dir_refuses_a_symlinked_name(tmp_path):
     assert "pg_database" in str(raised.value)
 
 
+@pytest.mark.parametrize("name", ["pg_database", "a"])
+def test_vendor_dir_refuses_a_name_that_is_not_a_directory(tmp_path, name):
+    """A truc IS one directory under `trucs/`, so `trucs/<name>` as a regular
+    file is not a destination this project owns. Left unchecked, `mkdir` and
+    `rmtree` both die on it with an `OSError` traceback instead of the refusal
+    the module promises (and the plan would have been a well-formed one)."""
+    (tmp_path / "trucs").mkdir()
+    squatter = tmp_path / "trucs" / name
+    squatter.write_text("not a directory\n")
+    with pytest.raises(_host.TrucNameRefusal) as raised:
+        _host._vendor_dir(str(tmp_path), name)
+    assert "not a directory" in str(raised.value)
+    assert squatter.read_text() == "not a directory\n"
+
+
+# --------------------------------------------- the leaf: the destination entry
+
+def test_a_write_refuses_a_symlinked_destination(tmp_path):
+    """`_vendor_dir` says the DIRECTORY is the project's own, not that the entry
+    inside it is a file. `write_text` follows a link, so a planted
+    `component.rvl` was written through to its target, outside the project,
+    under a success message."""
+    root = tmp_path / "trucs"
+    root.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("ORIGINAL-VICTIM\n")
+    (root / "component.rvl").symlink_to(victim)
+
+    with pytest.raises(_host.TrucNameRefusal) as raised:
+        _host._write_no_follow(root / "component.rvl", "// registry source\n",
+                               "trucs/pg_database/component.rvl")
+    assert "symlink" in str(raised.value)
+    assert victim.read_text() == "ORIGINAL-VICTIM\n"
+
+
+def test_a_write_refuses_a_symlinked_destination_whose_target_is_missing(tmp_path):
+    """The dangling half, and the reason an `exists()` test is not enough:
+    through a broken link `exists()` is False, and `write_text` does not fail on
+    it, it CREATES the target. Still a write outside the project."""
+    root = tmp_path / "trucs"
+    root.mkdir()
+    victim = tmp_path / "never-created.txt"
+    (root / "manifest.json").symlink_to(victim)
+
+    with pytest.raises(_host.TrucNameRefusal) as raised:
+        _host._write_no_follow(root / "manifest.json", "{}",
+                               "trucs/pg_database/manifest.json")
+    assert "symlink" in str(raised.value)
+    assert not victim.exists(), "the link's target was created outside the project"
+
+
+def test_a_write_refuses_a_destination_that_links_to_a_directory(tmp_path):
+    """A link is refused whatever it points at: a directory target is as far
+    outside the project as a file one."""
+    root = tmp_path / "trucs"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "dossier.json").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(_host.TrucNameRefusal):
+        _host._write_no_follow(root / "dossier.json", "{}",
+                               "trucs/pg_database/dossier.json")
+    assert sorted(p.name for p in outside.iterdir()) == []
+
+
+def test_a_plain_write_still_writes(tmp_path):
+    """The guard must cost nothing: an ordinary destination is still created and
+    still overwritten."""
+    path = tmp_path / "component.rvl"
+    _host._write_no_follow(path, "// one\n", "trucs/pg_database/component.rvl")
+    _host._write_no_follow(path, "// two\n", "trucs/pg_database/component.rvl")
+    assert path.read_text() == "// two\n"
+    assert not path.is_symlink()
+
+
+def test_the_vendored_file_list_is_the_triple_a_truc_is():
+    """`commit_add` copies a fixed list rather than globbing: which files make a
+    truc is a decision, and `entry_read` bundles exactly this triple."""
+    assert _host._VENDORED_FILES == ("component.rvl", "manifest.json",
+                                     "dossier.json")
+
+
 def test_a_plain_name_is_still_spelled_the_way_the_docs_spell_it(tmp_path):
     """Bare when it can be: `pg_database = { registry = "local" }` is what
     docs/truc.md and every hand-written project already contain, and rewriting
@@ -163,9 +246,11 @@ def test_every_admitted_name_is_a_parseable_toml_key(name):
 
 
 def test_the_key_escaper_agrees_with_toml_including_the_astral_planes():
-    """`json.dumps` is a near-miss quoter: JSON and TOML agree everywhere except
-    the astral planes, where JSON writes a surrogate pair (`\\ud83d\\ude00`)
-    and TOML forbids the escape outright. An emoji in a name is enough."""
+    """The parent wrote the key bare (`f'{name} = {{ registry = ... }}'`), so an
+    emoji in a name was enough to brick `truc.toml`. Quoting it fixes that, but
+    the quoter cannot be `json.dumps`: that is a near-miss, since JSON and TOML
+    agree everywhere except the astral planes, where JSON writes a surrogate
+    pair (`\\ud83d\\ude00`) and TOML forbids the escape outright."""
     for cp in list(range(0x00, 0x200)) + [0x2028, 0xFEFF, 0xFFFD, 0x10000,
                                           0x1F600, 0x10FFFF]:
         name = "a" + chr(cp) + "b"

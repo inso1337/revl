@@ -25,6 +25,14 @@ perfectly well-formed registry row. `_vendor_dir` is where a name stops being
 a string and has to be a directory *inside* `trucs/`, so that is where the
 shape is checked. The plan is still the whole decision — the check only
 refuses to let a name mean something other than what "this truc" means.
+
+The name is not the only string that becomes a path, so the jail has two
+halves. `_vendor_dir` jails the DIRECTORY; the entries inside it need jailing
+too, because `write_text` and `open(path, "w")` both FOLLOW a link — and
+through a dangling one they do not even fail, they create the target, outside
+the project, under a success message. `_write_no_follow` is that half: the
+bytes truc owns are the bytes under `trucs/`, and an entry that is a link is
+bytes it does not own.
 """
 
 from __future__ import annotations
@@ -95,14 +103,20 @@ def _check_name(name: object, what: str = "truc") -> str:
 def _vendor_dir(project_dir: str, name: str) -> pathlib.Path:
     """The one directory `name` is allowed to name: `<project>/trucs/<name>`.
 
-    Two checks, in the order the jail needs them: the name must be one plain
-    segment (above), and neither it nor `trucs/` itself may be a symlink. The
-    link check exists for the same reason `_launcher._contained_path` walks
-    every segment before compiling a stage-0 component — `mkdir(exist_ok=True)`
-    and `write_text` both FOLLOW a link, so `trucs/evil -> /etc` would turn
-    "vendor a truc" into a write outside the project, and `rmtree` would at
-    best die on it. The trust claim is that the bytes truc owns are the bytes
-    under `trucs/`; a link is bytes truc does not own.
+    Three checks, in the order the jail needs them: the name must be one plain
+    segment (above), neither it nor `trucs/` itself may be a symlink, and
+    `trucs/<name>` must be a directory if it exists at all. The link check
+    exists for the same reason `_launcher._contained_path` walks every segment
+    before compiling a stage-0 component — `mkdir(exist_ok=True)` and
+    `write_text` both FOLLOW a link, so `trucs/evil -> /etc` would turn "vendor
+    a truc" into a write outside the project, and `rmtree` would at best die on
+    it. The trust claim is that the bytes truc owns are the bytes under
+    `trucs/`; a link is bytes truc does not own. The directory check is the same
+    claim about the same trust: a regular file named `trucs/<name>` is not a
+    destination this project owns, and `mkdir` would die on it with an `OSError`
+    traceback instead of the refusal this module promises. What neither check
+    covers is the entries INSIDE the directory, which `_write_no_follow` closes
+    at each write.
     """
     _check_name(name)
     root = pathlib.Path(project_dir, "trucs")
@@ -113,7 +127,57 @@ def _vendor_dir(project_dir: str, name: str) -> pathlib.Path:
                 f"{os.readlink(path)!r}, and a truc's bytes are the ones under "
                 f"the project's own `trucs/` directory. Remove the link (or "
                 f"vendor the truc into the project) and re-run.")
+        if path.exists() and not path.is_dir():
+            raise TrucNameRefusal(
+                f"refusing to touch `{rel}`: it exists and is not a directory, "
+                f"and a truc IS one directory under the project's own `trucs/`. "
+                f"Remove it (or vendor the truc into the project) and re-run.")
     return root / name
+
+
+#: `O_NOFOLLOW` is POSIX and has no Windows spelling. Where it is missing the
+#: guard degrades to an explicit `is_symlink()` refusal (check-then-write)
+#: rather than disappearing.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _symlink_refusal(path: pathlib.Path, rel: str) -> TrucNameRefusal:
+    """The refusal for a destination that is a link: the same words
+    `_vendor_dir` uses for a linked directory, aimed at the entry instead."""
+    return TrucNameRefusal(
+        f"refusing to write `{rel}`: it is a symlink to "
+        f"{os.readlink(path)!r}, and a truc's bytes are the ones under "
+        f"the project's own `trucs/` directory. Remove the link (or "
+        f"vendor the truc into the project) and re-run.")
+
+
+def _write_no_follow(path: pathlib.Path, text: str, rel: str) -> None:
+    """Write `text` to `path`, refusing a symlink at the destination.
+
+    `_vendor_dir` establishes that the destination DIRECTORY is this project's
+    own; it says nothing about the entries inside it, and both `write_text` and
+    `open(path, "w")` follow a link. Through a dangling link they do not even
+    fail — they CREATE the target, outside the project — so the check has to be
+    `is_symlink()` (or `O_NOFOLLOW`), never `exists()`. `O_NOFOLLOW` is
+    preferred where the platform has it: the refusal is then atomic with the
+    open, so it cannot lose a race to a link planted in between.
+    """
+    if not _O_NOFOLLOW:
+        if path.is_symlink():
+            raise _symlink_refusal(path, rel)
+        path.write_text(text, encoding="utf-8")
+        return
+    try:
+        fd = os.open(path,
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW, 0o666)
+    except OSError:
+        # The open refused it; name the rule when the reason was a link and let
+        # every other failure (permissions, a directory in the way) stay as it is.
+        if path.is_symlink():
+            raise _symlink_refusal(path, rel) from None
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def sha256_hex(data: str) -> str:
@@ -438,6 +502,12 @@ def apply(project_dir: str, trust_host_code: bool) -> str:
                        "sources": json.dumps(manifest), "commit": ""})
 
 
+#: The files a vendored truc is: `commit_add` copies this list rather than
+#: globbing the registry entry, so "which files make a truc" stays a decision
+#: (`entry_read` bundles exactly this triple).
+_VENDORED_FILES = ("component.rvl", "manifest.json", "dossier.json")
+
+
 def commit_add(project_dir: str, plan_json: str) -> str:
     """Execute an `add` commit plan: vendor the registry entry, write the
     lock row, append the `[trucs]` entry to `truc.toml`.
@@ -464,14 +534,23 @@ def commit_add(project_dir: str, plan_json: str) -> str:
 
     # fetch is a copy: vendor the registry entry dir verbatim (§5). `_vendor_dir`
     # is the jail: the destination is inside this project's `trucs/`, or the
-    # plan does not get to write at all.
+    # plan does not get to write at all. It jails the directory, so the entries
+    # inside it are jailed here too: a `component.rvl` planted as a symlink is
+    # as far outside the project as a symlinked `trucs/` is, and the plan is
+    # just as well-formed either way.
     src_dir = pathlib.Path(reg_abs, "components", name)
     dst_dir = _vendor_dir(project_dir, name)
+    copies = [(fname, src_dir / fname) for fname in _VENDORED_FILES
+              if (src_dir / fname).exists()]
+    # Every destination is checked before the first write, so a refusal leaves
+    # nothing behind: no half-vendored directory, and no target written through.
+    for fname, _ in copies:
+        if (dst_dir / fname).is_symlink():
+            raise _symlink_refusal(dst_dir / fname, f"trucs/{name}/{fname}")
     dst_dir.mkdir(parents=True, exist_ok=True)
-    for fname in ("component.rvl", "manifest.json", "dossier.json"):
-        sp = src_dir / fname
-        if sp.exists():
-            (dst_dir / fname).write_text(sp.read_text(encoding="utf-8"), encoding="utf-8")
+    for fname, sp in copies:
+        _write_no_follow(dst_dir / fname, sp.read_text(encoding="utf-8"),
+                         f"trucs/{name}/{fname}")
 
     # verbatim projection of the index row into the lock (§4.2).
     row = json.loads(index_row(reg_abs, name))
@@ -515,12 +594,16 @@ _TOML_UNESCAPES = {escaped[1:]: raw for raw, escaped in _TOML_ESCAPES.items()}
 def _toml_string(text: str) -> str:
     """`text` as a TOML basic string, escapes and all.
 
-    Written out rather than borrowed from `json.dumps`, which is a *near* miss:
-    JSON and TOML agree on every character except the astral planes, where JSON
-    emits a surrogate pair (`\\ud83d\\ude00`) and TOML forbids the escape
-    outright. An emoji in a name is enough to make the difference load-bearing,
-    and the failure mode is the one this file exists to prevent — a
-    `truc.toml` that no longer parses.
+    The key it carries used to be interpolated raw (`f'{name} = {{ registry =
+    "..." }}'`), so any name TOML cannot spell bare — a space, `=`, a quote, an
+    emoji — produced a `truc.toml` that no longer parses, and not even the
+    remediating `rm` could read the project back. Quoting is therefore
+    mandatory, not cosmetic. Written out rather than borrowed from
+    `json.dumps`, which is a *near* miss: JSON and TOML agree on every
+    character except the astral planes, where JSON emits a surrogate pair
+    (`\\ud83d\\ude00`) and TOML forbids the escape outright. An emoji in a name
+    is enough to make the difference load-bearing, and the failure mode is the
+    one this file exists to prevent — a `truc.toml` that no longer parses.
     """
     out: list[str] = []
     for ch in text:
