@@ -654,6 +654,26 @@ def build_parser() -> argparse.ArgumentParser:
                            "canonical sequential baseline, and report any "
                            "interleaving that violates a property (py tier; "
                            "docs/design/295-schedule-testing.md)")
+    test.add_argument("--filter", default=None, metavar="SUBSTRING",
+                      help="run only the `test` (and `lifecycle test`) blocks "
+                           "whose name contains this substring (case-sensitive). "
+                           "Matching is over the tests collected from the full "
+                           "compilation — the input files are never narrowed, "
+                           "because a single component file does not compile "
+                           "standalone. A filter that matches no test exits "
+                           "non-zero.")
+    test.add_argument("--list", action="store_true",
+                      help="print each collected `test` name (one per line) and "
+                           "run nothing; answers 'which tests does this "
+                           "compilation actually collect?'")
+    test.add_argument("-v", "--verbose", action="store_true",
+                      help="print one PASS/FAIL line per test with its duration "
+                           "(the py tier already prints one line per test; -v "
+                           "adds the per-test timing)")
+    test.add_argument("--report", choices=("json", "tap"), default=None,
+                      help="machine-readable per-test report (name/status/"
+                           "duration) on the py tier, instead of the human "
+                           "summary")
 
     mcp = sub.add_parser("mcp", help="MCP bridge: serve the compiler, or project services <-> tools")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)

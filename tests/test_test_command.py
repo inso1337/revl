@@ -5,7 +5,9 @@ monkeypatched); the real toolchains are exercised when present, matching how
 the per-tier suites gate themselves.
 """
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -198,3 +200,110 @@ def test_lifecycle_refusals_on_followup_tiers_are_skips(monkeypatch, capsys):
     assert "[java] skip: lifecycle tests are a documented follow-up" in out
     assert "[wasm] skip: lifecycle tests are a documented follow-up" in out
     assert "summary: 3 pass, 3 skipped, 0 failed" in out
+
+
+# --- selection / observation (issue #843) -----------------------------------
+
+_MIXED = (
+    'fn one() -> Int { return 1 }\n'
+    'test "one is one" { assert one() == 1 }\n'
+    'test "two is two" { assert 1 + 1 == 2 }\n'
+    'test "empty body passes" { }\n'
+    'test "fails on purpose" { assert 1 == 2 }\n'
+)
+
+
+def test_unfiltered_output_is_unchanged(tmp_path):
+    """Selection/reporting must not alter an unfiltered run's output or verdicts."""
+    source = _write_rvl(tmp_path, "mixed.rvl", _MIXED)
+    result = _cli(tmp_path, str(source))
+    assert result.returncode == 1
+    assert result.stdout == (
+        "PASS one is one\n"
+        "PASS two is two\n"
+        "PASS empty body passes\n"
+        "FAIL fails on purpose: 1 == 2\n"
+        "  left  = 1\n"
+        "  right = 2\n"
+    )
+    assert result.stderr == "[py] fail: 3 of 4 test(s) passed\n"
+
+
+def test_list_prints_collected_names_and_runs_nothing(tmp_path):
+    source = _write_rvl(tmp_path, "mixed.rvl", _MIXED)
+    result = _cli(tmp_path, str(source), "--list")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "one is one", "two is two", "empty body passes", "fails on purpose",
+    ]
+    assert "PASS" not in result.stdout
+    assert result.stderr == ""
+
+
+def test_filter_runs_only_matching_tests_and_announces_subset(tmp_path):
+    source = _write_rvl(tmp_path, "mixed.rvl", _MIXED)
+    result = _cli(tmp_path, str(source), "--filter", "one")
+    assert result.returncode == 0, result.stderr
+    assert "PASS one is one" in result.stdout
+    assert "two is two" not in result.stdout
+    assert "fails on purpose" not in result.stdout
+    assert "[py] pass: 1 test(s) passed" in result.stdout
+    assert "[filter] matched 1 of 4 test(s)" in result.stderr
+
+
+def test_filter_zero_matches_is_loud_and_exits_nonzero(tmp_path):
+    source = _write_rvl(tmp_path, "mixed.rvl", _MIXED)
+    result = _cli(tmp_path, str(source), "--filter", "does-not-exist")
+    assert result.returncode == 1
+    assert "no test matched 'does-not-exist'" in result.stderr
+    assert "4 test(s) collected" in result.stderr
+    # never masquerade as a green run of zero tests
+    assert "0 passed" not in result.stdout
+    assert "PASS" not in result.stdout
+
+
+def test_filter_composes_with_list(tmp_path):
+    source = _write_rvl(tmp_path, "mixed.rvl", _MIXED)
+    result = _cli(tmp_path, str(source), "--list", "--filter", "one")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["one is one"]
+    assert "[filter] matched 1 of 4 test(s)" in result.stderr
+
+
+def test_verbose_prints_per_test_duration(tmp_path):
+    source = _write_rvl(tmp_path, "passing.rvl",
+                        'test "a" { assert true }\ntest "b" { assert true }\n')
+    result = _cli(tmp_path, str(source), "-v")
+    assert result.returncode == 0, result.stderr
+    assert re.search(r"PASS a \(\d+\.\d\dms\)", result.stdout)
+    assert re.search(r"PASS b \(\d+\.\d\dms\)", result.stdout)
+
+
+def test_report_json_emits_per_test_payload_and_preserves_verdict(tmp_path):
+    source = _write_rvl(tmp_path, "mixed.rvl", _MIXED)
+    result = _cli(tmp_path, str(source), "--report", "json")
+    assert result.returncode == 1  # one test fails; verdict must be preserved
+    payload = json.loads(result.stdout)
+    assert payload["total"] == 4
+    assert payload["passed"] == 3
+    assert payload["failed"] == 1
+    assert [t["name"] for t in payload["tests"]] == [
+        "one is one", "two is two", "empty body passes", "fails on purpose",
+    ]
+    assert all(set(t) == {"name", "status", "duration_ms"} for t in payload["tests"])
+    statuses = {t["name"]: t["status"] for t in payload["tests"]}
+    assert statuses["one is one"] == "pass"
+    assert statuses["fails on purpose"] == "fail"
+    assert result.stderr == ""
+
+
+def test_report_tap_emits_tap_lines(tmp_path):
+    source = _write_rvl(tmp_path, "passing.rvl",
+                        'test "a" { assert true }\ntest "b" { assert true }\n')
+    result = _cli(tmp_path, str(source), "--report", "tap")
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0] == "TAP version 13"
+    assert lines[1] == "1..2"
+    assert lines[2].startswith("ok 1 - a ")
+    assert lines[3].startswith("ok 2 - b ")

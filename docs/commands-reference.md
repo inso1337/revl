@@ -927,6 +927,19 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 - `--mock-requires` - run every `lifecycle test` in mock world: each unmet
   `requires` is filled by an auto-generated mock provider, so a consumer boots
   with zero real providers (py tier; [auto-mocks.md](auto-mocks.md)).
+- `--filter SUBSTRING` - run only the collected `test` blocks whose name contains
+  `SUBSTRING` (case-sensitive substring match, not a regex). Selection happens
+  over the tests collected from the full compilation — the input files are never
+  narrowed, because a single component file does not compile standalone. A
+  filter that matches fewer than all collected tests is announced, and a filter
+  matching nothing exits nonzero rather than reporting a false "0 passed".
+- `--list` - print the name of every collected `test` block and run nothing.
+  This answers "which tests does this compilation actually collect?" without
+  executing anything.
+- `-v`, `--verbose` - append a per-test duration to each one-line `PASS`/`FAIL`.
+- `--report {json,tap}` - emit a machine-readable per-test report (name, status,
+  duration) in JSON or TAP form instead of the human per-test lines. Verdicts
+  and exit codes are unchanged; py tier only.
 
 ---
 
