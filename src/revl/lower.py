@@ -879,6 +879,20 @@ class Env:
         # runs on the AST, before the slot is lowered, so the refusal can name
         # what the author wrote); scoped to the body being lowered.
         self.local_arrows: dict = {}
+        # VALUE PROVENANCE, the third arm of the same problem and the one that
+        # decides whether the walk asks about the SPELLING or the VALUE. A
+        # teardown slot's reach must be a question about what the inverse
+        # dispatches, and a value bound to a name dispatches exactly what the
+        # expression it was bound to dispatches — but the walk reads the `undo`
+        # AST, and the `let` that bound the name is not in it. So
+        # `undo dispatch1(w.task.run)` was refused while the identical crossing
+        # one `let` away — `let r = w.task.run; undo dispatch1(r)` — was
+        # admitted, and so was every container and `if`/`match` arm holding one.
+        # Keyed by SURFACE name to the AST value it was bound to, so the walk
+        # reads the value the author bound, transitively (`let s = r`) and
+        # through what holds it (a record field, a list index, an arm); scoped
+        # to the body being lowered, exactly like `local_arrows`.
+        self.provision_values: dict = {}
         # item 130: stream lifecycle tracking. `terminal_stream_sources` holds
         # the safe names of stream sources (`let s = effect Stream.source() undo
         # s.close()`) whose inverse CLOSES the source — the terminal-delivering
@@ -2964,6 +2978,11 @@ def _handle_component_name(surface: str, env) -> str | None:
     return args[0] if head == "Instance" and args else None
 
 
+#: `_project`'s answer for "no value is known for this node": it stands for
+#: itself and every arm of the walk reads it as written.
+_UNRESOLVED = object()
+
+
 def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
                             emitting_witness: dict, *, refuse, env=None,
                             refuse_opaque=None) -> None:
@@ -3006,6 +3025,21 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
       `_method_emissions` judges the same shape — the value may be dispatched
       by whoever receives it, so it counts as reaching what it names.
 
+    All three indirections above are asked about the VALUE the slot dispatch-
+    es, which is why a binding is resolved rather than read as a name. A
+    fourth arm completes that reading: a value bound to a `let` and reached
+    through the name (`let r = w.task.run; undo dispatch1(r)`), through a
+    second binding (`let s = r`), through a container (`let box = { f:
+    w.task.run }; undo dispatch1(box.f)`, `let ts = [w.task.run]; undo
+    dispatch1(ts[0])`) or through an `if`/`match` arm (`let g = if c { w.task.run
+    } else { pure1 }; undo dispatch1(g)`). Every one of those crosses the same
+    boundary as the direct spelling — the reviewer's counterexample to the
+    spelling-only reading of this rule — so the walk substitutes the bound
+    value (`_project`, over `Env.provision_values`) and the arms below judge it;
+    a container is traversed, so a record field and a list element are read too.
+    No arm of this walk is on the spelling of an emission rather than on the
+    value that reaches it.
+
     `refuse(node, name, terminal_class, chain)` is called with the offending
     call, the callee as written, the classification of the boundary actually
     reached, and the fn path to it; it must raise.
@@ -3020,25 +3054,111 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
     `arrows` maps a surface name to the `ExprArrow` it was bound to in the
     enclosing scope, and `known` is every name a call may legitimately
     name (declared fns/externs, host roots, ADT cases) — both read off `env`."""
-    from .parser import ExprArrow, ExprCall, ExprField, ExprVar
+    from .parser import (ExprArrow, ExprCall, ExprField, ExprIndex, ExprList,
+                         ExprLit, ExprRecord, ExprVar)
 
     arrows = (getattr(env, "local_arrows", None) or {}) if env is not None else {}
+    bound = (getattr(env, "provision_values", None) or {}) if env is not None else {}
     in_scope = set()
     if env is not None:
         in_scope = set(getattr(env, "params", None) or {}) \
             | set(getattr(env, "locals", None) or {})
 
+    def _project(e, seen=frozenset()):
+        """The VALUE `e` holds, with every name replaced by what `let` bound it
+        to; `_UNRESOLVED` when nothing is known and `e` must be read as written.
+
+        A teardown slot's reach is a question about the value the inverse
+        dispatches, so `let r = w.task.run` has to answer exactly as
+        `w.task.run` does. The binding is resolved transitively (`let s = r`
+        costs nothing) and through what holds the value — a record field, a list
+        element, and (returned as written, so the arms below read every one of
+        them) an `if`/`match` arm, whose union is the verdict. `seen` is the
+        chain already followed, which bounds the recursion however the names
+        nest and leaves a cycle unresolved rather than spinning."""
+        if not bound:
+            return _UNRESOLVED
+        if isinstance(e, ExprVar):
+            if e.name in seen or e.name not in bound:
+                return _UNRESOLVED
+            held = _project(bound[e.name], seen | {e.name})
+            return bound[e.name] if held is _UNRESOLVED else held
+        if isinstance(e, ExprField):
+            base = _project(e.target, seen)
+            if base is _UNRESOLVED:
+                return _UNRESOLVED
+            if isinstance(base, ExprRecord):
+                for key, item in base.fields:
+                    if key == e.name:
+                        held = _project(item, seen)
+                        return item if held is _UNRESOLVED else held
+                # the record is bound and does not hold the field: the read has
+                # no value, and it is NOT the rest of the record either
+                return None
+            return _UNRESOLVED
+        if isinstance(e, ExprIndex):
+            base = _project(e.target, seen)
+            if base is _UNRESOLVED:
+                return _UNRESOLVED
+            if isinstance(base, ExprList):
+                index = e.index
+                if isinstance(index, ExprLit) and isinstance(index.value, int) \
+                        and not isinstance(index.value, bool):
+                    if not 0 <= index.value < len(base.items):
+                        return None
+                    item = base.items[index.value]
+                    held = _project(item, seen)
+                    return item if held is _UNRESOLVED else held
+                # an index the walk cannot pin down leaves every element a
+                # candidate, so hand the list back and let the sweep take them
+                # all — the same union rule the `if`/`match` arms get
+                return base
+            return _UNRESOLVED
+        return _UNRESOLVED
+
+    def _field_boundary(e):
+        """`(spelling, "emission")` when the AST field expression `e` READS an
+        `emission` service operation — `net.send`, `w.task.run` — else None.
+
+        One resolution for both positions: `w.task.run(…)` and `f(w.task.run)`
+        name the same operation, so the arm that reads the call reads the
+        reference too. A reference the receiver may dispatch is a crossing one
+        indirection later, exactly as `_method_emissions` judges the same
+        shape in a method body (the G4 arm spells its verdict "passed as a
+        function value"); a rule that only saw the called form was a way
+        around the rule."""
+        if env is None or not isinstance(e, ExprField):
+            return None
+        if isinstance(e.target, ExprVar):
+            op = _service_emission_op(e.target.name, e.name, env)
+            if op is not None:
+                return op, "emission"
+        found = _handle_provision_op(e, env)
+        if found is not None and getattr(found[1], "emission", False):
+            return found[0], "emission"
+        return None
+
     def _walk(e, _seen=()):
         if e is None:
             return
-        if isinstance(e, ExprVar) and e.name in emitting_fns \
-                and e.name not in extern_class:
+        held = _project(e)
+        if held is not _UNRESOLVED and held is not e:
+            # the value the author bound, read in place of the name (or of the
+            # read off a bound record/list) that stands for it. A bound name is
+            # its value and nothing else, so this replaces the read rather than
+            # adding to it — which is also what keeps a record PROJECTION from
+            # being judged as the whole record.
+            _walk(held, _seen)
+            return
+        if isinstance(e, ExprVar) and e.name in emitting_fns:
             # a first-class reference in VALUE position: the callee it names may
             # be dispatched by whoever receives it, so it reaches what it names,
             # one indirection later (the same verdict `_method_emissions` gives
-            # this shape).
+            # this shape, and it is the same set — `emitting_fns` holds the
+            # emission externs too, so `f(hsend)` and `f(emit_wrapper)` are one
+            # rule, not two).
             chain = _emission_chain(e.name, emitting_witness)
-            refuse(e, e.name, extern_class.get(chain[-1]), chain)
+            refuse(e, e.name, extern_class.get(chain[-1]) or "emission", chain)
         if isinstance(e, ExprCall):
             callee = e.callee
             if isinstance(callee, ExprVar):
@@ -3058,18 +3178,19 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
                         and name not in emitting_fns and name in in_scope:
                     refuse_opaque(e, name)
             elif env is not None and isinstance(callee, ExprField):
-                op = None
-                if isinstance(callee.target, ExprVar):
-                    op = _service_emission_op(callee.target.name, callee.name, env)
-                if op is not None:
-                    refuse(e, op, "emission", [op])
-                else:
-                    found = _handle_provision_op(callee, env)
-                    if found is not None and getattr(found[1], "emission", False):
-                        refuse(e, found[0], "emission", [found[0]])
+                hit = _field_boundary(callee)
+                if hit is not None:
+                    refuse(e, hit[0], hit[1], [hit[0]])
             for a in e.args:
                 _walk(a, _seen)
             return
+        if isinstance(e, ExprField):
+            # the same read, NOT called: `undo dispatch1(w.task.run)`. Nothing
+            # about the crossing changed — the receiver dispatches the value it
+            # was handed — so it is refused here with the same diagnostic.
+            hit = _field_boundary(e)
+            if hit is not None:
+                refuse(e, hit[0], hit[1], [hit[0]])
         if isinstance(e, ExprArrow):
             _walk(e.body, _seen)
             return
@@ -3078,9 +3199,24 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
             if hasattr(v, "__dataclass_fields__"):
                 _walk(v, _seen)
             elif isinstance(v, (list, tuple)):
-                for x in v:
-                    if hasattr(x, "__dataclass_fields__"):
-                        _walk(x, _seen)
+                _walk_held(v, _seen)
+
+    def _walk_held(v, _seen):
+        """Sweep a list of expressions OR of the `(name, value)` pairs a record
+        literal and a `match` arm are written as.
+
+        The sweep above descends into entries that are themselves AST nodes, so
+        a record's `[(field, value)]` and a `match`'s `[(pattern, bind, body)]`
+        read as opaque tuples: an emission inside a record field or a `match`
+        arm was invisible to every arm, in an inline literal exactly as in a
+        value bound to one."""
+        for x in v:
+            if hasattr(x, "__dataclass_fields__"):
+                _walk(x, _seen)
+            elif isinstance(x, (list, tuple)):
+                for y in x:
+                    if hasattr(y, "__dataclass_fields__"):
+                        _walk(y, _seen)
 
     _walk(expr)
 
@@ -8086,6 +8222,7 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
         if inferred is not None:
             env.type_env[safe] = inferred
         _note_provision_alias(safe, value, env)
+        env.provision_values[stmt.name] = stmt.value
         if isinstance(stmt.value, ExprArrow):
             env.local_arrows[stmt.name] = stmt.value
         out.append({"step": "let", "name": safe, "value": value})
@@ -10806,6 +10943,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # leak into the next method, whose safe names may recycle theirs.
         saved_provisions = dict(env.provision_locals)
         saved_arrows = dict(env.local_arrows)
+        saved_values = dict(env.provision_values)
         env.params = env.bind_params(method.params, method.line)
         # method params carry the service's declared types (A6): surface
         # names bind the body, the service contributes the signature
@@ -10916,6 +11054,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             method_locals[ms.name] = safe
             env.params[ms.name] = safe
             _note_provision_alias(safe, value, env)
+            env.provision_values[ms.name] = ms.value
             if isinstance(ms.value, ExprArrow):
                 env.local_arrows[ms.name] = ms.value
             if ms.type is not None:
@@ -11276,6 +11415,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         env.type_env = saved_tenv
         env.provision_locals = saved_provisions
         env.local_arrows = saved_arrows
+        env.provision_values = saved_values
 
         # A service declaration is an *upper bound* on its providers' effects:
         # consumers bind to the service, not to this component, and a provider

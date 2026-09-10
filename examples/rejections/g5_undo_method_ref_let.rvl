@@ -1,0 +1,45 @@
+// REJECTED — G5: the same first-class crossing as g5_undo_handle_ref_let.rvl,
+// with the local holding the provision's METHOD rather than its handle — the
+// spelling that generalises, because the slot then names no receiver at all.
+//
+// `let r = w.task.run` binds the `run` operation — which the service declares
+// `emission` — to a local, and `dispatch1(r)` hands it to a helper as a value.
+// The sibling file binds the handle (`let t = w.task`) and spells `t.run` in the
+// slot, so an analysis that resolves the slot's receiver still finds a field to
+// look at; here the slot's only name is `r`, and the crossing is invisible to a
+// walk that reads the `undo` expression's own nodes. Admitting this slot is what
+// makes the check spelling-sensitive: the `run` that fires in teardown is the
+// same one, at the same point relative to the session verdict.
+//
+// expected error:
+//   the `undo` of this bracket calls `w.task.run`, which is an emission —
+//     a bracket inverse runs in teardown and may not cross a boundary (G5)
+
+extern pure fn pure1(k: Str) -> Int = @py { return 1 }
+
+fn dispatch1(f: (Str) -> Int) -> Int { return f("z") }
+
+service Net { emission[net] fn send(msg: Str) -> Int }
+service Task { emission[net] fn run(prompt: Str) -> Int }
+service S { fn go() -> Int }
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+  }
+}
+
+component Sup requires net: Net provides s: S {
+  let w = effect spawn Worker with { } undo w.dispose()
+  provide s {
+    fn go() {
+      let r = w.task.run
+      effect pure1("k")
+      undo   dispatch1(r)
+      return 1
+    }
+  }
+}

@@ -1,0 +1,42 @@
+// REJECTED — G5: the same union argument on the `match` side.
+//
+// `let g = match b { _ => w.task.run }` binds the `run` operation — declared
+// `emission` — as an arm value; the arm is a value slot like any other, so the
+// reference reaches the helper through `dispatch1(g)` and fires in teardown at
+// or after the session verdict. The wildcard arm keeps the case minimal: the
+// scrutinee is irrelevant to the verdict, only the value the arm produces is.
+// A walk that reads the `undo` expression's nodes sees a local name and stops,
+// which is why the arms have to be swept as values rather than skipped.
+//
+// expected error:
+//   the `undo` of this bracket calls `w.task.run`, which is an emission —
+//     a bracket inverse runs in teardown and may not cross a boundary (G5)
+
+extern pure fn pure1(k: Str) -> Int = @py { return 1 }
+
+fn dispatch1(f: (Str) -> Int) -> Int { return f("z") }
+
+service Net { emission[net] fn send(msg: Str) -> Int }
+service Task { emission[net] fn run(prompt: Str) -> Int }
+service S { fn go(b: Int) -> Int }
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+  }
+}
+
+component Sup requires net: Net provides s: S {
+  let w = effect spawn Worker with { } undo w.dispose()
+  provide s {
+    fn go(b) {
+      let g = match b { _ => w.task.run }
+      effect pure1("k")
+      undo   dispatch1(g)
+      return 1
+    }
+  }
+}
