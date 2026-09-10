@@ -29,7 +29,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import compile_source  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 from revl.errors import RevlError, RevlErrors  # noqa: E402
 
 
@@ -1254,17 +1254,11 @@ def test_rust_emits_the_iteration_form_as_a_blocking_next_loop():
     assert code.index("StreamNext::Item(o) => {") < code.index("sink.write(o)")
 
 
-def test_rust_still_refuses_the_typed_event_handler_by_name():
-    """rust lowers the plain `every … in` (Slice 4) but not the `on … as` typed
-    event handler (Slice 5): its schema-and-dedup contract gate is the py
-    reference tier's. The refusal must name the event form, not fall through to
-    an `unsupported component step` or silently drop the contract."""
-    emit = _tier_emit("rust")
-    with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(compile_source(_EVENT, "s.rvl"))
-    msg = str(excinfo.value)
-    assert "unsupported component step" not in msg
-    assert "`on … as` typed-event handler" in msg and "backend py" in msg
+# item 130 (roadmap #81): this tier is no longer a refusal here — it lowers the
+# handler. See `test_rust_lowers_the_typed_event_handler_with_an_additive_contract_gate`
+# in the Slice 5 section for the emitted shape, and
+# backends/rust/test_emit_rust.py::test_stream_runtime_on_real_cordis_rs for the
+# runtime proof.
 
 
 @pytest.mark.parametrize("tier", ["java", "wasm"])
@@ -1755,25 +1749,6 @@ def test_the_emitted_gate_runs_before_the_body_not_after():
     assert code.index(".admit(e,") < code.index("_revl_ctx.ship.dispatch(")
 
 
-def test_rust_refuses_the_handler_by_name():
-    """rust lowers the Slice 1/3 protocol and the plain `every … in` but not the
-    `on … as` handler — its schema-and-dedup contract gate is the py (and now go
-    and ts) tiers'. The refusal names the event form, not the generic
-    `unsupported component step`.
-
-    item 130 (roadmap #81): `go` is no longer here — it now lowers the handler
-    (see `test_go_lowers_the_typed_event_handler_with_an_additive_contract_gate`),
-    keeping the once doubly-load-bearing routing (an event always declares a
-    record, so its document carries a top-level type) live by DIVERTING a
-    stream-holding component to the stc-go path instead of dropping it."""
-    emit = _tier_emit("rust")
-    with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(compile_source(_EVENT, "s.rvl"))
-    msg = str(excinfo.value)
-    assert "unsupported component step" not in msg
-    assert "`on … as`" in msg and "backend py" in msg
-
-
 def test_go_lowers_a_stream_component_that_also_declares_a_record():
     """The routing hole the go refusal once named is now CLOSED by lowering: a
     stream-holding component in a document that also declares a record (the shape
@@ -1855,14 +1830,66 @@ def test_go_lowers_the_typed_event_handler_with_an_additive_contract_gate():
     assert go.index("var e OrderCreated") < go.index("e.OrderId")
 
 
-def test_rust_still_refuses_the_typed_event_handler():
-    """rust lowers the plain `every … in` (Slice 4) but not the `on … as`
-    handler (Slice 5): its schema-and-dedup contract gate is still the py (and
-    now go and ts) tiers'. The refusal must name the event form, not fall through
-    to an `unsupported component step` or silently drop the contract."""
-    emit = _tier_emit("rust")
-    with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(compile_source(_EVENT, "s.rvl"))
-    msg = str(excinfo.value)
-    assert "unsupported component step" not in msg
-    assert "`on … as` typed-event handler" in msg and "backend py" in msg
+def test_rust_lowers_the_typed_event_handler_with_an_additive_contract_gate():
+    """item 130 (roadmap #81): the rust tier graduated Slice 5 — it lowers the
+    `on … as` typed-event handler, no longer refusing it. The handler is the
+    SAME blocking `loop` the plain `every … in` emits (the specialization, §6)
+    plus one gate, and the tier erases the async color, so there is no `yield`
+    to move: the iteration boundary IS the return of the blocking `next`, and
+    the gate sits between that boundary and the body.
+
+    What must NOT move, and does not: `Closed => break` is still the FIRST arm
+    (a terminal ends the loop without being validated or delivered as an item),
+    and the gate's refusal is a `return Err(...)` — the same uncaught error the
+    `Faulted` arm propagates, so the activation fails and the prefix reverts
+    LIFO with the subscription bracket on it (go/ts express this as an error
+    return / a throw; rust has `Result`). The runtime proof (an item reaches the
+    typed body, a redelivery of its identity key collapses, a schema violation
+    faults and leaves no residue, the dedup window is bounded) is
+    backends/rust/scenarios/stream.rs, run by
+    backends/rust/test_emit_rust.py::test_stream_runtime_on_real_cordis_rs."""
+    code = _tier_emit("rust").emit(compile_source(_EVENT, "s.rvl"))
+    # the contract is built ONCE above the loop, from the derived schema
+    assert 'Stream::contract("OrderCreated", ' in code
+    assert '"order_id", 64)' in code, "the derived key and default window"
+    # exactly one iteration node (one lowering), with the gate after the terminal
+    # (the host's own `next` wait loop is not a lowering and lives in the shim)
+    assert code.count("StreamNext::Closed => break,") == 1
+    closed = code.index("StreamNext::Closed => break,")
+    gate = code.index(".admit(&e, ")
+    assert closed < gate, "the gate sits after the `Closed` terminal test"
+    # the three outcomes: run, collapse, FAULT (uncaught, so the prefix reverts)
+    assert "Ok(true) => {}" in code
+    assert "Ok(false) => continue," in code
+    assert "Err(_revl_event1_err) => return Err(cordis::CordisError::with_message(" in code
+    # the validated item decodes into the event's record for the typed body
+    assert "let e: OrderCreated = match serde_json::from_value::<OrderCreated>(" in code
+    assert code.index("let e: OrderCreated") < code.index("ship.dispatch(e.order_id)")
+    assert "except" not in code and "catch" not in code
+
+
+def test_a_multifile_build_carries_event_declarations_into_the_merged_program(
+        tmp_path):
+    """The frontend prerequisite the rust graduation exposed.
+
+    `compile_source` parses one in-memory document; the CLI compiles through
+    `compile_files`, which merges each module into a synthetic program before
+    lowering. That merge copied `type_decls`, `fn_decls`, `externs`, `tests`,
+    `prop_tests`, `secrets`, `components` and `services` but NOT `event_decls`,
+    and the module rewriter never visited `StreamIterStmt` or an event's name,
+    so a build down the CLI path lost the contract table and refused `on … as`
+    with "`OrderCreated` is a type, not an event" while the same source compiled
+    in memory. Nothing caught it because every stream test in this suite uses
+    `compile_source`; the rust scenario, which is compiled through
+    `compile_files`, did. Pin the merged program carries the contract the
+    handler lowers against."""
+    source = tmp_path / "s.rvl"
+    source.write_text(_EVENT)
+    ir = compile_files([str(source)])
+    steps = [s for c in ir["components"] for s in c.get("body", ())
+             if isinstance(s, dict) and s.get("step") == "stream-iter"]
+    assert len(steps) == 1, "the merged program kept the handler component"
+    assert steps[0]["event"]["name"] == "OrderCreated"
+    assert steps[0]["event"]["key"] == "order_id"
+    assert steps[0]["event"]["window"] == 64
+    assert steps[0]["event"]["schema"]["required"] == ["order_id", "quantity"]

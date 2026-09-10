@@ -354,7 +354,7 @@
       "v3 TypeScript rejects a hole before expression emission through the runtime refusal channel that is not present in the mirrored emitter": [
         "kind=hole"
       ],
-      "item 130 (roadmap #81) lowered the ts reactive tier in the REFERENCE emitter (subscribe/merge/source, the derived combinator chain and the `every ... in` iteration form, against the new runtime.ts Stream); the self-host port selfhost/emit_ts.rvl has NOT yet mirrored it, so these stream constructs are reference-only until the self-host stream port lands (the tracked remainder of #81, alongside the java tier and the `on ... as` handler)": [
+      "item 130 (roadmap #81) lowered the ts reactive tier in the REFERENCE emitter (subscribe/merge/source, the derived combinator chain and the `every ... in` iteration form, against the new runtime.ts Stream); the self-host port selfhost/emit_ts.rvl has NOT yet mirrored it, so these stream constructs are reference-only until the self-host stream port lands (the tracked remainder of #81: the java tier, which still refuses the whole stream surface)": [
         "kind=stream-merge",
         "kind=subscribe",
         "stage=take",

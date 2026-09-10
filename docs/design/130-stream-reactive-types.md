@@ -9,10 +9,12 @@ and `Stream[T, State]`, the subscribe/next/close bracket with the
 cancellation-first `next` and rule 3.6, `map`/`filter`/`take` with the declared
 backpressure policies and the drain clock, the `merge` fan-in with the go/rust
 blocking lowerings, `every … in` async iteration, and typed events; §4.5
-(`replay`) and §6b (events) record inline what each slice shipped. Still open:
-the iteration/handler forms on go/rust/java/typescript, the
+(`replay`) and §6b (events) record inline what each slice shipped. Still open: the
+iteration/handler forms on java (the only tier that still refuses them; wasm
+refuses the whole stream surface by design), the
 `replay(n)`/`replay(from: <durable>)` declaration, and the reconstructible
-crash-recovery case.
+crash-recovery case. Rust graduated S5 (`on … as`): py, ts, go and rust
+now lower both forms.
 
 Base: `origin/main` @ `e513772`. Every `file:line` anchor below was read at
 that sha. Every "admitted"/"refused" claim about *today's* checker is a claim
@@ -469,9 +471,12 @@ components. A typed event always brings a record declaration with it, so an
 event program would have emitted a bare struct and silently never subscribed.
 That path now refuses a dropped component that holds a stream, by name.
 
-Still open on §6: the `replay(...)` row (§4.5) and the reconstructible
-crash-recovery case (§4.9), and the iteration/handler forms on go, rust, java
-and typescript.
+Still open on §6: the `replay(...)` row (§4.5), the reconstructible
+crash-recovery case (§4.9), and the iteration/handler forms on java.
+Rust graduated the typed-event handler: it lowers to the same blocking
+`next` loop the plain `every … in` emits, plus the additive
+`Stream::contract` gate, against the cordis-rs `Stream` the Slice 3/4
+protocol already ships.
 
 ## 7. Slices
 

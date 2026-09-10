@@ -1869,6 +1869,10 @@ class _Env:
         self.timer_counter = 0
         # Per-component counter for unique witnessed-step temp names (item 243).
         self.wit_counter = 0
+        # Per-component counter for unique typed-event contract local names
+        # (item 130 Slice 5): two `on … as` handlers in one component must not
+        # collide on the contract/scratch bindings.
+        self.stream_iter_counter = 0
         # Activation-body `let`/`let-effect` bind names seen so far, in source
         # order — so a later `emit ... compensate` closure knows which of the
         # names it references are local Arc-wrapped bindings that need a
@@ -2331,8 +2335,18 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "",
             ]
         )
-    if "Stream" in used:
+    # item 130 Slice 5: a document holding an `on <Event> as … in <sub>` handler
+    # needs the typed-event contract (schema + bounded dedup window) even when
+    # the subscription's provider is not a `Stream.source()` host node (it can
+    # arrive as a required service), and the contract traces through
+    # `revl_stream_record`, so the stream host runtime comes with it.
+    stream_event = _uses_stream_event(ir)
+    if "Stream" in used or stream_event:
         out.extend(_stream_host_rust())
+        # Gated so a plain `every … in` program's emitted crate stays
+        # byte-identical.
+        if stream_event:
+            out.extend(_stream_event_host_rust())
     return out
 
 
@@ -2876,6 +2890,274 @@ pub fn revl_stream_reset() {
     });
 }
 '''.splitlines()
+
+
+# item 130 Slice 5 — the typed-EVENT half of the stream runtime (§6). A faithful
+# mirror of backends/python/runtime.py's `EventContract`/`_json_schema_error` and
+# the go tier's `_STREAM_EVENT_PREAMBLE`, spelt for Rust on `serde_json` (already
+# a dependency of every emitted crate, so this adds no dependency).
+#
+# An event is a `Stream[T]` element with a contract, so this holds exactly the
+# two things events add over the stream protocol and nothing else: the SCHEMA
+# every delivered item is validated against before the body runs, and the bounded
+# window of recently admitted KEYS that collapses a redelivery. Everything else —
+# the subscription bracket, the cancellation-first `next`, the terminal handling,
+# the LIFO teardown — is the Slice 3/4 machinery, untouched.
+#
+# This tier reports failure as `Err(String)`, the same shape `next` already
+# returns, so a schema violation is a `Faulted` by another name: the emitted call
+# site maps it into a `cordis::CordisError` and propagates it UNCAUGHT, which
+# fails the activation and reverts the prefix LIFO with the subscription bracket
+# on it (§6, A8). A duplicate is the `Ok(false)` the loop `continue`s on. Every
+# decision is traced (`event.<name> admit` / `event.<name> duplicate`), so a
+# collapsed duplicate is observable rather than silent.
+_STREAM_EVENT_HOST_RUST = r'''
+// ---- typed events: the schema-and-dedup contract (item 130 Slice 5, §6) ----
+
+/// The JSON type name for a decoded value, mirroring py's `type(value).__name__`
+/// for the names the derived schema's `type` keyword uses.
+fn _revl_json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Mirrors py's `_json_type_ok`: `integer` accepts a number with no fractional
+/// part (serde_json keeps `5` and `5.0` distinct, and the derived schema's own
+/// examples use both spellings).
+fn _revl_json_type_ok(value: &serde_json::Value, json_type: &str) -> bool {
+    match json_type {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "integer" => match value {
+            serde_json::Value::Number(n) => {
+                n.is_i64() || n.is_u64() || n.as_f64().map(|f| f.fract() == 0.0).unwrap_or(false)
+            }
+            _ => false,
+        },
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => true,
+    }
+}
+
+/// Validate a decoded JSON value against the derived JSON-Schema subset the revl
+/// mapping emits (item 257, §3) — the same subset an event's derived schema uses,
+/// and a faithful mirror of backends/python/runtime.py `_json_schema_error`:
+/// primitive `type`, `const`, `enum`, `nullable`, `properties`/`required`/
+/// `additionalProperties` (bool or schema), `items`, and a discriminated
+/// `oneOf`. Returns the FIRST violation, or `None` when the value conforms. No
+/// `$ref` (cyclic types are refused), so the walk is finite.
+fn _revl_json_schema_error(value: &serde_json::Value, schema: &serde_json::Value,
+                           path: &str) -> Option<String> {
+    let s = match schema.as_object() {
+        Some(o) => o,
+        None => return None,
+    };
+    if let Some(c) = s.get("const") {
+        if value != c {
+            return Some(format!("{}: expected const {}, got {}", path, c, value));
+        }
+        return None;
+    }
+    if let Some(e) = s.get("enum") {
+        let found = e
+            .as_array()
+            .map(|arms| arms.iter().any(|arm| arm == value))
+            .unwrap_or(false);
+        if !found {
+            return Some(format!("{}: {} is not one of {}", path, value, e));
+        }
+        return None;
+    }
+    if let Some(o) = s.get("oneOf") {
+        let matches = o
+            .as_array()
+            .map(|arms| {
+                arms.iter()
+                    .filter(|arm| _revl_json_schema_error(value, arm, path).is_none())
+                    .count()
+            })
+            .unwrap_or(0);
+        if matches == 1 {
+            return None;
+        }
+        if matches == 0 {
+            return Some(format!(
+                "{}: value matches no arm of the union (a well-formed value \
+names exactly one constructor)",
+                path
+            ));
+        }
+        return Some(format!(
+            "{}: value is ambiguous, matching {} union arms",
+            path, matches
+        ));
+    }
+    if s.get("nullable").and_then(|n| n.as_bool()).unwrap_or(false) && value.is_null() {
+        return None;
+    }
+    let json_type = s.get("type").and_then(|t| t.as_str());
+    if let Some(jt) = json_type {
+        if !_revl_json_type_ok(value, jt) {
+            return Some(format!(
+                "{}: expected type {:?}, got {}",
+                path,
+                jt,
+                _revl_json_type_name(value)
+            ));
+        }
+    }
+    if json_type == Some("object") || value.is_object() {
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => return None,
+        };
+        let empty = serde_json::Map::new();
+        let props = s
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .unwrap_or(&empty);
+        for rn in s
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+        {
+            if let Some(name) = rn.as_str() {
+                if !obj.contains_key(name) {
+                    return Some(format!("{}: missing required property {:?}", path, name));
+                }
+            }
+        }
+        let extra = s.get("additionalProperties");
+        for (key, item) in obj {
+            if let Some(ps) = props.get(key) {
+                if let Some(err) = _revl_json_schema_error(item, ps, &format!("{}.{}", path, key))
+                {
+                    return Some(err);
+                }
+            } else if let Some(ex) = extra {
+                if ex.as_bool() == Some(false) {
+                    return Some(format!("{}: unexpected property {:?}", path, key));
+                } else if ex.is_object() {
+                    if let Some(err) = _revl_json_schema_error(item, ex, &format!("{}.{}", path, key))
+                    {
+                        return Some(err);
+                    }
+                }
+            }
+        }
+    }
+    if json_type == Some("array") {
+        if let (Some(arr), Some(items)) = (value.as_array(), s.get("items").filter(|i| i.is_object()))
+        {
+            for (i, item) in arr.iter().enumerate() {
+                if let Some(err) =
+                    _revl_json_schema_error(item, items, &format!("{}[{}]", path, i))
+                {
+                    return Some(err);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The contract half of a typed event (design §6): the SCHEMA every delivered
+/// item is checked against before the handler body runs, and the bounded window
+/// of recently admitted KEYS that collapses a redelivery. The dedup memory is a
+/// fixed-size LRU of key values, CONSTANT per handler, so it is not the per-item
+/// accumulation §4.7 refuses; being bounded also bounds what it claims — a
+/// redelivery further apart than the window runs the handler again (a collapse,
+/// not a durable exactly-once claim, which needs the §4.5 durable cursor).
+pub struct EventContract {
+    name: String,
+    schema: serde_json::Value,
+    key: String,
+    window: usize,
+    /// admitted keys, oldest first (a bounded LRU)
+    seen: Vec<serde_json::Value>,
+}
+
+impl EventContract {
+    /// Check one delivered item against the contract: `Ok(true)` to run the body,
+    /// `Ok(false)` to collapse a duplicate, `Err(reason)` to FAULT on a schema
+    /// violation. Validation comes FIRST: the key read below is only sound
+    /// because the schema already proved the item is an object carrying that
+    /// field, so no malformed item reaches the dedup table (or the body) at all.
+    pub fn admit(&mut self, item: &str, where_: &str) -> Result<bool, String> {
+        let v: serde_json::Value = serde_json::from_str(item).map_err(|e| {
+            format!("{}: event {} item is not a JSON value: {}", where_, self.name, e)
+        })?;
+        if let Some(err) = _revl_json_schema_error(&v, &self.schema, "$") {
+            return Err(format!(
+                "{}: event {} item failed its schema: {}",
+                where_, self.name, err
+            ));
+        }
+        let key = v.get(&self.key).cloned().unwrap_or(serde_json::Value::Null);
+        if let Some(pos) = self.seen.iter().position(|k| *k == key) {
+            let k = self.seen.remove(pos);
+            self.seen.push(k); // move-to-end: most-recently seen
+            revl_stream_record(format!("event.{} duplicate", self.name));
+            return Ok(false);
+        }
+        self.seen.push(key);
+        while self.seen.len() > self.window {
+            self.seen.remove(0);
+        }
+        revl_stream_record(format!("event.{} admit", self.name));
+        Ok(true)
+    }
+}
+
+impl Stream {
+    /// The per-handler contract an `on <Event> as … in <sub>` opens (item 130
+    /// Slice 5). One per handler, built ONCE before the loop — never per
+    /// delivered item, which is what keeps the dedup memory constant in the
+    /// length of the stream. The schema arrives as its JSON text and is decoded
+    /// once here.
+    pub fn contract(name: &str, schema_json: &str, key: &str, window: usize) -> EventContract {
+        EventContract {
+            name: name.to_string(),
+            schema: serde_json::from_str(schema_json).unwrap_or(serde_json::Value::Null),
+            key: key.to_string(),
+            window: if window < 1 { 1 } else { window },
+            seen: Vec::new(),
+        }
+    }
+}
+'''.splitlines()
+
+
+def _stream_event_host_rust() -> list[str]:
+    """The typed-event contract runtime (item 130 Slice 5), emitted only for a
+    document that holds an `on <Event> as … in <sub>` handler.
+
+    No secret-mode pass here: unlike `revl_stream_record`'s `stream.emit {item}`
+    path, every mark this block writes names the EVENT and its KEY WINDOW
+    position, never a delivered item's contents, and the schema is derived from
+    the declared type, not from data."""
+    return _STREAM_EVENT_HOST_RUST
+
+
+def _uses_stream_event(ir: dict) -> bool:
+    """True when the document holds an `on <Event> as … in <sub>` handler — the
+    only thing that needs the `EventContract` runtime. A plain `every … in`
+    program carries no `event` key and stays byte-identical."""
+    for comp in ir.get("components") or []:
+        for step in comp.get("body") or []:
+            if step.get("step") == "stream-iter" and step.get("event") is not None:
+                return True
+    return False
 
 
 def _binds(component: dict) -> list[str]:
@@ -4639,32 +4921,120 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         # by the frontend (§4.7), so the body is emissions only, each rendered
         # through the same `_emit_step` path a top-level step takes.
         #
-        # Slice 5's `on … as` typed-event handler lowers to this SAME step with
-        # an additive `event` contract (schema + a bounded dedup window). That
-        # contract gate is not lowered on this tier yet — it runs on the py
-        # reference tier — so refuse it by name; the plain `every … in` below IS
-        # lowered here.
-        if step.get("event") is not None:
-            raise EmitError(
-                "the `on … as` typed-event handler is not lowered on the rust "
-                "tier; its schema-and-dedup contract gate runs on the py "
-                "reference tier (item 130 Slice 5) while the plain `every … in` "
-                "iteration form lowers here — try `--backend py`")
+        # Slice 5's typed-event handler (`on <Event> as <e> in <sub>`) is THIS
+        # loop with one gate added between the terminal test and the body — the
+        # specialization §6 calls for, not a second lowering (mirrors the py
+        # reference `_ComponentEmitter._stream_iter` and the go/ts emitters). The
+        # contract is built ONCE above the loop, so the dedup window is constant
+        # in the length of the stream; the gate sits AFTER the `next` and after
+        # the terminal test, so a `Closed` still ends the loop UNVALIDATED and
+        # the iteration boundary the guarantee rests on does not move. This tier
+        # reports failure as `Err(String)` rather than raising, so a schema
+        # violation is the `Err` `admit` hands back — the SAME shape a `Faulted`
+        # from `next` takes, mapped and propagated by the SAME `?` on the line
+        # above, which fails the activation and reverts the prefix LIFO with the
+        # subscription bracket on it (§6, A8); a duplicate is the `Ok(false)`
+        # that `continue`s and pulls the next item. The plain `every … in`
+        # carries no `event` contract and lowers byte-identically to before.
         subject = _expr(step.get("subject"), env)
         bind = _ident(step["bind"], "binding")
         body = step.get("body") or []
         if not body:  # pragma: no cover — the parser rejects an empty body
             raise EmitError("an `every … in` body is empty")
+        contract = step.get("event")
+        gate = None
+        if contract is not None:
+            # name/key stay RAW: `key` indexes the delivered item's raw JSON
+            # field, and the derived schema's `properties` are keyed the same
+            # way, so mangling either would break the lookup. The event NAME is
+            # the emitted record type the item decodes into, so it goes through
+            # `_ident` in the type-name position, exactly as `_emit_types` spells
+            # the struct.
+            ename = _ident(contract.get("name"), "type name")
+            key = contract.get("key")
+            if not isinstance(key, str) or not _IDENT_RE.match(key):
+                raise EmitError(f"invalid event key identifier: {key!r}")
+            window = contract.get("window")
+            if not isinstance(window, int) or isinstance(window, bool) or window < 1:
+                raise EmitError(
+                    f"event {contract.get('name')!r} has a non-positive dedup "
+                    f"window {window!r} — the window is bounded by construction")
+            env.stream_iter_counter += 1
+            gate = f"_revl_event{env.stream_iter_counter}"
+            where_ = _string(f"{env.name}: on {contract.get('name')}")
+            out.append(
+                f"{pad}let mut {gate} = Stream::contract("
+                f"{_string(contract.get('name'))}, "
+                f"{_string(json.dumps(contract.get('schema')))}, "
+                f"{_string(key)}, {window});")
         out.append(f"{pad}loop {{")
         out.append(
             f"{pad}    match {subject}.next().map_err(|e| "
             f"cordis::CordisError::with_message(cordis::ErrorCode::Plugin, e))? {{")
         # a `Closed` terminal ends the loop before the body — it is a terminal,
         # not an item (mirrors the go tier's `IsStreamClosed(..) { break }`).
+        # The gate below sits AFTER this arm, so a terminal is never validated.
         out.append(f"{pad}        StreamNext::Closed => break,")
         out.append(f"{pad}        StreamNext::Item({bind}) => {{")
+        if gate is not None:
+            # The iteration boundary is exactly here: one turn of the loop has
+            # returned from the blocking `next`, so a divert while parked (the
+            # owner's teardown tripping the cancel signal, which resolves
+            # `next` as `Closed`) abandons the loop before the arm is entered.
+            # The gate is pure and cannot park, so it never adds a second
+            # suspension point the guarantee would have to account for.
+            errvar = f"{gate}_err"
+            out.append(f"{pad}            match {gate}.admit(&{bind}, {where_}) {{")
+            out.append(f"{pad}                Ok(true) => {{}}")
+            # a duplicate inside the window is collapsed, not an item: pull the
+            # next one. `continue` targets the enclosing `loop`, not the `match`.
+            out.append(f"{pad}                Ok(false) => continue,")
+            # a schema violation is a fault by another name: propagate it
+            # UNCAUGHT, exactly as the `?` above propagates a `Faulted`, so the
+            # activation fails and the prefix reverts LIFO with the
+            # subscription bracket on it (§6, A8, "a failed handler does not
+            # leave a subscription active").
+            out.append(
+                f"{pad}                Err({errvar}) => return Err("
+                f"cordis::CordisError::with_message(cordis::ErrorCode::Plugin, "
+                f"{errvar})),")
+            out.append(f"{pad}            }}")
+            # `admit` already proved the shape, so this decode cannot fail on a
+            # conforming item; propagating the error keeps the tier honest if it
+            # somehow does, and the `Err` shape is the same fault.
+            vvar = f"{gate}_value"
+            dvar = f"{gate}_decode_err"
+            out.append(
+                f"{pad}            let {vvar} = match "
+                f"serde_json::from_str::<serde_json::Value>(&{bind}) {{")
+            out.append(f"{pad}                    Ok(v) => v,")
+            out.append(
+                f"{pad}                    Err({dvar}) => return Err("
+                f"cordis::CordisError::with_message(cordis::ErrorCode::Plugin, "
+                f"format!(\"{{}}: event {{}} item is not a JSON value: {{}}\", "
+                f"{where_}, {_string(contract.get('name'))}, {dvar}))),")
+            out.append(f"{pad}                }};")
+            # the validated item decodes into the event's declared record type,
+            # so the body reads `e.<field>` as an ordinary typed field access.
+            out.append(
+                f"{pad}            let {bind}: {ename} = "
+                f"match serde_json::from_value::<{ename}>({vvar}) {{")
+            out.append(f"{pad}                Ok(v) => v,")
+            out.append(
+                f"{pad}                Err({dvar}) => return Err("
+                f"cordis::CordisError::with_message(cordis::ErrorCode::Plugin, "
+                f"format!(\"{{}}: event {{}} item failed its schema: {{}}\", "
+                f"{where_}, {_string(contract.get('name'))}, {dvar}))),")
+            out.append(f"{pad}            }};")
+            # register the item's declared record type so the body's
+            # `e.<field>` accesses resolve against the struct (mirrors the go
+            # tier, which registers the same binding the same way). The value is
+            # the RAW type name: the type table is keyed by raw name.
+            env.v3_ctx().var_types[step.get("bind")] = contract.get("name")
         # a body that does not read the item must not trip an unused-binding
-        # lint on this tier; the go tier makes the same discard (`_ = o`).
+        # lint on this tier; the go tier makes the same discard (`_ = o`). After
+        # the event gate this discards the TYPED binding, which is the one the
+        # body reads.
         out.append(f"{pad}            let _ = &{bind};")
         for nested in body:
             _emit_step(nested, env, out, indent + 3)
@@ -6795,7 +7165,17 @@ def _emit_v3_types(types: dict) -> list[str]:
                 rendered = _rust_type(ftype, types)
                 if (raw_name, field) in boxed_fields:
                     rendered = f"Box<{rendered}>"
-                out.append(f"    {_ident(field, 'record field')}: {rendered},")
+                fname = _ident(field, "record field")
+                if fname != field:
+                    # `_mangle` renamed a field that collides with a Rust
+                    # keyword (`box`, `move`, `gen`), but the WIRE key is the
+                    # source field name on every tier (go pins it with a
+                    # `json:"<revl-name>"` tag, py/ts write it bare), so serde is
+                    # told the real key — without this a record round-trips under
+                    # a name no other tier writes, and any `from_value` decode of
+                    # the wire object faults on a field the schema just accepted.
+                    out.append(f'    #[serde(rename = "{field}")]')
+                out.append(f"    {fname}: {rendered},")
             out.append("}")
         elif spec.get("kind") == "variant":
             out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
