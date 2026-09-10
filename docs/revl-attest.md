@@ -265,7 +265,7 @@ like `--verify` it is a **check**: exit `0` when valid, nonzero when not.
 | --------------- | ---------------------------------------------------------------- |
 | `kind` / `version` | `revl.component-certificate` / `1.0`, the envelope identity   |
 | `subject`       | the file, its source sha256 and its canonical IR hash            |
-| `proof_model`   | the pinned Lean toolchain, a digest of the lake manifest and the pinned manifest dependencies, so "checked against v4.33.1" is a statement a reader can re-derive rather than take on trust |
+| `proof_model`   | the pinned Lean toolchain, a digest of the lake manifest and the dependency pins that manifest names, all three re-derived from the package at verify time, so "checked against v4.33.1" is a statement a reader can check rather than take on trust |
 | `statuses`      | one row per catalogued guarantee: the status this build reads out of `formal/STATUS.md`, the map's own status cell verbatim and the map's own gap cell verbatim |
 | `requirements`  | what each status rests on: the guarantee rows of the non-vacuity registry, the registry itself, the map, the axioms gate and its axiom policy, the model pin, the oracle census, the injection table and the mutation sweep |
 | `caveats`       | the qualifications the artifacts record, quoted rather than summarised |
@@ -307,7 +307,7 @@ member, and compared:
 - every caveat, quoted from the artifacts;
 - every requirement, both the `detail` and the `check` recorded behind it;
 - the whole proof model: the pinned toolchain, the manifest digest and the
-  manifest pins;
+  dependency pins the manifest names;
 - the checker identity, `checker.compiler` and `checker.ruleset`, against
   `attest.checker_identity()`;
 - the subject's source digest, when the file the `subject` names is readable
@@ -317,11 +317,13 @@ member, and compared:
 
 A certificate therefore cannot assert coverage the tree does not have, cannot
 drop a caveat the tree records, and cannot restate a gap, a theorem list, a
-requirement's reason or a toolchain pin the tree no longer supports: each of
-those is an evidence mismatch when it does not match. Verification fails closed
+requirement's reason, a toolchain pin or a dependency pin the tree no longer
+supports: each of those is an evidence mismatch when it does not match.
+Verification fails closed
 on an unknown guarantee name, a missing or duplicated status row, a caveat the
 artifacts still record, a requirement the artifacts no longer support, an
-unknown requirement kind, a malformed envelope, a subject hash that is not a
+unknown requirement kind, a malformed envelope, a signed member dropped from the
+record, a subject hash that is not a
 digest, a signature that is not ASCII, and, with `--against`, a composition
 whose hash differs from the `subject` hash. Each refusal names which of the key,
 the envelope and the evidence failed.
@@ -367,7 +369,12 @@ names and compares that digest, so a record pointing at another file with other
 bytes is refused, while a copy of the same bytes under a different path verifies.
 `as_of_commit` is checked as a revision of this repository's history rather than
 as an equality with `HEAD`, so a checkout that has legitimately moved forward
-still verifies while a commit this history does not contain is refused.
+still verifies while a commit this history does not contain is refused. The
+member is signed `null` when the package is not a git work tree, and then there
+is no revision to check; a record that does not carry the member at all is
+refused as a missing required member, so "there is no commit to check" is always
+the record's own statement rather than something a reader has to infer from
+silence.
 
 `--formal DIR` names the formal package to read instead of the one found from
 the working directory, `$REVL_FORMAL_DIR`, or the ancestors of the installed
