@@ -115,6 +115,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from revl.compiler import compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
+from revl.manifest import manifest_wire  # noqa: E402
 from revl.run_rust import rust_runtime_reason  # noqa: E402
 
 # The corpus and the reference classifier, IMPORTED from the self-host lowering
@@ -195,6 +196,26 @@ fn main() {
                     verdict.to_json()
                 ),
             }
+        }
+        return;
+    }
+    // `--into <manifest>` is the manifest arm of issue #346, driven from the
+    // SAME standalone binary: `admit_into(source, manifest)` for each source,
+    // against a running composition handed over as the flat manifest wire. The
+    // wire comes from argv, not from a constant here, so the corpus can hold the
+    // crate against the wire the PY side computes from its own running
+    // composition - a crate that ignored the parameter and re-derived a
+    // standalone verdict would red.
+    if mode.as_deref() == Some("--into") {
+        let manifest = match argv.next() {
+            Some(value) => value,
+            None => {
+                eprintln!("--into needs a manifest wire");
+                std::process::exit(2);
+            }
+        };
+        for source in blob.split('\0') {
+            println!("{}", revl_gate::admit_into(source, &manifest).to_json());
         }
         return;
     }
@@ -414,6 +435,268 @@ def test_crate_and_reference_agree_on_the_covered_corpus(agreement, index):
         f"{name}: message — crate {verdict['message']!r} != reference {ref_msg!r}")
 
 
+# ------------------------------------ the held-composition corpus (issue #346)
+#
+# `admit(source)` asks the STANDALONE question. Issue #346 added
+# `admit_into(source, manifest)`, which folds the same G2/G3 legs over the UNION
+# of a RUNNING composition's rows and the candidate — the shape an agent loop
+# actually asks, and the one `bench/inprocess_gate_harness.py` already asks on
+# py. It is driven here through the SAME standalone consumer, with `--into
+# <manifest wire>`: the wire is computed below from the py side's own flattening
+# of its own running composition, so a crate that ignored the parameter and
+# re-derived a standalone verdict would DISAGREE rather than quietly agree.
+#
+# What the arm does, and what it deliberately does not, is measured here:
+#
+# * it REFUSES a candidate that collides with a key the running composition
+#   already provides — `ambient_collision_*` — with the reference's own code and
+#   message, verbatim; and
+# * it does NOT resolve a `requires` against the running composition (that is the
+#   reference type layer, a separate lane), so `requires_the_running_provider`
+#   comes back a no-objection where the reference ADMITS. That entry is in the
+#   corpus DELIBERATELY: it is the half that is still open, held here so the
+#   distance stays visible instead of being papered over by a stub that answers
+#   everything the same way.
+#
+# `ambient_collision_a` is the load-bearing entry: the reference ADMITS it
+# standalone and REFUSES it into the running composition, so it is the case that
+# can only pass if the manifest parameter is genuinely read.
+
+HELD_RUNNING = """
+service Store {
+  fn get(key: Str) -> Str
+}
+service AppSvc {
+  fn snapshot() -> Str
+}
+component Kv provides store: Store {
+  provide store { fn get(key) = key }
+}
+component App requires store: Store provides app: AppSvc {
+  provide app { fn snapshot() = store.get("x") }
+}
+"""
+
+HELD_MANIFEST = manifest_wire(compile_source(HELD_RUNNING, "held.rvl"))
+
+MANIFEST_CORPUS: list[tuple[str, str]] = [
+    # The ambient collision the py gate refuses G2 and this gate must match: it
+    # provides `store` in the shared realm, which `Kv` already provides. Its
+    # `Store` carries the running provider's own surface, so no interface drift
+    # is in play and the collision is the only verdict.
+    ("ambient_collision_a", """
+service Store {
+  fn get(key: Str) -> Str
+}
+component Rogue provides store: Store {
+  provide store { fn get(key) = key }
+}
+"""),
+    # The same collision under a differently NAMED service: the conflict is on
+    # the provision KEY, not on the interface's spelling.
+    ("ambient_collision_b", """
+service Narrow { fn get(key: Str) -> Str }
+component Rogue provides store: Narrow {
+  provide store { fn get(key) = key }
+}
+"""),
+    # No collision: a fresh key. The reference admits it into the composition and
+    # this gate raises no objection.
+    ("clean_extension", """
+service Extra { fn ping() -> Str }
+component Add provides extra: Extra {
+  provide extra { fn ping() = "p" }
+}
+"""),
+    # THE OPEN HALF: the reference resolves `store` against the running `Kv`
+    # provider and ADMITS this into the composition (it REFUSES it standalone).
+    # This gate resolves nothing, so it can only decline to object.
+    ("requires_the_running_provider", """
+service Cache { fn lookup(key: Str) -> Str }
+component CacheLayer requires store: Store provides cache: Cache {
+  provide cache { fn lookup(key) = store.get(key) }
+}
+"""),
+    # G3 legs the manifest does not change: a component that requires a key it
+    # provides itself, and a dependency cycle. Both must come back refused with
+    # the reference's own tag and message, into the manifest as well as
+    # standalone.
+    ("self_requires", """
+service Store { fn get(key: Str) -> Str }
+component Odd provides odd: Store requires odd: Store {
+  provide odd { fn get(key) = key }
+}
+"""),
+    ("dependency_cycle", """
+service A { fn a() -> Str }
+service B { fn b() -> Str }
+component CycleA provides a: A requires b: B {
+  provide a { fn a() = "a" }
+}
+component CycleB provides b: B requires a: A {
+  provide b { fn b() = "b" }
+}
+"""),
+]
+
+
+def _manifest_reference(source: str, base: dict) -> tuple[str, str]:
+    """(tag, message) — ("", "") when the reference ADMITS this program INTO the
+    composition. The same call `revl.gate.admit_into` makes, with the refusal
+    rendered in the gate's guarantee vocabulary; a G2 conflict carries no
+    `RevlError.code` for `_classify` to be replaced by."""
+    try:
+        compile_source(source, "gate-crate.rvl", manifest=dict(base))
+        return ("", "")
+    except RevlError as error:
+        return (oracle._classify(error), error.message)
+
+
+def _py_admit_into(source: str, base: dict) -> bool:
+    """Does the PUBLIC `revl.gate.admit_into` verb admit this program INTO the
+    composition? Asked of the verb itself, not of a re-derivation of its two
+    calls, so the corpus is held against what an embedder would actually call."""
+    from revl import gate as py_gate
+
+    return py_gate.admit_into(source, dict(base)).admitted
+
+
+def _crate_into_verdicts(binary: Path, sources: list[str],
+                         manifest: str) -> list[dict]:
+    """One process, one manifest, one verdict per source — the crate's manifest
+    arm, driven from the standalone binary exactly as an embedder would."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+    run = subprocess.run([str(binary), "--into", manifest],
+                         input="\0".join(sources), text=True,
+                         capture_output=True, timeout=900, env=env, check=False)
+    assert run.returncode == 0, (
+        "the consumer binary exited nonzero on the manifest arm:\n"
+        + (run.stderr or run.stdout or "")[-4000:])
+    lines = [line for line in run.stdout.splitlines() if line.strip()]
+    assert len(lines) == len(sources), (
+        f"expected {len(sources)} manifest-arm verdicts, got {len(lines)}")
+    return [json.loads(line) for line in lines]
+
+
+@pytest.fixture(scope="module")
+def manifest_agreement(consumer) -> list[tuple[str, str, dict]]:
+    """(name, source, crate manifest-arm verdict) for the whole held-composition
+    corpus, computed once — the consumer binary is invoked a single time."""
+    verdicts = _crate_into_verdicts(consumer, [src for _, src in MANIFEST_CORPUS],
+                                    HELD_MANIFEST)
+    return [(name, src, verdict)
+            for (name, src), verdict in zip(MANIFEST_CORPUS, verdicts)]
+
+
+def test_the_manifest_arm_issues_no_admission_either(manifest_agreement):
+    """THE security clause, on the newer surface. `admit_into` answers a bigger
+    question than `admit` — it is handed the world the candidate would join — so
+    it is held to the same rule: no arm may read as an admission, on any corpus
+    program. A refusal here is an inconvenience; an admission is the hole."""
+    offenders = [(name, verdict) for name, _src, verdict in manifest_agreement
+                 if verdict["admitted"] is not False
+                 or verdict["verdict"] not in
+                 ("refused", "no_objection", "outside_frontier")]
+    assert not offenders, (
+        "the crate's manifest arm produced something a consumer could read as an "
+        "admission:\n  "
+        + "\n  ".join(f"{name}: {verdict}" for name, verdict in offenders))
+
+
+def test_every_manifest_refusal_is_a_real_reference_manifest_refusal(
+        manifest_agreement):
+    """The sound direction on the manifest arm: every refusal must be a real
+    `revl.gate.admit_into` refusal with the same code and the same message,
+    verbatim. A false alarm against a RUNNING composition is the expensive kind —
+    it throws away a candidate the live system would have accepted."""
+    base = compile_source(HELD_RUNNING, "held.rvl")
+    false_alarms, tag_drift, message_drift = [], [], []
+    refused = [name for name, _src, v in manifest_agreement
+               if v["verdict"] == "refused"]
+    assert refused, (
+        "the manifest arm refused NOTHING in this corpus, so the sound direction "
+        "is not exercised at all: the corpus must carry candidates the running "
+        "composition genuinely conflicts with, or a manifest-ignoring stub would "
+        "pass this test by refusing nothing")
+    for name, src, verdict in manifest_agreement:
+        if verdict["verdict"] != "refused":
+            continue
+        ref_tag, ref_msg = _manifest_reference(src, base)
+        if ref_tag == "":
+            false_alarms.append((name, verdict["code"], verdict["message"]))
+            continue
+        if verdict["code"] != ref_tag:
+            tag_drift.append((name, verdict["code"], ref_tag))
+        if verdict["message"] != ref_msg:
+            message_drift.append((name, verdict["message"], ref_msg))
+    assert not false_alarms, (
+        "the crate's manifest arm REFUSED programs `revl.gate.admit_into` "
+        "ADMITS:\n  "
+        + "\n  ".join(f"{name}: {code} ({msg!r})"
+                      for name, code, msg in false_alarms))
+    assert not tag_drift, (
+        "code drift on the manifest arm:\n  "
+        + "\n  ".join(f"{name}: crate {c!r} != reference {r!r}"
+                      for name, c, r in tag_drift))
+    assert not message_drift, (
+        "the manifest arm's message is not the reference's, verbatim:\n  "
+        + "\n  ".join(f"{name}:\n    crate {c!r}\n    ref   {r!r}"
+                      for name, c, r in message_drift))
+
+
+def test_the_manifest_parameter_is_read_rather_than_ignored(manifest_agreement):
+    """The positive claim, and the one a stub could not pass.
+
+    At least one corpus program must be ADMITTED standalone by the reference and
+    REFUSED by the reference when admitted against the running composition — and
+    the crate's manifest arm must land on the refusal. A crate that ignored its
+    manifest argument and returned the standalone verdict would be
+    indistinguishable from this one everywhere else in the corpus, so this entry
+    is what makes `admit_into` more than a renamed `admit`. The count of such
+    entries is asserted, not just its presence, so deleting the case is a red
+    rather than a silently weaker test."""
+    base = compile_source(HELD_RUNNING, "held.rvl")
+    contrast = []
+    for name, src, verdict in manifest_agreement:
+        standalone_tag, _ = _reference(src)
+        into_tag, into_msg = _manifest_reference(src, base)
+        if standalone_tag != "" or into_tag == "":
+            continue
+        contrast.append((name, into_tag, into_msg, verdict))
+    assert len(contrast) >= 1, (
+        "no corpus program distinguishes the standalone question from the "
+        "manifest question, so this test would pass for a crate that ignored its "
+        "manifest parameter: " + repr([n for n, _, _ in manifest_agreement]))
+    for name, into_tag, into_msg, verdict in contrast:
+        assert verdict["verdict"] == "refused", (
+            f"{name}: the reference ADMITS it standalone and REFUSES it "
+            f"{into_tag} into the running composition, but the crate's manifest "
+            f"arm said {verdict['verdict']} — the manifest parameter is not "
+            f"being read")
+        assert verdict["code"] == into_tag, (
+            f"{name}: crate {verdict['code']!r} != reference {into_tag!r}")
+        assert verdict["message"] == into_msg, (
+            f"{name}: crate {verdict['message']!r} != reference {into_msg!r}")
+    # And the other direction is priced, never hidden: the entry the crate can
+    # only decline to object to. If the self-host grows the type layer this
+    # becomes an agreement and the assertion should be tightened, not dropped.
+    open_half = [
+        (name, verdict) for name, src, verdict in manifest_agreement
+        if _reference(src)[0] != "" and _manifest_reference(src, base)[0] == ""
+        and _py_admit_into(src, base)
+    ]
+    assert open_half, (
+        "the corpus lost the requires-resolution case: without it this corpus "
+        "would be claiming the whole manifest question is closed")
+    for name, verdict in open_half:
+        assert verdict["verdict"] == "no_objection" and verdict["code"] is None, (
+            f"{name}: the crate cannot resolve a requires against the running "
+            f"composition, so the only honest arm is a no-objection "
+            f"(got {verdict['verdict']} {verdict['code']!r})")
+        assert verdict["admitted"] is False, name
+
+
 # ------------------------------------------- the measured type-layer gap
 
 # Programs the REFERENCE refuses and the self-host gate raises no objection to.
@@ -552,6 +835,97 @@ def test_a_deeply_nested_source_is_refused_rather_than_aborting(
     # the refusal states the bound rather than describing a resource failure
     assert "nesting" in verdict["message"] and "200" in verdict["message"], (
         verdict["message"])
+
+
+# ------------------------------------------------------------ manifest row bound
+#
+# The manifest is not a string the gate can scan and be done with: it is a
+# `;`-separated wire that the fold consumes ONE STACK FRAME PER ROW, so the size
+# bound above is not a bound on the fold. Measured against the crate as it was
+# before this bound existed: `"A/b/;" * 20000` is 100 KB, well under
+# `MAX_SOURCE_BYTES`, and took the process down with `fatal runtime error: stack
+# overflow` (exit 134, `Abort trap: 6`) on a stock 8 MiB main thread; `";" * 2700`
+# is 2.7 KB and took a 1 MiB thread down, which is the wasm module's default
+# because the component build sets no `stack-size`; and the DEBUG profile the
+# crate's own `cargo test` runs under went down at 20 000 rows too. A rust stack
+# overflow ABORTS, and `catch_unwind` cannot turn an abort back into a verdict,
+# so an embedder got no answer, no log and no process.
+# `MANIFEST_ROW_LIMIT` counts the rows ahead of the parser and declines the wire
+# with the same `outside_frontier` / `FRONTIER` shape the size bound uses.
+#
+# The wires below are deliberately INERT (`A/b/` names nothing a running
+# composition could hold), so a wire under the bound stays `no_objection` and
+# no probe here can pass by way of some unrelated refusal.
+
+ROW_BOUND_PROBE_SOURCE = "fn id(x: Int) -> Int { return x }"
+
+
+def _generated_manifest_row_limit() -> int:
+    """The row bound the crate was GENERATED with, read out of `src/frontier.rs`
+    for the same reason `_generated_frontier` reads the lexical tables: a probe
+    derived from the bound cannot outlive the bound it probes."""
+    src = (CRATE / "src" / "frontier.rs").read_text(encoding="utf-8")
+    match = re.search(r"MANIFEST_ROW_LIMIT: usize = (\d+);", src)
+    assert match, "the crate ships no manifest row bound in `src/frontier.rs`"
+    return int(match.group(1))
+
+
+def test_a_manifest_over_the_row_bound_is_declined_not_decided(consumer):
+    """The refusal that keeps the fold from taking the host down, proven from
+    the consumer side. The wire is a few KB, so the size bound cannot be what
+    declines it."""
+    limit = _generated_manifest_row_limit()
+    meta = json.loads((CRATE / "GENERATED.json").read_text(encoding="utf-8"))
+    manifest = ";".join(["A/b/"] * (limit + 1))
+    assert len(manifest) < meta["max_source_bytes"] // 10, (
+        "the point of this probe is that it is far below the size bound")
+    verdict = _crate_into_verdicts(consumer, [ROW_BOUND_PROBE_SOURCE],
+                                   manifest)[0]
+    assert verdict["admitted"] is False
+    assert verdict["verdict"] == "outside_frontier", (
+        f"expected the fold to be declined by the row bound, got "
+        f"{verdict['verdict']} ({verdict['message']!r})")
+    assert verdict["code"] == "FRONTIER"
+    # The refusal names the bound and the count, rather than describing a
+    # resource failure an embedder could not act on.
+    assert str(limit) in verdict["message"], verdict["message"]
+    assert str(limit + 1) in verdict["message"], verdict["message"]
+    assert "row" in verdict["message"], verdict["message"]
+
+
+def test_a_manifest_that_used_to_take_the_host_down_is_declined_not_risked(
+        consumer):
+    """The unreduced wire: the row count the pre-fix crate aborted on. It has to
+    come back as a verdict, because there is no recovering from the alternative
+    - a refused manifest costs a denial, an aborted one costs the process."""
+    limit = _generated_manifest_row_limit()
+    rows = 20_500
+    assert rows > limit
+    manifest = ";".join(["A/b/"] * rows)
+    assert len(manifest) < json.loads(
+        (CRATE / "GENERATED.json").read_text(encoding="utf-8"))["max_source_bytes"]
+    verdict = _crate_into_verdicts(consumer, [ROW_BOUND_PROBE_SOURCE],
+                                   manifest)[0]
+    assert verdict["admitted"] is False
+    assert verdict["verdict"] == "outside_frontier", verdict
+    assert verdict["code"] == "FRONTIER"
+    assert str(rows) in verdict["message"], verdict["message"]
+
+
+def test_a_manifest_at_or_under_the_row_bound_is_still_folded(consumer):
+    """Non-vacuity in the other direction: a ceiling, not a wall. The wire at
+    the bound is decided exactly as an empty manifest is, which is the standalone
+    gate - so an embedder that hands over a large-but-bounded composition does
+    not lose the arm."""
+    limit = _generated_manifest_row_limit()
+    for rows, label in ((limit, "at the bound"), (limit // 2, "under the bound")):
+        manifest = ";".join(["A/b/"] * rows)
+        verdict = _crate_into_verdicts(consumer, [ROW_BOUND_PROBE_SOURCE],
+                                       manifest)[0]
+        assert verdict["admitted"] is False, label
+        assert verdict["verdict"] == "no_objection", (
+            f"{rows} rows ({label}) must still be folded, got {verdict}")
+        assert verdict["code"] is None, label
 
 
 def test_ill_formed_sources_are_refused_not_waved_through(consumer):

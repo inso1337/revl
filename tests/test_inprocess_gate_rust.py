@@ -17,20 +17,30 @@ SELF-HOST front end compiled to rust, it decides the composition/guarantee layer
 admission arm at all (`Refused` / `NoObjection` / `OutsideFrontier`, with
 `"admitted": false` on the wire for every one).
 
+It does now answer TWO questions (issue #346): `admit(source)` asks the
+standalone one, and `admit_into(source, manifest)` folds the G2/G3 legs over the
+UNION of a running composition's rows and the candidate. The second is what makes
+the realistic agent loop - screen a candidate AGAINST the composition already
+running - expressible without Python. It buys the AMBIENT half of that question;
+it still does not resolve a `requires` against a live provider, which is the
+self-host type layer's work and its own roadmap lane. Both halves are held to the
+py gate's own answers below, one test each, and neither is overstated.
+
 So the claim held here is a DIFFERENTIAL, and an asymmetric one - the rule
 `docs/design/333-inprocess-gate.md` states for the rust tier and 332's release
 gate fixes:
 
 * **the release-blocking direction**: the rust gate must never let a host read
   anything as an admission. Structurally closed (no arm exists), held here over
-  the whole batch anyway, because "structurally closed" is a claim about the
-  code and this is the measurement.
+  the whole batch anyway - on BOTH questions - because "structurally closed" is a
+  claim about the code and this is the measurement.
 * **the sound direction**: every refusal the rust gate DOES issue must be a real
-  py refusal, with the same code. A false alarm is a candidate an agent throws
-  away for no reason.
+  py refusal, with the same code and the same why-trace. A false alarm is a
+  candidate an agent throws away for no reason.
 * **the tolerated direction**: a rust no-objection says nothing about py. py may
   admit it (agreement) or refuse it on a layer rust does not run (the hole draft,
-  the type layer). That gap is measured and reported here, never assumed away.
+  the type layer, a `requires` that resolves against the running composition).
+  That gap is measured and reported here, never assumed away.
 
 The two harnesses screen the SAME BYTES: the rust harness emits each candidate's
 source in its `--json` report, this test re-derives the py verdict from those
@@ -210,6 +220,24 @@ def _py_reference(source: str) -> tuple[str, str]:
         return (oracle._classify(error), error.message)
 
 
+def _py_manifest_reference(source: str, base: dict) -> tuple[str, str]:
+    """`(tag, message)` for the py MANIFEST arm - `("", "")` when py ADMITS.
+
+    The twin of `_py_reference`, and the same call `revl.gate.admit_into` makes
+    (`compile_source(source, manifest=dict(manifest))`). It stops short of
+    `admit_into` itself only to keep the RAISED error: `admit_into` renders a
+    refusal through `_verdict_from_error`, whose message is `str(error)`, while
+    the vocabulary this test compares the two gates in is `_classify(error)` +
+    `error.message` - and a G2 conflict carries no `code` to compare at all.
+    `test_the_manifest_gap_is_priced_not_hidden` holds the public `admit_into`
+    verb itself to this mirror, so the two cannot drift."""
+    try:
+        compile_source(source, manifest=dict(base))
+        return ("", "")
+    except RevlError as error:
+        return (oracle._classify(error), error.message)
+
+
 # ------------------------------------------- the release-blocking direction
 
 
@@ -219,12 +247,24 @@ def test_no_candidate_reads_as_an_admission(report):
     class the whole admission-gate arc exists to prevent. The crate closes it
     structurally - there is no `Admitted` arm and `to_json` reports
     `"admitted": false` on every arm - and this holds that over the batch a real
-    embedder screens."""
+    embedder screens, on BOTH questions the crate now answers: standalone, and
+    against the held manifest (issue #346's `admit_into`). The manifest arm is
+    held to the same clause because it is the newer surface: it must read as a
+    refusal or a no-objection, never as an admission into the running
+    composition."""
     offenders = [
         (c["name"], c["wire"]) for c in report["candidates"]
         if '"admitted":false' not in c["wire"]
         or c["verdict"] not in ("refused", "no_objection", "outside_frontier")
     ]
+    for candidate in report["candidates"]:
+        arm = candidate["into"]
+        if arm is None:
+            continue
+        if '"admitted":false' not in arm["wire"] or arm["verdict"] not in (
+                "refused", "no_objection", "outside_frontier"):
+            offenders.append((f"{candidate['name']} (into {candidate['manifest']})",
+                              arm["wire"]))
     assert not offenders, (
         "the rust harness produced something a host could read as an "
         "admission:\n  " + "\n  ".join(f"{n}: {w}" for n, w in offenders))
@@ -270,6 +310,59 @@ def test_every_rust_refusal_is_a_real_py_refusal_with_the_same_code(report):
         + "\n  ".join(f"{n}: rust {r!r} != py {p!r}" for n, r, p in tag_drift))
     assert not message_drift, (
         "the rust gate's why-trace is not the reference's, verbatim:\n  "
+        + "\n  ".join(f"{n}:\n    rust {r!r}\n    py   {p!r}"
+                      for n, r, p in message_drift))
+
+
+def test_every_rust_manifest_refusal_is_a_real_py_manifest_refusal(report):
+    """The sound direction ON THE MANIFEST ARM, and the negative exit test of
+    issue #346: a candidate the py gate refuses for a G2/G3 reason - a collision
+    with the RUNNING composition - must be refused by the rust gate with the same
+    code AND the same why-trace, byte for byte.
+
+    Held against `revl.gate.admit_into` rather than the standalone gate, because
+    the two ask different questions: the same bytes can be admitted standalone
+    and refused against a live composition. A rust manifest refusal of a
+    candidate py admits INTO the composition would be a false alarm the embedder
+    acts on; a refusal under a different tag points the repair at the wrong
+    obligation; and a message that is not the reference's is not the local
+    diagnostic a rust embedder links the crate for.
+    """
+    import inprocess_gate_harness as py_harness  # noqa: PLC0415
+
+    base = py_harness.base_manifest()
+    false_alarms = []
+    tag_drift = []
+    message_drift = []
+    arms = [(c["name"], c["into"]) for c in report["candidates"]
+            if c["into"] is not None]
+    assert [n for n, a in arms if a["verdict"] == "refused"], (
+        "the manifest arm refused nothing, so the sound direction is not "
+        "exercised at all and a stub that ignored its manifest argument would "
+        "pass by refusing nothing: " + repr([n for n, _ in arms]))
+    for candidate in report["candidates"]:
+        arm = candidate["into"]
+        if arm is None or arm["verdict"] != "refused":
+            continue
+        tag, message = _py_manifest_reference(candidate["source"], base)
+        if tag == "":
+            false_alarms.append((candidate["name"], arm["code"], arm["message"]))
+            continue
+        if tag != arm["code"]:
+            tag_drift.append((candidate["name"], arm["code"], tag))
+        if message != arm["message"]:
+            message_drift.append((candidate["name"], arm["message"], message))
+
+    assert not false_alarms, (
+        "the rust gate REFUSED into the running manifest candidates the py "
+        "manifest gate ADMITS:\n  "
+        + "\n  ".join(f"{n}: {c} ({m!r})" for n, c, m in false_alarms))
+    assert not tag_drift, (
+        "the rust gate refused against the running manifest with a different "
+        "guarantee tag than py:\n  "
+        + "\n  ".join(f"{n}: rust {r!r} != py {p!r}" for n, r, p in tag_drift))
+    assert not message_drift, (
+        "the rust gate's manifest why-trace is not the reference's, verbatim:\n  "
         + "\n  ".join(f"{n}:\n    rust {r!r}\n    py   {p!r}"
                       for n, r, p in message_drift))
 
@@ -337,39 +430,100 @@ def test_the_hole_draft_is_the_named_gap_not_a_silent_one(report):
 
 
 def test_the_manifest_gap_is_priced_not_hidden(report):
-    """The other measured gap: there is no native `admit_into`, so the realistic
-    agent shape - admit a candidate AGAINST the running composition - is not
-    available on rust at all.
+    """Which half of the manifest gap CLOSED (issue #346), and which is still
+    open. Both are held to the py gate's own answers here; neither may be
+    overstated.
 
-    The batch carries the py harness's `cache_layer` candidate to price it. py
-    ADMITS it into the running manifest and REFUSES it standalone; the rust gate
-    can only be asked the standalone question, and raises no objection to a
-    `requires` that resolves to nothing. So a rust agent loop cannot screen the
-    case its py twin screens best, and the no-objection it does get is worth
-    nothing - which is the point this test pins.
+    `crates/revl-gate` now carries a real `admit_into(source, manifest)`: it
+    folds the G2/G3 legs over the UNION of the running composition's rows and
+    the candidate, so the realistic agent shape - admit a candidate AGAINST the
+    running composition - is askable on rust. What that buys, and what it does
+    not:
+
+    * **CLOSED - the ambient half.** `ambient_provision_conflict` collides with
+      a key the RUNNING composition already provides. py's
+      `revl.gate.admit_into` refuses it `G2`; the rust gate refuses it `G2` with
+      the IDENTICAL why-trace; and py's STANDALONE `admit` ADMITS the same bytes.
+      That last clause is what makes the agreement mean something: a rust gate
+      that ignored its manifest argument would agree with the standalone gate,
+      not with `admit_into`.
+    * **STILL OPEN - requirement resolution.** py's `admit_into` RESOLVES
+      `cache_layer`'s `requires store: Store` against the running `Kv` provider
+      and ADMITS it, while the self-host fold - which checks disjointness,
+      acyclicity and route realms and never resolves a requirement - can only
+      decline to object. That is the self-host TYPE LAYER, its own roadmap lane,
+      and this test keeps the distance visible instead of papering over it.
+
+    Neither half may be made to lie: the manifest arm is a refusal arm, so it
+    reports `"admitted": false` on both. When the type layer lands, the open
+    half becomes an agreement and this test should be TIGHTENED (the rust arm
+    must then land on the reference's `G3`/`T*` tag with its why-trace) - never
+    deleted, and never relaxed into a tautology.
     """
     import inprocess_gate_harness as py_harness  # noqa: PLC0415
+    from revl.manifest import manifest_wire  # noqa: PLC0415
 
-    cache_layer = next((c for c in report["candidates"]
-                        if c["name"] == "cache_layer"), None)
-    assert cache_layer is not None, (
-        "the batch must carry the manifest-dependent candidate that prices the "
-        "missing admit_into")
+    base = py_harness.base_manifest()
+    assert report["held_manifest"] == manifest_wire(base), (
+        "the rust harness admits into a manifest the py harness does not hold:"
+        f"\nrust: {report['held_manifest']!r}\npy:   {manifest_wire(base)!r}")
 
-    # py, asked the STANDALONE question, refuses; py, asked the
-    # RUNNING-COMPOSITION question, admits. Two questions, and rust can only be
-    # asked the first one.
+    into_arms = {c["name"]: c for c in report["candidates"]
+                 if c["into"] is not None}
+    assert set(into_arms) == {"cache_layer", "ambient_provision_conflict"}, (
+        "the manifest arm's batch changed - one candidate must price the open "
+        "requires-resolution half and one must close the ambient half: "
+        f"{sorted(into_arms)}")
+
+    # ---------------------------------------------------------- the closed half
+    ambient = into_arms["ambient_provision_conflict"]
+    standalone_admitted, _ = _py_verdict(ambient["source"])
+    assert standalone_admitted is True, (
+        "py must ADMIT this candidate standalone - the contrast with the "
+        "manifest refusal is the whole evidence that the manifest is read")
+    assert ambient["verdict"] == "no_objection", (
+        "the ambient-collision candidate must not be refused standalone "
+        f"(got {ambient['verdict']})")
+
+    py_tag, py_message = _py_manifest_reference(ambient["source"], base)
+    assert py_tag == "G2", (
+        f"the py manifest gate must refuse this with G2, not {py_tag!r} - the "
+        "G2 leg is the half issue #346 closes")
+    public = py_gate.admit_into(ambient["source"], base)
+    assert public.admitted is False, (
+        "the public `revl.gate.admit_into` verb must refuse it too - comparing "
+        "the rust crate against a re-derivation of the call is not the same "
+        "claim as comparing it against the call")
+    assert ambient["into"]["verdict"] == "refused", (
+        "the rust manifest arm must REFUSE the ambient collision, not decline "
+        f"to object (got {ambient['into']['verdict']})")
+    assert ambient["into"]["code"] == py_tag, (
+        f"tag drift on the manifest arm: rust {ambient['into']['code']!r} != py "
+        f"{py_tag!r}")
+    assert ambient["into"]["message"] == py_message, (
+        "the rust manifest why-trace is not the reference's, verbatim:\n"
+        f"  rust: {ambient['into']['message']!r}\n  py:   {py_message!r}")
+
+    # ---------------------------------------------------------- the open half
+    cache_layer = into_arms["cache_layer"]
     standalone_admitted, _ = _py_verdict(cache_layer["source"])
     assert standalone_admitted is False, (
         "py must refuse this candidate standalone - if that changed, the "
-        "contrast this test draws no longer exists")
-    into = py_gate.admit_into(cache_layer["source"], py_harness.base_manifest())
-    assert into.admitted is True, (
-        "the py gate must admit this candidate INTO the running composition; "
-        "that contrast is what the missing native admit_into costs")
-
-    # And rust's answer to the only question it can be asked carries no weight:
-    # whatever arm it lands on, it may not read as an admission.
+        "contrast this half draws no longer exists")
+    public = py_gate.admit_into(cache_layer["source"], base)
+    assert public.admitted is True, (
+        "the py gate must still ADMIT this candidate INTO the running "
+        "composition by resolving its `requires` against the live provider; "
+        "that resolution is what rust still cannot do")
+    assert cache_layer["into"]["verdict"] == "no_objection", (
+        "rust cannot resolve a requires against the running composition, so the "
+        "only honest answer is a no-objection - if this became a refusal, the "
+        "self-host may have gained the layer (then tighten this test); if it "
+        f"became anything else, that is a defect ({cache_layer['into']['verdict']})")
+    assert cache_layer["into"]["code"] is None, (
+        "a no-objection must carry no code")
+    assert '"admitted":false' in cache_layer["into"]["wire"], (
+        "the still-open half may never read as an admission either")
     assert '"admitted":false' in cache_layer["wire"]
     if cache_layer["verdict"] == "refused":
         # It may legitimately become a refusal if the self-host gains the
