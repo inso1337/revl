@@ -430,8 +430,8 @@ def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
         def transactional(self, inverse, witness, **kwargs):
             self.entries.append(("activation", inverse, witness, kwargs))
 
-        def transactional_method(self, inverse, witness):
-            self.entries.append(("method", inverse, witness, {}))
+        def transactional_method(self, inverse, witness, **kwargs):
+            self.entries.append(("method", inverse, witness, kwargs))
 
     runtime = types.ModuleType("runtime")
     runtime.Frame = Frame
@@ -458,8 +458,13 @@ def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
     assert [entry[0] for entry in frames[1].entries] == ["activation", "method", "method"]
     for frame in frames:
         for mode, inverse, witness, kwargs in frame.entries:
-            assert kwargs == ({"undo_idempotent": True, "register": "declared"}
-                              if mode == "activation" else {})
+            # item 872: the DECLARED `witnessed[fs]` set rides on every
+            # registration, activation or method, which is what the recorder
+            # turns into the step's `scope`.
+            want = {"scope": {"caps": ["fs"]}}
+            if mode == "activation":
+                want.update(undo_idempotent=True, register="declared")
+            assert kwargs == want
             inverse(witness)
     assert [witness["ordinal"] for witness in restored] == [1, 2, 3, 4, 5]
     assert "saved = _revl_wit2" in source
