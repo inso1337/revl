@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import signal
 import socket as sockets_mod
 import subprocess
@@ -163,11 +164,15 @@ def _classpath(work: Path, runner_source: str, components_source: str) -> Path:
     return out
 
 
-def _spawn(classpath: Path, spec_path: Path) -> subprocess.Popen:
+def _spawn(classpath: "str | Path", spec_path: Path, *, main: str = "PlacementRunner",
+           wal: Path | None = None) -> subprocess.Popen:
+    """One runner process. `wal` is the `$REVL_WAL` the emitted `Components`
+    records to (unset -> the sink is the no-op the non-record default keeps)."""
+    env = None if wal is None else {**os.environ, "REVL_WAL": str(wal)}
     return subprocess.Popen(
-        [javac_gate.JAVA, "-cp", str(classpath), "PlacementRunner", str(spec_path)],
+        [javac_gate.JAVA, "-cp", str(classpath), main, str(spec_path)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        stdin=subprocess.DEVNULL)
+        stdin=subprocess.DEVNULL, env=env)
 
 
 def _read_until(proc: subprocess.Popen, marker: str, collected: list[str], timeout: float = 60.0) -> None:
@@ -212,11 +217,23 @@ def _wire_reply(socket_path: str) -> str:
     return reply.decode("utf-8", "replace")
 
 
-def _run_seam(classpath: Path, provider_config: dict) -> str:
+def _run_seam(classpath: "str | Path", provider_config: dict, *,
+              consumer_classpath: "str | Path | None" = None,
+              consumer_main: str = "PlacementRunner",
+              wal: dict[str, Path] | None = None) -> str:
     """Boot a java provider and a java consumer on the stub runtime, cross the
     seam once through the consumer's probe, tear both down, and return every
     line either printed plus the raw seam reply (prefixed `[wire]`). The same
-    spec shape `revl run --placement` writes."""
+    spec shape `revl run --placement` writes.
+
+    `consumer_classpath`/`consumer_main` swap the consumer for another compiled
+    runner (the reactive twin compiles only against the real cordis4j, so the
+    two sides can live on different classpaths — which is also how
+    `placement._build_java` picks between them). `wal` maps a side's name to the
+    `$REVL_WAL` path it records to.
+    """
+    consumer_classpath = consumer_classpath or classpath
+    wal = wal or {}
     # A Unix socket path is bounded (104 bytes on macOS), so the socket lives
     # under the system tmp dir rather than a pytest tmp_path.
     sockets = Path(tempfile.mkdtemp(prefix="revl-jseam-"))
@@ -235,11 +252,12 @@ def _run_seam(classpath: Path, provider_config: dict) -> str:
         "probe": ["front.login('alice')"],
     }))
     lines: list[str] = []
-    provider = _spawn(classpath, provider_spec)
+    provider = _spawn(classpath, provider_spec, wal=wal.get("provider"))
     try:
         _read_until(provider, "[provider] UP", lines)
         lines.append("[wire] " + _wire_reply(socket))
-        consumer = _spawn(classpath, consumer_spec)
+        consumer = _spawn(consumer_classpath, consumer_spec, main=consumer_main,
+                          wal=wal.get("consumer"))
         try:
             _read_until(consumer, "[consumer] UP", lines)
         finally:
@@ -373,3 +391,206 @@ def test_the_scenario_is_the_legitimate_use():
     ir = _compile(SCENARIO)
     keeper = next(c for c in ir["components"] if c["name"] == "Keeper")
     assert [f["name"] for f in keeper["config"] if f.get("secret")] == ["api_key"]
+
+
+# ---------------------------------------------------------------------------
+# item 1 of the audit (#815): the durable WAL, written by a real JVM
+#
+# The shape test above reads the emitted source and finds the registry on the
+# WAL descriptor path. What it cannot say is that the value a composition
+# declared secret is absent from the FILE — the WAL is plaintext at rest, and a
+# recorded inverse's arguments are part of it, so the file is a sink of its own.
+# These two RUN the sink: the repo's own crash producer drives the recorded
+# composition on a real JVM and `$REVL_WAL` points at a file we then read.
+# ---------------------------------------------------------------------------
+
+CRASHPROOF = BACKEND / "scenarios" / "crashproof"
+
+
+def _wal_ir(canary: str, *, mark: bool) -> dict:
+    """The recorded composition whose inverse's own argument IS the declared
+    value: a host call hands back a credential the composition then passes to
+    the re-issuable undo call, so the descriptor carries it by construction.
+    `mark=False` is the control that makes the declaration absent, not the
+    value: the same bytes reach the same sink without a registry to read them
+    through."""
+    ir = json.loads((CRASHPROOF / "crashproof.ir.json").read_text(encoding="utf-8"))
+    if mark:
+        ir["components"][0]["config"] = [
+            {"name": "api_key", "type": "Str", "default": canary, "secret": True}]
+    ir["externs"][0]["bodies"]["java"] = f'\n    return new RevlResult.Ok<>("{canary}");\n'
+    return ir
+
+
+def _wal_classpath(work: Path, components_source: str) -> Path:
+    """The stub runtime + the recorded unit + the repo's crash producer, the
+    classpath `tests/test_java_crash_recovery.py` compiles for the same sink."""
+    gen = work / "revl"
+    gen.mkdir(parents=True)
+    (gen / "Components.java").write_text(components_source, encoding="utf-8")
+    out = work / "out"
+    out.mkdir()
+    result = subprocess.run(
+        [javac_gate.JAVAC, "--release", javac_gate.RELEASE, "-d", str(out)]
+        + [str(s) for s in javac_gate.STUB_SOURCES]
+        + [str(gen / "Components.java"), str(CRASHPROOF / "CrashProducer.java")],
+        capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stderr
+    return out
+
+
+def _recorded_wal(classpath: Path, wal: Path) -> str:
+    """Activate -> dispose -> discharge: the clean run, so the descriptor is on
+    disk and the file we read is the one the sink wrote."""
+    result = subprocess.run(
+        [javac_gate.JAVA, "-cp", str(classpath), "CrashProducer"],
+        env={"REVL_WAL": str(wal), "PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert wal.exists(), "the run wrote no WAL at all"
+    return wal.read_text(encoding="utf-8")
+
+
+@needs_jdk
+def test_the_wal_a_live_run_writes_carries_no_declared_secret(tmp_path):
+    ir = _wal_ir(CANARY, mark=True)
+    recorded = javac_gate.compile_check(_emitter().emit(ir, record=True), "wal + secret")
+    text = _recorded_wal(_wal_classpath(tmp_path / "marked", recorded), tmp_path / "marked.wal")
+    # the record really is there (a silently dead sink would pass the rest)
+    assert '"record":"discharge-descriptor"' in text, text
+    assert '"method":"delete_row"' in text, text
+    # ...and the value the composition declared secret is not in the file
+    assert CANARY not in text, text
+    assert f'"args":["{REDACTED_SECRET}"]' in text, text
+
+
+@needs_jdk
+def test_without_the_declaration_the_same_run_writes_it(tmp_path):
+    """Non-vacuity: the scrub is the registry's, not the shape of the value or
+    a sink that never saw it. The identical run without the declaration records
+    the identical call with the value verbatim."""
+    recorded = javac_gate.compile_check(
+        _emitter().emit(_wal_ir(CANARY, mark=False), record=True), "wal control")
+    text = _recorded_wal(_wal_classpath(tmp_path / "unmarked", recorded), tmp_path / "unmarked.wal")
+    assert f'"args":["{CANARY}"]' in text, text
+
+
+# ---------------------------------------------------------------------------
+# item 4 of the audit (#815): the reactive twin, in secret mode
+#
+# `RealPlacementRunner` is a second `main` with its own printer, and everything
+# above compiles the JDK-17 stub runner instead. The twin is the cordis4j
+# composition path (`placement._build_java` prefers it whenever
+# `REVL_CORDIS4J_CLASSES` is set), so its console and its probe path need the
+# same treatment: the twin binds the emitted registry before its first line and
+# funnels its printers through it, and this runs that binding rather than
+# grepping for it.
+# ---------------------------------------------------------------------------
+
+CORDIS4J = os.environ.get("REVL_CORDIS4J_CLASSES")
+NO_CORDIS4J = ("the reactive runner compiles only against the real cordis4j "
+               "(REVL_CORDIS4J_CLASSES); CI's backend-java job provisions it")
+needs_cordis4j = pytest.mark.skipif(not CORDIS4J, reason=NO_CORDIS4J)
+
+
+def _twin_classpath(work: Path, components_source: str) -> str:
+    """The shipped reactive runner + its Estop seam against the REAL cordis4j,
+    plus the emitted unit — and both of those on the RUN classpath too, since
+    `Contexts` is resolved from the runtime at boot. The in-repo stubs are
+    deliberately absent: the twin's whole point is the cordis4j API they only
+    approximate."""
+    gen = work / "revl"
+    gen.mkdir(parents=True)
+    (gen / "Components.java").write_text(components_source, encoding="utf-8")
+    out = work / "out"
+    out.mkdir()
+    javac = [javac_gate.JAVAC, "--release", javac_gate.RELEASE, "-d", str(out),
+             "-cp", str(CORDIS4J)]
+    result = subprocess.run(
+        javac + [str(PLACEMENT / "Estop.java"), str(PLACEMENT / "RealPlacementRunner.java")],
+        capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run(
+        javac + ["-cp", f"{CORDIS4J}{os.pathsep}{out}", str(gen / "Components.java")],
+        capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stderr
+    return f"{out}{os.pathsep}{CORDIS4J}"
+
+
+@pytest.fixture(scope="module")
+def reactive_classpath(tmp_path_factory, emitted) -> str:
+    if javac_gate.JAVAC is None:
+        pytest.skip(javac_gate.NO_JDK)
+    if not CORDIS4J:
+        pytest.skip(NO_CORDIS4J)
+    return _twin_classpath(tmp_path_factory.mktemp("reactive"), emitted)
+
+
+def _run_twin_spec(classpath: str, spec: dict) -> str:
+    """One twin process, one spec: boot, read to UP, stop cleanly, return every
+    line it printed."""
+    work = Path(tempfile.mkdtemp(prefix="revl-jtwin-"))
+    spec_path = work / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    lines: list[str] = []
+    proc = _spawn(classpath, spec_path, main="RealPlacementRunner")
+    try:
+        _read_until(proc, "[consumer] UP", lines)
+    finally:
+        _stop(proc, lines)
+    return "".join(lines)
+
+
+# A consumer that holds a declared secret of its OWN and probes a method whose
+# host binding fails quoting it: the failure is local, so what the twin prints
+# is the twin's own registry's business and nothing the provider did.
+TWIN_LOCAL_PROBE = {
+    "name": "consumer", "module": "revl.Components",
+    "ifaces": {"vault": "revl.Components$Vault"},
+    "components": ["Keeper"], "config": {"Keeper": SECRET_CONFIG},
+    "probe": ["vault.open('alice')"],
+}
+
+
+@needs_jdk
+@needs_cordis4j
+def test_the_reactive_twin_keeps_the_secret_out_of_its_probe_path(shipped_classpath,
+                                                                  reactive_classpath):
+    """The consumer here is the twin, not the stub: the reactive inject branch
+    and its probe window are the twin's own code, and no other test in this
+    file compiles or runs them. What this CANNOT say is that the twin's funnel
+    redacted anything — the provider scrubs the reply before it leaves — so the
+    two tests below run the twin against a sink it alone owns."""
+    trace = _run_seam(shipped_classpath, SECRET_CONFIG,
+                      consumer_classpath=reactive_classpath,
+                      consumer_main="RealPlacementRunner")
+    # the twin really booted, loaded the component reactively and crossed once
+    assert "load" in trace and "ACTIVE (reactive)" in trace, trace
+    assert "front.login('alice')" in trace, trace
+    assert "ERROR RuntimeException:" in trace, trace
+    assert CANARY not in trace, trace
+    assert f"vault refused key {REDACTED_SECRET} at {PUBLIC_URL} for {REDACTED_ARG}" in trace, trace
+
+
+@needs_jdk
+@needs_cordis4j
+def test_the_reactive_twin_scrubs_the_secret_it_holds_itself(reactive_classpath):
+    trace = _run_twin_spec(reactive_classpath, TWIN_LOCAL_PROBE)
+    assert "vault.open('alice')" in trace, trace
+    assert "ERROR RuntimeException:" in trace, trace
+    assert CANARY not in trace, trace
+    assert f"vault refused key {REDACTED_SECRET} at {PUBLIC_URL} for alice" in trace, trace
+
+
+@needs_jdk
+@needs_cordis4j
+def test_the_reactive_twin_leaks_it_once_the_registration_is_stripped(tmp_path, emitted):
+    """Non-vacuity: the twin's binding is what stands between its probe window
+    and the value. Strip the registration and the same run prints it."""
+    unmarked = emitted.replace("            revlMarkSecret(this.api_key);\n", "")
+    assert unmarked != emitted
+    classpath = _twin_classpath(tmp_path, unmarked)
+    trace = _run_twin_spec(classpath, TWIN_LOCAL_PROBE)
+    assert "vault refused key" in trace, trace
+    assert CANARY in trace, trace
+    assert REDACTED_SECRET not in trace, trace

@@ -348,6 +348,57 @@ def redact_value(value: Any) -> Any:
 # pattern-matched, so ordinary trace and ordinary diagnostics are untouched.
 
 
+# The escapes a TEXT encoder writes for one character. Kept as a pair of small
+# tables rather than a call into `json`/`repr`, because this module imports
+# nothing (see the header) and because the point is to reproduce exactly the
+# encoders that render host text here, not to approximate "escaping".
+_SHORT_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\b": "\\b", "\f": "\\f"}
+
+
+def _escape_form(value: str, quote: str, control: str, ascii_only: bool) -> str:
+    """One encoder's body for `value`, without the surrounding quotes.
+
+    `quote` is the delimiter that encoder escapes, `control` the format it uses
+    for a control character (`\\uXXXX` for json, `\\xXX` for `repr`), and
+    `ascii_only` whether it escapes everything above the ASCII range."""
+    out = []
+    for char in value:
+        if char == "\\":
+            out.append("\\\\")
+        elif char == quote:
+            out.append("\\" + char)
+        elif char in _SHORT_ESCAPES:
+            out.append(_SHORT_ESCAPES[char])
+        elif char < " " or char == "\x7f" or (ascii_only and char > "~"):
+            out.append(control % ord(char))
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def _renderings(value: str) -> set:
+    """Every face one string value wears inside host text.
+
+    The match in `_replace_all` is exact, and that is the property that keeps
+    ordinary trace byte-identical — but the text it runs over is already
+    RENDERED. A value that contains a quote, a backslash or a control character
+    comes back ESCAPED from any encoder that renders it: `str(exception)` and
+    `repr` of a container carry the value inside a `'...'` literal, and
+    `json.dumps` writes a `"..."` one on the way to the WAL, the conductor
+    inventory or the seam wire. The raw bytes then match nothing, and a
+    `Secret[Str]` holding such a value — an ordinary password or DSN with a `"`
+    in it, say — crossed every sink verbatim while the identical value without
+    the quote was scrubbed. Registering the encoders' bodies closes that: three
+    faces of one value, longest first like every other needle.
+
+    A value that cleared `minimum` also clears it in every escaped face — an
+    escape only ever expands — so one bound covers all three."""
+    return {
+        value,
+        _escape_form(value, '"', "\\u%04x", True),  # json.dumps(value)[1:-1]
+        _escape_form(value, "'", "\\x%02x", False),  # repr(value)[1:-1]
+    }
+
 def _needles(value: Any, into: set, minimum: int) -> None:
     """Collect the string forms `value` can take inside host text.
 
@@ -358,7 +409,10 @@ def _needles(value: Any, into: set, minimum: int) -> None:
         return
     if isinstance(value, str):
         if len(value) >= minimum:
-            into.add(value)
+            # Every face, not just the raw bytes, so a registered value is
+            # scrubbed whichever encoder rendered it. The escaped faces are
+            # registered only for a value that cleared the bound itself.
+            into.update(_renderings(value))
         return
     if isinstance(value, bytes):
         for form in (value.decode("utf-8", "replace"), repr(value)):

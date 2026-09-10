@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Context } from 'cordis'
 
 import { makeProxy, serve } from './bridge.ts'
-import { assertNoResidue, fiberStateName, snapshotRuntime } from './runtime.ts'
+import { assertNoResidue, fiberStateName, redactText, snapshotRuntime } from './runtime.ts'
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const name: string = spec.name
@@ -70,7 +70,16 @@ for (const ref of (spec.refs || []) as Array<{ extern: string; path: string; sha
 }
 
 function log(channel: string, subject: string, detail = ''): void {
-  console.log(`[${name}] ${channel.padEnd(6)}| ${String(subject).padEnd(16)}| ${detail}`.trimEnd())
+  // item 815: the runner owns the `load` / `serve` / `proxy` / `probe` channels
+  // outright — only the `host` trace funnels through `runtime._record` — so
+  // every line this process prints is a sink. Scrub both halves against the
+  // process-wide registry, the ts twin of `PlacementRunner.redactSecrets`.
+  // Without it a probe whose provider raised locally printed the credential
+  // verbatim while the py and java runners scrubbed the same line.
+  console.log(
+    `[${name}] ${channel.padEnd(6)}| ${redactText(String(subject)).padEnd(16)}| `
+    + `${redactText(detail)}`.trimEnd(),
+  )
 }
 
 // --- probes: parsed, not evaluated -----------------------------------------

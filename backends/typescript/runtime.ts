@@ -181,13 +181,58 @@ const MIN_MARKABLE = 4
 
 const secretValues = new Set<string>()
 
+/** Every face `value` wears inside host text. The match in `redactText` is
+ *  EXACT, which is what keeps ordinary trace byte-identical — but the text it
+ *  runs over is already RENDERED, and some of the encoders that render it
+ *  ESCAPE what they write: `JSON.stringify` puts the value inside a `"..."`
+ *  literal and a `util.inspect`-style rendering inside a `'...'` one. A value
+ *  holding a quote, a backslash or a control character matches neither the
+ *  escaped bytes NOR (as the raw form) the rendering, so a `Secret[Str]` holding
+ *  one crossed every sink verbatim while the identical value without the quote
+ *  was scrubbed. The py tier registers the same three faces
+ *  (`confidential._renderings`), because a polyglot composition must redact the
+ *  same bytes whichever tier rendered them. Escaping only ever EXPANDS, so a
+ *  value that cleared MIN_MARKABLE clears it in every face; the extra faces are
+ *  registered for such a value only. */
+function renderings(value: string): string[] {
+  // `JSON.stringify` on a string returns a quoted literal, so the body is the
+  // encoder's own output rather than a reimplementation of it.
+  const json = JSON.stringify(value)
+  return [value, json.slice(1, -1), inspectBody(value)]
+}
+
+/** The body of a `'...'` rendering: the delimiter the `inspect`-shaped
+ *  renderers this tier prints use, with the escapes JavaScript string syntax
+ *  and `util.inspect` agree on. A character both leave raw is covered by the
+ *  raw face, so only the rewritten ones need reproducing here. */
+function inspectBody(value: string): string {
+  const short: Record<string, string> = {
+    '\n': '\\n',
+    '\r': '\\r',
+    '\t': '\\t',
+    '\b': '\\b',
+    '\f': '\\f',
+  }
+  let out = ''
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0
+    if (char === '\\') out += '\\\\'
+    else if (char === "'") out += "\\'"
+    else if (char in short) out += short[char]
+    else if ((code < 0x20 || code === 0x7f) && code > 0) {
+      out += '\\x' + code.toString(16).padStart(2, '0')
+    } else out += char
+  }
+  return out
+}
+
 /** Remember one already-rendered value as confidential. Walks a container so a
  *  `Secret[List[Str]]` receiver marks its elements, mirroring py's
  *  `register_secret_tree`. */
 function rememberSecret(value: unknown): void {
   if (value === null || value === undefined || typeof value === 'boolean') return
   if (typeof value === 'string') {
-    if (value.length >= MIN_MARKABLE) secretValues.add(value)
+    if (value.length >= MIN_MARKABLE) for (const face of renderings(value)) secretValues.add(face)
     return
   }
   if (typeof value === 'number' || typeof value === 'bigint') {
