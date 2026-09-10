@@ -915,11 +915,14 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 - `--filter PATTERN` - run only the collected test units whose name *contains*
   `PATTERN`. A plain substring, not a regex. A `PATTERN` that selects nothing
   exits 2 with a message on stderr: an empty selection is never a silent green.
-  The selection is applied to the IR, so every tier honours it, and
-  `--mock-requires` (which runs `lifecycle test` units by name) honours it too;
-  `--sweep` and `--schedule-*` sweep steps and interleavings rather than named
-  units, so combining them with `--filter` exits 2 instead of filtering
-  nothing.
+  The selection is applied to the IR, so every tier and every mode that reads a
+  test section honours it, and `--mock-requires` (which runs `lifecycle test`
+  units by name) honours it too. A tier the selection leaves with no unit it
+  runs (`prop test` and `fault test` are py-tier-only) reports `skip` with that
+  reason and exits 0: nothing was expected to run there, which is never printed
+  as a pass. `--sweep` and `--schedule-*` sweep steps and interleavings rather
+  than named units, so combining them with `--filter` exits 2 instead of
+  filtering nothing.
 - `--sweep` - fault sweep: inject failure at every step of every component and
   check L-Raise / no-residue / LIFO / siblings at each (py tier). With
   `--backend all`, sweep every runtime whose toolchain is present and assert
