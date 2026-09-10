@@ -808,6 +808,15 @@ def _print_table(table, document=None, provenance: bool = False) -> None:
     print(f"COMPOSITION  {table.name}  (origin `{table.origin}`, "
           f"{len(table.rows)} rows)")
     print(f"             {table.source}")
+    if table.slo:
+        # item 473: the declared SLO contract is a composition-level promise, so
+        # it is printed with the composition's identity rather than among the
+        # rows. Absent for every composition that declares no `slo` block, so
+        # this panel changes no existing output.
+        print()
+        print("SLO")
+        for key, (value, line) in table.slo.items():
+            print(f"  {key:<24} {value}   (declared at line {line})")
     print()
     print("ROWS")
     for row in table.rows:
