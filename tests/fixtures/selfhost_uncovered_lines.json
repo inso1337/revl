@@ -1108,7 +1108,7 @@
       "uncovered_statements": 533
     },
     "wasm": {
-      "statements": 2816,
+      "statements": 2836,
       "uncovered": {
         "Command-line JSON input, output directory creation and WAT-file writing are not entered by the in-process emit(ir) oracle.": {
           "<module>": 12
@@ -1319,7 +1319,7 @@
           "_ComponentEmitter._wal_undo_name": 3,
           "_ComponentEmitter._witnessed_effect_step": 37,
           "_ComponentEmitter._witnessed_extern": 5,
-          "_ComponentEmitter.emit": 68
+          "_ComponentEmitter.emit": 69
         },
         "The remaining call paths inline a deferred arrow or raise for an indirect callee, wrong Some arity, unknown named function, wrong declared-function arity, or void argument. Expected-free Some payload inference is covered by the bare expression statement.": {
           "_V3Emitter._call_expr": 6
@@ -1330,10 +1330,11 @@
           "_V3Emitter._helper_str_split": 1
         },
         "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
+          "_ComponentEmitter._provide_routed": 18,
           "_assert_realm_label": 2
         }
       },
-      "uncovered_statements": 1519
+      "uncovered_statements": 1538
     }
   },
   "selfhost": {

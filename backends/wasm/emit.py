@@ -603,6 +603,49 @@ class _ComponentEmitter:
             self.route_ops[key].append(op)
         return param_types, return_type
 
+    def _provide_routed(self, where: str) -> list[str]:
+        """item 173 + item 449 (G2): a routed provided key is realized by the
+        emitted routing body, never by a hand-written `provide <key>` step.
+
+        For each key this component both routes and re-provides, emit one
+        `provide:<key>.<op>` export per method of the routed service whose whole
+        body is a call to the generated `$route_<key>_<op>` wrapper: that
+        wrapper's `$route_select_<key>` picks a LIVE realm (re-probing
+        `route:<key>.live` on every call, so a withdrawn realm drops out —
+        reactive failover, and a trap once every realm has withdrawn) and
+        `route:<key>.<op>` forwards the call to that one realm's provider.
+
+        Emitted per routed KEY, not per routed CALL: the component's routing is
+        its body, so a routes-only Router (header `provides <key>`, no `provide`
+        step — the sanctioned item-449 shape) still provides the bare key. The
+        rejected alternative is a module with no `provide` export at all, which
+        the runtime reads as a Router that provides nothing: the routed key never
+        reaches the bare table (G2: exactly one provider downstream) and every
+        routed call fails. Mirrors rust's `_emit_router_struct` handle and the
+        go/java router bodies, both emitted for every routed key.
+        """
+        funcs: list[str] = []
+        for key in sorted(self.routes):
+            service_name = self.requires.get(key)
+            # a routed require the component does not re-provide has no bare key
+            # to realize: its calls go through the caller-side helpers alone
+            if service_name is None or self.provides.get(key) != service_name:
+                continue
+            service = self.services.get(service_name) or {}
+            for op in sorted(service.get("methods") or {}):
+                param_types, return_type = self._route_op_spec(key, op, where)
+                wtys = [_wasm_ty(pty) for pty in param_types]
+                decl = " ".join(f"(param $p{i} {w})" for i, w in enumerate(wtys))
+                head = (f'  (func (export '
+                        f'"{_wat_string(self._provide_prefix(key) + "." + op)}")')
+                if decl:
+                    head += f" {decl}"
+                if return_type is not None:
+                    head += f" (result {_wasm_ty(return_type)})"
+                args = "".join(f" (local.get $p{i})" for i in range(len(wtys)))
+                funcs.append(f"{head}\n    (call $route_{key}_{op}{args}))")
+        return funcs
+
     def _route_helpers(self) -> list[str]:
         """item 173: the emitted realization of a routed require on cordis-wasm,
         mirroring src/revl/run.py::_Router and the rust `_emit_router_struct`.
@@ -1462,6 +1505,10 @@ class _ComponentEmitter:
         # ordinary internal funcs. Populates `self.globals` (route cursor /
         # served counts), which `_module` renders below — so it must run before
         # it. Empty (no funcs, no globals) for a routes-less program.
+        # item 173: a routed provided key is realized by the routing body this
+        # component emits for it, so register its exports before the helpers
+        # (which populate `self.globals`) are rendered.
+        provide_funcs.extend(self._provide_routed(where))
         provide_funcs.extend(self._route_helpers())
         return self._module(segments, entries, provide_funcs)
 

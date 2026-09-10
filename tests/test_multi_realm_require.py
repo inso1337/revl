@@ -14,6 +14,7 @@ identifiers (NOT reserved words), so the reference KEYWORDS set — and the
 selfhosted lexer that mirrors it — is untouched.
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -260,6 +261,45 @@ def test_every_tier_router_scenario_compiles_to_the_sanctioned_shape():
         # the routed key is provided by the route proxy (G2), never by a body
         assert router["body"] == [], path
         assert set(router["routes"]) <= set(router["provides"]), path
+
+
+def test_wasm_emitter_provides_the_routed_key_through_the_route():
+    """The emitter half of the same regression (item 173).
+
+    Dropping the `provide <routed key>` body leaves the tier to realise the
+    provision itself. The hosted tiers do it structurally (the emitted router
+    struct/class IS the provider, one per routed key), and wasm does it by
+    routing: the routed key is exported as `provide:<key>.<op>` and forwards to
+    the per-op wrapper, which selects a live realm through the substrate's
+    `route:<key>` host op. Emitting the scenario shape alone is NOT enough — the
+    wasm emitter used to key its route machinery off routed CALLS, so a Router
+    that only routes (the sanctioned shape) emitted no provision at all, the
+    bare key never entered the table, and every downstream routed call failed.
+    Proven by running in `backends/wasm/test_router_exec_wasm.py`, which SKIPS in
+    CI behind the cordis-wasm pin gate — hence this runtime-free guard, which
+    runs wherever the frontend does and fails on the pre-fix emitter."""
+    scenario = ROOT / "backends" / "wasm" / "scenarios" / "router.rvl"
+    ir = compile_source(scenario.read_text(), str(scenario))
+    router = next(c for c in ir["components"] if c.get("routes"))
+    key = next(iter(router["routes"]))
+    methods = sorted(ir["services"][router["requires"][key]]["methods"])
+    assert methods, "the routed service declares no methods to route"
+
+    spec = importlib.util.spec_from_file_location(
+        "revl_wasm_emit_multi_realm", ROOT / "backends" / "wasm" / "emit.py")
+    emitter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emitter)
+    module = emitter.emit(ir)[router["name"]]
+
+    # G2: the key is provided exactly once, once per routed method
+    assert module.count(f'(export "provide:{key}.') == len(methods)
+    for op in methods:
+        assert f'(export "provide:{key}.{op}")' in module
+        # the provision IS the route: one call, no realm chosen by the host
+        assert f"(call $route_{key}_{op}" in module
+    # and the body routes through the substrate's liveness + dispatch ops
+    assert f'(import "route:{key}" "live"' in module
+    assert f'(import "route:{key}" "call"' in module
 
 
 def test_routing_an_undeclared_key_is_refused():
