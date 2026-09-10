@@ -1146,9 +1146,119 @@ def mock_requires_command(ir: dict) -> int:
     return 1 if failures else 0
 
 
+# --------------------------------------------------------------------------- #
+# Selection and collection (issue #843).                                        #
+# --------------------------------------------------------------------------- #
+#
+# `revl test` had exactly one mode: run every `test` block the compilation
+# collects and report one aggregate count plus the failures. That answers "is
+# the suite green" and nothing else. It cannot answer "which tests does this
+# compilation actually collect" (the half of the liveness question that had no
+# answer at all), and it cannot answer "did the test I just wrote execute"
+# without sabotaging an assertion and watching the global count move: slow, and
+# unsafe as routine practice, because a deliberately broken assertion is
+# exactly the edit that gets committed by accident.
+#
+# `--list` answers the first, `--filter` the second. Both are SELECTION AND
+# REPORTING ONLY: the same units run with the same verdicts, the checker is not
+# consulted differently, and a command line carrying neither flag behaves as it
+# did before. An empty selection is never a silent green -- it exits 2 with a
+# message -- because that is precisely the ambiguity the issue is about: a
+# green run over zero tests is indistinguishable from a green run over tests
+# that all passed.
+
+#: The IR sections that carry *named* test units, with the source keyword that
+#: names them, in the order the py reference tier runs them.
+_NAMED_TEST_SECTIONS = (("test", "tests"),
+                        ("fault test", "fault_tests"),
+                        ("prop test", "prop_tests"))
+
+
+def collected_tests(ir: dict) -> list:
+    """Every named test unit this compilation collects, as ``(kind, name)``.
+
+    ``kind`` is the source keyword; a ``lifecycle test`` is a ``test``. A name
+    collected twice is returned twice -- two files of one composition may
+    declare the same test name and neither the runner nor this listing can tell
+    them apart, so it does not pretend to.
+
+    The verified-effect round trips (docs/verified-effect.md) are keyed by
+    *component*, not by a test name, so they sit outside the selection surface:
+    ``--list`` does not name them and ``--filter`` does not select them. They
+    keep running, which is what "selection and reporting only" means for a
+    check with no name to select.
+    """
+    units: list = []
+    for kind, section in _NAMED_TEST_SECTIONS:
+        for unit in ir.get(section) or []:
+            name = unit.get("name")
+            if name is not None:
+                units.append((kind, name))
+    return units
+
+
+def select_tests(ir: dict, pattern: str) -> dict:
+    """*ir* pruned to the named test units whose name contains *pattern*.
+
+    A plain substring match, deliberately, not a regex: a regex is a second
+    language for the same job, and an accidentally special character (``.``,
+    ``(``, ``|``) would silently select a different set than the author read.
+
+    The IR's test sections are pruned, rather than a runner's output filtered,
+    so every tier runner and every mode that reads a test section honours the
+    same selection -- ``--mock-requires`` runs the `tests` section's lifecycle
+    blocks and therefore selects them too. The input IR is not mutated.
+    """
+    kept = {name for _kind, name in collected_tests(ir) if pattern in name}
+    pruned = dict(ir)
+    for _kind, section in _NAMED_TEST_SECTIONS:
+        if pruned.get(section):
+            pruned[section] = [
+                unit for unit in pruned[section] if unit.get("name") in kept]
+    return pruned
+
+
+def _empty_selection(ir: dict, pattern) -> int:
+    """Report an empty selection on stderr; the exit code is 2 (a usage error).
+
+    ``--list`` and ``--filter`` both end here, so "nothing was collected" and
+    "nothing matched" read the same however you asked, and neither can be
+    mistaken for a run: 2 is never 1 (a test FAILED) and never 0 (everything
+    was fine).
+    """
+    total = len(collected_tests(ir))
+    if total == 0:
+        print("error: this compilation collects no test units, so there is "
+              "nothing to list or select; nothing ran", file=sys.stderr)
+    else:
+        print(f"error: --filter {pattern!r} matched none of the {total} "
+              f"collected test unit(s); nothing ran", file=sys.stderr)
+    return 2
+
+
+def list_command(ir: dict, pattern=None) -> int:
+    """`revl test --list`: print the collected test names; execute nothing.
+
+    Compiling the sources IS the collection, so this needs no toolchain and
+    runs no tier: no emit, no runner, no interpreter. That is the point -- it
+    answers "which tests does this compilation collect" without paying for a
+    run, and it is the liveness proof an aggregate pass count cannot give.
+    """
+    units = collected_tests(ir)
+    if pattern is not None:
+        units = [(kind, name) for kind, name in units if pattern in name]
+    if not units:
+        return _empty_selection(ir, pattern)
+    for _kind, name in units:
+        print(name)
+    print(f"{len(units)} test(s) collected")
+    return 0
+
+
 def test_command(ir: dict, backend: str, sweep: bool = False,
                  mock_requires: bool = False, schedule_seed=None,
-                 schedule_seeds: int = None) -> int:
+                 schedule_seeds: int = None, list_tests: bool = False,
+                 filter_pattern=None) -> int:
     """Run the document's `test` blocks on the chosen tier(s); exit code.
 
     With ``sweep`` set, run the exhaustive fault sweep instead (py tier only —
@@ -1161,7 +1271,38 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     With ``schedule_seed`` / ``schedule_seeds`` set, run schedule testing — the
     seeded interleaving sweep (py tier only; roadmap item 295,
     docs/design/295-schedule-testing.md).
+
+    With ``list_tests`` set, print the collected test names and execute nothing
+    (issue #843); the mode flags above do not apply to a listing.
+
+    With ``filter_pattern`` set, run only the collected test units whose name
+    contains it (a plain substring, any tier). A filter that selects nothing is
+    a usage error (exit 2), never a silent green. `--mock-requires` runs
+    lifecycle test units and therefore honours the selection; `--sweep` and
+    `--schedule-*` do not run named units at all, so combining them with a
+    filter is also a usage error rather than a filter that quietly does
+    nothing.
     """
+    if list_tests:
+        return list_command(ir, filter_pattern)
+
+    if filter_pattern is not None:
+        if not any(filter_pattern in name for _kind, name in collected_tests(ir)):
+            return _empty_selection(ir, filter_pattern)
+        if sweep or schedule_seed is not None or schedule_seeds is not None:
+            # `--sweep` sweeps every top-level body step of every component and
+            # `--schedule-*` every interleaving; neither runs named test units,
+            # so a filter over test names cannot select inside them. Refusing
+            # is the honest answer: a filter that appeared to select while the
+            # whole sweep ran anyway is exactly the silent mismatch #843 is
+            # about.
+            print("error: --filter selects test units by name, and --sweep / "
+                  "--schedule-* sweep the composition's steps or interleavings "
+                  "rather than running named units; run them separately "
+                  "(issue #843)", file=sys.stderr)
+            return 2
+        ir = select_tests(ir, filter_pattern)
+
     if schedule_seed is not None or schedule_seeds is not None:
         if backend not in ("py", "all"):
             print(f"[schedule] note: schedule testing runs on the py reference "

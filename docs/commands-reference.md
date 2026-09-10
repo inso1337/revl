@@ -907,6 +907,19 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
 - `FILES` (required).
 - `--backend {py, ts, rust, java, wasm, go, all}` - tier to run the blocks on
   (default: `py`); `all` runs every tier whose toolchain is present.
+- `--list` - print every test name the compilation collects (plain `test`,
+  `prop test` and `fault test` units, in the order the py tier runs them) and
+  execute nothing: no tier runner, no emit, no runtime. A query, so the mode
+  flags below do not apply to it; with `--filter`, list only the selection.
+  Listing a compilation that collects no test units exits 2.
+- `--filter PATTERN` - run only the collected test units whose name *contains*
+  `PATTERN`. A plain substring, not a regex. A `PATTERN` that selects nothing
+  exits 2 with a message on stderr: an empty selection is never a silent green.
+  The selection is applied to the IR, so every tier honours it, and
+  `--mock-requires` (which runs `lifecycle test` units by name) honours it too;
+  `--sweep` and `--schedule-*` sweep steps and interleavings rather than named
+  units, so combining them with `--filter` exits 2 instead of filtering
+  nothing.
 - `--sweep` - fault sweep: inject failure at every step of every component and
   check L-Raise / no-residue / LIFO / siblings at each (py tier). With
   `--backend all`, sweep every runtime whose toolchain is present and assert
