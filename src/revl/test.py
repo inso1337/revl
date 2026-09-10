@@ -32,6 +32,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 
@@ -177,8 +178,8 @@ def required_tiers() -> frozenset[str]:
 def _require(tier: str, runner):
     """Wrap *runner* so an ABSENT-toolchain skip fails when the tier is required."""
 
-    def run(ir: dict) -> tuple[str, str]:
-        outcome, message = runner(ir)
+    def run(ir: dict, *args, **kwargs) -> tuple[str, str]:
+        outcome, message = runner(ir, *args, **kwargs)
         if outcome == "skip" and isinstance(message, Absent) \
                 and tier in required_tiers():
             return ("fail", (
@@ -207,8 +208,33 @@ _PY_RUNTIME_REMEDY = (
     "                    backends/python/.venv/bin/python -P -m revl test    # absolute-interpreter fallback (the `-P` is PYTHONSAFEPATH, issue #317)")
 
 
-def run_py(ir: dict) -> tuple[str, str]:
-    """Exec the cordis-py output in-process (the original runner)."""
+def _render_report(results: list, report: str) -> str:
+    """Serialize per-test results for `--report json|tap` (py tier)."""
+    if report == "tap":
+        lines = ["TAP version 13", f"1..{len(results)}"]
+        for index, result in enumerate(results, 1):
+            mark = "ok" if result["status"] == "pass" else "not ok"
+            lines.append(f"{mark} {index} - {result['name']} "
+                         f"# time={result['duration_ms']:.2f}ms")
+        return "\n".join(lines)
+    payload = {
+        "tests": results,
+        "passed": sum(1 for r in results if r["status"] == "pass"),
+        "failed": sum(1 for r in results if r["status"] == "fail"),
+        "total": len(results),
+    }
+    return json.dumps(payload, indent=2)
+
+
+def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, str]:
+    """Exec the cordis-py output in-process (the original runner).
+
+    ``verbose`` appends a per-test duration to the one-line-per-test output the
+    py tier already prints. ``report`` (``"json"`` or ``"tap"``) suppresses the
+    human per-test lines and emits a machine-readable per-test report for the
+    document's `test` blocks instead (fault/prop/round-trip units are separate
+    and keep their own output).
+    """
     emit = _emitter("python")
     backend_dir = str(BACKENDS / "python")
     if backend_dir not in sys.path:
@@ -252,31 +278,49 @@ def run_py(ir: dict) -> tuple[str, str]:
         entries = getattr(module, "REVL_TESTS", None) or []
     fault_entries = _fault(ir, module)
     if not entries and not fault_entries and not roundtrip_entries and not prop_entries:
+        if report is not None:
+            print(_render_report([], report))
         return ("pass", "no tests emitted by the backend")
 
     failures = 0
+    results = []  # per-test {"name", "status", "duration_ms"} for --report
     for name, test_fn in entries:
+        started = time.perf_counter()
         try:
             test_fn()
         except AssertionError as error:
             failures += 1
-            message = str(error).strip() or "assertion failed"
-            print(f"FAIL {name}: {message}")
+            detail = str(error).strip() or "assertion failed"
+            status = "fail"
         except Exception as error:  # noqa: BLE001 — the runner reports every failure
             failures += 1
-            print(f"FAIL {name}: {type(error).__name__}: {error}")
+            detail = f"{type(error).__name__}: {error}"
+            status = "fail"
         else:
-            print(f"PASS {name}")
+            detail = None
+            status = "pass"
+        duration_ms = round((time.perf_counter() - started) * 1000, 3)
+        results.append({"name": name, "status": status, "duration_ms": duration_ms})
+        if report is None:
+            suffix = f" ({duration_ms:.2f}ms)" if verbose else ""
+            if status == "pass":
+                print(f"PASS {name}{suffix}")
+            else:
+                print(f"FAIL {name}: {detail}{suffix}")
 
     summary = []
     if entries:
         summary.append(f"{len(entries) - failures} of {len(entries)} test(s) passed"
                        if failures else f"{len(entries)} test(s) passed")
+    # `--report` owns stdout for the test blocks; the fault/prop/round-trip
+    # runners' banners would corrupt the machine-readable payload, so silence
+    # them (their verdicts still feed the exit code unchanged).
+    silent = (lambda _line: None) if report is not None else None
     if fault_entries:
         from .fault import run_fault_units  # noqa: PLC0415 — lazy: needs cordis
 
         try:
-            fault_failures, fault_total = run_fault_units(ir, fault_entries)
+            fault_failures, fault_total = run_fault_units(ir, fault_entries, out=silent)
         except ModuleNotFoundError as error:
             # a fault test drives a real activation, so it needs the runtime
             # the plain `test` blocks do not; missing it is a skip, never a pass
@@ -284,6 +328,8 @@ def run_py(ir: dict) -> tuple[str, str]:
                       f"(the cordis-py runtime is not installed: {error.name!r} missing — "
                       f"sh backends/python/setup.sh)")
             if not entries:
+                if report is not None:
+                    print(_render_report(results, report))
                 return ("skip", reason)
             summary.append(reason)
         else:
@@ -295,7 +341,7 @@ def run_py(ir: dict) -> tuple[str, str]:
         from .fault import run_roundtrip_units  # noqa: PLC0415 — lazy: needs cordis
 
         try:
-            rt_failures, rt_dossier = run_roundtrip_units(ir, roundtrip_entries)
+            rt_failures, rt_dossier = run_roundtrip_units(ir, roundtrip_entries, out=silent)
         except ModuleNotFoundError as error:
             # a round-trip drives a real activation+teardown, so it needs the
             # runtime the plain `test` blocks do not; missing it is a skip
@@ -303,6 +349,8 @@ def run_py(ir: dict) -> tuple[str, str]:
                       f"(the cordis-py runtime is not installed: {error.name!r} missing — "
                       f"sh backends/python/setup.sh)")
             if not entries and not fault_entries:
+                if report is not None:
+                    print(_render_report(results, report))
                 return ("skip", reason)
             summary.append(reason)
         else:
@@ -314,12 +362,14 @@ def run_py(ir: dict) -> tuple[str, str]:
     if prop_entries:
         from .fault import run_prop_units  # noqa: PLC0415 — needs only the emitter
 
-        prop_failures, prop_dossier = run_prop_units(ir, prop_entries)
+        prop_failures, prop_dossier = run_prop_units(ir, prop_entries, out=silent)
         failures += prop_failures
         prop_total = prop_dossier["counts"]["props"]
         summary.append(
             f"{prop_total - prop_failures} of {prop_total} prop test(s) held")
 
+    if report is not None:
+        print(_render_report(results, report))
     if failures:
         return ("fail", "; ".join(summary) or f"{failures} test(s) failed")
     return ("pass", "; ".join(summary))
@@ -1148,7 +1198,9 @@ def mock_requires_command(ir: dict) -> int:
 
 def test_command(ir: dict, backend: str, sweep: bool = False,
                  mock_requires: bool = False, schedule_seed=None,
-                 schedule_seeds: int = None) -> int:
+                 schedule_seeds: int = None, name_filter: str = None,
+                 list_only: bool = False, verbose: bool = False,
+                 report: str = None) -> int:
     """Run the document's `test` blocks on the chosen tier(s); exit code.
 
     With ``sweep`` set, run the exhaustive fault sweep instead (py tier only —
@@ -1161,6 +1213,17 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     With ``schedule_seed`` / ``schedule_seeds`` set, run schedule testing — the
     seeded interleaving sweep (py tier only; roadmap item 295,
     docs/design/295-schedule-testing.md).
+
+    ``name_filter`` selects the `test` (and `lifecycle test`) blocks whose name
+    contains the given substring. Selection happens over the tests *collected*
+    from the full compilation — the input files are never narrowed, because a
+    single component file does not compile standalone (issue #843). A filter
+    that matches nothing exits non-zero.
+
+    ``list_only`` prints each collected test name and runs nothing. ``verbose``
+    adds a per-test duration to the py tier's one-line-per-test output;
+    ``report`` ("json"|"tap") emits a machine-readable per-test report on the
+    py tier instead of the human summary.
     """
     if schedule_seed is not None or schedule_seeds is not None:
         if backend not in ("py", "all"):
@@ -1183,17 +1246,49 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
                   f"--sweep` to sweep every runtime (docs/fault-tests.md)")
         return sweep_command(ir)
 
+    # Selection + observation (issue #843). Selection is over the tests
+    # *collected* from the full compilation: the input files are never
+    # narrowed, because in this project a single component file does not
+    # compile standalone.
+    tests = ir.get("tests") or []
+    if name_filter is not None:
+        matches = [t for t in tests if name_filter in (t.get("name") or "")]
+        if not matches:
+            print(f"[filter] no test matched {name_filter!r} "
+                  f"({len(tests)} test(s) collected)", file=sys.stderr)
+            return 1
+        # A partial match is also reported so a filtered run is never a silent
+        # subset — "matched 2 of 4" is the proof that selection happened.
+        print(f"[filter] matched {len(matches)} of {len(tests)} test(s)",
+              file=sys.stderr)
+        run_ir = {**ir, "tests": matches}
+    else:
+        run_ir = ir
+
+    if list_only:
+        names = [t.get("name") for t in (run_ir.get("tests") or [])]
+        if names:
+            print("\n".join(names))
+        else:
+            print("no tests collected")
+        return 0
+
     from .fault import prop_units, roundtrip_units  # noqa: PLC0415 — no cordis to find them
 
-    if (not (ir.get("tests") or []) and not (ir.get("fault_tests") or [])
-            and not roundtrip_units(ir) and not prop_units(ir)):
+    if (not (run_ir.get("tests") or []) and not (run_ir.get("fault_tests") or [])
+            and not roundtrip_units(run_ir) and not prop_units(run_ir)):
         print("no tests to run")
         return 0
+
+    if verbose or report:
+        if backend != "py":
+            print(f"[note] --verbose/--report apply to the py reference tier "
+                  f"only, not `{backend}`", file=sys.stderr)
 
     if backend == "all":
         verdicts = {"pass": 0, "skip": 0, "fail": 0}
         for name, runner in RUNNERS.items():
-            outcome, message = runner(ir)
+            outcome, message = runner(run_ir)
             verdicts[outcome] += 1
             print(f"[{name}] {_TAG[outcome]}: {message}")
         summary = (f"summary: {verdicts['pass']} pass, "
@@ -1206,7 +1301,16 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
         print("all tiers passed")
         return 0
 
-    outcome, message = RUNNERS[backend](ir)
+    if backend == "py":
+        outcome, message = RUNNERS["py"](run_ir, verbose=verbose, report=report)
+    else:
+        outcome, message = RUNNERS[backend](run_ir)
+
+    if report is not None and backend == "py":
+        # run_py already printed the machine-readable report; do not follow it
+        # with the human `[py] ...` summary line.
+        return 0 if outcome == "pass" else 1
+
     if outcome == "pass":
         print(f"[{backend}] pass: {message}")
         return 0
