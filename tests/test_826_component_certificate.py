@@ -32,7 +32,8 @@ These tests pin the definition of done, in the order the claim is made:
     promoted after signing, a caveat dropped, an artifact digest forged, a
     guarantee the catalogue does not define, a registry row deleted so a status
     has no theorem behind it, a gap cell emptied so a weaker guarantee loses its
-    reason, a formal package that is not there at all.
+    reason, a dependency pin the manifest does not name, a signed member dropped
+    from the record, a formal package that is not there at all.
 
 The negative controls matter as much as the mutations: an untouched re-signed
 copy and a faithful re-signed copy both still verify, so the sweep proves the
@@ -131,6 +132,22 @@ def _formal_copy(tmp_path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "formal" / rel, target)
     return root
+
+
+def _pin_packages(formal: Path, *names: str) -> Path:
+    """Name packages in the copy's `lake-manifest.json` and return it.
+
+    The checkout's own manifest names none, so `dependencies` is `[]` on both
+    sides of a comparison against it and an assertion there cannot fail. A
+    manifest that really names packages is the only way to assert that the
+    dependency pins are read out of the manifest and compared rather than
+    signed and ignored."""
+    manifest_path = formal / "lake-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["packages"] = [{"name": name, "type": "git", "rev": "0" * 40}
+                            for name in names]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest_path
 
 
 def _cert(tmp_path, *, formal=None, key=KEY, source=BASE, source_path=None, **kw):
@@ -284,20 +301,32 @@ def test_a_contentless_theorem_is_named_rather_than_counted_as_proof(tmp_path):
     assert any("contentless" in caveat for caveat in cert["caveats"])
 
 
-def test_the_proof_model_is_the_pinned_toolchain(tmp_path):
+def test_the_proof_model_is_the_pinned_toolchain_and_the_manifest_pins(tmp_path):
     """The certificate names the model its theorems were checked against, read
-    from the package's own pin rather than from a constant in this module."""
-    cert = _cert(tmp_path)
-    pinned = (ROOT / "formal" / "lean-toolchain").read_text(encoding="utf-8").strip()
-    manifest = json.loads((ROOT / "formal" / "lake-manifest.json").read_text(encoding="utf-8"))
+    from the package's own pin rather than from a constant in this module: the
+    toolchain, the digest of the manifest and the dependency pins that manifest
+    names.
+
+    The copy below names two packages, out of order, because the checkout's own
+    manifest names none: `dependencies == sorted([])` is `[] == []`, an
+    assertion that passes whether the member is read from the manifest or
+    hardcoded by the builder. Here it can only pass if it was read."""
+    formal = _formal_copy(tmp_path)
+    manifest_path = _pin_packages(formal, "zzz-pinned", "aaa-pinned")
+    cert = _cert(tmp_path, formal=formal)
+    pinned = (formal / "lean-toolchain").read_text(encoding="utf-8").strip()
 
     assert cert["kind"] == C.CERT_KIND
     assert cert["version"] == C.CERT_VERSION
     assert cert["proof_model"]["lean_toolchain"] == pinned
     assert cert["proof_model"]["manifest_digest"] == C.sha256_text(
-        (ROOT / "formal" / "lake-manifest.json").read_text(encoding="utf-8"))
-    assert cert["proof_model"]["dependencies"] == sorted(
-        str(package.get("name")) for package in manifest.get("packages") or [])
+        manifest_path.read_text(encoding="utf-8"))
+    assert cert["proof_model"]["dependencies"] == ["aaa-pinned", "zzz-pinned"]
+    model = [requirement for requirement in cert["requirements"]
+             if requirement["kind"] == C.REQ_MODEL]
+    assert "dependencies aaa-pinned, zzz-pinned" in model[0]["detail"]
+    ok, reason = C.verify_certificate(cert, KEY, formal=formal)
+    assert ok, reason
 
 
 def test_every_requirement_points_at_an_artifact_that_exists(tmp_path):
@@ -551,6 +580,14 @@ def _forge_the_manifest_pin(document):
     document["proof_model"]["manifest_digest"] = "0" * 64
 
 
+def _forge_the_dependencies(document):
+    document["proof_model"]["dependencies"] = ["evil-pkg"]
+
+
+def _drop_the_commit(document):
+    document.pop("as_of_commit")
+
+
 def _forge_the_checker(document):
     document["checker"]["compiler"] = "something-else"
 
@@ -620,6 +657,14 @@ FORGERIES = [
      "signed proof model member lean_toolchain is leanprover/lean4:v9.9.9"),
     ("a manifest pin forged", _forge_the_manifest_pin,
      "signed proof model member manifest_digest is " + "0" * 64),
+    # `dependencies` is not swept here as well: this build is over the checkout's
+    # own manifest, whose `packages` is empty, so `[]` is the honest answer and
+    # emptying the member would prove nothing. The pinned-manifest case lives in
+    # `test_a_dependency_pin_the_manifest_does_not_name_is_refused`.
+    ("a dependency pin invented", _forge_the_dependencies,
+     "signed proof model member dependencies is ['evil-pkg']"),
+    ("the commit member dropped", _drop_the_commit,
+     "missing required member 'as_of_commit'"),
     ("the checker version rewritten", _forge_the_checker,
      "checker mismatch"),
     ("the ruleset digest rewritten", _forge_the_ruleset,
@@ -646,6 +691,78 @@ def test_a_re_signed_certificate_cannot_claim_more_than_the_artifacts_record(
     ok, reason = C.verify_certificate(_resign(cert, mutate), KEY)
     assert not ok, f"{label} verified"
     assert expected in reason, f"{label}: {reason}"
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [["other-pkg"], ["evil-pkg", "second-pkg"], [], ["zzz"]],
+    ids=["replaced", "extended", "emptied", "invented"])
+def test_a_dependency_pin_the_manifest_does_not_name_is_refused(tmp_path, forged):
+    """The manifest is the only source for the dependency pins, so the signed
+    member and the re-derived one have to be compared: this certificate is
+    built over a manifest that really names `evil-pkg`, and every re-signed
+    rewrite of the member is refused by name.
+
+    Without that comparison all four are green — `['other-pkg']`,
+    `['evil-pkg', 'second-pkg']`, `[]` and `['zzz']` alike — which is a signed
+    member that is neither checked nor described as unchecked."""
+    formal = _formal_copy(tmp_path)
+    _pin_packages(formal, "evil-pkg")
+    cert = _cert(tmp_path, formal=formal)
+    assert cert["proof_model"]["dependencies"] == ["evil-pkg"]
+    ok, reason = C.verify_certificate(cert, KEY, formal=formal)
+    assert ok, reason  # the negative control: the sweep bites rather than always refusing
+
+    def forge(document):
+        document["proof_model"]["dependencies"] = list(forged)
+
+    ok, reason = C.verify_certificate(_resign(cert, forge), KEY, formal=formal)
+    assert not ok, f"a dependency pin of {forged!r} verified"
+    assert "signed proof model member dependencies" in reason, reason
+    assert f"{forged!r}" in reason, reason
+
+
+def test_an_absent_commit_member_is_a_reason_and_not_a_traceback(tmp_path, capsys):
+    """`as_of_commit` is optional in VALUE — a package outside a git work tree
+    signs `null`, which is why the envelope reads it with `get` — but not in
+    presence, and a verifier is a trust boundary: a document that dropped the
+    member is a refusal with a reason, never the `KeyError` a direct index
+    raises. Both signatures are covered, because only the second one gets past
+    the MAC: the honest certificate, whose signature no longer matches once the
+    member is gone, and the re-signed one, which reaches the evidence checks."""
+    cert = _cert(tmp_path)
+    dropped = copy.deepcopy(cert)
+    dropped.pop("as_of_commit")
+
+    ok, reason = C.verify_certificate(dropped, KEY)
+    assert not ok and "signature mismatch" in reason, reason
+
+    resigned = _resign(cert, _drop_the_commit)
+    ok, reason = C.verify_certificate(resigned, KEY)
+    assert not ok, "a certificate with no commit member verified"
+    assert "missing required member 'as_of_commit'" in reason, reason
+
+    comp = _write(tmp_path, "cli.rvl", BASE)
+    keyf = _key_file(tmp_path)
+    assert main(["attest", str(comp), "--certificate", "--key", keyf, "--json"]) == 0
+    document = json.loads(capsys.readouterr().out)
+    host_path = _write(tmp_path, "no-commit.json",
+                       json.dumps(_resign(document, _drop_the_commit)))
+
+    assert main(["attest", str(host_path), "--verify-certificate",
+                 "--key", keyf, "--json"]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["valid"] is False, payload
+    assert "missing required member 'as_of_commit'" in payload["reason"], payload
+    assert "Traceback" not in captured.out + captured.err, captured.err
+
+    assert main(["attest", str(host_path), "--verify-certificate",
+                 "--key", keyf]) == 1
+    captured = capsys.readouterr()
+    assert "INVALID" in captured.out, captured.out
+    assert "missing required member 'as_of_commit'" in captured.out, captured.out
+    assert "Traceback" not in captured.out + captured.err, captured.err
 
 
 def test_verification_needs_a_key_and_never_reads_a_default(tmp_path):

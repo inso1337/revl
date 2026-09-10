@@ -139,7 +139,9 @@ plus one step, and the user-facing statement of it lives in
   cell it was read out of, that cell's name, the gap, the theorem count, the
   oracle cell, the registered theorem names, the contentless findings); every
   caveat; every requirement with both the `detail` and the `check` recorded
-  behind it; the proof model pins; the checker identity; the
+  behind it; all three members of the proof model — the toolchain pin, the
+  manifest digest and the dependency pins the manifest names; the checker
+  identity; the
   subject's source digest; the commit, as a revision of this history; and
   `key_id`, against the key in hand. It never reads a status out of the document
   it is checking. An attacker who holds the key can edit the record and re-sign
@@ -150,13 +152,15 @@ plus one step, and the user-facing statement of it lives in
   digests are re-derived too. The same sweep catches a rewritten status cell, a
   rewritten or emptied gap, a renamed guarantee, an unregistered theorem, a
   rewritten theorem count or oracle cell, a dropped contentless finding, a
-  rewritten requirement `detail` or `check`, a forged toolchain pin or manifest
-  pin, a rewritten checker version or ruleset digest, a commit this history does
+  rewritten requirement `detail` or `check`, a forged toolchain pin, a forged
+  manifest digest or a dependency pin the manifest does not name, a rewritten
+  checker version or ruleset digest, a commit this history does
   not contain, a forged subject digest and a forged key fingerprint.
 - **It fails closed.** `verify_certificate` never raises: a malformed document
   is `(False, reason)` with the reason naming which of the key, the envelope and
   the evidence failed. Unknown guarantee names, unknown requirement kinds,
-  duplicated or unsorted rows, a missing status row, a truncated subject hash, a
+  duplicated or unsorted rows, a missing status row, a signed member dropped from
+  the record, a truncated subject hash, a
   non-instant timestamp, a missing signature and a signature that is not ASCII
   are all refusals. The last one is the defect class this verifier has to be
   immune to by construction: `hmac.compare_digest` raises `TypeError` on two
@@ -192,7 +196,7 @@ plus one step, and the user-facing statement of it lives in
 
 | file | change |
 |---|---|
-| `src/revl/cert.py` | new; 1390 lines, the model, the readers, the builder, the verifier and the renders |
+| `src/revl/cert.py` | new; 1413 lines, the model, the readers, the builder, the verifier and the renders |
 | `src/revl/cli/parser.py` | three flags on the existing `attest` subparser: `--certificate`, `--verify-certificate`, `--formal DIR` |
 | `src/revl/cli/observe.py` | `_run_attest` dispatches to `_run_certificate`, and refuses `--verify` combined with either certificate flag so the two protocols cannot be confused |
 | `tests/test_826_component_certificate.py` | new; the exit criterion, the readers, the trust boundary, the re-signed forgeries and the artifact mutations |

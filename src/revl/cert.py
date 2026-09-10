@@ -49,13 +49,15 @@ every member whose value the artifacts, the key or the verifier's own build
 fixes, and compares it with what was signed rather than reading it: the
 artifact digests, the per-guarantee rows including their status cells, their
 gaps, their registered theorems and their contentless findings, the caveats,
-the requirements and the check recorded behind each one, the proof model pins,
-the checker identity, the key fingerprint, the subject's source digest and the
-commit the certificate names. Two members are recorded rather than re-derived,
-because they are statements about the signing EVENT rather than about the tree:
-`timestamp` and `signer`. They are inside the MAC, so they cannot be edited
-after the fact, and every successful verification says in so many words that
-they were not re-derived, so a green check is never read as a claim about them.
+the requirements and the check recorded behind each one, the proof model in
+full (the toolchain pin, the manifest digest and the dependency pins that
+manifest names), the checker identity, the key fingerprint, the subject's
+source digest and the commit the certificate names. Two members are recorded
+rather than re-derived, because they are statements about the signing EVENT
+rather than about the tree: `timestamp` and `signer`. They are inside the MAC,
+so they cannot be edited after the fact, and every successful verification says
+in so many words that they were not re-derived, so a green check is never read
+as a claim about them.
 """
 
 from __future__ import annotations
@@ -460,9 +462,35 @@ def injection_sweep(text: str, *, source: str = "formal/STATUS.md") -> list[dict
     return rows
 
 
+def _dependencies(manifest_text: str | None) -> list[str]:
+    """The package names in `lake-manifest.json`, which is where a pinned
+    dependency would be visible. Revl's formal layer has none by design, and
+    a certificate that says so is saying something checkable.
+
+    A `lake-manifest.json` with no `packages` member, or none at all, derives
+    an empty list rather than `None`, so the member is always comparable: the
+    verifier re-derives it from this same manifest text and never has to fall
+    back on reading what was signed."""
+    if not manifest_text:
+        return []
+    import json  # noqa: PLC0415  (one local decode, no module-level side effect)
+    try:
+        manifest = json.loads(manifest_text)
+    except json.JSONDecodeError as error:
+        raise CertError(f"formal/lake-manifest.json is not JSON: {error}") from error
+    packages = manifest.get("packages") or []
+    return sorted(str(package.get("name")) for package in packages)
+
+
 def proof_model(root: Path, *, source: str | None = None) -> dict:
     """The proof model: the Lean release the theorems were checked against,
-    plus the pins of the package's own dependencies."""
+    the digest of the package's manifest, and the dependency pins that
+    manifest names.
+
+    All three members are read here and nowhere else, so the same call backs
+    the certificate and the re-derivation the verifier compares it with. A
+    member the builder filled in separately from the verifier's reading is a
+    member nothing compares, which is how a forged pin stays green."""
     toolchain_path = root / "lean-toolchain"
     if not toolchain_path.is_file():
         raise CertError(
@@ -477,23 +505,8 @@ def proof_model(root: Path, *, source: str | None = None) -> dict:
     return {
         "lean_toolchain": toolchain,
         "manifest_digest": sha256_text(manifest) if manifest is not None else None,
-        "dependencies": [],
+        "dependencies": _dependencies(manifest),
     }
-
-
-def _dependencies(manifest_text: str | None) -> list[str]:
-    """The package names in `lake-manifest.json`, which is where a pinned
-    dependency would be visible. Revl's formal layer has none by design, and
-    a certificate that says so is saying something checkable."""
-    if not manifest_text:
-        return []
-    import json  # noqa: PLC0415  (one local decode, no module-level side effect)
-    try:
-        manifest = json.loads(manifest_text)
-    except json.JSONDecodeError as error:
-        raise CertError(f"formal/lake-manifest.json is not JSON: {error}") from error
-    packages = manifest.get("packages") or []
-    return sorted(str(package.get("name")) for package in packages)
 
 
 def tree_commit(root: Path) -> str | None:
@@ -612,8 +625,6 @@ def formal_state(root: Path, *, guarantees: list[str] | None = None) -> dict:
     injections = injection_proofs(status_text, source=status_source)
     sweep = injection_sweep(status_text)
     model = proof_model(root)
-    model["dependencies"] = _dependencies(
-        _read(root / "lake-manifest.json") if (root / "lake-manifest.json").is_file() else None)
 
     kinds: dict[str, int] = {}
     for row in registered.values():
@@ -1143,10 +1154,11 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
         compared are the artifact digests, the whole of every per-guarantee
         row (its status, the cell that status is read out of, the cell's own
         name, the theorem names and the contentless findings), the caveats, the
-        requirements with the check recorded behind each one, the proof model
-        pins, the checker identity, the subject's source digest when the file
-        it names is readable here, and the commit it names as a revision of
-        this history.
+        requirements with the check recorded behind each one, all three members
+        of the proof model (the toolchain pin, the manifest digest and the
+        dependency pins that manifest names), the checker identity, the
+        subject's source digest when the file it names is readable here, and
+        the commit it names as a revision of this history.
       * **hash mismatch**: only when `against` is supplied, the composition
         presented now hashes differently from the one the certificate was
         signed for.
@@ -1246,7 +1258,19 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
                            f"{str(subject['source_hash'])[:12]}: the composition "
                            "it speaks about is not the one on this machine")
 
-    signed_commit = cert["as_of_commit"]
+    # The member is optional in VALUE — a package outside a git work tree signs
+    # `null` — but not in presence: `make_certificate` always writes it, so a
+    # record that dropped it is not the document this builder produces, and the
+    # envelope cannot tell absent from `null` (`_validate_envelope` reads both
+    # as `None`). The distinction is drawn here rather than one line later at an
+    # index a dropped member would turn into a traceback, which is what the
+    # "a malformed document is `(False, reason)`" contract forbids (roadmap 428
+    # F10: a peer-supplied record is a reason, never a crash).
+    if "as_of_commit" not in cert:
+        return False, ("certificate is missing required member 'as_of_commit': "
+                       "a certificate names the commit it was signed over, or "
+                       "`null` when the package is not a git work tree")
+    signed_commit = cert.get("as_of_commit")
     if signed_commit is not None:
         contained, why = commit_in_history(root, str(signed_commit))
         if contained is False:
@@ -1255,7 +1279,7 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
         if contained is None:
             unverified.append("as_of_commit")
 
-    for member in ("lean_toolchain", "manifest_digest"):
+    for member in ("lean_toolchain", "manifest_digest", "dependencies"):
         signed_member = cert["proof_model"][member]
         live_member = live["proof_model"][member]
         if signed_member != live_member:
