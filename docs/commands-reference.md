@@ -11,11 +11,11 @@ The verb set, in the order the parser declares it:
 <!-- docgen:cli-verbs begin -->
 ```text
 compile  explain  grammar  adapt  doctor  scaffold  composition  layer
-audit  goal  policy  diff  changelog  version  contract  erase-report
-plan  apply  undo  canary  query  fmt  quarantine  analyze  test  mcp
-import  export  serve  run  recover  estop  branch  compare  replay  why
-metrics  trace  profile  attest  dash  repair  bundle  emit  verify
-deploy  deploy-admit  truc
+audit  goal  policy  simulate  diff  changelog  version  contract
+erase-report  plan  apply  undo  canary  query  fmt  quarantine  analyze
+test  mcp  import  export  serve  run  recover  estop  branch  compare
+replay  why  metrics  trace  profile  attest  dash  repair  bundle  emit
+verify  deploy  deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
 
@@ -305,6 +305,48 @@ DSL.
 revl policy evaluate prod.policy app.rvl
 revl policy evaluate prod.policy app.rvl --json --component Billing
 revl policy evaluate local.policy app.rvl --recompute
+```
+
+### `revl simulate`
+
+Simulate a change against a recorded run (roadmap item 468). `simulate` has
+one subcommand, `policy-diff`, which reads two boundary policies and one
+write-ahead log and computes the newly-allowed and newly-denied action sets the
+change would have made over the crossings that run actually recorded, plus a
+blast-radius summary bounded by that recorded action set.
+
+This is not `revl audit --diff`, which re-audits a generation and fails when it
+adds boundary crossings but keeps no policy on its path. It is also not
+`revl policy evaluate`, which answers the policy-only question over a whole
+composition, over the capabilities the composition declares rather than the
+ones a run took. `simulate policy-diff` answers what the change would have done
+to the actions this run took, and it refuses to answer what one recorded run
+cannot say. An action the run never took is invisible here however widely the
+new policy opens it; an effect record whose step carried no capability scope is
+counted as unscoped rather than resolved to the label it recorded; and a
+realm-scoped rule stays undecided until the compiled composition supplies the
+component's realms.
+
+An action is a recorded effect record whose scope names a capability, and each
+verdict is the gate's own verdict: the diff calls the same
+`policy.capability_verdict` the admission refuses by, so a preview that could
+disagree with the admission it previews is not possible.
+
+- `OLD` - the boundary policy in force (required).
+- `NEW` - the boundary policy to simulate (required).
+- `--history FILE` - the write-ahead log to read (required).
+- `--composition FILE ...` - compile these composition sources and take each
+  component's realms from them; without one a realm-scoped rule is undecided.
+- `--json` - machine-readable output.
+
+Exit status follows the widening: `1` when the change newly allows a recorded
+action or leaves one undecided, and `0` when it only narrows or changes
+nothing.
+
+```bash
+revl simulate policy-diff prod.policy next.policy --history run.wal
+revl simulate policy-diff prod.policy next.policy --history run.wal --json
+revl simulate policy-diff loose.policy tight.policy --history run.wal --composition app.rvl
 ```
 
 ### `revl audit`
