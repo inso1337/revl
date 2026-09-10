@@ -83,15 +83,33 @@ def _run_test(args, ir: dict) -> int:
 
 
 def _run_erase_report(args, ir: dict) -> int:
-    """`revl erase-report --realm R` — right-to-erasure evidence (docs/erase-report.md)."""
+    """`revl erase-report --realm R`: right-to-erasure evidence (docs/erase-report.md).
+
+    With `--receipt-key` (or an exported REVL_ERASURE_KEY* ), the report is
+    SIGNED: a portable receipt naming every replica the erasure reaches rides
+    inside the document under `receipt` (roadmap item 472, src/revl/
+    erasure_receipt.py). Without a key the document is byte-identical to the
+    report this command always produced."""
+    from . import erasure_receipt  # noqa: PLC0415
     from .erase_report import build_report, render  # noqa: PLC0415
+
     report_doc = build_report(
         ir, args.realm,
         prove_residue=not getattr(args, "no_residue_proof", False))
+    key_path = getattr(args, "receipt_key", None)
+    receipt = None
+    if report_doc.get("ok") and (key_path or erasure_receipt.key_from_env()):
+        receipt = erasure_receipt.make_receipt(
+            report_doc, erasure_receipt.resolve_key(key_path), ir=ir,
+            signer=getattr(args, "receipt_signer", None))
+        report_doc["receipt"] = receipt
     if args.json:
         print(json.dumps(report_doc, indent=2))
     else:
         print(render(report_doc))
+        if receipt is not None:
+            print()
+            print(erasure_receipt.render_receipt(receipt))
     if not report_doc.get("ok"):
         return 1
     # a proven state-gone + untouched other realms is a clean report;
