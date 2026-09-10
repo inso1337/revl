@@ -1162,12 +1162,13 @@ transport spawns to have the RECEIVING side do the check, against that host's
 own local trust store, rather than the conductor checking in its own process.
 
 - `--key PATH` - a file holding a raw HMAC verify key this host trusts;
-  repeatable. The request carries no key, so with no `--key` the chain cannot be
-  verified and admission refuses at the signer link.
-- `--host-key PATH` - a file holding this host's own signing key. PREPARE signs
-  its admission verdict with it and COMMIT signs the load-time measurement with
-  it; with no `--host-key` a COMMIT refuses rather than returning an unsigned,
-  unattributable measurement.
+  repeatable. The file is read the way `attest.load_key` reads it (one trailing
+  newline stripped). The request carries no key, so with no `--key` the chain
+  cannot be verified and admission refuses at the signer link.
+- `--host-key PATH` - a file holding this host's own signing key, read the same
+  way (one trailing newline stripped). PREPARE signs its admission verdict with
+  it and COMMIT signs the load-time measurement with it; with no `--host-key` a
+  COMMIT refuses rather than returning an unsigned, unattributable measurement.
 - `--require-gauntlet` / `--require-conformance` - refuse a chain that binds no
   item-31 gauntlet or item-306 conformance evidence. The host is the floor: a
   request may add either requirement but never turn one off.
