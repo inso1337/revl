@@ -1201,6 +1201,19 @@ def build_parser() -> argparse.ArgumentParser:
     replay_cmd.add_argument(
         "--mode", default=None, choices=list(REPLAY_MODES),
         help="report readiness for one mode only, instead of all four")
+    replay_cmd.add_argument(
+        "--under", metavar="POLICY", default=None,
+        help="counterfactual incident replay (roadmap item 467): recompute this "
+             "policy's reach rules over the crossings the WAL recorded and name "
+             "the first dangerous crossing. With --candidate it also reports "
+             "whether the candidate composition is admitted; without one it "
+             "reports that the question is not answerable from the record, "
+             "because a crossing's capability token is not on the WAL")
+    replay_cmd.add_argument(
+        "--candidate", nargs="+", default=None, metavar="FILE",
+        help="the candidate composition to resolve each recorded crossing's "
+             "capability token from, and to admit under --under. Compiled "
+             "statically: no live effect fires")
     replay_cmd.add_argument("--json", action="store_true",
                             help="machine-readable output")
 
