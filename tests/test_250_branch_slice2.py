@@ -165,15 +165,22 @@ def test_an_unknown_capability_token_reads_as_crossing_offline(tmp_path):
     assert [e["label"] for e in doc["wouldCrossOnRewind"]] == ["quantum.write"]
 
 
-def test_a_scopeless_record_reads_as_host_confined_and_says_so(tmp_path):
-    """An absent scope reads exactly as the live classifier reads `None`. That is
-    the reader's one blind spot over an older WAL, so it is stated on the document
-    rather than left for the reader to discover."""
+def test_a_scopeless_record_is_enumerated_and_not_offered_as_rewindable(tmp_path):
+    """An absent scope is UNPROVEN, and the reader takes the same direction the
+    live classifier takes with `None`: enumerate, never offer as rewindable. That
+    is the reader's one blind spot over an older WAL — it cannot tell a step that
+    declared no capability from a step whose scope was never recorded — and it
+    resolves the ambiguity the safe way, stated on the document rather than left
+    for the reader to discover. Item 872: reading it as host-confined was the
+    fail-open inversion, so a WAL written before that has every effect enumerated
+    and can never claim a clean rewind."""
     tl = replay.Timeline("C")
     _mk(tl, replay.KIND_EFFECT, "legacy", undo=lambda: None)
     doc = branch_mod.partition(_durable(tmp_path, tl), -1)
-    assert [e["label"] for e in doc["wouldRewind"]] == ["legacy"]
-    assert "cannot distinguish" in doc["readerNote"]
+    assert doc["wouldRewind"] == []
+    assert [e["label"] for e in doc["wouldCrossOnRewind"]] == ["legacy"]
+    assert doc["residue"]["clean"] is False
+    assert "never offered as rewindable" in doc["readerNote"]
 
 
 def test_the_tail_is_bounded_by_at(tmp_path):

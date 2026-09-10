@@ -419,6 +419,16 @@ class Session:
         # records this session produced, WITH the item-251 shape-key fields, so
         # `distillation_offers` folds the live ledger without re-reading the WAL.
         self._approval_records: list = []
+        # roadmap item 471: the MULTI-PARTY decision graph. One record per
+        # (ticket hash, answer round) whose covering rule names approvers or
+        # demands more than one of them, keyed by the round-scoped `requestId`
+        # (the same unit `_ledger_entry_for_ticket` mints against, so the votes of
+        # one round can never satisfy the next asking of the same question).
+        # Each record holds the required set, the proposer, the votes cast so
+        # far (authority-bound, one per operator) and the decision state. The
+        # mirror of the `quorum-*` WAL records, so an in-process reader can audit
+        # the graph without reopening the log. Reset per session (invariant 5).
+        self._quorums: dict = {}
         # how many per-call class-(c) crossings auto-approved against a distilled
         # rule, and the offers/revokes applied this session (attribution + metrics).
         self._auto_consumed: int = 0
@@ -3297,6 +3307,10 @@ class Session:
         self._auto_rules = []
         self._auto_reviewed = {}
         self._approval_records = []
+        # roadmap item 471: the multi-party decision graph dies with the session
+        # exactly as the ledger it keys into does, so a vote cannot outlive the
+        # session that recorded it (invariant 5).
+        self._quorums = {}
         self._auto_consumed = 0
         self._distillation_seq = 0
         # item 310: the seam-method cache is session-scoped, exactly as the ledger
@@ -4169,7 +4183,8 @@ class Session:
         except Exception:  # noqa: BLE001 — a metric never crashes state()
             return []
 
-    def _distillation_ledger_fields(self, ticket: dict) -> dict:
+    def _distillation_ledger_fields(self, ticket: dict,
+                                    operator: str | None = None) -> dict:
         """The item-251 shape-key fields a grant record carries so the distiller
         folds it (design §1.1, §2.1): the crossing's realm, its bound resource
         valuations (`resourceScopes`, the registered-resource projection the N1
@@ -4206,13 +4221,20 @@ class Session:
             in the source already and discloses nothing about the caller — so a
             literal-targeted crossing distills identically under both modes.
 
+        `operator` names the identity the grant is attributed to. It defaults to
+        the session's bound operator, which is who answers an ordinary prompt; the
+        multi-party path (roadmap item 471) passes the approver whose vote closed
+        the quorum, so the record names the human who decided rather than the
+        session's identity, and an override passes the operator who exercised it.
+
         What is NOT on offer is recording a placeholder. That would be worse than
         the leak: every distinct target would fold to one shape and a rule minted
         over it would cover all of them, the over-authorization
         `mint_standing_grant` already refuses a placeholder-scoped grant for.
         """
         fields: dict = {"realm": ticket.get("realm", ""),
-                        "operator": self._operator_token(),
+                        "operator": (operator if operator is not None
+                                     else self._operator_token()),
                         # item 251 Slice 3: the grant's session (invariant 5) so
                         # the WAL, read back across sessions sharing a path, groups
                         # the per-session prompt series the time axis folds (§4).
@@ -4609,6 +4631,20 @@ class Session:
             The one prompt moves from the first crossing to the acquisition — the
             item-248 economics (3 prompts to 1), never to 0.
 
+        Roadmap item 471: when a covering rule of the lease's capability names
+        approvers or demands more than one, that operator mint does not exist —
+        a multi-party rule is answered by votes, so `mint_standing_grant` refuses
+        on both routes, and the ticket alone would close nothing (the answer
+        arrives over TIME, on the decision graph, not on the operator's call).
+        The acquisition then has exactly one route, taken here and nowhere else:
+        when the decision for THAT ticket is satisfied, this gate mints the lease
+        grant off the satisfied ledger entry itself (`_satisfied_decision_for`)
+        and spends it once. Before the votes arrive — and for a decision that is
+        absent, lapsed, spent or bound to another ticket — the lease is REFUSED
+        exactly as it always was, so the rule is never widened, and a lease this
+        session never issued a ticket for is refused too (a generation change
+        clears the outstanding-ticket table: that ticket is gone, not stale).
+
         Inert for every composition with no lease step, so byte-identity holds."""
         leases = _collect_lease_requests(ir)
         if not leases:
@@ -4629,6 +4665,18 @@ class Session:
             if self._live_lease_grant(component, cap) is not None:
                 continue  # already minted from an approved ticket (retry / pre-mint)
             ticket = self._build_lease_ticket(lz)
+            # roadmap item 471: the lease's own votes are the answer. The mint
+            # is taken from the LIVE satisfied decision for THIS ticket and from
+            # nothing else (see the docstring). `in self._tickets` is the other
+            # half of the binding: the mint is the retry of the load this
+            # session already asked about, never a replay of a decision that
+            # outlived the ticket it answered (a swap replaces the table).
+            decision = (self._satisfied_decision_for(ticket)
+                        if ticket["hash"] in self._tickets else None)
+            if decision is not None:
+                self._mint_grant(ticket_hash=ticket["hash"], decision=decision)
+                self._consume_approval(decision)  # consume-before-fire (Dec. 3)
+                continue
             self._issue_ticket(ticket)
             raise ApprovalRequired(ticket)
 
@@ -4693,6 +4741,66 @@ class Session:
             if _cap_covers(g["capability"], capability):
                 return g
         return None
+
+    def _satisfied_decision_for(self, ticket: dict) -> dict | None:
+        """The PROOF that lets a multi-party `kind='lease'` crossing boot: the
+        live ledger entry this session already minted from a SATISFIED decision
+        for `ticket` ITSELF, or None (`roadmap item 471` round 2).
+
+        This is the one route a quorum-gated `effect lease` has, and it is a
+        narrower route than the operator mint it replaces, bound four ways:
+
+          * the entry is the live, unconsumed, unexpired ledger entry for this
+            ticket's hash, reach-closure candidate hash and component
+            (`_find_standing_approval`) — a stale entry from a swapped
+            generation computes a different candidate hash and fails there;
+          * the decision filed under the entry's OWN round-scoped `requestId` is
+            closed as `satisfied`, by `votes` or by `override` — an open question
+            and a denied or expired one are not an answer;
+          * that decision's own hash/candidate/component are the entry's, so no
+            decision can be paired with an entry it did not mint;
+          * it is SPENT once, by the caller (`_enforce_lease_gate` consumes it
+            before boot), so the same decision cannot boot a second lease.
+
+        What it does NOT do: satisfy a crossing. The grant the gate mints from
+        this entry is lease-tagged and `_find_standing_grant` still refuses a
+        multi-party ticket, so no class-(c) crossing is ever admitted by it —
+        the lease grant is the acquisition's handle, nothing more."""
+        entry = self._find_standing_approval(ticket)
+        if entry is None:
+            return None
+        record = self._quorums.get(entry.get("requestId"))
+        if record is None or record.get("outcome") != "satisfied":
+            return None
+        if record.get("satisfiedBy") not in ("votes", "override"):
+            return None
+        if (record.get("hash"), record.get("candidateHash"),
+                record.get("component")) != (entry["hash"],
+                                             entry["candidateHash"],
+                                             entry["component"]):
+            return None
+        return entry
+
+    def _decision_authorizes_grant(self, decision: dict | None,
+                                   ticket_hash: str | None) -> bool:
+        """Whether `decision` is the proof that lets THIS mint pass the
+        `_mint_standing_grant` refusal for a multi-party rule (item 471, round
+        2). True only for the lease bridge: an exact, identity-checked satisfied
+        decision for THIS `kind='lease'` ticket, re-derived here rather than
+        trusted.
+
+        `decision` is never caller-supplied — the public `mint_standing_grant`
+        passes none, so no operator request can take this route — and a copy, a
+        stale or already-spent entry, an entry minted for another ticket, a
+        non-lease ticket and a decision that is not satisfied all fail. The
+        predicate `_multi_party_rules` stays load-bearing: this narrows WHO may
+        ask, never WHICH rules bind."""
+        if decision is None or ticket_hash is None:
+            return False
+        ticket = self._tickets.get(ticket_hash)
+        if ticket is None or ticket.get("kind") != "lease":
+            return False
+        return self._satisfied_decision_for(ticket) is decision
 
     def _runtime_lease_acquire(self, component: str, capability: str,
                                ttl_ms, uses) -> str | None:
@@ -4778,11 +4886,39 @@ class Session:
         no-op it must be (item 427 F5, `approve_ticket`). Once that approval has
         been spent at its one crossing, the next raise opens the next round and
         the operator can answer again — which is the whole two-step, and what
-        makes a repeated crossing approvable at all."""
+        makes a repeated crossing approvable at all.
+
+        A multi-party question is the same slot with one more reason not to
+        advance: a quorum's votes arrive over TIME (roadmap item 471), so the
+        proposer retrying the crossing, or a client re-issuing the call after a
+        load, would otherwise discard the votes already cast against the question
+        and move the goalposts under the approvers. While the round's quorum is
+        still open to votes, the round stands, `_open_quorum` hands back the same
+        record, and the deadline the votes are bound to does not restart either:
+        a question's clock starts when it is ASKED, not when the first voter
+        arrives, or a slow voter could extend the window indefinitely."""
         h = ticket["hash"]
+        # roadmap item 471: a crossing whose covering rule demands more distinct
+        # approvers than this session's one proposer leaves eligible is refused
+        # HERE, at the asking, rather than issuing a ticket no vote can answer.
+        # `_ticket_approval_shape` also refuses here when the crossing reaches
+        # capabilities whose rules name different approver sets, because no single
+        # set of humans can answer for it.
+        rule = self._ticket_approval_shape(ticket)
+        if rule is not None:
+            shortfall = self._quorum_shortfall(rule)
+            if shortfall is not None:
+                raise SessionError(
+                    f"cannot decide `{ticket.get('component')}`: {shortfall}")
         self._tickets[h] = ticket
-        if self._spendable_entry_for_ticket(h) is None:
+        if self._spendable_entry_for_ticket(h) is None \
+                and not self._quorum_pending(h):
             self._ticket_rounds[h] = self._ticket_rounds.get(h, 0) + 1
+        # the quorum opens HERE, on the asking, and not on the first vote: the
+        # record's `expiresAt` is the deadline every vote is bound to, and it has
+        # to run from the question rather than from whoever answers it last.
+        if rule is not None:
+            self._open_quorum(ticket, rule)
         if self._owner is not None:
             self._owner.prompts["perCall"] += 1
         self._count_posture("c")
@@ -4808,7 +4944,803 @@ class Session:
                 return entry
         return None
 
-    def approve_ticket(self, ticket_hash: str) -> dict:
+    # -- roadmap item 471: multi-party approval (N-of-M, separation of duties) --
+    #
+    # A policy rule may name the operators who may answer a crossing
+    # (`capability C requires approval require N of {a, b, c}`), and when N > 1
+    # one yes is not enough: the crossing stays refused until N distinct named
+    # approvers, none of them the operator who PROPOSED it, have each cast a vote
+    # bound to this exact question. The question is the one the single-approver
+    # path already asks (`_ticket_approval_shape` reads the same covering rule as
+    # `_ticket_ttl_ms`), and the answer is minted through the same
+    # `_mint_ticket_entry`, so a quorum approval is an ordinary ledger entry: it
+    # is consumed at the crossing by `_find_standing_approval` / `_consume_approval`
+    # exactly as a single yes is, and every existing invariant (hash-bound,
+    # candidate-bound, single-use, session-scoped, consume-before-fire) holds
+    # unchanged. A standing grant and a distilled auto-approve rule are
+    # DELIBERATELY not consulted for a multi-party ticket: each of those is one
+    # operator's authority recorded once, and one operator's authority is not N
+    # distinct humans. That exclusion is enforced in ONE place, the
+    # `_multi_party_rules` predicate, and NOT by three guards a fourth admission
+    # path could miss: `mint_standing_grant` refuses to mint (both routes),
+    # `_find_standing_grant` refuses to match a grant minted before the rule was
+    # bound, and `_auto_rule_covers` refuses to cover. See its docstring for the
+    # full call-site list, including why `_find_standing_approval` is not one.
+    #
+    # The one path that does NOT end in a refusal is an `effect lease` under a
+    # multi-party rule: its acquisition has no operator mint left (the predicate
+    # refuses it), so `_enforce_lease_gate` retries it against the DECISION
+    # instead — the lease grant is minted off the satisfied ledger entry for
+    # that very lease ticket, once, and spent before boot. Refused before the
+    # votes arrive, and never a class-(c) admission: the grant is lease-tagged,
+    # so the same predicate still turns it away at every crossing.
+    #
+    # What is new is the decision graph `self._quorums` keeps and the `quorum-*`
+    # WAL records it writes: who was asked, who voted, which votes were refused
+    # and why, and how the decision closed. The graph is keyed by the round-scoped
+    # `requestId` the ledger mints against, because a ticket hash names a QUESTION
+    # (see `_issue_ticket`) and the next asking of that question owes its own
+    # quorum rather than inheriting the last one's votes.
+
+    def _multi_party_rules(self, ticket: dict) -> list:
+        """THE item-471 predicate: every covering policy rule that DENIES
+        single-party authority over this crossing, or `[]` when every covering
+        rule is answerable by one operator's standing yes (`roadmap item 471`).
+
+        A rule denies it when it names the operators who may answer at all
+        (`require 1 of {a, b}` is "either of these two humans"), when it demands
+        more than one distinct approver (`require 2 of {a, b, c}`), or both. A
+        rule that names approvers is answered by those humans' votes; a rule that
+        demands several is answered by several distinct ones. Either way it is
+        NOT a question one operator's standing authority can answer.
+
+        This is the only predicate that decides it, and every admission path
+        consults THIS method rather than re-spelling the condition, so a fourth
+        path cannot be added that quietly forgets it:
+
+          * the VOTE path: `_ticket_approval_shape`, and through it
+            `_issue_ticket`, `approve_ticket`, `override_ticket`,
+            `escalate_ticket`, `revoke_ticket` and `quorum_state`;
+          * the STANDING-GRANT path: `mint_standing_grant` refuses the mint on
+            BOTH ways of naming what is granted (`ticket_hash=` and
+            `capability=`), so no such grant can ever exist, and
+            `_find_standing_grant` refuses to match one (`_live_grant_for`, its
+            only grant primitive, is therefore never reachable for such a
+            ticket either). The one request that is NOT refused is the lease
+            bridge below, and it is not an operator request at all;
+          * the LEASE path (item 294): an `effect lease` gated by a multi-party
+            rule is not widened either — there is no caller-supplied mint left
+            for its gate to admit on, so its acquisition is forced onto the vote
+            path (`_enforce_lease_gate`). The single route it keeps is the answer
+            the operators give: once the decision for THAT lease ticket is
+            satisfied, the gate mints the lease grant itself, off that decision
+            and nothing else (`_satisfied_decision_for`), and `_mint_grant`
+            accepts the mint only when `_decision_authorizes_grant` re-derives
+            the same proof for that very hash, for a `kind='lease'` ticket, and
+            spends it once (`_consume_approval`);
+          * the DISTILLED AUTO-APPROVE path: `_auto_rule_covers`, and through it
+            `_find_auto_approve`.
+
+        `_find_standing_approval` is deliberately NOT among the call sites: it is
+        how an ALREADY SATISFIED quorum's ledger entry is spent at its one
+        crossing, so gating it would deadlock the very vote path this predicate
+        protects."""
+        if self.sandbox is None \
+                or getattr(self.sandbox, "approval_rule_for", None) is None:
+            return []
+        return [rule for rule in (
+            self.sandbox.approval_rule_for(cap)
+            for cap in ticket.get("capabilities") or [])
+            if rule is not None and (rule.names_approvers() or rule.is_quorum())]
+
+    def _ticket_approval_shape(self, ticket: dict):
+        """The bound policy's multi-party shape for this ticket, or None when the
+        covering rules are all single-approver (`roadmap item 471`).
+
+        A ticket covers every capability its crossing reaches, and each may carry
+        its own rule. Two capabilities demanding DIFFERENT approver sets cannot
+        both be honoured by one answer, so that crossing is refused here rather
+        than silently answered against one of the two rules: "which humans does
+        this need" must have one answer or none (item 246's refuse-don't-degrade,
+        applied to the multi-party clause)."""
+        shapes = self._multi_party_rules(ticket)
+        if not shapes:
+            return None
+        distinct = {(rule.require, rule.approvers) for rule in shapes}
+        if len(distinct) > 1:
+            named = "; ".join(
+                f"`{cap}` needs {rule.quorum_text()}"
+                for cap, rule in ((c, self.sandbox.approval_rule_for(c))
+                                  for c in ticket.get("capabilities") or ())
+                if rule in shapes)
+            raise SessionError(
+                f"cannot decide `{ticket.get('component')}`: this crossing "
+                f"reaches capabilities whose approval rules name different "
+                f"approver sets ({named}), so no single set of humans can answer "
+                f"for it. Write one `require N of {{…}}` clause covering every "
+                f"capability the crossing reaches, or none (roadmap item 471, "
+                f"fail closed on an ambiguous quorum)")
+        return shapes[0]
+
+    def _quorum_request_id(self, ticket_hash: str) -> str:
+        """The round-scoped id a multi-party decision is filed under: the same id
+        `_mint_ticket_entry` mints against, so the votes of one asking of a
+        question can never satisfy the next asking of it (see `_issue_ticket`)."""
+        round_ = self._ticket_rounds.get(ticket_hash, 1)
+        return ticket_hash if round_ <= 1 else f"{ticket_hash}#r{round_}"
+
+    def _quorum_pending(self, ticket_hash: str) -> bool:
+        """Whether a multi-party question for this hash is still open to votes in
+        the round it was asked in. `_issue_ticket` consults this before opening a
+        new round so that re-raising an unanswered quorum keeps its votes (and
+        its deadline) instead of restarting the asking under the approvers."""
+        record = self._quorums.get(self._quorum_request_id(ticket_hash))
+        return (record is not None and record["outcome"] is None
+                and record["expiredAt"] is None)
+
+    def _record_quorum(self, kind: str, entry: dict) -> None:
+        """Write one record of the decision graph, durably and in memory. The WAL
+        is the cross-session audit surface (`quorum-*` records are consent facts,
+        so they consume no seq); `_approval_records` is the in-memory mirror the
+        session can be read back from."""
+        wal = self._approval_wal()
+        if wal is not None:
+            wal.record_quorum_event(kind, entry)
+        self._approval_records.append({"record": kind, **entry})
+
+    def _quorum_binding(self, record: dict) -> dict:
+        """The identity a vote or a decision is bound to: the ticket hash (which
+        carries the arguments digest), the reach-closure candidate hash, the
+        component and the round-scoped request id. Every vote row, refusal and
+        terminal record carries it, so the graph is joinable to the `approval-
+        granted` entry it authorizes and to the `approval-consumed` spend that
+        followed."""
+        return {"requestId": record["requestId"], "hash": record["hash"],
+                "candidateHash": record["candidateHash"],
+                "component": record["component"], "kind": record.get("kind"),
+                "round": record["round"]}
+
+    def _quorum_shortfall(self, rule) -> str | None:
+        """Why no vote can ever satisfy `rule` in this session, or None.
+
+        The interesting case is separation of duties biting: the operator
+        proposing the crossing is one of the named approvers, and the rule wants
+        more approvers than remain once the proposer is excluded. `require 2 of
+        {alice, bob}` proposed by alice names one eligible approver and demands
+        two, so the honest outcome is a refusal at the crossing rather than a
+        ticket that can never be answered. The proposer is the session's bound
+        operator token (there is exactly one identity per session, see the header
+        of this block)."""
+        proposer = self._operator_token()
+        eligible = [name for name in rule.approvers if name != proposer]
+        if len(eligible) >= rule.require:
+            return None
+        return (f"its approval rule demands {rule.quorum_text()}, but the operator "
+                f"proposing this crossing is `{proposer or 'nobody'}`, so only "
+                f"{len(eligible)} distinct approver"
+                f"{'' if len(eligible) == 1 else 's'} other than the proposer can "
+                f"vote and the count can never be reached. Name approvers who can "
+                f"answer without the proposer counting for two (roadmap item 471, "
+                f"separation of duties)")
+
+    def _open_quorum(self, ticket: dict, rule) -> dict:
+        """Enter `ticket` into voting for its current round, opening the decision
+        graph if this round has none yet, and return the record.
+
+        Opening is idempotent WITHIN a round: the same question re-raised after a
+        load that raised and never committed must not throw away the votes already
+        cast against it. Across rounds the record is fresh, which is the point:
+        the approvals already spent cannot answer the next asking.
+
+        A shape this session cannot satisfy is refused HERE, before any vote is
+        counted, with a message naming the rule and the proposer (see
+        `_quorum_shortfall`; `_issue_ticket` refuses the crossing earlier still)."""
+        request_id = self._quorum_request_id(ticket["hash"])
+        record = self._quorums.get(request_id)
+        if record is not None:
+            return record
+        shortfall = self._quorum_shortfall(rule)
+        if shortfall is not None:
+            raise SessionError(
+                f"cannot decide `{ticket.get('component')}`: {shortfall}")
+        proposer = self._operator_token()
+        now = self._now_ms()
+        ttl_ms = self._ticket_ttl_ms(ticket)
+        record = {
+            "requestId": request_id,
+            "hash": ticket["hash"],
+            "candidateHash": ticket["candidateHash"],
+            "component": ticket["component"],
+            "kind": ticket.get("kind"),
+            "round": self._ticket_rounds.get(ticket["hash"], 1),
+            "capabilities": list(ticket.get("capabilities") or ()),
+            "require": rule.require,
+            "approvers": list(rule.approvers),
+            "rule": rule.quorum_text(),
+            "proposer": proposer,
+            "openedAt": now,
+            # the deadline the votes are bound to: the tightest `requires approval
+            # ttl` over the covered capabilities, exactly the token's own ttl, so a
+            # vote cannot outlive the approval it would authorize.
+            "expiresAt": (now + ttl_ms) if ttl_ms is not None else None,
+            "expiredAt": None,
+            "votes": {},           # operator token -> its one vote row
+            "outcome": None,       # None while open; else satisfied/denied/…
+            "satisfiedBy": None,   # "votes" | "override", once decided
+            "resolvedAt": None,
+        }
+        self._quorums[request_id] = record
+        self._record_quorum("quorum-open", {
+            **self._quorum_binding(record),
+            "capabilities": record["capabilities"], "require": record["require"],
+            "approvers": record["approvers"], "rule": record["rule"],
+            "proposer": proposer, "openedAt": now,
+            "expiresAt": record["expiresAt"]})
+        return record
+
+    def _lapse_quorum(self, record: dict) -> bool:
+        """Whether the question's deadline has passed, latching the timeout the
+        first time it has (the same dead latch `_expired` applies to a grant, so a
+        clock that moves backwards cannot revive an answerable question)."""
+        if record["outcome"] == "expired":
+            return True
+        if record["expiredAt"] is not None:
+            return True
+        if self._expired(record):
+            record["outcome"] = "expired"
+            record["resolvedAt"] = record["expiredAt"]
+            self._record_quorum("quorum-expired", {
+                **self._quorum_binding(record), "proposer": record["proposer"],
+                "require": record["require"], "approvers": record["approvers"],
+                "counted": self._counted(record), "expiresAt": record["expiresAt"],
+                "expiredAt": record["expiredAt"]})
+            return True
+        return False
+
+    @staticmethod
+    def _counted(record: dict) -> int:
+        """How many distinct approvers have voted YES and been counted. One row
+        per operator token, so a repeat vote cannot inflate it."""
+        return sum(1 for row in record["votes"].values()
+                   if row["vote"] == "approve")
+
+    def _closed_reason(self, record: dict) -> str | None:
+        """Why this question can no longer be voted on, or None while it is open.
+        A satisfied or denied quorum is closed (the decision was made); an
+        escalated or revoked one is closed by the operator who closed it; an
+        expired one ran out of time."""
+        outcome = record["outcome"]
+        if outcome is None:
+            return None
+        return {"satisfied": "closed-decision", "denied": "closed-decision"}.get(
+            outcome, outcome)
+
+    def _refuse_vote(self, record: dict, reason: str, message: str, voter: str) -> None:
+        """Record a vote that was NOT counted and refuse it. Every refusal is
+        written down before it is raised: a quorum whose failures are invisible is
+        a quorum an attacker can probe without a trace."""
+        self._record_quorum("quorum-refused", {
+            **self._quorum_binding(record), "action": "vote", "reason": reason,
+            "voter": voter, "counted": self._counted(record),
+            "require": record["require"], "proposer": record["proposer"]})
+        raise SessionError(message)
+
+    def _cast_vote(self, ticket: dict, rule, *, vote: str, as_token: str | None,
+                   ) -> dict:
+        """Cast one approver's vote against an outstanding multi-party ticket and
+        report the decision graph.
+
+        The refusals are the point of the mechanism, and each is recorded before
+        it is raised:
+
+        * a vote from outside the rule's named set is refused (fail closed: an
+          approver the policy did not name cannot be counted, and neither can an
+          unidentifiable one);
+        * the PROPOSER's own vote is refused, so a quorum can never be closed by
+          the operator who asked for the crossing (separation of duties);
+        * a second vote asserted under a name that already voted is refused, so
+          one NAME supplies one vote toward the N. What that does NOT close is
+          the caller-asserted identity itself: `as_token` is a string the caller
+          supplies, not a verified credential, so one operator can assert several
+          of the rule's names. Decision 5 of `docs/design/471-quorum-approval.md`
+          states that bound, and binding the name to a credential is the
+          transport item that closes it;
+        * a vote against a question that is already decided, escalated, revoked,
+          or past its deadline is refused;
+        * a vote whose question no longer matches the live candidate is refused,
+          so a swap that changed the reach closure invalidates the pending votes
+          exactly as it invalidates a standing token;
+        * a vote that is neither `approve` nor `deny` is refused rather than
+          coerced.
+
+        Only after all of that does the vote count, and a counted vote either
+        closes the decision (minting the approval through the ordinary ledger) or
+        leaves the question open with one more name against it."""
+        record = self._open_quorum(ticket, rule)
+        voter = as_token if as_token is not None else self._operator_token()
+        if vote not in ("approve", "deny"):
+            self._refuse_vote(
+                record, "malformed-vote",
+                f"unparseable vote {vote!r} on ticket {ticket['hash']}: a vote is "
+                f"`approve` or `deny` (roadmap item 471, fail closed on an "
+                f"unparseable vote)", voter)
+        if self._lapse_quorum(record):
+            self._refuse_vote(
+                record, "expired",
+                f"ticket {ticket['hash']} lapsed at {record['expiresAt']}: its "
+                f"approval ttl ran out before the quorum answered, so no vote can "
+                f"be counted against it. Re-issue the call for a fresh ticket "
+                f"(roadmap item 471)", voter)
+        closed = self._closed_reason(record)
+        if closed is not None:
+            self._refuse_vote(
+                record, closed,
+                f"ticket {ticket['hash']} is already {record['outcome']}: its "
+                f"decision is made and a late vote is not counted (roadmap item "
+                f"471)", voter)
+        if record["candidateHash"] != ticket["candidateHash"] \
+                or record["component"] != ticket["component"]:
+            self._refuse_vote(
+                record, "stale-candidate",
+                f"ticket {ticket['hash']} no longer matches the live candidate "
+                f"({record['component']}@{record['candidateHash']} against "
+                f"{ticket['component']}@{ticket['candidateHash']}): the reach "
+                f"closure changed under the question, so its votes are void",
+                voter)
+        if record["approvers"] and voter not in record["approvers"]:
+            self._refuse_vote(
+                record, "unknown-approver",
+                f"`{voter or 'nobody'}` is not one of the approvers this crossing "
+                f"names ({', '.join(record['approvers'])}): an unnamed identity "
+                f"cannot be counted toward {record['rule']} (roadmap item 471, "
+                f"fail closed)", voter)
+        if voter == record["proposer"]:
+            self._refuse_vote(
+                record, "proposer",
+                f"`{voter}` proposed this crossing and cannot also approve it: "
+                f"{record['rule']} needs {record['require']} distinct approvers "
+                f"other than the proposer (roadmap item 471, separation of "
+                f"duties)", voter)
+        if voter in record["votes"]:
+            self._refuse_vote(
+                record, "duplicate-voter",
+                f"`{voter}` already voted on ticket {ticket['hash']} "
+                f"({record['votes'][voter]['vote']}): one operator supplies one "
+                f"vote toward {record['rule']}, and a repeat is not counted "
+                f"(roadmap item 471)", voter)
+
+        now = self._now_ms()
+        row = {"voteId": f"{record['requestId']}#v{len(record['votes']) + 1}",
+               "voter": voter, "vote": vote, "at": now, "round": record["round"]}
+        record["votes"][voter] = row
+        self._record_quorum("quorum-vote", {
+            **self._quorum_binding(record), "voteId": row["voteId"],
+            "voter": voter, "vote": vote, "at": now,
+            "counted": self._counted(record), "require": record["require"],
+            "proposer": record["proposer"]})
+        result = {
+            "approved": False, "hash": ticket["hash"],
+            "candidateHash": ticket["candidateHash"],
+            "component": ticket["component"], "kind": ticket.get("kind"),
+            "requestId": record["requestId"], "vote": vote, "voter": voter,
+            "voteId": row["voteId"], "counted": self._counted(record),
+            "require": record["require"],
+            "approvers": list(record["approvers"]),
+            "outstanding": [name for name in record["approvers"]
+                            if name not in record["votes"]],
+            "outcome": record["outcome"], "satisfiedBy": record["satisfiedBy"],
+        }
+        if vote == "approve" and self._counted(record) >= record["require"]:
+            return self._decide_satisfied(record, ticket, result)
+        # a vote that did not satisfy the count can still have made the count
+        # UNREACHABLE - enough named approvers have said no that the rest cannot
+        # carry it. Close the question rather than let it hang as an unanswerable
+        # ticket. (`_decide_denied` is a no-op while the count is still
+        # reachable, and it is called exactly once per vote.)
+        self._decide_denied(record)
+        result["outcome"] = record["outcome"]
+        return result
+
+    def _decide_denied(self, record: dict) -> bool:
+        """Close the question as DENIED when the remaining approvers can no longer
+        reach the count, and report whether it closed.
+
+        The question becomes arithmetically dead in one of two ways. A named
+        approver said no and the rest cannot carry the count: that is a DENIAL,
+        and the record names who denied so the decision is attributable to a
+        human. Or the eligible set shrank without a denial (the proposer moved
+        under a question that was already asked, the defensive case): that is
+        UNREACHABLE, and reading it as a refusal would blame an approver for the
+        policy's arithmetic. The record says which, so an audit can tell the two
+        apart; the outcome is `denied` either way, because either way the answer
+        is no and the crossing stays refused."""
+        remaining = [name for name in record["approvers"]
+                     if name not in record["votes"]]
+        separated = [name for name in remaining if name != record["proposer"]]
+        counted = self._counted(record)
+        if counted + len(separated) >= record["require"]:
+            return False
+        denied = sorted(name for name, row in record["votes"].items()
+                        if row["vote"] == "deny")
+        reason = "denied" if denied else "unreachable"
+        record["outcome"] = "denied"
+        record["resolvedAt"] = self._now_ms()
+        self._record_quorum("quorum-denied", {
+            **self._quorum_binding(record), "reason": reason,
+            "counted": counted, "require": record["require"],
+            "approvers": record["approvers"], "proposer": record["proposer"],
+            "denied": denied, "resolvedAt": record["resolvedAt"]})
+        return True
+
+    def _decide_satisfied(self, record: dict, ticket: dict, result: dict,
+                          *, satisfied_by: str = "votes") -> dict:
+        """Close the question as SATISFIED and mint the approval it authorizes.
+
+        `satisfied_by` is `votes` when N distinct named approvers other than the
+        proposer each cast a yes, and `override` when an emergency override closed
+        it instead. The record carries both the count reached and the count
+        DEMANDED plus which of the two closed it, so an override can never be read
+        as a quorum of votes: it is a different authority, recorded as itself."""
+        actor = record.get("decidedBy") or (
+            max(record["votes"].values(), key=lambda row: row["at"])["voter"]
+            if record["votes"] else self._operator_token())
+        record["outcome"] = "satisfied"
+        record["satisfiedBy"] = satisfied_by
+        record["resolvedAt"] = self._now_ms()
+        counted = self._counted(record)
+        self._record_quorum("quorum-satisfied", {
+            **self._quorum_binding(record), "satisfiedBy": satisfied_by,
+            "counted": counted, "require": record["require"],
+            "approvers": record["approvers"], "proposer": record["proposer"],
+            "voted": sorted(row["voter"] for row in record["votes"].values()
+                            if row["vote"] == "approve"),
+            "actors": [actor], "resolvedAt": record["resolvedAt"],
+            "expiresAt": record["expiresAt"],
+            **({"override": record["override"]} if record.get("override")
+               else {})})
+        self._mint_ticket_entry(
+            ticket, operator=actor,
+            quorum={"requestId": record["requestId"],
+                    "require": record["require"], "counted": counted,
+                    "approvers": list(record["approvers"]),
+                    "proposer": record["proposer"],
+                    "satisfiedBy": satisfied_by,
+                    "voted": sorted(row["voter"] for row in record["votes"].values()
+                                    if row["vote"] == "approve"),
+                    **({"override": record["override"]}
+                       if record.get("override") else {})})
+        result.update({"approved": True, "outcome": "satisfied",
+                       "satisfiedBy": satisfied_by, "counted": counted,
+                       "require": record["require"]})
+        return result
+
+    def override_ticket(self, ticket_hash: str, *, reason: str | None = None,
+                        as_token: str | None = None) -> dict:
+        """Close a multi-party question by EMERGENCY OVERRIDE (roadmap item 471).
+
+        The override exists for the case the item names: the named approvers
+        cannot be convened, and a crossing that matters must still be decidable.
+        It is a different authority from a vote and is recorded as one: the
+        decision names `satisfiedBy: "override"`, carries the exempted minimum,
+        the count actually reached, the operator who exercised it, whether that
+        operator was also the proposer, and the reason it was given. It is never
+        counted as a quorum, and a quorum that could still be reached is not
+        overridable.
+
+        A reason is required and a missing one is refused: an override without a
+        stated reason is an unattributable act. NOTE (honest bound, see
+        `docs/design/471-quorum-approval.md` Decision 4): this method is NOT
+        reachable from the MCP transport in this slice. There is no `revl_override`
+        tool, and the `override` / `escalate` / `revoke` / `quorum_state` entries
+        are called only from `tests/test_471_quorum_approval.py`. Who may override
+        in process is therefore the caller, and the operator-verb gate the design
+        note assigns to it lands with the Slice 2 verbs."""
+        ticket = self._tickets.get(ticket_hash)
+        if ticket is None:
+            raise SessionError(
+                f"unknown ticket hash {ticket_hash!r} - the server never issued it "
+                f"(or the generation changed and the outstanding-ticket table was "
+                f"replaced). Re-issue the call to get a fresh ticket (roadmap item "
+                f"471, the outstanding-ticket table)")
+        rule = self._ticket_approval_shape(ticket)
+        if rule is None or not rule.is_quorum():
+            raise SessionError(
+                f"ticket {ticket_hash} does not demand a quorum, so there is "
+                f"nothing to override: approving it is the ordinary path, and an "
+                f"override with no quorum to bypass would be an unaudited bypass "
+                f"of an ordinary refusal (roadmap item 471)")
+        record = self._quorums.get(self._quorum_request_id(ticket_hash))
+        if record is None:
+            # the overriding operator may never have seen the ticket, so open the
+            # graph here rather than refusing: the record is what makes the
+            # override auditable.
+            record = self._open_quorum(ticket, rule)
+        actor = as_token if as_token is not None else self._operator_token()
+        if not reason or not str(reason).strip():
+            self._record_quorum("quorum-refused", {
+                **self._quorum_binding(record), "action": "override",
+                "reason": "no-reason", "voter": actor,
+                "counted": self._counted(record), "require": record["require"],
+                "proposer": record["proposer"]})
+            raise SessionError(
+                f"an override of ticket {ticket_hash} must state a reason: an "
+                f"emergency override is an act someone is accountable for, and "
+                f"the record has to say why (roadmap item 471)")
+        if self._lapse_quorum(record):
+            raise SessionError(
+                f"ticket {ticket_hash} lapsed at {record['expiresAt']} and cannot "
+                f"be overridden: re-issue the call for a fresh ticket (roadmap "
+                f"item 471)")
+        closed = self._closed_reason(record)
+        if closed is not None and record["outcome"] != "escalated":
+            raise SessionError(
+                f"ticket {ticket_hash} is already {record['outcome']}, so it "
+                f"cannot be overridden (roadmap item 471)")
+        now = self._now_ms()
+        record["override"] = {"by": actor, "reason": str(reason).strip(),
+                              "at": now,
+                              "selfOverride": actor == record["proposer"],
+                              "proposer": record["proposer"]}
+        record["decidedBy"] = actor
+        result = {
+            "approved": False, "hash": ticket["hash"],
+            "candidateHash": ticket["candidateHash"],
+            "component": ticket["component"], "kind": ticket.get("kind"),
+            "requestId": record["requestId"], "vote": "override", "voter": actor,
+            "counted": self._counted(record), "require": record["require"],
+            "approvers": list(record["approvers"]),
+            "outstanding": [name for name in record["approvers"]
+                            if name not in record["votes"]],
+        }
+        record["outcome"] = None        # an override closes it, deliberately
+        self._record_quorum("quorum-override", {
+            **self._quorum_binding(record), **record["override"],
+            "counted": self._counted(record), "require": record["require"],
+            "approvers": record["approvers"]})
+        return self._decide_satisfied(record, ticket, result,
+                                      satisfied_by="override")
+
+    def escalate_ticket(self, ticket_hash: str, *, reason: str | None = None,
+                        as_token: str | None = None) -> dict:
+        """Hand a multi-party question up and close its vote path (roadmap item
+        471).
+
+        Escalation is what an approver does when the rule cannot be answered as
+        written: the named approvers cannot be convened, the question has stalled,
+        or the change needs an authority the rule does not name. Closing the votes
+        makes the remaining path the override, which is the stricter one (it is
+        separately granted and separately recorded), so escalation only ever
+        narrows authority: an escalated question cannot be approved by votes.
+
+        The escalator must be an approver the rule names or the proposer, so a
+        bystander cannot close somebody else's question. The record names who
+        escalated it and why."""
+        ticket = self._tickets.get(ticket_hash)
+        if ticket is None:
+            raise SessionError(
+                f"unknown ticket hash {ticket_hash!r} - the server never issued it "
+                f"(roadmap item 471, the outstanding-ticket table)")
+        rule = self._ticket_approval_shape(ticket)
+        if rule is None or not rule.is_quorum():
+            raise SessionError(
+                f"ticket {ticket_hash} does not demand a quorum, so there is "
+                f"nothing to escalate: a single-approver crossing has no stalled "
+                f"vote to hand up (roadmap item 471)")
+        record = self._quorums.get(self._quorum_request_id(ticket_hash))
+        if record is None:
+            record = self._open_quorum(ticket, rule)
+        actor = as_token if as_token is not None else self._operator_token()
+        if record["approvers"] and actor != record["proposer"] \
+                and actor not in record["approvers"]:
+            self._record_quorum("quorum-refused", {
+                **self._quorum_binding(record), "action": "escalate",
+                "reason": "unknown-approver", "voter": actor,
+                "counted": self._counted(record), "require": record["require"],
+                "proposer": record["proposer"]})
+            raise SessionError(
+                f"`{actor or 'nobody'}` cannot escalate ticket {ticket_hash}: only "
+                f"an approver this crossing names ({', '.join(record['approvers'])}) "
+                f"or the proposer may hand it up (roadmap item 471, fail closed)")
+        if self._lapse_quorum(record):
+            raise SessionError(
+                f"ticket {ticket_hash} lapsed at {record['expiresAt']}, so there is "
+                f"nothing left to escalate (roadmap item 471)")
+        closed = self._closed_reason(record)
+        if closed is not None:
+            raise SessionError(
+                f"ticket {ticket_hash} is already {record['outcome']}, so it cannot "
+                f"be escalated (roadmap item 471)")
+        now = self._now_ms()
+        record["outcome"] = "escalated"
+        record["resolvedAt"] = now
+        self._record_quorum("quorum-escalated", {
+            **self._quorum_binding(record), "by": actor,
+            "reason": (str(reason).strip() if reason else ""),
+            "counted": self._counted(record), "require": record["require"],
+            "approvers": record["approvers"], "proposer": record["proposer"],
+            "at": now})
+        return {"escalated": True, "hash": ticket["hash"],
+                "candidateHash": ticket["candidateHash"],
+                "component": ticket["component"], "requestId": record["requestId"],
+                "by": actor, "counted": self._counted(record),
+                "require": record["require"], "outcome": "escalated",
+                "how_to_resolve": ("the vote path is closed and the crossing "
+                                   "stays refused: no verb reachable from the "
+                                   "transport can still admit it (the `override` "
+                                   "operator verb is Slice 2, design only)")}
+
+    def revoke_ticket(self, ticket_hash: str, *, reason: str | None = None,
+                      as_token: str | None = None) -> dict:
+        """Withdraw a multi-party request, or veto an open one (roadmap item 471).
+
+        The proposer withdraws the crossing it asked for; an approver the rule
+        names can also close the question, which is a veto. Either way the votes
+        cast so far stop counting and no approval is minted, and the record names
+        who closed it and why. A bystander cannot: the same fail-closed membership
+        check escalation uses."""
+        ticket = self._tickets.get(ticket_hash)
+        if ticket is None:
+            raise SessionError(
+                f"unknown ticket hash {ticket_hash!r} - the server never issued it "
+                f"(roadmap item 471, the outstanding-ticket table)")
+        rule = self._ticket_approval_shape(ticket)
+        if rule is None or not rule.is_quorum():
+            raise SessionError(
+                f"ticket {ticket_hash} does not demand a quorum, so it cannot be "
+                f"revoked as one: revoke the standing grant instead (roadmap item "
+                f"471)")
+        record = self._quorums.get(self._quorum_request_id(ticket_hash))
+        if record is None:
+            record = self._open_quorum(ticket, rule)
+        actor = as_token if as_token is not None else self._operator_token()
+        if record["approvers"] and actor != record["proposer"] \
+                and actor not in record["approvers"]:
+            self._record_quorum("quorum-refused", {
+                **self._quorum_binding(record), "action": "revoke",
+                "reason": "unknown-approver", "voter": actor,
+                "counted": self._counted(record), "require": record["require"],
+                "proposer": record["proposer"]})
+            raise SessionError(
+                f"`{actor or 'nobody'}` cannot revoke ticket {ticket_hash}: only "
+                f"the proposer or an approver this crossing names "
+                f"({', '.join(record['approvers'])}) may close it (roadmap item "
+                f"471, fail closed)")
+        closed = self._closed_reason(record)
+        if closed is not None:
+            raise SessionError(
+                f"ticket {ticket_hash} is already {record['outcome']}, so it cannot "
+                f"be revoked (roadmap item 471)")
+        now = self._now_ms()
+        withdrawn = sorted(name for name, row in record["votes"].items()
+                           if row["voter"] == actor)
+        record["outcome"] = "revoked"
+        record["resolvedAt"] = now
+        self._record_quorum("quorum-revoked", {
+            **self._quorum_binding(record), "by": actor,
+            "reason": (str(reason).strip() if reason else ""),
+            "proposer": record["proposer"], "counted": self._counted(record),
+            "require": record["require"], "withdrewVotes": withdrawn, "at": now})
+        return {"revoked": True, "hash": ticket["hash"],
+                "candidateHash": ticket["candidateHash"],
+                "component": ticket["component"], "requestId": record["requestId"],
+                "by": actor, "withdrewVotes": withdrawn, "outcome": "revoked"}
+
+    def quorum_state(self, ticket_hash: str) -> dict:
+        """The decision graph of an outstanding multi-party ticket, read-only: the
+        required count, the named approvers, the votes counted so far and who cast
+        them, the votes refused and why, and the outcome. Fail-closed like every
+        other reader: an unknown hash is refused, and a ticket that demands no
+        quorum reports that rather than inventing an empty graph."""
+        ticket = self._tickets.get(ticket_hash)
+        if ticket is None:
+            raise SessionError(
+                f"unknown ticket hash {ticket_hash!r} - the server never issued it "
+                f"(roadmap item 471, the outstanding-ticket table)")
+        rule = self._ticket_approval_shape(ticket)
+        if rule is None:
+            return {"hash": ticket_hash, "component": ticket.get("component"),
+                    "quorum": False,
+                    "detail": "this ticket's approval rules name no approver set "
+                              "and demand no quorum"}
+        record = self._quorums.get(self._quorum_request_id(ticket_hash))
+        if record is None:
+            return {"hash": ticket_hash, "component": ticket.get("component"),
+                    "quorum": rule.is_quorum(), "require": rule.require,
+                    "approvers": list(rule.approvers), "rule": rule.quorum_text(),
+                    "outcome": None, "counted": 0, "votes": [],
+                    "refusals": [], "detail": "no vote has been recorded for this "
+                                              "round yet"}
+        refusals = [
+            {"action": row.get("action"), "reason": row.get("reason"),
+             "voter": row.get("voter")}
+            for row in self._approval_records
+            if row.get("record") == "quorum-refused"
+            and row.get("requestId") == record["requestId"]]
+        return {"hash": ticket_hash, "component": record["component"],
+                "quorum": rule.is_quorum(), "requestId": record["requestId"],
+                "round": record["round"], "require": record["require"],
+                "approvers": list(record["approvers"]), "rule": record["rule"],
+                "proposer": record["proposer"], "openedAt": record["openedAt"],
+                "expiresAt": record["expiresAt"], "outcome": record["outcome"],
+                "satisfiedBy": record["satisfiedBy"],
+                "counted": self._counted(record),
+                "outstanding": [name for name in record["approvers"]
+                                if name not in record["votes"]],
+                "votes": [dict(row) for row in record["votes"].values()],
+                "refusals": refusals,
+                **({"override": record["override"]}
+                   if record.get("override") else {})}
+
+    def _mint_ticket_entry(self, ticket: dict, *, operator: str | None = None,
+                           quorum: dict | None = None) -> dict:
+        """Mint the single-use ledger entry an answered ticket authorizes, and the
+        `approval-granted` WAL record that makes it durable.
+
+        Shared by the single-approver path (`approve_ticket`) and the multi-party
+        one (a quorum that reached its count), so both mint the identical shape:
+        one entry bound to the ticket hash, the reach-closure candidate hash, the
+        component, the round and the session, single-use, consumed durably before
+        the fire. `operator` names who answered (defaulting to the session's bound
+        operator); `quorum`, when the decision was multi-party, is spliced into the
+        granted record so the audit can see that several votes, or one override,
+        closed it, and never has to infer it."""
+        ticket_hash = ticket["hash"]
+        now = self._now_ms()
+        # item 246, Slice 2: the ttl from the policy rule covering this ticket's
+        # capabilities. The tightest (min) ttl over the covered required
+        # capabilities bounds the token; None = session-end at the latest.
+        ttl_ms = self._ticket_ttl_ms(ticket)
+        # the round this yes answers, and a `requestId` distinct per round. The
+        # audit joins `approval-granted` -> `approval-consumed` -> the emission on
+        # `requestId`, so two yeses to the same repeated question have to be two
+        # ids or the join cannot say which spend belongs to which decision. Round
+        # 1 keeps the bare ticket hash, so the id every existing session and WAL
+        # carries is unchanged.
+        round_ = self._ticket_rounds.get(ticket_hash, 1)
+        request_id = ticket_hash if round_ <= 1 \
+            else f"{ticket_hash}#r{round_}"
+        entry = {
+            "requestId": request_id,
+            "round": round_,
+            "hash": ticket["hash"],
+            "candidateHash": ticket["candidateHash"],
+            "component": ticket["component"],
+            "key": ticket.get("key"),
+            "method": ticket.get("method"),
+            "argsDigest": ticket.get("argsDigest"),
+            "kind": ticket.get("kind"),
+            "session": self._session_id,   # invariant 5: session-bound
+            "fields": {},           # the human's evidence (the language path fills)
+            "grantedAt": now,
+            "expiresAt": (now + ttl_ms) if ttl_ms is not None else None,
+            "consumed": False,
+        }
+        self._ledger.append(entry)
+        granted = {
+            "requestId": entry["requestId"], "hash": entry["hash"],
+            "candidateHash": entry["candidateHash"],
+            "component": entry["component"], "kind": entry["kind"],
+            **self._distillation_ledger_fields(ticket, operator=operator)}
+        if quorum is not None:
+            granted["quorum"] = quorum
+        wal = self._approval_wal()
+        if wal is not None:
+            wal.record_approval_granted(granted)
+        self._approval_records.append({"record": "approval-granted", **granted})
+        return entry
+
+    @staticmethod
+    def _ticket_response(ticket: dict) -> dict:
+        """The answer `approve_ticket` has always returned for a minted approval:
+        the hash, the component, the key/method/kind a caller needs to re-issue the
+        identical call, and the reach-closure candidate hash it is bound to."""
+        return {"approved": True, "hash": ticket["hash"],
+                "component": ticket["component"], "key": ticket.get("key"),
+                "method": ticket.get("method"), "kind": ticket.get("kind"),
+                "candidateHash": ticket["candidateHash"]}
+
+    def approve_ticket(self, ticket_hash: str, *, vote: str = "approve",
+                       as_token: str | None = None) -> dict:
         """Mint a standing approval bound to an outstanding ticket (Decision 2/3).
         Refuses a hash the server never issued (the outstanding-ticket table) — an
         approval can only be minted for a question the server actually asked. The
@@ -4842,7 +5774,16 @@ class Session:
         keep raising the same ticket with nothing left to consume. A new round
         opens only when the previous answer has been used up, so a resend that
         overlaps the answer it duplicates still lands on that answer's round and
-        still mints nothing."""
+        still mints nothing.
+
+        Roadmap item 471: a ticket whose covering rule names approvers, or demands
+        more than one (`require 2 of {a,b,c}`), is NOT answered here. A single yes
+        cannot carry it, so the call is routed to `_cast_vote`, which counts
+        distinct named votes and mints through the same `_mint_ticket_entry` this
+        method uses. That keeps the two paths one protocol with one ledger and one
+        set of invariants, and it is why a quorum approval is consumed at the
+        crossing by the same `_find_standing_approval` / `_consume_approval` the
+        single-approver path uses."""
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
@@ -4850,56 +5791,19 @@ class Session:
                 f"it (or the generation changed and the outstanding-ticket table "
                 f"was replaced). Re-issue the call to get a fresh ticket, then "
                 f"approve that (item 246, the outstanding-ticket table)")
-        existing = self._ledger_entry_for_ticket(ticket_hash)
-        if existing is not None:
-            return {"approved": True, "hash": existing["hash"],
-                    "component": existing["component"], "key": existing.get("key"),
-                    "method": existing.get("method"), "kind": existing.get("kind"),
-                    "candidateHash": existing["candidateHash"]}
-        now = self._now_ms()
-        # item 246, Slice 2: the ttl from the policy rule covering this ticket's
-        # capabilities. The tightest (min) ttl over the covered required
-        # capabilities bounds the token; None = session-end at the latest.
-        ttl_ms = self._ticket_ttl_ms(ticket)
-        # the round this yes answers, and a `requestId` distinct per round. The
-        # audit joins `approval-granted` -> `approval-consumed` -> the emission on
-        # `requestId`, so two yeses to the same repeated question have to be two
-        # ids or the join cannot say which spend belongs to which decision. Round
-        # 1 keeps the bare ticket hash, so the id every existing session and WAL
-        # carries is unchanged.
-        round_ = self._ticket_rounds.get(ticket_hash, 1)
-        request_id = ticket["hash"] if round_ <= 1 \
-            else f"{ticket['hash']}#r{round_}"
-        entry = {
-            "requestId": request_id,
-            "round": round_,
-            "hash": ticket["hash"],
-            "candidateHash": ticket["candidateHash"],
-            "component": ticket["component"],
-            "key": ticket.get("key"),
-            "method": ticket.get("method"),
-            "argsDigest": ticket.get("argsDigest"),
-            "kind": ticket.get("kind"),
-            "session": self._session_id,   # invariant 5: session-bound
-            "fields": {},           # the human's evidence (the language path fills)
-            "grantedAt": now,
-            "expiresAt": (now + ttl_ms) if ttl_ms is not None else None,
-            "consumed": False,
-        }
-        self._ledger.append(entry)
-        granted = {
-            "requestId": entry["requestId"], "hash": entry["hash"],
-            "candidateHash": entry["candidateHash"],
-            "component": entry["component"], "kind": entry["kind"],
-            **self._distillation_ledger_fields(ticket)}
-        wal = self._approval_wal()
-        if wal is not None:
-            wal.record_approval_granted(granted)
-        self._approval_records.append({"record": "approval-granted", **granted})
-        return {"approved": True, "hash": ticket["hash"],
-                "component": ticket["component"], "key": ticket.get("key"),
-                "method": ticket.get("method"), "kind": ticket.get("kind"),
-                "candidateHash": ticket["candidateHash"]}
+        rule = self._ticket_approval_shape(ticket)
+        if rule is None:
+            if vote != "approve" or as_token is not None:
+                raise SessionError(
+                    f"ticket {ticket_hash} names no approver set and demands no "
+                    f"quorum, so it cannot be answered with a vote: approve it "
+                    f"plainly (roadmap item 471)")
+            existing = self._ledger_entry_for_ticket(ticket_hash)
+            if existing is not None:
+                return self._ticket_response(existing)
+            self._mint_ticket_entry(ticket)
+            return self._ticket_response(ticket)
+        return self._cast_vote(ticket, rule, vote=vote, as_token=as_token)
 
     # -- item 344: session-scoped standing capability grants ----------------
 
@@ -4981,6 +5885,13 @@ class Session:
         class_c = ticket.get("classCCapabilities") or []
         if not class_c:
             return None  # no class-(c) capability to cover (fail-closed)
+        # roadmap item 471: a rule that names approvers, or demands more than one,
+        # is answered by VOTES and by nothing else. One operator's standing grant
+        # is not N distinct named approvers, so it never covers such a crossing
+        # (`_multi_party_rules` is the single predicate, and this is the only
+        # grant primitive: `_live_grant_for` is reached from nowhere else).
+        if self._multi_party_rules(ticket):
+            return None
         now = self._now_ms()
         grants: list[dict] = []
         seen: set[int] = set()
@@ -5110,6 +6021,12 @@ class Session:
         if self._auto_rule_suspended(entry):
             entry["suspended"] = True
             return False
+        # roadmap item 471: a rule carrying the multi-party clause is answered by
+        # VOTES and by nothing else, so no distilled rule covers a crossing it
+        # gates (`_multi_party_rules` is the single predicate). Checked AFTER the
+        # H1 suspend above so a grown glob is still latched as suspended.
+        if self._multi_party_rules(ticket):
+            return False
         if entry["realm"] is not None \
                 and entry["realm"] != ticket.get("realm", ""):
             return False
@@ -5197,7 +6114,33 @@ class Session:
         Bounded by construction: at least one of `uses`, `ttl_ms`, or a policy
         `requires approval ttl` rule must bound the grant — an unbounded standing
         grant is refused. Gated (in the mcp verb dispatch) by the `approve`
-        operator verb, exactly as `approve_ticket`."""
+        operator verb, exactly as `approve_ticket`.
+
+        Roadmap item 471: refused outright when the crossing's covering rule
+        names approvers or demands more than one, on BOTH routes. Such a rule is
+        answered by votes, and one operator's standing authority is not N
+        distinct named approvers (`_multi_party_rules`).
+
+        The ONE route such a rule keeps is the `kind='lease'` ticket an
+        `effect lease` raised: the lease gate mints that grant itself, off the
+        SATISFIED decision for that very ticket (`_decision_authorizes_grant`),
+        and never off anything an operator sent. This verb passes no `decision`,
+        so the public mint can never take that route."""
+        return self._mint_grant(ticket_hash=ticket_hash, capability=capability,
+                                uses=uses, ttl_ms=ttl_ms)
+
+    def _mint_grant(self, *, ticket_hash: str | None = None,
+                    capability: str | None = None, uses: int | None = None,
+                    ttl_ms: int | None = None,
+                    decision: dict | None = None) -> dict:
+        """The ONE implementation behind the standing-grant mint.
+
+        `decision` is the item-471 lease bridge and is deliberately NOT part of
+        the public signature: it is the live, satisfied ledger entry for a
+        multi-party `kind='lease'` ticket, passed only by `_enforce_lease_gate`,
+        and it is re-verified here rather than trusted
+        (`_decision_authorizes_grant`). Every other caller passes nothing, so a
+        multi-party rule refuses them exactly as it did before the bridge."""
         if uses is not None:
             if not isinstance(uses, int) or isinstance(uses, bool) or uses < 1:
                 raise SessionError(
@@ -5213,6 +6156,9 @@ class Session:
         candidate_hash: str | None = None
         policy_ttl: int | None = None
         is_lease = False
+        # the capabilities whose covering rules decide whether this crossing may
+        # be answered by one operator's standing authority at all (item 471).
+        shape_caps: list = []
 
         if ticket_hash is not None:
             ticket = self._tickets.get(ticket_hash)
@@ -5266,6 +6212,7 @@ class Session:
             component = ticket["component"]
             candidate_hash = ticket["candidateHash"]
             policy_ttl = self._ticket_ttl_ms(ticket)
+            shape_caps = ticket.get("capabilities") or []
         elif capability is not None:
             if self._class_map is None:
                 raise SessionError(
@@ -5287,11 +6234,48 @@ class Session:
                     f"rather than an ambiguous proactive grant")
             component = targets[0]["component"]
             candidate_hash = targets[0]["candidateHash"]
+            shape_caps = targets[0].get("capabilities") or []
         else:
             raise SessionError(
                 "provide a `capability` (+ `uses`/`ttlMs`) to mint a standing "
                 "grant, or a ticket `hash` to mint one from an outstanding "
                 "class-(c) ticket")
+
+        # roadmap item 471: the mint is refused HERE, at the source, for BOTH
+        # ways of naming what is granted (an outstanding ticket and a proactive
+        # capability), so that no standing grant for a quorum-gated crossing can
+        # ever exist for a later crossing to match. A standing grant is ONE
+        # operator's authority recorded once (item 344), and one operator is not
+        # N distinct named approvers; honouring it would admit the crossing with
+        # no votes at all and leave the question it gated unanswered in the
+        # durable graph. `_multi_party_rules` is the single predicate every
+        # admission path consults.
+        #
+        # The refusal has exactly ONE exception, and it is not an operator
+        # request: `decision` is the satisfied decision for the multi-party
+        # `kind='lease'` ticket whose acquisition this session is retrying, and
+        # `_decision_authorizes_grant` re-derives that proof from the live
+        # ledger and the decision graph before letting the mint through. Without
+        # it, an `effect lease` under a multi-party rule could never be acquired
+        # at all — the votes would have no consumable answer — so the exception
+        # is what re-admits the lease WITHOUT widening the rule: the authority
+        # is still the N votes, and the grant it produces is lease-tagged, so
+        # `_find_standing_grant` still refuses it at every class-(c) crossing.
+        rules = self._multi_party_rules({"capabilities": shape_caps})
+        if rules and not self._decision_authorizes_grant(decision, ticket_hash):
+            raise SessionError(
+                f"cannot mint a standing grant for `{component}`: the approval "
+                f"rule covering this crossing demands {rules[0].quorum_text()}, "
+                f"and a multi-party rule is answered by votes, never by a "
+                f"standing grant (roadmap item 471, separation of duties). A "
+                f"standing grant is one operator's authority recorded once, so "
+                f"it would admit the crossing with zero votes. Cast a vote "
+                f"instead with `revl_approve(hash=…, vote=…, asToken=…)`, then "
+                f"re-issue the refused crossing: the satisfied decision IS its "
+                f"approval, spent single-use there. That is also the only route "
+                f"a quorum-gated `effect lease` has — re-run the load that "
+                f"raised the lease ticket and its grant is minted from the "
+                f"satisfied decision itself, once the votes are in")
 
         # item 416c: a resource dimension declared `Secret[T]` binds to the
         # REDACTED placeholder (approval.bind_resource_scope), never the real

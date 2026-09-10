@@ -289,6 +289,31 @@ def _transactional_register_kwargs(ext: dict) -> str:
     return (", " + ", ".join(parts)) if parts else ""
 
 
+def _transactional_scope_kwargs(ext: dict) -> str:
+    """item 872: the extra `.transactional(...)` kwarg carrying an extern's
+    DECLARED `witnessed[caps]` capability set, or `""` when it declares none.
+
+    The capability scope of a witnessed effect is the axis the item 250
+    scope-gated fork rewind keys on (docs/design/250-session-branching.md,
+    Decision 2), and until item 872 nothing carried it to the runtime at all:
+    `Step.scope` was left `None`, `scope_host_confined(None)` read that as
+    host-confined, and a rewind FIRED a recorded outbound `net` inverse that
+    Decision 2 exists to keep from firing. The declaration is known HERE, at the
+    registration the emitter writes, so it rides the registration rather than
+    being re-derived from source text at record time (a witnessed step's
+    activation body is emitted into the transaction runtime, so the recorder has
+    no code site to match it against).
+
+    Emitted ONLY when the extern declares a capability, so a witnessed extern
+    with none emits byte-identically (the additivity discipline) and the
+    recorder's own `{"caps": []}` states that case explicitly -- `None` must mean
+    "nothing durable said", never "the source declared nothing"."""
+    caps = list(ext.get("capabilities") or ())
+    if not caps:
+        return ""
+    return f", scope={{'caps': {caps!r}}}"
+
+
 def _deferred_register_kwargs(ext: dict, args: list) -> str:
     """item 440 §(b): the extra `.enqueue_deferred(...)` kwargs that put a
     deferred emission's idempotency register — and the key's VALUE at this call
@@ -2254,7 +2279,11 @@ class _ComponentEmitter:
         # when the author declared it, so a witnessed extern with no register
         # emits byte-identical code (the additivity discipline). The register
         # gates free-vs-fenced abort-Phase-1 fencing and free-vs-fenced recover.
-        extra = _transactional_register_kwargs(ext)
+        # item 872: the same for the declared `witnessed[caps]` scope, which the
+        # recorder writes to the WAL so the fork rewind can tell a host-confined
+        # inverse from a boundary-crossing one instead of assuming every
+        # unrecorded scope is confined.
+        extra = _transactional_register_kwargs(ext) + _transactional_scope_kwargs(ext)
         out.add(indent + 1,
                 f"yield _revl_frame.transactional((lambda result: {undo}), "
                 f"{tmp}.value{extra})")
@@ -2289,8 +2318,12 @@ class _ComponentEmitter:
         # a method-seam witnessed inverse (item 318) fences its abort Phase-1 apply
         # and recovers free-vs-fenced. The activation-body path is wired; this
         # narrower per-tool-call seam is deferred.
+        # item 872: the declared capability scope IS carried here, because the
+        # scope gate is a safety property of every witnessed inverse and not a
+        # recovery nicety (the deferred register above is).
         out.add(indent + 1,
-                f"_revl_frame.transactional_method((lambda result: {undo}), {tmp}.value)")
+                f"_revl_frame.transactional_method((lambda result: {undo}), "
+                f"{tmp}.value{_transactional_scope_kwargs(ext)})")
         if bind is not None:
             out.add(indent, f"{bind} = {tmp}")
 

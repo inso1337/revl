@@ -249,7 +249,11 @@ def test_witnessed_call_site_emits_ok_conditional_transactional():
     # the mutation runs, then the DECLARED inverse (unstash) registers as a
     # transactional entry — only on the Ok branch, carrying the Ok payload.
     assert "isinstance(_revl_wit1, Ok)" in body
-    assert "_revl_frame.transactional((lambda result: unstash(result)), _revl_wit1.value)" in body
+    # item 872: the registration carries the DECLARED `witnessed[fs]` set (the
+    # same shape the from-source path above emits), which is what the recorder
+    # reads when it stamps the step's scope for the scope-gated fork rewind.
+    assert ("_revl_frame.transactional((lambda result: unstash(result)), "
+            "_revl_wit1.value, scope={'caps': ['fs']})") in body
     # it is NOT a bracket: no `yield lambda:` disposer for the witnessed step
     # (the only yields are the transactional one and the frame drain).
     assert "yield lambda:" not in body
