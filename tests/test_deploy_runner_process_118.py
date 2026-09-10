@@ -248,6 +248,74 @@ def test_a_dead_runner_fails_closed(bundle):
 
 
 # ---------------------------------------------------------------------------
+# a refusal is attributed to the failure that actually occurred (the #878
+# follow-up: one wording was blamed on the host's key material for every
+# exception, including a corrupt bundle the CONDUCTOR staged)
+# ---------------------------------------------------------------------------
+
+
+def test_a_corrupt_staged_bundle_is_not_blamed_on_the_host_key(
+        bundle, keyfile, hostkeyfile):
+    """The runner read BOTH of its own key files fine — `--key` and
+    `--host-key` are loaded off the command line before the loop, and the
+    `--key` file is read to build the trust store inside `serve_admit_request`.
+    What is broken is `attestation.json` in the bundle the CONDUCTOR staged, a
+    fault on the conductor's disk. Blaming the host's key material sends an
+    operator to debug the wrong machine, so the reason must name the failure
+    that occurred instead."""
+    (bundle / deploy.ATTESTATION_NAME).write_text("{ not json", encoding="utf-8")
+    with _transport(keyfile, hostkeyfile) as transport:
+        reply = transport.send(_request(bundle).to_wire())
+    # fail-closed, unchanged shape: same kind, link and verdict
+    assert reply["kind"] == deploy.RECEIPT_KIND, reply
+    assert reply["verdict"] == deploy.REFUSE, reply
+    assert reply["link"] == deploy.LINK_TRANSPORT, reply
+    assert "could not read its own key material" not in reply["reason"], reply
+    # and it names the real cause: the staged path it could not read
+    assert str(bundle) in reply["reason"], reply
+
+
+def test_a_genuinely_unreadable_key_file_is_reported_as_key_material(
+        bundle, tmp_path, hostkeyfile):
+    """The other side of the narrowing: when a `--key` file on the runner's OWN
+    command line cannot be read, the refusal says so — the host has no trust
+    store to admit against. Without this the narrow handler could be narrowed
+    into silence and the honest wording lost."""
+    missing = tmp_path / "gone.key"
+    with _transport(missing, hostkeyfile) as transport:
+        reply = transport.send(_request(bundle).to_wire())
+    assert reply["kind"] == deploy.RECEIPT_KIND, reply
+    assert reply["verdict"] == deploy.REFUSE, reply
+    assert reply["link"] == deploy.LINK_TRANSPORT, reply
+    assert "could not read its own key material" in reply["reason"], reply
+    assert str(missing) in reply["reason"], reply
+
+
+def test_the_transport_refusal_is_not_a_challenge_check(
+        bundle, keyfile, hostkeyfile):
+    """What the fix's prose corrects. The refusal is a RECEIPT_KIND record with
+    no `challenge`, so the conductor never reaches its `hmac.compare_digest`
+    challenge check: `AdmitResponse.from_wire` rejects it on the kind guard
+    first. The reply still fails CLOSED, which is the property that matters."""
+    (bundle / deploy.ATTESTATION_NAME).write_text("{ not json", encoding="utf-8")
+    with _transport(keyfile, hostkeyfile) as transport:
+        reply = transport.send(_request(bundle).to_wire())
+    assert "challenge" not in reply, reply
+    with pytest.raises(ValueError, match="not a revl.deploy.admit-response"):
+        deploy.AdmitResponse.from_wire(reply)
+    # ...and through the conductor, the refusal is a LINK_TRANSPORT refusal
+    # whose reason is the PARSE failure, never the challenge mismatch
+    class _Fixed:
+        def send(self, request_wire, *, now=None):
+            return reply
+
+    receipt = deploy.request_admission(_Fixed(), _request(bundle))
+    assert receipt["verdict"] == deploy.REFUSE, receipt
+    assert receipt["link"] == deploy.LINK_TRANSPORT, receipt
+    assert "could not be read as an admission response" in receipt["reason"], receipt
+
+
+# ---------------------------------------------------------------------------
 # the CLI is wired: `revl deploy-admit` is a real subcommand
 # ---------------------------------------------------------------------------
 
