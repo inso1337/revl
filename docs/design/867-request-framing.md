@@ -148,7 +148,13 @@ pins that decision with the RFC citations in the test body.
 - **Do not read `Content-Length` or `Transfer-Encoding` yourself.** Ask
   `body_length(headers, ceiling)` for the number of body bytes and read exactly
   that many; anything else is the defect this module exists to remove. There is
-  now one place in the whole ecosystem where the rule lives.
+  now one place in the Revl ecosystem where the rule lives: every Revl
+  component that frames a request routes through `body_length`. The compiler's
+  own host-side HTTP face is a residue this module does not retire —
+  `src/revl/mcp/http_face.py` reads `Content-Length` with
+  `int(self.headers.get("Content-Length") or 0)`, i.e. first-value-wins with no
+  duplicate check and no ceiling. It is Python host code and cannot call a Revl
+  primitive, so closing that reader is separate work.
 - **Map the refusal with `status_for`, not by hand.** `400` for the three
   framing refusals, `413` for `OverCeiling`, and `is_too_large(r)` when the
   caller only needs the 413 test. Refuse and **close the connection** (RFC 7230
