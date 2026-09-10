@@ -434,3 +434,86 @@ def test_a_config_free_program_keeps_an_inert_walk():
     ir = compile_source(src, "plain.rvl")
     comp = {c["name"]: c for c in ir["components"]}["Keeper"]
     assert "taint" not in comp
+
+
+# ===========================================================================
+# 6. An interface-only carrier: a declared operation return is confidential.
+# ===========================================================================
+#
+# Item 426 section 5 exchanges a service row by its INTERFACE, so a composition
+# can hold an operation DECLARATION whose providing component lives in another
+# unit — the shape `compile_files(candidate, manifest=running)` admits on a hot
+# swap. The declared `Secret[T]` return was stripped to its base type there
+# without minting `confidential`, so the token arrived in the caller's value
+# world already clean and an ordinary disclosure sink accepted it. With the
+# provider in the unit the origin reaches the call site from the body instead,
+# which is why the two agree there and why the carrier is the only difference.
+
+_SECRET_HEAD = (
+    "extern emission[fs] fn write_file(p: Str, body: Str) = @py { return }\n"
+    "service Ops { emission fn go(p: Str) }\n")
+
+
+def _secret_caller() -> str:
+    return (
+        "component L requires v: Vault provides ops: Ops {\n"
+        "  provide ops { fn go(p) {\n"
+        "    let d = emit v.get()\n"
+        "    emit write_file(p, d)\n"
+        "  } }\n"
+        "}\n")
+
+
+def test_out_of_unit_secret_service_return_is_refused_at_a_disclosure_sink():
+    """No providing component in the unit, so the declared `Secret[Str]` return
+    is the only statement of what `get` hands back: it mints `confidential`, and
+    the write of the token into an ordinary sink is refused."""
+    src = (_SECRET_HEAD
+           + "service Vault { emission[vault.mint] fn get() -> Secret[Str] }\n"
+           + _secret_caller())
+    err = _refuses(src, "out_of_unit_secret.rvl")
+    assert "write_file" in err.message
+    assert "get() -> write_file" in str(err)
+
+
+def test_a_provided_secret_service_return_refuses_the_same_disclosure():
+    """The honest control: with the vault in the unit the same hand-off already
+    refused, before and after the operation-level mint — and here the refusal
+    lands EARLIER, at the provider's own return, because the body carries the
+    origin across the service boundary."""
+    src = (
+        "extern emission[fs] fn write_file(p: Str, body: Str) = @py { return }\n"
+        "extern emission[vault.mint] fn mint() -> Secret[Str] = @py { return \"\" }\n"
+        "service Vault { emission[vault.mint, mint] fn get() -> Secret[Str] }\n"
+        "service Ops { emission fn go(p: Str) }\n"
+        "component V provides v: Vault { provide v { fn get() { return emit mint() } } }\n"
+        + _secret_caller())
+    err = _refuses(src, "in_unit_secret.rvl")
+    assert "provide-method return" in err.message
+
+
+def test_out_of_unit_secret_service_return_is_admitted_by_a_declared_receiver():
+    """The dual discipline still holds across an interface-only carrier: the
+    token crosses only where the receiving side declares `Secret[T]`, so the
+    declared receiver admits it."""
+    src = (
+        "extern emission[fs] fn write_file(p: Str, body: Str) = @py { return }\n"
+        "service Vault { emission[vault.mint] fn get() -> Secret[Str] }\n"
+        "service Sink { emission fn take(x: Secret[Str]) -> Int }\n"
+        "service Ops { emission fn go(p: Str) }\n"
+        "component L requires v: Vault requires k: Sink provides ops: Ops {\n"
+        "  provide ops { fn go(p) {\n"
+        "    let d = emit v.get()\n"
+        "    emit k.take(d)\n"
+        "  } }\n"
+        "}\n")
+    compile_source(src, "out_of_unit_receiver.rvl")  # must not raise
+
+
+def test_a_plain_out_of_unit_return_is_not_minted_confidential():
+    """The declaration is authoritative in both directions: an operation declared
+    to hand back a plain `Str` mints nothing, so the same write compiles."""
+    src = (_SECRET_HEAD
+           + "service Vault { emission[vault.mint] fn get() -> Str }\n"
+           + _secret_caller())
+    compile_source(src, "out_of_unit_plain_secret.rvl")  # must not raise

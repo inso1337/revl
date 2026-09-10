@@ -183,3 +183,99 @@ def test_an_active_taint_surface_does_not_warn():
         warnings.simplefilter("error", InertTaintPolicyWarning)
         vios = evaluate(pol, audit)  # must not warn
     assert vios and vios[0].kind == "taint-flow"
+
+
+# --- The interface-only carrier: a declared operation return is authoritative --
+
+# Item 426 section 5 exchanges a service row by its INTERFACE, so a composition
+# can hold an operation DECLARATION whose providing component lives in another
+# unit — the shape `compile_files(candidate, manifest=running)` admits on a hot
+# swap, and the shape every caller sees for a component built elsewhere. The
+# declared `Untrusted[T]` return was stripped to its base type there without
+# minting an origin, so the reply read as public to every sink downstream and
+# the qualifier its author wrote was silently discarded. When the provider IS in
+# the unit the origin also reaches the call site from the body, which is why the
+# two agree and why the carrier is the only difference. Fixed by minting at the
+# operation, exactly as the extern loop had always minted.
+
+_UNTRUSTED_HEAD = (
+    "extern emission[fs] fn read_file(p: Str) -> Untrusted[Str] = @py { return \"\" }\n"
+    "extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }\n"
+    "service Ops { emission fn go(p: Str) }\n")
+_READER = "service Reader { emission[fs] fn read(p: Str) -> Untrusted[Str] }\n"
+
+
+def _caller(body: str) -> str:
+    return (
+        "component L requires r: Reader provides ops: Ops {\n"
+        "  provide ops { fn go(p) {\n" + body + "\n  } }\n"
+        "}\n")
+
+
+def test_out_of_unit_service_return_does_not_launder_taint():
+    """With no providing component in the unit the declared `Untrusted[Str]`
+    return is the only statement of what `read` hands back, so it is a taint
+    source and the `Trusted[Str]` shell sink is refused."""
+    src = _UNTRUSTED_HEAD + _READER + _caller(
+        "    let d = emit r.read(p)\n    emit run(d)")
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "out_of_unit_return.rvl")
+    assert classify(excinfo.value)["code"] == "G9"
+    assert "fs" in excinfo.value.message
+    assert "read() -> run" in str(excinfo.value)
+
+
+def test_a_provided_service_return_refuses_the_same_hand_off():
+    """The honest control: the SAME hand-off with the providing component in the
+    unit already refused, before and after the operation-level mint — there the
+    origin reaches the call site from the body. `emission[fs, read_file]` keeps
+    the declaration inside its granted scope so G4 stays quiet, leaving the taint
+    rule as the one under test."""
+    src = (
+        _UNTRUSTED_HEAD
+        + "service Reader { emission[fs, read_file] fn read(p: Str) -> Untrusted[Str] }\n"
+        + "component R provides r: Reader {\n"
+          "  provide r { fn read(p) { return emit read_file(p) } }\n"
+          "}\n"
+        + _caller("    let d = emit r.read(p)\n    emit run(d)"))
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "in_unit_return.rvl")
+    assert classify(excinfo.value)["code"] == "G9"
+    assert "fs" in excinfo.value.message
+
+
+def test_out_of_unit_service_return_sent_nowhere_still_compiles():
+    """The mint alone never refuses: an untrusted reply that reaches no sink
+    compiles, so the operation-level source does not over-refuse."""
+    src = _UNTRUSTED_HEAD + _READER + _caller("    let d = emit r.read(p)")
+    compile_source(src, "out_of_unit_no_sink.rvl")  # must not raise
+
+
+def test_a_plain_service_return_stays_clean_out_of_unit():
+    """The declaration is authoritative in BOTH directions: an operation
+    declared to hand back a plain `Str` mints nothing, so the same sink
+    compiles untouched."""
+    src = (
+        _UNTRUSTED_HEAD
+        + "service Reader { emission[fs] fn read(p: Str) -> Str }\n"
+        + _caller("    let d = emit r.read(p)\n    emit run(d)"))
+    compile_source(src, "out_of_unit_plain.rvl")  # must not raise
+
+
+def test_out_of_unit_service_return_endorse_still_downgrades():
+    """The remedy the diagnostic names still works across an interface-only
+    carrier: a declared `endorse[fs]` slot on the operation downgrades the reply
+    before it reaches the sink."""
+    src = (
+        "extern emission[fs] fn read_file(p: Str) -> Untrusted[Str] = @py { return \"\" }\n"
+        "extern emission[shell] fn run(cmd: Trusted[Str]) = @py { return }\n"
+        "service Ops { emission endorse[fs] fn go(p: Str) }\n"
+        "service Reader { emission[fs] fn read(p: Str) -> Untrusted[Str] }\n"
+        "component L requires r: Reader provides ops: Ops {\n"
+        "  provide ops { fn go(p) {\n"
+        "    let d = emit r.read(p)\n"
+        "    let safe = endorse[fs](d, reason = \"path normalized and checked\")\n"
+        "    emit run(safe)\n"
+        "  } }\n"
+        "}\n")
+    compile_source(src, "out_of_unit_endorse.rvl")  # must not raise
