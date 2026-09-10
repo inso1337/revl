@@ -1838,6 +1838,14 @@ fn witnessed_extern(expr: Any, externs: List[Any]) -> Any {
   return None
 }
 
+fn transactional_scope_kwargs(ext: Any) -> Str {
+  let caps = value_list(value_field(ext, "capabilities"))
+  if (caps.length() == 0) { return "" }
+  var parts = []
+  for (c of caps) { parts = parts.push(py_repr(value_str(c))) }
+  return ", scope={'caps': [".concat(parts.join(", ")).concat("]}")
+}
+
 fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) -> Emit {
   let c = counter + 1
   let tmp = `_revl_wit${c}`
@@ -1853,6 +1861,7 @@ fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) 
     if (!value_is_null(value_field(ext, "register"))) { kwargs = kwargs.concat(", register=").concat(py_repr(value_str(value_field(ext, "register")))) }
     if (!value_is_null(value_field(ext, "idempotency_key"))) { kwargs = kwargs.concat(", idempotency=").concat(py_repr(value_str(value_field(ext, "idempotency_key")))) }
   }
+  kwargs = kwargs.concat(transactional_scope_kwargs(ext))
   out = out.push(line(indent + 1, register.concat("((lambda result: ").concat(inverse_expr).concat("), ").concat(tmp).concat(".value").concat(kwargs).concat(")")))
   if (value_str(value_field(step, "step")) == "let-effect") {
     out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${tmp}`))

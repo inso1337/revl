@@ -606,7 +606,7 @@
       "uncovered_statements": 942
     },
     "py": {
-      "statements": 2426,
+      "statements": 2431,
       "uncovered": {
         "#850 added `_ComponentEmitter._extern_emit_fire` to the reference emitter and left this record off the ledger. The shipped corpus reaches the four `emission_fire` call sites, so the dispatch arm counts as covered, while the single `if` body that actually fires the extern hook is never taken: no document in the corpus declares an extern emit. services_body.rvl and witnessed.rvl pin every other shape in this region. A fixture that compiles an extern emit onto a component method is the corpus work that retires this entry.": {
           "_ComponentEmitter._extern_emit_fire": 1
@@ -784,9 +784,12 @@
         "backends/python/emit.py::_ComponentEmitter._method_control: issue #548 provide-method control flow (if/while/for/break/continue over a method's value computation) and its nested block step emitter. No byte-agreement corpus document contains method-level control flow, so no corpus document calls the helper; the fn-grammar if/while/for it mirrors is covered through the module _fn_stmt path.": {
           "_ComponentEmitter._method_control": 19,
           "_ComponentEmitter._method_control.block": 6
+        },
+        "item 872 additivity arm of the `.transactional(scope=...)` kwarg: every witnessed extern in the corpus declares a capability (`emit_py_corpus/witnessed.rvl` declares `witnessed[fs]`), so the branch that emits NO `scope=` for a cap-less witnessed extern never runs under the oracle. That branch is the byte-identical additivity guarantee a pre-872 witnessed extern depends on, and reaching it from a corpus document means adding a `tests/fixtures` input, which is a gate-crate census input this item must not move.": {
+          "_transactional_scope_kwargs": 1
         }
       },
-      "uncovered_statements": 649
+      "uncovered_statements": 650
     },
     "rust": {
       "statements": 3454,
@@ -1611,7 +1614,7 @@
       "uncovered_statements": 182
     },
     "py": {
-      "statements": 1949,
+      "statements": 1958,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
@@ -1706,6 +1709,9 @@
         "inline_template rejects guarded return with missing expression/condition. Such a value-returning guard is frontend-invalid; inline.rvl covers valid guarded templates. Reference _fn_inline_template has the identical null checks.": {
           "inline_template": 1
         },
+        "item 872 additivity arm of the `.transactional(scope=...)` kwarg: every witnessed extern in the corpus declares a capability (`emit_py_corpus/witnessed.rvl` declares `witnessed[fs]`), so the branch that emits NO `scope=` for a cap-less witnessed extern never runs under the oracle. That branch is the byte-identical additivity guarantee a pre-872 witnessed extern depends on, and reaching it from a corpus document means adding a `tests/fixtures` input, which is a gate-crate census input this item must not move.": {
+          "transactional_scope_kwargs": 1
+        },
         "line's empty-text return is bypassed by callers which append blank lines directly; reference _Lines.add has the same empty-line spelling. This formatter branch does not represent omitted source behavior.": {
           "line": 1
         },
@@ -1719,7 +1725,7 @@
           "witnessed_extern": 1
         }
       },
-      "uncovered_statements": 97
+      "uncovered_statements": 98
     },
     "rust": {
       "statements": 1989,
