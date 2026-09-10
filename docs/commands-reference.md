@@ -371,11 +371,21 @@ nothing, the same offline-reader contract as `revl branch` and `revl compare`.
 - `WAL` - a write-ahead log, ideally one written by a Slice-3a runtime that
   recorded its model decisions (required).
 - `--mode <mode>` - report readiness for one mode only, instead of all four.
+- `--under POLICY` - counterfactual incident replay (roadmap item 467,
+  [467-counterfactual-replay.md](design/467-counterfactual-replay.md)):
+  recompute this policy's reach rules over the crossings the WAL recorded and
+  name the first dangerous crossing. Without a candidate the question is not
+  answerable from the record, because a crossing's capability token is not on
+  the WAL, and the command says so and exits 1.
+- `--candidate FILE...` - the candidate composition to resolve each recorded
+  crossing's capability token from and to admit under `--under`. It is compiled
+  statically, so no live effect fires.
 - `--json` - machine-readable output.
 
 ```bash
 revl replay run.wal
 revl replay run.wal --mode exact --json
+revl replay incident.wal --under policy/new.toml --candidate candidate.rvl
 ```
 
 ### `revl diff`
