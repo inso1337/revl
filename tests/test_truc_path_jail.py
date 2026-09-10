@@ -150,6 +150,73 @@ def test_add_refuses_a_trucs_directory_that_is_a_symlink(tmp_path):
     assert sorted(p.name for p in outside.iterdir()) == []
 
 
+# --------------------------------- the destination FILES are part of the jail
+#
+# `_vendor_dir` says the destination DIRECTORY is the project's own; it says
+# nothing about the entries inside it, and `write_text` follows a link. With a
+# legitimate name and a real `trucs/<name>/`, a `component.rvl` planted as a
+# symlink was written through to its target with `rc=0` and "vendored into
+# trucs/" on stdout: a containment claim the code never derived.
+
+def test_add_refuses_a_symlinked_component_and_leaves_the_target_alone(tmp_path):
+    """THE BLOCKING CASE. Existing target: without the guard the registry
+    source lands in `victim-existing.txt`, outside the project, and `add`
+    reports success."""
+    proj = _new_project(tmp_path)
+    victim = tmp_path / "victim-existing.txt"
+    victim.write_text("ORIGINAL-VICTIM\n")
+    (proj / "trucs" / ENTRY).mkdir()
+    (proj / "trucs" / ENTRY / "component.rvl").symlink_to(victim)
+
+    r = _truc(proj, "add", ENTRY)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "refused" in r.stderr and "symlink" in r.stderr
+    assert victim.read_text() == "ORIGINAL-VICTIM\n"
+    assert not (proj / "truc.lock").exists(), "the lock was written anyway"
+    assert f'{ENTRY} = {{ registry = "local" }}' not in \
+        (proj / "truc.toml").read_text()
+    assert _parses(proj)
+
+
+def test_add_refuses_a_dangling_symlinked_manifest_and_creates_nothing(tmp_path):
+    """The dangling half: `exists()` is False through a broken link, so the
+    guard has to be `is_symlink()` (or `O_NOFOLLOW`), never `exists()`. Without
+    it `write_text` CREATES `victim-dangling.txt`, outside the project."""
+    proj = _new_project(tmp_path)
+    victim = tmp_path / "victim-dangling.txt"
+    (proj / "trucs" / ENTRY).mkdir()
+    (proj / "trucs" / ENTRY / "manifest.json").symlink_to(victim)
+
+    r = _truc(proj, "add", ENTRY)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "refused" in r.stderr and "symlink" in r.stderr
+    assert not victim.exists(), "the link's target was created outside the project"
+    # Every destination is checked before the first write, so the sibling that
+    # is NOT a link was not vendored either: no half-vendored truc dir.
+    assert not (proj / "trucs" / ENTRY / "component.rvl").exists()
+    assert not (proj / "truc.lock").exists()
+    assert _parses(proj)
+
+
+def test_add_refuses_a_name_that_is_a_regular_file(tmp_path):
+    """`trucs/<name>` as a regular file is not a destination this project owns.
+    Left alone, `mkdir` dies on it and `add` reports an `OSError` traceback
+    rather than a refusal."""
+    proj = _new_project(tmp_path)
+    squatter = proj / "trucs" / ENTRY
+    squatter.write_text("not a directory\n")
+
+    r = _truc(proj, "add", ENTRY)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "refused" in r.stderr and "not a directory" in r.stderr
+    assert squatter.read_text() == "not a directory\n"
+    assert not (proj / "truc.lock").exists()
+    assert _parses(proj)
+
+
 # ------------------------------------------------------------ the happy path
 
 def test_a_plain_add_then_rm_still_round_trips(tmp_path):
