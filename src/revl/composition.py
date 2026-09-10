@@ -1211,6 +1211,22 @@ def _resolve_seam(seam, catalog: dict, rows: list["Row"], decl: CompositionDecl,
 # "target >= every declared ceiling of the backing parameter", and it reads the
 # ceiling the same way item 260's own gate does, through `cap_order`.
 #
+# The SCOPE of "every declared ceiling" is deliberately WIDER than the routes
+# this composition crosses. `_slo_ceilings` harvests every `emission[...]`
+# ceiling from every file the composition names, including a file it only
+# `use`s and never rows, and including a route no row crosses. That is a
+# decision, not an oversight: a declared ceiling is a promise about that
+# backing parameter, so a composition that carries a provider whose `db` method
+# caps `time=30s` carries a 30s crossing whether or not a row crosses `db`
+# today. Narrowing the harvest to the crossed set would make this gate ADMIT
+# compositions it refuses now, which is the direction a rollout gate must not
+# move in. The cost of the wide scope is an over-refusal whose message explains
+# itself; the cost of the narrow one is admitting a rollout that violates a
+# declared ceiling. And because the comparison is `target >= every ceiling`,
+# the BINDING ceiling is the LARGEST one of that kind: that is the value the
+# target has to reach, so that is the one the refusal names. A tighter one
+# would send the author to a target this same check refuses again.
+#
 # The remaining datums (`success_rate`, `recovery_time`, `approval_wait`) have
 # NO declaration-owned bound in this language version: nothing in the tree
 # declares a success rate, a recovery time, or an approval wait (there is no
@@ -1227,6 +1243,12 @@ def _slo_ceilings(rows: list["Row"], uses: list[str], sources: dict,
                   root: str) -> list[tuple[str, str, int, str]]:
     """Every declared `emission[...]` ceiling the composition's own sources
     carry, as `(route token, ceiling parameter, value, source)`.
+
+    The scope is EVERY file the composition names, not just the row sources:
+    the `use`d files are read first, then the row sources, and a `use`d file
+    whose components no row names still contributes its ceilings, as does a
+    route no row crosses. That is deliberate and conservative (see the item 473
+    note above); narrowing it would ADMIT compositions this gate refuses today.
 
     Read out of the parse tree the way `_declares_calls_ceiling` (lower.py)
     reads them: `cap_order.parse_cap` plus `split_ceilings`, so a ceiling
@@ -1273,6 +1295,12 @@ def _check_slo_bounds(decl: CompositionDecl, doc: str, rows: list["Row"],
     the same quantity: the declared crossing ceiling against the objective the
     composition promises to hold over it. A datum the language cannot bound is
     not a gate, it is a promise the IR records.
+
+    The refusal names the BINDING ceiling, the largest of that kind the
+    composition declares, because that is the value the target has to reach
+    (see the scope note above); when the composition declares more than one it
+    also says how many were compared and which of them is tightest, so a reader
+    is never left to guess why a ceiling in a file it only `use`s counts.
     """
     if not decl.slo:
         return {}
@@ -1283,21 +1311,35 @@ def _check_slo_bounds(decl: CompositionDecl, doc: str, rows: list["Row"],
         param = SLO_BACKED_BY.get(datum)
         if param is None:
             continue
-        for route, cparam, value, rel in ceilings:
-            if cparam != param or target >= value:
-                continue
-            raise RevlError(
-                doc, line,
-                f"composition {decl.name} promises `{datum}: {target}` but its "
-                f"own `{route}` declaration caps `{param}={value}`",
-                hint=f"`{rel}` declares an emission ceiling of {value} on the "
-                     f"`{route}` route, so the composition has already "
-                     "predicted a crossing that breaches this objective: a "
-                     f"rollout carrying it would be refused on arrival (item "
-                     f"473). Raise the `{datum}` target to at least {value}, or "
-                     f"lower the declared `{param}` ceiling",
-                code="G4", category="slo",
-            )
+        of_kind = [(route, value, rel) for route, cparam, value, rel in ceilings
+                   if cparam == param]
+        tripping = [c for c in of_kind if c[1] > target]
+        if not tripping:
+            continue
+        route, value, rel = max(tripping, key=lambda c: c[1])
+        hint = (f"`{rel}` declares an emission ceiling of {value} on the "
+                f"`{route}` route, so the composition has already "
+                "predicted a crossing that breaches this objective: a "
+                f"rollout carrying it would be refused on arrival (item "
+                f"473). Raise the `{datum}` target to at least {value}, or "
+                f"lower the declared `{param}` ceiling")
+        if len(of_kind) > 1:
+            t_route, t_value, t_rel = min(of_kind, key=lambda c: (c[1], c[0]))
+            hint += (
+                f". This is the binding one of the {len(of_kind)} `{param}` "
+                "ceilings this composition declares, and the gate compares the "
+                f"target against every one of them, the other "
+                f"{len(of_kind) - 1} included, so the largest is the value the "
+                f"target has to reach. The tightest is {t_value} on `{t_route}` "
+                f"in `{t_rel}`, and a ceiling on a route no row crosses counts "
+                "like a crossed one")
+        raise RevlError(
+            doc, line,
+            f"composition {decl.name} promises `{datum}: {target}` but its "
+            f"own `{route}` declaration caps `{param}={value}`",
+            hint=hint,
+            code="G4", category="slo",
+        )
     return {SLO_IR_KEYS[datum]: (value, line)
             for datum, value, line in decl.slo}
 

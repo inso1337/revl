@@ -488,21 +488,38 @@ The datum set is closed, and each datum fixes its own unit:
 
 | datum | unit | gated against |
 |---|---|---|
-| `p95_latency` | duration | the tightest declared `emission[..(time=..)]` ceiling |
+| `p95_latency` | duration | every declared `emission[..(time=..)]` ceiling in the composition |
 | `success_rate` | percent, may be fractional | nothing yet |
 | `recovery_time` | duration | nothing yet |
 | `approval_wait` | duration | nothing yet |
-| `max_pending_tasks` | count | the tightest declared `emission[..(calls=..)]` ceiling |
+| `max_pending_tasks` | count | every declared `emission[..(calls=..)]` ceiling in the composition |
 
 `max_pending_tasks: 100` is a count and `p95_latency: 250ms` is a duration: a
 duration datum given a count unit is refused rather than guessed at. A bare
 number is seconds, like every other duration in the language.
 
 **A rollout that cannot meet its own contract is refused at compile time.** For
-each gated datum the composition's declared ceilings are the promise the
-providers already made, so an SLO STRICTER than its ceiling is a `G4` refusal
-naming the datum, the target, the ceiling and the line. An SLO exactly AT the
-ceiling resolves: the provider already agreed to that bound.
+each gated datum EVERY declared ceiling of that kind is the promise a provider
+already made, so an SLO STRICTER than any one of them is a `G4` refusal naming
+the datum, the target, the ceiling and the line. The comparison is `target >=
+every ceiling`, so the ceiling that BINDS is the LARGEST one: that is the value
+the target has to reach, and that is the one the message names (with the count
+of ceilings compared, and the tightest named too, when the composition declares
+more than one). With `emission[net(time="2s")]` and `emission[db(time="30s")]`
+both declared, a `p95_latency: 2s` target is refused against `time=30000`, not
+against `2000`: 30s is the value the target must reach. An SLO exactly AT the
+binding ceiling resolves: the provider already agreed to that bound.
+
+The scope is deliberately WIDER than the routes this composition crosses. A
+ceiling is read from every file the composition names, including a `use`d file
+whose components no row ever names and a route no row ever crosses, because a
+declared `emission[...]` ceiling is a promise about that backing parameter
+wherever it is written, and this is a rollout gate: the cost of the wide scope
+is an over-refusal whose message explains itself, while the cost of the narrow
+one is admitting a rollout that breaches a declared ceiling. Narrowing the
+scope to the crossed set would make this gate admit compositions it refuses
+today, so it is deliberately not done; the design note records the same
+decision under "The conservative scope".
 
 ```text
 shop.rvl:4: composition Shop promises `p95_latency: 250` but its own `net` declaration caps `time=2000`

@@ -307,6 +307,168 @@ layer Slow for base {
     assert ".::@slow" in [row.qualified for row in table.rows]
 
 
+# ------------------------------------------- the conservative scope (a decision)
+
+# A provider whose SECOND method no row crosses: the composition crosses `net`
+# under `time="2s"` and declares `db(time="30s")` on a method nothing calls.
+TWO_CEILINGS = """
+service Net {
+  emission[net(time="2s")] fn fetch(a: Str) -> Bool
+}
+
+service Db {
+  emission[db(time="30s")] fn query(a: Str) -> Bool
+}
+
+component Svc provides net: Net provides db: Db {
+  provide net { fn fetch(a) = true }
+  provide db { fn query(a) = true }
+}
+"""
+
+# A file the composition only `use`s. Its component is never rowed and its
+# `other` route is never crossed, so nothing in the composition reaches it.
+UNROWED = """
+service Audit {
+  emission[other(time="6h")] fn log(a: Str) -> Bool
+}
+
+component AuditSvc provides audit: Audit {
+  provide audit { fn log(a) = true }
+}
+"""
+
+# A `use`d file whose ceiling sits BETWEEN the other two and is written FIRST,
+# so a reader of `_slo_ceilings`' harvest order reaches it before the binding
+# one. A gate that named the first tripping ceiling would name `mid=5000`.
+MID = """
+service Mid {
+  emission[mid(time="5s")] fn ping(a: Str) -> Bool
+}
+
+component MidSvc provides mid: Mid {
+  provide mid { fn ping(a) = true }
+}
+"""
+
+SHOPPER = """
+service Shop {
+  emission fn buy(a: Str) -> Bool
+}
+
+component ShopSvc requires net: Net provides shop: Shop {
+  provide shop {
+    fn buy(a) = emit net.fetch(a)
+  }
+}
+"""
+
+
+def wide(tmp_path: Path, slo: str, *, uses: str = "", **files: str) -> Path:
+    """A composition that crosses ONE route (`net`, `time="2s"`), with its
+    `use` lines passed verbatim by the caller and `services.rvl` holding a
+    second, uncrossed ceiling."""
+    write(tmp_path, services=TWO_CEILINGS, consumer=SHOPPER, **files)
+    doc = tmp_path / "base.rvl"
+    doc.write_text(f"""
+composition base {{
+{uses}  slo {{ {slo} }}
+  row @checkout from "consumer.rvl" provides shop
+  row @net from "services.rvl" provides net
+}}
+""")
+    return doc
+
+
+def test_a_ceiling_on_a_route_no_row_crosses_still_refuses(tmp_path):
+    """INTENTIONAL AND CONSERVATIVE, not incidental. `services.rvl` declares
+    `db(time="30s")` on a method no row of this composition crosses, and this
+    composition is still refused for a 2s target. The scope of the gate is
+    every ceiling the composition declares, not the ceilings of the routes it
+    crosses today, because a declared ceiling is a promise about that backing
+    parameter wherever it is written. Do NOT narrow this to the crossed set:
+    that would ADMIT compositions the gate refuses now, and the cost of the
+    wide scope is an over-refusal whose message names the source, while the
+    cost of the narrow one is admitting a rollout that breaches a ceiling.
+
+    The binding ceiling is the LARGEST one, because the predicate is `target >=
+    every ceiling`: 30s is what a target has to reach, and that is what the
+    message names (the previous implementation named whichever ceiling came
+    first in harvest order)."""
+    doc = wide(tmp_path, "p95_latency: 2s")
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert exc.value.code == "G4" and exc.value.category == "slo"
+    assert "its own `db` declaration caps `time=30000`" in exc.value.message
+    assert "Raise the `p95_latency` target to at least 30000" in exc.value.hint
+    assert "the other 1 included" in exc.value.hint
+    assert "The tightest is 2000 on `net` in `services.rvl`" in exc.value.hint
+
+    # the LARGEST ceiling is the value that admits: at it, the gate is silent
+    doc = wide(tmp_path, "p95_latency: 30s")
+    assert resolve_file(str(doc), str(tmp_path)).slo["p95_latency_ms"][0] \
+        == 30000
+
+
+def test_a_ceiling_in_a_file_the_composition_only_uses_still_refuses(tmp_path):
+    """INTENTIONAL AND CONSERVATIVE. `extra.rvl` is `use`d and nothing else:
+    its `AuditSvc` is never rowed and its `other` route is never crossed by any
+    row. Its declared `other(time="6h")` ceiling still refuses this composition,
+    and it is the binding (largest) ceiling, so it is the one named. Narrowing
+    the harvest to the crossed routes is exactly the change this test forbids:
+    it would flip this document from REFUSED to ADMITTED."""
+    doc = wide(tmp_path, "p95_latency: 2s",
+               uses='  use "extra.rvl"\n', extra=UNROWED)
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "its own `other` declaration caps `time=21600000`" \
+        in exc.value.message
+    # three `time` ceilings: `net` and `db` in `services.rvl`, `other` here
+    assert "the other 2 included" in exc.value.hint
+
+    # at the largest declared ceiling the composition resolves
+    doc = wide(tmp_path, "p95_latency: 6h",
+               uses='  use "extra.rvl"\n', extra=UNROWED)
+    assert resolve_file(str(doc), str(tmp_path)).slo["p95_latency_ms"][0] \
+        == 21600000
+
+
+def test_the_refusal_names_the_binding_ceiling_not_the_first_one_found(
+        tmp_path):
+    """The message is a claim about the number the target must reach, so it
+    names the LARGEST ceiling of that kind. `mid.rvl` is written first and
+    declares 5000, `services.rvl` declares 30000 on the uncrossed `db`: the two
+    are reached in that order, and only 30000 is the value a target has to
+    reach. Naming the first tripping ceiling instead would send the author to a
+    target this same check refuses again, which is the defect this pins."""
+    doc = wide(tmp_path, "p95_latency: 1s",
+               uses='  use "mid.rvl"\n', mid=MID)
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "its own `db` declaration caps `time=30000`" in exc.value.message
+    assert "the other 2 included" in exc.value.hint
+    # the tightest is reported too, so the reader sees both ends of the set
+    assert "The tightest is 2000 on `net` in `services.rvl`" in exc.value.hint
+
+    # ... and at 30000, the composition the old rule mis-described now resolves
+    doc = wide(tmp_path, "p95_latency: 30s",
+               uses='  use "mid.rvl"\n', mid=MID)
+    assert resolve_file(str(doc), str(tmp_path)).slo["p95_latency_ms"][0] \
+        == 30000
+
+
+def test_one_ceiling_of_a_kind_keeps_the_plain_non_comparative_hint(tmp_path):
+    """With a single ceiling of that kind there is nothing to compare it
+    against, so the message stays the one-ceiling message: no count sentence is
+    appended to every refusal, and the common case does not grow. The gate is
+    the same gate; only the sentence that explains a MULTIPLE is conditional."""
+    doc = project(tmp_path, "slo { p95_latency: 250ms }")
+    with pytest.raises(RevlError) as exc:
+        resolve_file(str(doc), str(tmp_path))
+    assert "its own `net` declaration caps `time=2000`" in exc.value.message
+    assert "binding one of" not in exc.value.hint
+
+
 # ------------------------------------------------------------------ the IR and panel
 
 def test_the_contract_is_carried_into_the_ir_under_unit_bearing_keys(tmp_path):

@@ -97,16 +97,22 @@ Three things are fixed at the surface, deliberately:
 `_check_slo_bounds` in `composition.py` is the gate, and it is a rollup of
 numbers that already exist rather than a new analysis:
 
-* it reads every `emission[...]` ceiling from the composition's row sources
+* it reads every `emission[...]` ceiling the composition declares
   (`_slo_ceilings`), the same way `lower._check_declared_ceilings` reads them
   for item 260's own check, through `cap_order.parse_cap` and
-  `split_ceilings`;
-* for each datum in `SLO_BACKED_BY` it compares the declared SLO against the
-  tightest declared ceiling of that kind anywhere in the composition and
-  refuses with `code="G4", category="slo"` when the SLO is STRICTER than the
-  ceiling (`target < value`). A hard ceiling of `time="2s"` cannot deliver a
-  `p95_latency: 250ms` promise, so the rollout is refused before it starts;
-* the bound is INCLUSIVE: a target exactly at the ceiling resolves. The
+  `split_ceilings`. The scope is EVERY file the composition names: the row
+  sources first and the `use`d files before them, and every route in them
+  whether or not a row crosses it. See "The conservative scope" below;
+* for each datum in `SLO_BACKED_BY` it compares the declared SLO against EVERY
+  declared ceiling of that kind and refuses with `code="G4", category="slo"`
+  when the SLO is STRICTER than any one of them (`target < value`). A hard
+  ceiling of `time="2s"` cannot deliver a `p95_latency: 250ms` promise, so the
+  rollout is refused before it starts. The predicate is therefore `target >=
+  every ceiling`, which makes the BINDING ceiling the LARGEST one of that kind:
+  that is the value the target has to reach, so that is the one the refusal
+  names (and, when there is more than one, the message also reports how many
+  were compared and which of them is tightest);
+* the bound is INCLUSIVE: a target exactly at the binding ceiling resolves. The
   ceiling is a bound the provider already agreed to, so a promise to meet it is
   not a breach.
 
@@ -119,6 +125,27 @@ that writes none is byte-identical in behaviour and in the IR to what it was
 before this slice, which is the property that keeps an opt-in contract from
 being a breaking change and is why the refusal is a new `category` value rather
 than a reused one.
+
+#### The conservative scope
+
+The gate reads ceilings from every file the composition names, including a file
+it only `use`s, and on every route, including one that no row of this
+composition crosses. That is deliberately BROADER than the set of routes this
+composition actually crosses, and the breadth is the point: a declared
+`emission[...]` ceiling is a promise about that backing parameter wherever it
+is written, so a composition that carries a provider whose `db` method caps
+`time=30s` carries a 30s crossing whether or not a row crosses `db` today.
+
+The asymmetry is what settles it. Over-refusal costs a confusing refusal, and
+the refusal is at compile time with the source position and the binding value
+in it; a wrongly narrowed gate costs a rollout that violates a declared ceiling,
+which is the failure this item exists to prevent. Narrowing `_slo_ceilings` to
+the crossed routes would make the gate ADMIT compositions it refuses today,
+which is not a documentation change and is not something an over-refusal
+argument licenses. This is a decision, recorded here so that a later reader
+does not "fix" it back; `_slo_ceilings` carries the same note in code, and
+`tests/test_473_slo_rollout_gate.py` pins it with a composition whose second
+file contributes a ceiling on a route no row crosses.
 
 ### The carrier and the panel
 
@@ -138,7 +165,11 @@ declares `slo { p95_latency: 2000ms, max_pending_tasks: 100 }` is refused with
 `G4`/`slo` naming the datum, the target, the ceiling and the line. It also pins
 the inclusive boundary, the three ungated datums, the no-ceiling composition,
 the fold path widening a ceiling, the IR unit-bearing keys, the absent key when
-undeclared, the panel, and the JSON round trip.
+undeclared, the panel, and the JSON round trip. It also pins the conservative
+SCOPE as intentional rather than incidental: a ceiling contributed by a file the
+composition only `use`s, and a ceiling on a route no row crosses, both refuse,
+and the refusal names the binding (largest) ceiling of that kind rather than
+whichever one the file order reaches first.
 
 ## Left out, and why
 
