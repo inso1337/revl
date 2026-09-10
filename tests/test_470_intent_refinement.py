@@ -171,6 +171,31 @@ def test_the_verb_bypasses_nothing_else():
     assert refusal.violation is Violation.VERB
 
 
+def test_a_bare_string_verb_declaration_is_refused_not_split_into_characters():
+    # `frozenset("write")` is the five single-character verbs, so the intended
+    # verb would be refused while `w` was admitted: a widening, not a narrowing.
+    # The declaration is refused instead of guessed at (fail closed).
+    with pytest.raises(ValueError):
+        _intent(("m",), verbs="write")
+
+    intent = _intent(("m",), verbs={"write"})
+    assert intent.verbs == frozenset({"write"})
+    # The intended verb is admitted, and the character the bare string used to
+    # declare is not: a multi-character verb cannot be reached one letter wide.
+    assert refine(intent, _action(("m",), verb="write")) is None
+    refusal = refine(intent, _action(("m",), verb="w"))
+    assert refusal is not None
+    assert refusal.violation is Violation.VERB
+    assert refusal.declared == "write"
+
+
+def test_a_verb_that_is_not_a_verb_name_is_refused():
+    with pytest.raises(ValueError):
+        _intent(("m",), verbs=("op", 3))
+    with pytest.raises(ValueError):
+        _intent(("m",), verbs=b"op")
+
+
 # --------------------------------------------------------------- the ceiling
 
 
@@ -214,6 +239,82 @@ def test_no_ceiling_stated_and_none_spent_is_admitted():
     intent = _intent(("fs.write", [("path", "/tmp")]))
     assert intent.ceilings == ()
     assert refine(intent, _action(("fs.write", [("path", "/tmp")]))) is None
+
+
+def test_a_zero_spend_against_a_stated_ceiling_is_admitted():
+    # The bound is the intent, and spending none of it is inside it.
+    intent = _intent(("model.complete", [("calls", 3)]))
+    assert refine(intent, _action(("model.complete",), amounts=(("calls", 0),))) is None
+
+
+def test_a_negative_declared_spend_is_refused():
+    # A negative spend satisfies `spent[name] > bound` for every non-negative
+    # bound, so it reads as proof of compliance: the one true sign fail-open in
+    # this dimension. It is refused where `cap_order._canon_value` refuses a
+    # negative parsed ceiling, at construction of the record that states it.
+    with pytest.raises(ValueError):
+        _action(("m",), amounts=(("calls", -5),))
+    with pytest.raises(ValueError):
+        Action(make_cap("m"), "op", (("calls", -1),), None)
+    with pytest.raises(ValueError):
+        Intent(make_cap("m"), frozenset({"op"}), (("calls", -1),), None)
+
+
+def test_a_non_numeric_amount_or_bound_is_refused_never_a_bare_type_error():
+    # A `str` amount made the comparison raise a bare TypeError out of `refine`,
+    # which is neither the record's contract (an unbuildable declaration) nor
+    # `refine`'s (fail closed through `Refusal`). `_canonical_ceilings` is the
+    # single validation point for both directions, so it refuses the value.
+    with pytest.raises(ValueError):
+        _action(("m",), amounts=(("calls", "3"),))
+    with pytest.raises(ValueError):
+        Action(make_cap("m"), "op", (("calls", "3"),), None)
+    with pytest.raises(ValueError):
+        Intent(make_cap("m"), frozenset({"op"}), (("calls", "3"),), None)
+    with pytest.raises(ValueError):
+        ceiling_params({"calls": "3"})
+    # `bool` IS an `int` in Python, so `calls=True` would compare as `calls=1`.
+    with pytest.raises(ValueError):
+        _action(("m",), amounts=(("calls", True),))
+
+
+def test_refine_is_total_when_a_record_bypassed_the_construction_check():
+    # Unpickling a frozen dataclass rebuilds it with `__new__` plus a state
+    # assignment, so `__post_init__` does not run and a value the records refuse
+    # can still be present. `refine` is fail-closed through `Refusal`, so an
+    # uncomparable value is a refusal and never a bare TypeError out of the
+    # comparison.
+    intent = _intent(("m", [("calls", 3)]))
+    valid = _action(("m",), amounts=(("calls", 1),))
+
+    def _bypass(cls, **fields):
+        record = object.__new__(cls)
+        for name, value in fields.items():
+            object.__setattr__(record, name, value)
+        return record
+
+    for planted in ((("calls", -5),), (("calls", "1"),), (("calls", True),)):
+        bypassed = _bypass(
+            Action,
+            object=valid.object,
+            verb=valid.verb,
+            amounts=planted,
+            tenant=valid.tenant,
+        )
+        refusal = refine(intent, bypassed)
+        assert isinstance(refusal, Refusal)
+        assert refusal.violation is Violation.CEILING
+
+    bypassed_intent = _bypass(
+        Intent,
+        object=intent.object,
+        verbs=intent.verbs,
+        ceilings=(("calls", "3"),),
+        tenant=None,
+    )
+    refusal = refine(bypassed_intent, valid)
+    assert isinstance(refusal, Refusal)
+    assert refusal.violation is Violation.CEILING
 
 
 def test_each_ceiling_dimension_is_compared_independently():
@@ -289,6 +390,22 @@ def test_ceiling_params_refuses_a_resource_kind_name():
     for name in ("path", "host", "table"):
         with pytest.raises(ValueError):
             ceiling_params({name: 1})
+
+
+def test_a_hand_built_intent_is_canonicalized_like_one_built_from_cap():
+    # `_canonical_ceilings` claims to be the single validation point for both
+    # directions; `Intent.__post_init__` did not route through it, so a
+    # hand-built record could hold ceilings `from_cap` would have refused.
+    intent = Intent(make_cap("m"), ["op", "write"], (("size", 2), ("calls", 1)), None)
+    assert intent.verbs == frozenset({"op", "write"})
+    assert intent.ceilings == (("calls", 1), ("size", 2))
+
+
+def test_a_hand_built_intent_goes_through_the_check_from_cap_routes_through():
+    with pytest.raises(ValueError):
+        Intent(make_cap("m"), frozenset({"op"}), (("path", 1),), None)
+    with pytest.raises(ValueError):
+        Intent(make_cap("m"), frozenset({"op"}), (("calls", 1), ("calls", 2)), None)
 
 
 def test_the_records_refuse_a_ceiling_parameter_on_the_object():

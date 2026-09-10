@@ -116,11 +116,11 @@ three asymmetries rather than defaulting them:
 - An intent that declares no tenant (`tenant=None`) does not constrain tenancy.
   But an *action* that declares no tenant can never be shown to be in a stated
   tenant, so against a stated tenant it is refused. Unknown is not permitted.
-- An intent that states no ceiling leaves the spend unbounded. But an action that
-  spends a ceiling the intent never stated is spending outside the stated intent,
-  so it is refused. The intent bounded a different quantity, so it has not
-  authorized this spend. (The all-`unstated` case, no ceiling stated and none
-  spent, is the exhaustive-intent case and is allowed.)
+- An intent that states no ceiling does NOT leave the spend unbounded: an action
+  that states a spend against an intent that states no ceiling is spending
+  outside the stated intent, so it is refused. The intent bounded no quantity, so
+  it has not authorized this spend. (The all-`unstated` case, no ceiling stated
+  and none spent, is the exhaustive-intent case and is allowed.)
 - An action that states no amount cannot be shown to be within a stated ceiling,
   so it is refused.
 

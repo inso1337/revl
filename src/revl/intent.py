@@ -39,9 +39,10 @@ than defaulted:
     tenancy, but an ACTION that declares no tenant can never be shown to be in
     a stated tenant, so it is refused against one (fail closed: unknown is not
     permitted);
-  * an intent that states no ceiling leaves the spend unbounded, but an action
-    that spends a ceiling the intent never stated is spending outside the
-    stated intent, so it is refused;
+  * an intent that states no ceiling does NOT leave the spend unbounded: an
+    action that states a spend against an intent that states no ceiling is
+    spending outside the stated intent, so it is refused (the one admitted
+    pair is the exhaustive intent, no ceiling stated and none spent);
   * an action that states no amount cannot be shown to be within a stated
     ceiling, so it is refused.
 
@@ -149,6 +150,16 @@ def _canonical_ceilings(
     bound twice is refused too: a mapping hides the contradiction, and the second
     spelling would silently win. Sorted by name so two records with the same
     bounds are equal (the `Cap.params` precedent).
+
+    The VALUE goes through the same rule `cap_order._canon_value` applies to a
+    parsed ceiling: a non-negative integer, and never a `bool` (which is an
+    `int` in Python, and `calls=True` is not a count). A negative amount is the
+    sign fail-open this check closes: `spent[name] > bound` reads a negative
+    spend as proof of compliance, so a record is refused before it can be
+    compared. A `str` amount (or a `str` bound) would make `refine` raise a bare
+    `TypeError` out of the comparison, so it is refused as an unbuildable record
+    instead: the kernel is fail-closed through `Refusal`, and a malformed record
+    never gets that far.
     """
     seen: dict[str, int] = {}
     for name, value in pairs:
@@ -163,13 +174,64 @@ def _canonical_ceilings(
                 f"ceiling parameter `{name}` is bound twice; a ceiling states one "
                 f"bound, and a second spelling would silently win"
             )
+        if not _is_amount(value):
+            raise ValueError(
+                f"`{name}={value!r}` is not a numeric bound: `{name}` is a "
+                f"ceiling parameter and holds a non-negative integer count "
+                f"(cap_order's ceiling registry), never a `{type(value).__name__}`"
+            )
+        if value < 0:
+            raise ValueError(
+                f"`{name}={value}` is negative: a ceiling is a count of at most "
+                f"N, and neither a negative bound nor a negative spend can be "
+                f"shown to be within one. Write a non-negative integer"
+            )
         seen[name] = value
     return tuple(sorted(seen.items()))
+
+
+def _is_amount(value: object) -> bool:
+    """Whether `value` is a usable ceiling bound or spend.
+
+    `bool` is excluded on purpose: it IS an `int` in Python, so `calls=True`
+    would otherwise compare as `calls=1`. This mirrors `cap_order._canon_value`.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def ceiling_params(bounds: Mapping[str, int]) -> tuple[tuple[str, int], ...]:
     """Canonicalize a ceiling map into the sorted pair-tuple the records store."""
     return _canonical_ceilings(bounds.items())
+
+
+def _canonical_verbs(verbs: Iterable[str]) -> frozenset[str]:
+    """Canonicalize a verb declaration into the set an intent stores.
+
+    A bare `str` is REFUSED rather than iterated. `frozenset("write")` is the
+    five characters `{'w','r','e','t','i'}`, so a caller who wrote one verb would
+    declare five and the intended verb would be refused while `w` was admitted:
+    a widening, not a spelling slip. The verb dimension is a set of operation
+    names and a string is ONE name, so the ambiguity is refused instead of
+    guessed at (fail closed: an unbuildable declaration cannot be read as a
+    permissive one).
+    """
+    if isinstance(verbs, str):
+        raise ValueError(
+            f"`verbs={verbs!r}` is a bare string, and `verbs` is a set of "
+            f"operation names: iterating it would declare its "
+            f"{len(set(verbs))} distinct characters instead of the one verb. "
+            f"Pass a set/frozenset of names, or `verbs=({verbs!r},)` for a "
+            f"single verb"
+        )
+    declared = frozenset(verbs)
+    for verb in declared:
+        if not isinstance(verb, str):
+            raise ValueError(
+                f"`verbs` holds operation names, and `{verb!r}` is a "
+                f"`{type(verb).__name__}`: a verb is the string the action "
+                f"performs"
+            )
+    return declared
 
 
 def _render_params(params: Iterable[tuple[str, object]]) -> str:
@@ -190,7 +252,10 @@ class Intent:
 
     `verbs` is the set of operations permitted ON that object. The empty set is
     a legitimate contract meaning "no operation is permitted" and refuses every
-    action (fail closed); it is not a spelling of "unconstrained".
+    action (fail closed); it is not a spelling of "unconstrained". The set is
+    canonicalized at construction, and a bare `str` is refused rather than
+    iterated: `frozenset("write")` is the five single-character verbs, which
+    would refuse `write` and admit `w`.
 
     `tenant` is the item-33 realm, or `None` when the intent does not constrain
     tenancy. `None` is a STATED absence (an argument the caller must write),
@@ -214,6 +279,13 @@ class Intent:
                     f"intent's object: it belongs in `ceilings`, which is the "
                     f"one comparison of it (use Intent.from_cap to split it)"
                 )
+        # The verb set and the ceilings go through the SAME checks an action's
+        # do, and at construction rather than at comparison: a hand-built
+        # `Intent` is held to exactly the contract `from_cap` routes through,
+        # so `_canonical_ceilings` really is the one validation point for both
+        # directions and neither record can carry a bound the other would refuse.
+        object.__setattr__(self, "verbs", _canonical_verbs(self.verbs))
+        object.__setattr__(self, "ceilings", _canonical_ceilings(self.ceilings))
 
     @classmethod
     def from_cap(
@@ -228,7 +300,7 @@ class Intent:
         split is defined) instead of by a second parse here.
         """
         obj, ceilings = split_ceilings(cap)
-        return cls(obj, frozenset(verbs), ceiling_params(ceilings), tenant)
+        return cls(obj, verbs, ceiling_params(ceilings), tenant)
 
     def ceiling_map(self) -> dict[str, int]:
         return dict(self.ceilings)
@@ -372,9 +444,73 @@ def _object_violation(intent: Intent, action: Action) -> Refusal | None:
     )
 
 
+def _unusable_amount(
+    name: str,
+    value: object,
+    side: str,
+    declared: str,
+    requested: str,
+) -> Refusal:
+    """The refusal for a bound or a spend that is not a usable ceiling value."""
+    what = "a negative integer" if _is_amount(value) else f"a `{type(value).__name__}`"
+    return Refusal(
+        violation=Violation.CEILING,
+        dimension="ceilings",
+        declared=declared,
+        requested=requested,
+        message=(
+            f"the {side} states `{name}={value!r}`, which is {what}, and a "
+            f"ceiling parameter holds a non-negative integer"
+        ),
+        hint=(
+            "a ceiling is a static count of at most N: a value that is not one "
+            "cannot be compared, and a negative spend reads as compliance with "
+            "every bound (fail closed). Both records refuse such a value at "
+            "construction; this one did not come through that check"
+        ),
+    )
+
+
+def _unusable_amounts(intent: Intent, action: Action) -> Refusal | None:
+    """Refuse a bound or a spend `_canonical_ceilings` would not accept.
+
+    Both records canonicalize their values at construction, so a record built
+    the documented way never reaches this check. A record that skipped
+    `__post_init__` can: unpickling a frozen dataclass rebuilds it with
+    `__new__` plus a state assignment, and a negative or non-numeric value can
+    be planted with `object.__setattr__`. `refine` is fail-closed through
+    `Refusal`, and a bare `TypeError` out of the comparison below is not a
+    refusal, so both sides are checked before any comparison happens.
+    """
+    spent = action.amount_map()
+    for name, bound in intent.ceilings:
+        if not _is_amount(bound) or bound < 0:
+            return _unusable_amount(
+                name,
+                bound,
+                "declared intent",
+                f"{name}={bound!r}",
+                f"{name}={spent.get(name, '<unstated>')}",
+            )
+    for name in sorted(spent):
+        amount = spent[name]
+        if not _is_amount(amount) or amount < 0:
+            return _unusable_amount(
+                name,
+                amount,
+                "action",
+                _render_params(intent.ceilings),
+                f"{name}={amount!r}",
+            )
+    return None
+
+
 def _ceiling_violation(intent: Intent, action: Action) -> Refusal | None:
     """The ceiling dimension, in the fail-closed order: a stated bound is met
     by a stated amount within it, and a spend on an unstated bound is refused."""
+    unusable = _unusable_amounts(intent, action)
+    if unusable is not None:
+        return unusable
     spent = action.amount_map()
     for name, bound in intent.ceilings:
         if name not in spent:
