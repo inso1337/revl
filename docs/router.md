@@ -95,6 +95,20 @@ prerequisite the routing needs and which aligns the standalone driver with the
 emitted lifecycle-test driver. For a component with no placements this is
 byte-identical to a bare `ctx.plugin`.
 
+**The same realization has to be synthesized on a driverless tier.** A tier
+whose emitted module is the whole runtime (wasm) has no driver to install the
+proxy provision, so the module must carry it. Codegen therefore emits, for every
+key the component both routes and re-provides, one `provide:<key>.<op>` export
+per method of the routed service, whose whole body is a call to the generated
+routing wrapper (`backends/wasm/emit.py::_provide_routed`, item 173 + item 449
+G2). The routed component's routing *is* its body, so a routes-only Router
+(`provides <key>` with no `provide` step) declares no provision to emit, and
+without the synthesized export the module would be read as a Router that
+provides nothing: the routed key would never reach the bare downstream table and
+every routed call would fail on G2. This is the emitter-side counterpart of the
+driver's `root.reflect.provide(key, proxy)`, and it is emitted per routed key,
+not per routed call.
+
 ### A consequence for interception (item 424 b)
 
 Because a `routes`-carrying component is realized rather than plugged, ANY body
@@ -146,7 +160,11 @@ out of scope for this item and are recorded here so they are not re-derived:
   - **wasm** (first-party): the substrate grew a `route:<key>` host op — a
     strict single-realm liveness-checked read + a `live` probe, no parent
     fallback — and the emitter emits a selector + strict dispatch that consume
-    it (`backends/wasm/emit.py`, proven by `test_router_exec_wasm.py`).
+    it (`backends/wasm/emit.py`, proven by `test_router_exec_wasm.py`). The
+    provision side is synthesized too: one `provide:<key>.<op>` export per
+    routed-service method, each forwarding through the routing wrapper, so the
+    routed key reaches the bare downstream table on a tier with no driver (§2,
+    `_provide_routed`).
   - **go**: a `revlRouter<Comp><Key>` struct re-resolves live per-realm handles
     each call via the stc-go fork's strict `ServiceInRealm` (no parent-chain
     fallback); built + tested against the fork (`forks/stc-go`), upstream PR
