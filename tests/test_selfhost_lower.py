@@ -227,6 +227,31 @@ def _classify(e: RevlError) -> str:
         return "G4"
     if "(A1)" in m:
         return "A1"
+    # ---- item 391 / issue #106: extern declarations and inverse slots -------
+    # `_lower_externs`'s declaration-line class rules plus `_check_extern_undo`'s
+    # slot judgment (`undo`/`compensate`). Both surfaces are code-less in the
+    # reference, so before this slice every one of them fell through to "OUT:"
+    # and parked in `no-objection-out-of-slice` — the bucket `--check` cannot
+    # see. The gate now mirrors them itself (selfhost/lower.rvl's explicit
+    # extern section), so naming them here is what turns a parked divergence
+    # into a measured agreement.
+    #
+    # The markers are POSITIVE: each is a substring the gate now spells
+    # byte-for-byte. That deliberately excludes the shapes still left out of the
+    # gate — `_check_witnessed_inverse`'s "witnessed extern … must declare
+    # `undo`" (code G5/G4, a real refusal the gate is silent on) and
+    # `_check_deferred_not_in_teardown`'s "calls deferred emission …" (G5), and
+    # `_check_inverse_args`' T1 arm — all of which stay "OUT:" so a future
+    # no-objection case stays visible in the census rather than being mislabelled
+    # as an agreement.
+    if "unclassified extern" in m:
+        return "G8"
+    if ("slot of extern" in m
+            or "declares no return type, so there is no acquired value to bind" in m
+            or "cannot call the extern itself" in m
+            or ("acquire extern `" in m and "must declare `undo`" in m)
+            or "cannot declare `undo`" in m):
+        return "G4"
     # ---- the self-host TYPE LAYER (docs/design/457, slice T0; item 429) -----
     # The reference's type layer refuses a program the gate has no phase for, so
     # `admit_src` waves it through. Every such refusal used to fall here to
@@ -242,10 +267,12 @@ def _classify(e: RevlError) -> str:
     # The vocabulary is design §4.3: `e.code` for the checks that set T1/T2,
     # `HOST-METHOD` straight through (it is already a reference code), and the
     # message-shape families for the code-less remainder. It is append-only and
-    # deliberately narrow: it must not name a refusal outside the type layer
-    # (the extern-slot G4/G5, `a2`/`a9`, `use`, the parser-form fixtures and the
-    # `unknown service` provide-clause refusals stay "OUT:" until their own
-    # slice lands and can refuse them natively).
+    # deliberately narrow: it must not name a refusal outside the type layer.
+    # The extern-slot G4 family has since landed for real (item 391, above) and
+    # was struck from this list; `a2`/`a9`, `use`, the parser-form fixtures, the
+    # `unknown service` provide-clause refusals and the extern G5s (`deferred`
+    # in teardown, a witnessed inverse that reaches an emission) stay "OUT:"
+    # until their own slice lands and can refuse them natively.
     if e.code in ("T1", "T2", "HOST-METHOD"):
         return e.code
     if "is not declared in this function" in m:
@@ -813,6 +840,30 @@ component C provides s: S {
 fn helper(u: Str) -> Int { let p = Map.new()   return 1 }
 service S { fn go(u: Str) -> Int }
 component C provides s: S { provide s { fn go(u) = 1 } }
+"""),
+
+    # ---- item 391 / issue #106: extern declarations and inverse slots ------
+    # The accepting twins of the extern refusals pinned in REJECTED_PROGRAMS.
+    # Each is a legal extern whose inverse slot must keep admitting: an
+    # `emission` may declare `compensate`, an `acquire` must declare `undo`
+    # (and that `undo` may name a declared `pure` extern or a builtin
+    # constructor). `extern` declarations do not need a calling component, so
+    # these are declaration-only programs — the narrowest input that reaches the
+    # rule and nothing else.
+    ("an emission extern declaring its optional compensate slot", """
+extern pure fn log_unsent(n: Int) = @py { return None }
+extern emission fn send(data: Str) -> Int compensate log_unsent(1) = @py { return 1 }
+"""),
+    ("an acquire extern whose undo is a declared pure extern", """
+extern pure fn close_it(s: Socket) = @py { return None }
+extern acquire fn listen(port: Int) -> Socket undo close_it(result) = @py { return port }
+"""),
+    ("an acquire extern whose undo is a builtin constructor", """
+extern acquire fn listen(port: Int) -> Socket undo Ok(result) = @py { return port }
+"""),
+    ("an acquire extern with no return type and a legal inverse", """
+extern pure fn g(h: Int) = @py { return None }
+extern acquire fn f() undo g(1) = @py { return 1 }
 """),
 ]
 
@@ -1542,6 +1593,87 @@ component C requires db: Db, bus: Bus provides api: Api {
     fn go() { return db.run("a") + bus.send("b") }
   }
 }
+""", "G4"),
+
+    # ---- item 391 / issue #106: extern declarations and inverse slots ------
+    # Roadmap item 391's "remaining family" for the boundary surface. The
+    # reference refuses each of these in `_lower_externs` (the `extern` line's
+    # CLASS rules) or `_check_extern_undo` (the `undo`/`compensate` slot walk),
+    # both code-less, so until this slice the gate raised no objection at all
+    # and the census parked them in `no-objection-out-of-slice`. The first six
+    # are the checked-in rejection fixtures; the rest are the family's message
+    # shapes, kept inline because the corpus carries one fixture per shape.
+    ("extern with no classification is G8", _fixture("v2_extern_unclassified"),
+     "G8"),
+    ("acquire extern with no undo", _fixture("v2_extern_acquire_no_undo"),
+     "G4"),
+    ("compensate slot binding an unbound result",
+     _fixture("g4_extern_compensate_result"), "G4"),
+    ("undo slot sees only the implicit result binding",
+     _fixture("g4_extern_undo_param_not_in_scope"), "G4"),
+    ("undo slot cannot call the extern itself",
+     _fixture("g4_extern_undo_self_call"), "G4"),
+    ("undo slot may only call a declared fn, extern, or host builtin",
+     _fixture("g4_extern_undo_undeclared_fn"), "G4"),
+    # a `pure` extern has no observable effect, so it has no inverse to declare;
+    # `compensate` alone is already a refusal (the slot rule is per-class).
+    ("pure extern cannot declare compensate", """
+extern pure fn g(h: Int) = @py { return None }
+extern pure fn f(x: Str) compensate g(1) = @py { return x }
+""", "G4"),
+    # an `emission` may declare `compensate` but never `undo` (its inverse would
+    # be a second boundary crossing, which is what G5's teardown rule forbids).
+    ("emission extern cannot declare undo", """
+extern pure fn g(h: Int) = @py { return None }
+extern emission fn f(x: Str) -> Int undo g(1) = @py { return 1 }
+""", "G4"),
+    # `compensate` is not a substitute for `acquire`'s mandatory `undo`: the
+    # class rule fires before the slot rules are reached.
+    ("acquire extern with compensate but no undo", """
+extern pure fn g(h: Int) = @py { return None }
+extern acquire fn f() -> H compensate g(1) = @py { return 1 }
+""", "G4"),
+    # the three slot shapes that need the DECLARATION read, not just the slot:
+    # a `result` in a slot with no acquired value, an undeclared callee, and a
+    # bare name with no binding at all.
+    ("no-return extern refuses a `result` binding", """
+extern pure fn g(h: Int) = @py { return None }
+extern acquire fn f(x: Str) undo g(result) = @py { return 1 }
+""", "G4"),
+    ("a no-return extern's slot runs with no variables in scope", """
+extern pure fn g(h: Int) = @py { return None }
+extern acquire fn f(x: Str) undo g(q) = @py { return 1 }
+""", "G4"),
+    ("an extern slot must be a plain call", """
+extern acquire fn f(x: Str) -> H undo obj.close(x) = @py { return 1 }
+""", "G4"),
+    # the walk is generic, so a refusal nested inside the slot expression's own
+    # `match`/list sub-expressions is reached exactly as the reference reaches
+    # it — and `path` is out of scope at either depth.
+    ("an extern slot refusal inside a match arm", """
+extern pure fn close(h: Int) = @py { return None }
+extern acquire fn open_(p: Str) -> H undo close(match result { _ => p })
+  = @py { return 1 }
+""", "G4"),
+    ("an extern slot refusal inside a list literal", """
+extern pure fn close(h: Int) = @py { return None }
+extern acquire fn open_(p: Str) -> H undo close([p][0]) = @py { return 1 }
+""", "G4"),
+    # ORDERING. `_lower_externs` finishes ONE declaration — its class rules, then
+    # both slots — before it starts the next, so the winner is the first
+    # declaration in SOURCE order, not the lowest line: here the first extern's
+    # `undo` sits on line 4 while the second extern's class rule is on line 6.
+    ("the first malformed extern in source order wins", """
+extern acquire fn a() -> H
+  undo ghost(1)
+  = @py { return 1 }
+extern pure fn p() -> Str undo ghost2(1) = @py { return "x" }
+""", "G4"),
+    # ...and a valid declaration before a malformed one does not mask it.
+    ("a valid extern before a malformed one", """
+extern pure fn g(h: Int) = @py { return None }
+extern acquire fn good() -> H undo g(1) = @py { return 1 }
+extern acquire fn bad() -> H = @py { return 1 }
 """, "G4"),
 ]
 
