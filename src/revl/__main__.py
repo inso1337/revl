@@ -1141,6 +1141,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_fmt(args)
     if args.command == "run":
         return run_command(args)
+    if args.command == "dev":
+        from .dev import dev_command  # noqa: PLC0415 — process orchestration is optional
+        return dev_command(args)
     if args.command == "why":
         return _run_why(args)
     if args.command == "metrics":
