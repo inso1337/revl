@@ -486,7 +486,7 @@ class Timeline:
         except TypeError:  # pragma: no cover — id() never raises, belt and braces
             pass
 
-    def record_emission(self, key: str, method: str, args: tuple,
+    def record_emission(self, key: str, method: Optional[str], args: tuple,
                         service: Optional[str], site: tuple) -> Step:
         """Record one boundary crossing.
 
@@ -500,7 +500,9 @@ class Timeline:
         secret = self.secrets.crossing(service=service, method=method, key=key,
                                        component=self.component)
         step = self._add(
-            KIND_EMISSION, f"{key}.{method}", None,
+            # item 414: a direct host-extern crossing has no receiver, so its
+            # name is both its key and its method; it is printed once.
+            KIND_EMISSION, key if method == key else f"{key}.{method}", None,
             file=file, lineno=lineno, source=self.sources.line(file, lineno),
             detail={"key": key, "method": method, "service": service,
                     "args": confidential.redact_args(args, secret, _describe)},
@@ -1325,18 +1327,15 @@ class _SpawnRecorder:
         return f"<recording spawn {getattr(self._handle, 'component', '?')}>"
 
 
-# The recorder observes an emission only where the crossing is routed through a
-# handle it wraps: a required service (`_ServiceProxy` off the recording context)
-# or a spawn-handle provision (`_SpawnRecorder.get` above). A *direct* free host
-# extern emission (`emit announce(x)`, a kind-3/4 crossing) compiles to a bare
-# module-level call — `announce(x)` — that never touches the recording context,
-# and the extern body is G8-opaque, so there is no seam to record it at this
-# layer. That crossing is caught statically by the approval fold and the
-# activation-crossing gate, not by this runtime WAL recorder.
-# TODO(414): if such a free-extern emission ever needs a runtime WAL record, the
-# seam is the emitter (route the extern call through `_revl_ctx`) or a recorded
-# extern shim, not `_RecordingContext` — the recorder cannot see the call as it
-# stands.
+# The recorder observes an emission where the crossing is routed through a seam
+# it wraps: a required service (`_ServiceProxy` off the recording context), a
+# spawn-handle provision (`_SpawnRecorder.get`) or a DIRECT free host extern
+# emission (`_revl_record_extern` below, item 414). The first two arrive through
+# the emitted code's OWN attribute access; a free extern has no receiver to route
+# it, so it arrives through `runtime.revl_extern_emit`, which the emitter emits
+# for exactly the fire expressions it classified as a host-extern crossing. The
+# recorder still cannot see such a call on its own, and does not try to: this
+# seam exists only because the emitter routes the crossing to it.
 
 
 class _RecordingContext:
@@ -1375,6 +1374,40 @@ class _RecordingContext:
             object.__getattribute__(self, "_revl_timeline"),
             object.__getattribute__(self, "_revl_ir"),
             object.__getattribute__(self, "_revl_services"))
+
+    def _revl_record_extern(self, name: str, args: tuple) -> None:
+        """Record a DIRECT free host-extern emission (`emit announce(msg)`, a
+        kind-3/4 crossing) on THIS component's timeline (item 414).
+
+        The runtime's :func:`runtime.revl_extern_emit` calls this when the emitted
+        body fires such a crossing, the runtime counterpart to the static
+        approval fold: without it the WAL carried no `KIND_EMISSION` step for a
+        crossing that has no inverse, so a recovery verdict over the timeline came
+        back false-clean. The hook is absent on the real cordis ``Context``, so an
+        un-instrumented activation is untouched, exactly as `_revl_record_spawn`
+        is.
+
+        The emitter routes ONLY the fires it classified as a host-extern crossing
+        here, so the crossings that were already recorded are not recorded twice:
+        a required-service emission and a spawn-provision emission both reach the
+        timeline through :class:`_ServiceProxy`, and a crossing that ALSO carries
+        an approval edge is still one crossing, recorded once.
+
+        `service` is empty because the crossing has no receiver service - the
+        caller's own declaration is what made the extern a host emission. The
+        extern name is both the key and the method, which is all the record can
+        honestly say, and the site is derived from the frame that fired it, the
+        same way `_ServiceProxy` derives it, so the record points at the emitted
+        line.
+        """
+        frame = sys._getframe(1)
+        while frame is not None and \
+                "_revl_transparent_frame" in frame.f_code.co_varnames:
+            frame = frame.f_back
+        object.__getattribute__(self, "_revl_timeline").record_emission(
+            name, name, tuple(args), None,
+            (frame.f_code.co_filename, frame.f_lineno)
+            if frame is not None else (None, None))
 
     def effect(self, fn, *args, **kwargs):
         label = args[0] if args else kwargs.get("label")

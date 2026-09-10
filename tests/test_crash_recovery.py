@@ -509,6 +509,252 @@ def test_a_spawn_handle_emission_is_recorded_in_the_wal(session, tmp_path):
                for e in report["unreconstructible"])
 
 
+# A composition whose provide-method body reaches a FREE host extern directly
+# (`emit announce(msg)`), not off a required service and not through a spawn
+# handle. It is the one emission shape with no receiver to route it, so the
+# runtime recorder — which wraps required services (`_ServiceProxy`) and spawn
+# provision calls (`_SpawnRecorder`) — has no call of its own to observe. Item
+# 414 left this residual behind and 841 closes it at the emitter, the seam the
+# now-retired `TODO(414)` named. The extern is a real host write so the test can
+# also prove the crossing HAPPENED, not merely that a record appeared.
+_FREE_EXTERN_DECL = (
+    "extern emission fn announce(sink: Str, msg: Str) -> Str = @py {\n"
+    "    with open(sink, 'a') as _f:\n"
+    "        _f.write('announce:' + msg + '\\n')\n"
+    "    return msg\n"
+    "}\n"
+    "service Ops { emission fn shout(msg: Str) -> Str }\n"
+)
+
+
+def _free_extern_source(sink: str, step: str) -> str:
+    """The free-extern composition with `step` spliced into the component scope,
+    so the same crossing can be exercised from an activation body and from a
+    provide-method body (the two firing sites)."""
+    return (
+        _FREE_EXTERN_DECL
+        + "component Agent provides ops: Ops {\n"
+        + step
+        + "  provide ops {\n"
+        "    fn shout(msg) {\n"
+        f'      emit announce("{sink}", msg)\n'
+        "      return msg\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+@needs_cordis
+def test_a_free_host_extern_emission_is_recorded_in_the_wal(session, tmp_path):
+    """Item 841. A free host extern emission (`emit announce(msg)`) compiles to a
+    fire that reaches the recording seam, so the WAL carries exactly ONE
+    `KIND_EMISSION` step for it. Before the fix the emitter rendered a bare
+    module-level `announce(msg)` the recorder could not see, so the timeline held
+    ZERO emission steps for a crossing `replay.py` itself documents as not
+    revertible — and `recover` reported a false-clean verdict over it."""
+    sink = str(tmp_path / "announce.log")
+    session.load(compile_source(_free_extern_source(sink, ""), "<free-extern>.rvl"),
+                 record=True)
+
+    assert session.call("ops", "shout", ["hi"])["result"] == "hi"
+    # the crossing genuinely left the process (the host body ran)
+    assert _sink_lines(sink) == ["announce:hi"]
+
+    tl = session.recorder.timeline("Agent")
+    emissions = [s for s in tl.steps if s.kind == replay.KIND_EMISSION]
+    assert len(emissions) == 1  # exactly one crossing, exactly one record
+    assert emissions[0].detail["key"] == "announce"
+    assert emissions[0].detail["service"] is None  # no receiver to name
+    assert emissions[0].detail["args"] == [sink, "hi"]
+
+    path = str(tmp_path / "free-extern.wal")
+    with replay.WriteAheadLog(path, ir=session.ir, generation=1) as wal:
+        wal.append_timeline(tl)  # NO commit -> crashed mid-activation
+
+    loaded = replay.WriteAheadLog.read(path)
+    assert "emission" in [r["boundary"]["class"] for r in loaded["records"]
+                          if r["record"] == "effect"]
+
+    report = recover(path)
+    assert report["verdict"] == "rolled-back"  # no longer false-clean
+    assert any(e["kind"] == "emission" and "announce" in e.get("label", "")
+               for e in report["unreconstructible"])
+
+
+@needs_cordis
+def test_an_activation_body_free_host_extern_emission_is_recorded(session, tmp_path):
+    """The same crossing fired from an ACTIVATION body (`emit announce(...)` at
+    component scope, the shape `_c_activation_source` below uses) rather than a
+    provide-method body. Both firing sites share one shape decision
+    (`emit._emission_fire`), so both reach the seam."""
+    sink = str(tmp_path / "boot.log")
+    step = f'  emit announce("{sink}", "boot")\n'
+    session.load(compile_source(_free_extern_source(sink, step), "<activation>.rvl"),
+                 record=True)
+
+    assert _sink_lines(sink) == ["announce:boot"]
+    emissions = [s for s in session.recorder.timeline("Agent").steps
+                 if s.kind == replay.KIND_EMISSION]
+    assert len(emissions) == 1
+    assert emissions[0].detail["key"] == "announce"
+
+
+# The two crossings the runtime ALREADY records: a required-service emission
+# (wrapped by `_ServiceProxy`, replay.py:1227) and a spawn provision call
+# (`_SpawnRecorder`, replay.py:1274). The free-extern seam must not add a second
+# record on either path — one crossing means one WAL step, never two.
+def _mixed_crossings_source(sink: str, extern: bool = True) -> str:
+    """A method that reaches an emission BOTH ways at once: off a required
+    service through a `_ServiceProxy`, and (unless `extern` is False) through a
+    free host extern. One method, one timeline, so the two routes' counts are
+    read together."""
+    crossing = f'      emit announce("{sink}", msg)\n' if extern else ""
+    return (
+        _FREE_EXTERN_DECL
+        + "service Hive { emission fn go(msg: Str) -> Str }\n"
+        "component OpsImpl provides ops: Ops {\n"
+        "  provide ops { fn shout(msg) = msg }\n"
+        "}\n"
+        "component Agent requires ops: Ops provides hive: Hive {\n"
+        "  provide hive {\n"
+        "    fn go(msg: Str) {\n"
+        "      emit ops.shout(msg)\n"
+        + crossing
+        + "      return msg\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+@needs_cordis
+def test_the_already_recorded_crossings_are_not_recorded_twice(session, tmp_path):
+    """One crossing, one WAL step. A `req` emission off a required service and a
+    free host extern in the SAME method body record once each — the free-extern
+    seam must not double-count the route the recorder already covers, and the
+    already-covered route must not shift by a step."""
+    sink = str(tmp_path / "mixed.log")
+    session.load(compile_source(_mixed_crossings_source(sink), "<mixed>.rvl"),
+                 record=True)
+    assert session.call("hive", "go", ["hi"])["result"] == "hi"
+
+    emissions = [s for s in session.recorder.timeline("Agent").steps
+                 if s.kind == replay.KIND_EMISSION]
+    assert len(emissions) == 2  # the req seam + the free extern, no more
+    by_key = {(s.detail.get("key"), s.detail.get("method")): s for s in emissions}
+    assert set(by_key) == {("ops", "shout"), ("announce", "announce")}
+    assert by_key[("ops", "shout")].detail["service"] == "Ops"   # _ServiceProxy
+    assert by_key[("announce", "announce")].detail["service"] is None
+    # the provided service's own timeline carries the receiver-side record only
+    assert [s for s in session.recorder.timeline("OpsImpl").steps
+            if s.kind == replay.KIND_EMISSION] == []
+
+
+@needs_cordis
+def test_a_spawn_handle_emission_count_is_unchanged(session, tmp_path):
+    """The spawn provision seam (`_SpawnRecorder`) keeps its own count: the
+    free-extern seam is a THIRD route, not a wider net over the other two."""
+    session.load(compile_source(_SPAWN_EMIT, "<spawn-count>.rvl"), record=True)
+    assert session.call("sup", "run", [5])["result"] == 5
+    emissions = [s for s in session.recorder.timeline("Supervisor").steps
+                 if s.kind == replay.KIND_EMISSION]
+    assert len(emissions) == 1 and emissions[0].detail["method"] == "charge"
+
+
+@needs_cordis
+def test_a_timer_body_free_host_extern_emission_is_recorded(session, tmp_path):
+    """A timer body fires its emissions from the clock, off the awaiting task, so
+    it renders them on its own path (`emit._timer`). A free host extern there is
+    the same kind-3/4 crossing and reaches the same seam: one firing, one step."""
+    import runtime
+
+    sink = str(tmp_path / "beat.log")
+    src = (
+        "extern emission fn announce(sink: Str, msg: Str) -> Str = @py {\n"
+        "    with open(sink, 'a') as _f:\n"
+        "        _f.write('announce:' + msg + '\\n')\n"
+        "    return msg\n"
+        "}\n"
+        "service Ops { fn ping() -> Int }\n"
+        "component Beat provides ops: Ops {\n"
+        f'  every 5s {{ emit announce("{sink}", "beat") }}\n'
+        "  provide ops { fn ping() = 1 }\n"
+        "}\n"
+    )
+    runtime.Clock.reset()
+    session.load(compile_source(src, "<timer>.rvl"), record=True)
+    assert runtime.Clock.advance(5000) == 1  # exactly one firing
+    assert _sink_lines(sink) == ["announce:beat"]
+    emissions = [s for s in session.recorder.timeline("Beat").steps
+                 if s.kind == replay.KIND_EMISSION]
+    assert len(emissions) == 1
+    assert emissions[0].detail["key"] == "announce"
+
+
+# ------------------------------------------------------------------ emitter half
+
+def _py_emit():
+    """The py tier emitter module, loaded by path: it is a backend implementation
+    file, not an importable package member."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("py_emit_841", BACKEND / "emit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_only_the_free_extern_fire_is_routed_through_the_recording_seam():
+    """The emitter half of item 841, pinned at the byte level. The free host
+    extern crossing is the one emission shape with no receiver to route it, so it
+    is the one shape the emitter wraps: the fire names the recording seam
+    (`extern_emit`, referenced under its import alias `_revl_extern_emit`) and
+    hands it the firing context, the extern's own name and its arguments. Every
+    shape the recorder already sees — a required-service emission
+    (`_ServiceProxy`) and a spawn provision call (`_SpawnRecorder`) — keeps a
+    bare call, so nothing is recorded twice."""
+    emit = _py_emit()
+
+    free = emit.emit(compile_source(_free_extern_source("/sink.log", ""), "<t>"))
+    assert ("_revl_extern_emit(_revl_ctx, 'announce', announce, "
+            "('/sink.log', msg,))") in free
+
+    # …and the seam is the ONLY change to that module's shape: a mixed method
+    # (one req emission + one free extern) routes the extern and nothing else.
+    mixed = emit.emit(compile_source(_mixed_crossings_source("/sink.log"), "<t>"))
+    assert mixed.count("_revl_extern_emit(") == 1
+
+    for already_recorded in (emit.emit(compile_source(_SPAWN_EMIT, "<t>")),
+                             emit.emit(compile_source(
+                                 _mixed_crossings_source("/sink.log", extern=False),
+                                 "<t>"))):
+        assert "_revl_extern_emit" not in already_recorded
+
+
+def test_the_await_on_an_async_free_extern_stays_outside_the_seam():
+    """An async host extern returns a coroutine, so the settle (`await`) has to
+    wrap the seam CALL, not sit inside it: the helper records the crossing and
+    then fires the extern, and the caller still awaits the coroutine it
+    returned."""
+    emit = _py_emit()
+    src = emit.emit(compile_source(
+        "extern emission async fn post(sink: Str, msg: Str) -> Str = @py {\n"
+        "    return msg\n"
+        "}\n"
+        "service Ops { emission async fn shout(msg: Str) -> Str }\n"
+        "component Agent provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    async fn shout(msg: Str) {\n"
+        '      emit post("/sink.log", msg)\n'
+        "      return msg\n"
+        "    }\n"
+        "  }\n"
+        "}\n", "<t>"))
+    assert "(await _revl_extern_emit(_revl_ctx, 'post', post, ('/sink.log', msg,)))" \
+        in src
+
+
 @needs_cordis
 def test_roll_forward_resumes_the_persisted_generation(session, tmp_path):
     """Roll-forward composes with item 15: a completed activation's WAL, plus

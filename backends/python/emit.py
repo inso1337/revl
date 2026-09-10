@@ -82,6 +82,7 @@ _IMPORT_ALIAS = {
     "validate_retry": "_revl_validate_retry",
     "validate_retry_async": "_revl_validate_retry_async",
     "produced_emit": "_revl_produced_emit",
+    "extern_emit": "_revl_extern_emit",
     "Clock": "_revl_Clock",
     "SessionOwner": "_revl_SessionOwner",
     "set_session_owner": "_revl_set_session_owner",
@@ -2092,13 +2093,53 @@ class _ComponentEmitter:
         # the stack, so the L-Raise teardown unwinds a correctly-ordered stack.
         out.add(indent, "_revl_raise_first(_revl_group)")
 
+    def _extern_emit_fire(self, expr: dict, where: str) -> str:
+        """The Python expression that fires a DIRECT host-extern emission
+        (`emit announce(msg)`, a kind-3/4 crossing) through the recording seam
+        (item 414).
+
+        `<alias>(_revl_ctx, 'announce', announce, (sink, msg))`: the extern name,
+        the callee OBJECT and the arguments are all evaluated before the helper
+        is entered, the same shape and the same record-then-fire order as the
+        `_revl_produced_emit` seam and `_ServiceProxy`, so a crossing nested in an
+        argument still records first and a host body never runs unrecorded.
+
+        The `await` stays OUTSIDE the helper: calling an async extern returns a
+        coroutine, and the same rule `_expr`'s `fn` branch applies decides whether
+        this context settles it."""
+        self.uses.add("extern_emit")
+        name = _ident(expr.get("name"), f"{where}: function")
+        args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
+        call = (f"{_runtime_ref('extern_emit')}(_revl_ctx, {name!r}, {name}, "
+                f"({args}{',' if args else ''}))")
+        if self._in_async and not self._in_arrow \
+                and name in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
+            return f"(await {call})"
+        return call
+
+    def _emission_fire(self, expr: dict, where: str) -> str:
+        """The Python expression that FIRES an emission expression: a DIRECT
+        host-extern crossing (`_emission_shape` == "extern", the one emission
+        shape with no receiver to route it) fires through `_extern_emit_fire`, so
+        the crossing reaches the runtime recording seam (item 414); every other
+        shape renders exactly as before. The single shape decision every firing
+        site shares, so a new firing site cannot pick up one and miss the other."""
+        if self._emission_shape(expr) == "extern":
+            return self._extern_emit_fire(expr, where)
+        return self._expr(expr, where)
+
     def _emit_fire(self, step: dict, where: str) -> str:
         """The Python expression that fires an `emit` step's host body. When the
         step carries a `with a` approval edge (item 246), the fire is wrapped in
         `_revl_frame.approval_crossing(a, "C", lambda: <fire>)`: the frame checks
         and consumes the token durably before the body runs (Decision 3). No edge
-        emits byte-identically to before."""
-        fire = self._expr(step.get("expr"), where)
+        emits byte-identically to before.
+
+        item 414: a DIRECT host-extern crossing (`_emission_shape` == "extern",
+        the one emission shape with no receiver to route it) fires through
+        `_extern_emit_fire` instead of a bare module-level call. Nothing else
+        changes shape."""
+        fire = self._emission_fire(step.get("expr"), where)
         approval = step.get("approval")
         if approval is None:
             return fire
@@ -2369,7 +2410,10 @@ class _ComponentEmitter:
         inverse cancels the schedule AND every still-in-flight task, so unload
         leaves no orphaned in-flight async work — the sync path's residue-free
         teardown extended to the async case (R4/A8). A sync timer body carries
-        no `async` key and emits byte-identically to before."""
+        no `async` key and emits byte-identically to before, except for a DIRECT
+        host-extern crossing in the body, which reaches the recording seam
+        (item 414: `_emission_fire`), so a timer that fires a host emission is
+        no longer invisible to the WAL while a firing is in flight."""
         mode = step.get("mode")
         schedule = "schedule_every" if mode == "every" else "schedule_after"
         self.uses.add(schedule)
@@ -2388,7 +2432,8 @@ class _ComponentEmitter:
             if not emissions:  # pragma: no cover — the parser rejects an empty body
                 out.add(indent + 1, "pass")
             for emission in emissions:
-                out.add(indent + 1, self._expr(emission.get("expr"), where))
+                out.add(indent + 1,
+                        self._emission_fire(emission.get("expr"), where))
             out.add(indent, f"{handle} = {_runtime_ref(schedule)}({interval}, {fn})")
             out.add(indent, f"yield lambda: {handle}.cancel()")
             return
@@ -2405,7 +2450,7 @@ class _ComponentEmitter:
             out.add(indent + 1, "pass")
         for emission in emissions:
             expr = emission.get("expr")
-            rendered = self._expr(expr, where)
+            rendered = self._emission_fire(expr, where)
             if _py_reaches_coroutine(expr, self.requires):
                 # spawn the suspension into the in-flight window and track it so
                 # the inverse can cancel it; a done task drops itself from the set
