@@ -286,7 +286,7 @@ is PYTHONSAFEPATH, the safety bit; without it, `-m` puts the CWD at
 never has to touch the filesystem. This is your primary interface.
 
 <!-- docgen:agents-mcp-count begin -->
-The complete advertised verb set is 51 verbs, from
+The complete advertised verb set is 52 verbs, from
 `src/revl/mcp/server.py` and `query_tools.py`. It is grouped below by what
 you reach for; each verb's exact inputs and outputs are in
 [mcp-reference.md](mcp-reference.md).
@@ -299,6 +299,7 @@ you reach for; each verb's exact inputs and outputs are in
 | `revl_admit` | may it enter **this running composition**? | [mcp-reference.md](mcp-reference.md#revl_admit) |
 | `revl_plan` | and then what? the delta a swap would produce, without applying it | [plan.md](plan.md) |
 | `revl_ship` | check → admit → plan in one early-exit call; `apply:true` also swaps | [token-economy.md](token-economy.md) |
+| `revl_deploy` | push the running composition onto a **second host** through the ssh leg: admission-gated and approval-gated; without `apply:true` it rehearses | [deploy.md](deploy.md) |
 | `revl_resolve` | is there already an admission-compatible component to **import** instead of regenerating? | [registry.md](registry.md) |
 | `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-reference.md](mcp-reference.md#revl_audit) |
 | `revl_load` · `revl_call` · `revl_state` | boot in memory, invoke a provided operation, inspect what is loaded | [mcp-reference.md](mcp-reference.md#revl_load) |
