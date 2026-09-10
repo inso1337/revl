@@ -21,10 +21,11 @@ The substrate is the verifiable private peer pool of item 461
   an `Attestation` facet (`peer_offer.py:159`) and a `grant_ceiling`.
 * `sign_offer` / `verify_offer` (`peer_offer.py:253`, `:331`), an HMAC over the
   canonical body under a domain-separated prefix (`SIGN_DOMAIN`,
-  `peer_offer.py:90`), so an offer signature never verifies as an `attest`
+  `peer_offer.py:93`), so an offer signature never verifies as an `attest`
   attestation or a deploy receipt under a shared key.
 * `PlacementSlot` (`peer_offer.py:364`), the requirements side: `trust_floor`,
-  `regions`, `hardware`, `need`, `grant`, `budgets`.
+  `regions`, `hardware`, `need`, `grant`, `budgets`. `attested_tee` is the
+  requirement this item adds to it (see below).
 * `offer_eligible` (`peer_offer.py:393`), the match. Its order is prove
   authenticity (`verify_offer`), then check facets, then check that the offer's
   `grant_ceiling` covers the grant the slot would hand over, computed with the
@@ -54,7 +55,7 @@ change.
 1. **A verifier, `src/revl/tee_attestation.py`.** It owns the vocabulary of a
    remote-attestation proof and the decision the vocabulary encodes.
 
-   * `TeeRequirement` (`tee_attestation.py:219`) is the typed, checkable
+   * `TeeRequirement` (`tee_attestation.py:243`) is the typed, checkable
      requirement. It names the approved `bundle` by canonical content hash, the
      set of acceptable `measurements` (one per permitted enclave build), the
      permitted `regions`, this placement's `nonce` (the freshness challenge it
@@ -68,14 +69,16 @@ change.
      because a requirement that asks for an open network is not the placement
      this item describes and silently honouring it would widen the very
      confinement the requirement exists to narrow.
-   * `EnclaveEvidence` (`tee_attestation.py:292`) is the proof: `peer` (which
-     offer it is about), `bundle` (the measurement of what is running),
-     `enclave` (the platform identity), `region`, `outbound_network`,
-     `challenge` (the requirement's nonce), `issued_at` / `expires_at`, and a
-     `key_id` naming the ATTESTER. `sign_evidence` / `verify_evidence`
-     (`:343`, `:406`) prove authenticity over its own domain
-     (`EVIDENCE_SIGN_DOMAIN`, `:89`).
-   * `tee_admits` (`tee_attestation.py:435`) is the whole decision, and it is
+   * `EnclaveEvidence` (`tee_attestation.py:316`) is the proof: `peer_id` (the
+     peer it is about), `bundle` (the approved bundle's content hash),
+     `measurement` (what is running inside the enclave), `region`,
+     `outbound_network`, `nonce` (the requirement's challenge), and
+     `issued_at` / `expires_at`. The signed record also carries a `key_id`
+     naming the ATTESTER, added by `sign_evidence` rather than held by the
+     dataclass. `sign_evidence` / `verify_evidence`
+     (`:367`, `:430`) prove authenticity over its own domain
+     (`EVIDENCE_SIGN_DOMAIN`, `:101`).
+   * `tee_admits` (`tee_attestation.py:461`) is the whole decision, and it is
      where the security content lives. It refuses when the proof is absent, not
      an object, unsigned, signed by a key the caller supplied no attester key
      for, or signed by the wrong key. Then it refuses when the proof is about
@@ -88,12 +91,15 @@ change.
    * **The load-bearing refusal.** `tee_admits` refuses when
      `attester_key == peer_key`: a peer that signs its own attestation has
      proven nothing an `attestation` facet did not already prove, and admitting
-     it would make the whole mechanism a longer way to write "trust me".
+     it would make the whole mechanism a longer way to write "trust me". It
+     refuses on the same ground when the caller supplies no peer key at all
+     (`None`, the empty key, or a key of the wrong type), because a separation
+     that cannot be checked is not a separation.
    * Replay is closed by a ledger of consumed challenges, and the ledger is
      mutated ON SUCCESS ONLY, so a refused probe does not let an attacker burn
      a legitimate peer's challenge.
    * `ResultReceipt` / `sign_result_receipt` / `receipt_admits`
-     (`tee_attestation.py:535`, `:573`, `:636`) are the return path: the
+     (`tee_attestation.py:569`, `:607`, `:672`) are the return path: the
      composition gets a signed receipt binding the result digest, the run, the
      bundle and the peer, under its own domain, so an enclave cannot be asked to
      sign for a result it did not produce and a receipt cannot be replayed as
@@ -121,11 +127,12 @@ offer is decoration, and `tests/test_tee_attestation.py` pins that specifically:
 
 ## Verification
 
-`tests/test_tee_attestation.py` (67 tests) pins the accept path, then every
+`tests/test_tee_attestation.py` (70 tests) pins the accept path, then every
 refusal above, then the integration: an asserted trust level does not fill an
 attested slot; a proof for another bundle, another region, a tampered
-measurement, a replayed challenge, a missing ledger and a missing attester key
-are each refused; and re-signing the offer around a forged proof does not help,
+measurement, a replayed challenge, a missing ledger, a missing attester key and
+a missing peer key are each refused; and re-signing the offer around a forged
+proof does not help,
 because the offer signature covers `tee_proof`. The tamper cases re-sign the
 tampered body, so they demonstrate that the accept path is not reachable with a
 forged proof, not merely that an unmodified forgery is caught. One test leaves
@@ -136,7 +143,7 @@ closed, and the reason names why.
 
 Objections worth recording:
 
-* The algorithm is a symmetric MAC (`SIGN_ALG`, `tee_attestation.py:84`). The
+* The algorithm is a symmetric MAC (`SIGN_ALG`, `tee_attestation.py:96`). The
   member exists and is validated so an asymmetric upgrade is additive, and the
   rest of this note does not change with it. Real quote formats are deferred.
 * The verifier is pure and reads no clock of its own: `now` is passed in, so a

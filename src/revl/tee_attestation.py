@@ -42,13 +42,15 @@ key authored the record. If the PEER holds the attester key, the peer can mint
 its own "proof" that it runs a bundle it has never run, and the requirement
 degenerates into an assertion. So a requirement is enforced together with a key
 separation: :func:`tee_admits` refuses when the attester key is the peer's own
-offer key, and :func:`receipt_admits` refuses when the receipt key is. In a real
-deployment the attester key belongs to whoever quotes the enclave (the hardware
-root, or the attestation service mediating it), and the requirement is
-meaningful exactly to the extent that the peer does not hold that key. The
-limitation is stated here rather than papered over: an asymmetric, hardware-
-rooted quote, checkable with a public key, is the follow-up, and the ``sign_alg``
-member exists so that migration is additive.
+offer key, and :func:`receipt_admits` refuses when the receipt key is. Neither
+can be checked without the peer's own offer key, so a caller that supplies none
+(the empty key included) is refused rather than compared against an empty key.
+In a real deployment the attester key belongs to whoever quotes the enclave
+(the hardware root, or the attestation service mediating it), and the
+requirement is meaningful exactly to the extent that the peer does not hold that
+key. The limitation is stated here rather than papered over: an asymmetric,
+hardware-rooted quote, checkable with a public key, is the follow-up, and the
+``sign_alg`` member exists so that migration is additive.
 
 Fail-closed, everywhere
 -----------------------
@@ -57,8 +59,18 @@ bundle, another measurement, another region or another challenge; an expired or
 stale proof; a proof or receipt presented twice for the same challenge; a network
 posture other than the one demanded; an unparseable member; a receipt whose
 signature, whose result bytes or whose run do not match. Every verifier returns
-``(ok, reason)`` and never raises, so a hostile record cannot break a caller that
-iterates candidate peers.
+``(ok, reason)`` and refuses rather than raises on a malformed proof, so a
+hostile record cannot break a caller that iterates candidate peers.
+
+The one exception is INHERITED from the pool and is stated rather than papered
+over. A signature is checked with ``hmac.compare_digest``, exactly as
+``peer_offer.verify_offer`` checks one, and that call raises ``TypeError:
+comparing strings with non-ASCII characters is not supported`` when the
+record's ``signature`` member is a ``str`` carrying a non-ASCII character. So a
+record with such a signature raises out of these verifiers instead of being
+refused. The comparison is deliberately left identical to the pool's, so the two
+verifiers behave the same way; an ASCII check before it would close the hole and
+is a follow-up rather than part of this slice.
 """
 
 from __future__ import annotations
@@ -124,8 +136,10 @@ class TeeError(ValueError):
     """A TEE requirement, evidence or receipt is malformed at construction time
     (no permitted measurement, no region, no challenge, an unknown network
     posture, a member that is not a digest). Distinct from a verification
-    refusal, which is reported as ``(ok, reason)`` and never raises, so a
-    hostile peer-supplied record cannot break that contract."""
+    refusal, which is reported as ``(ok, reason)`` and refuses rather than raises
+    on a malformed proof, so a hostile peer-supplied record cannot break that
+    contract (the module docstring records the one inherited exception, a
+    non-ASCII ``signature`` string)."""
 
 
 def bundle_identity(bundle: Any) -> str:
@@ -208,6 +222,16 @@ def _require_window(issued_at: Any, expires_at: Any) -> tuple[datetime, datetime
             f"the validity window is empty or backwards: expires_at="
             f"{expires_at!r} is not after issued_at={issued_at!r}")
     return issued, expires
+
+
+def _key_bytes(key: Any) -> bytes:
+    """A caller-supplied key as bytes, or ``b""`` when there is no usable key.
+
+    A key of the wrong type is ABSENT rather than compared. The ``bytes(key or
+    b"")`` idiom this replaces raised ``TypeError`` on a ``str`` key, because
+    ``bytes("k")`` needs an encoding, so a caller reaching a gate directly with
+    one would have crashed the verifier instead of being refused by it."""
+    return bytes(key) if isinstance(key, (bytes, bytearray)) else b""
 
 
 # --------------------------------------------------------------------------
@@ -405,7 +429,9 @@ def _validate_evidence(record: Mapping) -> str:
 
 def verify_evidence(record: Mapping, attester_key: bytes) -> tuple[bool, str]:
     """Check a signed evidence record with the attester's key. Returns
-    ``(ok, reason)`` and NEVER raises.
+    ``(ok, reason)`` and refuses rather than raises on a malformed proof; the
+    module docstring records the one inherited exception (a non-ASCII
+    ``signature`` string).
 
     Order mirrors ``peer_offer.verify_offer``: prove authenticity (the MAC)
     FIRST, then validate the envelope. A record from another protocol signed with
@@ -438,7 +464,9 @@ def tee_admits(record: Mapping, requirement: TeeRequirement, *,
                replay_ledger: Optional[MutableSet[tuple[str, str]]] = None
                ) -> tuple[bool, str]:
     """Does this evidence satisfy ``requirement`` for ``peer_id``? Returns
-    ``(admitted, reason)`` and never raises.
+    ``(admitted, reason)`` and refuses rather than raises on a malformed proof;
+    the module docstring records the one inherited exception (a non-ASCII
+    ``signature`` string).
 
     The gates, in order:
 
@@ -462,7 +490,13 @@ def tee_admits(record: Mapping, requirement: TeeRequirement, *,
     challenge, so an honest peer can still answer it."""
     if not isinstance(record, Mapping):
         return False, "enclave evidence is not an object"
-    if bytes(attester_key or b"") == bytes(peer_key or b""):
+    peer = _key_bytes(peer_key)
+    if not peer:
+        return False, (
+            "no peer key provided, so the key separation cannot be checked: "
+            "without the peer's own offer key a proof the peer signed itself "
+            "would be accepted, and an unchecked separation is not a separation")
+    if _key_bytes(attester_key) == peer:
         return False, (
             "the evidence is verified with the peer's own offer key, so it proves "
             "nothing: a peer that signs its own attestation can attest any bundle "
@@ -611,7 +645,9 @@ def _validate_receipt(record: Mapping) -> str:
 
 def verify_result_receipt(record: Mapping, enclave_key: bytes) -> tuple[bool, str]:
     """Check a signed result receipt with the enclave's key. ``(ok, reason)``,
-    never raises. Whether it covers the result that actually arrived, and
+    refusing rather than raising on a malformed receipt (the module docstring
+    records the one inherited exception, a non-ASCII ``signature`` string).
+    Whether it covers the result that actually arrived, and
     whether it belongs to the attested run, is :func:`receipt_admits`."""
     if not isinstance(enclave_key, (bytes, bytearray)) or not enclave_key:
         return False, "no receiving key provided"
@@ -640,7 +676,9 @@ def receipt_admits(record: Mapping, *, enclave_key: bytes, peer_key: bytes,
                    replay_ledger: Optional[MutableSet[tuple[str, str]]] = None
                    ) -> tuple[bool, str]:
     """Accept a result only when its receipt proves it came from the attested
-    run. Returns ``(admitted, reason)`` and never raises.
+    run. Returns ``(admitted, reason)`` and refuses rather than raises on a
+    malformed receipt (the module docstring records the one inherited exception,
+    a non-ASCII ``signature`` string).
 
     Gates, in order: the key separation (a receipt the peer can sign itself
     proves nothing about the enclave), the signature and envelope, the peer, the
@@ -653,7 +691,13 @@ def receipt_admits(record: Mapping, *, enclave_key: bytes, peer_key: bytes,
     :func:`tee_admits` consumes; the two record different events."""
     if not isinstance(record, Mapping):
         return False, "result receipt is not an object"
-    if bytes(enclave_key or b"") == bytes(peer_key or b""):
+    peer = _key_bytes(peer_key)
+    if not peer:
+        return False, (
+            "no peer key provided, so the key separation cannot be checked: "
+            "without the peer's own offer key a receipt the peer signed itself "
+            "would be accepted, and an unchecked separation is not a separation")
+    if _key_bytes(enclave_key) == peer:
         return False, (
             "the receipt is verified with the peer's own offer key, so it proves "
             "nothing about the enclave: a peer can sign a result it fabricated "
