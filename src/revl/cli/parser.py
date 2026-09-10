@@ -1642,15 +1642,18 @@ def build_parser() -> argparse.ArgumentParser:
     admit_cmd.add_argument(
         "--key", metavar="PATH", action="append",
         help="a file holding a raw HMAC verify key THIS host trusts; repeatable. "
-             "The request carries no key (S2.4), so with no --key the chain "
-             "cannot be verified and admission refuses at the signer link")
+             "The file is read the way attest.load_key reads it (one trailing "
+             "newline stripped). The request carries no key (S2.4), so with no "
+             "--key the chain cannot be verified and admission refuses at the "
+             "signer link")
     admit_cmd.add_argument(
         "--host-key", metavar="PATH",
         help="a file holding this host's own signing key (design R5: the "
-             "receipt key is the host's identity). PREPARE signs its admission "
-             "verdict with it, and COMMIT signs the load-time measurement with "
-             "it; with no --host-key a COMMIT refuses rather than returning an "
-             "unsigned, unattributable measurement")
+             "receipt key is the host's identity), read the way attest.load_key "
+             "reads it (one trailing newline stripped). PREPARE signs its "
+             "admission verdict with it, and COMMIT signs the load-time "
+             "measurement with it; with no --host-key a COMMIT refuses rather "
+             "than returning an unsigned, unattributable measurement")
     admit_cmd.add_argument(
         "--require-gauntlet", action="store_true",
         help="REFUSE a chain that binds no item-31 gauntlet evidence. The host "

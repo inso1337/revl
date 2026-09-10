@@ -109,7 +109,7 @@ was corrected by hand and had drifted back within a day.
 | crash-recovery.md | needs-work | 52 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
-| deploy.md | needs-work | 12 |  |
+| deploy.md | needs-work | 14 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 86 |  |
 | design-v2-realms.md | needs-work | 17 |  |

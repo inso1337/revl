@@ -145,6 +145,22 @@ itself `cross_domain=True` under `hmac-sha256` is **refused outright** with the
 reason naming the Ed25519 upgrade. Shipping cross-domain deploy on HMAC would
 make `signer-untrusted` a fiction; refusing says so instead.
 
+### One canonicalisation, one key rule
+
+A deploy receipt is signed the same way an attestation is: HMAC-SHA256 over a
+domain tag plus the canonical bytes of the receipt body with its `signature`
+member removed (`deploy.RECEIPT_DOMAIN`, `revl.deploy.receipt/v1`). The
+canonical bytes and the key rule are **`attest`'s, not deploy's**:
+`deploy._receipt_mac` MACs `attest._canonical_bytes`, and every key `deploy`
+reads off disk — the operator's `--key`, the runner's `--host-key`, the far
+host's `[deploy].host_key` receipt key — is read with `attest.load_key`'s rule,
+a trailing newline stripped. Both used to be restated locally in `deploy`, and
+both restatements disagreed with the documented rule: a receipt body carrying
+non-ASCII text was `\u`-escaped (`ensure_ascii=True`) and MACed to different
+bytes than a third party computes, and a `cat`-built key file was two different
+keys (two `key_id`s) depending on which verb loaded it. `docs/revl-attest.md`
+is the rule; `attest` is its implementation, and `deploy` delegates.
+
 ### The load-measured COMMIT receipt, and the comparison that gates COMMIT
 
 `admit` is PREPARE: it verifies the chain and **loads nothing**. Between it and
