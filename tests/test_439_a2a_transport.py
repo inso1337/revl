@@ -473,6 +473,37 @@ service Agent {
     assert "a `Str` (a text `Part`) or a `Bytes`" in message
 
 
+# ------------------------------------------------- no marked value crosses
+# Item 439 question (2). `through a2a` binds `Str` and `Bytes` and NOTHING else,
+# and neither of those is a marked type. So the F5 shape item 421 built (a marked
+# value reaching a consumer through the failure text) has no crossing point at
+# this boundary. This pins the precondition the note's question-(2) answer leans
+# on: widen the modality subset and F5 reopens here.
+
+@pytest.mark.parametrize(
+    ("method", "needle"),
+    [
+        ("emission fn ask(question: Secret[Str]) -> Str", "Secret[Str]"),
+        ("emission fn ask(question: Str) -> Secret[Str]", "Secret[Str]"),
+    ],
+    ids=["parameter", "return"],
+)
+def test_no_marked_value_can_cross_the_a2a_wire(tmp_path, method, needle):
+    """A `Secret[Str]` has no `Part` in either direction, so the crossing is
+    refused naming the method and the type rather than funnelled, flattened or
+    rendered into the peer's fault text."""
+    services = f"service Agent {{\n  {method}\n}}\n"
+    write(tmp_path, services=services, base=WITHDRAW)
+    with pytest.raises(RevlError) as excinfo:
+        resolve(tmp_path)
+    message = str(excinfo.value)
+    assert f"`{needle}`" in message
+    assert "`ask`" in message
+    # The refusal is the MODALITY check, not the transport or the taint check:
+    # the message names what a `Part` may carry.
+    assert "a text `Part`" in message
+
+
 # ---------------------------------------------- the generated crossing, executed
 
 class _Ok:
