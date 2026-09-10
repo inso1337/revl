@@ -317,6 +317,26 @@ REJECTIONS = {
         "the `undo` of this bracket calls `w.task.run`, which is an emission",
     "g5_undo_handle_ref_let.rvl":
         "the `undo` of this bracket calls `t.run`, which is an emission",
+    # The reference-bound sibling of `g5_undo_handle_ref_let.rvl`: there the
+    # local holds the handle and the method is read at the slot, here the local
+    # holds the METHOD ITSELF and the slot sees only the local's name. The
+    # crossing is identical, so the check has to follow the value bound at the
+    # `let` rather than the spelling that reaches the slot. The container and
+    # arm files are the same value one hop further out: a record field, a list
+    # element, and an `if`/`match` arm are read positions, and any one crossing
+    # arm is enough to refuse.
+    "g5_undo_method_ref_let.rvl":
+        "the `undo` of this bracket calls `w.task.run`, which is an emission",
+    "g5_undo_method_ref_alias.rvl":
+        "the `undo` of this bracket calls `w.task.run`, which is an emission",
+    "g5_undo_method_ref_record.rvl":
+        "the `undo` of this bracket calls `w.task.run`, which is an emission",
+    "g5_undo_method_ref_list.rvl":
+        "the `undo` of this bracket calls `w.task.run`, which is an emission",
+    "g5_undo_method_ref_if_arm.rvl":
+        "the `undo` of this bracket calls `w.task.run`, which is an emission",
+    "g5_undo_method_ref_match_arm.rvl":
+        "the `undo` of this bracket calls `w.task.run`, which is an emission",
     # A method-local binding may not shadow an activation-body one: the method
     # lowers into a closure over the activation frame, and the shadow took the
     # component local's own host-safe name.
