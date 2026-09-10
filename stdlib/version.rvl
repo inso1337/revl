@@ -48,6 +48,11 @@
 //   5 -> adds `stdlib/escape.rvl` (roadmap item 459, issue #722): the pure-revl
 //        contextual-escaping kit for frontend-asset crossings — `escape_html`,
 //        `escape_js` and `escape_uri`.
+//   6 -> adds `stdlib/template.rvl` (roadmap item 459, issue #722): the pure-revl
+//        context-scoped template renderer — `Hole`/`Binding`/`TemplateError`,
+//        `contexts`, `context_ok`, `escape_for`, `scan`, `render` and
+//        `render_one`. It picks the escaper from each hole's declared insertion
+//        context and refuses raw or wrongly-contextual insertion.
 pub fn stdlib_version() -> Str {
-  return "5"
+  return "6"
 }
