@@ -426,7 +426,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     (r"lifecycle|fault_test|_emit_tests|_test_|REVL_TESTS",
      "declared out of every self-host slice: in-file `test` / `fault_test` / "
      "`lifecycle test` emission."),
-    (r"placement|realm|isolate|intercept|router|routes|_spawn|instance",
+    (r"placement|realm|isolate|intercept|router|routed|routes|_spawn|instance",
      "declared out of every self-host slice: realm placements, routers, "
      "spawn/instances."),
     (r"bridge|marshal|serde|abi|_canonical",
