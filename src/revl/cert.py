@@ -41,10 +41,21 @@ the status cells are written in, so a guarantee whose theorems are not
 registered cannot be certified as proved, and a certificate that does not
 carry the gaps of its partial rows does not build at all. A document that
 says nothing about a guarantee yields a refusal rather than a weaker
-claim, because silence is not evidence. `revl attest --verify-certificate`
-re-derives every requirement from the artifacts on the verifying machine and
-fails when they disagree with the signed record, so the check never reads the
-statuses out of the certificate it is checking.
+claim, because silence is not evidence.
+
+The verification boundary is member by member, because a MAC proves authorship
+and a key holder authors freely. `revl attest --verify-certificate` re-derives
+every member whose value the artifacts, the key or the verifier's own build
+fixes, and compares it with what was signed rather than reading it: the
+artifact digests, the per-guarantee rows including their status cells, their
+gaps, their registered theorems and their contentless findings, the caveats,
+the requirements and the check recorded behind each one, the proof model pins,
+the checker identity, the key fingerprint, the subject's source digest and the
+commit the certificate names. Two members are recorded rather than re-derived,
+because they are statements about the signing EVENT rather than about the tree:
+`timestamp` and `signer`. They are inside the MAC, so they cannot be edited
+after the fact, and every successful verification says in so many words that
+they were not re-derived, so a green check is never read as a claim about them.
 """
 
 from __future__ import annotations
@@ -63,6 +74,14 @@ from .errors import RevlError
 CERT_KIND = "revl.component-certificate"
 CERT_VERSION = "1.0"
 CERT_SIGN_DOMAIN = b"revl.component-certificate/v1\x00"
+
+#: The signed members no verifier can re-derive, because they are statements
+#: about the signing EVENT rather than about the tree: the instant the signer
+#: signed and the label it chose for itself. They are inside the MAC, so they
+#: cannot be edited after signing, and `verify_certificate` names them as
+#: recorded rather than re-derived in every result it returns, so a green check
+#: is never read as a claim about them.
+UNVERIFIABLE = ("timestamp", "signer")
 
 #: Where the formal package lives, when it is not found by walking up from
 #: this file or from the working directory.
@@ -493,6 +512,30 @@ def tree_commit(root: Path) -> str | None:
     return done.stdout.strip() or None
 
 
+def commit_in_history(root: Path, commit: str) -> tuple[bool | None, str]:
+    """Is the commit a certificate names one this tree's history contains?
+
+    `(None, reason)` when the package on this machine is not a checkout and the
+    question cannot be asked here at all. The commit is the checkout the signer
+    had, so a package that has since moved forward is not a moved certificate:
+    what is checkable is that the named commit is a revision of THIS history,
+    which is what makes a fabricated commit id a refusal rather than a
+    footnote."""
+    head = tree_commit(root)
+    if head is None:
+        return None, "the formal package on this machine is not a git work tree"
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", commit, "HEAD"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, f"git could not answer ({error})"
+    if done.returncode == 0:
+        return True, ""
+    return False, (f"no commit {commit} in this repository's history "
+                   f"(HEAD is {head[:12]})")
+
+
 # --------------------------------------------------------------------------- #
 # the state, and its requirements                                             #
 # --------------------------------------------------------------------------- #
@@ -835,6 +878,10 @@ def make_certificate(ir: dict, key: bytes, *, verdict=None,
 # --- verification ---------------------------------------------------------- #
 _HEX64 = re.compile(r"\A[0-9a-f]{64}\Z")
 _HEX16 = re.compile(r"\A[0-9a-f]{16}\Z")
+#: A commit id as `git rev-parse HEAD` writes it: sha-1 and sha-256 objects
+#: alike, abbreviated or not, so the field is checked for being a commit id
+#: rather than for being forty characters.
+_COMMIT = re.compile(r"\A[0-9a-f]{7,64}\Z")
 
 
 def _validate_envelope(cert: dict) -> str:
@@ -876,6 +923,10 @@ def _validate_envelope(cert: dict) -> str:
     timestamp = cert.get("timestamp")
     if not isinstance(timestamp, str) or attest._parse_iso(timestamp) is None:
         return f"envelope refused: timestamp is not an ISO-8601 instant ({timestamp!r})"
+    commit = cert.get("as_of_commit")
+    if commit is not None and not _COMMIT.match(str(commit)):
+        return (f"envelope refused: as_of_commit is not a commit id "
+                f"({commit!r})")
 
     subject = cert.get("subject")
     if not isinstance(subject, dict):
@@ -903,6 +954,17 @@ def _validate_envelope(cert: dict) -> str:
     if not isinstance(model, dict) or not isinstance(model.get("lean_toolchain"), str) \
             or not model["lean_toolchain"]:
         return f"envelope refused: proof_model names no Lean toolchain ({model!r})"
+    if set(model) != {"lean_toolchain", "manifest_digest", "dependencies"}:
+        return (f"envelope refused: proof_model is not the toolchain, the manifest "
+                f"digest and the dependency pins ({sorted(str(member) for member in model)})")
+    if model["manifest_digest"] is not None \
+            and not _HEX64.match(str(model["manifest_digest"])):
+        return (f"envelope refused: proof_model.manifest_digest is not a sha256 digest "
+                f"({model['manifest_digest']!r})")
+    if not isinstance(model["dependencies"], list) \
+            or not all(isinstance(name, str) and name for name in model["dependencies"]):
+        return (f"envelope refused: proof_model carries no list of dependency pins "
+                f"({model['dependencies']!r})")
 
     statuses = cert.get("statuses")
     if not isinstance(statuses, list) or not statuses:
@@ -922,8 +984,20 @@ def _validate_envelope(cert: dict) -> str:
             return f"envelope refused: {code} carries no status cell to explain its status"
         if not isinstance(row.get("gap"), str):
             return f"envelope refused: {code} carries no gap field"
+        if not isinstance(row.get("name"), str) or not row["name"]:
+            return f"envelope refused: {code} names no guarantee ({row.get('name')!r})"
+        for member in ("theorems_cell", "oracle_cell"):
+            if not isinstance(row.get(member), str):
+                return f"envelope refused: {code} carries no {member} ({row.get(member)!r})"
         if not isinstance(row.get("registered"), list) or not row["registered"]:
             return f"envelope refused: {code} names no registered theorem"
+        if not all(isinstance(name, str) and name for name in row["registered"]):
+            return (f"envelope refused: {code} names a registered theorem that is not a "
+                    f"name ({row['registered']!r})")
+        if not isinstance(row.get("contentless"), list) \
+                or not all(isinstance(name, str) and name for name in row["contentless"]):
+            return (f"envelope refused: {code} carries no contentless findings "
+                    f"({row.get('contentless')!r})")
         seen.append(code)
     if seen != sorted(set(seen)):
         return f"envelope refused: statuses must be sorted by code and free of duplicates ({seen!r})"
@@ -965,8 +1039,10 @@ def _validate_envelope(cert: dict) -> str:
         return "envelope refused: no per-guarantee status requirement, so the certificate carries no coverage"
 
     checker = cert.get("checker")
-    if not isinstance(checker, dict):
-        return "envelope refused: no `checker` member, so nothing says WHICH frontend asserted this"
+    if not isinstance(checker, dict) or set(checker) != {"compiler", "ruleset"}:
+        return ("envelope refused: checker is not the compiler version and the "
+                "ruleset digest "
+                f"({sorted(checker) if isinstance(checker, dict) else checker!r})")
     if not isinstance(checker.get("compiler"), str) or not checker["compiler"]:
         return f"envelope refused: checker.compiler is not a version ({checker.get('compiler')!r})"
     if not _HEX64.match(str(checker.get("ruleset"))):
@@ -979,6 +1055,69 @@ def _validate_envelope(cert: dict) -> str:
 
 def _requirement_key(requirement: dict) -> tuple[str, str, str]:
     return (requirement["kind"], requirement["subject"], requirement["source"])
+
+
+#: The members of a per-guarantee row that are re-derived from `STATUS.md`,
+#: the registry and the gate. `code` is the key, so it is not here.
+STATUS_ROW_MEMBERS = ("name", "status", "status_cell", "theorems_cell",
+                      "oracle_cell", "gap", "registered", "contentless")
+
+#: The requirement members re-derived and compared. `kind`/`subject`/`source`
+#: are the key, and `check` is what the certificate says produced the evidence,
+#: which is as much of a claim as the evidence's own text.
+REQUIREMENT_MEMBERS = ("detail", "check")
+
+
+def affirm_key_id(named, key: bytes) -> str:
+    """Refuse a certificate whose `key_id` is not the fingerprint of the key it
+    is being checked with. Returns a reason, or `""`.
+
+    The fingerprint is a function of the key alone, so a certificate that names
+    a different one is a certificate about a different signer, even when its
+    MAC is right: `key_id` is the member a reader uses to decide WHICH key to
+    fetch, and a MAC that verifies under a key the record does not name is the
+    one arrangement in which that decision cannot be made."""
+    expected = attest.key_id(bytes(key))
+    if named == expected:
+        return ""
+    return ("identity mismatch: the certificate names key "
+            f"{str(named)[:64]!r}, which is not the key it is being checked "
+            f"with (this key is {expected})")
+
+
+def _read_named_source(named: str, root: Path) -> bytes | None:
+    """The bytes of the source file a certificate names, when this machine can
+    read them; `None` when it cannot.
+
+    `None` is not a failure. A certificate travels, and the machine asked to
+    check one need not hold the composition it is about; what it must not do is
+    claim to have re-derived a digest it never read. A relative name is
+    resolved against the working directory and then against the checkout that
+    holds the formal package, never guessed at by basename alone: a wrong file
+    compared against a right digest would be a refusal for the wrong reason."""
+    path = Path(named)
+    candidates = [path] if path.is_absolute() else [path, root.parent / path]
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate.read_bytes()
+        except OSError:
+            return None
+    return None
+
+
+def _brief(value) -> str:
+    text = str(value)
+    return text if len(text) <= 96 else text[:93] + "..."
+
+
+def _recorded_not_derived(unverified: list[str]) -> str:
+    """The tail a successful verification carries: which signed members this
+    run read rather than re-derived. Silence here would let a green check be
+    read as a claim about a member nothing on this machine can check."""
+    if not unverified:
+        return ""
+    return "; recorded rather than re-derived here: " + ", ".join(unverified)
 
 
 def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
@@ -996,17 +1135,33 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
         of the shape this verifier accepts, or claims a guarantee code or an
         evidence kind that does not exist.
       * **evidence mismatch**: the formal artifacts on this machine no longer
-        re-derive the signed requirements. This is the check that makes the
+        re-derive the signed members. This is the check that makes the
         certificate proof carrying rather than self describing: the statuses
         are computed from `STATUS.md`, the registry and the gate, and a
         document whose rows moved makes the certificate fail rather than
-        restate whatever it was signed with.
+        restate whatever it was signed with. The members re-derived and
+        compared are the artifact digests, the whole of every per-guarantee
+        row (its status, the cell that status is read out of, the cell's own
+        name, the theorem names and the contentless findings), the caveats, the
+        requirements with the check recorded behind each one, the proof model
+        pins, the checker identity, the subject's source digest when the file
+        it names is readable here, and the commit it names as a revision of
+        this history.
       * **hash mismatch**: only when `against` is supplied, the composition
         presented now hashes differently from the one the certificate was
         signed for.
+      * **identity mismatch**: the certificate names a key fingerprint that is
+        not the key it is being checked with.
 
     A missing key, a non-object record, a record with no signature, or one
     whose artifacts cannot be read is a refusal, never silently "valid".
+
+    Two signed members are inside the MAC and are NOT re-derived, because they
+    are statements about the signing EVENT rather than about the tree:
+    `timestamp` (`UNVERIFIABLE`) and `signer`. Every successful verification
+    names them, and names any member this run could not reach (a source file
+    this machine does not hold, a formal package that is not a checkout), so a
+    green result is never read as a claim about what it did not check.
     """
     if not isinstance(key, (bytes, bytearray)) or not key:
         return False, "no signing key provided"
@@ -1015,6 +1170,14 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
     given_sig = cert.get(attest.SIGNATURE_FIELD)
     if not isinstance(given_sig, str):
         return False, "certificate has no signature"
+    if not given_sig.isascii():
+        # A peer-supplied record must not be able to raise here: comparing two
+        # strings that are not both ASCII is a `TypeError` in
+        # `hmac.compare_digest`, and a hostile certificate's failure mode is a
+        # reason rather than a traceback. The shared predicate keeps this wording
+        # and `--verify`'s in step.
+        return False, ("certificate " +
+                       attest.signature_not_ascii_reason(given_sig))
     if cert.get("kind") != CERT_KIND:
         return False, (f"not a component certificate: kind is "
                        f"{cert.get('kind')!r}, not {CERT_KIND!r}")
@@ -1026,6 +1189,12 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
     if not hmac.compare_digest(expected_sig, given_sig):
         return False, ("signature mismatch: wrong key, or the certificate was "
                        "tampered with after signing")
+
+    # The fingerprint is part of the signed body and is a function of the key
+    # alone, so there is no reason for it to be anything but the key's.
+    named_key = affirm_key_id(cert.get("key_id"), key)
+    if named_key:
+        return False, named_key
 
     envelope = _validate_envelope(cert)
     if envelope:
@@ -1061,16 +1230,66 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
                            f"signed over (signed {str(signed_artifact['digest'])[:12]}, "
                            f"now {str(live_artifact['digest'])[:12]})")
 
+    # Members this run could not re-derive, named in the result. A green check
+    # is a claim about what was checked, so it says what was not.
+    unverified = list(UNVERIFIABLE)
+
+    source_bytes = _read_named_source(subject["filename"], root)
+    if source_bytes is None:
+        unverified.append("subject.source_hash")
+    else:
+        found = sha256_bytes(source_bytes)
+        if not hmac.compare_digest(found, str(subject["source_hash"])):
+            return False, ("subject mismatch: the file this certificate names "
+                           f"({subject['filename']}) hashes to {found[:12]} here, "
+                           f"but the certificate signs "
+                           f"{str(subject['source_hash'])[:12]}: the composition "
+                           "it speaks about is not the one on this machine")
+
+    signed_commit = cert["as_of_commit"]
+    if signed_commit is not None:
+        contained, why = commit_in_history(root, str(signed_commit))
+        if contained is False:
+            return False, ("evidence mismatch: the certificate names commit "
+                           f"{str(signed_commit)[:12]}, but {why}")
+        if contained is None:
+            unverified.append("as_of_commit")
+
+    for member in ("lean_toolchain", "manifest_digest"):
+        signed_member = cert["proof_model"][member]
+        live_member = live["proof_model"][member]
+        if signed_member != live_member:
+            return False, ("evidence mismatch: the signed proof model member "
+                           f"{member} is {_brief(signed_member)}, and the formal "
+                           f"package pins {_brief(live_member)}")
+
+    # The identity of the frontend that produced the verdict. Both members are
+    # derived on this machine from the shipped ruleset and the running version,
+    # so a certificate is checked by the build that speaks for it.
+    identity = attest.checker_identity()
+    for member in ("compiler", "ruleset"):
+        if cert["checker"][member] != identity[member]:
+            return False, ("checker mismatch: this certificate was signed by a "
+                           f"different revl frontend (signed {member} "
+                           f"{_brief(cert['checker'][member])}, this verifier is "
+                           f"{_brief(identity[member])})")
+
     signed = {_requirement_key(row): row for row in cert["requirements"]}
     current = {_requirement_key(row): row for row in live["requirements"]}
     gone = sorted(set(signed) - set(current))
     new = sorted(set(current) - set(signed))
     moved = sorted(key for key in set(signed) & set(current)
-                   if signed[key]["detail"] != current[key]["detail"])
+                   if any(signed[key][member] != current[key][member]
+                          for member in REQUIREMENT_MEMBERS))
     if gone or new or moved:
         parts = []
         if moved:
-            parts.append(f"{len(moved)} requirement(s) changed ({', '.join(key[1] for key in moved[:4])})")
+            members = sorted({member for key in moved
+                              for member in REQUIREMENT_MEMBERS
+                              if signed[key][member] != current[key][member]})
+            parts.append(f"{len(moved)} requirement(s) changed "
+                         f"({', '.join(key[1] for key in moved[:4])}; "
+                         f"{', '.join(members)})")
         if gone:
             parts.append(f"{len(gone)} no longer recorded ({', '.join(key[1] for key in gone[:4])})")
         if new:
@@ -1079,6 +1298,12 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
                        "what the formal artifacts record do not agree: "
                        + "; ".join(parts))
 
+    # The status of every row first, so the message a reader has always been
+    # given for a promoted or demoted guarantee is unchanged, then the rest of
+    # each row: the prose a status is read out of, the theorem names, the
+    # contentless findings. A row's status is derived FROM its cell, so a
+    # certificate that kept the cell and changed the status, or kept the status
+    # and changed the cell, is a certificate whose own members disagree.
     signed_status = {row["code"]: row["status"] for row in cert["statuses"]}
     live_status = {row["code"]: row["status"] for row in live["statuses"]}
     if signed_status != live_status:
@@ -1086,6 +1311,17 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
                          if signed_status.get(code) != live_status.get(code))
         return False, ("evidence mismatch: the recorded per-guarantee status "
                        f"changed for {', '.join(changed)}")
+
+    live_rows = {row["code"]: row for row in live["statuses"]}
+    for row in cert["statuses"]:
+        derived = live_rows[row["code"]]
+        for member in STATUS_ROW_MEMBERS:
+            if row[member] == derived[member]:
+                continue
+            return False, ("evidence mismatch: the signed row for "
+                           f"{row['code']} records {member} {_brief(row[member])}, "
+                           f"and {row['code']} re-derives from the artifacts as "
+                           f"{_brief(derived[member])}")
 
     signed_caveats = cert["caveats"]
     if signed_caveats != live["caveats"]:
@@ -1105,7 +1341,7 @@ def verify_certificate(cert: dict, key: bytes, *, against: dict | None = None,
                   "from the formal artifacts, and the composition matches"
                   if against is not None else
                   "valid: certificate is authentic and its evidence re-derives "
-                  "from the formal artifacts")
+                  "from the formal artifacts") + _recorded_not_derived(unverified)
 
 
 # --- rendering ------------------------------------------------------------- #

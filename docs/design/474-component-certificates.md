@@ -112,7 +112,15 @@ guarantee whose status is `proved` needs at least one theorem registered under
 its name, a guarantee that is not `proved` needs the map's own gap sentence,
 and every catalogued code needs a row. That is what makes "the certificate
 cannot claim a guarantee the artifacts do not back" a property of the builder
-rather than a promise in a comment.
+rather than a promise in a comment. The asymmetry to know about: the rows and
+the registered theorems are required, but the unstatable-obligation section is
+optional. Deleting the whole "What G9 does NOT cover" section from
+`formal/STATUS.md` therefore still builds, silently dropping `REQ_UNSTATABLE`
+and one requirement (26 to 25), so a certificate can be produced over a package
+that stopped admitting the unstatable obligation at all. It is not silent to a
+*verifier*: the deleted text moves the `formal/STATUS.md` digest, and a reader
+holding the revision the certificate was signed over catches it as an artifact
+mismatch.
 
 ## The trust boundary
 
@@ -125,20 +133,38 @@ plus one step, and the user-facing statement of it lives in
   The signature is checked first and what the record says is checked after,
   because authenticity is not authority.
 - **The evidence is the formal artifacts, not the certificate.**
-  `cert.verify_certificate` re-derives the statuses, the requirements and the
-  caveats from the package on the verifying machine and compares them with what
-  was signed. It never reads a status out of the document it is checking. An
-  attacker who holds the key can edit the record and re-sign it, and the
-  re-derivation is what survives that: a `proved` status promoted over a
-  `partial` one is caught as an evidence mismatch, a dropped status row is
+  `cert.verify_certificate` re-derives the evidence from the package on the
+  verifying machine and compares it with what was signed, member by member: the
+  artifact digests; every member of every status row (the status, the status
+  cell it was read out of, that cell's name, the gap, the registered theorem
+  names, the contentless findings); every caveat; every requirement with the
+  `check` recorded behind it; the proof model pins; the checker identity; the
+  subject's source digest; the commit, as a revision of this history; and
+  `key_id`, against the key in hand. It never reads a status out of the document
+  it is checking. An attacker who holds the key can edit the record and re-sign
+  it, and the re-derivation is what survives that: a `proved` status promoted
+  over a `partial` one is caught as an evidence mismatch, a dropped status row is
   caught because the catalogue is closed, a dropped caveat is caught because the
   caveat set is re-derived, and a forged artifact digest is caught because the
-  digests are re-derived too.
+  digests are re-derived too. The same sweep catches a rewritten status cell, a
+  rewritten or emptied gap, a renamed guarantee, an unregistered theorem, a
+  dropped contentless finding, a rewritten requirement `check`, a rewritten
+  toolchain pin and a forged key fingerprint.
 - **It fails closed.** `verify_certificate` never raises: a malformed document
   is `(False, reason)` with the reason naming which of the key, the envelope and
   the evidence failed. Unknown guarantee names, unknown requirement kinds,
   duplicated or unsorted rows, a missing status row, a truncated subject hash, a
-  non-instant timestamp and a missing signature are all refusals.
+  non-instant timestamp, a missing signature and a signature that is not ASCII
+  are all refusals. The last one is the defect class this verifier has to be
+  immune to by construction: `hmac.compare_digest` raises `TypeError` on two
+  strings that are not both ASCII, so a peer-supplied record must be refused
+  before it reaches the comparison, or the failure mode of a hostile certificate
+  is a traceback rather than a reason.
+- **Two members are recorded, not re-derived.** `timestamp` and `signer` are
+  statements about the signing event rather than about the tree, so there is
+  nothing on the verifying machine to compare them with (`cert.UNVERIFIABLE`).
+  They stay inside the MAC and every successful verification names them in its
+  reason, so a green result is never read as a claim about them.
 - **The secret never appears in `argv`.** `--key PATH` names a file,
   `REVL_ATTEST_KEY_FILE` names one, `REVL_ATTEST_KEY` carries the bytes in the
   environment. There is no default key.
@@ -151,13 +177,19 @@ plus one step, and the user-facing statement of it lives in
   digest. It does not establish that the Lean development has no mistakes, and
   it does not establish that the prose in `formal/STATUS.md` accurately
   describes the development. It records what the status document says,
-  including the rows that say the coverage is not there.
+  including the rows that say the coverage is not there. `timestamp` and
+  `signer` are not checked against anything: they describe the signing event,
+  not the tree. `subject.filename` is checked through the digest of the file it
+  names rather than as a path, so the same bytes under another path verify, and
+  `as_of_commit` is checked as a revision of this repository's history rather
+  than as an equality with `HEAD`, so a checkout that moved forward is not a
+  false refusal and a commit this history does not contain is.
 
 ## Seams touched
 
 | file | change |
 |---|---|
-| `src/revl/cert.py` | new; 1140 lines, the model, the readers, the builder, the verifier and the renders |
+| `src/revl/cert.py` | new; 1390 lines, the model, the readers, the builder, the verifier and the renders |
 | `src/revl/cli/parser.py` | three flags on the existing `attest` subparser: `--certificate`, `--verify-certificate`, `--formal DIR` |
 | `src/revl/cli/observe.py` | `_run_attest` dispatches to `_run_certificate`, and refuses `--verify` combined with either certificate flag so the two protocols cannot be confused |
 | `tests/test_826_component_certificate.py` | new; the exit criterion, the readers, the trust boundary, the re-signed forgeries and the artifact mutations |

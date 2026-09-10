@@ -355,6 +355,21 @@ def test_a_re_signed_copy_with_no_edits_still_verifies(tmp_path):
     assert ok, reason
 
 
+def test_a_green_verification_names_the_members_it_read_rather_than_checked(
+        tmp_path):
+    """The boundary, stated on the success path. `timestamp` and `signer` are
+    statements about the signing EVENT, not about the tree, so they are inside
+    the MAC and outside the re-derivation. A VALID that stayed silent about them
+    would let its reader take it for a claim about the whole document."""
+    cert = _cert(tmp_path)
+    ok, reason = C.verify_certificate(cert, KEY)
+    assert ok, reason
+    assert "recorded rather than re-derived" in reason, reason
+    for member in C.UNVERIFIABLE:
+        assert member in reason, f"the reason does not name {member}: {reason}"
+    assert "timestamp" in reason and "signer" in reason, reason
+
+
 def test_the_certificate_is_a_second_signature_domain(tmp_path):
     """One key signs two protocols. Neither document may verify as the other,
     or a cross-protocol confusion is a forgery with no work in it."""
@@ -462,6 +477,106 @@ def _claim_to_be_an_attestation(document):
     document["kind"] = A.ATTEST_KIND
 
 
+# The prose a status is read out of, and the rows it is read from. These are the
+# members the certificate asserts and the verifier now RE-DERIVES: the mutation
+# keeps the signed member and rewrites it, so the only thing that can catch it is
+# a comparison against the artifacts rather than a re-reading of the record.
+
+def _rewrite_a_status_cell(document):
+    """Keep `status` and rewrite the cell it was read out of. A certificate
+    whose own status and status cell disagree is a certificate that says two
+    things at once."""
+    for row in document["statuses"]:
+        if row["code"] == "G1":
+            row["status_cell"] = "full"
+
+
+def _rewrite_a_gap(document):
+    for row in document["statuses"]:
+        if row["code"] == "G1":
+            row["gap"] = "no gaps of any kind"
+
+
+def _empty_a_gap(document):
+    for row in document["statuses"]:
+        if row["code"] == "G9":
+            row["gap"] = ""
+
+
+def _rename_a_guarantee(document):
+    for row in document["statuses"]:
+        if row["code"] == "G1":
+            row["name"] = "whatever the signer prefers"
+
+
+def _unregister_a_theorem(document):
+    for row in document["statuses"]:
+        if row["code"] == "G1":
+            row["registered"] = ["0" * 16]
+
+
+def _drop_a_contentless_finding(document):
+    for row in document["statuses"]:
+        if row["contentless"]:
+            row["contentless"] = []
+            return
+    raise AssertionError("no row carries a contentless finding to drop")
+
+
+def _rewrite_a_theorems_cell(document):
+    for row in document["statuses"]:
+        if row["code"] == "G1":
+            row["theorems_cell"] = "none, on the signer's word"
+
+
+def _rewrite_an_oracle_cell(document):
+    for row in document["statuses"]:
+        if row["code"] == "G1":
+            row["oracle_cell"] = "yes"
+
+
+def _rewrite_a_requirement_check(document):
+    document["requirements"][0]["check"] = "obviously fine, no gaps"
+
+
+def _rewrite_a_requirement_detail(document):
+    document["requirements"][0]["detail"] = "proved: full (the signer says so)"
+
+
+def _forge_the_proof_model(document):
+    document["proof_model"]["lean_toolchain"] = "leanprover/lean4:v9.9.9"
+
+
+def _forge_the_manifest_pin(document):
+    document["proof_model"]["manifest_digest"] = "0" * 64
+
+
+def _forge_the_checker(document):
+    document["checker"]["compiler"] = "something-else"
+
+
+def _forge_the_ruleset(document):
+    document["checker"]["ruleset"] = "0" * 64
+
+
+def _forge_the_commit(document):
+    document["as_of_commit"] = "0" * 40
+
+
+def _forge_the_subject_filename(document):
+    """Point the subject at a file that really exists, so the mismatch is the
+    digest rather than a missing file."""
+    document["subject"]["filename"] = str(ROOT / "formal" / "STATUS.md")
+
+
+def _forge_the_subject_hash(document):
+    document["subject"]["source_hash"] = "0" * 64
+
+
+def _forge_the_key_fingerprint(document):
+    document["key_id"] = "0123456789abcdef"
+
+
 FORGERIES = [
     ("a promoted status", _promote_g1,
      "the recorded per-guarantee status changed for G1"),
@@ -484,6 +599,39 @@ FORGERIES = [
      "timestamp is not an ISO-8601 instant"),
     ("a rewrite of the kind", _claim_to_be_an_attestation,
      "not a component certificate"),
+    ("a status cell rewritten under a kept status", _rewrite_a_status_cell,
+     "records status_cell full"),
+    ("a gap rewritten", _rewrite_a_gap, "records gap no gaps of any kind"),
+    ("a gap emptied", _empty_a_gap, "records gap , and G9 re-derives"),
+    ("a guarantee renamed", _rename_a_guarantee, "records name whatever the signer"),
+    ("a registered theorem replaced", _unregister_a_theorem,
+     "records registered ['0000000000000000']"),
+    ("a contentless finding dropped", _drop_a_contentless_finding,
+     "records contentless []"),
+    ("a theorems cell rewritten", _rewrite_a_theorems_cell,
+     "records theorems_cell none, on the signer's word"),
+    ("an oracle cell rewritten", _rewrite_an_oracle_cell,
+     "records oracle_cell yes"),
+    ("a requirement's check rewritten", _rewrite_a_requirement_check,
+     "(G1; check)"),
+    ("a requirement's detail rewritten", _rewrite_a_requirement_detail,
+     "(G1; detail)"),
+    ("a proof model pin rewritten", _forge_the_proof_model,
+     "signed proof model member lean_toolchain is leanprover/lean4:v9.9.9"),
+    ("a manifest pin forged", _forge_the_manifest_pin,
+     "signed proof model member manifest_digest is " + "0" * 64),
+    ("the checker version rewritten", _forge_the_checker,
+     "checker mismatch"),
+    ("the ruleset digest rewritten", _forge_the_ruleset,
+     "signed ruleset " + "0" * 64),
+    ("a commit that is not in this history", _forge_the_commit,
+     "no commit " + "0" * 40 + " in this repository's history"),
+    ("the subject pointed at another file", _forge_the_subject_filename,
+     "subject mismatch: the file this certificate names"),
+    ("the subject's source digest forged", _forge_the_subject_hash,
+     "but the certificate signs 000000000000"),
+    ("a key fingerprint that is not the key", _forge_the_key_fingerprint,
+     "which is not the key it is being checked with"),
 ]
 
 
@@ -520,6 +668,77 @@ def test_verification_fails_closed_rather_than_raising(tmp_path):
     stripped.pop("signature")
     ok, reason = C.verify_certificate(stripped, KEY)
     assert not ok and "no signature" in reason
+
+
+@pytest.mark.parametrize("signature", ["\u00e9\u00e9", "caf\u00e9", "\u00e9" * 64])
+def test_a_signature_that_is_not_ascii_is_a_reason_and_not_a_raise(
+        tmp_path, signature):
+    """A certificate comes from a peer, so a value that cannot be a hex MAC has
+    to end as a reason. `hmac.compare_digest` raises `TypeError` on two strings
+    that are not both ASCII, and a traceback out of a verifier is a failure mode
+    its caller may read as something other than a refusal."""
+    hostile = {**_cert(tmp_path), "signature": signature}
+    ok, reason = C.verify_certificate(hostile, KEY)
+    assert not ok
+    assert "not ASCII" in reason, reason
+    # The refusal has to be the character guard, not the MAC: an ASCII run of
+    # the same length fails as a mismatch, and the two are different findings.
+    assert "signature mismatch" not in reason, reason
+
+
+def test_the_cli_refuses_a_non_ascii_signature_without_a_traceback(
+        tmp_path, capsys):
+    """The same refusal over the real command line, where a traceback would be
+    printed rather than raised at the caller: exit 1, a reason on stdout, and no
+    rendered certificate beside it."""
+    comp = _write(tmp_path, "base.rvl", BASE)
+    keyf = _key_file(tmp_path)
+    assert main(["attest", str(comp), "--certificate", "--key", keyf, "--json"]) == 0
+    document = json.loads(capsys.readouterr().out)
+    document["signature"] = "\u00e9\u00e9"
+    cert_path = _write(tmp_path, "hostile.json", json.dumps(document))
+
+    assert main(["attest", str(cert_path), "--verify-certificate",
+                 "--key", keyf]) == 1
+    captured = capsys.readouterr()
+    assert "not ASCII" in captured.out, captured.out
+    assert "INVALID" in captured.out
+    assert "Traceback" not in captured.out + captured.err, captured.err
+    assert "coverage:" not in captured.out, "a report was fabricated"
+
+    assert main(["attest", str(cert_path), "--verify-certificate",
+                 "--key", keyf, "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False and "not ASCII" in payload["reason"]
+
+
+def test_the_verifier_process_refuses_a_non_ascii_signature(tmp_path):
+    """The refusal as a process sees it: the subprocess exit code and stderr,
+    where a `TypeError` would surface as a traceback and a nonzero status rather
+    than the deliberate 1 this command documents."""
+    comp = _write(tmp_path, "base.rvl", BASE)
+    keyf = _key_file(tmp_path)
+    signed = subprocess.run(
+        [sys.executable, "-m", "revl", "attest", str(comp), "--certificate",
+         "--key", keyf, "--json"],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(ROOT), env={"PATH": str(Path(sys.executable).parent),
+                            "PYTHONPATH": str(SRC)})
+    assert signed.returncode == 0, signed.stderr
+    document = json.loads(signed.stdout)
+    document["signature"] = "\u00e9\u00e9"
+    hostile = _write(tmp_path, "hostile.json", json.dumps(document))
+
+    refused = subprocess.run(
+        [sys.executable, "-m", "revl", "attest", str(hostile),
+         "--verify-certificate", "--key", keyf],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(ROOT), env={"PATH": str(Path(sys.executable).parent),
+                            "PYTHONPATH": str(SRC)})
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "not ASCII" in refused.stdout, refused.stdout
+    assert "Traceback" not in refused.stderr, refused.stderr
+    assert refused.stderr == "", refused.stderr
 
 
 # ------------------------------------------------ mutations on the artifacts
