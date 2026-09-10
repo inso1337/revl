@@ -188,6 +188,15 @@ def test_in_process_state_is_a_row_of_its_own(report, receipt):
     assert receipt["inProcess"]["provisionsErased"] == \
         report["inProcessStateGone"]["provisionsErased"]
     assert receipt["summary"]["replicas"] == len(receipt["replicas"]) + 1
+    assert receipt["summary"]["byDisposition"]["unproven"] == 1
+    # the two vocabularies describe different things and do not overlap: a
+    # boundary row states what happened to a crossing, the realm row states
+    # what is known about the realm's own copy.
+    assert not set(erasure_receipt.DISPOSITIONS) & \
+        set(erasure_receipt.IN_PROCESS_DISPOSITIONS)
+    assert set(erasure_receipt.ALL_DISPOSITIONS) == \
+        set(erasure_receipt.DISPOSITIONS) | \
+        set(erasure_receipt.IN_PROCESS_DISPOSITIONS)
 
 
 @pytest.mark.skipif(not _has_runtime(), reason="needs the cordis runtime")
@@ -211,8 +220,12 @@ def test_wrong_key_is_refused_by_fingerprint(report, receipt):
 
 
 def test_an_altered_replica_row_breaks_the_signature(report, receipt):
+    # a WELL-FORMED edit, so the refusal comes from the signature and not from
+    # the envelope: the row keeps a disposition a boundary row may carry.
     tampered = json.loads(json.dumps(receipt))
-    tampered["replicas"][0]["disposition"] = "reclaimed"
+    original = tampered["replicas"][0]["disposition"]
+    replacement = next(d for d in erasure_receipt.DISPOSITIONS if d != original)
+    tampered["replicas"][0]["disposition"] = replacement
     ok, why = erasure_receipt.verify_receipt(tampered, KEY)
     assert not ok and "does not match the signature" in why
 
@@ -248,6 +261,20 @@ def test_a_relabelled_document_is_refused_by_the_envelope(receipt):
     bad_row["replicas"][0]["disposition"] = "deleted-forever"
     ok, why = erasure_receipt.verify_receipt(bad_row, KEY)
     assert not ok and "disposition" in why
+    # the two vocabularies are not each other: a boundary row cannot claim an
+    # in-process state, and the realm's own row cannot claim a crossing state.
+    crossed = json.loads(json.dumps(receipt))
+    crossed["replicas"][0]["disposition"] = "reclaimed"
+    ok, why = erasure_receipt.verify_receipt(crossed, KEY)
+    assert not ok and "replicas[].disposition" in why
+    in_state = json.loads(json.dumps(receipt))
+    in_state["inProcess"]["disposition"] = "revertible"
+    ok, why = erasure_receipt.verify_receipt(in_state, KEY)
+    assert not ok and "inProcess.disposition" in why
+    missing_state = json.loads(json.dumps(receipt))
+    del missing_state["inProcess"]
+    ok, why = erasure_receipt.verify_receipt(missing_state, KEY)
+    assert not ok and "inProcess" in why
 
 
 def test_a_mac_from_another_protocol_does_not_verify(report, vault_ir):

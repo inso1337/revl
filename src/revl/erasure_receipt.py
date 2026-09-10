@@ -81,10 +81,20 @@ KEY_ENV = "REVL_ERASURE_KEY"
 KEY_FILE_ENV = "REVL_ERASURE_KEY_FILE"
 KEY_ID_DOMAIN = b"revl-erasure-keyid\x00"
 
-# The statuses a replica row can carry. They are the erase report's own
-# vocabulary, not a new one: a receipt that renamed the report's states would
-# be a second account of the same fact.
-DISPOSITIONS = ("reclaimed", "revertible", "compensated", "unresolved", "bare")
+# The statuses a BOUNDARY replica row can carry. They are the erase report's own
+# vocabulary, not a new one: a receipt that renamed the report's states would be
+# a second account of the same fact.
+DISPOSITIONS = ("revertible", "compensated", "unresolved", "bare")
+
+# The statuses the realm's OWN in-process row can carry: `reclaimed` only when
+# the R4 no-residue proof stands, and `unproven` when the proof was not run,
+# which is the honest reading of "we did not measure it" and never of "it is
+# still there". Kept APART from DISPOSITIONS so the envelope check for a
+# boundary row cannot be satisfied by an in-process state, and vice versa.
+IN_PROCESS_DISPOSITIONS = ("reclaimed", "unproven")
+
+# Every disposition a replica row of either shape can carry, in render order.
+ALL_DISPOSITIONS = DISPOSITIONS + IN_PROCESS_DISPOSITIONS
 
 # The header the receipt states about itself, mirroring `erase_report.
 # HONEST_SCOPE`: the difference between "the data is gone everywhere" (false)
@@ -306,7 +316,7 @@ def build_body(report: Mapping, ir: Optional[dict] = None, *,
     member breaks the signature. The whole record is committed, not a chosen
     subset."""
     rows = replicas(report, ir)
-    counts = {name: 0 for name in DISPOSITIONS}
+    counts = {name: 0 for name in ALL_DISPOSITIONS}
     for row in rows:
         counts[row["disposition"]] = counts.get(row["disposition"], 0) + 1
     realm_row = in_process(report)
@@ -428,6 +438,13 @@ def _envelope(receipt: Mapping) -> str:
         if row.get("disposition") not in DISPOSITIONS:
             return reason("replicas[].disposition", DISPOSITIONS,
                           row.get("disposition"))
+    state = receipt.get("inProcess")
+    if not isinstance(state, Mapping):
+        return reason("inProcess", "the realm's own in-process replica row",
+                      state)
+    if state.get("disposition") not in IN_PROCESS_DISPOSITIONS:
+        return reason("inProcess.disposition", IN_PROCESS_DISPOSITIONS,
+                      state.get("disposition"))
     return ""
 
 
@@ -526,6 +543,6 @@ def render_receipt(receipt: Mapping) -> str:
     by = (receipt.get("summary") or {}).get("byDisposition") or {}
     out.append("")
     out.append("  summary: " + ", ".join(
-        f"{name} {by.get(name, 0)}" for name in DISPOSITIONS if by.get(name)))
+        f"{name} {by.get(name, 0)}" for name in ALL_DISPOSITIONS if by.get(name)))
     out.append(f"  signature: {receipt.get(SIGNATURE_FIELD)}")
     return "\n".join(out)
