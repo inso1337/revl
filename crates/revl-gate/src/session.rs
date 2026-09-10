@@ -955,6 +955,40 @@ fn put(key, value) { return value } } }";
     }
 
     #[test]
+    fn admit_into_fails_closed_on_a_manifest_over_the_row_bound() {
+        // The row bound reaches this door too, and it has to: `Session::admit_into`
+        // funnels into `crate::admit_into`, so the refusal shape must be the
+        // crate's own, not a session one, or an embedder driving the session
+        // surface would get a different answer for the same wire.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let wire = "A/b/;".repeat(crate::MANIFEST_ROW_LIMIT + 1);
+        let out = s.admit_into(CLEAN_SRC, &wire).unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("FRONTIER"));
+        let reason = match crate::admit_into(CLEAN_SRC, &wire) {
+            Verdict::OutsideFrontier { reason } => reason,
+            other => panic!("expected the crate's own frontier gap, got {:?}", other),
+        };
+        assert_eq!(out.message.as_deref(), Some(reason.as_str()));
+        assert!(reason.contains(&crate::MANIFEST_ROW_LIMIT.to_string()), "{}", reason);
+        // The live composition is untouched, exactly as on every other refusal.
+        assert_eq!(s.generation(), 1);
+    }
+
+    #[test]
+    fn admit_into_still_folds_a_manifest_under_the_row_bound() {
+        // Non-vacuity at this door: the SAME wire one row shorter is folded as
+        // before, so the bound is a ceiling and not a wall.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let under = "A/b/;".repeat(crate::MANIFEST_ROW_LIMIT - 1);
+        let out = s.admit_into(CLEAN_SRC, &under).unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("NO_ADMISSION"));
+    }
+
+    #[test]
     fn call_records_a_witnessed_effect() {
         let mut s = Session::new();
         s.load(base()).unwrap();

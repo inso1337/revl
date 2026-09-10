@@ -153,6 +153,20 @@ CRATE_VERSION = "0.1.0"
 # fail-closed promise true.
 MAX_SOURCE_BYTES = 256 * 1024
 
+# A manifest row wire is folded by `parse_manifest_rows` (`selfhost/lower.rvl`),
+# which recurses ONE STACK FRAME PER `;`-SEPARATED ROW. The byte bound above is
+# therefore not a stack bound, and the manifest arm proved it: 2_700 rows of
+# `A/b/;` are 13 KB, far under MAX_SOURCE_BYTES, and abort a 1 MiB stack, while
+# 20_100 rows (100 KB) abort an 8 MiB one. Measured release thresholds are
+# ~2_600 rows on 1 MiB and ~20_000 rows on 8 MiB. This is the bound that
+# actually bounds the fold: it is checked BEFORE the wire reaches the parser,
+# and it is set under half the smallest measured threshold (the wasm crate sets
+# no `stack-size`, so the toolchain's 1 MiB default is the floor and it cannot
+# be measured in this tree, since wasm32-unknown-unknown is not installed),
+# because a stack exhaustion ABORTS and no `catch_unwind` can turn an abort back
+# into a refusal.
+MANIFEST_ROW_LIMIT = 512
+
 # What the native gate actually decides, in one line, stamped into the crate's
 # `COVERED_LAYER`, its README and its provenance so the three cannot disagree.
 # Measured, not assumed: `selfhost/lower.rvl`'s `admit_src` runs no type layer,
@@ -375,6 +389,17 @@ pub const FRONTIER_ID: &str = "@FRONTIER_ID@";
 /// near keeps the fail-closed promise honest.
 pub const MAX_SOURCE_BYTES: usize = @MAX_SOURCE_BYTES@;
 
+/// Manifest row wires above this many `;`-separated rows are refused rather
+/// than folded, for the same reason [`MAX_SOURCE_BYTES`] refuses a source: the
+/// fold recurses one stack frame per row and a stack exhaustion ABORTS, which
+/// no `catch_unwind` can turn back into a refusal. The two limits are NOT the
+/// same kind of bound: the byte limit above does not bound the manifest, since
+/// 2_700 rows of `A/b/;` are 13 KB and already overflow a 1 MiB stack, and both
+/// limits are checked before the wire reaches the parser so an embedder cannot
+/// spend the host on either side of the door. A manifest wire no corpus comes
+/// near keeps the fail-closed promise honest.
+pub const MANIFEST_ROW_LIMIT: usize = @MANIFEST_ROW_LIMIT@;
+
 @EXCLUDED_KEYWORDS@
 @EXCLUDED_BUILTINS@
 
@@ -581,9 +606,13 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //! * the native gate panics while deciding (caught via `catch_unwind`);
 //! * the native gate returns a verdict wire shape this crate does not
 //!   recognise;
-//! * in [`admit_into`], the manifest wire itself is longer than
-//!   [`MAX_SOURCE_BYTES`] (the fold parses it with the same front end), or the
-//!   fold's answer is a shape this crate does not recognise.
+//! * in [`admit_into`], the manifest wire is longer than [`MAX_SOURCE_BYTES`],
+//!   or carries more than [`MANIFEST_ROW_LIMIT`] `;`-separated rows, or the
+//!   fold's answer is a shape this crate does not recognise. Both manifest
+//!   limits are checked before the wire reaches the parser, because the fold
+//!   consumes one stack frame per row: the byte limit on its own is NOT a bound
+//!   on the fold's stack use, and a stack exhaustion aborts rather than
+//!   refusing.
 //!
 //! # The manifest arm (issue #346)
 //!
@@ -683,7 +712,7 @@ pub mod ir;
 pub mod session;
 pub mod symbols;
 
-pub use frontier::{FRONTIER_ID, MAX_SOURCE_BYTES};
+pub use frontier::{FRONTIER_ID, MANIFEST_ROW_LIMIT, MAX_SOURCE_BYTES};
 pub use ir::{check_ir_boundary, IrRefusal, KNOWN_IR_FIELDS, KNOWN_IR_REVISIONS};
 
 /// The semver of the GATE SURFACE itself (`gate_version().api`). Bumped by
@@ -849,6 +878,16 @@ pub fn admit(source: &str) -> Verdict {
     verdict_from_wire(&wire)
 }
 
+/// Rows in a manifest wire, counted the way the fold consumes it: one segment
+/// per `;` boundary plus the trailing one, so `A/b/;` is two rows. The empty
+/// wire is the empty composition, not one empty row.
+fn manifest_rows(manifest: &str) -> usize {
+    if manifest.is_empty() {
+        return 0;
+    }
+    manifest.matches(';').count() + 1
+}
+
 /// The native gate's verdict for `source` once it is admitted INTO the running
 /// composition `manifest` (item 186's ambient gate; issue #346).
 ///
@@ -899,12 +938,28 @@ pub fn admit_into(source: &str, manifest: &str) -> Verdict {
             ),
         };
     }
+    // A byte bound is not a stack bound: `selfhost::admit_ambient` fans the wire
+    // into `parse_manifest_rows`, which recurses ONE FRAME PER ROW, so a 13 KB
+    // wire of empty rows overflows a 1 MiB stack. Measured on a release build:
+    // 2_700 rows abort a 1 MiB stack, 20_100 rows (100 KB) abort the 8 MiB
+    // default. Counted and refused HERE, ahead of the parser, because an
+    // overflow aborts and `catch_unwind` below cannot see it.
+    let rows = manifest_rows(manifest);
+    if rows > MANIFEST_ROW_LIMIT {
+        return Verdict::OutsideFrontier {
+            reason: format!(
+                "manifest carries {} rows, above the {}-row bound this gate will fold (the fold recurses one stack frame per row, so the byte bound is not a bound on its stack use, and an overflow aborts rather than refusing); ask the reference `revl` toolchain",
+                rows,
+                MANIFEST_ROW_LIMIT
+            ),
+        };
+    }
     let owned = source.to_string();
-    let rows = manifest.to_string();
+    let wire_rows = manifest.to_string();
     // Same contract as `admit`: the emitted stages are total over the surface
     // they were written for, and "written for" is the thing this crate refuses
     // to assume. An abort must become a refusal to decide, not a verdict.
-    let wire = match std::panic::catch_unwind(move || selfhost::admit_ambient(owned, rows)) {
+    let wire = match std::panic::catch_unwind(move || selfhost::admit_ambient(owned, wire_rows)) {
         Ok(wire) => wire,
         Err(_) => {
             return Verdict::OutsideFrontier {
@@ -1152,6 +1207,102 @@ component CacheLayer requires store: Store provides store: Store {\n\
             Verdict::Refused { code, .. } => assert_eq!(code, "MANIFEST"),
             other => panic!("expected a MANIFEST refusal, got {:?}", other),
         }
+    }
+
+    // The row bound (the manifest half of the fail-closed story: the byte bound
+    // above is not a stack bound).
+
+    fn is_row_bound_refusal(verdict: &Verdict) -> bool {
+        match verdict {
+            Verdict::OutsideFrontier { reason } => {
+                reason.contains("row") && reason.contains(&MANIFEST_ROW_LIMIT.to_string())
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn manifest_rows_counts_the_segments_the_fold_folds() {
+        // The count has to be the one the fold actually walks, or the bound
+        // bounds nothing: `parse_manifest_rows` consumes a segment per `;` and
+        // one more for the tail, and the empty wire is the empty composition
+        // rather than one empty row.
+        assert_eq!(manifest_rows(""), 0);
+        assert_eq!(manifest_rows("A/b/"), 1);
+        assert_eq!(manifest_rows("A/b/;"), 2);
+        assert_eq!(manifest_rows("A/b/;B/c/"), 2);
+        assert_eq!(manifest_rows("A/b/;B/c/;"), 3);
+        assert_eq!(manifest_rows("!halted;"), 2);
+    }
+
+    #[test]
+    fn a_manifest_over_the_row_bound_is_a_gap_and_not_an_abort() {
+        let wire = "A/b/;".repeat(MANIFEST_ROW_LIMIT + 1);
+        // The point of the case, and the false claim this bound retires: the
+        // wire is a few KB, far under MAX_SOURCE_BYTES, and it used to ABORT a
+        // 1 MiB stack inside the fold (2_700 rows of it, measured).
+        assert!(wire.len() < MAX_SOURCE_BYTES / 10);
+        assert_eq!(manifest_rows(&wire), MANIFEST_ROW_LIMIT + 2);
+        let verdict = admit_into("fn id(x: Int) -> Int { return x }", &wire);
+        assert!(
+            is_row_bound_refusal(&verdict),
+            "a manifest this long must be declined by the row bound, not folded: {:?}",
+            verdict,
+        );
+        assert!(verdict.is_undecided());
+        assert_eq!(verdict.code(), Some("FRONTIER"));
+        assert!(verdict.to_json().contains("\"admitted\":false"));
+    }
+
+    #[test]
+    fn the_row_bound_is_checked_before_the_wire_is_folded() {
+        // Rows the fold REFUSES (a deferred replacement row, code MANIFEST)
+        // repeated past the row bound. Reading MANIFEST here would mean the
+        // parser had already walked the wire, which is the stack the bound
+        // exists to keep: the answer must be the row bound's.
+        let wire = "Kv/store/;-Kv/store/;".repeat(MANIFEST_ROW_LIMIT + 1);
+        let verdict = admit_into("fn id(x: Int) -> Int { return x }", &wire);
+        assert!(
+            is_row_bound_refusal(&verdict),
+            "the row bound must be checked before the fold, got {:?}",
+            verdict,
+        );
+    }
+
+    #[test]
+    fn a_manifest_under_the_row_bound_is_still_folded() {
+        // Non-vacuity in the other direction: a ceiling, not a wall. The wire
+        // below the bound is folded exactly as it was before the bound existed,
+        // and a conflict in it is still found.
+        let under = "A/b/;".repeat(MANIFEST_ROW_LIMIT - 1);
+        assert!(manifest_rows(&under) <= MANIFEST_ROW_LIMIT);
+        let verdict = admit_into("fn id(x: Int) -> Int { return x }", &under);
+        assert!(
+            !is_row_bound_refusal(&verdict),
+            "a manifest under the bound must still be decided: {:?}",
+            verdict,
+        );
+        assert_eq!(verdict, Verdict::NoObjection);
+        assert_eq!(admit_into("fn id(x: Int) -> Int { return x }", ""), verdict);
+    }
+
+    #[test]
+    fn a_manifest_at_the_row_bound_is_still_folded() {
+        // The boundary itself, from both sides: MANIFEST_ROW_LIMIT rows are
+        // folded, MANIFEST_ROW_LIMIT + 1 rows are refused. Without this pair
+        // the bound could be off by a whole wire.
+        let at = "A/b/;".repeat(MANIFEST_ROW_LIMIT - 1);
+        assert_eq!(manifest_rows(&at), MANIFEST_ROW_LIMIT);
+        let over = format!("{}A/b/;", at);
+        assert_eq!(manifest_rows(&over), MANIFEST_ROW_LIMIT + 1);
+        assert_eq!(
+            admit_into("fn id(x: Int) -> Int { return x }", &at),
+            Verdict::NoObjection
+        );
+        assert!(is_row_bound_refusal(&admit_into(
+            "fn id(x: Int) -> Int { return x }",
+            &over
+        )));
     }
 }
 '''
@@ -2114,6 +2265,40 @@ fn put(key, value) { return value } } }";
     }
 
     #[test]
+    fn admit_into_fails_closed_on_a_manifest_over_the_row_bound() {
+        // The row bound reaches this door too, and it has to: `Session::admit_into`
+        // funnels into `crate::admit_into`, so the refusal shape must be the
+        // crate's own, not a session one, or an embedder driving the session
+        // surface would get a different answer for the same wire.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let wire = "A/b/;".repeat(crate::MANIFEST_ROW_LIMIT + 1);
+        let out = s.admit_into(CLEAN_SRC, &wire).unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("FRONTIER"));
+        let reason = match crate::admit_into(CLEAN_SRC, &wire) {
+            Verdict::OutsideFrontier { reason } => reason,
+            other => panic!("expected the crate's own frontier gap, got {:?}", other),
+        };
+        assert_eq!(out.message.as_deref(), Some(reason.as_str()));
+        assert!(reason.contains(&crate::MANIFEST_ROW_LIMIT.to_string()), "{}", reason);
+        // The live composition is untouched, exactly as on every other refusal.
+        assert_eq!(s.generation(), 1);
+    }
+
+    #[test]
+    fn admit_into_still_folds_a_manifest_under_the_row_bound() {
+        // Non-vacuity at this door: the SAME wire one row shorter is folded as
+        // before, so the bound is a ceiling and not a wall.
+        let mut s = Session::new();
+        s.load(base()).unwrap();
+        let under = "A/b/;".repeat(crate::MANIFEST_ROW_LIMIT - 1);
+        let out = s.admit_into(CLEAN_SRC, &under).unwrap();
+        assert!(!out.admitted);
+        assert_eq!(out.code.as_deref(), Some("NO_ADMISSION"));
+    }
+
+    #[test]
     fn call_records_a_witnessed_effect() {
         let mut s = Session::new();
         s.load(base()).unwrap();
@@ -2274,7 +2459,10 @@ TESTS_ADMIT_RS = r'''//! The crate's own agreement + fail-closed tests (`cargo t
 //! only the crate gets the refusals, and — the load-bearing half — that no
 //! input path produces something a caller could read as an admission.
 
-use revl_gate::{admit, compile_to, gate_version, Tier, Verdict, MAX_SOURCE_BYTES};
+use revl_gate::{
+    admit, admit_into, compile_to, gate_version, Tier, Verdict, MANIFEST_ROW_LIMIT,
+    MAX_SOURCE_BYTES,
+};
 
 // ------------------------------------------------------ refusals that agree
 
@@ -2405,6 +2593,51 @@ fn a_frontier_gap_reads_as_not_admitted_on_the_wire() {
     assert_eq!(verdict.code(), Some("FRONTIER"));
     assert_eq!(verdict.kind(), "outside_frontier");
     assert!(verdict.to_json().contains("\"admitted\":false"));
+}
+
+// The size bound is not a ROW bound either. `admit_into` hands its manifest to
+// the fold, and the fold consumes one stack frame per `;`-separated row before
+// it decides anything: 2_700 rows of `A/b/;` are 13 KB, far under
+// MAX_SOURCE_BYTES, and ABORT a 1 MiB stack, while the 8 MiB default goes down
+// at ~20_000 rows. A rust stack overflow aborts, which `catch_unwind` cannot
+// turn back into a verdict, so the row count is bounded ahead of the parser.
+// The probes read the bound out of the crate rather than restating it, for the
+// same reason `frontier_probe` is generated.
+
+#[test]
+fn a_manifest_over_the_row_bound_is_declined_rather_than_risked() {
+    // The always-live trigger, and the one this bound exists for.
+    let wire = "A/b/;".repeat(MANIFEST_ROW_LIMIT + 1);
+    assert!(wire.len() < MAX_SOURCE_BYTES / 10);
+    let verdict = admit_into("fn id(x: Int) -> Int { return x }", &wire);
+    assert!(verdict.is_undecided());
+    assert_eq!(verdict.code(), Some("FRONTIER"));
+    assert_eq!(verdict.kind(), "outside_frontier");
+    assert!(verdict.to_json().contains("\"admitted\":false"));
+    match verdict {
+        Verdict::OutsideFrontier { reason } => {
+            // The refusal states the bound rather than describing a resource
+            // failure: an embedder has to be able to act on it.
+            assert!(reason.contains(&MANIFEST_ROW_LIMIT.to_string()), "{}", reason);
+            assert!(reason.contains("row"), "{}", reason);
+        }
+        other => panic!("a row count over the bound must not be decided, got {:?}", other),
+    }
+}
+
+#[test]
+fn a_manifest_under_the_row_bound_is_still_folded() {
+    // Non-vacuity in the other direction: a ceiling, not a wall. The wire below
+    // the bound is decided exactly as it was before the bound existed.
+    let under = "A/b/;".repeat(MANIFEST_ROW_LIMIT - 1);
+    let verdict = admit_into("fn id(x: Int) -> Int { return x }", &under);
+    assert_ne!(verdict.kind(), "outside_frontier", "{:?}", verdict);
+    assert_eq!(verdict, Verdict::NoObjection);
+    // And the empty manifest is still the standalone gate, byte for byte.
+    assert_eq!(
+        admit_into("fn id(x: Int) -> Int { return x }", ""),
+        admit("fn id(x: Int) -> Int { return x }")
+    );
 }
 
 // The front end is recursive descent, so nesting costs stack. The byte bound
@@ -3347,8 +3580,12 @@ crate returns it whenever:
 * the native gate panics while deciding (caught via `catch_unwind`);
 * the native gate returns a verdict wire shape this crate does not recognise;
 * in `admit_into`, the manifest wire is longer than the bound the gate will
-  decide (the fold parses the manifest with the same front end), or the fold
-  returns a shape this crate does not recognise.
+  decide, or carries more `;`-separated rows than the gate will fold, or the
+  fold returns a shape this crate does not recognise. Both manifest limits are
+  checked BEFORE the wire reaches the parser, because the byte bound is not a
+  row bound: the fold consumes one stack frame per row, so 2 700 rows of
+  `A/b/;` are 13 KB and still take a 1 MiB stack down. The row half of the pair
+  is `revl_gate::MANIFEST_ROW_LIMIT`.
 
 ### The generated frontier table at this generation
 
@@ -3900,6 +4137,7 @@ def render(tables: dict[str, list[str]], digest: str, fid: str, language: str,
         "src/frontier.rs": (FRONTIER_RS_TEMPLATE
                             .replace("@FRONTIER_ID@", fid)
                             .replace("@MAX_SOURCE_BYTES@", str(MAX_SOURCE_BYTES))
+                            .replace("@MANIFEST_ROW_LIMIT@", str(MANIFEST_ROW_LIMIT))
                             .replace("@EXCLUDED_KEYWORDS@", _rust_str_array(
                                 "EXCLUDED_KEYWORDS", tables["keywords"],
                                 "/// Reference language keywords the self-host front end does not lex.\n"
