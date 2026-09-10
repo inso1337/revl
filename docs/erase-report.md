@@ -124,7 +124,19 @@ The row carries the evidence its disposition summarises, inside the signed body:
 the proof's availability, the reason it was never taken, and the checks that did
 not hold. The verifier re-checks the disposition against that evidence, so a
 receipt whose row claims `reclaimed` over a failed proof is refused even if its
-MAC is intact.
+MAC is intact; it also checks the row against the `summary.byDisposition` tally
+that counts it, so a `residue` row cannot sit directly above `summary: reclaimed
+1` in the same signed document.
+
+Asking for a receipt that cannot be signed is an error rather than a crash or a
+guess. Three inputs are refused with `error: ...` on stderr and exit `1`, with
+no document on stdout, because the artifact the run was asked for does not
+exist: a `--receipt-key` file the process cannot read, a `REVL_ERASURE_KEY`
+value whose bytes are not UTF-8 (export the secret as a file instead, which
+carries any bytes), and a `--receipt-signer` name with no UTF-8 spelling. A
+signer name that is text but not ASCII, such as `José Müller`, is signed like
+any other name. The report on its own is always one flag away: drop the key and
+the command prints exactly the report it always printed.
 
 The receipt also carries the canonical sha256 of the report it was issued over,
 so a report edited after issue stops verifying against its own receipt, and it

@@ -192,10 +192,18 @@ note.
    too). A receipt issued by the first revision whose proof failed therefore
    stops verifying, which is the intended reading of a document that cannot say
    which of two opposite facts it recorded.
-   `RECEIPT_VERSION` stays `1.0`: the change ADDS a vocabulary value and adds
-   row members, so it is additive by the rule in
-   `src/revl/erasure_receipt.py:66-68`, and no external verifier holds a receipt
-   yet. A removed or re-shaped member would be the MAJOR case.
+   `RECEIPT_VERSION` stays `1.0` because nothing has been issued to be
+   compatible with: `src/revl/erasure_receipt.py` is new in this change (no file
+   of that name is reachable from `main`), so no first-revision receipt has
+   escaped this tree and no external verifier holds a signed `1.0` document. The
+   versioning rule stated above (`src/revl/erasure_receipt.py:66-68`: bump MINOR
+   for an additive change, MAJOR for a breaking one) is the rule for a version
+   that has landed, and read literally it would ask for a MINOR bump here, since
+   this change adds a vocabulary value and adds row members. The reason not to
+   mint a `1.1` is that `1.0` has never been observed by anyone, so there is no
+   reader to protect by keeping an older spelling readable; once a receipt has
+   been emitted, an additive change is the MINOR case and this reasoning stops
+   applying.
 2. **The key file rule had drifted from `attest`.** This module read the key
    verbatim while `attest.load_key` strips a trailing newline, so the same
    `cat`-created file was two different keys and the same receipt MACed and
@@ -210,6 +218,10 @@ note.
    every other verb. The construction is now inside the handler and answers with
    `error: ...` on stderr and exit 1.
 
+The second review confirmed all four of these and found that the fourth was
+necessary but not sufficient, in three ways. They are recorded as
+"Corrections after the second review" below, together with the widened catch.
+
 Not fixed here, and reported instead: `deploy._receipt_mac`
 (`src/revl/deploy.py:473-489`) still canonicalizes with `ensure_ascii=True`, and
 `deploy` reads its `--host-key` and far-host receipt key files without
@@ -218,6 +230,83 @@ Not fixed here, and reported instead: `deploy._receipt_mac`
 both rules, and it is pre-existing and documented as deliberate in `deploy`'s
 own docstrings rather than introduced by this item, so it is out of this
 change's scope and deserves its own issue.
+
+## Corrections after the second review
+
+The second review confirmed the four corrections above, confirmed that the
+`proven`/`disposition` machinery now says one thing to every reader, and found
+three further ways these guarantees leaked. One of them was introduced by
+correction 3 above, which is the reason it is recorded here at length.
+
+1. **A `--receipt-signer` name with no UTF-8 spelling crashed the CLI.** The MAC
+   is over `attest._canonical_bytes`, so once correction 3 started signing the
+   canonical bytes, a signer that arrived as undecodable bytes
+   (`--receipt-signer $'ops-\xff\xfe'`) had no MAC to compute at all, and
+   `attest.NotCanonicalizable` is a `ValueError` rather than a `RevlError`, so
+   the handler around the construction did not catch it: a traceback on stderr,
+   exit 1, and nothing on stdout. The first revision had printed the whole
+   report with a signature no conforming verifier could recompute, so correction
+   3 traded an unverifiable receipt for a refusal that told an operator less.
+   The refusal is now raised in `make_receipt` as a `RevlError` naming the
+   flag, and the CLI handler catches `(RevlError, attest.NotCanonicalizable)`,
+   the pair `deploy.py` already catches, so no path here can traceback.
+
+   The decision is to refuse up front rather than sign without the name:
+   `signer` is a field of the signed body, so quietly dropping it or sanitising
+   it would put a name in the receipt that the operator did not write, and
+   printing the report while silently skipping the signature would report a
+   signing failure as a completed run. A receipt that was not produced is not
+   printed as one: stdout stays empty and the exit is 1, which is the answer the
+   missing-key path already gives, and the report-only form is one flag away
+   (drop `--receipt-key`/`REVL_ERASURE_KEY*`). A signer that IS text is not this
+   case, ASCII or not: a `José Müller` signer is signed as UTF-8 and
+   verifies, which is the example this note advertises.
+
+2. **`REVL_ERASURE_KEY` with bytes that are not UTF-8 text escaped the same
+   handler.** The variable is documented as the secret bytes directly, but a
+   string has to be encoded before it can be bytes, and `inline.encode("utf-8")`
+   raises `UnicodeEncodeError` (again a `ValueError`, not a `RevlError`) for a
+   value the shell handed over as raw bytes (`REVL_ERASURE_KEY=$'\xff\xfeabc'`).
+   That is pre-existing rather than introduced, but it is the same class of
+   answer and it sits at the call site the fourth correction touched, so the
+   inline encode now raises a `RevlError` naming the file route, which carries
+   any bytes. A value that is text is unchanged, and that includes a non-ASCII
+   secret.
+
+3. **`_envelope` did not check the row's new evidence against its disposition,
+   or the rows against the tally that counts them.** Correction 1 added
+   `available`, `reason` and `failedChecks` to the in-process row and a
+   `summary.byDisposition` tally beside the rows, and checked neither against
+   the rest of the document, so five bodies with an intact MAC were still valid
+   receipts: `failedChecks` deleted, `failedChecks` naming a check when no proof
+   was taken, `reclaimed` beside `available: false, reason: "runtime proof
+   skipped"`, `reclaimed` beside a failed check, and a `residue` row counted as
+   `summary: reclaimed 1`. `_envelope` now checks, on top of the
+   `proven`/`disposition` pair it already checked:
+
+     * the shape of the evidence (`available` a bool, `failedChecks` a list of
+       strings, `reason` a string or null), so a dropped member is a refusal
+       rather than a row that quietly reads as "nothing failed";
+     * `unproven` with a non-empty `failedChecks` is refused, because no proof
+       was taken and so no check can have been reported as failed;
+     * `reclaimed` requires `proven: true`, `available: true`, no `reason` and
+       no failed check, because `reclaimed` is the one reading whose evidence is
+       a proof that both ran and held;
+     * `summary.byDisposition` has to equal the tally of the receipt's own rows
+       (the replica rows plus the in-process row, over the same closed
+       vocabulary `build_body` counts), so the word a reader quotes cannot
+       disagree with the rows printed beside it.
+
+   Each check reads one member of the signed body against another, so none of
+   them re-derives the report and none of them reads unsigned input: the report
+   is not consulted, and the tally is computed from rows the MAC already covers.
+   What they deliberately do not do is pin the check NAMES to a catalogue: the
+   receipt does not own that vocabulary, since `revl run`'s teardown and the MCP
+   session's teardown report different check sets, so a list pinned here would
+   refuse an honest receipt from the other host. The line drawn is "evidence
+   that contradicts the word the row carries", not "a second opinion on the
+   proof", so a `residue` row naming a check that in fact held stays formally
+   well formed here and is left to the report side.
 
 ## What a receipt proves and what it does not
 
