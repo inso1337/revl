@@ -89,7 +89,13 @@ def _run_erase_report(args, ir: dict) -> int:
     SIGNED: a portable receipt naming every replica the erasure reaches rides
     inside the document under `receipt` (roadmap item 472, src/revl/
     erasure_receipt.py). Without a key the document is byte-identical to the
-    report this command always produced."""
+    report this command always produced.
+
+    Asking for a receipt that cannot be signed (a key no route can resolve, a
+    `--receipt-signer` whose bytes are not UTF-8 text) is an error: a message on
+    stderr and exit 1, with no document printed, because a receipt that does not
+    exist must not be printed as one."""
+    from . import attest  # noqa: PLC0415 — only for attest's signing refusals
     from . import erasure_receipt  # noqa: PLC0415
     from .erase_report import build_report, render  # noqa: PLC0415
 
@@ -99,16 +105,22 @@ def _run_erase_report(args, ir: dict) -> int:
     key_path = getattr(args, "receipt_key", None)
     receipt = None
     if report_doc.get("ok") and (key_path or erasure_receipt.key_from_env()):
-        # A key this process cannot resolve is the same class of answer as any
-        # other unresolved input: a message on stderr and a nonzero exit, which
-        # is what every other verb here does. Letting it escape the handler made
-        # a missing key a traceback rather than an answer an operator can act
-        # on, before the document was printed either way (issue #824 review).
+        # A key this process cannot resolve, a key whose bytes are not UTF-8
+        # text, and a name the canonical spelling cannot carry are the same
+        # class of answer as any other unresolved input: a message on stderr and
+        # a nonzero exit before the document is printed, which is what every
+        # other verb here does. Letting any of them escape the handler made a
+        # missing key or an undecodable --receipt-signer a traceback rather than
+        # an answer an operator can act on (issue #824 review, #851 review).
+        # `attest.NotCanonicalizable` is a `ValueError`, not a `RevlError`, so it
+        # has to be named here: the same pair `deploy.py` catches. A receipt that
+        # was never produced prints no report, and the run can be retried without
+        # the key.
         try:
             receipt = erasure_receipt.make_receipt(
                 report_doc, erasure_receipt.resolve_key(key_path), ir=ir,
                 signer=getattr(args, "receipt_signer", None))
-        except RevlError as error:
+        except (RevlError, attest.NotCanonicalizable) as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
         report_doc["receipt"] = receipt

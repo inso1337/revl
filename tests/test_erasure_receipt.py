@@ -306,11 +306,15 @@ def test_a_receipt_cannot_claim_reclaimed_over_residue_evidence(monkeypatch,
     lying["inProcess"]["disposition"] = "reclaimed"
     ok, why = erasure_receipt.verify_receipt(lying, KEY)
     assert not ok and "inProcess.disposition" in why
-    # and rewriting the evidence to match the lie breaks the signature instead:
-    # the pair cannot be moved together either.
+    # and rewriting the WHOLE row to match the lie, evidence and tally alike, is
+    # refused by the signature instead: the envelope has nothing left to object
+    # to, and a self-consistent lie is still a body the key never MACed.
     rewritten = json.loads(json.dumps(receipt))
-    rewritten["inProcess"]["disposition"] = "reclaimed"
-    rewritten["inProcess"]["proven"] = True
+    rewritten["inProcess"].update(
+        disposition="reclaimed", proven=True, available=True, reason=None,
+        failedChecks=[])
+    rewritten["summary"]["byDisposition"] = erasure_receipt._disposition_tally(
+        rewritten["replicas"], rewritten["inProcess"])
     ok, why = erasure_receipt.verify_receipt(rewritten, KEY)
     assert not ok and "does not match the signature" in why
     assert erasure_receipt.verify_receipt(receipt, KEY) == (True, "")
@@ -340,6 +344,113 @@ def test_a_row_cannot_read_reclaimed_without_a_standing_proof(monkeypatch,
     assert not ok and "inProcess.proven" in why
 
 
+# The row's own evidence and the summary that counts it, in the only threat
+# model that makes these checks load-bearing: the forger HOLDS the key, so every
+# edit below is re-MACed and the refusal has to come from the envelope. A MAC
+# proves who wrote a body; it does not prove the body means one thing.
+def _resigned(receipt, mutate):
+    body = json.loads(json.dumps(receipt))
+    mutate(body)
+    body.pop("signature", None)
+    return {**body, "signature": erasure_receipt._mac(body, KEY)}
+
+
+def _drop_the_failed_checks(body):
+    del body["inProcess"]["failedChecks"]
+
+
+def _blame_a_check_that_never_ran(body):
+    body["inProcess"]["failedChecks"] = ["registry"]
+
+
+def _claim_reclaimed_over_a_skipped_proof(body):
+    body["inProcess"]["available"] = False
+    body["inProcess"]["reason"] = "runtime proof skipped"
+
+
+def _claim_reclaimed_over_a_failed_check(body):
+    body["inProcess"]["available"] = False
+    body["inProcess"]["failedChecks"] = ["registry"]
+
+
+def _count_a_residue_row_as_reclaimed(body):
+    body["summary"]["byDisposition"]["residue"] = 0
+    body["summary"]["byDisposition"]["reclaimed"] = 1
+
+
+def _count_a_row_that_is_not_there(body):
+    body["summary"]["byDisposition"]["compensated"] = 3
+
+
+@pytest.mark.parametrize("proof,mutate,expected", [
+    pytest.param(FAILING_PROOF, _drop_the_failed_checks,
+                 "inProcess.failedChecks", id="failed-checks-removed"),
+    pytest.param(None, _blame_a_check_that_never_ran,
+                 "inProcess.failedChecks", id="a-check-where-none-ran"),
+    pytest.param(PASSING_PROOF, _claim_reclaimed_over_a_skipped_proof,
+                 "reclaimed", id="reclaimed-over-a-skipped-proof"),
+    pytest.param(PASSING_PROOF, _claim_reclaimed_over_a_failed_check,
+                 "reclaimed", id="reclaimed-over-a-failed-check"),
+    pytest.param(FAILING_PROOF, _count_a_residue_row_as_reclaimed,
+                 "summary.byDisposition", id="a-residue-row-counted-reclaimed"),
+    pytest.param(FAILING_PROOF, _count_a_row_that_is_not_there,
+                 "summary.byDisposition", id="a-tally-of-rows-that-are-not-there"),
+])
+def test_the_envelope_refuses_a_row_or_tally_that_contradicts_itself(
+        monkeypatch, vault_ir, proof, mutate, expected):
+    # the receipt is honest before the edit and refused after it, with an intact
+    # MAC both times, so what refuses it is the envelope reading the document's
+    # own members against each other rather than the signature.
+    receipt = erasure_receipt.make_receipt(
+        _report_over_proof(vault_ir, monkeypatch, proof), KEY, ir=vault_ir,
+        now=NOW)
+    assert erasure_receipt.verify_receipt(receipt, KEY) == (True, "")
+    forged = _resigned(receipt, mutate)
+    ok, why = erasure_receipt.verify_receipt(forged, KEY)
+    assert not ok, "the envelope accepted a body that contradicts its own row"
+    assert "envelope refused" in why, why
+    assert expected in why, why
+
+
+def test_the_same_edit_without_a_re_mac_is_refused_by_the_signature(
+        monkeypatch, vault_ir):
+    # the other half of the same story: the envelope's checks are not a
+    # substitute for the MAC, so an un-re-MACed edit is still refused, by the
+    # signature, and the two refusals are distinguishable.
+    receipt = erasure_receipt.make_receipt(
+        _report_over_proof(vault_ir, monkeypatch, FAILING_PROOF), KEY,
+        ir=vault_ir, now=NOW)
+    edited = json.loads(json.dumps(receipt))
+    del edited["inProcess"]["failedChecks"]
+    ok, why = erasure_receipt.verify_receipt(edited, KEY)
+    assert not ok and "envelope refused" in why
+
+
+@pytest.mark.parametrize("proof,disposition", [
+    (PASSING_PROOF, "reclaimed"),
+    (None, "unproven"),
+    (FAILING_PROOF, "residue"),
+])
+def test_every_honest_reading_still_verifies_after_the_cross_checks(
+        monkeypatch, vault_ir, proof, disposition):
+    # the control for the refusals above: each of the three readings the row can
+    # carry, with the evidence that reading actually has, is accepted, so the
+    # cross-checks refuse contradictions rather than the evidence itself. The
+    # members they read are asserted here too: a later tightening that starts
+    # refusing an honest row has to change this test to do it.
+    receipt = erasure_receipt.make_receipt(
+        _report_over_proof(vault_ir, monkeypatch, proof), KEY, ir=vault_ir,
+        now=NOW)
+    row = receipt["inProcess"]
+    assert row["disposition"] == disposition
+    assert isinstance(row["available"], bool)
+    assert isinstance(row["failedChecks"], list)
+    assert (row["reason"] is None) == (row["available"] is True)
+    assert erasure_receipt.verify_receipt(receipt, KEY) == (True, "")
+    assert erasure_receipt.verify_receipt(
+        json.loads(json.dumps(receipt)), KEY) == (True, "")
+
+
 # ------------------------------------------------------ the signature
 
 def test_receipt_round_trips_against_its_key_and_its_report(report, receipt):
@@ -359,6 +470,11 @@ def test_an_altered_replica_row_breaks_the_signature(report, receipt):
     original = tampered["replicas"][0]["disposition"]
     replacement = next(d for d in erasure_receipt.DISPOSITIONS if d != original)
     tampered["replicas"][0]["disposition"] = replacement
+    # the tally is moved with the row, so the envelope has nothing to object to
+    # and the refusal is the MAC's: an edit that keeps the document consistent
+    # with itself is still an edit.
+    tampered["summary"]["byDisposition"] = erasure_receipt._disposition_tally(
+        tampered["replicas"], tampered["inProcess"])
     ok, why = erasure_receipt.verify_receipt(tampered, KEY)
     assert not ok and "does not match the signature" in why
 
@@ -475,6 +591,30 @@ def test_an_empty_key_is_refused(report):
         erasure_receipt.make_receipt(report, b"")
 
 
+def test_a_signer_that_has_no_utf8_spelling_is_refused_as_a_revl_error(
+        report, vault_ir):
+    # `signer` reaches the signature through the canonical bytes, and
+    # `--receipt-signer $'ops-\xff\xfe'` arrives as lone surrogates, which have
+    # no encoding. That raised attest.NotCanonicalizable, which is a ValueError
+    # and NOT a RevlError, so it escaped a caller whose only answer is
+    # `except RevlError` and the CLI printed a traceback with no report. The
+    # refusal now happens here, as the error type this module documents, and it
+    # names the flag: a body that cannot be MACed is a refusal to produce a
+    # receipt, not a receipt with an unusable signature, so nothing is returned.
+    assert not issubclass(attest.NotCanonicalizable, RevlError)
+    undecodable = "ops-\udcff\udcfe"
+    with pytest.raises(RevlError) as err:
+        erasure_receipt.make_receipt(
+            report, KEY, ir=vault_ir, now=NOW, signer=undecodable)
+    message = str(err.value)
+    assert "receipt-signer" in message, message
+    assert "no conforming verifier could recompute" in message, message
+    # a name that IS text is not this case: it is signed, and it verifies
+    encodable = "ops-\u00e9"
+    assert erasure_receipt.verify_receipt(erasure_receipt.make_receipt(
+        report, KEY, ir=vault_ir, now=NOW, signer=encodable), KEY) == (True, "")
+
+
 # -------------------------------------------------------------- the key rule
 
 def test_no_key_is_an_error_and_never_a_hardcoded_default():
@@ -495,6 +635,27 @@ def test_key_resolution_order_is_path_then_file_then_secret(tmp_path):
         str(key_file), env={"REVL_ERASURE_KEY": "inline-secret"}
     ) == b"from-the-file"
     assert erasure_receipt.key_from_env({"REVL_ERASURE_KEY": "x"}) is True
+
+
+def test_a_secret_that_is_not_text_names_the_route_that_carries_bytes():
+    # REVL_ERASURE_KEY is documented as the secret bytes directly, but the
+    # environment hands the value over as text, so raw bytes in it arrive as
+    # lone surrogates, which have no encoding. `inline.encode("utf-8")` raised
+    # UnicodeEncodeError, which is a ValueError and not a RevlError, so the CLI
+    # printed a traceback instead of an answer. The answer names the file route,
+    # which carries any bytes.
+    assert not issubclass(UnicodeEncodeError, RevlError)
+    with pytest.raises(RevlError) as err:
+        erasure_receipt.resolve_key(
+            None, env={"REVL_ERASURE_KEY": "\udcff\udcfeabc"})
+    message = str(err.value)
+    assert "REVL_ERASURE_KEY" in message, message
+    assert "not UTF-8" in message, message
+    assert "REVL_ERASURE_KEY_FILE" in message, message
+    # a secret that IS text is unchanged, UTF-8 and all, so this refuses the
+    # values that cannot be a key rather than the ones that are not ASCII
+    assert erasure_receipt.resolve_key(
+        None, env={"REVL_ERASURE_KEY": "cl\u00e9"}) == "cl\u00e9".encode("utf-8")
 
 
 def test_key_fingerprints_are_domain_separated():
@@ -585,6 +746,57 @@ def test_cli_reports_an_unreadable_receipt_key_rather_than_crashing(tmp_path):
     assert proc.returncode == 1, proc.stderr
     assert proc.stderr.startswith("error: "), proc.stderr
     assert "definitely-missing.key" in proc.stderr
+    assert proc.stdout == ""
+
+
+def test_cli_refuses_an_undecodable_receipt_signer_without_a_traceback(tmp_path):
+    # the signer is recorded in the signed body, so a name with no UTF-8
+    # spelling cannot be signed. Asking for one is an error rather than a receipt
+    # with a signature no conforming verifier could recompute, and an error
+    # rather than a traceback. No report is printed either: the artifact the run
+    # was asked for does not exist, which is what the missing-key test above
+    # already pins for the other refusal.
+    key_file = tmp_path / "receipt.key"
+    key_file.write_bytes(KEY)
+    proc = _cli("--realm", "vault", "--json", "--no-residue-proof",
+                "--receipt-key", str(key_file),
+                "--receipt-signer", "ops-\udcff\udcfe")
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert proc.stderr.startswith("error: "), proc.stderr
+    assert "receipt-signer" in proc.stderr, proc.stderr
+    assert proc.stdout == ""
+
+
+def test_cli_signs_and_verifies_a_non_ascii_receipt_signer(tmp_path):
+    # docs/design/472-retention-erasure-receipts.md advertises a non-ASCII
+    # signer, so it has to sign and verify. A name that is encodable is not the
+    # refusal above: the canonical bytes are UTF-8, so a verifier who canonicalises
+    # the documented way recomputes them.
+    key_file = tmp_path / "receipt.key"
+    key_file.write_bytes(KEY)
+    proc = _cli("--realm", "vault", "--json", "--no-residue-proof",
+                "--receipt-key", str(key_file),
+                "--receipt-signer", "Jos\u00e9 M\u00fcller")
+    assert proc.returncode == 0, proc.stderr
+    receipt = json.loads(proc.stdout)["receipt"]
+    assert receipt["signer"] == "Jos\u00e9 M\u00fcller"
+    assert erasure_receipt.verify_receipt(receipt, KEY) == (True, "")
+
+
+def test_cli_refuses_a_receipt_key_that_is_not_text_without_a_traceback():
+    # the same class of answer, at the call site the last fix touched:
+    # REVL_ERASURE_KEY is the secret bytes directly, but the environment hands
+    # the value over as text, so raw bytes in it have no encoding. This printed a
+    # traceback at the first revision and at the fix commit alike, and an
+    # unresolved key is not a different kind of failure from a key file that
+    # cannot be read.
+    proc = _cli("--realm", "vault", "--json", "--no-residue-proof",
+                extra_env={"REVL_ERASURE_KEY": "\udcff\udcfeabc"})
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert proc.stderr.startswith("error: "), proc.stderr
+    assert "REVL_ERASURE_KEY" in proc.stderr, proc.stderr
     assert proc.stdout == ""
 
 

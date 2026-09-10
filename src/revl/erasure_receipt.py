@@ -193,7 +193,22 @@ def resolve_key(key_path: str | None, *, env=None) -> bytes:
         return load_key(file_env)
     inline = env.get(KEY_ENV)
     if inline:
-        return inline.encode("utf-8")
+        try:
+            return inline.encode("utf-8")
+        except UnicodeEncodeError as error:
+            # `REVL_ERASURE_KEY` is "the secret bytes directly", but the string
+            # an operator hands over has to BE text to become bytes, and a value
+            # that arrived as undecodable bytes (the shell's `$'\xff\xfeabc'`)
+            # has no UTF-8 spelling. `UnicodeEncodeError` is a `ValueError`, not
+            # a `RevlError`, so it escaped the CLI's handler as a traceback; it
+            # is the same class of answer as any other unresolved input, and the
+            # message names the route that does carry arbitrary bytes.
+            raise RevlError(
+                "<erase-receipt>", 0,
+                f"{KEY_ENV} is not text: the secret has bytes that are not "
+                "UTF-8, so it cannot be read as the key. Pass the key as a file "
+                f"(--receipt-key PATH or {KEY_FILE_ENV}), which carries any "
+                "bytes") from error
     raise RevlError(
         "<erase-receipt>", 0,
         f"no signing key: pass --receipt-key PATH, or set {KEY_FILE_ENV} (a "
@@ -390,7 +405,10 @@ def _mac(body: Mapping, key: bytes) -> str:
 
     A body with no canonical byte spelling raises
     `attest.NotCanonicalizable`, which `verify_receipt` turns into a refusal
-    rather than a crash, the same contract `deploy._receipt_mac` keeps."""
+    rather than a crash, the same contract `deploy._receipt_mac` keeps.
+    `make_receipt` catches it at the signing boundary and refuses with a
+    `RevlError`: a body that cannot be MACed has no signature to return, which
+    is an error rather than a refusal, and no receipt exists to hand on."""
     return hmac.new(bytes(key), RECEIPT_DOMAIN + attest._canonical_bytes(
         {k: v for k, v in body.items() if k != SIGNATURE_FIELD}),
         hashlib.sha256).hexdigest()
@@ -406,7 +424,15 @@ def make_receipt(report: Mapping, key: bytes, *, ir: Optional[dict] = None,
 
     An unknown realm is never signed. `build_report` returns a document whose
     `ok` is False for a realm the composition does not name, and signing one
-    would put a signature on an erasure of nothing."""
+    would put a signature on an erasure of nothing.
+
+    A document with no canonical byte spelling is not signed either: the MAC is
+    over `attest._canonical_bytes`, so a `--receipt-signer` name whose bytes are
+    not UTF-8 text has NO valid MAC to compute (the signing step cannot answer
+    "here is the signature" at all), and the refusal is raised here as a
+    `RevlError` naming the flag rather than escaping the caller as
+    `attest.NotCanonicalizable`. There is no partially-signed receipt: a receipt
+    that was never produced is not printed."""
     if not isinstance(key, (bytes, bytearray)) or not key:
         raise RevlError("<erase-receipt>", 0,
                         "the signing key must be non-empty bytes")
@@ -417,8 +443,31 @@ def make_receipt(report: Mapping, key: bytes, *, ir: Optional[dict] = None,
             f"{((report or {}).get('error')) or 'the report is not ok'}. A "
             "receipt is evidence about a measurement, and this realm was not "
             "measured")
-    body = build_body(report, ir, now=now, signer=signer, key=bytes(key))
-    return {**body, SIGNATURE_FIELD: _mac(body, bytes(key))}
+    try:
+        body = build_body(report, ir, now=now, signer=signer, key=bytes(key))
+        signature = _mac(body, bytes(key))
+    except attest.NotCanonicalizable as error:
+        raise RevlError(
+            "<erase-receipt>", 0,
+            "the receipt cannot be signed: this document has no canonical byte "
+            f"spelling ({error}), so no conforming verifier could recompute a "
+            "signature over it. A --receipt-signer name that is not UTF-8 text "
+            "is the usual cause; drop the flag to omit the name") from error
+    return {**body, SIGNATURE_FIELD: signature}
+
+
+def _disposition_tally(rows, state) -> dict:
+    """The tally `summary.byDisposition` has to be, derived from the rows the
+    receipt already carries: one count per member of `ALL_DISPOSITIONS` over the
+    replica rows plus the in-process row, so a category no row fell into is 0
+    rather than absent (`build_body` counts the same way). It reads no report and
+    no unsigned input: the rows and the summary are both inside the signed body,
+    so this is one member of a document checked against another."""
+    tally = {name: 0 for name in ALL_DISPOSITIONS}
+    for row in rows:
+        tally[row["disposition"]] += 1
+    tally[state["disposition"]] += 1
+    return tally
 
 
 def _envelope(receipt: Mapping) -> str:
@@ -428,9 +477,10 @@ def _envelope(receipt: Mapping) -> str:
     A MAC proves authorship. It does not prove that what was authored means
     what the reader assumes, so every member whose value carries a fixed
     meaning is checked here: a `revl.attestation` or a `revl.deploy.receipt`
-    presented as an erasure receipt is a mislabel, and a record whose
-    dispositions are not this protocol's vocabulary is refused rather than
-    printed VALID."""
+    presented as an erasure receipt is a mislabel, a record whose dispositions
+    are not this protocol's vocabulary is refused rather than printed VALID,
+    and so is a record whose in-process row contradicts its own evidence or
+    whose summary contradicts the rows it counts."""
     def reason(member, expected, found):
         return (f"envelope refused: {member} is {found!r}, expected "
                 f"{expected!r}")
@@ -485,6 +535,61 @@ def _envelope(receipt: Mapping) -> str:
     if state.get("disposition") != expected:
         return reason("inProcess.disposition", expected,
                       state.get("disposition"))
+    # The pair above ties the WORD to the reading. The row also carries the
+    # evidence it states that reading in, and the two are tied here rather than
+    # one of them being trusted: `failedChecks` is the names of the checks that
+    # did not hold (always a list, so a dropped member is a refusal and not a
+    # row that reads as "nothing failed"), `available` says whether a proof ran
+    # at all, and `reason` is why it could not. `residue` is the reading
+    # `revl erase-report` exits 1 on, so a row carrying it beside evidence of a
+    # proof that STOOD is refused here even when its MAC is intact.
+    available = state.get("available")
+    if not isinstance(available, bool):
+        return reason("inProcess.available",
+                      "true when a proof ran, false when none did", available)
+    failed = state.get("failedChecks")
+    if not isinstance(failed, list) or not all(
+            isinstance(name, str) for name in failed):
+        return reason("inProcess.failedChecks", "a list of failed check names",
+                      failed)
+    why = state.get("reason")
+    if why is not None and not isinstance(why, str):
+        return reason("inProcess.reason", "a string, or null when none applies",
+                      why)
+    if expected == "unproven" and failed:
+        # no proof was taken, so no check can have been reported as failed: a
+        # row that names one is carrying evidence it cannot have.
+        return reason("inProcess.failedChecks", "[] when no proof was taken",
+                      failed)
+    if expected == "reclaimed" and (available is not True or why or failed):
+        # `reclaimed` is the one reading whose evidence is a proof that ran and
+        # held, so `available: false`, a reason why the proof was skipped, or a
+        # failed check all describe a DIFFERENT row and cannot be paired with
+        # this word. Without this, "the proof never ran, and it passed" was a
+        # valid signed receipt.
+        return ("envelope refused: inProcess is `reclaimed` while its own "
+                f"evidence describes a proof that did not stand (available="
+                f"{available!r}, reason={why!r}, failedChecks={failed!r})")
+    # The summary is the receipt's own tally of the rows around it, and it is
+    # the line a reader quotes ("reclaimed 1"), so a tally that disagrees with
+    # the rows it counts is refused: without this, a `residue` row could sit
+    # directly above `reclaimed 1` in the same signed artifact, which is the one
+    # word two readers confusion this protocol exists to remove. It counts only
+    # members the receipt already carries (the replica rows and the in-process
+    # row), so nothing here is re-derived from the report and nothing here reads
+    # unsigned input.
+    summary = receipt.get("summary")
+    if not isinstance(summary, Mapping):
+        return reason("summary", "the receipt's own tally", summary)
+    by = summary.get("byDisposition")
+    if not isinstance(by, Mapping):
+        return reason("summary.byDisposition",
+                      "a mapping of this protocol's dispositions", by)
+    tally = _disposition_tally(rows, state)
+    if dict(by) != tally:
+        return ("envelope refused: summary.byDisposition is not the tally of "
+                f"this receipt's own rows: it says {dict(by)!r}, the rows count "
+                f"{tally!r}")
     return ""
 
 
@@ -496,9 +601,11 @@ def verify_receipt(receipt: Mapping, key: bytes, *,
     Four checks, in order, so the cheapest refusal wins and a caller can tell
     a wrong key from a tampered body from a stale report:
 
-      * the envelope: kind, version, algorithms, realm, signature presence and
-        the disposition vocabulary (a MAC on a mislabelled document is still a
-        mislabelled document);
+      * the envelope: kind, version, algorithms, realm, signature presence, the
+        disposition vocabularies, the in-process row against the evidence it
+        carries, and the summary against the rows it counts (a MAC on a
+        mislabelled document is still a mislabelled document, and a MAC on a
+        body that says two things about one row is still that);
       * the MAC, constant-time, over the canonical body;
       * when `report` is supplied, that the report in hand hashes to the value
         the receipt was signed over. A report edited after issue is a report
