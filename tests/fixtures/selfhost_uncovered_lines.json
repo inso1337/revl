@@ -279,7 +279,7 @@
       "uncovered_statements": 3084
     },
     "java": {
-      "statements": 2583,
+      "statements": 2587,
       "uncovered": {
         "backends/java/emit.py::<module>: The __main__ CLI entry is not invoked by the emit(ir) API oracle.": {
           "<module>": 1
@@ -606,7 +606,7 @@
       "uncovered_statements": 942
     },
     "py": {
-      "statements": 2414,
+      "statements": 2426,
       "uncovered": {
         "Activation residuals: Map.cas conditional undo belongs to component host runtime; non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). Deferred/approval/await/stream paths belong to the named runtime boundaries. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms.": {
           "_ComponentEmitter._body_step": 17
@@ -615,12 +615,15 @@
           "_ComponentEmitter._approval_step": 3,
           "_ComponentEmitter._emit_fire": 3
         },
+        "Async extern firing needs an async body: _extern_emit_fire's `(await ...)` arm is taken only when `_in_async and not _in_arrow` and the extern is coloured or async, which is the async-coloring surface every self-host slice declares out. No corpus document is an async body firing a coloured extern, and authoring one would require porting the async slice into selfhost/emit_py.rvl before the byte-agreement oracle could stay green over it, so the single statement is recorded here rather than reached.": {
+          "_ComponentEmitter._extern_emit_fire": 1
+        },
         "Async parallel planner boundary: _build_parallel_leaders skips nested/noncontiguous members and records contiguous leaders; _emission_shape distinguishes req/spawn/extern; idempotency helpers inspect service/extern/undo declarations; _group_eligible rejects unsafe compensation, approval, deferred and validated calls; _emit_parallel_group awaits tasks, flushes records, registers successful compensation then raises. The port emits sequentially. tests/test_parallel_259.py::HDR and its commutative/disjoint tests reproduce the input family.": {
           "_ComponentEmitter._build_parallel_leaders": 3,
           "_ComponentEmitter._call_declares_idempotent": 12,
           "_ComponentEmitter._compensation_idempotent_or_absent": 4,
           "_ComponentEmitter._emission_idempotent": 11,
-          "_ComponentEmitter._emission_shape": 15,
+          "_ComponentEmitter._emission_shape": 7,
           "_ComponentEmitter._emit_parallel_group": 11,
           "_ComponentEmitter._group_eligible": 15
         },
@@ -783,7 +786,7 @@
           "_ComponentEmitter._method_control.block": 6
         }
       },
-      "uncovered_statements": 656
+      "uncovered_statements": 649
     },
     "rust": {
       "statements": 3454,
@@ -1608,7 +1611,7 @@
       "uncovered_statements": 182
     },
     "py": {
-      "statements": 1926,
+      "statements": 1949,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
