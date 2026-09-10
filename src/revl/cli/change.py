@@ -638,21 +638,35 @@ def _run_compare(args) -> int:
 
 
 def _run_replay(args) -> int:
-    """`revl replay WAL [--mode MODE]` — replay-mode readiness over a durable WAL
-    (item 250, Slice 3b, the offline half).
+    """`revl replay WAL [--mode MODE] [--under POLICY [--candidate FILE...]]`.
 
-    Reports, per mode (exact / tool-only / model-substitute / counterfactual),
-    whether the WAL's durable model decisions (item 250 Slice 3a) carry enough
-    to inform that mode, and what the live executor would still need. Reads the
-    tier-agnostic WAL core, so any tier's WAL plans the same. Runs nothing: an
-    offline reader has no live component, so every mode reads `executable:
-    false` and the live Slice-3b executor is what would run one.
+    Without `--under` this is replay-mode readiness over a durable WAL (item
+    250, Slice 3b, the offline half): it reports, per mode (exact / tool-only /
+    model-substitute / counterfactual), whether the WAL's durable model
+    decisions (item 250 Slice 3a) carry enough to inform that mode, and what the
+    live executor would still need. Reads the tier-agnostic WAL core, so any
+    tier's WAL plans the same. Runs nothing: an offline reader has no live
+    component, so every mode reads `executable: false` and the live Slice-3b
+    executor is what would run one.
 
-    Exit status: 0 when at least one mode is plannable from the record (the WAL
-    carries model decisions), 1 when none is (no model decision recorded, so
-    the WAL cannot inform any LLM-aware replay mode), which doubles as an honest
-    gate on "is this WAL model-aware".
+    With `--under POLICY` it is the counterfactual incident replay of roadmap
+    item 467: the recorded crossings are re-graded under the alternate policy
+    and the report names the first one the new policy refuses, plus whether the
+    candidate is admitted. `--candidate` supplies the composition that resolves
+    each crossing's capability token and is itself admitted under the policy; it
+    is compiled statically, so no live effect fires.
+
+    Exit status without `--under`: 0 when at least one mode is plannable from
+    the record (the WAL carries model decisions), 1 when none is (no model
+    decision recorded, so the WAL cannot inform any LLM-aware replay mode), which
+    doubles as an honest gate on "is this WAL model-aware". With `--under`: 0
+    when the question is answerable, no recorded crossing is refused and the
+    candidate is admitted; 1 when a recording cannot answer it, when a recorded
+    crossing is refused, or when the candidate is refused.
     """
+    if getattr(args, "under", None):
+        return _run_counterfactual(args)
+
     from ..replay_modes import ReplayPlanError, plan, render  # noqa: PLC0415
 
     try:
@@ -666,6 +680,32 @@ def _run_replay(args) -> int:
     else:
         print(render(doc))
     return 0 if any(m["plannable"] for m in doc["modes"]) else 1
+
+
+def _run_counterfactual(args) -> int:
+    """The `--under POLICY` half of `revl replay`: counterfactual incident
+    replay over the WAL (roadmap item 467). Reads the record and compiles the
+    candidate; fires no effect."""
+    from ..counterfactual import (CounterfactualError, replay_under,  # noqa: PLC0415
+                                  render)
+
+    try:
+        doc = replay_under(args.wal, args.under, candidate=args.candidate)
+    except CounterfactualError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(doc, indent=2))
+    else:
+        print(render(doc))
+
+    if not doc["answerable"]:
+        return 1
+    if doc["refusedCrossings"]:
+        return 1
+    admission = doc.get("admission") or {}
+    return 0 if admission.get("admitted") else 1
 
 
 def _run_repair(args) -> int:
