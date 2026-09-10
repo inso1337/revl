@@ -775,6 +775,35 @@ def revl_take_produced_by() -> "Optional[int]":
     return token
 
 
+def extern_emit(ctx, name: "str", fn, args: "tuple"):
+    """Fire a DIRECT host-extern emission (`emit announce(msg)`, a kind-3/4
+    crossing) through the recording seam on `ctx` (item 414).
+
+    Without this the py tier compiled such a crossing to a bare module-level
+    call, so the recorder never saw it, the WAL carried no `KIND_EMISSION` step
+    for a crossing the runtime itself documents as NOT revertible, and a recovery
+    verdict over that timeline came back false-clean.
+
+    The emitter routes ONLY the fire expressions it classified as a host-extern
+    crossing here, so an ordinary call of the same extern never touches this
+    seam. `fn` and `args` are already evaluated by the time this is called, the
+    same record-then-fire order as the required-service seam: the record lands
+    BEFORE the host body runs.
+
+    `_revl_record_extern` lives only on the recorder's context wrapper; the real
+    cordis `Context` returns None for a `_`-prefixed unknown name, so an
+    un-recorded activation calls `fn` with exactly the arguments, and exactly the
+    color (this frame returns the coroutine an async extern produced, for the
+    caller's own `await`), it would have called it with before. The declared
+    transparent frame keeps a recorded site on the emitted module's own line
+    rather than on this helper."""
+    _revl_transparent_frame = True
+    record = getattr(ctx, "_revl_record_extern", None)
+    if callable(record):
+        record(name, args)
+    return fn(*args)
+
+
 def _revl_canonical_args_bytes(args) -> bytes:
     """A stable byte encoding of the revl-typed emission arguments (§2.3): the
     program-passed values the taint checker can see, NEVER the host-materialised
