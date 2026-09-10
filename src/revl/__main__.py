@@ -244,9 +244,10 @@ def _run_simulate(args) -> int:
 
     Never admits, refuses or mutates. Exit 0 when the change newly allows no
     recorded crossing, leaves none undecided and withholds none; 1 when any of
-    those is true, so a preview that could not decide an action, or could not
-    name one, does not report the change clean; 2 on a usage, parse or read
-    error."""
+    those is true, so a preview that could not decide an action, could not name
+    one, or could not read the history whole (a torn tail, or a recording that
+    never reached its `activation-complete` record) does not report the change
+    clean; 2 on a usage, parse or read error."""
     from .policy import PolicyError, component_realms, load_policy
     from .policy_diff import PolicyDiffError, diff, load_history, render, widened
 

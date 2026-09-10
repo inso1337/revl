@@ -24,6 +24,12 @@ rather than a caveat in prose:
   the WAL records no realms. Those actions are undecided unless the caller
   supplies the composition the run was compiled from, and an undecided action is
   never reported as allowed or denied.
+* A history the diff could not read WHOLE is withheld the same way: a torn tail
+  (the crash itself) or a recording that never reached its `activation-complete`
+  marker leaves the recorded action set a prefix of the run rather than the run,
+  and a diff over a prefix cannot report the crossings it never saw as
+  unaffected. `revl.branch` reports a torn tail as a `torn-tail` finding on the
+  same reasoning.
 * The capability verdict reads two of the legs an admission is refused by: the
   deny-lists and the closed allow-lists. The agent-sandbox allow-list, the
   taint-flow tier, the approval and declassify rules, the declaration-strength
@@ -40,6 +46,7 @@ rather than a caveat in prose:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Optional
 
 from . import policy as _policy
@@ -272,6 +279,44 @@ def _could_select(rule, name: str, realms: Optional[frozenset]) -> bool:
     return rule.selects(name, realms if realms is not None else frozenset())
 
 
+#: The token namespace the declassify-approval leg asks about:
+#: `policy.py:1981` builds `f"declassify.{origin}"` — one token per declassify
+#: record — and `policy.py:1982` asks `approval_rule_for` for it.
+DECLASSIFY_TOKEN_PREFIX = "declassify."
+
+
+def _could_cover_declassify(pattern: str) -> bool:
+    """Whether one approval rule could be the rule `approval_rule_for` returns for
+    a `declassify.<origin>` token.
+
+    The origins are the audit fact this leg is unmodelled for, so the tokens the
+    leg asks about are exactly the `declassify.` namespace and this is the operand
+    and namespace the gate itself selects in. A pattern with no wildcard matches
+    one literal token, so it reaches that namespace only when it IS in it; a
+    pattern WITH a wildcard is taken as reaching it, because deciding that a glob
+    cannot match `declassify.<anything>` is not a claim this module can make and a
+    rule left out by mistake is the one wrong answer this surface can give."""
+    if any(char in pattern for char in "*?["):
+        return True
+    return pattern.startswith(DECLASSIFY_TOKEN_PREFIX)
+
+
+def _teardown_rows(policy) -> tuple:
+    """The teardown floor ONE policy carries, as the driver computes it.
+
+    `policy.py:1689-1691` does not read the rule list: it reduces it to the
+    STRONGEST floor (`max(..., key=_REGISTER_RANK.get)`) and the leg then refuses
+    an entry below that one number, so two rule lists with the same strongest
+    floor read the same requirement here and a rule added UNDER the floor is not
+    a fact this leg decides by. The expression is repeated rather than
+    re-spelled so the row cannot drift from the floor the gate computes."""
+    if not policy.teardown_rules:
+        return ()
+    from .lower import _REGISTER_RANK  # noqa: PLC0415
+    return (max((rule.strength for rule in policy.teardown_rules),
+                key=lambda strength: _REGISTER_RANK.get(strength, 0)),)
+
+
 def _evidence_rows(policy, name: str, token: str, realms) -> tuple:
     """The evidence clauses of one policy that could grade this pair.
 
@@ -284,7 +329,16 @@ def _evidence_rows(policy, name: str, token: str, realms) -> tuple:
         if rule.scope == "capability":
             selected = _policy._matches_any(token, (rule.selector,))
         elif rule.scope == "component":
-            selected = _could_select(rule, name, realms)
+            # The gate's own selector is `_evidence_rule_selects`
+            # (`policy.py:1445-1461`): for a component-scope rule it is the
+            # component NAME glob plus, for an ORIGIN-scoped rule, the admission
+            # origin the rule names (`policy.py:1459`). The origin is an audit
+            # fact this diff does not carry, so the name glob is the whole of the
+            # operand here and an origin-scoped rule is INCLUDED rather than
+            # dropped — the same direction `_could_select` takes for a
+            # realm-scoped rule without the composition. The origin itself stays
+            # in the row below, so an origin the rule names is a moving surface.
+            selected = fnmatchcase(name, rule.selector)
         else:
             selected = True
         if selected:
@@ -302,20 +356,46 @@ def leg_surfaces(policy, name: str, token: str, realms) -> dict:
     that says the leg does not arm for this pair is the empty row, and the
     sandbox entry folds the unarmed policy into the allowed case, since an
     unarmed policy refuses nothing here and neither does an armed one whose list
-    carries the token."""
+    carries the token.
+
+    Each row is selected with the operand the leg's own driver in `policy.py`
+    selects with, named in the comment above it, because a row keyed on a
+    different operand is a leg that silently never moves: `declassify` selects on
+    the component and reads origins, `declassify-approval` selects in the
+    `declassify.` token namespace, `approval` selects on the capability token,
+    and the two are not the same expression even though both read one policy
+    field."""
     return {
         "mcp-sandbox": policy.mcp_allow is None
                        or _policy._allowed(token, policy.mcp_allow),
         "taint-flow": _rows((rule.origin, rule.patterns, rule.without_approval)
                             for rule in policy.taint_flow_rules
                             if _policy._matches_any(token, rule.patterns)),
+        # `policy.py:1965-1969` selects a declassify rule on the component
+        # (`rule.selects(name, realms)`) and then matches its patterns against a
+        # TAINT ORIGIN (`_matches_any(origin, rule.patterns)`), not against the
+        # pair's capability token: the origins a component declassified are
+        # precisely the audit fact this leg is unmodelled for, so every rule the
+        # component selector arms is part of the surface and a rule the selector
+        # arms must make the pair undecided rather than leave it unchanged.
         "declassify": _rows((rule.selector, rule.patterns)
                             for rule in policy.declassify_rules
-                            if _could_select(rule, name, realms)
-                            and _policy._matches_any(token, rule.patterns)),
+                            if _could_select(rule, name, realms)),
+        # `policy.py:1978-1984` selects on `approval_rule_for(f"declassify.{origin}")`
+        # — a token in the `declassify.` namespace, built per declassify record —
+        # so the operand is the approval rules a `declassify.<origin>` token can
+        # reach, never `covers(token)` of the pair's capability token. Origins are
+        # audit facts, so each such rule is a candidate for some origin, and a
+        # change to one of them can be the reason this leg refuses where it
+        # admitted.
         "declassify-approval": _rows((rule.pattern, rule.ttl_ms)
                                      for rule in policy.approval_rules
-                                     if rule.covers(token)),
+                                     if _could_cover_declassify(rule.pattern)),
+        # `policy.py:2414` is `approval_rule_for(token)`, so this leg and the one
+        # above read the SAME policy field through two DIFFERENT token operands
+        # (`token` here, `declassify.<origin>` there). The rows coincide only when
+        # an approval rule can cover both, which is why the rows are derived
+        # separately rather than shared.
         "approval": _rows((rule.pattern, rule.ttl_ms)
                           for rule in policy.approval_rules
                           if rule.covers(token)),
@@ -323,7 +403,8 @@ def leg_surfaces(policy, name: str, token: str, realms) -> dict:
                           for rule in policy.register_rules
                           if _policy._matches_any(token, (rule.capability,))),
         "evidence": _rows(_evidence_rows(policy, name, token, realms)),
-        "teardown": _rows((rule.strength,) for rule in policy.teardown_rules),
+        # the floor `policy.py:1689-1691` reduces the rules to, not the rule list
+        "teardown": _teardown_rows(policy),
         "tenant": (policy.tenants_isolated,),
     }
 
@@ -406,13 +487,19 @@ def _blast_radius(moves: list, cells: dict, recorded: dict) -> dict:
     }
 
 
-def _withheld(recorded: dict) -> list:
+def _withheld(recorded: dict, wal: dict) -> list:
     """The records the diff could not name, and why, as the artifact's own field.
 
     A record the diff cannot name is not a record it decided: whatever crossing
     it carried could hide a widening the report would otherwise print as clean,
     which is why a non-empty `withheld` puts the exit status where a widening
-    does."""
+    does. A HISTORY that could not be read whole is the same refusal one level
+    up, and it is reported here rather than as a clean diff over an empty action
+    set: `revl.branch` treats a torn tail as a finding on exactly this reasoning
+    (`branch.py:422-426`), and `--history` is the crash-recovery artefact where a
+    torn tail is the expected shape. Those two findings carry `records: None`,
+    because the count that field carries elsewhere is a count of records the diff
+    could not name and here there is no such count."""
     out = []
     if recorded["unscoped"]:
         out.append({
@@ -425,6 +512,25 @@ def _withheld(recorded: dict) -> list:
                    "annotates, so the recorded action set of a real run is empty "
                    "and a change can hide behind every one of these records",
         })
+    if wal.get("torn"):
+        out.append({
+            "axis": "torn history",
+            "records": None,
+            "why": "the final record of the history is half written (the crash "
+                   "itself), so the recorded action set may be shorter than what "
+                   "actually ran and a crossing this diff never saw cannot be "
+                   "reported as unaffected. `revl branch` reports the same tail "
+                   "as a `torn-tail` finding",
+        })
+    elif not wal.get("complete"):
+        out.append({
+            "axis": "unfinished history",
+            "records": None,
+            "why": "the history carries no `activation-complete` record, so it "
+                   "holds the activation prefix of a run that never committed "
+                   "rather than a finished recording: an action missing from it "
+                   "cannot be read here as an action the change did not affect",
+        })
     return out
 
 
@@ -433,7 +539,12 @@ def diff(old, new, wal: dict, *, realms: Optional[dict] = None, label: str = "")
 
     `realms` maps a component name to the realms its composition places it in;
     it is `{}` when the caller supplied no composition, which is what leaves a
-    realm-scoped rule undecided."""
+    realm-scoped rule undecided.
+
+    A WAL that could not be read whole (`torn`, or a recording that never
+    committed) is reported in `withheld` rather than read as an empty run, so a
+    caller gating on `widened` never sees a clean diff over a history that was
+    not read to the end."""
     recorded = recorded_actions(wal)
     realms = realms or {}
     moves = [_pair(old, new, action, realms_for(action.component, realms))
@@ -457,7 +568,7 @@ def diff(old, new, wal: dict, *, realms: Optional[dict] = None, label: str = "")
         "newlyDenied": [m for m in moves if m["move"] == DENY],
         "undecided": [m for m in moves if m["move"] == UNDECIDED],
         "unscoped": recorded["unscoped"],
-        "withheld": _withheld(recorded),
+        "withheld": _withheld(recorded, wal),
         "legs": [{"leg": leg.leg, "state": leg.state, "decides": leg.decides}
                  for leg in LEGS],
         "blastRadius": _blast_radius(moves, recorded["byToken"], recorded),
@@ -469,9 +580,11 @@ def widened(doc: dict) -> bool:
     """Whether one diff document says the change cannot be called clean.
 
     True when the change newly allows a recorded crossing, leaves one undecided,
-    or could not name one at all. The CLI and any caller that gates on this
-    document read THIS function rather than re-deriving the condition, so the
-    widened cases and the exit status cannot drift apart."""
+    or could not name one at all — a record whose scope the WAL did not carry, or
+    a history the diff could not read whole (a torn tail, a recording that never
+    committed). The CLI and any caller that gates on this document read THIS
+    function rather than re-deriving the condition, so the widened cases and the
+    exit status cannot drift apart."""
     return bool(doc["newlyAllowed"] or doc["undecided"] or doc["withheld"])
 
 
@@ -494,8 +607,12 @@ def render(doc: dict) -> str:
                  len(doc["newlyDenied"]), len(doc["undecided"])))
     lines.append(counts)
     for entry in doc["withheld"]:
-        lines.append("  withheld   %s over %d record(s): %s"
-                     % (entry["axis"], entry["records"], entry["why"]))
+        if entry["records"] is None:
+            lines.append("  withheld   %s: %s"
+                         % (entry["axis"], entry["why"]))
+        else:
+            lines.append("  withheld   %s over %d record(s): %s"
+                         % (entry["axis"], entry["records"], entry["why"]))
     for title, moves in (("NEWLY ALLOWED", doc["newlyAllowed"]),
                          ("NEWLY DENIED", doc["newlyDenied"])):
         lines.append("")

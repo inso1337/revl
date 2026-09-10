@@ -501,6 +501,296 @@ def test_the_legs_the_gate_refuses_by_are_enumerated_in_the_artifact(tmp_path):
 
 
 # ===========================================================================
+# one row per leg, driven directly: every leg is derived from the operand its
+# own driver selects on
+# ===========================================================================
+
+#: The pair every recipe below is read against. The token `net` is in no
+#: recipe's rule text unless the recipe names it, so a row keyed on the pair's
+#: capability token instead of the operand its driver selects on cannot move.
+_LEG_BASE = "component Agent* may reach llm, kv, net\n"
+
+#: One recipe per UNMODELLED leg: two policy texts that differ only on the
+#: surface that leg reads, so `moved_legs` over `(AgentX, net)` must name that
+#: leg and no other.
+LEG_RECIPES = (
+    ("mcp-sandbox",
+     "mcp may reach llm, kv\n",
+     "mcp may reach llm, kv, net\n"),
+    ("taint-flow",
+     "web-taint may not reach net\n",
+     "web-taint may not reach fs\n"),
+    ("declassify",
+     "component Agent* may not declassify web\n",
+     "component Agent* may not declassify fs\n"),
+    ("declassify-approval",
+     "",
+     "capability declassify.web requires approval\n"),
+    ("approval",
+     "",
+     "capability net requires approval\n"),
+    ("register",
+     "capability net requires register declared\n",
+     "capability net requires register strong\n"),
+    ("evidence",
+     "component AgentX requires evidence [attestation valid]\n",
+     "component AgentX requires evidence [attestation valid, fault-sweep full]\n"),
+    ("teardown",
+     "requires idempotent-teardown\n",
+     "requires idempotent-teardown(strength: strong)\n"),
+    ("tenant",
+     "",
+     "tenants never reach each other\n"),
+)
+
+UNMODELLED = tuple(recipe[0] for recipe in LEG_RECIPES)
+
+
+def test_the_direct_leg_recipes_cover_every_unmodelled_leg():
+    """The recipes below are the coverage claim: one per leg the diff does not
+    read, and no row for the two it does."""
+    assert set(UNMODELLED) == {leg.leg for leg in policy_diff.LEGS
+                               if leg.state == "unmodelled"}
+    assert len(UNMODELLED) == len(set(UNMODELLED)) == 9
+    assert {"capability", "deny"}.isdisjoint(UNMODELLED)
+
+
+@pytest.mark.parametrize("leg,old_rule,new_rule", LEG_RECIPES,
+                         ids=list(UNMODELLED))
+def test_every_unmodelled_leg_is_driven_by_its_own_operand(leg, old_rule,
+                                                           new_rule):
+    """`leg_surfaces` and `moved_legs` driven DIRECTLY, one leg at a time.
+
+    Each recipe moves exactly one leg's surface for `(AgentX, net)`; the pair
+    must name that leg and only that leg, and either policy against itself must
+    name nothing. A row keyed on an operand its own driver does not select on
+    fails the first half here without the gate, the CLI or an audit being
+    involved at all."""
+    old = parse_policy(_LEG_BASE + old_rule)
+    new = parse_policy(_LEG_BASE + new_rule)
+    before = policy_diff.leg_surfaces(old, "AgentX", "net", None)
+    after = policy_diff.leg_surfaces(new, "AgentX", "net", None)
+
+    assert set(before) == set(after) == set(UNMODELLED), \
+        "the surface carries one row per unmodelled leg and no compared leg"
+    assert before[leg] != after[leg], \
+        "the recipe has to move the leg it is named for"
+    assert policy_diff.moved_legs(old, new, "AgentX", "net", None) == (leg,)
+    assert policy_diff.moved_legs(old, old, "AgentX", "net", None) == ()
+    assert policy_diff.moved_legs(new, new, "AgentX", "net", None) == ()
+    assert policy_diff.moved_legs(new, old, "AgentX", "net", None) == (leg,)
+
+
+def test_a_rule_that_does_not_select_the_pair_leaves_the_leg_surface_alone():
+    """The other half of the operand: a rule the component selector does not
+    select is not part of the pair's surface, or every rule in the document
+    would move every leg."""
+    old = parse_policy(_LEG_BASE)
+    unselected = parse_policy(_LEG_BASE + "component Other* may not declassify web\n")
+    selected = parse_policy(_LEG_BASE + "component Agent* may not declassify web\n")
+    assert policy_diff.moved_legs(old, unselected, "AgentX", "net", None) == ()
+    assert policy_diff.moved_legs(old, selected, "AgentX", "net", None) \
+        == ("declassify",)
+
+
+def test_a_realm_scoped_declassify_rule_follows_the_same_selector():
+    """`policy.py:1968` selects a declassify rule with `rule.selects(name,
+    realms)`, so a realm-scoped rule is part of the surface when the caller has
+    no composition (it might select) and drops out when the composition the run
+    was compiled from says this component is not in that realm."""
+    old = parse_policy(_LEG_BASE)
+    new = parse_policy(_LEG_BASE + "realm billing may not declassify web\n")
+    assert policy_diff.moved_legs(old, new, "AgentX", "net", None) \
+        == ("declassify",)
+    assert policy_diff.moved_legs(old, new, "AgentX", "net", frozenset()) == ()
+    assert policy_diff.moved_legs(old, new, "AgentX", "net",
+                                  frozenset({"billing"})) == ("declassify",)
+
+
+def test_the_teardown_leg_reads_the_floor_the_gate_reduces_the_rules_to():
+    """`policy.py:1689-1691` reduces the teardown rules to the STRONGEST floor
+    and refuses on that one number, so a weaker rule added under an unchanged
+    floor is not a fact this leg reads: the same requirement decides the same
+    pair, and naming it undecided here would be answering a question the gate
+    never asks."""
+    old = parse_policy(_LEG_BASE
+                       + "requires idempotent-teardown(strength: strong)\n")
+    new = parse_policy(_LEG_BASE
+                       + "requires idempotent-teardown(strength: strong)\n"
+                       + "requires idempotent-teardown\n")
+    assert policy_diff.leg_surfaces(old, "AgentX", "net",
+                                    None)["teardown"] == ("strong",)
+    assert policy_diff.leg_surfaces(new, "AgentX", "net",
+                                    None)["teardown"] == ("strong",)
+    assert policy_diff.moved_legs(old, new, "AgentX", "net", None) == ()
+
+
+def test_the_evidence_leg_reads_the_component_glob_and_the_origin_it_names():
+    """`policy.py:1445-1461` selects an evidence rule on the component name glob
+    and, for an origin-scoped rule, the admission origin it names. The name glob
+    is the operand a WAL-less diff can read; the origin is an audit fact, so it
+    is carried in the row rather than dropped. Reading either of them off the
+    wrong object (`EvidenceRule` has no `selects`) crashed the whole diff, which
+    is what this drives directly."""
+    base = parse_policy(_LEG_BASE)
+    thin = parse_policy(_LEG_BASE
+                        + "component AgentX requires evidence [attestation valid]\n")
+    thick = parse_policy(
+        _LEG_BASE
+        + "component AgentX requires evidence [attestation valid, fault-sweep full]\n")
+    assert policy_diff.moved_legs(base, thin, "AgentX", "net", None) == ("evidence",)
+    assert policy_diff.moved_legs(thin, thick, "AgentX", "net", None) == ("evidence",)
+    assert policy_diff.moved_legs(thin, thin, "AgentX", "net", None) == ()
+    # a component the glob does not select is graded by neither rule, so the pair
+    # is untouched by the rule being added
+    other = parse_policy(
+        _LEG_BASE
+        + "component Other* requires evidence [attestation valid, fault-sweep full]\n")
+    assert policy_diff.moved_legs(base, other, "AgentX", "net", None) == ()
+    # the ORIGIN a rule names moves the surface under the same name glob
+    registry = parse_policy(
+        _LEG_BASE + "component registry:* requires evidence [attestation valid]\n")
+    plain = parse_policy(_LEG_BASE
+                         + "component * requires evidence [attestation valid]\n")
+    assert policy_diff.moved_legs(registry, plain, "AgentX", "net", None) \
+        == ("evidence",)
+
+
+# ---------------------------------------------------------------------------
+# Defect 1 and Defect 2, end to end: the leg the gate widened on was reported
+# `unchanged` with no leg named and the CLI exited 0
+# ---------------------------------------------------------------------------
+
+#: A component that declassifies the `web` origin at a declared endorse point
+#: and then emits at a sink, so its taint surface carries a `declassify` record
+#: (with no covering approval edge) whatever the recorded crossing is.
+_DECLASSIFY_SOURCE = (
+    "extern emission[web] fn fetch(url: Str) -> Untrusted[Str] = @py "
+    "{ return \"\" }\n"
+    "extern emission[net] fn run(cmd: Trusted[Str]) = @py { return }\n"
+    "service Ops { emission endorse[web] fn go(url: Str) }\n"
+    "component AgentX provides ops: Ops {\n"
+    "  provide ops {\n"
+    "    fn go(url) {\n"
+    "      let page = emit fetch(url)\n"
+    "      let safe = endorse[web](page, reason = \"ack\")\n"
+    "      emit run(safe)\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+
+_DECLASSIFY_BASE = "component Agent* may reach web, net\n"
+
+
+def _declassify_audit():
+    from revl.audit_diff import audit_report
+    from revl.compiler import compile_source
+
+    return audit_report(compile_source(_DECLASSIFY_SOURCE, "declassify.rvl"))
+
+
+def test_the_declassify_leg_is_named_when_the_gate_widens_on_it(tmp_path,
+                                                               capsys):
+    """Defect 1. The pair is `(AgentX, net)` and the rule that flips is
+    `component Agent* may not declassify web`: selected by the COMPONENT and
+    matched against a taint ORIGIN, so the token `net` appears nowhere in it. A
+    row filtered on the pair's token (the defect) is empty on both sides, the
+    pair reads `unchanged`, and the CLI exits 0 over an admission that widened
+    from refuse to allow."""
+    from revl.__main__ import main
+
+    audit = _declassify_audit()
+    old = parse_policy(_DECLASSIFY_BASE + "component Agent* may not declassify web\n")
+    new = parse_policy(_DECLASSIFY_BASE)
+    assert [v.kind for v in evaluate(old, audit)] == ["declassify"]
+    assert evaluate(new, audit) == []
+    assert old.declassify_rules[0].selector == "Agent*"
+    assert old.declassify_rules[0].patterns == ("web",)
+    assert any("web" in cell
+               for cell in policy_diff.leg_surfaces(old, "AgentX", "net",
+                                                    None)["declassify"])
+
+    history = _wal(tmp_path, ("AgentX", [("emission", "net.run", ["net"])]),
+                   name="declassify.wal")
+    result = policy_diff.diff(old, new, read_wal(history))
+    move = result["moves"][0]
+    assert (move["component"], move["token"]) == ("AgentX", "net")
+    assert (move["before"], move["after"]) == ("allow", "allow"), \
+        "the capability legs allow the pair on both sides"
+    assert move["legs"] == ["declassify"], \
+        "the leg the gate refuses by has to be named"
+    assert move["move"] == "undecided", \
+        "the pair is decided by a leg outside the diff"
+    assert "declassify" in move["reason"]
+    assert result["newlyAllowed"] == [] and result["withheld"] == []
+    assert [m["token"] for m in result["undecided"]] == ["net"]
+    assert policy_diff.widened(result)
+
+    old_path = str(_write(tmp_path, "declassify-o.policy",
+                          _DECLASSIFY_BASE
+                          + "component Agent* may not declassify web\n"))
+    new_path = str(_write(tmp_path, "declassify-n.policy", _DECLASSIFY_BASE))
+    assert main(["simulate", "policy-diff", old_path, new_path,
+                 "--history", history]) == 1
+    out = capsys.readouterr().out
+    assert "declassify" in out and "UNDECIDED" in out
+
+    # the control: the same gate flip spelled so the pattern globs the token was
+    # already reported correctly, which is what isolated the operand as the cause
+    control = parse_policy(_DECLASSIFY_BASE
+                           + "component Agent* may not declassify *\n")
+    assert [v.kind for v in evaluate(control, audit)] == ["declassify"]
+    control_move = policy_diff.diff(control, new, read_wal(history))["moves"][0]
+    assert control_move["legs"] == ["declassify"]
+    assert control_move["move"] == "undecided"
+
+
+def test_the_declassify_approval_leg_is_named_when_the_gate_widens_on_it(
+        tmp_path, capsys):
+    """Defect 2. `policy.py:1978-1984` asks `approval_rule_for("declassify.web")`
+    — a token in the `declassify.` namespace, not the pair's `net` — so a row
+    filtered on `covers("net")` was empty on both sides and the pair the gate
+    widened on read `unchanged` with the CLI exiting 0."""
+    from revl.__main__ import main
+
+    audit = _declassify_audit()
+    old = parse_policy(_DECLASSIFY_BASE
+                       + "capability declassify.web requires approval\n")
+    new = parse_policy(_DECLASSIFY_BASE)
+    assert [v.kind for v in evaluate(old, audit)] == ["declassify-approval"]
+    assert evaluate(new, audit) == []
+
+    history = _wal(tmp_path, ("AgentX", [("emission", "net.run", ["net"])]),
+                   name="declassify-approval.wal")
+    result = policy_diff.diff(old, new, read_wal(history))
+    move = result["moves"][0]
+    assert (move["before"], move["after"]) == ("allow", "allow")
+    assert move["legs"] == ["declassify-approval"], \
+        "the declassify-approval leg has to be named, not the approval leg"
+    assert move["move"] == "undecided"
+    assert result["newlyAllowed"] == [] and result["withheld"] == []
+    assert policy_diff.widened(result)
+
+    old_path = str(_write(tmp_path, "decl-approval-o.policy",
+                          _DECLASSIFY_BASE
+                          + "capability declassify.web requires approval\n"))
+    new_path = str(_write(tmp_path, "decl-approval-n.policy", _DECLASSIFY_BASE))
+    assert main(["simulate", "policy-diff", old_path, new_path,
+                 "--history", history]) == 1
+    out = capsys.readouterr().out
+    assert "declassify-approval" in out
+
+    # the control: the ordinary approval leg reads the pair's OWN token, so it
+    # moves on its own row and the declassify namespace stays untouched
+    control = parse_policy(_DECLASSIFY_BASE + "capability net requires approval\n")
+    assert policy_diff.moved_legs(new, control, "AgentX", "net", None) \
+        == ("approval",)
+    assert policy_diff.moved_legs(new, old, "AgentX", "net", None) \
+        == ("declassify-approval",)
+
+
+# ===========================================================================
 # the one comparison site
 # ===========================================================================
 
@@ -596,6 +886,92 @@ def test_the_cli_exits_one_on_a_widening_and_zero_on_a_narrowing(tmp_path,
     assert main(["simulate", "policy-diff", loose, tight, "--history", tenants,
                  "--composition", str(FIXTURES / "policy_tenants.rvl")]) == 0
     assert "NEWLY DENIED:" in capsys.readouterr().out
+
+
+# ===========================================================================
+# a history the diff could not read whole
+# ===========================================================================
+
+
+def test_a_torn_history_is_a_finding_and_reaches_the_exit_status(tmp_path,
+                                                                 capsys):
+    """Defect 3. `--history` is the crash-recovery artefact, so a torn tail is
+    the shape it is EXPECTED to have: `revl.branch` reports one as a `torn-tail`
+    finding rather than reading the prefix as the run (`branch.py:422-426`).
+    Reading it as a clean empty diff exited 0 over a history that was not read
+    to the end, so the withheld record carries the finding and the exit status
+    with it. Also covers the other two unreadable shapes: a file that is not a
+    recording at all, an empty file, and a header with nothing committed under
+    it — none of them carries an `activation-complete` marker, so none of them
+    is a recording of a run that took no actions."""
+    from revl.__main__ import main
+
+    policy = str(_write(tmp_path, "whole.policy", WIDE))
+    whole = _wal(tmp_path, ("AgentLeak", [("emission", "net.push", ["net"])]),
+                 name="whole.wal")
+    assert main(["simulate", "policy-diff", policy, policy,
+                 "--history", whole]) == 0, "a whole history with no finding is 0"
+
+    torn = _wal(tmp_path, ("AgentLeak", [("emission", "net.push", ["net"])]),
+                name="torn.wal")
+    with open(torn, "a", encoding="utf-8") as handle:
+        handle.write('{"record": "effect", "seq": 9, "boun')  # torn mid-write
+    loaded = read_wal(torn)
+    assert loaded["torn"] is True
+    document = policy_diff.diff(parse_policy(WIDE), parse_policy(WIDE), loaded)
+    assert [entry["axis"] for entry in document["withheld"]] == ["torn history"]
+    assert document["withheld"][0]["records"] is None
+    assert policy_diff.widened(document), \
+        "a history read only in part cannot be called clean"
+    assert "torn history" in policy_diff.render(document)
+    assert main(["simulate", "policy-diff", policy, policy,
+                 "--history", torn]) == 1
+    assert "torn history" in capsys.readouterr().out
+
+    header = Path(whole).read_text(encoding="utf-8").splitlines()[0] + "\n"
+    for name, text, axis in (("junk.wal", "not json at all\n", "torn history"),
+                             ("empty.wal", "", "unfinished history"),
+                             ("header-only.wal", header, "unfinished history")):
+        path = str(_write(tmp_path, name, text))
+        loaded = read_wal(path)
+        assert loaded["torn"] is (name == "junk.wal"), name
+        assert loaded["complete"] is False, name
+        document = policy_diff.diff(parse_policy(WIDE), parse_policy(WIDE), loaded)
+        assert [entry["axis"] for entry in document["withheld"]] == [axis], name
+        assert main(["simulate", "policy-diff", policy, policy,
+                     "--history", path]) == 1, name
+        out = capsys.readouterr().out
+        assert f"withheld   {axis}" in out, (name, out)
+
+
+def test_a_recording_that_never_committed_is_a_finding(tmp_path, capsys):
+    """The same refusal one shape over: a WAL whose activation never completed is
+    the prefix of a run, not a run. An action missing from a prefix cannot be
+    read here as an action the change did not affect, so the prefix is withheld
+    and it reaches the exit status."""
+    from revl.__main__ import main
+
+    path = str(tmp_path / "uncommitted.wal")
+    wal = replay.WriteAheadLog(path, ir={}, generation=1).open()
+    timeline = replay.Timeline("AgentLeak")
+    _step(timeline, replay.KIND_EMISSION, "net.push", caps=["net"])
+    wal.append_timeline(timeline)
+    wal.close()  # no commit_activation: the crash before the marker
+
+    loaded = read_wal(path)
+    assert loaded["torn"] is False and loaded["complete"] is False
+    assert [m["token"] for m in policy_diff.diff(parse_policy(NARROW),
+                                                 parse_policy(WIDE),
+                                                 loaded)["newlyAllowed"]] == ["net"]
+    document = policy_diff.diff(parse_policy(WIDE), parse_policy(WIDE), loaded)
+    assert [entry["axis"] for entry in document["withheld"]] == \
+        ["unfinished history"]
+    assert policy_diff.widened(document)
+    assert main(["simulate", "policy-diff",
+                 str(_write(tmp_path, "u-o.policy", NARROW)),
+                 str(_write(tmp_path, "u-n.policy", WIDE)),
+                 "--history", path]) == 1
+    assert "unfinished history" in capsys.readouterr().out
 
 
 if __name__ == "__main__":  # pragma: no cover
