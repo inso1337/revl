@@ -45,6 +45,11 @@ from revl import compile_source  # noqa: E402
 
 BACKEND = ROOT / "backends" / "rust"
 
+# The registry and both funnels are a fixed part of the runner crate, not
+# generated code (item 421 F6(c)): the runner's own console channels read them.
+RUNNER_CONFIDENTIAL = BACKEND / "placement_runner" / "src" / "confidential.rs"
+_RUNNER_CONFIDENTIAL = RUNNER_CONFIDENTIAL.read_text(encoding="utf-8")
+
 CANARY = "SEKRIT-CANARY-421-F5F6"
 ARG_CANARY = "USER-ARG-CANARY-421-F5F6"
 REDACTED_ARG = "<redacted:arg>"
@@ -120,15 +125,22 @@ def _arm(code: str, method: str = "open") -> str:
 
 def test_secret_mode_emits_the_funnel_and_the_shared_marker():
     code = _emit(_SECRET_DOC)
-    assert f'pub const REVL_REDACTED_ARG: &str = "{REDACTED_ARG}";' in code
-    assert code.count("pub fn revl_seam_failure(text: String, args: &[serde_json::Value]) -> String {") == 1
-    assert code.count("pub fn revl_funnel_err_value(value: &mut serde_json::Value, args: &[serde_json::Value]) {") == 1
+    # the funnel is a fixed part of the runner crate -- the runner's own console
+    # channels read the same registry (item 421 F6(c)) -- so the generated half
+    # imports it rather than carrying a second copy
+    assert code.count("use crate::confidential::*;") == 1
+    assert "pub fn revl_seam_failure" not in code
+    assert f'pub const REVL_REDACTED_ARG: &str = "{REDACTED_ARG}";' in _RUNNER_CONFIDENTIAL
+    assert _RUNNER_CONFIDENTIAL.count(
+        "pub fn revl_seam_failure(text: String, args: &[serde_json::Value]) -> String {") == 1
+    assert _RUNNER_CONFIDENTIAL.count(
+        "pub fn revl_funnel_err_value(value: &mut serde_json::Value, args: &[serde_json::Value]) {") == 1
     # ...and it is the Err half the dispatch funnels, over the args the call was
     # made with -- both stages of the contract, in the contract's order.
     arm = _arm(code)
     assert "Err(_e) => { let mut _j = serde_json::to_value(&_e)" in arm
     assert "revl_funnel_err_value(&mut _j, args);" in arm
-    assert "revl_redact_text(text)" in code
+    assert "revl_redact_text(text)" in _RUNNER_CONFIDENTIAL
 
 
 def test_the_ok_half_is_left_alone():
@@ -169,7 +181,10 @@ def test_the_arg_marker_is_the_one_the_other_tiers_produce():
     assert REDACTED_ARG == declared(
         ROOT / "backends" / "typescript" / "bridge.ts",
         r"^export const REDACTED_ARG = '([^']*)'$")
-    assert REDACTED_ARG in _emit(_SECRET_DOC)
+    assert REDACTED_ARG == declared(
+        RUNNER_CONFIDENTIAL,
+        r'^pub const REVL_REDACTED_ARG: &str = "([^"]*)";$')
+    assert "use crate::confidential::*;" in _emit(_SECRET_DOC)
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +325,12 @@ mod revl_seam_failure_tests {{
 def test_a_real_failure_reaches_the_consumer_without_the_arguments(tmp_path):
     src = _emit(_SECRET_DOC)
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "lib.rs").write_text(src + "\n" + _HARNESS, encoding="utf-8")
+    # the generated module imports `crate::confidential`, so the crate root
+    # declares it and the runner's real registry file is copied in beside it
+    (tmp_path / "src" / "confidential.rs").write_text(
+        _RUNNER_CONFIDENTIAL, encoding="utf-8")
+    (tmp_path / "src" / "lib.rs").write_text(
+        src + "\nmod confidential;\n" + _HARNESS, encoding="utf-8")
     (tmp_path / "Cargo.toml").write_text(
         _rust_emit().cargo_toml("revl_seam_check"), encoding="utf-8")
     result = _cargo("test", tmp_path, "--", "--test-threads=1")

@@ -61,6 +61,13 @@ from revl import compile_source  # noqa: E402
 
 SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text()
 
+# The registry is NOT emitted: it is a fixed part of the runner crate, so the
+# runner's own console channels (item 421 F6(c)) read the same process-global
+# the emitted sinks do. The generated module imports it in secret mode.
+RUNNER_CONFIDENTIAL = BACKEND / "placement_runner" / "src" / "confidential.rs"
+CONFIDENTIAL = RUNNER_CONFIDENTIAL.read_text()
+SECRET_IMPORT = "use crate::confidential::*;"
+
 # Long enough that an exact match means something, and not a substring of
 # anything else the run prints.
 CANARY = "SEKRIT-RUST-CANARY-421-F6"
@@ -88,13 +95,16 @@ def test_the_plugin_registers_the_secret_config_field_at_load():
     assert "revl_mark_secret(&config.api_key);" in code, code
     # ...and only the declared field: the ordinary one beside it is not marked
     assert "revl_mark_secret(&config.url" not in code
-    # the registry itself, once, with the shared marker
-    assert code.count("pub fn revl_redact_text(text: String) -> String {") == 1
-    assert 'pub const REVL_REDACTED_SECRET: &str = "<redacted:secret>";' in code
+    # the generated module imports the runner's registry, once, and does not
+    # carry a second copy of it
+    assert code.count(SECRET_IMPORT) == 1, code
+    assert "pub fn revl_redact_text" not in code
+    assert CONFIDENTIAL.count("pub fn revl_redact_text(text: String) -> String {") == 1
+    assert 'pub const REVL_REDACTED_SECRET: &str = "<redacted:secret>";' in CONFIDENTIAL
 
 
 def test_a_secretless_document_is_byte_identical():
-    """The registry is emitted only for a document that declares a `Secret[T]`,
+    """The registry is imported only for a document that declares a `Secret[T]`,
     so every existing golden and the selfhost mirror stay untouched."""
     plain = SCENARIO.replace("api_key: Secret[Str]", "api_key: Str").replace(
         "key: Secret[Str]", "key: Str")
@@ -102,6 +112,7 @@ def test_a_secretless_document_is_byte_identical():
     assert "revl_mark_secret" not in code
     assert "revl_redact_text" not in code
     assert "REVL_REDACTED_SECRET" not in code
+    assert "confidential" not in code
 
 
 def test_the_host_trace_choke_point_reads_through_the_registry():
@@ -209,6 +220,22 @@ def _cargo(subcommand: str, cwd: Path, *extra: str) -> subprocess.CompletedProce
     )
 
 
+def _write_crate(tmp_path: Path, src: str, harness: str,
+                 *, confidential: str = CONFIDENTIAL) -> None:
+    """Materialise the emitted module as a crate root.
+
+    In secret mode the generated module imports `crate::confidential::*`, so the
+    crate root declares that module and the runner's real registry file is
+    copied in beside it — the same file the runner crate compiles, which is what
+    makes a run here evidence that the two halves share one registry.
+    """
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "confidential.rs").write_text(confidential, encoding="utf-8")
+    (tmp_path / "src" / "lib.rs").write_text(
+        src + "\nmod confidential;\n" + harness, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+
+
 needs_cargo = pytest.mark.skipif(
     shutil.which("cargo") is None, reason="cargo not installed"
 )
@@ -269,9 +296,7 @@ mod revl_secret_registry_tests {{
 @needs_cargo
 def test_no_sink_carries_the_secret_when_run(tmp_path):
     src = emit.emit(_compile(SCENARIO))
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "lib.rs").write_text(src + "\n" + _HARNESS, encoding="utf-8")
-    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    _write_crate(tmp_path, src, _HARNESS)
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     assert "test result: ok" in (result.stdout or "")
@@ -300,22 +325,22 @@ ESCAPED_CANARY_LITERAL = json.dumps(ESCAPED_CANARY)
 
 def test_the_registry_registers_the_escaped_faces_too():
     code = emit.emit(_compile(SCENARIO))
-    assert "fn revl_renderings(text: &str) -> Vec<String> {" in code
+    assert SECRET_IMPORT in code
+    assert "fn revl_renderings(text: &str) -> Vec<String> {" in CONFIDENTIAL
     # the remember path registers what revl_renderings hands back, not the raw
     # string alone
-    assert "for face in revl_renderings(&text) {" in code
+    assert "for face in revl_renderings(&text) {" in CONFIDENTIAL
     # ...and each face comes from the encoder that writes it, so neither can
     # drift from the escape table the encoder actually applies
-    assert "serde_json::to_string(text)" in code
-    assert 'format!("{:?}", text)' in code
+    assert "serde_json::to_string(text)" in CONFIDENTIAL
+    assert 'format!("{:?}", text)' in CONFIDENTIAL
 
 
 def test_the_bound_gates_the_raw_value_only():
     """`REVL_MIN_MARKABLE` is checked against the raw value, before any face is
     derived: an escape can only ever EXPAND, so a value that cleared the bound
     clears it in every escaped face too."""
-    code = emit.emit(_compile(SCENARIO))
-    remember = code[code.index("fn revl_remember_secret(text: String) {"):]
+    remember = CONFIDENTIAL[CONFIDENTIAL.index("fn revl_remember_secret(text: String) {"):]
     assert (remember.index("text.len() < REVL_MIN_MARKABLE")
             < remember.index("revl_renderings(&text)"))
 
@@ -380,9 +405,7 @@ mod revl_escaped_face_tests {{
 @needs_cargo
 def test_no_sink_carries_an_escaped_value_when_run(tmp_path):
     src = emit.emit(_compile(SCENARIO))
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "lib.rs").write_text(src + "\n" + _ESCAPED_HARNESS, encoding="utf-8")
-    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    _write_crate(tmp_path, src, _ESCAPED_HARNESS)
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     assert "test result: ok" in (result.stdout or "")
@@ -393,10 +416,9 @@ def test_with_the_escaped_faces_stripped_the_value_leaks(tmp_path):
     """Non-vacuity: `revl_renderings` is what stands between the encoders and
     the sinks. Register the raw face alone — the pre-F6(d) shape — and the same
     crate shows the escaped rendering surviving redaction."""
-    src = emit.emit(_compile(SCENARIO))
-    raw_only = src.replace("for face in revl_renderings(&text) {",
-                           "for face in vec![text.clone()] {")
-    assert raw_only != src, "the registration no longer reads through revl_renderings"
+    raw_only = CONFIDENTIAL.replace("for face in revl_renderings(&text) {",
+                                    "for face in vec![text.clone()] {")
+    assert raw_only != CONFIDENTIAL, "the registration no longer reads through revl_renderings"
     harness = _ESCAPED_HARNESS.replace(
         "assert_eq!(\n            revl_redact_text(format!(\"reply {}\", wire_body)),\n"
         "            format!(\"reply {}\", REDACTED),\n"
@@ -413,9 +435,7 @@ def test_with_the_escaped_faces_stripped_the_value_leaks(tmp_path):
         '            "the Debug rendering was scrubbed: it should not have been"\n        );',
     )
     assert harness.count("should not have been") == 2, "the leak assertions were not substituted"
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "lib.rs").write_text(raw_only + "\n" + harness, encoding="utf-8")
-    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    _write_crate(tmp_path, raw_only, harness, confidential=raw_only)
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     assert "test result: ok" in (result.stdout or "")
@@ -472,11 +492,13 @@ def test_a_non_scalar_secret_takes_the_door_its_declared_type_needs():
     assert "revl_mark_secret_bytes(&key); " in code, code
     assert "revl_mark_secret_encoded(&key); " in code, code
     # ...and the scalar doors are left exactly as they were, so every existing
-    # golden and the selfhost mirror stay untouched
-    assert "pub fn revl_mark_secret<T: std::fmt::Display>(value: &T) {" in code
-    assert "pub fn revl_secret_result<T: std::fmt::Display>(value: T) -> T {" in code
-    assert "pub fn revl_mark_secret_bytes(value: &[u8]) {" in code
-    assert "pub fn revl_mark_secret_encoded<T: std::fmt::Debug + ?Sized>(value: &T) {" in code
+    # golden and the selfhost mirror stay untouched. The doors themselves live
+    # in the runner crate's `confidential.rs`, which the emitted module imports.
+    assert "pub fn revl_mark_secret<T: std::fmt::Display>(value: &T) {" in CONFIDENTIAL
+    assert "pub fn revl_secret_result<T: std::fmt::Display>(value: T) -> T {" in CONFIDENTIAL
+    assert "pub fn revl_mark_secret_bytes(value: &[u8]) {" in CONFIDENTIAL
+    assert "pub fn revl_mark_secret_encoded<T: std::fmt::Debug + ?Sized>(value: &T) {" in CONFIDENTIAL
+    assert "use crate::confidential::*;" in code, code
 
 
 def test_a_scalar_secret_still_takes_the_display_door():
@@ -550,10 +572,7 @@ def test_a_non_scalar_secret_composition_builds_and_is_scrubbed(tmp_path):
     implement std::fmt::Display`, at the config and receiver doors both), so the
     front end accepted a composition whose artifact was unusable."""
     src = emit.emit(_compile(_NON_SCALAR_SCENARIO))
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "lib.rs").write_text(
-        src + "\n" + _NON_SCALAR_HARNESS, encoding="utf-8")
-    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    _write_crate(tmp_path, src, _NON_SCALAR_HARNESS)
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     assert "test result: ok" in (result.stdout or "")
@@ -638,17 +657,14 @@ def test_the_container_door_emits_a_walk_over_every_reachable_leaf():
     assert "for _revl_leaf0 in _revl_v.values() {" in flat, walk
     assert "if let Some(_revl_leaf0) = _revl_v.as_ref() {" in flat, walk
     # the scalar doors are untouched, so every existing golden stays as it was.
-    assert "pub fn revl_mark_secret_encoded<T: std::fmt::Debug + ?Sized>(value: &T) {" in walk
-    assert "pub fn revl_secret_result_encoded<T: std::fmt::Debug>(value: T) -> T {" in walk
+    assert "pub fn revl_mark_secret_encoded<T: std::fmt::Debug + ?Sized>(value: &T) {" in CONFIDENTIAL
+    assert "pub fn revl_secret_result_encoded<T: std::fmt::Debug>(value: T) -> T {" in CONFIDENTIAL
 
 
 @needs_cargo
 def test_a_returned_containers_leaf_is_scrubbed_on_its_own(tmp_path):
     src = emit.emit(_compile(_LEAF_WALK_SCENARIO))
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "lib.rs").write_text(
-        src + "\n" + _LEAF_WALK_HARNESS, encoding="utf-8")
-    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    _write_crate(tmp_path, src, _LEAF_WALK_HARNESS)
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     assert "test result: ok" in (result.stdout or "")
@@ -689,5 +705,8 @@ def test_a_recursive_record_composition_emits():
     recursive record reached `emit` and killed it. Emission must now complete,
     and the walk it produces must be bounded."""
     code = emit.emit(_compile(_RECURSIVE_SCENARIO))
-    assert "revl_mark_secret_encoded" in code, code
+    assert "use crate::confidential::*;" in code, code
+    # the cap bounds the walk rather than abandoning the shape: the reachable
+    # leaves are registered, and the recursion stops instead of running away.
+    assert "revl_mark_secret(&_revl_v.val);" in code, code
     assert code.count("revl_mark_secret(&") < 100, code.count("revl_mark_secret(&")

@@ -19,8 +19,53 @@ import { Context } from 'cordis'
 import { makeProxy, serve } from './bridge.ts'
 import { assertNoResidue, fiberStateName, redactText, snapshotRuntime } from './runtime.ts'
 
+// The uncaught-failure funnel (issue #814, the ts half of the same rule the py
+// driver, the java runners and the go runner follow).
+//
+// `log()` funnels every line this process prints (item 815) and the bridge
+// funnels the reply it sends back across a seam, but the failures those two
+// expect are not the only ones a boot can raise: a ref hash check, a config
+// hook, a serve setup, an inverse during teardown — anything the load path and
+// the probe path do not catch — used to escape as an UNCAUGHT EXCEPTION, and
+// node prints that itself: the error, its message and the full stack, straight
+// to stderr, unfunnelled. The conductor merges that verbatim
+// (`placement.py::pump` spawns children with `stderr=subprocess.STDOUT`), and a
+// message and a stack quote whatever the failing frame held. This module is
+// top-level-await, so a rejected top-level await arrives here too.
+//
+// One redacted line, non-zero exit: still loud, still machine-visible, no
+// longer an unanalysed crossing. Exiting rather than rethrowing keeps the
+// process from unwinding into a teardown that would print `DOWN` — the
+// conductor's clean-teardown signal, which a process that died mid-boot must
+// not claim (E7).
+//
+// `fs.writeSync` and not `console.log`: the process is about to exit, and a
+// line still sitting in a piped stream's buffer when `process.exit` runs is
+// dropped — a funnel that prints nothing is not a funnel. (The java tier's
+// `System.err.flush()` before `Runtime.halt` is the same precaution.)
+//
+// The label is hoisted and defaulted so a boot that fails before the spec names
+// this process — an unreadable spec, a spec without `name` — still prints one.
+// It has to be the `name` the rest of the runner uses, and it has to be
+// initialized before the handlers are installed: a handler that ran while it
+// was still in its temporal dead zone would throw instead of reporting.
+let name = 'proc'
+
+function fatal(reason: unknown): void {
+  const detail = reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason)
+  fs.writeSync(2, `[${name}] FATAL ${redactText(detail)}\n`)
+  process.exit(1)
+}
+
+// Installed unconditionally, and before anything that can fail. An
+// `unhandledRejection` is included because node's default disposition for one
+// is to raise it as an uncaught exception anyway: leaving it to the default
+// would leave exactly the channel this closes open, one event-loop turn later.
+process.on('uncaughtException', fatal)
+process.on('unhandledRejection', fatal)
+
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
-const name: string = spec.name
+name = spec.name ?? 'proc'
 
 // item 396 option B: a `@ts ref` thunk resolves its host module at call time
 // through `globalThis.__REVL_REF_ROOT__` joined with the recorded relative path
