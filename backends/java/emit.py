@@ -198,7 +198,28 @@ private static void revlRememberSecret(Object value) {
         }
         return;
     }
-    String text = String.valueOf(value);
+    if (value instanceof byte[] raw) {
+        // `Bytes` is the one declared type whose java runtime value is not a
+        // `String`, and the fallback below is the wrong answer for it:
+        // `String.valueOf(byte[])` is the identity string `[B@hash`, which no
+        // sink this tier has writes, so a `Secret[Bytes]` registered a needle
+        // that could never match and its decoded payload crossed every funnel
+        // verbatim. Register the two forms a byte payload actually wears in
+        // host text, each bounded on its own length like every other needle:
+        // the decoded text (a body that says `new String(raw)`; the py tier's
+        // `value.decode("utf-8", "replace")`) and the debug list
+        // (`Arrays.toString`; the py tier's `repr`). Malformed input decodes to
+        // U+FFFD, the same replacement the py tier asks for.
+        revlRememberText(new String(raw, java.nio.charset.StandardCharsets.UTF_8));
+        revlRememberText(java.util.Arrays.toString(raw));
+        return;
+    }
+    revlRememberText(String.valueOf(value));
+}
+
+// One string face of a remembered value: bounded, escaped and re-sorted like
+// every other needle, so a scalar and a decoded byte payload register alike.
+private static void revlRememberText(String text) {
     if (text.length() < REVL_MIN_MARKABLE) {
         return;
     }
