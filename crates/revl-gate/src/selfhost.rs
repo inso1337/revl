@@ -339,6 +339,12 @@ pub struct TyParts {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TaintDecl {
+    name: String,
+    types: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StepR {
     ok: bool,
     js: String,
@@ -5893,6 +5899,234 @@ fn taint_secret_witness(ty: String) -> bool {
     return (((p.head == "Result") && (p.args.revl_length() == 2i64)) && taint_mentions_secret((p.args)[(0i64) as usize].clone()));
 }
 
+fn taint_decl_at(ts: Vec<Token>, i: i64) -> TaintDecl {
+    let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
+    if atw(&ts, i, "extern") {
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+        if atk(&ts, j.clone(), "[") {
+            j = skip_brackets(&ts, j.clone());
+        }
+        if atw(&ts, j, "async") {
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+        }
+        if (!atw(&ts, j, "fn")) {
+            return TaintDecl { name: String::from(""), types: vec![] };
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let nm = tkc(&ts, j).text;
+    j = (j).checked_add(1i64).expect("revl: Int overflow");
+    if atk(&ts, j, "[") {
+        j = skip_brackets(&ts, j);
+    }
+    if (!atk(&ts, j, "(")) {
+        return TaintDecl { name: String::from(""), types: vec![] };
+    }
+    let ps = params_at(ts.clone(), (j).checked_add(1i64).expect("revl: Int overflow"));
+    let mut types: Vec<String> = vec![];
+    let mut k = 0i64;
+    while (k < ps.ps.revl_length()) {
+        types.push((ps.ps)[(k) as usize].ty.clone());
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return TaintDecl { name: nm.clone(), types: types.clone() };
+}
+
+fn taint_decl_params(ts: Vec<Token>) -> Vec<TaintDecl> {
+    let mut out: Vec<TaintDecl> = vec![];
+    let mut d = 0i64;
+    let mut i = 0i64;
+    while (i < ts.revl_length()) {
+        if atk(&ts, i, "{") {
+            d = (d).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if atk(&ts, i, "}") {
+                d = (d).checked_sub(1i64).expect("revl: Int overflow");
+            } else {
+                if ((d == 0i64) && (atw(&ts, i, "extern") || atw(&ts, i, "fn"))) {
+                    let dec = taint_decl_at(ts.clone(), i);
+                    if (dec.name != "") {
+                        out.push(dec.clone());
+                    }
+                }
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn taint_params_of(ds: &[TaintDecl], name: &str) -> Vec<String> {
+    let mut i = 0i64;
+    while (i < ds.revl_length()) {
+        if ((ds)[(i) as usize].name == name) {
+            return (ds)[(i) as usize].types.clone();
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return vec![];
+}
+
+fn taint_callee_name(tg: Expr) -> String {
+    return match tg {
+    Expr::Var(vn) => vn,
+    Expr::Field(f) => { let f = *f; f.name },
+    _ => String::from(""),
+};
+}
+
+fn taint_call_receiver(c: CallN, ds: &[TaintDecl]) -> bool {
+    let cn = taint_callee_name(c.target.clone());
+    if (cn == "") {
+        return false;
+    }
+    let ps = taint_params_of(ds, &cn);
+    let mut i = 0i64;
+    while ((i < c.args.revl_length()) && (i < ps.revl_length())) {
+        if (taint_mentions_secret((ps)[(i) as usize].clone()) && taint_expr_mentions((c.args)[(i) as usize].clone(), "result")) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn taint_expr_mentions(e: Expr, bn: &str) -> bool {
+    return match e {
+    Expr::Var(vn) => (vn == bn),
+    Expr::IntLit(_) => false,
+    Expr::FloatLit(_) => false,
+    Expr::StrLit(_) => false,
+    Expr::BoolLit(_) => false,
+    Expr::NullLit => false,
+    Expr::Hole(_) => false,
+    Expr::Bad(_) => false,
+    Expr::Bin(b) => { let b = *b; (taint_expr_mentions(b.l.clone(), bn) || taint_expr_mentions(b.r.clone(), bn)) },
+    Expr::Un(u) => { let u = *u; taint_expr_mentions(u.e.clone(), bn) },
+    Expr::Emit(u) => { let u = *u; taint_expr_mentions(u.e.clone(), bn) },
+    Expr::Call(c) => { let c = *c; (taint_expr_mentions(c.target.clone(), bn) || taint_exprs_mention(&c.args, 0i64, bn)) },
+    Expr::Field(f) => { let f = *f; taint_expr_mentions(f.target.clone(), bn) },
+    Expr::OptField(f) => { let f = *f; taint_expr_mentions(f.target.clone(), bn) },
+    Expr::OptCall(c) => { let c = *c; (taint_expr_mentions(c.target.clone(), bn) || taint_exprs_mention(&c.args, 0i64, bn)) },
+    Expr::Index(x) => { let x = *x; (taint_expr_mentions(x.target.clone(), bn) || taint_expr_mentions(x.idx.clone(), bn)) },
+    Expr::If(x) => { let x = *x; ((taint_expr_mentions(x.cond.clone(), bn) || taint_expr_mentions(x.then_.clone(), bn)) || taint_expr_mentions(x.els.clone(), bn)) },
+    Expr::Rec(r) => taint_inits_mention(&r.fields, 0i64, bn),
+    Expr::Lst(l) => taint_exprs_mention(&l.items, 0i64, bn),
+    Expr::Arrow(a) => { let a = *a; taint_expr_mentions(a.body, bn) },
+    Expr::Match(m) => { let m = *m; (taint_expr_mentions(m.scrut.clone(), bn) || taint_arms_mention(&m.arms, 0i64, bn)) },
+    Expr::Templ(t) => taint_parts_mention(&t.parts, 0i64, bn),
+    _ => unreachable!(),
+};
+}
+
+fn taint_exprs_mention(xs: &[Expr], i: i64, bn: &str) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if taint_expr_mentions((xs)[(i) as usize].clone(), bn) {
+        return true;
+    }
+    return taint_exprs_mention(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bn);
+}
+
+fn taint_inits_mention(xs: &[InitN], i: i64, bn: &str) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if taint_expr_mentions((xs)[(i) as usize].value.clone(), bn) {
+        return true;
+    }
+    return taint_inits_mention(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bn);
+}
+
+fn taint_arms_mention(xs: &[ArmN], i: i64, bn: &str) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if taint_expr_mentions((xs)[(i) as usize].body.clone(), bn) {
+        return true;
+    }
+    return taint_arms_mention(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bn);
+}
+
+fn taint_parts_mention(xs: &[PartN], i: i64, bn: &str) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if taint_expr_mentions((xs)[(i) as usize].e.clone(), bn) {
+        return true;
+    }
+    return taint_parts_mention(xs, (i).checked_add(1i64).expect("revl: Int overflow"), bn);
+}
+
+fn taint_witness_receiver(e: Expr, ds: &[TaintDecl]) -> bool {
+    return match e {
+    Expr::Var(_) => false,
+    Expr::IntLit(_) => false,
+    Expr::FloatLit(_) => false,
+    Expr::StrLit(_) => false,
+    Expr::BoolLit(_) => false,
+    Expr::NullLit => false,
+    Expr::Hole(_) => false,
+    Expr::Bad(_) => false,
+    Expr::Bin(b) => { let b = *b; (taint_witness_receiver(b.l.clone(), ds) || taint_witness_receiver(b.r.clone(), ds)) },
+    Expr::Un(u) => { let u = *u; taint_witness_receiver(u.e.clone(), ds) },
+    Expr::Emit(u) => { let u = *u; taint_witness_receiver(u.e.clone(), ds) },
+    Expr::Call(c) => { let c = *c; ((taint_call_receiver(c.clone(), ds) || taint_witness_receiver(c.target.clone(), ds)) || taint_witness_receivers(&c.args, 0i64, ds)) },
+    Expr::Field(f) => { let f = *f; taint_witness_receiver(f.target.clone(), ds) },
+    Expr::OptField(f) => { let f = *f; taint_witness_receiver(f.target.clone(), ds) },
+    Expr::OptCall(c) => { let c = *c; (taint_witness_receiver(c.target.clone(), ds) || taint_witness_receivers(&c.args, 0i64, ds)) },
+    Expr::Index(x) => { let x = *x; (taint_witness_receiver(x.target.clone(), ds) || taint_witness_receiver(x.idx.clone(), ds)) },
+    Expr::If(x) => { let x = *x; ((taint_witness_receiver(x.cond.clone(), ds) || taint_witness_receiver(x.then_.clone(), ds)) || taint_witness_receiver(x.els.clone(), ds)) },
+    Expr::Rec(r) => taint_witness_receivers_init(&r.fields, 0i64, ds),
+    Expr::Lst(l) => taint_witness_receivers(&l.items, 0i64, ds),
+    Expr::Arrow(a) => { let a = *a; taint_witness_receiver(a.body, ds) },
+    Expr::Match(m) => { let m = *m; (taint_witness_receiver(m.scrut.clone(), ds) || taint_witness_receivers_arm(&m.arms, 0i64, ds)) },
+    Expr::Templ(t) => taint_witness_receivers_part(&t.parts, 0i64, ds),
+    _ => unreachable!(),
+};
+}
+
+fn taint_witness_receivers(xs: &[Expr], i: i64, ds: &[TaintDecl]) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if taint_witness_receiver((xs)[(i) as usize].clone(), ds) {
+        return true;
+    }
+    return taint_witness_receivers(xs, (i).checked_add(1i64).expect("revl: Int overflow"), ds);
+}
+
+fn taint_witness_receivers_init(xs: &[InitN], i: i64, ds: &[TaintDecl]) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if taint_witness_receiver((xs)[(i) as usize].value.clone(), ds) {
+        return true;
+    }
+    return taint_witness_receivers_init(xs, (i).checked_add(1i64).expect("revl: Int overflow"), ds);
+}
+
+fn taint_witness_receivers_arm(xs: &[ArmN], i: i64, ds: &[TaintDecl]) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if taint_witness_receiver((xs)[(i) as usize].body.clone(), ds) {
+        return true;
+    }
+    return taint_witness_receivers_arm(xs, (i).checked_add(1i64).expect("revl: Int overflow"), ds);
+}
+
+fn taint_witness_receivers_part(xs: &[PartN], i: i64, ds: &[TaintDecl]) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    if taint_witness_receiver((xs)[(i) as usize].e.clone(), ds) {
+        return true;
+    }
+    return taint_witness_receivers_part(xs, (i).checked_add(1i64).expect("revl: Int overflow"), ds);
+}
+
 fn ir_params_json(ps: &[ParamN]) -> String {
     let mut out = String::from("");
     let mut i = 0i64;
@@ -8519,7 +8753,7 @@ fn ir_cap_list(ts: &[Token], i: i64) -> CapR {
     return CapR { js: out.clone(), i: (k).checked_add(1i64).expect("revl: Int overflow") };
 }
 
-fn ir_extern(ts: Vec<Token>, i: i64) -> IrRes {
+fn ir_extern(ts: Vec<Token>, i: i64, decls: Vec<TaintDecl>) -> IrRes {
     let cls = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
     let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
     let mut capsJson = String::from("");
@@ -8560,6 +8794,7 @@ fn ir_extern(ts: Vec<Token>, i: i64) -> IrRes {
     let mut hasUndo = false;
     let mut undoIdem = false;
     let mut undoRead = false;
+    let mut undoRecv = false;
     let mut compJson = String::from("");
     let mut hasComp = false;
     if atw(&ts, k, "undo") {
@@ -8577,6 +8812,7 @@ fn ir_extern(ts: Vec<Token>, i: i64) -> IrRes {
             return mk_irres(false, String::from(""));
         }
         undoJson = lir_expr(r.e.clone(), vec![]);
+        undoRecv = taint_witness_receiver(r.e.clone(), &decls);
         hasUndo = true;
         k = r.i;
     }
@@ -8611,7 +8847,7 @@ fn ir_extern(ts: Vec<Token>, i: i64) -> IrRes {
     if taint_mentions_secret(retDecl.clone()) {
         js.push_str(", \"secret_return\": true");
     }
-    if taint_secret_witness(retDecl.clone()) {
+    if (taint_secret_witness(retDecl.clone()) || undoRecv) {
         js.push_str(", \"secret_witness\": true");
     }
     if undoIdem {
@@ -8627,7 +8863,7 @@ fn ir_extern(ts: Vec<Token>, i: i64) -> IrRes {
         js.push_str(", \"async\": true");
     }
     if (cls == "witnessed") {
-        js = ((js.revl_concat(", \"entry_kind\": \"transactional\", \"revertible\": true")).revl_concat(", \"ok_conditional\": true, \"witness\": ")).revl_concat(&jstr(&type_arg1(&retDecl)));
+        js = ((js.revl_concat(", \"entry_kind\": \"transactional\", \"revertible\": true")).revl_concat(", \"ok_conditional\": true, \"witness\": ")).revl_concat(&jstr(&taint_strip(type_arg1(&retDecl))));
     }
     if (((cls == "witnessed") || (cls == "emission")) && hasCaps) {
         js = ((js.revl_concat(", \"capabilities\": [")).revl_concat(&capsJson)).revl_concat("]");
@@ -8641,42 +8877,42 @@ fn ir_extern(ts: Vec<Token>, i: i64) -> IrRes {
     return mk_irres(true, js.revl_concat("}"));
 }
 
-fn externs_walk(ts: Vec<Token>, i: i64, acc: String, ok: bool) -> ExAcc {
+fn externs_walk(ts: Vec<Token>, i: i64, acc: String, ok: bool, decls: Vec<TaintDecl>) -> ExAcc {
     if ((i >= ts.revl_length()) || atk(&ts, i, "eof")) {
         return ExAcc { js: acc.clone(), ok: ok };
     }
     let t = tkc(&ts, i);
     if at_boot(&ts, i) {
-        return externs_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone(), ok);
+        return externs_walk(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), acc.clone(), ok, decls.clone());
     }
     if (t.kind != "kw") {
-        return externs_walk(ts.clone(), skip_line(&ts, i), acc.clone(), ok);
+        return externs_walk(ts.clone(), skip_line(&ts, i), acc.clone(), ok, decls.clone());
     }
     if (t.text == "extern") {
-        let ex = ir_extern(ts.clone(), i);
+        let ex = ir_extern(ts.clone(), i, decls.clone());
         let ni = p_extern(ts.clone(), i, empty_prog()).i;
         let acc2 = if ex.ok { if (acc == "") { ex.js } else { (acc.revl_concat(", ")).revl_concat(&ex.js) } } else { acc.clone() };
-        return externs_walk(ts.clone(), ni, acc2, (ok && ex.ok));
+        return externs_walk(ts.clone(), ni, acc2, (ok && ex.ok), decls.clone());
     }
     if (t.text == "test") {
         if atk(&ts, (i).checked_add(1i64).expect("revl: Int overflow"), "{") {
             let e = close_brace(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
             if (e != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return externs_walk(ts.clone(), e, acc.clone(), ok);
+                return externs_walk(ts.clone(), e, acc.clone(), ok, decls.clone());
             }
         }
-        return externs_walk(ts.clone(), skip_line(&ts, i), acc.clone(), ok);
+        return externs_walk(ts.clone(), skip_line(&ts, i), acc.clone(), ok, decls.clone());
     }
     if (t.text == "fn") {
-        return externs_walk(ts.clone(), p_fn(ts.clone(), i, empty_prog()).i, acc.clone(), ok);
+        return externs_walk(ts.clone(), p_fn(ts.clone(), i, empty_prog()).i, acc.clone(), ok, decls.clone());
     }
     if (t.text == "service") {
-        return externs_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, acc.clone(), ok);
+        return externs_walk(ts.clone(), p_service(ts.clone(), i, empty_prog()).i, acc.clone(), ok, decls.clone());
     }
     if (t.text == "component") {
-        return externs_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, acc.clone(), ok);
+        return externs_walk(ts.clone(), p_component(ts.clone(), i, empty_prog()).i, acc.clone(), ok, decls.clone());
     }
-    return externs_walk(ts.clone(), skip_line(&ts, i), acc.clone(), ok);
+    return externs_walk(ts.clone(), skip_line(&ts, i), acc.clone(), ok, decls.clone());
 }
 
 fn skip_brackets(ts: &[Token], i: i64) -> i64 {
@@ -8882,7 +9118,7 @@ pub fn lower_to_ir(src: String) -> String {
     let ver = if a.v3 { String::from("3") } else { if a.v2 { String::from("2") } else { String::from("1") } };
     let fnsjs = fns_walk(ts.clone(), 0i64, String::from(""), case_binds(ts.clone()));
     let typesjs = types_walk(ts.clone(), 0i64, String::from(""));
-    let exres = externs_walk(ts.clone(), 0i64, String::from(""), true);
+    let exres = externs_walk(ts.clone(), 0i64, String::from(""), true, taint_decl_params(ts.clone()));
     let mut out = (((((String::from("{\"ir_version\": ").revl_concat(&ver)).revl_concat(", \"services\": {")).revl_concat(&a.svcs)).revl_concat("}, \"components\": [")).revl_concat(&a.comps)).revl_concat("]");
     if (typesjs != "") {
         out = ((out.revl_concat(", \"types\": {")).revl_concat(&typesjs)).revl_concat("}");
@@ -11231,6 +11467,36 @@ fn the_witness_position_is_the_ok_arm_alone() {
     assert!((taint_secret_witness(String::from("Result[Str, Secret[Str]]")) == false));
     assert!((taint_secret_witness(String::from("Secret[Str]")) == false));
     assert!((taint_secret_witness(String::from("Opt[Secret[Str]]")) == false));
+}
+
+#[test]
+fn the_declared_inverse_s_parameter_is_a_witness_position_too() {
+    let ir = lower_to_ir(String::from("extern pure fn revoke(id: Secret[Str]) -> Unit = @py { return }\nextern witnessed fn lease() -> Result[Str, Str]\n    undo revoke(result)\n    = @py { return Ok(\"x\") }"));
+    assert!((ir.revl_index_of("\"secret_witness\": true") != (0i64).checked_sub(1i64).expect("revl: Int overflow")));
+    assert!((ir.revl_index_of("\"secret_return\": true") == (0i64).checked_sub(1i64).expect("revl: Int overflow")));
+    let plain = lower_to_ir(String::from("extern pure fn revoke(id: Str) -> Unit = @py { return }\nextern witnessed fn lease() -> Result[Str, Str]\n    undo revoke(result)\n    = @py { return Ok(\"x\") }"));
+    assert!((plain.revl_index_of("\"secret_witness\"") == (0i64).checked_sub(1i64).expect("revl: Int overflow")));
+}
+
+#[test]
+fn the_receiver_rule_marks_the_parameter_the_witness_flows_into__and_no_other() {
+    let ts = lex_src(String::from("extern pure fn revoke(id: Secret[Str]) -> Unit = @py { return }\nextern pure fn tag(id: Str, tag: Secret[Str]) -> Unit = @py { return }\nextern witnessed fn lease() -> Result[Str, Str]\n    undo revoke(result)\n    = @py { return Ok(\"x\") }"));
+    let ds = taint_decl_params(ts.clone());
+    assert!((taint_params_of(&ds, "revoke").revl_length() == 1i64));
+    assert!(((taint_params_of(&ds, "revoke"))[(0i64) as usize] == "Secret[Str]"));
+    assert!(((taint_params_of(&ds, "tag"))[(1i64) as usize] == "Secret[Str]"));
+    assert!((taint_params_of(&ds, "nobody").revl_length() == 0i64));
+}
+
+#[test]
+fn the_scanner_reads_the_declared_parameter_list__qualifier_and_all() {
+    let ts = lex_src(String::from("extern witnessed[fs] async fn pull(k: Str) -> Result[Str, Str]\n    undo drop(result)\n    = @py { return Ok(\"x\") }\nextern pure fn drop(v: Secret[Str]) -> Unit = @py { return }\nextern pure fn plain(a: Int, b: Str) -> Unit = @py { return }"));
+    let ds = taint_decl_params(ts.clone());
+    assert!((taint_params_of(&ds, "pull").revl_length() == 1i64));
+    assert!(((taint_params_of(&ds, "pull"))[(0i64) as usize] == "Str"));
+    assert!(((taint_params_of(&ds, "drop"))[(0i64) as usize] == "Secret[Str]"));
+    assert!((taint_params_of(&ds, "plain").revl_length() == 2i64));
+    assert!(((taint_params_of(&ds, "plain"))[(1i64) as usize] == "Str"));
 }
 
 #[test]

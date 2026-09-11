@@ -1862,6 +1862,18 @@ fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) 
     if (!value_is_null(value_field(ext, "idempotency_key"))) { kwargs = kwargs.concat(", idempotency=").concat(py_repr(value_str(value_field(ext, "idempotency_key")))) }
   }
   kwargs = kwargs.concat(transactional_scope_kwargs(ext))
+  // A witnessed extern whose confidentiality is declared on the INVERSE's
+  // parameter (`undo revoke(result)` against `revoke(id: Secret[Str])`) rather
+  // than on its own return. This tier redacts by VALUE at the recorder, so the
+  // witness has to be REGISTERED before the frame takes it, and the
+  // return-position origin (`@_revl_secret_result` on the extern) is not there
+  // to do it — the extern's declared return is ordinary. `secret_witness`
+  // without `secret_return` is exactly that spelling: a `Secret[...]` in the
+  // `Ok` arm implies `secret_return`, so the return position always carries
+  // both and never reaches this line.
+  if (value_bool(value_field(ext, "secret_witness")) && value_is_null(value_field(ext, "secret_return"))) {
+    out = out.push(line(indent + 1, `${runtime_ref("mark_secret")}(${tmp}.value)`))
+  }
   out = out.push(line(indent + 1, register.concat("((lambda result: ").concat(inverse_expr).concat("), ").concat(tmp).concat(".value").concat(kwargs).concat(")")))
   if (value_str(value_field(step, "step")) == "let-effect") {
     out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${tmp}`))
@@ -1993,6 +2005,54 @@ fn body_has_secret_param(steps: List[Any], services: Any) -> Bool {
     if (k == "if") {
       if (body_has_secret_param(value_list(value_field(s, "then")), services)) { return true }
       if (body_has_secret_param(value_list(value_field(s, "else")), services)) { return true }
+    }
+  }
+  return false
+}
+
+// The receiver-position spelling of item 243: does this extern take the witness
+// through an inverse parameter the author qualified `Secret[...]`, with an
+// ordinary declared return? `witnessed_step` emits the registration for exactly
+// this condition, so the import gate has to ask the same question the emit site
+// answers — the reference adds the import AT the emit site, and a
+// declared-but-never-invoked receiver-position extern therefore pulls in no
+// import there.
+fn is_receiver_secret_witness(wit: Any) -> Bool {
+  if (value_is_null(wit)) { return false }
+  if (!value_bool(value_field(wit, "secret_witness"))) { return false }
+  return value_is_null(value_field(wit, "secret_return"))
+}
+
+// Activation bodies: walk `effect` / `let-effect` as `body_step` emits them,
+// descending into `if` branches and into each `provide` method's body, which is
+// the same traversal `emit_body_steps` / `provide_lines` perform.
+fn body_has_receiver_secret_witness(steps: List[Any], externs: List[Any]) -> Bool {
+  for (s of steps) {
+    let k = value_str(value_field(s, "step"))
+    if (k == "effect" || k == "let-effect") {
+      if (is_receiver_secret_witness(witnessed_extern(value_field(s, "acquire"), externs))) { return true }
+    }
+    if (k == "provide") {
+      for (m of value_list(value_field(s, "methods"))) {
+        if (method_body_has_receiver_secret_witness(value_list(value_field(m, "body")), externs)) { return true }
+      }
+    }
+    if (k == "if") {
+      if (body_has_receiver_secret_witness(value_list(value_field(s, "then")), externs)) { return true }
+      if (body_has_receiver_secret_witness(value_list(value_field(s, "else")), externs)) { return true }
+    }
+  }
+  return false
+}
+
+// Method bodies: `method_step` reads only the top-level steps (it has no `if`
+// arm), so this walk stops where the emitter stops rather than claiming a
+// registration the emitter would not write.
+fn method_body_has_receiver_secret_witness(steps: List[Any], externs: List[Any]) -> Bool {
+  for (s of steps) {
+    let k = value_str(value_field(s, "step"))
+    if (k == "effect" || k == "let-effect") {
+      if (is_receiver_secret_witness(witnessed_extern(value_field(s, "acquire"), externs))) { return true }
     }
   }
   return false
@@ -2728,6 +2788,15 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   var need_mark_secret = false
   for (c of components) {
     if (body_has_secret_param(value_list(value_field(c, "body")), value_field(ir, "services"))) { need_mark_secret = true }
+  }
+  // The receiving-end spelling: a witnessed extern whose inverse takes the
+  // witness through a parameter the author qualified `Secret[...]`, with an
+  // ordinary declared return. `witnessed_step` emits the registration for it, so
+  // the import is gated on a component body that actually reaches one — the
+  // reference adds the import at the emit site, and gating on the extern table
+  // instead would import `mark_secret` for an extern no body ever invokes.
+  for (c of components) {
+    if (body_has_receiver_secret_witness(value_list(value_field(c, "body")), value_list(value_field(ir, "externs")))) { need_mark_secret = true }
   }
   var need_secret_result = false
   for (e of value_list(value_field(ir, "externs"))) {

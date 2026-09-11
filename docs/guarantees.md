@@ -92,6 +92,15 @@ groups "the `Secret` families" with G9 as the same no-paper-anchor family.
 | [G-SECRET](rejections.md#the-families) | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) | revl-original (items 249 / 256); no paper anchor |
 | [G-SECRET-FLOW](rejections.md#the-families) | a `Secret[T]` value never reaches a disclosure sink; it crosses only at a declared `Secret[T]` receiver and downgrades only at a declared `endorse[confidential]` | lower (taint flow) | revl-original (items 249 / 256); no paper anchor |
 
+A declared receiver is not a licence to RECORD. A `Secret[T]` declaration
+authorises disclosure to the receiver it names; it says nothing about a durable
+copy taken beside the call. The one place that matters for a witnessed extern is
+its discharge descriptor: the inverse is reconstructed from the `Ok` witness, so
+the witness is the field a crash log keeps, and an author who declared the
+witness confidential — on either end of the call, `Result[Secret[W], E]` on the
+extern or `Secret[W]` on the inverse's parameter — gets the placeholder there
+too. See `docs/design/243-witnessed-externs.md` rule 4.
+
 ## Sandbox isolation rungs
 
 From `docs/design/411-sandbox-placement.md` (item 411). Isolation is a

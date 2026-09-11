@@ -6790,6 +6790,239 @@ fn taint_secret_witness(ty: Str) -> Bool {
          && taint_mentions_secret(p.args[0])
 }
 
+// ---------------------------------------------------------------------------
+// the receiving-side spelling of the same marking
+//
+// `taint_secret_witness` above reads the extern's OWN declared return, which is
+// the whole story only when the author spells the qualifier there. The same
+// bytes at the same position — the inverse's referent argument, which is
+// exactly what a witnessed step's durable discharge descriptor records — are
+// declared this way instead:
+//
+//   extern pure fn release(lease: Secret[Str]) -> Unit = @py { … }
+//   extern witnessed fn lease(…) -> Result[Str, Str] undo release(result)
+//
+// The checker accepts it (the inverse's parameter type is checked at lowering,
+// so it is load-bearing rather than decorative) and an extern's own return
+// cannot see it, so a WAL writer deciding the referent's fate from
+// `taint_secret_witness` alone wrote the confidential value out verbatim.
+// ---------------------------------------------------------------------------
+
+// The declared parameters of the top-level `extern`/`fn` whose keyword sits at
+// `i`, the qualifier INCLUDED: `ir_params_json` strips it off everything it
+// writes, so this is the only place a receiver's `Secret[…]` survives to be
+// read. An empty name means the head is not shaped like a declaration — the
+// same walk `ir_extern` does over the class word, the capability scope,
+// `async`, `fn` and generic brackets.
+type TaintDecl = { name: Str, types: List[Str] }
+
+fn taint_decl_at(ts: List[Token], i: Int) -> TaintDecl {
+  var j = i + 1
+  if (atw(ts, i, "extern")) {
+    j += 1
+    if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+    if (atw(ts, j, "async")) { j += 1 }
+    if (!atw(ts, j, "fn")) { return { name: "", types: [] } }
+    j += 1
+  }
+  let nm = tkc(ts, j).text
+  j += 1
+  if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+  if (!atk(ts, j, "(")) { return { name: "", types: [] } }
+  let ps = params_at(ts, j + 1)
+  var types: List[Str] = []
+  var k = 0
+  while (k < ps.ps.length()) {
+    types = types.push(ps.ps[k].ty)
+    k += 1
+  }
+  return { name: nm, types: types }
+}
+
+// Every top-level `extern`/`fn`'s declared parameters, in source order. Top
+// level only: the scan counts braces, matching the grammar, which has no nested
+// declaration position.
+fn taint_decl_params(ts: List[Token]) -> List[TaintDecl] {
+  var out: List[TaintDecl] = []
+  var d = 0
+  var i = 0
+  while (i < ts.length()) {
+    if (atk(ts, i, "{")) {
+      d += 1
+    } else if (atk(ts, i, "}")) {
+      d -= 1
+    } else if (d == 0 && (atw(ts, i, "extern") || atw(ts, i, "fn"))) {
+      let dec = taint_decl_at(ts, i)
+      if (dec.name != "") { out = out.push(dec) }
+    }
+    i += 1
+  }
+  return out
+}
+
+fn taint_params_of(ds: List[TaintDecl], name: Str) -> List[Str] {
+  var i = 0
+  while (i < ds.length()) {
+    if (ds[i].name == name) { return ds[i].types }
+    i += 1
+  }
+  return []
+}
+
+// The callee NAME of a call head, "" when it is not a name a declaration can be
+// resolved through. A method spelling (`x.restore(y)`) names the method, which
+// is how the reference's `getattr(call.callee, "name")` reads it too.
+fn taint_callee_name(tg: Expr) -> Str {
+  return match tg {
+    Var(vn) => vn,
+    Field(f) => f.name,
+    _ => "",
+  }
+}
+
+// Whether this call passes the witness binder through a parameter the callee
+// declared `Secret[…]`. The reference stops at the shorter of the two lists,
+// because a call that does not match its callee's arity never reaches lowering.
+fn taint_call_receiver(c: CallN, ds: List[TaintDecl]) -> Bool {
+  let cn = taint_callee_name(c.target)
+  if (cn == "") { return false }
+  let ps = taint_params_of(ds, cn)
+  var i = 0
+  while (i < c.args.length() && i < ps.length()) {
+    if (taint_mentions_secret(ps[i]) && taint_expr_mentions(c.args[i], "result")) {
+      return true
+    }
+    i += 1
+  }
+  return false
+}
+
+// Whether the expression reads the variable `bn` anywhere inside it, nested in
+// a container included — the witness a descriptor records is the VALUE, not its
+// spelling at the argument position.
+fn taint_expr_mentions(e: Expr, bn: Str) -> Bool {
+  return match e {
+    Var(vn) => vn == bn,
+    IntLit(_) => false,
+    FloatLit(_) => false,
+    StrLit(_) => false,
+    BoolLit(_) => false,
+    NullLit => false,
+    Hole(_) => false,
+    Bad(_) => false,
+    Bin(b) => taint_expr_mentions(b.l, bn) || taint_expr_mentions(b.r, bn),
+    Un(u) => taint_expr_mentions(u.e, bn),
+    Emit(u) => taint_expr_mentions(u.e, bn),
+    Call(c) => taint_expr_mentions(c.target, bn)
+              || taint_exprs_mention(c.args, 0, bn),
+    Field(f) => taint_expr_mentions(f.target, bn),
+    OptField(f) => taint_expr_mentions(f.target, bn),
+    OptCall(c) => taint_expr_mentions(c.target, bn)
+                  || taint_exprs_mention(c.args, 0, bn),
+    Index(x) => taint_expr_mentions(x.target, bn)
+                || taint_expr_mentions(x.idx, bn),
+    If(x) => taint_expr_mentions(x.cond, bn)
+             || taint_expr_mentions(x.then_, bn)
+             || taint_expr_mentions(x.els, bn),
+    Rec(r) => taint_inits_mention(r.fields, 0, bn),
+    Lst(l) => taint_exprs_mention(l.items, 0, bn),
+    Arrow(a) => taint_expr_mentions(a.body, bn),
+    Match(m) => taint_expr_mentions(m.scrut, bn)
+                || taint_arms_mention(m.arms, 0, bn),
+    Templ(t) => taint_parts_mention(t.parts, 0, bn),
+  }
+}
+
+fn taint_exprs_mention(xs: List[Expr], i: Int, bn: Str) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (taint_expr_mentions(xs[i], bn)) { return true }
+  return taint_exprs_mention(xs, i + 1, bn)
+}
+
+fn taint_inits_mention(xs: List[InitN], i: Int, bn: Str) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (taint_expr_mentions(xs[i].value, bn)) { return true }
+  return taint_inits_mention(xs, i + 1, bn)
+}
+
+fn taint_arms_mention(xs: List[ArmN], i: Int, bn: Str) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (taint_expr_mentions(xs[i].body, bn)) { return true }
+  return taint_arms_mention(xs, i + 1, bn)
+}
+
+fn taint_parts_mention(xs: List[PartN], i: Int, bn: Str) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (taint_expr_mentions(xs[i].e, bn)) { return true }
+  return taint_parts_mention(xs, i + 1, bn)
+}
+
+// Whether the inverse expression reaches a call that takes the witness binder
+// through a declared `Secret[…]` parameter — the whole rule, over the inverse's
+// own expression tree. Only `Call` is a call: an optional-call node is a
+// distinct variant the reference does not treat as one either.
+fn taint_witness_receiver(e: Expr, ds: List[TaintDecl]) -> Bool {
+  return match e {
+    Var(_) => false,
+    IntLit(_) => false,
+    FloatLit(_) => false,
+    StrLit(_) => false,
+    BoolLit(_) => false,
+    NullLit => false,
+    Hole(_) => false,
+    Bad(_) => false,
+    Bin(b) => taint_witness_receiver(b.l, ds)
+              || taint_witness_receiver(b.r, ds),
+    Un(u) => taint_witness_receiver(u.e, ds),
+    Emit(u) => taint_witness_receiver(u.e, ds),
+    Call(c) => taint_call_receiver(c, ds)
+               || taint_witness_receiver(c.target, ds)
+               || taint_witness_receivers(c.args, 0, ds),
+    Field(f) => taint_witness_receiver(f.target, ds),
+    OptField(f) => taint_witness_receiver(f.target, ds),
+    OptCall(c) => taint_witness_receiver(c.target, ds)
+                  || taint_witness_receivers(c.args, 0, ds),
+    Index(x) => taint_witness_receiver(x.target, ds)
+                || taint_witness_receiver(x.idx, ds),
+    If(x) => taint_witness_receiver(x.cond, ds)
+             || taint_witness_receiver(x.then_, ds)
+             || taint_witness_receiver(x.els, ds),
+    Rec(r) => taint_witness_receivers_init(r.fields, 0, ds),
+    Lst(l) => taint_witness_receivers(l.items, 0, ds),
+    Arrow(a) => taint_witness_receiver(a.body, ds),
+    Match(m) => taint_witness_receiver(m.scrut, ds)
+                || taint_witness_receivers_arm(m.arms, 0, ds),
+    Templ(t) => taint_witness_receivers_part(t.parts, 0, ds),
+  }
+}
+
+fn taint_witness_receivers(xs: List[Expr], i: Int, ds: List[TaintDecl]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (taint_witness_receiver(xs[i], ds)) { return true }
+  return taint_witness_receivers(xs, i + 1, ds)
+}
+
+fn taint_witness_receivers_init(xs: List[InitN], i: Int,
+                                ds: List[TaintDecl]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (taint_witness_receiver(xs[i].value, ds)) { return true }
+  return taint_witness_receivers_init(xs, i + 1, ds)
+}
+
+fn taint_witness_receivers_arm(xs: List[ArmN], i: Int,
+                               ds: List[TaintDecl]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (taint_witness_receiver(xs[i].body, ds)) { return true }
+  return taint_witness_receivers_arm(xs, i + 1, ds)
+}
+
+fn taint_witness_receivers_part(xs: List[PartN], i: Int,
+                                ds: List[TaintDecl]) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (taint_witness_receiver(xs[i].e, ds)) { return true }
+  return taint_witness_receivers_part(xs, i + 1, ds)
+}
+
 // ---------------------------------------------------------------- services IR
 
 // A declaration's `params` list. The qualifier is STRIPPED off each type and,
@@ -9281,7 +9514,7 @@ fn ir_cap_list(ts: List[Token], i: Int) -> CapR {
 // a capability scope (`witnessed[fs]`/`emission[net]`, item 343) and the
 // `undo`/`compensate` teardown slots (items 243/309/440) are all in the covered
 // surface and lower to the reference's `_lower_externs` shape.
-fn ir_extern(ts: List[Token], i: Int) -> IrRes {
+fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl]) -> IrRes {
   // `witnessed` is a contextual keyword (an ident), so `.text` is the class for
   // every classification. `pure`/`acquire`/`emission` are reserved keywords.
   let cls = tkc(ts, i + 1).text
@@ -9323,6 +9556,9 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
   var hasUndo = false
   var undoIdem = false
   var undoRead = false
+  // Whether the inverse takes the witness through a parameter the callee
+  // declared `Secret[…]` — the receiving-side spelling of the marking below.
+  var undoRecv = false
   var compJson = ""
   var hasComp = false
   if (atw(ts, k, "undo")) {
@@ -9334,6 +9570,7 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
     let r = expr_at(ts, u)
     if (is_bad(r.e) || r.i <= u) { return mk_irres(false, "") }
     undoJson = lir_expr(r.e, [])
+    undoRecv = taint_witness_receiver(r.e, decls)
     hasUndo = true
     k = r.i
   }
@@ -9367,8 +9604,16 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
   // `secret_return` for the value anywhere in the declared return, and the
   // narrower `secret_witness` for the `Ok` arm a witnessed extern's durable
   // discharge descriptor records as its inverse's referent.
+  //
+  // Two spellings put the qualifier on the witness POSITION, and both have to
+  // be read: the extern's own return (`Result[Secret[W], E]`, above) and the
+  // declared inverse's receiving parameter (`undo release(result)` against
+  // `release(lease: Secret[Str])`), which the checker accepts and which an
+  // extern's own return type cannot see.
   if (taint_mentions_secret(retDecl)) { js = js.concat(", \"secret_return\": true") }
-  if (taint_secret_witness(retDecl)) { js = js.concat(", \"secret_witness\": true") }
+  if (taint_secret_witness(retDecl) || undoRecv) {
+    js = js.concat(", \"secret_witness\": true")
+  }
   // item 309: the idempotency register the inverse-carrying slots stamp. Both
   // flags are additive and the `register` tier is `read` for `undo pure`, else
   // `declared` (a keyed emission is out of the covered extern surface).
@@ -9380,10 +9625,17 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
   if (isAsync) { js = js.concat(", \"async\": true") }
   // item 243: the witnessed transactional descriptor. The witness is the `Ok`
   // payload of the declared `Result[Witness, Error]` return, WAL-serializable
-  // data the auto-registered inverse is rebuilt from.
+  // data the auto-registered inverse is rebuilt from. `retDecl` is the RAW
+  // declared text (the taint flags above read the qualifier off it), so the
+  // qualifier has to come back off here: `witness` is a concrete data type the
+  // emitters parse (`_rust_type`/`_java_v3_type`/wasm's direct read), and past
+  // the declaration a `Secret[T]` parameter IS a `T`. The reference lowers the
+  // witness off the already-stripped return, so this is what keeps the two
+  // byte-identical for `Result[Secret[Str], Str]`.
   if (cls == "witnessed") {
     js = js.concat(", \"entry_kind\": \"transactional\", \"revertible\": true")
-      .concat(", \"ok_conditional\": true, \"witness\": ").concat(jstr(type_arg1(retDecl)))
+      .concat(", \"ok_conditional\": true, \"witness\": ")
+      .concat(jstr(taint_strip(type_arg1(retDecl))))
   }
   // item 343: the declared capability TOKEN a witnessed/emission crossing is
   // keyed on (a bare `emission` writes none — name-as-capability).
@@ -9398,28 +9650,29 @@ fn ir_extern(ts: List[Token], i: Int) -> IrRes {
 // Collect every top-level `extern` into the `externs` list. A single extern
 // outside the covered surface drops the whole section (ok=false), mirroring the
 // component-body omission discipline.
-fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool) -> ExAcc {
+fn externs_walk(ts: List[Token], i: Int, acc: Str, ok: Bool,
+                 decls: List[TaintDecl]) -> ExAcc {
   if (i >= ts.length() || atk(ts, i, "eof")) { return { js: acc, ok: ok } }
   let t = tkc(ts, i)
-  if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok) }
-  if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok) }
+  if (at_boot(ts, i)) { return externs_walk(ts, i + 1, acc, ok, decls) }
+  if (t.kind != "kw") { return externs_walk(ts, skip_line(ts, i), acc, ok, decls) }
   if (t.text == "extern") {
-    let ex = ir_extern(ts, i)
+    let ex = ir_extern(ts, i, decls)
     let ni = p_extern(ts, i, empty_prog()).i
     let acc2 = ex.ok ? (acc == "" ? ex.js : acc.concat(", ").concat(ex.js)) : acc
-    return externs_walk(ts, ni, acc2, ok && ex.ok)
+    return externs_walk(ts, ni, acc2, ok && ex.ok, decls)
   }
   if (t.text == "test") {
     if (atk(ts, i + 1, "{")) {
       let e = close_brace(ts, i + 1)
-      if (e != 0 - 1) { return externs_walk(ts, e, acc, ok) }
+      if (e != 0 - 1) { return externs_walk(ts, e, acc, ok, decls) }
     }
-    return externs_walk(ts, skip_line(ts, i), acc, ok)
+    return externs_walk(ts, skip_line(ts, i), acc, ok, decls)
   }
-  if (t.text == "fn") { return externs_walk(ts, p_fn(ts, i, empty_prog()).i, acc, ok) }
-  if (t.text == "service") { return externs_walk(ts, p_service(ts, i, empty_prog()).i, acc, ok) }
-  if (t.text == "component") { return externs_walk(ts, p_component(ts, i, empty_prog()).i, acc, ok) }
-  return externs_walk(ts, skip_line(ts, i), acc, ok)
+  if (t.text == "fn") { return externs_walk(ts, p_fn(ts, i, empty_prog()).i, acc, ok, decls) }
+  if (t.text == "service") { return externs_walk(ts, p_service(ts, i, empty_prog()).i, acc, ok, decls) }
+  if (t.text == "component") { return externs_walk(ts, p_component(ts, i, empty_prog()).i, acc, ok, decls) }
+  return externs_walk(ts, skip_line(ts, i), acc, ok, decls)
 }
 
 // ================================================================ types IR
@@ -9599,7 +9852,7 @@ pub fn lower_to_ir(src: Str) -> Str {
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
   let fnsjs = fns_walk(ts, 0, "", case_binds(ts))
   let typesjs = types_walk(ts, 0, "")
-  let exres = externs_walk(ts, 0, "", true)
+  let exres = externs_walk(ts, 0, "", true, taint_decl_params(ts))
   var out = "{\"ir_version\": ".concat(ver).concat(", \"services\": {")
     .concat(a.svcs).concat("}, \"components\": [").concat(a.comps).concat("]")
   if (typesjs != "") { out = out.concat(", \"types\": {").concat(typesjs).concat("}") }
@@ -10589,6 +10842,57 @@ test "the witness position is the Ok arm alone" {
   assert taint_secret_witness("Result[Str, Secret[Str]]") == false
   assert taint_secret_witness("Secret[Str]") == false
   assert taint_secret_witness("Opt[Secret[Str]]") == false
+}
+
+test "the declared inverse's parameter is a witness position too" {
+  // The receiving-side spelling: the extern hands back an ordinary value and
+  // the INVERSE declares that it takes the witness confidentially. An extern's
+  // own return type cannot see this, which is why the rule reads the callee's
+  // declared parameters as well.
+  let ir = lower_to_ir("""extern pure fn revoke(id: Secret[Str]) -> Unit = @py { return }
+extern witnessed fn lease() -> Result[Str, Str]
+    undo revoke(result)
+    = @py { return Ok("x") }""")
+  assert ir.indexOf("\"secret_witness\": true") != 0 - 1
+  assert ir.indexOf("\"secret_return\": true") == 0 - 1
+  // ...and the boundary: the same extern with an unqualified inverse parameter
+  // says nothing about the referent, so nothing is marked.
+  let plain = lower_to_ir("""extern pure fn revoke(id: Str) -> Unit = @py { return }
+extern witnessed fn lease() -> Result[Str, Str]
+    undo revoke(result)
+    = @py { return Ok("x") }""")
+  assert plain.indexOf("\"secret_witness\"") == 0 - 1
+}
+
+test "the receiver rule marks the parameter the witness flows into, and no other" {
+  let ts = lex_src("""extern pure fn revoke(id: Secret[Str]) -> Unit = @py { return }
+extern pure fn tag(id: Str, tag: Secret[Str]) -> Unit = @py { return }
+extern witnessed fn lease() -> Result[Str, Str]
+    undo revoke(result)
+    = @py { return Ok("x") }""")
+  let ds = taint_decl_params(ts)
+  assert taint_params_of(ds, "revoke").length() == 1
+  assert taint_params_of(ds, "revoke")[0] == "Secret[Str]"
+  assert taint_params_of(ds, "tag")[1] == "Secret[Str]"
+  assert taint_params_of(ds, "nobody").length() == 0
+}
+
+test "the scanner reads the declared parameter list, qualifier and all" {
+  // `ir_params_json` strips the qualifier off everything it writes, so this
+  // scan is the only place a receiver's `Secret[...]` survives to be read. The
+  // head walk has to skip the class word, a capability scope, `async`, the
+  // name and an optional generic list before it reaches the `(`.
+  let ts = lex_src("""extern witnessed[fs] async fn pull(k: Str) -> Result[Str, Str]
+    undo drop(result)
+    = @py { return Ok("x") }
+extern pure fn drop(v: Secret[Str]) -> Unit = @py { return }
+extern pure fn plain(a: Int, b: Str) -> Unit = @py { return }""")
+  let ds = taint_decl_params(ts)
+  assert taint_params_of(ds, "pull").length() == 1
+  assert taint_params_of(ds, "pull")[0] == "Str"
+  assert taint_params_of(ds, "drop")[0] == "Secret[Str]"
+  assert taint_params_of(ds, "plain").length() == 2
+  assert taint_params_of(ds, "plain")[1] == "Str"
 }
 
 test "the stamps land in the IR the emitters read" {
