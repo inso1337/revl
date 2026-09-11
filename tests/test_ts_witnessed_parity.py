@@ -79,6 +79,8 @@ _WITNESSED = [
     r"mv a\ b c",
     "rm 'weird$name'",
     "   mv a b   ",
+    "mv 'a\\\nb' c",    # a backslash-newline INSIDE quotes is literal, not a
+                        # continuation — the shell and the tokenizer agree
 ]
 _EMISSION = [
     "",
@@ -118,6 +120,9 @@ _EMISSION = [
     "mv a",
     "mv a b c",
     'mv "unbalanced',
+    "mv a\\\nb c",      # backslash-newline line continuation (shell joins words)
+    'mv "a\\\nb" c',    # continuation inside double quotes
+    "mv 'x'\\\n'y' c",  # continuation joining two quoted words
 ]
 _CORPUS = _WITNESSED + _EMISSION
 

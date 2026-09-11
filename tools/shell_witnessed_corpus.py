@@ -68,6 +68,9 @@ CORPUS: list[tuple[str, str]] = [
 
     # --- shell features: pipelines, redirects, substitution, sequences ---
     ("cat setup.py | grep version", "emission"),
+    # a backslash-newline line continuation: the shell deletes the pair and
+    # joins the words, so the tokenizer's operand is not the word it would run
+    ("mv stale\\\nname.txt current.txt", "emission"),
     ("ls -la | head", "emission"),
     ("echo 'export X=1' >> ~/.bashrc", "emission"),
     ("python app.py > out.log 2>&1", "emission"),
