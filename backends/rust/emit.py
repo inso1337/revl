@@ -1762,18 +1762,10 @@ _SECRET_DISPLAY_TYPES = frozenset({"Str", "Int", "Int32", "Float", "Bool"})
 # leaves the container face as the whole coverage.
 _SECRET_WALK_HEADS = frozenset({"List", "Opt", "Map", "Result"})
 
-# item 421 F6(j): the walk recurses the DECLARED type, and revl admits
-# recursive datatypes, so a cyclic record has no base case -- `type Node = {
-# next: Opt[Node] }` walks Node, Opt[Node], Node, ... and never returns. The
-# cap mirrors `revlRegisterValue`'s `depth > 8` on the go tier, which bounds the
-# same shape at runtime; past it the container face is the whole coverage for
-# that subtree, exactly as an undecomposable shape leaves it. `depth` stays the
-# indentation/leaf-name counter so non-recursive output is unchanged.
-_SECRET_WALK_MAX_DEPTH = 8
-
 
 def _secret_face_lines(declared: object, expr: str, types: dict,
-                       depth: int = 0, levels: int = 0) -> list[str]:
+                       depth: int = 0,
+                       path: frozenset[str] = frozenset()) -> list[str]:
     """The statements registering every LEAF reachable inside `expr`, which is
     declared `declared`.
 
@@ -1787,14 +1779,37 @@ def _secret_face_lines(declared: object, expr: str, types: dict,
     faces the scalar doors already register.
 
     `[]` means this walk cannot decompose the shape, which leaves the caller's
-    container face as the whole coverage -- the same kind of bound the go walk's
-    `depth > 8` cap has. That cap is item 421 F6(j): without it a recursive
-    record (`type Node = { next: Opt[Node] }`) has no base case and the emitter
-    dies on a legal program."""
+    container face as the whole coverage.
+
+    item 421 F6(o): the walk is bounded by the PATH of declared types it is on,
+    not by a depth. It used to stop at `levels > 8`, and a depth cap is a
+    confidentiality regression in exactly the walk that exists to prevent one:
+    it terminates the recursion, but it also stops REGISTERING, so the leaves of
+    any declared shape nested deeper than the cap were never registered as their
+    own text and crossed verbatim in every sink `revl_redact_text` covers. A
+    declared type that re-enters itself is the only shape with no base case
+    (`type Node = { next: Opt[Node] }`, item 421 F6(j)), and a path set catches
+    exactly that while leaving every legal shape's leaves registered at any
+    depth. `path` is per-branch, so a type reached twice as siblings is walked
+    twice -- only re-entry on ONE path is a cycle. `depth` stays the
+    indentation/leaf-name counter so non-recursive output is unchanged.
+
+    item 421 F6(p): a declared VARIANT is decomposed by its cases, the way a
+    record is decomposed by its fields. The walk covered the four generic heads
+    and `record` and stopped there, so `Secret[Step]` for
+    `type Step = Final(Str) | Retry` registered the container's own `Debug` face
+    and nothing else -- and the plainest thing an author writes with an ADT is
+    one case's payload (`match step { Step::Final(v) => sink(v) }`), which is a
+    different string and crossed every funnelled sink verbatim. That is F6(i)'s
+    shape exactly, on the one declared shape F6(i) left out: go's reflect walk
+    reaches the payload through the emitted `StepFinal{Value: ..}` struct and
+    py's `_members` reaches it through the case class's `__slots__`, so rust was
+    again the tier whose registry stopped short."""
     if not isinstance(declared, str) or not declared:
         return []
-    if levels > _SECRET_WALK_MAX_DEPTH:
+    if declared in path:
         return []
+    path = path | {declared}
     pad = "    " * depth
     if declared in _SECRET_DISPLAY_TYPES:
         return [f"{pad}revl_mark_secret(&{expr});"]
@@ -1806,8 +1821,35 @@ def _secret_face_lines(declared: object, expr: str, types: dict,
         for field, ftype in (spec.get("fields") or {}).items():
             lines += _secret_face_lines(
                 ftype, f"{expr}.{_ident(field, 'record field')}", types, depth,
-                levels + 1)
+                path)
         return lines
+    if isinstance(spec, dict) and spec.get("kind") == "variant":
+        # item 421 F6(p): a CASE PAYLOAD is a leaf the walk has to reach, and
+        # the arm is the only way in. A nullary case carries nothing and a
+        # re-entrant payload is caught by `path`; both fall to the `_` arm,
+        # which is also what keeps the `match` exhaustive. The arm binds
+        # through `match &{expr}` rather than `match {expr}` so an OWNED
+        # scrutinee (the origin door's `let _revl_v = ...`, which the walk must
+        # leave intact to return) is borrowed, not moved.
+        enum = _ident(declared, "type name")
+        name = f"_revl_leaf{depth}"
+        arms: list[str] = []
+        for case in spec.get("cases") or []:
+            payload = case.get("payload")
+            if not isinstance(payload, str) or not payload:
+                continue
+            body = _secret_face_lines(payload, name, types, depth + 2, path)
+            if not body:
+                continue
+            # the case name is mangled at the DEFINITION (`_emit_types`), so
+            # the pattern has to mangle it the same way to name a real variant
+            cname = _ident(case.get("name"), "case name")
+            arms += ([f"{pad}    {enum}::{cname}({name}) => {{"]
+                     + body + [f"{pad}    }}"])
+        if not arms:
+            return []
+        return ([f"{pad}match &{expr} {{"] + arms
+                + [f"{pad}    _ => {{}}", f"{pad}}}"])
     generic = re.match(r"^(\w+)\[(.+)\]$", declared)
     if generic and generic.group(1) in _SECRET_WALK_HEADS:
         head, inner = generic.group(1), generic.group(2)
@@ -1821,9 +1863,9 @@ def _secret_face_lines(declared: object, expr: str, types: dict,
         elif head == "Result":
             ok, err = _split_generic(inner)
             ok_lines = _secret_face_lines(ok, name, types, depth + 2,
-                                          levels + 1)
+                                          path)
             err_lines = _secret_face_lines(err, name, types, depth + 2,
-                                           levels + 1)
+                                           path)
             if not ok_lines and not err_lines:
                 return []
             return ([f"{pad}match {expr}.as_ref() {{",
@@ -1838,7 +1880,7 @@ def _secret_face_lines(declared: object, expr: str, types: dict,
             opener, closer = f"if let Some({name}) = {expr}.as_ref() {{", "}"
         else:
             opener, closer = f"for {name} in {expr}.iter() {{", "}"
-        body = _secret_face_lines(inner, name, types, depth + 1, levels + 1)
+        body = _secret_face_lines(inner, name, types, depth + 1, path)
         if not body:
             return []
         return [opener] + body + [f"{pad}{closer}"]
