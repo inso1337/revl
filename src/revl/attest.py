@@ -361,6 +361,20 @@ def _parse_iso(value: str):
 SIGNATURE_FIELD = "signature"
 
 
+def signature_not_ascii_reason(given_sig: str) -> str:
+    """The reason a `signature` field can never match, or `""` if it is a
+    candidate at all.
+
+    The MAC is hex, so a signature outside ASCII cannot be the value it would
+    have to be. `hmac.compare_digest` raises `TypeError` on such an input rather
+    than returning False, so a verifier that feeds it one unchecked raises where
+    the contract says it re-derives and REFUSES: a hostile attestation would
+    choose the failure mode, a traceback instead of a reason."""
+    if given_sig.isascii():
+        return ""
+    return "signature is not ASCII, so it is not the hex MAC it would have to be"
+
+
 # ---------------------------------------------------------------------------
 # the gate verdict — the measurement an attestation records
 # ---------------------------------------------------------------------------
@@ -693,6 +707,9 @@ def verify_attestation(att: dict, key: bytes, ir: dict | None = None
         return False, "attestation has no signature"
     if "composition_hash" not in att:
         return False, "attestation missing required member 'composition_hash'"
+    not_ascii = signature_not_ascii_reason(given_sig)
+    if not_ascii:
+        return False, not_ascii
 
     # Sign over exactly the received members (everything but `signature`). Any
     # altered, dropped, or added member — verdict, timestamp, hash, guarantees,
