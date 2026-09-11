@@ -281,6 +281,23 @@ function rememberSecret(value: unknown, seen?: Set<unknown>): void {
     registerText(JSON.stringify(value))
     return
   }
+  // A revl `Map` is this tier's built-in JS `Map` (emit.py lowers `Map.new()`
+  // to `new Map()`), and a `Map`'s entries are not OWN enumerable properties,
+  // so the record walk below reads it as `Object.values(map) === []` and
+  // registers nothing. A `Secret[Map[K, V]]` receiver is an ordinary
+  // author-reachable argument -- the emitter writes `host.markSecret(m)` at the
+  // head of the method -- so every value it held crossed every sink
+  // `redactText` covers verbatim, `Map.get` and `JSON.stringify` and the
+  // `Map(n) { … }` rendering alike. Values only, and for the reason the record
+  // walk below states: the KEYS are field names the author wrote, and the py
+  // and java tiers register `dict.values()` / `Map.values()` for the same rule.
+  // A `Map` renders its own face as `{}` or `[object Map]`, so there is no
+  // container face to add here -- the registered values are what the
+  // renderings that matter are built from.
+  if (value instanceof Map) {
+    for (const item of value.values()) rememberSecret(item, seen)
+    return
+  }
   // Values only: a record's KEYS are field names the author wrote, not the
   // declared secret, and erasing them would destroy the trace's shape.
   for (const item of Object.values(value as Record<string, unknown>)) {
