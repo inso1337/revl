@@ -141,6 +141,31 @@ SELFHOST_ORACLE_TESTS = {
 # parser.rvl, which issue #431 calls out as needing their oracle + this gate.
 SELFHOST_ALWAYS = ("tests/test_selfhost_line_coverage.py",)
 
+# Which self-host emitter port mirrors a backend tier's REFERENCE emitter:
+# `backends/<package>/emit.py` is what `selfhost/emit_<stem>.rvl` is held
+# byte-identical to by the oracle tests. Keyed by the tier directory name, so
+# the mapping is the same one tools/selfhost_line_coverage.py's TIERS table
+# states in the other direction.
+REFERENCE_EMITTER_ORACLE = {
+    "python": "emit_py",
+    "typescript": "emit_ts",
+    "go": "emit_go",
+    "java": "emit_java",
+    "rust": "emit_rust",
+    "wasm": "emit_wasm",
+}
+
+# The self-host oracles that load EVERY tier's reference emitter and compare it
+# with its port, so any tier's `backends/*/emit.py` can break them. They name the
+# reference only in prose (tools/selfhost_differential_survey.py builds
+# `backends/<tier>/emit.py` paths programmatically and the test module never
+# spells out a tier name), so the text heuristic in `_tier_tests` cannot see
+# them. This is the other half of the #850 hole: that PR changed
+# `backends/python/emit.py` alone and the matrix was skipped, but even the
+# inner-loop selector would not have selected
+# tests/test_selfhost_differential_survey.py.
+REFERENCE_EMITTER_ALWAYS = ("tests/test_selfhost_differential_survey.py",)
+
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
 _SHARED_TEST_FILES = {
     "tests/conftest.py",
@@ -450,6 +475,19 @@ def select(changed, root) -> dict:
             if tier not in BACKEND_TIERS:
                 return _full(f"unknown backend path {f} -> full")
             pytest_nodes |= _tier_tests(root, tier)
+            # `_tier_tests` matches the tier NAME, by filename or by content, in
+            # the tests it scans. The oracles that hold a tier's REFERENCE
+            # emitter byte-identical to its self-host port do not satisfy that:
+            # they reach `backends/<tier>/emit.py` through a path assembled at
+            # runtime, or mention it only in prose. Select them by the tier they
+            # guard instead of by a word they may not contain (issue #854: PR
+            # #850 changed backends/python/emit.py, the port was never made, and
+            # tests/test_selfhost_differential_survey.py was not selected).
+            oracle = REFERENCE_EMITTER_ORACLE.get(tier)
+            if oracle:
+                pytest_nodes |= set(SELFHOST_ORACLE_TESTS.get(oracle, ()))
+                pytest_nodes |= set(SELFHOST_ALWAYS)
+            pytest_nodes |= set(REFERENCE_EMITTER_ALWAYS)
             pytest_nodes.add("tests/test_goldens.py")
             gates.add("conformance")
             if tier in BACKEND_STEP_TIERS:

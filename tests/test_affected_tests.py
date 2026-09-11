@@ -226,6 +226,51 @@ def test_selfhost_oracle_map_covers_the_tree():
             assert (root / t).is_file(), f"{stem} maps to a missing test {t}"
 
 
+def test_reference_emitter_map_covers_every_tier():
+    """The reverse of the self-host mapping: every backend tier's REFERENCE
+    emitter must have its self-host port's oracle selected by a
+    `backends/<tier>/**` change, and nothing in that mapping may point at a file
+    that is not on disk.
+
+    Issue #854: PR #850 changed `backends/python/emit.py` alone. The oracle that
+    holds that file byte-identical to `selfhost/emit_py.rvl` was still selected
+    (it names the path in prose), but `tests/test_selfhost_differential_survey.py`
+    reaches the same file through a path built at runtime, so it was selected by
+    nothing. A tier whose oracle is not named here can regress the same way, so
+    this recomputes the tier set from the tree instead of trusting the table."""
+    from tools.affected_tests import (
+        BACKEND_TIERS,
+        REFERENCE_EMITTER_ALWAYS,
+        REFERENCE_EMITTER_ORACLE,
+        SELFHOST_ALWAYS,
+    )
+
+    root = Path(__file__).resolve().parent.parent
+    on_disk = {
+        p.parent.name
+        for p in (root / "backends").glob("*/emit.py")
+    }
+    mapped = set(REFERENCE_EMITTER_ORACLE)
+    assert mapped == on_disk == set(BACKEND_TIERS), (
+        "REFERENCE_EMITTER_ORACLE has drifted from backends/*/emit.py.\n"
+        f"  tiers with an emitter but no oracle mapping: "
+        f"{sorted(on_disk - mapped)}\n"
+        f"  stale keys (no such backend emitter): {sorted(mapped - on_disk)}\n"
+        f"  tier not listed in BACKEND_TIERS: {sorted(on_disk - set(BACKEND_TIERS))}\n"
+        "Update tools/affected_tests.py::REFERENCE_EMITTER_ORACLE."
+    )
+    for tier, stem in REFERENCE_EMITTER_ORACLE.items():
+        r = sel(f"backends/{tier}/emit.py")
+        assert r["full"] is False, f"{tier} escalates a reference-emitter change"
+        for t in (f"tests/test_selfhost_{stem}.py",) + tuple(SELFHOST_ALWAYS) \
+                + tuple(REFERENCE_EMITTER_ALWAYS):
+            assert (root / t).is_file(), f"{tier} maps to a missing test {t}"
+            assert t in r["pytest"], (
+                f"{t} guards backends/{tier}/emit.py and is not selected by it: "
+                f"reason={r['reason']!r}"
+            )
+
+
 # --- CI-3: a .md / docs change compiles the doc snippets (issue #550) ------- #
 def test_markdown_change_selects_doc_examples():
     """Before #550 a `.md` edit matched no pytest rule and selected ZERO tests,
