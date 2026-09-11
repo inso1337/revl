@@ -419,3 +419,136 @@ def test_with_the_escaped_faces_stripped_the_value_leaks(tmp_path):
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     assert "test result: ok" in (result.stdout or "")
+
+
+# ---------------------------------------------------------------------------
+# item 421 F6(f): the declared `Secret[T]` types that are NOT scalars
+# ---------------------------------------------------------------------------
+#
+# `revl_mark_secret` and `revl_secret_result` were generic over
+# `std::fmt::Display`, which `String`, `i64`, `i32`, `f64` and `bool` implement
+# and which `Vec<u8>` (what `Bytes` lowers to) and `Vec<String>` (`List[Str]`)
+# do not. A composition declaring a non-scalar `Secret[T]` was accepted by the
+# front end and emitted a crate that did not build at all, so the doors now
+# read the declared type: a scalar keeps the `Display` door unchanged, `Bytes`
+# gets the decoded/json/Debug trio the go tier registers for a byte slice
+# (item 421 F6(e)), and every other shape gets the `Debug` form -- the one
+# formatter every type a `Secret[T]` lowers to implements, cordis `Value`
+# included, and the only one an emitted sink can write such a value with.
+
+_NON_SCALAR_SCENARIO = '''
+extern emission[vault.connect] fn connect(key: Secret[Bytes]) -> Unit
+  = @rs { let _ = key; }
+
+service Vault { emission fn open(key: Secret[Bytes]) -> Str }
+service Front { emission fn put(key: Secret[List[Str]]) -> Str }
+
+component Keeper provides vault: Vault {
+  config { url: Str = "pg://main", api_key: Secret[Bytes] }
+
+  provide vault {
+    fn open(key) {
+      return "opened"
+    }
+  }
+}
+
+component Portal requires vault: Vault provides front: Front {
+  provide front {
+    fn put(key) {
+      return "ok"
+    }
+  }
+}
+'''
+
+
+def test_a_non_scalar_secret_takes_the_door_its_declared_type_needs():
+    code = emit.emit(_compile(_NON_SCALAR_SCENARIO))
+    # the config door, on a `Bytes` field
+    assert "revl_mark_secret_bytes(&config.api_key);" in code, code
+    # the receiver doors, one per declared shape
+    assert "revl_mark_secret_bytes(&key); " in code, code
+    assert "revl_mark_secret_encoded(&key); " in code, code
+    # ...and the scalar doors are left exactly as they were, so every existing
+    # golden and the selfhost mirror stay untouched
+    assert "pub fn revl_mark_secret<T: std::fmt::Display>(value: &T) {" in code
+    assert "pub fn revl_secret_result<T: std::fmt::Display>(value: T) -> T {" in code
+    assert "pub fn revl_mark_secret_bytes(value: &[u8]) {" in code
+    assert "pub fn revl_mark_secret_encoded<T: std::fmt::Debug + ?Sized>(value: &T) {" in code
+
+
+def test_a_scalar_secret_still_takes_the_display_door():
+    """The scenario's `Secret[Str]` is the shape the tier always handled; its
+    doors must not have moved to the encoder pair."""
+    code = emit.emit(_compile(SCENARIO))
+    assert "revl_mark_secret(&config.api_key);" in code
+    assert "revl_mark_secret_bytes(&config.api_key)" not in code
+    assert "revl_mark_secret_encoded(&config.api_key)" not in code
+
+
+_NON_SCALAR_HARNESS = f'''
+#[cfg(test)]
+mod revl_secret_non_scalar_tests {{
+    use crate::{{
+        revl_forget_secrets, revl_mark_secret_bytes, revl_mark_secret_encoded,
+        revl_redact_text, revl_secret_result_bytes, revl_secret_result_encoded,
+    }};
+
+    const CANARY: &str = "{CANARY}";
+    const REDACTED: &str = "{REDACTED_SECRET}";
+
+    #[test]
+    fn a_non_scalar_secret_is_scrubbed_on_every_face_it_is_written_with() {{
+        let payload = CANARY.as_bytes().to_vec();
+        let debug_face = format!("{{:?}}", payload);
+        let json_face = format!("[{{}}]", payload.iter().map(|b| b.to_string())
+            .collect::<Vec<_>>().join(","));
+
+        // 1. Bytes: the byte door registers the decoded text, the json array the
+        //    wire carries, and the Debug form -- the three a sink can write.
+        revl_forget_secrets();
+        revl_mark_secret_bytes(&payload);
+        assert_eq!(revl_redact_text(CANARY.to_string()), REDACTED);
+        assert_eq!(revl_redact_text(debug_face.clone()), REDACTED);
+        assert_eq!(revl_redact_text(json_face.clone()), REDACTED);
+
+        // 2. the origin end hands the value back unchanged, like the scalar door.
+        revl_forget_secrets();
+        let minted = revl_secret_result_bytes(payload.clone());
+        assert_eq!(minted, payload);
+        assert_eq!(revl_redact_text(CANARY.to_string()), REDACTED);
+
+        // 3. a container with no Display registers through the Debug door.
+        revl_forget_secrets();
+        let list = vec![CANARY.to_string()];
+        revl_mark_secret_encoded(&list);
+        assert_eq!(revl_redact_text(format!("{{:?}}", list)), REDACTED);
+        let minted = revl_secret_result_encoded(list.clone());
+        assert_eq!(minted, list);
+
+        // 4. non-vacuity: with nothing registered every face flows verbatim, so
+        //    the assertions above are the registry working, not an empty read.
+        revl_forget_secrets();
+        assert!(revl_redact_text(CANARY.to_string()).contains(CANARY));
+        assert_eq!(revl_redact_text(debug_face.clone()), debug_face);
+        assert_eq!(revl_redact_text(json_face.clone()), json_face);
+    }}
+}}
+'''
+
+
+@needs_cargo
+def test_a_non_scalar_secret_composition_builds_and_is_scrubbed(tmp_path):
+    """The regression this pins is a BUILD one: before the doors read the
+    declared type, this crate did not compile (`E0277: Vec<u8> doesn't
+    implement std::fmt::Display`, at the config and receiver doors both), so the
+    front end accepted a composition whose artifact was unusable."""
+    src = emit.emit(_compile(_NON_SCALAR_SCENARIO))
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(
+        src + "\n" + _NON_SCALAR_HARNESS, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    assert "test result: ok" in (result.stdout or "")
