@@ -148,8 +148,12 @@
 // Like `stdlib/http.rvl` and `stdlib/render.rvl`, this is PURE revl (records,
 // variants, `match`, loops: no `@py`, no `@ts`), so there is nothing to defer per
 // tier and the module lowers on every backend. The py tier is executed by
-// `tests/test_framing_stdlib.py`. It imports `Header` from `stdlib/http.rvl` and
-// nothing else, so a component that vendors stdlib files copies both.
+// `tests/test_framing_stdlib.py`. It imports `Header` and the one header-name
+// comparison, `header_name_eq`, from `stdlib/http.rvl` and nothing else, so a
+// component that vendors stdlib files copies both. The comparison is shared
+// rather than re-implemented here on purpose: a second copy is a second answer
+// to "is this the same field", and two readers that can disagree about whether
+// a header is present are the defect `header_name_eq` exists to remove.
 //
 // ---------------------------------------------------------------- the residue
 //
@@ -158,7 +162,7 @@
 // close that. It makes the canonical decision cheap, typed and one `use` away,
 // and it makes taking a different decision a visible one.
 
-use "stdlib/http.rvl" { Header }
+use "stdlib/http.rvl" { Header, header_name_eq }
 
 // ---------------------------------------------------------------- refusal
 
@@ -230,7 +234,7 @@ pub fn message_of(r: FramingRefusal) -> Str {
 pub fn header_values(headers: List[Header], name: Str) -> List[Str] {
   var out: List[Str] = []
   for (h of headers) {
-    if (name_eq(h.name, name)) {
+    if (header_name_eq(h.name, name)) {
       out = out.push(h.value)
     }
   }
@@ -361,29 +365,4 @@ fn strip_ows(s: Str) -> Str {
     b -= 1
   }
   return s.slice(a, b)
-}
-
-// ASCII lower-fold of a code unit, so field names compare case-insensitively
-// (RFC 9110 5.1) whatever case a caller stored them in; WHATWG `Headers`, which
-// `stdlib/http.rvl` mirrors, stores them lower-cased.
-fn lower_code(x: Int) -> Int {
-  if (x >= 65 && x <= 90) {
-    return x + 32
-  }
-  return x
-}
-
-fn name_eq(a: Str, b: Str) -> Bool {
-  if (a.length() != b.length()) {
-    return false
-  }
-  var i = 0
-  let n = a.length()
-  while (i < n) {
-    if (lower_code(a.charCodeAt(i)) != lower_code(b.charCodeAt(i))) {
-      return false
-    }
-    i += 1
-  }
-  return true
 }

@@ -164,7 +164,12 @@ def test_module_file_is_the_documented_surface():
     assert "pub fn header_count(headers: List[Header], name: Str) -> Int" in text
     # the header set it reads is the one stdlib/http.rvl already models, kept as a
     # LIST precisely so a repeated name stays visible
-    assert 'use "stdlib/http.rvl" { Header }' in text
+    assert 'use "stdlib/http.rvl" { Header, header_name_eq }' in text
+    # and the one name comparison is SHARED with http.rvl's own `header_value`,
+    # not re-implemented here: two copies are two answers to "is this the same
+    # field", and two readers disagreeing about a header's presence is the defect
+    assert "fn name_eq(" not in text
+    assert "fn lower_code(" not in text
 
 
 def test_the_module_doc_names_the_evidence_and_the_rfc_rules():
@@ -444,3 +449,49 @@ fn doubled() -> Int {
     names = {f["name"] for f in ir["functions"]}
     assert {"body_to_read", "refusal_for", "frames_request", "doubled"} <= names
     assert ir.get("externs", []) == []
+
+
+def test_the_two_shipped_header_readers_agree_about_presence(tmp_path):
+    # The defect this pins: `header_value` (`stdlib/http.rvl`) compared names
+    # with `==` while `header_values`/`header_count` (this module) compared them
+    # case-insensitively, so for ONE `List[Header]` one reader answered "present"
+    # and the other answered "absent". A request head carries the wire's own
+    # spelling (`Content-Type`, `Authorization`), which is what the HTTP face
+    # stores into the `Request` record, so the disagreement was reachable on
+    # every routed request: `header_count(hs, "content-type")` said 1 while
+    # `header_value(hs, "content-type")` said `None`. Both now compare through
+    # the one `header_name_eq`, so a component that imports both readers -- the
+    # shape `test_a_component_that_imports_http_rvl_too_compiles` shows is
+    # supported -- sees ONE answer for every spelling.
+    main = tmp_path / "readers.rvl"
+    main.write_text("""\
+use "stdlib/framing.rvl" { header_count, header_values }
+use "stdlib/http.rvl" { Header, header_value }
+
+fn first(hs: List[Header], name: Str) -> Str {
+  return match header_value(hs, name) {
+    Some(v) => v,
+    None => "<absent>",
+  }
+}
+
+fn count(hs: List[Header], name: Str) -> Int {
+  return header_count(hs, name)
+}
+
+fn all_values(hs: List[Header], name: Str) -> Str {
+  return header_values(hs, name).join("|")
+}
+""", encoding="utf-8")
+    ns = _exec_python(compile_files([str(main)]))
+    wire = [H("Content-Type", "application/json")]
+    # the wire's own spelling, and every other spelling of the same field
+    for name in ("Content-Type", "content-type", "CONTENT-TYPE"):
+        assert ns["first"](wire, name) == "application/json", name
+        assert ns["count"](wire, name) == 1, name
+        assert ns["all_values"](wire, name) == "application/json", name
+    # and the two agree about ABSENCE as well, so "present" and "absent" are the
+    # only two answers and no reader can be read as saying both
+    assert ns["first"](wire, "authorization") == "<absent>"
+    assert ns["count"](wire, "authorization") == 0
+    assert ns["all_values"](wire, "authorization") == ""

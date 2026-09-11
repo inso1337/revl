@@ -110,8 +110,11 @@ pub fn parse_method(s: Str) -> Opt[Method] {
 // than a `Map[Str, Str]` because this mirrors Cordis's WHATWG `Headers`
 // (`req.headers` / `res.headers`): a real request may repeat a header name
 // (Set-Cookie, Accept), and order is observable on the wire — a plain map loses
-// both. WHATWG `Headers` lower-cases names on the wire, so callers normalise
-// before storing (see `header_value`).
+// both. The stored `name` keeps whatever spelling its source used — a request
+// head carries the wire's own (`Content-Type`, `Authorization`), while this
+// module's response builders write lower-case — so readers compare names
+// case-insensitively (RFC 9110 5.1) via `header_name_eq`, and any spelling finds
+// the same field.
 pub type Header = { name: Str, value: Str }
 
 // ---------------------------------------------------------------- body
@@ -315,12 +318,44 @@ pub fn body_text(b: Body) -> Str {
   }
 }
 
-// Look up the first value for a header name (case-sensitive on the stored name;
-// callers normalise to lower-case before storing, as WHATWG `Headers` does).
-// `None` when absent — never a sentinel.
+// ASCII lower-fold of a code unit, so field names compare case-insensitively
+// (RFC 9110 5.1) whatever case a caller stored them in. WHATWG `Headers`, which
+// this module mirrors, guarantees the same answer for any spelling, and the
+// store is not required to normalise: a header set built from a request head
+// carries the wire's own spelling (`Content-Type`, `Authorization`).
+fn lower_code(x: Int) -> Int {
+  if (x >= 65 && x <= 90) {
+    return x + 32
+  }
+  return x
+}
+
+// Whether two header NAMES are the same field, comparing case-insensitively
+// (RFC 9110 5.1). Every reader in this module and in `stdlib/framing.rvl`
+// compares through this one function, so no two readers can disagree about
+// whether a name is present.
+pub fn header_name_eq(a: Str, b: Str) -> Bool {
+  if (a.length() != b.length()) {
+    return false
+  }
+  var i = 0
+  let n = a.length()
+  while (i < n) {
+    if (lower_code(a.charCodeAt(i)) != lower_code(b.charCodeAt(i))) {
+      return false
+    }
+    i += 1
+  }
+  return true
+}
+
+// Look up the first value for a header name. Field names are case-insensitive
+// (RFC 9110 5.1), so `header_value(hs, "content-type")` finds a header stored as
+// `Content-Type` — the spelling a request head carries. `None` when absent —
+// never a sentinel.
 pub fn header_value(headers: List[Header], name: Str) -> Opt[Str] {
   for (h of headers) {
-    if (h.name == name) { return Some(h.value) }
+    if (header_name_eq(h.name, name)) { return Some(h.value) }
   }
   return None
 }
