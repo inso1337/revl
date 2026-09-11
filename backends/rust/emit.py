@@ -1790,6 +1790,116 @@ pub fn revl_redact_text(text: String) -> String {
 pub fn revl_forget_secrets() {
     revl_secret_values(|values| values.clear());
 }
+
+// ---- the seam failure funnel (item 421 F5) ---------------------------
+//
+// The cross-process error channel. A served method returning Result<T, E> whose
+// E quotes the call's own arguments or a held credential is serialized into the
+// reply's value channel by revl_seam_failure before it leaves this process: the
+// same two-stage contract the py, ts, go and java tiers implement, in the same
+// order. Stage 1 replaces the call's OWN argument values -- the caller's bytes
+// crossing back -- and stage 2 the values a declared Secret[T] registered. A
+// failure that quotes a registered credential the call was NOT made with is
+// stage 2's case and stage 1 cannot see it, which is why both stages run.
+//
+// The funnel sits in the GENERATED half rather than in the runner because on
+// this tier the registry is here: rust (native) has no reflection, so the
+// process-global registry is populated by the emitted code itself and read
+// in-line by the emitted sinks. The runner holds no registry to consult, so
+// there is nothing for a hook in it to reach.
+//
+// Rust's error channel is the value channel: `handle_conn` always replies
+// {"ok": true, "value": ...}, and a Result's Err is encoded as the canonical
+// {"$kind": "Err", "$value": ...}. So the funnel runs over the DECODED error
+// value's string leaves and the reply is rendered afterwards. Scrubbing the
+// rendered JSON instead would match nothing for a value holding a quote or a
+// backslash -- the escape-before-redact hole of F6(d) -- so the order here is
+// deliberate.
+
+// Must equal confidential.REDACTED_ARG on the py tier and bridge.RedactedArg on
+// the go tier: a polyglot seam produces the SAME marker whichever tier answered.
+pub const REVL_REDACTED_ARG: &str = "<redacted:arg>";
+
+// The length below which an argument is left alone: a shorter substring match is
+// a coin flip against ordinary English and replacing it would shred the
+// diagnostic for no confidentiality gain. Same bound as the go tier's
+// minMatchableArg.
+const REVL_MIN_MATCHABLE_ARG: usize = 3;
+
+// revl_arg_needles collects the string forms an argument can take inside error
+// text. Booleans and null are skipped (their renderings are ordinary words); an
+// object's KEYS are skipped too, because they are field names the author wrote
+// rather than the caller's data.
+fn revl_arg_needles(value: &serde_json::Value, into: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.chars().count() >= REVL_MIN_MATCHABLE_ARG {
+                into.push(s.clone());
+            }
+        }
+        serde_json::Value::Number(n) => {
+            let spelled = n.to_string();
+            if spelled.chars().count() >= REVL_MIN_MATCHABLE_ARG {
+                into.push(spelled);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter() {
+                revl_arg_needles(item, into);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_key, item) in map.iter() {
+                revl_arg_needles(item, into);
+            }
+        }
+        _ => {}
+    }
+}
+
+// revl_seam_failure is the error text a provider-side failure is allowed to send
+// back, with this call's own argument values replaced by REVL_REDACTED_ARG and
+// every registered secret value replaced by REVL_REDACTED_SECRET. Longest needle
+// first, so one that contains another leaves no tail behind.
+pub fn revl_seam_failure(text: String, args: &[serde_json::Value]) -> String {
+    let mut needles: Vec<String> = Vec::new();
+    for arg in args.iter() {
+        revl_arg_needles(arg, &mut needles);
+    }
+    // Longest first, and equal-length needles ordered by value so a duplicate is
+    // adjacent and `dedup` can drop it -- the set the go tier collects.
+    needles.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    needles.dedup();
+    let mut text = text;
+    for needle in needles.iter() {
+        text = text.replace(needle.as_str(), REVL_REDACTED_ARG);
+    }
+    revl_redact_text(text)
+}
+
+// revl_funnel_err_value runs the funnel over every string leaf of a decoded
+// error value, leaving the shape alone: an error type that is a plain String
+// (the common `Result<T, Str>`) is one leaf, and a structured one has each field
+// it quotes scrubbed. A value that is not a string carries no caller bytes.
+pub fn revl_funnel_err_value(value: &mut serde_json::Value, args: &[serde_json::Value]) {
+    match value {
+        serde_json::Value::String(s) => {
+            let text = std::mem::take(s);
+            *s = revl_seam_failure(text, args);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                revl_funnel_err_value(item, args);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_key, item) in map.iter_mut() {
+                revl_funnel_err_value(item, args);
+            }
+        }
+        _ => {}
+    }
+}
 '''
 
 
@@ -8463,6 +8573,21 @@ def _result_to_json(call: str) -> str:
             f'Err(_e) => serde_json::json!({{"$kind": "Err", "$value": serde_json::to_value(&_e).unwrap_or(serde_json::Value::Null)}}) }} }}')
 
 
+def _result_to_json_funneled(call: str) -> str:
+    """`_result_to_json`, with the Err payload run through the seam funnel.
+
+    item 421 F5: the Err half is the one place a provider's failure text crosses
+    this seam, so it is the one place the funnel has to run. The Ok half is a
+    value the caller asked for and is left exactly as it was -- a `Secret[T]`
+    return crosses intact and the CONSUMER registers it, as on the other tiers.
+    """
+    return (f'{{ match {call} {{ '
+            f'Ok(_v) => serde_json::json!({{"$kind": "Ok", "$value": serde_json::to_value(&_v).unwrap_or(serde_json::Value::Null)}}), '
+            f'Err(_e) => {{ let mut _j = serde_json::to_value(&_e).unwrap_or(serde_json::Value::Null); '
+            f'revl_funnel_err_value(&mut _j, args); '
+            f'serde_json::json!({{"$kind": "Err", "$value": _j}}) }} }} }}')
+
+
 def _bridge_arg_ser(name: str, rtype: str) -> str:
     """Serialize a proxy method argument to a serde_json::Value."""
     if rtype in ("String", "i64", "f64", "bool"):
@@ -8527,7 +8652,9 @@ def _bridge_ret_ser(call: str, rtype: str) -> str:
                 f"v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default())"
                 f".collect::<Vec<_>>()) }}")
     if _split_result(rtype):
-        return _result_to_json(call)
+        # item 421 F5: only a document that declares a `Secret[T]` carries the
+        # funnel, so a marking-free unit stays byte-identical (`_SECRET_MODE`).
+        return _result_to_json_funneled(call) if _SECRET_MODE else _result_to_json(call)
     if _bridge_serde_ok(rtype):
         return f"{{ let _r = {call}; serde_json::to_value(&_r).unwrap_or(serde_json::Value::Null) }}"
     return f"{{ let _ = {call}; serde_json::Value::Null }}"  # opaque Value return
