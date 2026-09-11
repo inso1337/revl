@@ -177,6 +177,13 @@ lease is a renewal that keeps the original `acquired` time. A name another
 operator holds live is **never stealable** — wait for its TTL to elapse, or
 have the holder release it.
 
+A TTL may not exceed `MAX_TTL` (86400s, one day); a longer claim is refused
+rather than truncated, so the caller knows its lease is not what it asked for.
+The bound exists because the TTL is what makes "a walked-away agent never wedges
+the workspace" true: a lease long enough to outlive the workspace is a fence
+instead of an iteration window. See Persistence below for why the same bound
+applies to a lease arriving from a document.
+
 ## Visible in the causal trace (item 27)
 
 Every claim, renewal, release, and TTL expiry is stamped as a `lease`-channel
@@ -191,6 +198,17 @@ Leases are wall-clock claims, so a snapshot (`docs/persistence.md`) records the
 active set in its meta, and `revl_restore` re-seats only the leases still live
 at restore time — any whose TTL elapsed while the snapshot sat are silently
 dropped. A claim does not come back from the dead across a restart.
+
+The re-seated lease is **bounded** the same way a claimed one is: its `expiry`
+is clamped to `MAX_TTL` from restore time. `expiry` comes out of the same
+caller-supplied document as `holder`, so without the clamp a document could
+re-seat a fence over a name no operator token matches — no one is exempt from
+it, and `release` is holder-checked, so no one can lift it either — and it would
+never expire on its own. That is a veto over `revl_swap`/`revl_repair` for every
+real operator that only a restart clears: the wedge the TTL exists to rule out.
+Clamped, the worst a snapshot can install is a delay that ends on the schedule a
+real claim could have asked for. A non-finite `expiry` is either clamped
+(`Infinity`) or dropped (`NaN`, which is not an instant at all).
 
 ## Where the code lives
 
