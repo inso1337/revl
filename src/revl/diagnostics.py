@@ -48,6 +48,8 @@ GUARANTEES = {
     "T1": "declared types are checked",
     "T2": "absence is Opt[T]; `null` has no type",
     "T3": "a hole is an obligation: it checks, but it never runs (docs/holes.md)",
+    "T-UNRESOLVED": "a type this compilation does not declare is refused as "
+                    "unresolved, never reported as a mismatch it cannot check",
 }
 
 # how to satisfy each guarantee — the one-line rewrite `revl explain <code>`
@@ -102,6 +104,8 @@ FIXES = {
     # test_explain_every_guarantee_has_a_fix, which is what caught its absence.
     "T3": "fill the hole in — a draft compiles, but it cannot be admitted into "
           "a running composition; `revl compile` lists every open obligation",
+    "T-UNRESOLVED": "declare the type in this compilation, or pass the file that "
+                    "declares it in the same `revl compile` invocation",
 }
 
 
