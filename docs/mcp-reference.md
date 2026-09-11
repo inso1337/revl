@@ -389,7 +389,7 @@ TTL, so a walked-away agent never wedges the workspace
 ([component-leases.md](component-leases.md)).
 
 - Inputs: `component` (required); `action` (`claim` / `renew` / `release`,
-  default `claim`); `ttl` (seconds, default 300).
+  default `claim`); `ttl` (seconds, default 300, max 86400).
 
 ### `revl_snapshot`
 

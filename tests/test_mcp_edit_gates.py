@@ -28,6 +28,7 @@ same bytes sent as a document and as a delta) boots one.
 
 import importlib.util
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -308,6 +309,49 @@ def test_an_elapsed_restored_lease_still_does_not_come_back():
                                     "acquired": 1.0, "expiry": 2.0}])
     assert sess.leases.holder_of("UserCache") is None
     assert L.check_swap(sess, {"source": _swap_user()}) is None
+
+
+def test_a_restored_lease_cannot_outlive_the_horizon():
+    """`expiry` is one more number out of the same client-supplied document as
+    `holder`. Unbounded, a document can re-seat a fence over a *stranger* that
+    no operator token matches — so no one is exempt from it and no one may
+    release it (`release` is holder-checked) — and no clock ever lifts it
+    either: a veto over `revl_swap`/`revl_repair` that only a restart clears,
+    which is exactly the wedge the wall-clock TTL exists to rule out."""
+    sess = _FakeSession(Operator("alice"), sandbox=ENFORCING)
+    before = time.time()
+    persist._restore_leases(sess, [{"component": "UserCache",
+                                    "holder": "nobody-with-a-token",
+                                    "acquired": 1.0, "expiry": 1e12}])
+    after = time.time()
+    # it does fence, right now: the fence is the part that survives a restore
+    refusal = L.check_swap(sess, {"source": _swap_user()})
+    assert refusal is not None and refusal.heldBy == "nobody-with-a-token"
+    # and it is unattributable: alice cannot hand it back
+    with pytest.raises(L.LeaseError):
+        sess.leases.release("UserCache", "alice", now=after)
+    # but it is bounded, so the wedge is a delay that ends on its own
+    assert sess.leases.holder_of("UserCache",
+                                 now=before + L.MAX_TTL - 1) is not None
+    assert sess.leases.holder_of("UserCache", now=after + L.MAX_TTL) is None
+
+
+def test_a_restored_lease_with_a_non_finite_expiry_is_bounded():
+    """The same untrusted document can carry `Infinity`/`NaN`. A `NaN` expiry is
+    not a time at all, so the best-effort rehydrate skips it; an `Infinity` one
+    is an over-long expiry like any other and is clamped, not honoured."""
+    sess = _FakeSession(Operator("alice"), sandbox=ENFORCING)
+    persist._restore_leases(sess, [
+        {"component": "OtherCache", "holder": "bob", "acquired": 1.0,
+         "expiry": float("inf")},
+        {"component": "UserCache", "holder": "bob", "acquired": 1.0,
+         "expiry": float("nan")},
+    ])
+    assert sess.leases.holder_of("UserCache") is None
+    # the Infinity one is a bounded fence, not an unbounded one
+    assert sess.leases.holder_of("OtherCache") == "bob"
+    assert sess.leases.holder_of("OtherCache",
+                                 now=time.time() + L.MAX_TTL) is None
 
 
 # --------------------------------------------------- end to end, over stdio

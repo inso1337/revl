@@ -36,6 +36,14 @@ TTL is wall-clock: a lease with no renewal expires on its own, so a crashed or
 walked-away agent never wedges the workspace. Every read prunes expired leases
 first (recording an ``expired`` trace event as it goes), so ``active`` is
 always the live set and expiry needs no background timer.
+
+"Never wedges the workspace" is an INVARIANT of this module, not a consequence
+of :data:`DEFAULT_TTL`: a claim and a rehydrate are both bounded by
+:data:`MAX_TTL`, so no lease — the one asked for over the wire, or the one a
+caller-supplied snapshot document carries — can outlive the horizon the model
+sanctions. Without that bound the property is only as strong as the *input*: a
+document could re-seat a fence that never self-clears and that only the holder
+it names could release, which is precisely the wedge the TTL exists to prevent.
 """
 
 from __future__ import annotations
@@ -56,6 +64,15 @@ DEFAULT_HOLDER = "operator"
 # that a forgotten lease clears itself within minutes, long enough to cover an
 # agent's generate→check→admit→swap loop.
 DEFAULT_TTL = 300.0
+
+# The longest span any lease may cover, however it is minted. A lease is an
+# iteration window, not a permanent fence, and the point of a wall-clock TTL is
+# that a walked-away agent's claim clears itself: a claim that outlives the
+# workspace wedges it instead. So the bound holds on BOTH minting paths —
+# `claim` refuses a longer `ttl`, and `reinstate` clamps a rehydrated one — or
+# else the restore path, which reads its numbers out of caller-supplied input,
+# is the one hole left in an otherwise total property.
+MAX_TTL = 86400.0
 
 
 class LeaseError(RuntimeError):
@@ -164,8 +181,18 @@ class LeaseBook:
         otherwise succeed. Re-claiming your own live lease is a renewal."""
         now = time.time() if now is None else now
         ttl = DEFAULT_TTL if ttl is None else float(ttl)
-        if ttl <= 0:
+        # `not (ttl > 0)` rather than `ttl <= 0` so a NaN TTL — which a
+        # permissive JSON reader hands straight through, `NaN` being a literal
+        # it accepts — is refused instead of minting a lease that is born
+        # expired and silently no-ops.
+        if not (ttl > 0):
             raise LeaseError(f"a lease TTL must be positive (got {ttl})")
+        if ttl > MAX_TTL:
+            raise LeaseError(
+                f"a lease TTL may not exceed {MAX_TTL:g}s (got {ttl:g}) — a "
+                f"lease is an iteration window, and one that outlives the "
+                f"workspace wedges it rather than clearing itself "
+                f"(component leases, item 61)")
         self._prune(now)
         current = self._leases.get(component)
         if current is not None and current.holder != holder:
@@ -226,10 +253,32 @@ class LeaseBook:
         document, and claiming through here would make `revl_restore` a way to
         mint a lease in *any* name — including the restoring operator's own,
         which is precisely the name :func:`check_swap` exempts. The fence comes
-        back; the exemption has to be re-earned with a real :meth:`claim`."""
+        back; the exemption has to be re-earned with a real :meth:`claim`.
+
+        The re-seated lease is also **bounded**, for the same reason: ``expiry``
+        comes out of that same document. It is clamped to :data:`MAX_TTL` from
+        now, so the worst a snapshot can install is a fence that clears itself
+        on the schedule a claim could have asked for — never one that outlives
+        the workspace and that nobody but the holder it names could release. A
+        re-seated lease that names a holder no operator token can match is
+        otherwise a permanent, unattributable veto over the swap gate, and the
+        module's "a walked-away agent never wedges the workspace" property would
+        hold for every lease except the ones that arrive over the wire."""
         now = time.time() if now is None else now
-        if now >= expiry:
+        # `not (expiry > now)` rather than `now >= expiry`, so a `NaN` expiry is
+        # dropped here as well: `Infinity` and `NaN` are literals a permissive
+        # JSON reader accepts, and this rehydrate is best-effort by contract — a
+        # malformed record is skipped, never fatal. (`Infinity` is not skipped:
+        # `inf > now` holds, and the clamp below is the right answer for "as long
+        # as possible".)
+        if not (expiry > now):
             return None
+        expiry = min(expiry, now + MAX_TTL)
+        # `acquired` is display-only, but it is read out of the same document
+        # and surfaced by `revl_state`: keep it a real instant no later than the
+        # expiry it belongs to, so a non-finite one cannot reach the wire.
+        if not (0.0 <= acquired <= expiry):
+            acquired = now
         lease = Lease(component, holder, acquired, expiry, verified=False)
         self._leases[component] = lease
         return lease

@@ -225,9 +225,21 @@ def _restore_leases(session, docs) -> None:
     vacuous for exactly the operator who wanted in (same caller-supplied-input
     rule the path jail applies to `snapshot.sources.files`,
     `server._jail_refusal`). The fence is restored; the exemption is re-earned
-    with a real `revl_lease` claim."""
+    with a real `revl_lease` claim.
+
+    They are **bounded** too, by the same rule: `reinstate` clamps each one to
+    `MAX_TTL` from now. A restored lease is a fence, and a fence the document
+    gets to size is a fence the document can make permanent — `expiry` is one
+    more number in the same untrusted input as `holder`. So the worst a snapshot
+    can install is a denial that clears itself on the schedule a claim could
+    have asked for, which is what the TTL exists to guarantee."""
     book = getattr(session, "leases", None)
     if book is None:
+        return
+    # `docs` is the document's own `meta.leases`, so it is whatever the caller
+    # put there — "never fatal to the restore" has to hold for a `leases` that
+    # is not a list at all, not only for entries that are malformed.
+    if not isinstance(docs, (list, tuple)):
         return
     for doc in docs:
         try:
