@@ -594,3 +594,188 @@ def test_the_reactive_twin_leaks_it_once_the_registration_is_stripped(tmp_path, 
     assert "vault refused key" in trace, trace
     assert CANARY in trace, trace
     assert REDACTED_SECRET not in trace, trace
+
+
+# ---------------------------------------------------------------------------
+# item 421 F6(d): the ESCAPED face of a registered value
+# ---------------------------------------------------------------------------
+#
+# Both redaction stages match a value EXACTLY against text that has already
+# been RENDERED. A value holding a `"`, a `\` or a control character comes back
+# ESCAPED from every encoder this tier renders it with — `PlacementRunner.render`
+# routes a container through `Json.write`, whose `esc` rewrites exactly those
+# characters before any `revlRedactText` sees the line, and the seam wire
+# escapes the same way — so the raw bytes match nothing and the value crossed
+# the probe channel and the wire verbatim, while the identical value without
+# the quote was scrubbed everywhere.
+#
+# `revlRenderings` registers the encoder's body beside the raw value. The escape
+# set is restated in the emitted program BY HAND (the encoder lives in the
+# runner, which an emitted unit cannot reach), so the coupling is pinned below
+# in two ways: a textual drift check against the real `Json.esc`, and a run of
+# the emitted registry through the real `Json.write`.
+
+# A canary carrying the two characters every encoder in play rewrites. It is
+# registered through the same runtime path a config value takes, so the harness
+# never depends on the scenario text spelling it.
+ESCAPED_CANARY = 'SEK"RIT\\JAVA-CANARY-421-F6D'
+
+RUNNER_SOURCE_PATH = PLACEMENT / "PlacementRunner.java"
+
+
+def _emitted_escape_table() -> list[tuple[str, str]]:
+    """The (character, replacement) pairs the emitted `revlRenderings` rewrites."""
+    import re  # noqa: PLC0415
+
+    code = _emitter().emit(_compile(SCENARIO))
+    body = code[code.index("private static java.util.List<String> revlRenderings"):
+                code.index("private static void revlRememberSecret")]
+    return re.findall(
+        r"case ('(?:\\.|[^'])*') -> escaped\.append\(\"((?:\\.|[^\"])*)\"\);", body)
+
+
+def _runner_escape_table() -> list[tuple[str, str]]:
+    """The same pairs, read out of the runner's own `Json.esc`."""
+    import re  # noqa: PLC0415
+
+    source = RUNNER_SOURCE_PATH.read_text(encoding="utf-8")
+    body = source[source.index("static void esc(String s, StringBuilder b) {"):
+                  source.index("// Canonical ADT/Result wire codec")]
+    return re.findall(
+        r"case ('(?:\\.|[^'])*'): b\.append\(\"((?:\\.|[^\"])*)\"\); break;", body)
+
+
+def test_the_registry_registers_the_escaped_face_too():
+    code = _emitter().emit(_compile(SCENARIO))
+    assert "private static java.util.List<String> revlRenderings(String text) {" in code
+    # the remember path registers what revlRenderings hands back, not the raw
+    # string alone
+    assert "for (String face : revlRenderings(text)) {" in code
+
+
+def test_the_emitted_escape_table_is_the_runners_escape_table():
+    """The set is hand-kept, so this is the check that keeps it honest: if
+    `Json.esc` learns a character (or drops one) and the emitted copy does not
+    follow, the tier goes back to leaking that character's rendering."""
+    emitted_pairs = _emitted_escape_table()
+    runner_pairs = _runner_escape_table()
+    assert runner_pairs, "Json.esc no longer looks the way this check reads it"
+    assert emitted_pairs == runner_pairs
+
+
+def test_the_bound_gates_the_raw_value_only():
+    """`REVL_MIN_MARKABLE` is checked against the raw value, before any face is
+    derived: an escape can only ever EXPAND, so a value that cleared the bound
+    clears it in every escaped face too."""
+    code = _emitter().emit(_compile(SCENARIO))
+    remember = code[code.index("private static void revlRememberSecret("):]
+    assert (remember.index("text.length() < REVL_MIN_MARKABLE")
+            < remember.index("revlRenderings(text)"))
+
+
+def test_a_secretless_document_carries_no_renderings():
+    plain = SCENARIO.replace("api_key: Secret[Str]", "api_key: Str").replace(
+        "key: Secret[Str]", "key: Str")
+    code = _emitter().emit(_compile(plain))
+    assert "revlRenderings" not in code
+    assert "revlRedactText" not in code
+
+
+def _runner_json_class() -> str:
+    """The runner's `Json` class, lifted into a compilation unit of its own.
+
+    The runtime check below renders a container through the REAL encoder rather
+    than a restatement of it, which is the only way the check can say anything
+    about the line a sink actually receives.
+    """
+    lines = RUNNER_SOURCE_PATH.read_text(encoding="utf-8").split("\n")
+    start = next(i for i, line in enumerate(lines)
+                 if line.strip() == "static final class Json {")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "    }")
+    body = "\n".join(line[4:] if line.startswith("    ") else line
+                     for line in lines[start:end + 1])
+    body = body.replace("static final class Json {", "final class Json {", 1)
+    return ("package revl;\n\nimport java.util.ArrayList;\nimport java.util.List;\n"
+            "import java.util.Map;\n\n" + body + "\n")
+
+
+_MAIN = """
+    public static void main(String[] args) {
+        String canary = %s;
+        String ordinary = %s;
+        revlForgetSecrets();
+        revlMarkSecret(canary);
+        // the probe channel: the runner renders a container with Json.write and
+        // the console funnel redacts the line it produced
+        java.util.Map<String, Object> probe = new java.util.LinkedHashMap<>();
+        probe.put("api_key", canary);
+        System.out.println("container: probe " + revlRedactText(Json.write(probe)));
+        System.out.println("raw: " + revlRedactText("trace key=" + canary));
+        System.out.println("ordinary: " + revlRedactText(ordinary).equals(ordinary));
+    }
+"""
+
+
+def _run_registry(tmp_path: Path, emitted_source: str) -> str:
+    """Compile the emitted unit beside the runner's real `Json` and run it."""
+    pkg = tmp_path / "revl"
+    pkg.mkdir()
+    # the main is injected into the emitted class rather than into a second
+    # file, so the harness reaches the registry exactly as the tier does
+    close = emitted_source.rindex("\n}\n")
+    (pkg / "Components.java").write_text(
+        emitted_source[:close] + "\n" + _MAIN % (json.dumps(ESCAPED_CANARY),
+                                                 json.dumps(PUBLIC_URL)) + "}\n",
+        encoding="utf-8")
+    (pkg / "Json.java").write_text(_runner_json_class(), encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    result = subprocess.run(
+        [javac_gate.JAVAC, "--release", javac_gate.RELEASE, "-d", str(out)]
+        + [str(s) for s in javac_gate.STUB_SOURCES]
+        + [str(pkg / "Components.java"), str(pkg / "Json.java")],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stderr
+    run = subprocess.run(
+        [javac_gate.JAVA, "-cp", str(out), "revl.Components"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    return run.stdout
+
+
+@needs_jdk
+def test_no_sink_carries_the_escaped_value_when_run(tmp_path):
+    trace = _run_registry(tmp_path, _emitter().emit(_compile(SCENARIO)))
+    assert f'container: probe {{"api_key":"{REDACTED_SECRET}"}}' in trace, trace
+    assert ESCAPED_CANARY not in trace, trace
+    # the raw face still matches, so the fix is additive
+    assert f"raw: trace key={REDACTED_SECRET}" in trace, trace
+    # no over-redaction: an ordinary value beside it is verbatim
+    assert "ordinary: true" in trace, trace
+
+
+@needs_jdk
+def test_with_the_escaped_face_stripped_the_value_leaks(tmp_path):
+    """Non-vacuity: `revlRenderings` is what stands between the probe channel
+    and the value. Register the raw face alone — the pre-F6(d) shape — and the
+    same run prints the escaped canary."""
+    code = _emitter().emit(_compile(SCENARIO))
+    raw_only = code.replace("for (String face : revlRenderings(text)) {",
+                            "for (String face : java.util.List.of(text)) {")
+    assert raw_only != code, "the registration no longer reads through revlRenderings"
+    trace = _run_registry(tmp_path, raw_only)
+    assert f'container: probe {{"api_key":"{_escape(ESCAPED_CANARY)}"}}' in trace, trace
+    # the raw face is still covered: only the escaped face was missing
+    assert f"raw: trace key={REDACTED_SECRET}" in trace, trace
+
+
+def _escape(text: str) -> str:
+    """What `Json.esc` writes for `text`, so the leak assertion names the exact
+    rendering the probe channel produces."""
+    out = []
+    for ch in text:
+        out.append({'\\': '\\\\', '"': '\\"', "\n": "\\n",
+                    "\t": "\\t", "\r": "\\r"}.get(ch, ch))
+    return "".join(out)
