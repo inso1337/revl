@@ -165,6 +165,20 @@ private static java.util.List<String> revlRenderings(String text) {
     return faces;
 }
 
+// A generated shape hands its members over by path (item 421 F6(q)).
+//
+// This tier emits every declared record and every variant case as a plain
+// `class`, never a java `record`, so the reflective branch below is false for
+// all of them and the fallback registers `String.valueOf(value)` — the
+// identity string `Name@hash`, which no sink writes. Only the container's own
+// face ended up registered, so its leaves crossed every funnel verbatim. Each
+// generated shape declares the members a message would quote and the walk
+// recurses into them, so a nested shape is covered the same way a `Result`
+// already was.
+public interface RevlSecretShape {
+    java.util.List<Object> revlSecretMembers();
+}
+
 // A declared Secret[T] may be a record, a list, an Opt: the members are what a
 // message would quote, so they are what is remembered (the py tier's
 // register_secret_tree). Keys of a map are field names the author wrote.
@@ -204,6 +218,20 @@ private static void revlRememberSecret(Object value, java.util.Set<Object> seen)
         }
         for (Object item : record.values()) {
             revlRememberSecret(item, seen);
+        }
+        return;
+    }
+    if (value instanceof RevlSecretShape shape) {
+        // A declared shape can re-enter itself (`type Node = { kids: List[Node] }`),
+        // so this branch takes the same bound every other container branch takes.
+        // Without it the walk restarts with a FRESH set at each shape and a
+        // self-referential value raises StackOverflowError before the crossing --
+        // the defect F6(m) closed for the containers beside this branch.
+        if (!seen.add(value)) {
+            return;
+        }
+        for (Object member : shape.revlSecretMembers()) {
+            revlRememberSecret(member, seen);
         }
         return;
     }
@@ -2891,12 +2919,35 @@ def _emit_hash_helper() -> list[str]:
     ]
 
 
+def _emit_v3_secret_members(members: list[str]) -> list[str]:
+    """`revlSecretMembers` for one generated shape (item 421 F6(q)).
+
+    The registry's reflective walk cannot see a generated record or variant
+    case: this tier emits both as plain `class`es, so `instanceof Record` is
+    false for them and the fallback registered the identity string `Name@hash`,
+    a needle no sink writes. The shape hands its members over by path instead
+    and the walk recurses into them, so nesting needs no extra emission.
+    Emitted only in `_SECRET_MODE`, which is what keeps a secretless document
+    byte-identical (there is no registry to call into).
+    """
+    lines = [
+        "    public java.util.List<Object> revlSecretMembers() {",
+        f"        java.util.List<Object> members = new java.util.ArrayList<>({len(members)});",
+    ]
+    for member in members:
+        lines.append(f"        members.add({member});")
+    lines.append("        return members;")
+    lines.append("    }")
+    return lines
+
+
 def _emit_v3_types(types: dict) -> list[str]:
     lines: list[str] = []
     for name, spec in types.items():
         name = _ident(name, "type name")
         if spec.get("kind") == "record":
-            lines.append(f"public static final class {name} {{")
+            shape = " implements RevlSecretShape" if _SECRET_MODE else ""
+            lines.append(f"public static final class {name}{shape} {{")
             fields = spec.get("fields") or {}
             for field, ftype in fields.items():
                 field = _ident(field, "record field")
@@ -2915,6 +2966,9 @@ def _emit_v3_types(types: dict) -> list[str]:
                 for field, ftype in fields.items()
             ]
             lines.extend(_emit_v3_value_equality(name, components))
+            if _SECRET_MODE:
+                lines.extend(_emit_v3_secret_members(
+                    [f"this.{_ident(f, 'record field')}" for f in fields]))
             lines.append("}")
         else:
             cases = spec.get("cases") or []
@@ -2924,18 +2978,24 @@ def _emit_v3_types(types: dict) -> list[str]:
             for case in cases:
                 cname = _ident(case.get("name"), "case name")
                 payload = case.get("payload")
+                shape = ", RevlSecretShape" if _SECRET_MODE else ""
                 if payload is None:
-                    lines.append(f"    final class {cname} implements {name} {{")
+                    lines.append(f"    final class {cname} implements {name}{shape} {{")
                     lines.append(f"        public {cname}() {{}}")
                     lines.extend(
                         "    " + line if line else line
                         for line in _emit_v3_value_equality(
                             cname, [], tag=f"{name}.{cname}")
                     )
+                    if _SECRET_MODE:
+                        lines.extend(
+                            "    " + line
+                            for line in _emit_v3_secret_members([])
+                        )
                     lines.append("    }")
                 else:
                     ptype = _java_v3_type(payload)
-                    lines.append(f"    final class {cname} implements {name} {{")
+                    lines.append(f"    final class {cname} implements {name}{shape} {{")
                     lines.append(f"        public final {ptype} value;")
                     lines.append(
                         f"        public {cname}({ptype} value) {{ this.value = value; }}"
@@ -2945,6 +3005,11 @@ def _emit_v3_types(types: dict) -> list[str]:
                         for line in _emit_v3_value_equality(
                             cname, [(ptype, "value")], tag=f"{name}.{cname}")
                     )
+                    if _SECRET_MODE:
+                        lines.extend(
+                            "    " + line
+                            for line in _emit_v3_secret_members(["this.value"])
+                        )
                     lines.append("    }")
             lines.append("}")
         lines.append("")
