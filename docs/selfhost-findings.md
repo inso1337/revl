@@ -1567,6 +1567,52 @@ program; only the frontend port did.
    fix does: the fixture existed and was inert, which is the same failure the two
    findings above describe, one turn later.
 
+4. **Capability-bound `secret NAME for CAP` is dropped by the whole pipeline.**
+   This is the third kind of site, neither an emitter site nor a frontend stamp:
+   a binding the reference resolves at RUN time and the self-host never carries.
+   `src/revl/lower.py:7504` writes the manifest rows to `ir["secrets"]` and
+   `:4844` annotates each bound extern entry with `entry["secrets"]`.
+   `backends/python/emit.py:3967-3983` turns the per-extern names into a
+   `_REVL_SECRETS` dict plus a fail-loud `def _revl_secret(_name)` helper, and
+   `:4067` injects the first body local (`api_key = _revl_secret('api_key')`).
+   `src/revl/run.py:473-505` resolves the rows and `:1439-1440` populates
+   `_REVL_SECRETS` from them.
+
+   The self-host emits neither half. `selfhost/lower.rvl` contains zero
+   occurrences of `secrets`, and its `lower_to_ir` result carries the keys
+   `['components','externs','ir_version','services']` with no top-level
+   `secrets` and no per-extern `secrets`. `selfhost/emit_py.rvl` contains
+   neither `_REVL_SECRETS` nor `_revl_secret(`. Handing the reference IR for a
+   bound composition to `emit_py_src` yields 797 bytes against the reference's
+   1205, and the difference is exactly the removed block.
+
+   Nothing has gone red because the self-host grammar does not parse the
+   declaration at all, which is also why this is a coverage boundary rather
+   than a live defect. `secret` appears zero times in `selfhost/lexer.rvl`,
+   `selfhost/parser.rvl` and `selfhost/checker.rvl`, so
+   `admit("secret api_key for net.send")` answers `BAD|unexpected token at top
+   level` and `compile_to` returns `REFUSED` before any emitter runs. No
+   `src/revl` production path drives the self-host regardless
+   (`src/revl/gate.py:303-337` is reference-backed, `frontier:
+   reference-full:<language>`), and the shipped `crates/revl-gate` issues no
+   admissions. Where the drop IS reached the failure is closed, not quiet: the
+   host body raises `NameError` on the unbound local before any value exists,
+   which is a loud stop and not a disclosure.
+
+   The oracles are the part to fix first, since they are what let this sit.
+   `tests/test_selfhost_emit_py.py` feeds the REFERENCE IR, so it would catch
+   the emitter half the day a fixture spells `secret X for CAP`, and no fixture
+   in `tests/fixtures/` or `examples/` does. No oracle compares the top-level
+   `secrets` key at all; `tests/test_selfhost_lower_ir.py:395` compares
+   `externs` only, which would catch the per-extern half alone. The port is
+   `src/revl/lower.py:4776-4844` into `selfhost/lower.rvl`, plus the
+   `if any(ext.get("secrets"))` block and the `for _sname in ext.get("secrets")`
+   injection loop in `selfhost/emit_py.rvl::emit_externs` (`:1113`), with
+   `tests/fixtures/emit_py_corpus/secrets_bound.rvl` seen to red first. That
+   fixture cannot go green end to end until the frontend grammar closes, so the
+   grammar gap is the real prerequisite and the emitter port is what makes the
+   prerequisite observable.
+
 ### Sibling survey, redone on source (#234)
 
 The earlier survey in this file and in roadmap 429(d) recorded that `secret`
