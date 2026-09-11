@@ -173,7 +173,10 @@ Every bridge marshals values to the same JSON so any pair of backends interop:
   (`Hit`, `Missing`, `Ok`, `Err`, ...) and `<payload>` is the case's single
   argument encoded canonically (omitted for a nullary case). The `$kind` key is
   the marker that separates a tagged value from a record (records never carry a
-  `$kind` field).
+  `$kind` field). `$kind` names a declared case and nothing else: a receiving
+  bridge resolves it against that backend's case constructors and refuses any
+  name that is not one, so a malformed tag is a wire error rather than an
+  arbitrary lookup in the emitting program's namespace.
 
 The shape is self-describing: the case name travels in `$kind`, so a consumer
 rebuilds the native ADT (map `$kind` to the case constructor) without needing

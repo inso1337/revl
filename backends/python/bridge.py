@@ -271,6 +271,27 @@ class SeamMarshalError(TypeError):
             "than shipping a dead tag.")
 
 
+class SeamTagError(SeamMarshalError):
+    """A `$kind` on the wire did not name an emitted ADT / `Result` case class.
+
+    The decode-side mirror of `SeamMarshalError`'s rule: the tagged half of the
+    wire vocabulary is exactly the declared cases, so a tag is resolved against
+    that set and nothing else. Refusing here is what keeps an untrusted string
+    from naming an arbitrary attribute of the emitted module — every program fn
+    is a module-level `def`, so a bare `getattr(module, kind)` CALLED it, and on
+    the argument path that ran before the seam's export allow-list was
+    consulted. Subclasses `SeamMarshalError` so the provider's dispatch loop
+    marshals it back as an error reply exactly as it does a marshal refusal.
+    """
+
+    def __init__(self, kind) -> None:
+        self.kind = kind
+        TypeError.__init__(
+            self,
+            f"{kind!r} is not a case class of the emitted module: a tagged "
+            "value may only name a declared ADT/Result case")
+
+
 def _is_emitted_case(value) -> bool:
     """Is `value` an emitted ADT / Result case instance (as opposed to an opaque
     host object)?
@@ -325,16 +346,53 @@ def _encode_value(value):
     return tagged
 
 
+def _is_case_class(obj) -> bool:
+    """Is `obj` an emitted ADT / `Result` case CLASS — the only thing a wire
+    `$kind` may name?
+
+    The class-level reading of `_is_emitted_case`: an emitted case declares
+    `__slots__` on every class in its MRO (the ADT base `()`, a nullary case
+    `()`, a payload case `("value",)`) and its slots are at most `value`. A
+    record declares no `__slots__` at all; a function, a module, a plain class,
+    an imported name — everything else a module's namespace holds — is refused.
+    """
+    if not isinstance(obj, type) or obj is object:
+        return False
+    if dataclasses.is_dataclass(obj):
+        return False
+    slots: set[str] = set()
+    for klass in obj.__mro__:
+        if klass is object:
+            continue
+        declared = klass.__dict__.get("__slots__")
+        if declared is None:  # instances carry a __dict__: not an emitted case
+            return False
+        slots.update((declared,) if isinstance(declared, str) else declared)
+    return slots <= {"value"}
+
+
 def _decode_value(value, module):
     """Inverse of `_encode_value`: rebuild native ADT / Result case instances
     from `{"$kind", "$value"}` using `module`'s case classes; records stay
     dicts. With no module a tagged value passes through as a plain dict (the
-    caller does not cross ADTs)."""
+    caller does not cross ADTs).
+
+    A `$kind` that does not name an emitted case class is REFUSED fail-closed,
+    the mirror of the encoder's rule: the tagged half of the wire vocabulary is
+    exactly the declared cases. Resolving the tag with a bare
+    `getattr(module, kind)` let an untrusted string name ANY attribute of the
+    emitted program and CALL it — every program fn is a module-level `def`, so
+    `{"$kind": "<fn name>", "$value": <arg>}` invoked that fn, and in `_invoke`
+    that happened before the seam's export allow-list was consulted, reaching
+    fns the seam never exported."""
     if isinstance(value, list):
         return [_decode_value(item, module) for item in value]
     if isinstance(value, dict):
         if "$kind" in value and module is not None:
-            case = getattr(module, value["$kind"])
+            kind = value["$kind"]
+            case = getattr(module, kind, None) if isinstance(kind, str) else None
+            if not _is_case_class(case):
+                raise SeamTagError(kind)
             return case(_decode_value(value["$value"], module)) if "$value" in value else case()
         return {key: _decode_value(item, module) for key, item in value.items()}
     return value
@@ -468,7 +526,19 @@ async def _invoke(ctx, exports: dict, req: dict, module=None) -> dict:
     # record dict) passes through unchanged, so a value-typed call is byte-
     # identical to the pre-encode wire. Without a module (the legacy serve form)
     # a tagged value stays a plain dict, exactly as before.
-    args = _decode_value(req.get("args") or [], module)
+    #
+    # Finding D: a malformed tag is refused HERE, before `exports` is consulted
+    # — which is precisely the point, since decoding runs before the allow-list
+    # and a forged `$kind` therefore used to reach a function the seam never
+    # exported. The refusal is marshalled back as an ordinary error reply rather
+    # than raised past this call: the serve loop catches only transport errors,
+    # so raising would drop the connection instead of answering. `args` does not
+    # exist yet, so the redaction funnel scrubs the raw wire args.
+    raw_args = req.get("args") or []
+    try:
+        args = _decode_value(raw_args, module)
+    except Exception as exc:
+        return {"ok": False, "error": seam_failure(exc, raw_args)}
     if key not in exports:
         return {"ok": False, "error": f"key {key!r} is not exported by this process"}
     try:
