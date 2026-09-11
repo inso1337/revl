@@ -38,6 +38,7 @@ that uses no qualifier. Only the taint verdict is new.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import warnings
 from dataclasses import dataclass, field
@@ -235,11 +236,91 @@ def secret_witness_position(type_name: str | None) -> bool:
     puts a confidential value on disk while `Result[Str, Secret[Str]]` — the
     same declaration with the qualifier on the error arm — does not. Reading
     `secret_return` alone would redact both and lose the second one's referent
-    for nothing."""
+    for nothing.
+
+    This reads the extern's OWN return type, which is the whole story only when
+    the author spells the marking there. The same value is confidential when the
+    author spells it on the receiving side instead — see
+    :func:`witness_receiver_position`, which must be consulted alongside this
+    one."""
     if not type_name:
         return False
     head, args = parse_type(type_name)
     return head == "Result" and len(args) == 2 and mentions_secret(args[0])
+
+
+def _mentions_binder(node, name: str) -> bool:
+    """True when the expression reads the variable `name` anywhere inside it —
+    including nested in a container, since the witness a WAL records is the
+    value, not its spelling at the argument position."""
+    from .parser import ExprVar
+
+    if isinstance(node, (list, tuple)):
+        return any(_mentions_binder(item, name) for item in node)
+    if not (dataclasses.is_dataclass(node) and not isinstance(node, type)):
+        return False
+    if isinstance(node, ExprVar):
+        return node.name == name
+    return any(_mentions_binder(getattr(node, f.name, None), name)
+               for f in dataclasses.fields(node))
+
+
+def _iter_calls(node):
+    """Every call node in an expression, outermost first."""
+    from .parser import ExprCall
+
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            yield from _iter_calls(item)
+        return
+    if not (dataclasses.is_dataclass(node) and not isinstance(node, type)):
+        return
+    if isinstance(node, ExprCall):
+        yield node
+    for f in dataclasses.fields(node):
+        yield from _iter_calls(getattr(node, f.name, None))
+
+
+def witness_receiver_position(decl, declared_params: dict) -> bool:
+    """True when a witnessed extern's declared INVERSE takes the witness through
+    a parameter the author declared `Secret[...]`.
+
+    The receiving-side spelling of :func:`secret_witness_position`. An extern
+    may say where its confidential bytes are by qualifying what it hands back:
+
+        extern witnessed fn lease(...) -> Result[Secret[Str], Str] undo release(result)
+
+    or by qualifying what its inverse takes:
+
+        extern pure fn release(lease: Secret[Str]) -> Unit = @py { ... }
+        extern witnessed fn lease(...) -> Result[Str, Str] undo release(result)
+
+    Both describe the same bytes at the same position — the inverse's referent
+    argument, which is exactly what a witnessed step's durable
+    discharge-descriptor writes. The second spelling is accepted by the checker
+    (the inverse's parameter type is checked at lowering, so it is load-bearing
+    rather than decorative) but reads the qualifier off the INVERSE, and an
+    extern's own return is the only type the first spelling consults. A tier
+    whose WAL writer decides the referent's fate from the resulting stamp alone
+    therefore wrote the confidential value out verbatim.
+
+    `declared_params` maps a module-level callable's name to its parameter types
+    as declared, captured BEFORE this pass strips the qualifiers off them."""
+    undo = getattr(decl, "undo", None)
+    if undo is None:
+        return False
+    for call in _iter_calls(undo):
+        callee = getattr(call, "callee", None)
+        name = getattr(callee, "name", None)
+        params = declared_params.get(name) if name else None
+        if not params:
+            continue
+        for index, arg in enumerate(getattr(call, "args", ())):
+            if index >= len(params):
+                break
+            if mentions_secret(params[index]) and _mentions_binder(arg, "result"):
+                return True
+    return False
 
 
 def _origin_of(capabilities) -> str:
@@ -405,6 +486,17 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                 setter(clean)
         return secret_indices
 
+    # Every module-level callable's DECLARED parameter types, captured before
+    # the sweep below strips the qualifiers off them. An extern's `undo` names a
+    # module-level declaration (a `fn` or another extern — `_check_extern_undo`
+    # refuses anything else), so its declared parameters are readable here, and
+    # reading them is what lets a declaration that puts the `Secret[...]` on the
+    # RECEIVING side mint the same marking as one that puts it on the return.
+    _declared_params: dict[str, list] = {}
+    for _decl in (*getattr(program, "externs", ()),
+                  *getattr(program, "fn_decls", ())):
+        _declared_params[_decl.name] = [p.type for p in _decl.params]
+
     # externs: an `Untrusted[T]` return is a taint source; a `Trusted[T]` param
     # is a sink; both are stripped to their base type.
     for ext in getattr(program, "externs", ()):
@@ -437,7 +529,12 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
         # confidential. A witnessed extern's durable discharge-descriptor
         # records the Ok witness as the inverse's referent argument, so this is
         # the flag a WAL writer reads to keep a leased credential off disk.
-        if secret_witness_position(ext.returns):
+        # Two spellings say so, and both have to be read: the extern's own
+        # return (`Result[Secret[W], E]`, above) and the declared inverse's
+        # receiving parameter (`undo release(lease: Secret[Str])`), which the
+        # checker accepts and which an extern's own return type cannot see.
+        if (secret_witness_position(ext.returns)
+                or witness_receiver_position(ext, _declared_params)):
             ext.secret_witness = True
         params = []
         for i, p in enumerate(ext.params):

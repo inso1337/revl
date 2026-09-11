@@ -606,7 +606,7 @@
       "uncovered_statements": 942
     },
     "py": {
-      "statements": 2431,
+      "statements": 2437,
       "uncovered": {
         "#850 added `_ComponentEmitter._extern_emit_fire` to the reference emitter and left this record off the ledger. The shipped corpus reaches the four `emission_fire` call sites, so the dispatch arm counts as covered, while the single `if` body that actually fires the extern hook is never taken: no document in the corpus declares an extern emit. services_body.rvl and witnessed.rvl pin every other shape in this region. A fixture that compiles an extern emit onto a component method is the corpus work that retires this entry.": {
           "_ComponentEmitter._extern_emit_fire": 1
@@ -685,7 +685,7 @@
         "Float-shape fallback: _is_float_expr rejects nondicts and recursively infers unary minus only after direct Float operands stamps fail. Legal typed unary nodes carry operands=Float, exercised by branches.rvl::negate_float; the port retains the same unstamped-IR recursion.": {
           "_is_float_expr": 2
         },
-        "Frontend excludes provide-method bound witnessed acquisitions: remaining _method_witnessed_step assignment bind=tmp is present in the port but tests/test_selfhost_emit_py.py pins the source refusal. Remaining _transactional_register_kwargs idempotency= branch requires a keyed inverse (an emission) on a witnessed inverse (which must not be an emission), an incompatible declaration. witnessed.rvl covers unbound method and bound activation, multiple counters, setup and undo_idempotent.": {
+        "Frontend excludes provide-method bound witnessed acquisitions: remaining _method_witnessed_step assignment bind=tmp is present in the port but tests/test_selfhost_emit_py.py pins the source refusal. Remaining _transactional_register_kwargs idempotency= branch requires a keyed inverse (an emission) on a witnessed inverse (which must not be an emission), an incompatible declaration. witnessed.rvl covers unbound method and bound activation, multiple counters, setup and undo_idempotent. Item 421 F6(k) added two statements to `_method_witnessed_step` and two to `_witnessed_step` for a confidential witness declared on the INVERSE's parameter (`undo release(result)` against `pure fn release(lease: Secret[Str])`) rather than on the extern's return, the spelling `taint.witness_receiver_position` stamps as `secret_witness` without `secret_return`: this tier redacts by VALUE at the recorder rather than positionally, so the referent has to be registered before the frame takes it, in both the effect position (`_witnessed_step`) and the provide-method position (`_method_witnessed_step`). selfhost/emit_py.rvl now ports that registration, and the corpus declares the spelling in both positions (witnessed_secret.rvl) plus the declared-but-never-invoked case that separates the reference's emit-site import gate from an extern-table one (witnessed_secret_unused.rvl), which retired the `_witnessed_step` residual and all of `_method_witnessed_step` but its `bind=tmp` statement. The reference half is pinned by tests/test_secret_witness_receiver_position.py.": {
           "_ComponentEmitter._method_witnessed_step": 1,
           "_transactional_register_kwargs": 1
         },
@@ -1622,7 +1622,7 @@
       "uncovered_statements": 182
     },
     "py": {
-      "statements": 1958,
+      "statements": 1992,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
@@ -1630,7 +1630,8 @@
         "Component cexpr residuals: do rejects non-let steps and wraps empty tail; bare None/Some map to None/identity; single-argument Some call returns its argument; ADT argument loop constructs positional payloads; final unknown-kind marker captures named host/format/spawn/instance/stream runtime boundaries. branches.rvl covers nonempty do, optional and ordinary records; declarations/construction are supported, not deferred wholesale.": {
           "cexpr": 8
         },
-        "Conditional capability discovery branches: body_has_secret_param/body_has_timer return true when nested if branches contain a provide/timer. Source activation guards permit only fail/nested guard, not conditional provision/timers (negative boundary tests pin that rule). Top-level secret provides and both timer modes are covered by secrets and services_timers.": {
+        "Conditional capability discovery branches: body_has_secret_param/body_has_timer/body_has_receiver_secret_witness return true when nested if branches contain a provide/timer/witnessed effect. Source activation guards permit only fail/nested guard, not conditional provision/timers/effects (negative boundary tests pin that rule). Top-level secret provides and both timer modes are covered by secrets and services_timers; the top-level and provide-method receiver-position registrations are covered by witnessed_secret. The recursion is kept rather than dropped because the reference's `_body_step` descends `if` the same way, so the port's import gate has to ask the question at every step the emit site can reach.": {
+          "body_has_receiver_secret_witness": 2,
           "body_has_secret_param": 2,
           "body_has_timer": 2
         },
@@ -1733,7 +1734,7 @@
           "witnessed_extern": 1
         }
       },
-      "uncovered_statements": 98
+      "uncovered_statements": 100
     },
     "rust": {
       "statements": 1992,

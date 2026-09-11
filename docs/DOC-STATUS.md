@@ -129,7 +129,7 @@ was corrected by hand and had drifted back within a day.
 | gauntlet.md | needs-work | 18 |  |
 | generation-history.md | current | 22 |  |
 | generics.md | needs-work | 10 |  |
-| guarantees.md | needs-work | 0 |  |
+| guarantees.md | needs-work | 2 |  |
 | guide-ai-agents.md | stale-fixed | 3 |  |
 | guide-humans.md | stale-fixed | 1 | yes |
 | harness-gate-guide.md | needs-work | 2 |  |

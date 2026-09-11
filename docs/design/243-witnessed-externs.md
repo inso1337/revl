@@ -62,6 +62,21 @@ extern witnessed[fs] fn rm(path: Str) -> Result[FsWitness, FsError]
    closure inverse after a crash is residue, not recovery. `FsWitness` must be
    durable data (paths, refs) and the inverse WAL-reconstructible as a named call
    with captured arguments.
+
+   The witness is also **declarable confidential**, and when it is, the durable
+   descriptor must not carry it in the clear. The author says so from either end
+   of the call — on the producing side with `Result[Secret[W], E]`, or on the
+   receiving side by declaring the inverse's parameter `Secret[W]`:
+
+       extern witnessed fn lease(...) -> Result[Str, Str] undo release(result)
+       extern pure fn release(lease: Secret[Str]) -> Unit = @py { ... }
+
+   Both put the qualifier on the same position: the inverse's referent argument,
+   which is the field the durable discharge descriptor records. Lowering strips
+   the qualifier before the IR exists, so it must leave a `secret_witness` stamp
+   behind; every tier's WAL writer frames its placeholder off that stamp. The
+   declaration authorises disclosure to the *receiver*, not to the recorder — a
+   `$REVL_WAL` is a plaintext file at rest that `revl recover` replays.
 5. **Idempotent replay.** Abort replay can crash mid-way and `revl recover` replays
    again; inverses must be idempotent (or replay checkpointed). Rename-back run
    twice must not clobber.
