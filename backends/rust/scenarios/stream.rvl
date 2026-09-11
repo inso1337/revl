@@ -15,6 +15,10 @@
 //     the subscription, so multi-source teardown rides the one bracket the
 //     subscribe registers.
 
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+
+service Sink { emission fn write(v: Str) }
+
 component Consumer {
   let pool = effect Pool.open("orders", 2) undo pool.close()
   let src = effect Stream.source() undo src.close()
@@ -32,4 +36,39 @@ component Fanin {
   let b = effect Stream.source() undo b.close()
   let sub = subscribe merge(a, b) undo sub.close()
   await sub.next()
+}
+
+// ---------------------------------------------------------------------------
+// item 130 Slice 4/5 — the async-iteration and typed-event forms (§4.7, §6).
+//
+//   Iterate — `every o in sub { … }`: this tier erases the async color, so the
+//     form is a plain `loop` over the blocking `next`. A `Closed` terminal ends
+//     the loop WITHOUT entering the body; a `Faulted` is the `Err` the loop
+//     propagates UNCAUGHT (so the activation fails and the prefix reverts LIFO
+//     with the subscription bracket on it); unloading the owner while parked
+//     trips the cancel signal, which resolves the park as `Closed`.
+//   Handler — `on OrderCreated as e in sub { … }`: the SAME loop with one gate
+//     between the terminal test and the body — the derived-schema validation and
+//     the bounded dedup window `Stream::contract` carries. The iteration
+//     boundary does not move, so a `Closed` still ends the loop unvalidated and
+//     a divert while parked still abandons the loop. A schema violation is an
+//     `Err` at the gate, propagated the same way a `Faulted` is.
+//
+// The provider delivers JSON strings (the stream buffer is a `String` queue on
+// this tier), each validated against the derived schema before the body runs.
+
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+
+component Handler requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  on OrderCreated as e in sub {
+    emit sink.write(e.order_id)
+  }
 }

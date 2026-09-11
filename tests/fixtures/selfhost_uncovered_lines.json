@@ -792,10 +792,10 @@
       "uncovered_statements": 650
     },
     "rust": {
-      "statements": 3454,
+      "statements": 3500,
       "uncovered": {
-        "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and stream refusal. Those require the live plugin/frame runtime that the self-host component slice explicitly marks DEFER.": {
-          "_emit_step": 108,
+        "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
+          "_emit_step": 138,
           "_guard_frame_neutral_loop": 1,
           "_uses_timer.walk": 2
         },
@@ -841,9 +841,9 @@
           "_emit_v3_externs": 10,
           "_rust_extern_config_bind": 9
         },
-        "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle.": {
+        "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs.": {
           "_component_map_values": 5,
-          "_emit_host_stubs": 5,
+          "_emit_host_stubs": 7,
           "_emit_host_stubs.walk": 1,
           "_host_of": 12,
           "_map_expr_inserts": 20,
@@ -915,11 +915,13 @@
           "_main": 11,
           "cargo_toml": 1
         },
-        "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. The self-host Rust emitter has no stream runtime representation.": {
+        "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. Since item 130 Slice 5 the same boundary carries the typed-event half: `_uses_stream_event` asks whether any component iterates a typed event (the document predicate that pulls the contract, and with it the stream host runtime, even when the subscription arrives as a required service) and `_stream_event_host_rust` materializes the `EventContract` schema-and-dedup preamble. Both are reached only by a document holding an `on <Event> as <e> in <sub>` handler, which no corpus document does. The self-host Rust emitter has no stream runtime representation.": {
           "_is_stream_next": 7,
           "_refuse_unlowered_stream_surface": 7,
+          "_stream_event_host_rust": 1,
           "_stream_head": 4,
-          "_subscription_binds": 1
+          "_subscription_binds": 1,
+          "_uses_stream_event": 1
         },
         "Validated-IR and scalar formatting fallbacks: these statements reject malformed refs/signatures/identifiers, non-finite floats, absent or unknown types, invalid literal nodes, and unsupported escape/default forms. Accepted typed identifiers, scalar defaults, widening and ASCII/control escaping are positively covered.": {
           "_arg_ref_name": 2,
@@ -985,7 +987,7 @@
           "_stream_host_rust": 8
         }
       },
-      "uncovered_statements": 1294
+      "uncovered_statements": 1328
     },
     "ts": {
       "statements": 2151,
@@ -1728,7 +1730,7 @@
       "uncovered_statements": 98
     },
     "rust": {
-      "statements": 1989,
+      "statements": 1992,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "component_uses_await": 1,

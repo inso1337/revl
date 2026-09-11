@@ -165,3 +165,33 @@ def test_non_reserved_underscore_names_are_untouched():
     assert "value_: " in out
     assert "let out_ = value_" in out
     assert "value__" not in out and "out__" not in out
+
+
+def test_keyword_record_field_keeps_its_wire_key():
+    """A mangled field name is an EMIT detail, never a wire change: the source
+    field name is what every other tier writes (go pins it with a
+    `json:"<revl-name>"` tag), so the struct is told the real key with
+    `serde(rename)`. Without it the serde form of a record with a
+    Rust-keyword field name diverges from py/ts/go, and any decode of the wire
+    object (`serde_json::from_value`, the bridge, the item-130 event gate)
+    faults on a field the schema just accepted."""
+    out = _emit(
+        "type Box = { impl: Str, value: Str }\n"
+        "fn make(a: Str) -> Box { return { impl: a, value: a } }\n"
+    )
+    assert '#[serde(rename = "impl")]\n    impl_: String,' in out
+    # only the renamed field is tagged; a name that needed no mangle is untouched
+    assert out.count("#[serde(rename =") == 1
+    assert 'rename = "value"' not in out
+
+
+def test_keyword_field_wire_key_survives_the_injective_ladder():
+    """`const` and its underscore twin both mangle (`const_` / `const__`), and
+    BOTH must carry their own source name as the wire key — the injective rename
+    must not collapse two distinct JSON keys onto one."""
+    out = _emit(
+        "type Box = { const: Str, const_: Str }\n"
+        "fn mk(a: Str, b: Str) -> Box { return { const: a, const_: b } }\n"
+    )
+    assert '#[serde(rename = "const")]\n    const_: String,' in out
+    assert '#[serde(rename = "const_")]\n    const__: String,' in out

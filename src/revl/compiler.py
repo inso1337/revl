@@ -844,6 +844,19 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if declaration_key(module, "type", index) not in emitted_keys:
                 merged.type_decls.append(decl)
                 emitted_keys.add(declaration_key(module, "type", index))
+        # item 130 Slice 5: an `event` declaration is carried by its OWN list
+        # (its record half is a sibling `TypeDecl`, copied just above), so the
+        # contract table `_lower_event_decls` builds is keyed off `event_decls`.
+        # Without this the declaration is dropped by the merge and every
+        # multi-file build — which is the CLI path (`__main__` compiles with
+        # `compile_files`) — would report that an event `names no declared
+        # event`, while the single-source path admits it. Same per-module
+        # declaration-key discipline as the other lists, so a module that
+        # imports another's event cannot emit it twice.
+        for index, decl in enumerate(getattr(module.program, "event_decls", ())):
+            if declaration_key(module, "event", index) not in emitted_keys:
+                merged.event_decls.append(decl)
+                emitted_keys.add(declaration_key(module, "event", index))
         for index, decl in enumerate(module.program.fn_decls):
             if declaration_key(module, "fn", index) not in emitted_keys:
                 merged.fn_decls.append(decl)
@@ -1146,6 +1159,13 @@ def _rewrite_module(program: Program, val_renames: dict[str, str],
             fld.type = subst(fld.type)
         for case in td.cases:
             case.payload = subst(case.payload)
+    # item 130 Slice 5: an event decl names its RECORD, so a renamed private
+    # record must carry its contract along. Left behind, the event would keep a
+    # bare name that now resolves to whichever same-named record survived the
+    # merge — a contract (key, schema) read off the WRONG record, which is worse
+    # than the name clash this pass exists to repair.
+    for ev in getattr(program, "event_decls", ()):
+        ev.name = type_renames.get(ev.name, ev.name)
 
     # 2. bodies: value references (shadow-aware) + body-level type annotations.
     for fn in program.fn_decls:
@@ -1209,6 +1229,17 @@ def _rewrite_stmt(stmt, val_renames, type_renames, bound: set[str]) -> None:
         _rewrite_body(stmt.body, val_renames, type_renames, bound)
     elif isinstance(stmt, _ast.ForStmt):
         _rewrite_expr(stmt.iterable, val_renames, type_renames, bound)
+        inner = set(bound)
+        inner.add(stmt.bind)
+        _rewrite_body(stmt.body, val_renames, type_renames, inner)
+    elif isinstance(stmt, _ast.StreamIterStmt):
+        # item 130 Slice 4/5: the subject is a local (never renamed, so the walk
+        # is only for a shadowing top-level name), the item binder is in scope
+        # for the body, and `event` — the `on <Event> as …` half — names a
+        # declaration that module privacy may have renamed out from under it.
+        _rewrite_expr(stmt.subject, val_renames, type_renames, bound)
+        if getattr(stmt, "event", None) is not None:
+            stmt.event = type_renames.get(stmt.event, stmt.event)
         inner = set(bound)
         inner.add(stmt.bind)
         _rewrite_body(stmt.body, val_renames, type_renames, inner)

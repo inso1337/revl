@@ -3186,6 +3186,21 @@ def test_method_witnessed_does_not_perturb_non_witnessed_methods():
 
 _STREAM_SCENARIO = ROOT / "backends" / "rust" / "scenarios" / "stream.rvl"
 
+# The iteration form WITHOUT its typed-event sibling: the same `loop` over the
+# blocking `next`, and no contract — the proof that the gate is pulled in by an
+# `on … as` clause and not by the loop itself.
+_ITER_ONLY_RVL = """
+service Sink { emission fn write(v: Str) }
+
+component Iterate requires sink: Sink {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+"""
+
 
 def _stream_src() -> str:
     return emit.emit(compile_files([str(_STREAM_SCENARIO)]))
@@ -3249,6 +3264,76 @@ def test_stream_free_program_is_byte_identical():
     assert "revl_stream_pending" not in src
 
 
+# ---------------------------------------------------------------------------
+# item 130 Slice 5 — `on <Event> as e in sub { … }` on the typed-event half:
+# the §6 contract gate. This tier refused the form by name until now; the go
+# tier's shape is the model, so the two blocking tiers are held to one gate.
+# ---------------------------------------------------------------------------
+
+
+def test_typed_event_gate_sits_between_the_await_and_the_body():
+    """The three load-bearing orderings, pinned on the emitted bytes of the one
+    loop both surfaces lower to.
+
+      * the gate is INSIDE the `Item` arm — the wait is the iteration boundary,
+        and the gate is pure, so there is no second suspension point a divert
+        could land between the accept and the body;
+      * `Closed => break` sits BEFORE the gate, so a terminal ends the loop
+        without ever being validated or delivered as an item;
+      * the gate's refusal is a RETURN, i.e. the same `Err` the `Faulted` arm
+        propagates — NOT a `continue`/`break`, so the activation fails and the
+        prefix reverts LIFO with the subscription bracket on it.
+    """
+    src = _stream_src()
+    handler = src.split("pub fn handler()", 1)[1].split("\npub fn ", 1)[0]
+    closed = handler.index("StreamNext::Closed => break,")
+    gate = handler.index('.admit(&e, "Handler: on OrderCreated")')
+    body = handler.index("sink.write(e.order_id)")
+    assert closed < gate < body, (
+        "the terminal test must precede the gate, and the gate the body")
+    assert 'StreamNext::Item(e) => {' in handler
+    # the contract is built ONCE, before the loop — never per delivered item
+    assert ('let mut _revl_event1 = Stream::contract("OrderCreated",' in handler)
+    assert handler.index("let mut _revl_event1 = Stream::contract(") < handler.index("loop {")
+    assert '"order_id", 64);' in handler
+    # the three outcomes: run, collapse, FAULT
+    assert "Ok(true) => {}" in handler
+    assert "Ok(false) => continue," in handler
+    assert ("Err(_revl_event1_err) => return "
+            "Err(cordis::CordisError::with_message("
+            "cordis::ErrorCode::Plugin, _revl_event1_err)),") in handler
+    # the body sees the TYPED record, decoded from the admitted item
+    assert "let e: OrderCreated = match serde_json::from_value::<OrderCreated>(" in handler
+    assert "pub struct OrderCreated {" in src
+
+
+def test_the_iteration_form_alone_opens_no_contract():
+    """`every x in sub` is the SAME loop with no gate: the typed-event machinery
+    (the contract and its schema) is pulled in by an `on … as` clause only, so a
+    document that never writes one emits no dedup table and no schema copy."""
+    src = _stream_src()
+    iterate = src.split("pub fn iterate()", 1)[1].split("\npub fn ", 1)[0]
+    assert "Stream::contract" not in iterate
+    assert "admit" not in iterate
+    assert "StreamNext::Closed => break," in iterate
+    assert "let _ = sink.write(o);" in iterate
+
+    plain = emit.emit(compile_source(_ITER_ONLY_RVL))
+    assert "StreamNext::Closed => break," in plain   # the loop is still lowered
+    assert "EventContract" not in plain              # the gate is not
+    assert "fn admit" not in plain
+
+
+def test_typed_event_item_must_be_json_text():
+    """The typed-event form is only sound because the wire item is JSON the gate
+    can validate: the contract decodes the item text once and reports a
+    non-JSON item as a fault, so a malformed delivery never reaches the body."""
+    src = _stream_src()
+    assert "pub fn admit(&mut self, item: &str, where_: &str) -> Result<bool, String> {" in src
+    assert "event {} item is not a JSON value: {}" in src
+    assert '"{}: event {} item failed its schema: {}"' in src
+
+
 @needs_cargo
 def test_stream_runtime_on_real_cordis_rs(tmp_path):
     """Definition of done for the rust tier: the emitted components RUN on real
@@ -3264,7 +3349,13 @@ def test_stream_runtime_on_real_cordis_rs(tmp_path):
       * `merge` — an item from either source reaches the one consumer, the
         fan-in tears down as one LIFO stack, one source's close does not strand
         the consumer on the other, and a source's fault propagates at once;
-      * backpressure `error` — a full bounded buffer faults, no silent loss.
+      * backpressure `error` — a full bounded buffer faults, no silent loss;
+      * §4.7/§6 the iteration loop — `every x in` and `on … as e in` — each item
+        runs the body once, a `Closed` terminal ends the loop WITHOUT becoming
+        an item, a `Faulted` terminal is NOT caught (the activation fails and
+        the bracket reverts LIFO), an in-window redelivery of an identity
+        collapses while a schema violation faults before the body, and the
+        contract's window is BOUNDED rather than a history.
 
     Single-threaded: the provider/subscription registry the scenario drives is
     process-wide, so parallel `#[test]` threads would clobber each other's
@@ -3282,4 +3373,4 @@ def test_stream_runtime_on_real_cordis_rs(tmp_path):
         encoding="utf-8")
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "11 passed" in result.stdout
+    assert "17 passed" in result.stdout
