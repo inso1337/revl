@@ -43,7 +43,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 
 public final class PlacementRunner {
-    static String name = "?";
+    static volatile String name = "?";
     static final List<Disposable> fibers = new ArrayList<>();
 
     // The one choke point every console line passes through (the py tier's
@@ -89,14 +89,96 @@ public final class PlacementRunner {
         return text == null ? null : secretRedactor.apply(text);
     }
 
+    // The FATAL line's own funnel. `secretRedactor` deliberately THROWS when the
+    // container's redactor cannot be invoked (a funnel that cannot run must not
+    // let text through), and this is the one caller that cannot propagate that:
+    // a failure raised inside the failure path would escape as exactly the bare
+    // stack trace this funnel exists to remove. So a funnel that cannot run
+    // withholds the detail instead of passing it through.
+    static String redactFatal(String text) {
+        try {
+            return redactSecrets(text);
+        } catch (RuntimeException funnelDown) {
+            return "<detail withheld: redaction unavailable>";
+        }
+    }
+
     static String pad(String s, int n) {
         StringBuilder b = new StringBuilder(s);
         while (b.length() < n) b.append(' ');
         return b.toString();
     }
 
+    // The uncaught-failure funnel (issue #814, the java half). The load path
+    // funnels a refused seam and the probe path funnels its own failures;
+    // anything else — a config hook, a serve setup, an inverse during teardown —
+    // used to escape `main` as a bare stack trace on System.err, which the
+    // conductor merges verbatim (`placement.py::pump`, stderr=STDOUT). The stack
+    // trace quotes whatever the failing frame interpolated, and no funnel ever
+    // saw it.
+    //
+    // One redacted line, non-zero exit: still loud, still machine-visible, no
+    // longer an unanalysed crossing. `halt`, not `exit`, for the reason the
+    // E-Stop watcher below halts: a process that died mid-boot must not run the
+    // shutdown hook and print `DOWN`, which is the conductor's clean-teardown
+    // signal (E7). The py tier reaches the same place with `raise SystemExit(1)`.
+    //
+    // `failAndHalt` is the ONE composer of that line, so the thread that runs
+    // `main` and the other threads this runner starts cannot drift apart.
+    public static void main(String[] argv) {
+        installThreadFunnel();
+        try {
+            run(argv);
+        } catch (Throwable fatal) {
+            failAndHalt(fatal);
+        }
+    }
+
+    // One redacted line, then `halt` — the disposition `main`'s catch and the
+    // default uncaught-exception handler both use.
+    static void failAndHalt(Throwable fatal) {
+        String label = name == null ? "?" : name;
+        String detail = fatal.getMessage();
+        String message = detail == null
+                ? fatal.getClass().getSimpleName()
+                : fatal.getClass().getSimpleName() + ": " + detail;
+        System.err.println("[" + label + "] FATAL " + redactFatal(message));
+        System.err.flush();
+        Runtime.getRuntime().halt(1);
+    }
+
+    // The per-thread half of the same funnel. A java `try` covers the thread
+    // that runs it, so `main`'s catch cannot see a failure on any OTHER thread,
+    // and the JVM's default handler prints it as a bare stack trace on
+    // System.err — the same unfunnelled channel, one thread over. This runner
+    // starts several: the `revl-estop` watcher, `bridge-stub`'s accept loop and
+    // a `bridge-conn` handler per connection. The last is the one that matters
+    // most: its frame holds the crossing's own arguments, which is where a
+    // declared `Secret[T]` travels.
+    //
+    // `Thread.setDefaultUncaughtExceptionHandler` is the only process-wide
+    // channel java offers, and it must be installed BEFORE `run` starts any of
+    // those threads. A thread with a handler of its own would bypass this one;
+    // none of them sets one.
+    static void installThreadFunnel() {
+        Thread.setDefaultUncaughtExceptionHandler((thread, fatal) -> {
+            try {
+                failAndHalt(fatal);
+            } catch (Throwable funnelDown) {
+                // The funnel itself failed. Withhold the detail and die: a bare
+                // stack trace here is exactly what this channel exists to
+                // remove, and a funnel that cannot run must not let text
+                // through. Nothing was printed yet — the line is composed
+                // before it is written — so this is still one line.
+                System.err.println("[?] FATAL <detail withheld: funnel unavailable>");
+                System.err.flush();
+                Runtime.getRuntime().halt(1);
+            }
+        });
+    }
+
     @SuppressWarnings("unchecked")
-    public static void main(String[] argv) throws Exception {
+    static void run(String[] argv) throws Exception {
         Map<String, Object> spec = (Map<String, Object>) Json.parse(Files.readString(Path.of(argv[0])));
         name = (String) spec.get("name");
         String container = (String) spec.getOrDefault("module", "revl.Components");

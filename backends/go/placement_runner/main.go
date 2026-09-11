@@ -79,24 +79,87 @@ type labeledFiber struct {
 	fiber *stc.Fiber
 }
 
+// fatalLine composes the one line this process prints for a failure no
+// load-path or probe-path funnel saw. It is the only place that spells the
+// line, so the goroutine that runs main and the goroutine that answers a
+// crossing cannot drift apart (issue #814).
+func fatalLine(name string, fatal any) {
+	fmt.Fprintln(os.Stderr, "["+name+"] FATAL "+bridge.ScrubText(fmt.Sprint(fatal)))
+}
+
+// guard returns the deferred function that funnels a failure of the goroutine
+// it is deferred in: one redacted line on stderr, then `os.Exit`, which runs NO
+// teardown and so reaches no `DOWN` — the conductor's clean-teardown signal
+// (E7). It is a no-op on a goroutine that returns normally.
+//
+// It exists because Go has no process-wide panic hook: `recover` covers only
+// the goroutine that runs it, so main's defer cannot see a panic anywhere else.
+// The runtime prints a panic it reaches the top of, VERBATIM, on stderr — and
+// the panic value quotes whatever the failing frame held. The frame that holds
+// a crossing's own arguments is `bridge.Serve`'s per-connection goroutine,
+// which is where a declared `Secret[T]` travels.
+//
+// The indirection is load-bearing: `recover` stops a panic only when the
+// DEFERRED FUNCTION calls it directly, so the closure returned here — never a
+// helper it calls — has to be the one that runs. Call sites spell it
+// `defer guard(&name)()`; dropping the trailing `()` calls the guard while the
+// goroutine is still healthy and recovers nothing.
+//
+// The label arrives BY POINTER because main registers its defer before the spec
+// is parsed: the closure has to read the label when the FAILURE happens, not
+// when the defer statement runs, or a panic after boot would still be labelled
+// `proc` once the spec had named the placement. Same reason the java tier's
+// handler reads a `volatile` field rather than a captured local.
+func guard(name *string) func() {
+	return func() {
+		if fatal := recover(); fatal != nil {
+			fatalLine(*name, fatal)
+			os.Exit(1)
+		}
+	}
+}
+
 func main() {
+	// The uncaught-failure funnel (issue #814, the go half). The load path and
+	// the probe path each funnel the failures they expect; anything else — a
+	// config hook, a serve setup, an inverse during teardown — used to escape
+	// as a PANIC, and the runtime prints a panic value plus a stack trace
+	// straight to stderr, unfunnelled. The conductor merges that verbatim
+	// (`placement.py::pump`), and the panic value quotes whatever the failing
+	// frame held: the go tier has no second chance to redact it.
+	//
+	// One redacted line, non-zero exit: still loud, still machine-visible, no
+	// longer an unanalysed crossing. `os.Exit`, not a re-panic, for the reason
+	// the E-Stop watcher below exits: a process that died mid-boot must not
+	// reach the teardown that prints `DOWN`, which is the conductor's
+	// clean-teardown signal (E7). This defer is registered FIRST, so it runs
+	// LAST: every other defer in main (the teardown's `cancel`) has already
+	// run by the time it does. It covers THIS goroutine only — see `guard` —
+	// and the other goroutines main starts carry their own.
+	name := "proc"
+	defer guard(&name)()
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: revl_placement_runner <spec.json>")
 		os.Exit(2)
 	}
 	raw, err := os.ReadFile(os.Args[1])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "read spec:", err)
+		// item 421 F5: these three lines run before any component has loaded,
+		// but `bridge.ScrubText` is already live — the emitted package installs
+		// the scrub in an `init`, so it is in force from the first statement of
+		// main. `parse spec` is the one that needs it: a json error quotes the
+		// spec text it choked on, and the spec carries this process's config
+		// values, a declared `Secret[T]` among them.
+		fmt.Fprintln(os.Stderr, bridge.ScrubText("read spec: "+err.Error()))
 		os.Exit(1)
 	}
 	var s spec
 	if err := json.Unmarshal(raw, &s); err != nil {
-		fmt.Fprintln(os.Stderr, "parse spec:", err)
+		fmt.Fprintln(os.Stderr, bridge.ScrubText("parse spec: "+err.Error()))
 		os.Exit(1)
 	}
-	name := s.Name
-	if name == "" {
-		name = "proc"
+	if s.Name != "" {
+		name = s.Name
 	}
 	log := func(channel, subject, detail string) {
 		// item 421 F5 — the runner's single log choke point. Probe results,
@@ -177,6 +240,12 @@ func main() {
 		} else {
 			listener = ln
 			go bridge.Serve(ln, func(key, method string, args []json.RawMessage) (any, error) {
+				// The crossing goroutine's own funnel. `bridge.Serve` answers
+				// each connection on a goroutine of its own, so a panic raised
+				// in a provider method reaches the top of THAT goroutine and
+				// never main's defer. `args` is where a declared `Secret[T]`
+				// travels, and a panicking frame's value quotes what it held.
+				defer guard(&name)()
 				return emitted.RevlInvoke(root, key, method, args)
 			})
 			log("serve", strings.Join(s.Serve.Keys, ", "), "-> "+s.Serve.Socket)
@@ -246,6 +315,10 @@ func main() {
 	//     only when the placement is armed, so an unarmed run spawns no watcher.
 	if s.EstopLatch != "" {
 		go func() {
+			// The watcher's own funnel: it reads and parses the latch file and
+			// composes the HALTED inventory on a goroutine main's defer cannot
+			// see.
+			defer guard(&name)()
 			for {
 				if record := estop.ReadLatch(estop.LatchPath("", "", true)); record != nil {
 					fmt.Println(estop.EstopHaltLine(name, estop.InFlightCrossings(), record))

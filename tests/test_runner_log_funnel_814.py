@@ -25,6 +25,13 @@ except the last, which pins a byte-identity property rather than a redaction:
                          un-funnel the `_funnel_line` in the catch-all -> FAIL
   `_estop_watch` HALTED  test_the_estop_inventory_is_funnelled
                          un-funnel the `_funnel_line` -> FAIL
+  the OTHER threads    test_a_failure_on_a_thread_prints_one_redacted_line
+                         `run()` starts `revl-estop` and `revl-control`; a raise
+                         on either never reaches `main()`. Drop the
+                         `threading.excepthook` install -> the runtime prints
+                         the value verbatim and this test fails on the canary
+  `_thread_fatal`      test_the_thread_hook_prints_one_redacted_line
+                         the hook's own unit arm: un-funnel `_fatal_line` -> FAIL
   `_funnel_line` itself  test_funnel_line_scrubs_a_registered_secret
                          never a site test: proves the sink the four routed
                          prints share, on the channel that has no other canary
@@ -47,11 +54,13 @@ on an empty line.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -448,3 +457,156 @@ def test_the_parsed_protocol_lines_survive_the_funnel(tmp_path):
     # missing one
     assert trace.count("[only] UP") == 1, trace
     assert trace.count("[only] DOWN") == 1, trace
+
+
+# ---------------------------------------------------------------------------
+# the THREAD channel: `run()` starts `revl-estop` and `revl-control`, and a
+# raise on either never reaches `main()`
+# ---------------------------------------------------------------------------
+
+ARMED_NAME = "svc"
+
+
+def test_main_arms_the_thread_hook_before_run_can_start_a_thread():
+    """SHAPE. `threading.excepthook` is process-wide, so arming it is only
+    correct BEFORE `run()` runs — `run()` is what starts the two threads whose
+    failures the hook exists for — and `_FATAL_NAME` has to be set first
+    because the hook reads it from another thread. Both orderings are asserted
+    on `main()`'s SOURCE, sliced rather than grepped: an install placed after
+    the `try` is still "in `main()`" and would pass an `in` check while being
+    too late to matter."""
+    body = inspect.getsource(runner.main)
+    assert body.index('_FATAL_NAME = spec.get("name")') \
+        < body.index("threading.excepthook = _thread_fatal"), body
+    assert body.index("threading.excepthook = _thread_fatal") \
+        < body.index("asyncio.run("), body
+    # exactly one install, and no per-thread `Thread(...)`/`threading.Thread`
+    # override anywhere: one process-wide funnel, not a set of them
+    assert body.count("threading.excepthook =") == 1, body
+    assert "setUncaughtExceptionHandler" not in body, body
+
+
+def test_the_thread_hook_prints_one_redacted_line(monkeypatch, capsys):
+    """UNIT, on the hook itself: the failure that reaches `threading.excepthook`
+    by DEFAULT prints its traceback verbatim on stderr, which the conductor
+    merges (`placement.py::pump` spawns children with `stderr=STDOUT`), and the
+    traceback's message quotes whatever the failing frame interpolated. The hook
+    is handed a real exception carrying the canary in its message, so the canary
+    really is in the text it has to scrub, and `os._exit` is stubbed because the
+    real one would take pytest down with it."""
+    runner._funnel().register_secret_value(CANARY)
+    monkeypatch.setattr(runner, "_FATAL_NAME", ARMED_NAME)
+    codes: list[int] = []
+    monkeypatch.setattr(runner.os, "_exit", codes.append)
+    try:
+        raise ValueError(f"estop latch unreadable at {CANARY}")
+    except ValueError as exc:
+        args = threading.ExceptHookArgs(
+            (type(exc), exc, exc.__traceback__, threading.current_thread()))
+    runner._thread_fatal(args)
+
+    # no unwind: the process has to die where the thread died, or the teardown
+    # prints `DOWN` (E7), which is the conductor's clean-teardown signal
+    assert codes == [1]
+    err = capsys.readouterr().err
+    assert err == (f"[{ARMED_NAME}] FATAL ValueError: "
+                   f"estop latch unreadable at {REDACTED}\n"), err
+    # redact, do not delete: the type and the sentence around the value stay
+    assert CANARY not in err, err
+    assert "Traceback" not in err, err
+
+
+def test_a_systemexit_on_a_thread_is_not_a_failure(monkeypatch, capsys):
+    """The default hook ignores `SystemExit`, and so must this one: a thread
+    that ends by raising it is asking to be unwound, not reporting a failure.
+    Without the guard a plain `raise SystemExit(3)` inside a thread would print
+    a FATAL line and kill the process."""
+    codes: list[int] = []
+    monkeypatch.setattr(runner.os, "_exit", codes.append)
+    args = threading.ExceptHookArgs(
+        (SystemExit, SystemExit(3), None, threading.current_thread()))
+    runner._thread_fatal(args)
+    assert codes == []
+    assert capsys.readouterr().err == ""
+
+
+def test_the_thread_hook_shares_the_one_fatal_composer():
+    """Both fatal channels — `main()`'s catch-all and the thread hook — have to
+    reach the SAME composer, or the second one is free to forget the funnel.
+    `_fatal_line` is that composer and there is exactly one `FATAL` line in the
+    module, so a channel that spelled its own would be a second one."""
+    source = Path(runner.__file__).read_text(encoding="utf-8")
+    assert source.count('] FATAL ') == 1, "a second FATAL composer appeared"
+    hook = inspect.getsource(runner._thread_fatal)
+    assert "_fatal_line(args.exc_value)" in hook, hook
+    assert "print(" not in hook, hook
+    assert "_fatal_line(" in inspect.getsource(runner.main)
+
+
+# The live arm's driver. `run()`'s own two threads have no DETERMINISTIC escape
+# — the E-Stop latch read fails CLOSED (an unreadable or malformed latch is a
+# verdict, not a raise) and `control_reader` swallows a malformed control line —
+# so the live test pins the CHANNEL with the runner's real thread BODY
+# (`_estop_watch`, the target `run()` starts for `revl-estop`) and a runtime stub
+# whose latch read raises. What is under test is the channel, not the stub: the
+# armed arm installs the hook with the SAME statement `main()` executes, and the
+# unarmed arm is the non-vacuity control that shows the value verbatim.
+_THREAD_DRIVER = '''
+import sys, threading, time
+sys.path.insert(0, {src!r})
+from revl import _process_runner as runner
+
+
+class _UnreadableLatch:
+    def estop_from_latch(self):
+        raise RuntimeError("latch read failed on " + {canary!r})
+
+
+runner._funnel().register_secret_value({canary!r})
+runner._FATAL_NAME = {name!r}
+if sys.argv[1] == "armed":
+    threading.excepthook = runner._thread_fatal
+threading.Thread(target=runner._estop_watch, args=({name!r}, _UnreadableLatch()),
+                 name="revl-estop", daemon=True).start()
+time.sleep(2)
+'''
+
+
+def _run_thread_driver(tmp_path, armed: bool):
+    """Run the driver out of process: `_thread_fatal` ends in `os._exit`, which
+    is the point of it and is also why this arm cannot run inside pytest."""
+    script = tmp_path / "thread_driver.py"
+    script.write_text(_THREAD_DRIVER.format(src=str(ROOT / "src"), canary=CANARY,
+                                            name=ARMED_NAME), encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(script), "armed" if armed else "unarmed"],
+        capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
+
+
+def test_a_failure_on_a_thread_prints_one_redacted_line(tmp_path):
+    """The finding, on a REAL thread. The default hook's line is
+    `Exception in thread revl-estop: Traceback ... RuntimeError: latch read
+    failed on SEKRIT-RUNNER-CANARY-814`, and the conductor merges it verbatim.
+    With the hook armed: one funnelled line, exit 1, no traceback — and the
+    process does NOT unwind, so no `DOWN` is printed."""
+    result = _run_thread_driver(tmp_path, armed=True)
+    assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+    assert result.stdout == "", result.stdout
+    assert result.stderr.count("FATAL") == 1, result.stderr
+    assert result.stderr == (f"[{ARMED_NAME}] FATAL RuntimeError: "
+                             f"latch read failed on {REDACTED}\n"), result.stderr
+    assert CANARY not in result.stderr, result.stderr
+    assert "Exception in thread" not in result.stderr, result.stderr
+    assert "Traceback" not in result.stderr, result.stderr
+    assert "DOWN" not in result.stdout + result.stderr
+
+
+def test_without_the_thread_hook_the_runtime_prints_the_value(tmp_path):
+    """NON-VACUITY, the same run with the one install statement deleted. The
+    process survives (the default hook does not exit), so this also pins that
+    the armed arm's exit code came from the hook and not from the raise."""
+    result = _run_thread_driver(tmp_path, armed=False)
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert CANARY in result.stderr, result.stderr
+    assert "Exception in thread revl-estop" in result.stderr, result.stderr
+    assert "FATAL" not in result.stderr, result.stderr
