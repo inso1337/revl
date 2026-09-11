@@ -126,6 +126,45 @@ private static final int REVL_MIN_MARKABLE = 4;
 // Longest first, so a needle containing another leaves no tail behind.
 private static final java.util.List<String> revlSecretValues = new java.util.ArrayList<>();
 
+// The faces one string value wears inside host text (item 421 F6(d)).
+//
+// The match in revlRedactText is EXACT, and the text it runs over has already
+// been RENDERED. A value that holds a quote, a backslash or a newline comes
+// back ESCAPED from every encoder this tier has: `PlacementRunner.render`
+// routes a container through `Json.write`, whose `esc` rewrites exactly those
+// characters before any `revlRedactText` sees the line, and the seam wire
+// escapes the same way. The raw bytes then match nothing, so a `Secret[Str]`
+// holding such a value — an ordinary password or DSN with a `"` in it — crossed
+// the probe channel and the wire verbatim while the identical value without the
+// quote was scrubbed everywhere. Registering the encoder's body closes that:
+// two faces of one value, longest first like every other needle.
+//
+// The escape set is kept in step with `PlacementRunner.Json.esc` BY HAND,
+// because that encoder lives in the runner and this block is emitted into the
+// program, which cannot reach it. Same two faces the py tier's
+// `confidential._renderings` registers (raw + json body); the py tier's third
+// face is `repr`, which this tier has no producer of.
+private static java.util.List<String> revlRenderings(String text) {
+    StringBuilder escaped = new StringBuilder(text.length());
+    for (int k = 0; k < text.length(); k++) {
+        char c = text.charAt(k);
+        switch (c) {
+            case '"' -> escaped.append("\\\"");
+            case '\\' -> escaped.append("\\\\");
+            case '\n' -> escaped.append("\\n");
+            case '\t' -> escaped.append("\\t");
+            case '\r' -> escaped.append("\\r");
+            default -> escaped.append(c);
+        }
+    }
+    java.util.List<String> faces = new java.util.ArrayList<>(2);
+    faces.add(text);
+    if (!escaped.toString().equals(text)) {
+        faces.add(escaped.toString());
+    }
+    return faces;
+}
+
 // A declared Secret[T] may be a record, a list, an Opt: the members are what a
 // message would quote, so they are what is remembered (the py tier's
 // register_secret_tree). Keys of a map are field names the author wrote.
@@ -163,11 +202,14 @@ private static void revlRememberSecret(Object value) {
     if (text.length() < REVL_MIN_MARKABLE) {
         return;
     }
+    // The bound gates the RAW value only: an escape can only ever expand, so a
+    // value that cleared it clears it in every escaped face too.
     synchronized (revlSecretValues) {
-        if (revlSecretValues.contains(text)) {
-            return;
+        for (String face : revlRenderings(text)) {
+            if (!revlSecretValues.contains(face)) {
+                revlSecretValues.add(face);
+            }
         }
-        revlSecretValues.add(text);
         revlSecretValues.sort((a, b) -> Integer.compare(b.length(), a.length()));
     }
 }

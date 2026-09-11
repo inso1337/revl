@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 4275,
+      "statements": 4276,
       "uncovered": {
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
@@ -161,7 +161,7 @@
           "_emit_go_proxy_decode": 49,
           "_emit_go_proxy_method": 15,
           "_emit_v3_bridge_helpers": 52,
-          "_emit_v3_placement": 197,
+          "_emit_v3_placement": 198,
           "_go_bridge_arg_expr": 4,
           "_go_opt_inner": 4,
           "_go_result_inner": 5,
@@ -276,7 +276,7 @@
           "_needs_sync": 1
         }
       },
-      "uncovered_statements": 3086
+      "uncovered_statements": 3087
     },
     "java": {
       "statements": 2587,

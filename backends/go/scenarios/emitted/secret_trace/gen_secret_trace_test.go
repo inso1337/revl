@@ -4,6 +4,7 @@ package secrettrace
 
 import (
 	stdctx "context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"slices"
@@ -65,19 +66,52 @@ var _revlSecretMu sync.Mutex
 // Longest first, so a needle containing another leaves no tail behind.
 var _revlSecretValues []string
 
+// revlRenderings is every face one string value wears inside host text (item
+// 421 F6(d)).
+//
+// The match in revlRedactText is EXACT, and the text it runs over has already
+// been RENDERED. A value that holds a quote, a backslash or a control character
+// comes back ESCAPED from any encoder this tier renders it with — the runner's
+// probe channel writes a container with `json.Marshal` before the line reaches
+// the funnel, and the seam wire escapes the same way — so the raw bytes match
+// nothing there, and a `Secret[Str]` holding such a value crossed verbatim
+// while the identical value without the quote was scrubbed everywhere.
+// Registering the encoder's body closes that.
+//
+// Derived from `json.Marshal` itself rather than restating its escape table, so
+// the face cannot drift from the encoder that writes it. `encoding/json` quotes
+// the result, hence the slice.
+func revlRenderings(text string) []string {
+	faces := []string{text}
+	if encoded, err := json.Marshal(text); err == nil && len(encoded) >= 2 {
+		if body := string(encoded[1 : len(encoded)-1]); body != text {
+			faces = append(faces, body)
+		}
+	}
+	return faces
+}
+
 func revlRememberSecret(v any) {
 	text := fmt.Sprintf("%v", v)
 	if len(text) < revlMinMarkable {
 		return
 	}
+	// The bound gates the RAW value only: an escape can only ever expand, so a
+	// value that cleared it clears it in every escaped face too.
 	_revlSecretMu.Lock()
 	defer _revlSecretMu.Unlock()
-	for _, known := range _revlSecretValues {
-		if known == text {
-			return
+	for _, face := range revlRenderings(text) {
+		known := false
+		for _, seen := range _revlSecretValues {
+			if seen == face {
+				known = true
+				break
+			}
+		}
+		if !known {
+			_revlSecretValues = append(_revlSecretValues, face)
 		}
 	}
-	_revlSecretValues = append(_revlSecretValues, text)
 	slices.SortFunc(_revlSecretValues, func(a, b string) int { return len(b) - len(a) })
 }
 
