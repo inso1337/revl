@@ -254,17 +254,50 @@ def _schema_error(value, schema, path: str = "$") -> str | None:
     return None
 
 
+def _header_values(headers, name: str) -> list:
+    """Every value of `name`, in wire order.
+
+    `Message.get_all` is the duplicate-visible reader, for the same reason
+    `_frame_request` uses it: `.get()` answers with the FIRST occurrence and
+    cannot see a doubled field at all. A plain mapping has no duplicates to
+    report, but the same field can be spelled two ways in one, so both
+    spellings are read -- a mapping carrying both IS the doubled case.
+    """
+    if headers is None:
+        return []
+    get_all = getattr(headers, "get_all", None)
+    if get_all is not None:
+        return list(get_all(name) or [])
+    return [value for key in (name, name.lower())
+            if (value := headers.get(key)) is not None]
+
+
 def _bearer_token(headers) -> str | None:
     """The credential in an `Authorization: Bearer <token>` header, or None. The
-    router binds it UNTOUCHED as an untrusted claim; it decides nothing."""
-    if headers is None:
+    router binds it UNTOUCHED as an untrusted claim; it decides nothing.
+    A request that presents MORE THAN ONE `Authorization` field presents no
+    unambiguous credential, so no claim is made and the handler's `validate`
+    denies -- the same answer a missing credential gets. Reading only the
+    first of several would let this face and the `Request` escape hatch
+    (which carries every header, per `stdlib/http.rvl`'s `Header` list)
+    disagree about what one request presented, and would hand the first
+    field the authority of the credential an intermediary validated.
+    `stdlib/framing.rvl`'s `header_count` is the value-side reader for the
+    same question.
+    """
+    values = _header_values(headers, "Authorization")
+    if len(values) != 1:
         return None
-    raw = headers.get("Authorization") or headers.get("authorization")
+    raw = values[0]
     if not raw:
         return None
     parts = raw.split(None, 1)
-    if len(parts) == 2 and parts[0].lower() == "bearer":
-        return parts[1]
+    if not parts:
+        return None
+    if parts[0].lower() == "bearer":
+        # the scheme with no credentials is no credential, not a credential
+        # whose value is the word "Bearer"
+        return parts[1] if len(parts) == 2 else None
     return raw
 
 
