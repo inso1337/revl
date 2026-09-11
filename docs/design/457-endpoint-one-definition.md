@@ -137,11 +137,15 @@ operations; they are 456's remaining scope (2) and get their own contract.
    path values are validated against the derived schema BEFORE the provide
    method runs; a failure is `400` with an `ApiError` whose `message` names the
    field, and the handler is never invoked. Validation is about shape, not
-   trust: every routed input is an `Untrusted` source with origin `http`, the
-   inbound twin of D-424c.9, so a request value reaching a G9 sink (a command,
-   an authority selection, an instruction channel) is refused without an
-   `endorse`. Ordinary CRUD is not a sink, so the exemplary app pays nothing for
-   this.
+   trust: every routed input is an `Untrusted` source, the inbound twin of
+   D-424c.9, so a request value reaching a G9 sink (a command, an authority
+   selection, an instruction channel) is refused without an `endorse`. The
+   static lattice's origin class is `input` — the class `_origin_of` gives an
+   inbound crossing that declares no capability scope, which is what a routed
+   request is; the compiler is declaring `Untrusted[...]` on the author's
+   behalf, keyed by the operation name so the provide method implementing it
+   sees the origin in its own body. Ordinary CRUD is not a sink, so the
+   exemplary app pays nothing for this.
 3. **Response serialization.** The return rules above over the canonical
    encoding (docs/interop-bridge.md, "Canonical value encoding"): records as
    objects, `Opt` as the bare value or `null`, ADTs and `Result` payloads as
