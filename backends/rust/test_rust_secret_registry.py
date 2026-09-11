@@ -275,3 +275,147 @@ def test_no_sink_carries_the_secret_when_run(tmp_path):
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     assert "test result: ok" in (result.stdout or "")
+
+
+# ---------------------------------------------------------------------------
+# item 421 F6(d): the ESCAPED faces of a registered value
+# ---------------------------------------------------------------------------
+#
+# Both redaction stages match a value EXACTLY against text that has already
+# been RENDERED. A value holding a `"`, a `\` or a control character comes back
+# ESCAPED from every encoder this tier renders it with — `serde_json` on the
+# wire and in the runner's reply, `{:?}` in the host's own diagnostics — so the
+# raw bytes matched nothing and the value crossed verbatim, while the identical
+# value without the quote was scrubbed everywhere.
+#
+# `revl_renderings` registers each encoder's body beside the raw value, and
+# takes the body FROM the encoder rather than restating an escape table, so a
+# face cannot drift from the encoder that writes it.
+
+ESCAPED_CANARY = 'SEK"RIT\\RUST-CANARY-421-F6D'
+# JSON and Rust agree on the escaping of these characters, so the literal the
+# harness declares is the JSON rendering of the same value.
+ESCAPED_CANARY_LITERAL = json.dumps(ESCAPED_CANARY)
+
+
+def test_the_registry_registers_the_escaped_faces_too():
+    code = emit.emit(_compile(SCENARIO))
+    assert "fn revl_renderings(text: &str) -> Vec<String> {" in code
+    # the remember path registers what revl_renderings hands back, not the raw
+    # string alone
+    assert "for face in revl_renderings(&text) {" in code
+    # ...and each face comes from the encoder that writes it, so neither can
+    # drift from the escape table the encoder actually applies
+    assert "serde_json::to_string(text)" in code
+    assert 'format!("{:?}", text)' in code
+
+
+def test_the_bound_gates_the_raw_value_only():
+    """`REVL_MIN_MARKABLE` is checked against the raw value, before any face is
+    derived: an escape can only ever EXPAND, so a value that cleared the bound
+    clears it in every escaped face too."""
+    code = emit.emit(_compile(SCENARIO))
+    remember = code[code.index("fn revl_remember_secret(text: String) {"):]
+    assert (remember.index("text.len() < REVL_MIN_MARKABLE")
+            < remember.index("revl_renderings(&text)"))
+
+
+def test_a_secretless_document_carries_no_renderings():
+    plain = SCENARIO.replace("api_key: Secret[Str]", "api_key: Str").replace(
+        "key: Secret[Str]", "key: Str")
+    code = emit.emit(_compile(plain))
+    assert "revl_renderings" not in code
+    assert "revl_redact_text" not in code
+
+
+# The `format!` braces are doubled for the f-string; the canary is declared from
+# the JSON rendering of the value so the escape cannot be mistyped here.
+_ESCAPED_HARNESS = f'''
+#[cfg(test)]
+mod revl_escaped_face_tests {{
+    use crate::{{revl_forget_secrets, revl_mark_secret, revl_redact_text}};
+
+    const CANARY: &str = {ESCAPED_CANARY_LITERAL};
+    const REDACTED: &str = "{REDACTED_SECRET}";
+
+    #[test]
+    fn the_registry_covers_every_rendering_of_the_value() {{
+        // The two faces the emitted registry derives, taken from the encoders
+        // themselves so this test cannot drift from them either.
+        let wire = serde_json::to_string(CANARY).unwrap();
+        let wire_body = wire[1..wire.len() - 1].to_string();
+        let debug = format!("{{:?}}", CANARY);
+        let debug_body = debug[1..debug.len() - 1].to_string();
+        // the premise: both encoders really do rewrite this value, so a raw
+        // needle alone could not have matched either rendering
+        assert_ne!(wire_body, CANARY, "the wire encoder did not escape it");
+        assert_ne!(debug_body, CANARY, "the Debug encoder did not escape it");
+
+        revl_forget_secrets();
+        revl_mark_secret(&CANARY.to_string());
+
+        // a host line that quoted the value the way the wire encoder renders it
+        assert_eq!(
+            revl_redact_text(format!("reply {{}}", wire_body)),
+            format!("reply {{}}", REDACTED),
+            "the wire rendering crossed"
+        );
+        // ...and the way the host's own diagnostics render it
+        assert_eq!(
+            revl_redact_text(format!("panic {{}}", debug_body)),
+            format!("panic {{}}", REDACTED),
+            "the Debug rendering crossed"
+        );
+        // the raw face still matches, so the fix is additive rather than a
+        // replacement
+        assert_eq!(
+            revl_redact_text(format!("raw {{}}", CANARY)),
+            format!("raw {{}}", REDACTED)
+        );
+    }}
+}}
+'''
+
+
+@needs_cargo
+def test_no_sink_carries_an_escaped_value_when_run(tmp_path):
+    src = emit.emit(_compile(SCENARIO))
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(src + "\n" + _ESCAPED_HARNESS, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    assert "test result: ok" in (result.stdout or "")
+
+
+@needs_cargo
+def test_with_the_escaped_faces_stripped_the_value_leaks(tmp_path):
+    """Non-vacuity: `revl_renderings` is what stands between the encoders and
+    the sinks. Register the raw face alone — the pre-F6(d) shape — and the same
+    crate shows the escaped rendering surviving redaction."""
+    src = emit.emit(_compile(SCENARIO))
+    raw_only = src.replace("for face in revl_renderings(&text) {",
+                           "for face in vec![text.clone()] {")
+    assert raw_only != src, "the registration no longer reads through revl_renderings"
+    harness = _ESCAPED_HARNESS.replace(
+        "assert_eq!(\n            revl_redact_text(format!(\"reply {}\", wire_body)),\n"
+        "            format!(\"reply {}\", REDACTED),\n"
+        '            "the wire rendering crossed"\n        );',
+        "assert!(\n            revl_redact_text(format!(\"reply {}\", wire_body))"
+        ".contains(&wire_body),\n"
+        '            "the wire rendering was scrubbed: it should not have been"\n        );',
+    ).replace(
+        "assert_eq!(\n            revl_redact_text(format!(\"panic {}\", debug_body)),\n"
+        "            format!(\"panic {}\", REDACTED),\n"
+        '            "the Debug rendering crossed"\n        );',
+        "assert!(\n            revl_redact_text(format!(\"panic {}\", debug_body))"
+        ".contains(&debug_body),\n"
+        '            "the Debug rendering was scrubbed: it should not have been"\n        );',
+    )
+    assert harness.count("should not have been") == 2, "the leak assertions were not substituted"
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(raw_only + "\n" + harness, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    assert "test result: ok" in (result.stdout or "")
