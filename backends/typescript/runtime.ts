@@ -226,13 +226,21 @@ function inspectBody(value: string): string {
   return out
 }
 
+/** Register one already-RENDERED string's faces, under the bound the scalar
+ *  path applies. Split out because the byte faces below are renderings rather
+ *  than values: they need the bound and the escape faces, not the `typeof`
+ *  dispatch. */
+function registerText(text: string): void {
+  if (text.length >= MIN_MARKABLE) for (const face of renderings(text)) secretValues.add(face)
+}
+
 /** Remember one already-rendered value as confidential. Walks a container so a
  *  `Secret[List[Str]]` receiver marks its elements, mirroring py's
  *  `register_secret_tree`. */
 function rememberSecret(value: unknown): void {
   if (value === null || value === undefined || typeof value === 'boolean') return
   if (typeof value === 'string') {
-    if (value.length >= MIN_MARKABLE) for (const face of renderings(value)) secretValues.add(face)
+    registerText(value)
     return
   }
   if (typeof value === 'number' || typeof value === 'bigint') {
@@ -242,6 +250,24 @@ function rememberSecret(value: unknown): void {
   }
   if (Array.isArray(value)) {
     for (const item of value) rememberSecret(item)
+    return
+  }
+  // item 421 F6(f): a byte payload. The object walk below reaches one as its
+  // byte NUMBERS, and `String(byte)` is at most three characters — under
+  // MIN_MARKABLE — so a `Secret[Bytes]` registered nothing at all and its
+  // content crossed every sink verbatim. It wears a different face in each
+  // renderer and no one of them is derivable from another: a template literal
+  // writes the comma-joined decimals (this tier's `%v`), a host that prints the
+  // payload writes the decoded text, and the wire writes a json body. The go
+  // tier closes the same three faces off a `[]byte`.
+  if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
+    const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+    registerText(bytes.join(','))
+    registerText(new TextDecoder().decode(bytes))
+    // The value's OWN json face, not the view's: a `Buffer` serializes as
+    // `{"type":"Buffer","data":[…]}` where a plain `Uint8Array` writes
+    // `{"0":…}`, and a sink marshals whichever it was handed.
+    registerText(JSON.stringify(value))
     return
   }
   if (typeof value === 'object') {
