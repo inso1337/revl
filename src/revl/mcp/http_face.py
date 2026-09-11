@@ -51,13 +51,15 @@ from .session import SessionError
 # SESSION refuses (an unknown key, a runtime fault surfaced as a SessionError)
 # is 400; a route with no operation is 404; a wrong method on an operation path
 # is 405; a class-(c) crossing awaiting a human yes is 403 with the ticket in
-# the body (fail-closed: nothing fired); a callee that raised is 500.
+# the body (fail-closed: nothing fired); a callee that raised is 500; a body
+# larger than this face accepts is 413 (`stdlib/framing.rvl`'s `status_for`).
 _OK = 200
 _NO_CONTENT = 204
 _BAD_REQUEST = 400
 _FORBIDDEN = 403
 _NOT_FOUND = 404
 _METHOD_NOT_ALLOWED = 405
+_PAYLOAD_TOO_LARGE = 413
 _SERVER_ERROR = 500
 
 
@@ -663,25 +665,162 @@ def _err(message: str, *, code: str) -> dict:
 
 # ------------------------------------------------------------ HTTP plumbing
 
+# The largest request body this face accepts, in bytes. The ceiling is the
+# CALLER's policy and not part of the wire framing (`stdlib/framing.rvl:252`),
+# and this is the value that module's own usage example names —
+# `body_length(req.headers, 1024 * 1024)`, `stdlib/framing.rvl:41` — so the host
+# face and the primitive it mirrors agree on the number as well as on the rules.
+_MAX_BODY = 1024 * 1024
+
+
+@dataclasses.dataclass(frozen=True)
+class _FramingRefusal:
+    """A request this face refuses to frame, in `stdlib/framing.rvl`'s shape:
+    the wire status (`status_for`), the stable machine token (`reason_of`) and
+    the sentence to ship (`message_of`). All three come from that module
+    verbatim, so a caller reading this face's refusals reads the same words as a
+    caller reading the primitive's."""
+
+    status: int
+    reason: str
+    message: str
+
+
+_UNSUPPORTED_TRANSFER_ENCODING = _FramingRefusal(
+    _BAD_REQUEST, "unsupported_transfer_encoding",
+    "the request declares a Transfer-Encoding, which this server does not "
+    "decode; refuse it and close the connection rather than reading a body "
+    "framed by Content-Length (RFC 9112 6.1)")
+
+_DUPLICATE_CONTENT_LENGTH = _FramingRefusal(
+    _BAD_REQUEST, "duplicate_content_length",
+    "the request carries more than one Content-Length field (or a "
+    "comma-separated list in one field), so where the body ends is ambiguous; "
+    "refuse it and close the connection (RFC 9110 8.6, RFC 7230 3.3.3)")
+
+_MALFORMED_CONTENT_LENGTH = _FramingRefusal(
+    _BAD_REQUEST, "malformed_content_length",
+    "Content-Length must be one plain non-negative decimal integer: no sign, "
+    "no leading zeros beyond a single 0, no whitespace inside the value; refuse "
+    "it and close the connection (RFC 9112 6.3)")
+
+_OVER_CEILING = _FramingRefusal(
+    _PAYLOAD_TOO_LARGE, "over_ceiling",
+    "the declared body is larger than this endpoint accepts; refuse it with 413 "
+    "before reading any of it")
+
+# The HTTP grammar's OWS is SP and HTAB, deliberately narrower than
+# `str.strip()`'s wider set: a value padded with a form feed is malformed rather
+# than trimmed (`stdlib/framing.rvl:340`, RFC 9110 5.6.3).
+_OWS = " \t"
+
+
+def _frame_request(headers, ceiling: int) -> "tuple[int | None, _FramingRefusal | None]":
+    """How many body bytes belong to this request, or the refusal that says why
+    it is not framed.
+
+    The host-side port of `stdlib/framing.rvl`'s `body_length`
+    (`stdlib/framing.rvl:262`): the same rules in the same order — transfer
+    encoding, then a repeated length, then the value grammar, then the ceiling —
+    earning the same cases, the same wire statuses and the same sentences. This
+    is Python host code and cannot call a Revl primitive, so it mirrors the
+    primitive rather than calling it; `docs/design/867-request-framing.md:151`
+    names this reader as exactly that residue, and a reader that answered any of
+    these four rules differently from the primitive is the drift that module
+    exists to remove.
+
+    `headers` is the `email.message.Message` `BaseHTTPRequestHandler` builds.
+    `get_all` is its duplicate-visible reader — the analogue of the stdlib's
+    `header_values`/`header_count` — because `.get()` answers with the FIRST
+    occurrence only and cannot see a doubled field at all (`stdlib/http.rvl`'s
+    `header_value` has the same blind spot, which is why that module carries
+    both).
+    """
+    if headers.get_all("Transfer-Encoding"):
+        return None, _UNSUPPORTED_TRANSFER_ENCODING
+    lengths = headers.get_all("Content-Length") or []
+    if len(lengths) > 1:
+        return None, _DUPLICATE_CONTENT_LENGTH
+    if not lengths:
+        # RFC 9112 6.3 item 7: neither field means no body, which is 0, not a
+        # refusal.
+        return 0, None
+    return _length_of(lengths[0], ceiling)
+
+
+def _length_of(value: str, ceiling: int) -> "tuple[int | None, _FramingRefusal | None]":
+    """One `Content-Length` value to its length, or the rule it broke."""
+    v = value.strip(_OWS)
+    if not v:
+        return None, _MALFORMED_CONTENT_LENGTH
+    if not _all_digits(v):
+        # a comma in the value is a list of lengths in ONE field: the duplicate
+        # defect spelled differently, and a comma is what a list is
+        if "," in v:
+            return None, _DUPLICATE_CONTENT_LENGTH
+        return None, _MALFORMED_CONTENT_LENGTH
+    if len(v) > 1 and v[0] == "0":
+        # `0000000001` is legal ABNF and is still refused: accepting two
+        # spellings of one length forces every reader to compare them as text
+        return None, _MALFORMED_CONTENT_LENGTH
+    # Bound BEFORE the multiply, exactly as `stdlib/framing.rvl`'s `length_of`
+    # does (`stdlib/framing.rvl:299`): the digit loop stops as soon as the digits
+    # read exceed the ceiling, so a 4300-digit value is refused on its first few
+    # digits and is never handed to an integer conversion at all. Without the
+    # second clause the loop could be walked one digit past the ceiling.
+    acc = 0
+    head = ceiling // 10
+    for ch in v:
+        d = ord(ch) - 48
+        if acc > head or (acc == head and d > ceiling - acc * 10):
+            return None, _OVER_CEILING
+        acc = acc * 10 + d
+    return acc, None
+
+
+def _all_digits(value: str) -> bool:
+    return all("0" <= ch <= "9" for ch in value)
+
+
 def _make_handler(server: HttpComposedServer):
     class _Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
-        def _respond(self, method: str) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length else b""
-            # item 457: `dispatch_http` honours `route` clauses first (with the
-            # request headers and query, for bearer/path/query binding) and falls
-            # back to the canonical fourth-quadrant dispatch otherwise.
-            reply = server.dispatch_http(method, self.path, body, self.headers)
+        def _write(self, reply: HttpReply, *, close: bool = False) -> None:
             self.send_response(reply.status)
             self.send_header("Content-Type", reply.content_type)
             for name, value in reply.headers:
                 if name and name.lower() != "content-type":
                     self.send_header(name, value)
+            if close:
+                # RFC 7230 3.3.3, and `docs/design/867-request-framing.md:159`:
+                # a refused framing means the byte stream is no longer
+                # trustworthy, so a pipelined request behind it must not be
+                # parsed — say so, and close rather than keep reading.
+                self.close_connection = True
+                self.send_header("Connection", "close")
             self.send_header("Content-Length", str(len(reply.body)))
             self.end_headers()
             self.wfile.write(reply.body)
+
+        def _respond(self, method: str) -> None:
+            length, refusal = _frame_request(self.headers, _MAX_BODY)
+            if refusal is not None:
+                # A clean, structured refusal in the module's own error shape,
+                # never a traceback: which bytes belong to this body is the
+                # sender's to declare and this face's to check, so a request that
+                # declares it wrongly gets an answer (`_err`, the same
+                # `{"severity", "code", "category", "message"}` envelope every
+                # other refusal on this face uses) instead of a crash.
+                self._write(HttpReply.json(refusal.status, _err(
+                    refusal.message, code=refusal.reason)), close=True)
+                return
+            body = self.rfile.read(length) if length else b""
+            # item 457: `dispatch_http` honours `route` clauses first (with the
+            # request headers and query, for bearer/path/query binding) and falls
+            # back to the canonical fourth-quadrant dispatch otherwise.
+            reply = server.dispatch_http(method, self.path, body, self.headers)
+            self._write(reply)
 
         def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
             self._respond("GET")
