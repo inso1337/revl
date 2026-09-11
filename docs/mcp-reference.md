@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 51 verbs below, one section each.
+The advertised list is exactly the 52 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -51,6 +51,7 @@ the transition, so the running system keeps serving.
 | `revl_admit` | yes | no | `manifest` (source) |
 | `revl_plan` | yes | no | - (source) |
 | `revl_ship` | no | yes | - (source) |
+| `revl_deploy` | no | yes | `placement` |
 | `revl_audit` | yes | no | - (source) |
 | `revl_tools` | yes | no | - (source) |
 | `revl_load` | no | no | - (source) |
@@ -148,6 +149,37 @@ check → admit → plan → swap into this one call; without it nothing is muta
 
 - Inputs: `source` / `files` / `modules`; `manifest`; `replacing`; `apply`
   (default false, the read-only rehearsal).
+- Destructive when `apply: true`.
+
+### `revl_deploy`
+
+The acting, cross-host half of `revl_ship`: drive an admission-gated
+cross-machine reconfiguration of the running composition onto a second host
+(`via = ssh`) through the same leg `revl deploy` uses ([deploy.md](deploy.md),
+roadmap item 476, issue #830). Runs the deploy-map admission gate first —
+refusing a machine boundary without a pinned host key (`known_hosts`), an
+unknown `via`, a network provider, and so on — and reports the plan. Without
+`apply`, or with `apply: false`, this is a REHEARSAL: it admits and plans and
+mutates NOTHING on either host. With `apply: true` it stages the attested
+bundle under each pinned host key and drives the coordinated
+PREPARE/COMMIT/ABORT protocol — the far host re-hashes the bytes it runs, the
+conductor verifies the signed admission and COMMIT receipts, and a remote the
+conductor cannot settle on ABORT is `unresolved`, never a false rollback. The
+crossing is irreversible, so `apply: true` is additionally refused without the
+configured approval: it returns the `revl_approve` ticket two-step, and the
+identical re-issue after a yes fires exactly once.
+
+Host, port, `known_hosts`, `host_key`, `remote_bundle` and the ssh options are
+keys of the `[processes.<p>.deploy]` table inside `placement`, not top-level
+arguments. A `via = ssh` target needs `host`, `known_hosts` (the PINNED
+host-key file) and `remote_bundle` (the path on the far host the bundle is
+staged to and re-hashed); `host_key` is a conductor-side copy of the far host's
+receipt-signing key, so the conductor can verify the signed receipts it gets
+back.
+
+- Inputs: `placement` (the deploy map); `bundle` (required for `apply: true` on
+  a cross-machine deploy); `backend` (default `python`); `apply` (default false,
+  the read-only rehearsal).
 - Destructive when `apply: true`.
 
 ### `revl_audit`

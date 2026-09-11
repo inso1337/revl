@@ -144,12 +144,12 @@ was corrected by hand and had drifted back within a day.
 | interop-bridge.md | needs-work | 51 |  |
 | lifecycle-contract.md | needs-work | 0 |  |
 | mcp-bridge.md | needs-work | 76 |  |
-| mcp-reference.md | current | 3 |  |
+| mcp-reference.md | current | 6 |  |
 | namespacing.md | needs-work | 8 |  |
 | network-path.md | needs-work | 24 |  |
 | network-placement.md | needs-work | 4 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
-| operator-capabilities.md | needs-work | 34 |  |
+| operator-capabilities.md | needs-work | 35 |  |
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |
