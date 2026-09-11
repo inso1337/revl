@@ -399,7 +399,10 @@ class TaintModel:
         and no endorse slot engages nothing — the flow walk is skipped and stays
         byte-identical. A bound secret mints a `secret` source, so it engages the
         walk through `sources` (item 256); a `Secret[T]` receiver engages it
-        through `secret_receivers` (item 256 Slice 3)."""
+        through `secret_receivers` (item 256 Slice 3); a `route` clause engages it
+        through `untrusted_params` (item 457 — a routed operation's parameters are
+        request values, so the operation carries an `input` origin whether or not
+        the author wrote a qualifier)."""
         return bool(self.sources or self.sinks or self.untrusted_params
                     or self.declassifiers or self.declared_endorse
                     or self.secret_receivers or self.secret_config)
@@ -604,6 +607,22 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
     # required key; qualifiers are stripped from the (name, type) tuples.
     for svc in getattr(program, "services", ()):
         for method in svc.methods.values():
+            # item 457: a `route` clause makes the operation reachable over HTTP,
+            # so every one of its parameters IS a request value. The clause binds
+            # the WHOLE parameter list — a path placeholder, a `Bearer` from the
+            # `Authorization` header, a `Request`, the query string, or the one
+            # body record — so the inbound stamp covers every index. The origin is
+            # `input`, the lattice's class for an inbound crossing that declares no
+            # scope (`_origin_of`), which is exactly what a routed request is: the
+            # compiler declaring `Untrusted[...]` on the author's behalf, the twin
+            # of the `emission[web]` return the outbound half mints (D-424c.9).
+            # Without it a routed handler could hand a raw request value to a G9
+            # sink with no `endorse`, because the qualifier strip leaves the bare
+            # type and the flow walk is the only thing standing between the wire
+            # and the sink. Keyed by the operation name like the qualifier arms
+            # below, so the provide method implementing it resolves to the same
+            # key and sees the origins in its own body.
+            routed = bool(getattr(method, "route", None))
             endorse_origins = getattr(method, "endorse_origins", frozenset())
             if endorse_origins:
                 # keyed by the operation name — a provide method implementing it
@@ -639,6 +658,12 @@ def extract_and_normalize(program, taint_strict: bool = False) -> TaintModel:
                     # marked at the same crossing (admission-only; see there).
                     model.secret_receivers.setdefault(method.name, set()).add(i)
                     secret_indices.add(i)
+                if routed:
+                    # a declared qualifier states what the value IS, so it keeps
+                    # its own label; the route is what makes it reachable, and it
+                    # is what an `endorse[input]` on the handler clears.
+                    model.untrusted_params.setdefault(
+                        method.name, {}).setdefault(i, "input")
                 new_params.append((pname, clean))
             method.params = new_params
             # The stamp the IR carries into the runtime. `method.params` above no
@@ -2197,7 +2222,9 @@ def _infer_signatures(fns, components, model: TaintModel, filename: str,
 def check_taint(program, fns, components, model: TaintModel,
                 filename: str, untrusted: bool = False) -> None:
     """Refuse any untrusted value that reaches a sink without a declassifier
-    (G9). No-op — and byte-identical — when the program uses no qualifier.
+    (G9). No-op — and byte-identical — when the program uses no qualifier and
+    declares no `route` (a routed operation's parameters are request values, so
+    a routed program is never vacuous; item 457).
 
     `untrusted` (item 274) marks the untrusted-author profile: a G9 sink
     refusal then carries the collapsed navigable verdict instead of teaching a
