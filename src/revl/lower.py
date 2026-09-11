@@ -3138,7 +3138,7 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
             return found[0], "emission"
         return None
 
-    def _walk(e, _seen=()):
+    def _walk(e, _seen=(), _computed=False):
         if e is None:
             return
         held = _project(e)
@@ -3148,7 +3148,20 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
             # its value and nothing else, so this replaces the read rather than
             # adding to it — which is also what keeps a record PROJECTION from
             # being judged as the whole record.
-            _walk(held, _seen)
+            #
+            # `_computed` carries the one thing the substitution cannot read off
+            # the value itself: WHERE that value was computed. The `let` that
+            # binds it sits in the method body, ahead of the bracket, so a call
+            # inside it ran there and not in this slot — `let t = emit
+            # mint_token(u)` followed by `undo store.remove(t)` hands the
+            # inverse a token it is entitled to use, and reading the call as
+            # though it were written in the slot refuses a program whose
+            # emission never crossed the boundary. Only the call arm below
+            # consults the flag: a REFERENCE is a reference however it was
+            # bound, because the receiver dispatches the value it was handed
+            # (`let r = w.task.run; undo dispatch1(r)`), and that indirection is
+            # what this walk exists to close.
+            _walk(held, _seen, True)
             return
         if isinstance(e, ExprVar) and e.name in emitting_fns:
             # a first-class reference in VALUE position: the callee it names may
@@ -3161,28 +3174,33 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
             refuse(e, e.name, extern_class.get(chain[-1]) or "emission", chain)
         if isinstance(e, ExprCall):
             callee = e.callee
-            if isinstance(callee, ExprVar):
-                name = callee.name
-                bad = extern_class.get(name)
-                if bad in ("emission", "witnessed"):
-                    refuse(e, name, bad, [name])
-                elif bad is None and name in emitting_fns:
-                    chain = _emission_chain(name, emitting_witness)
-                    refuse(e, name, extern_class.get(chain[-1]), chain)
-                elif name in arrows and name not in _seen:
-                    # follow the arrow: whatever ITS body reaches, this call
-                    # reaches. Resolved, not over-approximated, so a teardown
-                    # calling a host-local arrow still compiles.
-                    _walk(arrows[name].body, _seen + (name,))
-                elif refuse_opaque is not None and bad is None \
-                        and name not in emitting_fns and name in in_scope:
-                    refuse_opaque(e, name)
-            elif env is not None and isinstance(callee, ExprField):
-                hit = _field_boundary(callee)
-                if hit is not None:
-                    refuse(e, hit[0], hit[1], [hit[0]])
+            if not _computed:
+                # a call WRITTEN in the slot runs in teardown, so whatever it
+                # reaches is a crossing; the same call read out of a binding the
+                # body already evaluated is a value, and `_computed` is the
+                # whole of that difference.
+                if isinstance(callee, ExprVar):
+                    name = callee.name
+                    bad = extern_class.get(name)
+                    if bad in ("emission", "witnessed"):
+                        refuse(e, name, bad, [name])
+                    elif bad is None and name in emitting_fns:
+                        chain = _emission_chain(name, emitting_witness)
+                        refuse(e, name, extern_class.get(chain[-1]), chain)
+                    elif name in arrows and name not in _seen:
+                        # follow the arrow: whatever ITS body reaches, this call
+                        # reaches. Resolved, not over-approximated, so a teardown
+                        # calling a host-local arrow still compiles.
+                        _walk(arrows[name].body, _seen + (name,), _computed)
+                    elif refuse_opaque is not None and bad is None \
+                            and name not in emitting_fns and name in in_scope:
+                        refuse_opaque(e, name)
+                elif env is not None and isinstance(callee, ExprField):
+                    hit = _field_boundary(callee)
+                    if hit is not None:
+                        refuse(e, hit[0], hit[1], [hit[0]])
             for a in e.args:
-                _walk(a, _seen)
+                _walk(a, _seen, _computed)
             return
         if isinstance(e, ExprField):
             # the same read, NOT called: `undo dispatch1(w.task.run)`. Nothing
@@ -3192,16 +3210,21 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
             if hit is not None:
                 refuse(e, hit[0], hit[1], [hit[0]])
         if isinstance(e, ExprArrow):
-            _walk(e.body, _seen)
+            # an arrow's body is DEFERRED: it runs where the value is INVOKED,
+            # not where the `let` sits, so a dispatched arrow emits in teardown
+            # and its body is judged as slot code however the arrow was bound
+            # (`_project` hands back `let f = (x) => send(x)` for `undo
+            # dispatch1(f)`, and that is a crossing, not a value).
+            _walk(e.body, _seen, False)
             return
         for f in type(e).__dataclass_fields__:
             v = getattr(e, f)
             if hasattr(v, "__dataclass_fields__"):
-                _walk(v, _seen)
+                _walk(v, _seen, _computed)
             elif isinstance(v, (list, tuple)):
-                _walk_held(v, _seen)
+                _walk_held(v, _seen, _computed)
 
-    def _walk_held(v, _seen):
+    def _walk_held(v, _seen, _computed=False):
         """Sweep a list of expressions OR of the `(name, value)` pairs a record
         literal and a `match` arm are written as.
 
@@ -3212,11 +3235,11 @@ def _walk_inverse_emissions(expr, extern_class: dict, emitting_fns: set,
         value bound to one."""
         for x in v:
             if hasattr(x, "__dataclass_fields__"):
-                _walk(x, _seen)
+                _walk(x, _seen, _computed)
             elif isinstance(x, (list, tuple)):
                 for y in x:
                     if hasattr(y, "__dataclass_fields__"):
-                        _walk(y, _seen)
+                        _walk(y, _seen, _computed)
 
     _walk(expr)
 
