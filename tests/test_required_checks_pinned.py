@@ -25,13 +25,32 @@ temporal-exit, backend-roots-combined) are named here so that their exclusion is
 an ASSERTED choice with a reason, not an oversight. If branch protection is ever
 updated, update REQUIRED_CHECKS to match and this file documents the new intent.
 
+IMPORTANT: REQUIRED_CHECKS is INTENT, and it is NOT the live enforcement set.
+Read against `repos/inso1337/revl/branches/main/protection` on 2026-09-10, the
+required status check contexts on `main` are SEVEN:
+
+    lint, backend-python, backend-typescript, backend-wasm, backend-rust,
+    backend-java, backend-go
+
+and rulesets are empty. So `frontend`, `frontend-cordis`, `conformance` and
+`formal` are marked required HERE and are NOT enforced by the server, and no
+unit test can tell the two apart without credentials. That gap is part of why
+PR #850 (`e6067cd1`) reached `main` with the root suite uncollected: its
+`frontend` job was skipped AND `frontend` is not a required context, so even a
+FAILED `frontend` would not have blocked the merge (`site-wheel-drift` and
+`frontend-arm64` did fail on it, and both are non-required). Read
+REQUIRED_CHECKS as the partition `main` is intended to enforce, read
+ENFORCED_TODAY below as the last verified server-side reading, and update both
+when branch protection changes. The command is
+`gh api repos/inso1337/revl/branches/main/protection`.
+
 NOTE on the "13 required checks" figure in ci.yml's merge-queue comment: this
-partition marks 11 jobs required and 5 non-required. The two are reconciled at
-the branch-protection settings, which are out of tree; whichever is stale, this
-test at least makes the job-name side of the contract explicit and drift-proof.
-It reads ci.yml as text, so it needs no PyYAML (not a declared dependency) and
-rides the frontend job's plain `pytest tests/ -q`, like
-tests/test_site_wheel_gate_runs_in_ci.py.
+partition marks 11 jobs intended-required (7 of them enforced) and 7
+non-required. The two are reconciled at the branch-protection settings, which
+are out of tree; whichever is stale, this test at least makes the job-name side
+of the contract explicit and drift-proof. It reads ci.yml as text, so it needs
+no PyYAML (not a declared dependency) and rides the frontend job's plain
+`pytest tests/ -q`, like tests/test_site_wheel_gate_runs_in_ci.py.
 """
 
 from __future__ import annotations
@@ -42,20 +61,33 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 
-# Every ci.yml job that branch protection is intended to require before a merge.
-REQUIRED_CHECKS = frozenset({
+# The contexts branch protection on `main` actually enforces, verified against
+# the API on 2026-09-10 (`gh api repos/inso1337/revl/branches/main/protection`,
+# strict=false, enforce_admins=false, no rulesets). Seven contexts, and none of
+# them is a root-suite job.
+ENFORCED_TODAY = frozenset({
     "lint",
-    "frontend",
     "backend-python",
-    "frontend-cordis",
     "backend-typescript",
     "backend-wasm",
     "backend-rust",
     "backend-java",
     "backend-go",
+})
+
+# Intended to gate a merge, NOT enforced by the server as of the read above. The
+# 3-version root-suite matrix and the two conformance lanes live here, which is
+# the more dangerous half of the #854 incident: a job in this set cannot stop a
+# merge, and a `skipped` job in this set reads as a `success` anyway.
+ASPIRATIONAL = frozenset({
+    "frontend",
+    "frontend-cordis",
     "conformance",
     "formal",
 })
+
+# Every ci.yml job that branch protection is intended to require before a merge.
+REQUIRED_CHECKS = ENFORCED_TODAY | ASPIRATIONAL
 
 # Jobs deliberately NOT required. Each exclusion is a choice with a reason, so a
 # reader can tell an intentional gap from a forgotten one.
@@ -80,6 +112,21 @@ NOT_REQUIRED_CHECKS = {
     # conformance/formal jobs run on a given PR. Pure routing over `git diff`;
     # it gates nothing itself and is never a merge blocker.
     "changes": "path-filter router for the gated frontend jobs; not a gate",
+    # Issue #854: the unconditional owner of root-suite coverage. `frontend` and
+    # `frontend-cordis` are the fast path for the 3-version matrix, and a diff
+    # that misses the fast-path filter used to leave the root suite collected by
+    # no job at all. This one runs the selection `tools/affected_tests.py`
+    # computes, on one interpreter, for every diff, and has no `if:` so it can
+    # never report `skipping`. Kept out of branch protection on purpose for now:
+    # it is coverage insurance rather than the gate itself, and a required
+    # context must already exist on `main` before it can be required (requiring
+    # it before this merges blocks every PR forever on a check no run reports).
+    # The follow-up, once this is on `main`, is a read-modify-write of the
+    # contexts list:
+    #   gh api repos/inso1337/revl/branches/main/protection/required_status_checks
+    #   gh api -X PATCH repos/inso1337/revl/branches/main/protection/required_status_checks \
+    #     --input - <<< '{"strict":false,"contexts":[...ENFORCED_TODAY...,"root-suite-affected"]}'
+    "root-suite-affected": "issue #854 unconditional root-suite coverage; promotion is a branch-protection change, out of tree",
 }
 
 
@@ -138,6 +185,30 @@ def test_required_and_not_required_partition_every_ci_job():
 def test_required_and_not_required_are_disjoint():
     overlap = REQUIRED_CHECKS & set(NOT_REQUIRED_CHECKS)
     assert not overlap, f"a job is both required and not-required: {sorted(overlap)}"
+
+
+# --- intent is not enforcement --------------------------------------------- #
+def test_the_enforced_partition_is_not_read_as_the_enforced_reality():
+    """Issue #854: a list marked "required" that the server does not enforce is
+    the same false-assurance class as a `skipped` job that branch protection
+    reads as `success`. Pin the split so REQUIRED_CHECKS cannot be mistaken for
+    the live gate, and so a promotion or a demotion has to be made on purpose
+    (update ENFORCED_TODAY and the docstring together with the API call)."""
+    assert ENFORCED_TODAY | ASPIRATIONAL == REQUIRED_CHECKS
+    assert not (ENFORCED_TODAY & ASPIRATIONAL)
+    # Verified on 2026-09-10: none of the root-suite matrix is a required
+    # context, and neither conformance lane is. If that changes, this reds and
+    # forces the split to be re-read from the API rather than guessed.
+    for job in ("frontend", "frontend-cordis", "conformance", "formal"):
+        assert job in ASPIRATIONAL, f"{job} moved without re-reading the API"
+        assert job not in ENFORCED_TODAY, (
+            f"{job} is not a required context on main as of 2026-09-10; if it was "
+            "promoted, move it to ENFORCED_TODAY and update the docstring"
+        )
+    assert ENFORCED_TODAY == frozenset({
+        "lint", "backend-python", "backend-typescript", "backend-wasm",
+        "backend-rust", "backend-java", "backend-go",
+    }), "the 7 enforced contexts changed; re-read branch protection and update"
 
 
 # --- the deliberate exclusions are asserted, not incidental ---------------- #

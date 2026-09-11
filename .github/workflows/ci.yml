@@ -80,11 +80,37 @@ env:
   GOSUMDB: "off"
 
 jobs:
-  # PR fast-path (approved CI-topology change). The heavy frontend-family jobs
-  # (`frontend`'s 3.11/3.12/3.13 matrix and `frontend-cordis`, and by
-  # dependency `conformance` and `formal`) only need to run when a PR actually
-  # touches language sources. This job decides that ONCE, and those jobs gate
-  # on its `frontend` output.
+  # PR fast-path (approved CI-topology change, reworked by issue #854). The
+  # heavy frontend-family jobs (`frontend`'s 3.11/3.12/3.13 matrix and
+  # `frontend-cordis`, and by dependency `conformance` and `formal`) are skipped
+  # only when a PR touches NOTHING that could affect the root suite. This job
+  # decides that ONCE, and those jobs gate on its `frontend` output.
+  #
+  # The rule is an ALLOW-list, and issue #854 reworked it into one because the
+  # DENY-list form shipped a real break. The rule used to be
+  # `grep -Eq '^(src/revl/|selfhost/|stdlib/)'`: an enumeration of what counts
+  # as a language change, so ANY path the author had not thought of silently
+  # disabled the entire root `tests/` suite, and a `skipping` check is
+  # indistinguishable from a passing one to branch protection. PR #850
+  # (e6067cd1) changed only `backends/python/emit.py`,
+  # `backends/python/replay.py`, `backends/python/runtime.py` and
+  # `tests/test_crash_recovery.py`. None of those matched, the whole suite was
+  # skipped, and `backends/python/emit.py` is the REFERENCE emitter that
+  # `tests/test_selfhost_emit_py.py` holds byte-identical to its revl twin
+  # `selfhost/emit_py.rvl`. The twin was not ported, nothing collected the test
+  # that says so, and main has been red on
+  # `test_selfhosted_emitter_is_byte_identical[../policy_agents.rvl]` ever
+  # since.
+  #
+  # So the sets are inverted. The SKIPPABLE set is now an explicit ALLOW-list
+  # (`SKIP_RE`) of paths that cannot affect the suite, it is documentation and
+  # nothing else, and every other path -- every tier under `backends/`,
+  # `crates/`, `tools/`, `tests/`, `selfhost/`, `stdlib/`, `src/`, `.github/`,
+  # `pyproject.toml`, and any path this file has never heard of -- runs the
+  # matrix. Two fail-safes point the same way: an empty diff takes the matrix,
+  # because "no files" is not evidence that no relevant file changed, and
+  # `root-suite-affected` below is UNGATED, so the suite is collected by a job
+  # that runs even on a documentation-only diff.
   #
   # On any NON-pull_request event -- push to main, the nightly schedule, a
   # manual workflow_dispatch, a merge_group candidate, or a workflow_call from
@@ -112,6 +138,16 @@ jobs:
           # the roadmap-marker step in `lint` follows for github.head_ref).
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
+          # The ALLOW-list: the only paths whose changes cannot affect the root
+          # suite, so a PR touching nothing else may skip the matrix. It is as
+          # small as the evidence allows, and documentation is the whole of it.
+          # `tests/test_doc_examples.py` is the one root-suite test that reads
+          # that documentation, which is why the ungated `root-suite-affected`
+          # job still runs it for a documentation-only diff. Adding a path here
+          # is the claim "the suite cannot observe this file": make that claim
+          # with a test under `tests/`, never by widening the pattern to make a
+          # red PR green.
+          SKIP_RE: '^(docs/|.*\.md$)'
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" != "pull_request" ]; then
@@ -125,13 +161,21 @@ jobs:
           # history, so a depth-1 base tip is enough.
           git fetch --no-tags --depth=1 origin \
             "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
-          if git diff --name-only "origin/${BASE_REF}" HEAD \
-               | grep -Eq '^(src/revl/|selfhost/|stdlib/)'; then
+          changed=$(git diff --name-only "origin/${BASE_REF}" HEAD)
+          # Every changed path that is NOT on the allow-list. `grep -v` exits
+          # non-zero when nothing survives it, which is a legitimate answer
+          # here, so that status is swallowed rather than read as an error.
+          relevant=$(printf '%s\n' "$changed" | sed '/^$/d' | grep -Ev "$SKIP_RE" || true)
+          if [ -z "$changed" ]; then
             echo "frontend=true" >> "$GITHUB_OUTPUT"
-            echo "PR touches src/revl|selfhost|stdlib: frontend=true"
-          else
+            echo "no changed paths (unresolved base ref?): frontend=true (full matrix)"
+          elif [ -z "$relevant" ]; then
             echo "frontend=false" >> "$GITHUB_OUTPUT"
-            echo "PR touches no language sources: frontend=false (skip frontend family)"
+            echo "PR touches documentation only: frontend=false (skip frontend family)"
+          else
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            count=$(printf '%s\n' "$relevant" | sed '/^$/d' | wc -l | tr -d ' ')
+            echo "PR touches ${count} path(s) off the allow-list: frontend=true (full matrix)"
           fi
 
   # roadmap 110d: lint gate. The repo's `# noqa` discipline is F-level
@@ -460,6 +504,139 @@ jobs:
       # future failure needs excluding, enumerate it here with a reason and add
       # it to 430 rather than narrowing the path above.
       - run: backends/python/.venv/bin/python -m pytest tests/ -q
+
+  # Issue #854. The root `tests/` suite ran in exactly two jobs, `frontend` and
+  # `frontend-cordis`, and BOTH gated on `changes.outputs.frontend`, which was
+  # 'true' only when the diff touched `src/revl/`, `selfhost/` or `stdlib/`. A PR
+  # whose diff touched anything else therefore selected NO job that ran the
+  # suite: both jobs reported `skipping`, and a skipped check is
+  # indistinguishable from a passing one in the merge box. That is not theory.
+  # PR #845 added a guard test in `tests/test_multi_realm_require.py` and edited
+  # `tests/fixtures/selfhost_uncovered_lines.json`, collected and evaluated by
+  # nothing; a java ledger drift landed on `main` the same way, repaired after
+  # the fact by #837; and PR #850 (`e6067cd1`) changed only
+  # `backends/python/emit.py`, `backends/python/replay.py`,
+  # `backends/python/runtime.py` and `tests/test_crash_recovery.py`, merged with
+  # the suite skipped, and left `main` red on
+  # `tests/test_selfhost_emit_py.py::test_selfhosted_emitter_is_byte_identical`
+  # because `backends/python/emit.py` is the reference twin of
+  # `selfhost/emit_py.rvl` and the port was never made.
+  #
+  # The primary repair is in `changes` above, which now runs the matrix by
+  # default and skips it only for an ALLOW-list of paths that cannot affect the
+  # suite: `backends/**`, `crates/**`, `tools/**`, `tests/**` and every other
+  # unlisted path select `frontend` and `frontend-cordis` again, and a
+  # documentation-only PR still skips them.
+  #
+  # This job is the second half of the repair, and it is here because no
+  # classifier should be trusted with COVERAGE: it is UNGATED, with no `if:` at
+  # all, so on every event and for every diff it reports a real pass or a real
+  # failure and never `skipping`. A future allow-list edit, a base ref that will
+  # not resolve, or a path nobody has thought of yet cannot make the root suite
+  # go quiet again: the defect #854 names is "the suite did not run and said
+  # nothing", and a job that never evaluates its `if:` is the part of the
+  # topology that cannot fail that way.
+  #
+  # It invents no second notion of "affected" either: it runs the selection
+  # `tools/affected_tests.py` already computes and `make pre-merge --affected`
+  # already consumes, so the narrow-versus-FULL decision keeps one owner. Here
+  # that selection is a COST decision, not a coverage one. On a
+  # documentation-only diff -- the one case the allow-list still skips the
+  # matrix -- it is `tests/test_doc_examples.py`, the single root-suite test that
+  # reads documentation, so the fast path stays fast and stays covered. On
+  # `tests/fixtures/**`, or on any compile-reachable change, it is the
+  # selector's documented fail-safe, the whole root suite.
+  #
+  # Deliberate limits, so the next reader does not have to infer them: the gates
+  # the selector also names are left to the jobs that own them (`ruff` runs
+  # ungated in `lint`; `conformance` and `formal` have their own jobs; the
+  # site-wheel gate must never run on a PR, see
+  # tests/test_site_wheel_gate_runs_in_ci.py), and there is no cordis-py runtime
+  # on this interpreter, so the runtime-guarded half of the suite skips here
+  # exactly as it does in `frontend`. The cordis half of a documentation-only
+  # diff is therefore still unmeasured, which is a strictly smaller hole than
+  # #854 (nothing at all), and closing it means installing the runtime here,
+  # which duplicates `frontend-cordis` rather than selecting for it.
+  root-suite-affected:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # full history so the PR base and the previous push tip are both real
+          # locally; the explicit base fetch below is the belt-and-braces guard
+          # that a shallow checkout still works, the same shape `changes` uses.
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      # `.[test]` carries pytest and PyYAML, which the workflow-reading tests in
+      # this suite import, and it installs `revl` itself.
+      - run: pip install -e ".[test]"
+      # `tests/` carries cross-tier probes that EXECUTE emitted Go and Java, and
+      # they decide whether to run from whether a toolchain answers on PATH. The
+      # runner's preinstalled ones are not the pinned versions, so without these
+      # two pins the selector's own fail-safe FULL selection would measure the
+      # wrong toolchain and red on it. Same pins, same versions, same reason as
+      # `frontend` (which needed them for exactly these probes).
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26"
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961  # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - id: select
+        env:
+          # a branch name is attacker-controllable text, so it reaches the shell
+          # through env: and never as interpolated source, the same rule the
+          # `changes` job and the roadmap-marker step in `lint` follow.
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # A merge_group, schedule, dispatch or workflow_call event has no
+          # diff to narrow against, and the selector maps an empty changed-set
+          # to the FULL selection on its own, which is the wanted answer there.
+          base_arg=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin \
+              "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+            base_arg="--base origin/${BASE_REF}"
+          elif [ -n "${BEFORE_SHA}" ] \
+               && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            base_arg="--base ${BEFORE_SHA}"
+          fi
+          # A base ref the selector cannot resolve yields an empty changed-set,
+          # which it turns into FULL itself, and an outright failure is caught
+          # here rather than read as "nothing to do": an empty node list that
+          # came out of a FAILED selection must never mean "skip the suite".
+          # `make pre-merge` wraps the same call the same way.
+          if ! out=$(python3 tools/affected_tests.py --format machine $base_arg); then
+            out=$(printf 'FULL 1\nREASON the selector exited non-zero -> full\nPYTEST tests/')
+          fi
+          printf '%s\n' "$out"
+          nodes=$(printf '%s\n' "$out" | sed -n 's/^PYTEST //p')
+          if [ -z "$nodes" ]; then
+            # An empty node list must never mean "run nothing", which is the same
+            # hole one level down. The selector's own FULL answer is `tests/`, so
+            # an empty list degrades to precisely that.
+            nodes="tests/"
+            echo "affected selection: empty node list -> tests/ (fail safe)"
+          else
+            echo "affected selection: pytest $nodes"
+          fi
+          echo "pytest=$nodes" >> "$GITHUB_OUTPUT"
+      - name: root suite (affected nodes)
+        env:
+          # diff paths are the author's, and this list is derived from them, so
+          # it arrives as a variable and is only ever word-split into pytest
+          # arguments; it is never re-parsed as shell source.
+          SEL_PYTEST: ${{ steps.select.outputs.pytest }}
+        run: |
+          set -euo pipefail
+          set -f
+          pytest $SEL_PYTEST -q
 
   # The `container` isolation rung (roadmap item 411 Slice 2) launches a REAL
   # container: a sandboxed process runs inside a boundary whose confinement
