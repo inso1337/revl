@@ -81,6 +81,12 @@ _MIN_MATCHABLE_ARG = 3
 
 _secret_values: set = set()
 
+# The declared field types of the record types a declared `Secret[T]` reaches,
+# filled by :func:`declare_secret_types`. Empty for a module that declares no
+# secret record, which is why the walk below treats an absent entry as "not a
+# record" and falls back to the values-only rule.
+_declared_types: dict = {}
+
 
 # ---------------------------------------------------------------------------
 # declared markings
@@ -260,7 +266,59 @@ def _entered(value: Any, path: set) -> bool:
     return False
 
 
-def register_secret_tree(value: Any, _path: Optional[set] = None) -> None:
+def _type_split(name: Optional[str]) -> tuple:
+    """`"Map[Str, Map[Str, Str]]"` -> `("Map", ["Str", "Map[Str, Str]"])`.
+
+    The head name and its TOP-LEVEL arguments, splitting only on commas at
+    bracket depth zero. A name with no argument list is its own head with no
+    arguments, so a scalar and an unknown head are indistinguishable here — both
+    simply have no arguments, which is all the walk below needs.
+
+    Deliberately local: this module ships with the emitted program and is
+    imported by generated code, so it cannot reach the frontend's
+    `revl.typecheck.parse_type`. It re-implements only the head/argument split,
+    never the unification the checker does."""
+    if not name:
+        return None, []
+    name = name.strip()
+    if "[" not in name or not name.endswith("]"):
+        return name, []
+    head, _, rest = name.partition("[")
+    rest = rest[:-1]
+    args: list = []
+    depth = 0
+    current = ""
+    for char in rest:
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+        if char == "," and depth == 0:
+            args.append(current.strip())
+            current = ""
+            continue
+        current += char
+    if current.strip():
+        args.append(current.strip())
+    return head.strip(), args
+
+
+def declare_secret_types(table: Any) -> None:
+    """Record the field types of the record types a declared `Secret[T]` can
+    reach, so the walk below can tell a record's fields from a `Map`'s entries.
+
+    Emitted once per module, and only for the record types a declared secret
+    type actually reaches — a module that declares no secret record emits
+    nothing and this stays empty. The table is a plain
+    `{record: {field: type}}` map and holds only type NAMES, so it carries no
+    program data and is safe to keep for the process lifetime."""
+    if isinstance(table, dict):
+        _declared_types.update(table)
+
+
+def register_secret_tree(
+    value: Any, _path: Optional[set] = None, _type: Optional[str] = None
+) -> None:
     """Remember every string leaf of a value a declared marking identified as
     confidential, containers included.
 
@@ -271,19 +329,52 @@ def register_secret_tree(value: Any, _path: Optional[set] = None) -> None:
     guard :func:`_entered` explains: without it a self-referential value raised
     `RecursionError` out of this funnel and registered NOTHING, so a container
     the runtime had just been handed as confidential crossed every later sink
-    verbatim."""
+    verbatim.
+
+    `_type` is the type the declaration gave THIS node, when the emitter knows
+    it. It exists because a `Map` and a record are both a `dict` on this tier, so
+    the value alone cannot say which of the two the author declared, and the two
+    differ in exactly one respect: a `Map`'s keys are the CALLER's data and a
+    record's keys are the author's field names. Without the type the walk had to
+    pick one rule for both, and it picked the record rule — so a declared
+    `Secret[Map[K, V]]` registered every value and no key, and a key reached a
+    trace line verbatim. `None` (every caller that does not know its declared
+    type, and every nested node whose type was not threaded) keeps the previous
+    values-only behavior exactly."""
     if _path is None:
         _path = set()
+    head, args = _type_split(_type)
     if isinstance(value, (list, tuple)):
         if _entered(value, _path):
             return
+        item_type = args[0] if args else None
         for item in value:
-            register_secret_tree(item, _path)
+            register_secret_tree(item, _path, item_type)
         return
     if isinstance(value, dict):
-        # Values only: a record's KEYS are field names the author wrote, and
-        # registering them would redact the field name out of every later trace.
         if _entered(value, _path):
+            return
+        if head == "Map" and len(args) == 2:
+            # A `Map`'s keys are the caller's data, so they are remembered
+            # beside its values. This is the half the values-only rule below
+            # used to drop: it cited the record rule, but a record does not
+            # take this branch — the emitted record read is
+            # `r['k'] if isinstance(r, dict) else getattr(r, 'k')`, and the
+            # field NAMES are skipped here only when the declared type says the
+            # node is not a `Map`.
+            for key, item in value.items():
+                register_secret_tree(key, _path, args[0])
+                register_secret_tree(item, _path, args[1])
+            return
+        fields = _declared_types.get(head) if head else None
+        if isinstance(fields, dict):
+            # A declared record: its KEYS are field names the author wrote, so
+            # they are skipped and only the field VALUES are walked — but each
+            # field is walked with its DECLARED type, so a `Map` in a field is
+            # reached as a `Map` rather than as another record.
+            for field, field_type in fields.items():
+                if field in value:
+                    register_secret_tree(value[field], _path, field_type)
             return
         for item in value.values():
             register_secret_tree(item, _path)

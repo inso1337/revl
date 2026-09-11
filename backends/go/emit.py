@@ -3734,9 +3734,16 @@ func revlRegisterValue(rv reflect.Value, seen map[revlWalkKey]bool) bool {
 		cyclic := false
 		iter := rv.MapRange()
 		for iter.Next() {
-			// Values only, like the py tier: a record's KEYS are field names
-			// the author wrote, not the caller's data, and redacting them
-			// would erase the diagnostic's shape.
+			// The KEYS are registered too. The values-only rule this loop used
+			// to carry cited the record rule -- "a record's KEYS are field
+			// names the author wrote, not the caller's data" -- but a record is
+			// a `reflect.Struct` and takes the branch below, which reads
+			// `rv.Field(i)` and so skips its field names by construction. A
+			// revl `Map` is not a record: its keys ARE the caller's data, and a
+			// key the caller chose is as confidential as the value it maps to.
+			if revlRegisterValue(iter.Key(), seen) {
+				cyclic = true
+			}
 			if revlRegisterValue(iter.Value(), seen) {
 				cyclic = true
 			}

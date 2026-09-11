@@ -71,6 +71,9 @@ SECRET_IMPORT = "use crate::confidential::*;"
 # Long enough that an exact match means something, and not a substring of
 # anything else the run prints.
 CANARY = "SEKRIT-RUST-CANARY-421-F6"
+# item 421 F6(q): the KEY of a declared `Secret[Map[K, V]]`. A key the caller
+# chose is as confidential as the value it maps to, so it has to register too.
+MAP_KEY_CANARY = "SEKRIT-RUST-MAPKEY-421-F6Q"
 # The ordinary value beside it: the control that the registry redacts what was
 # declared and nothing else.
 PUBLIC_URL = "pg://real-host-5432/app"
@@ -590,7 +593,7 @@ extern pure fn leaves() -> Secret[List[Str]]
   = @rs {{ vec!["{CANARY}".to_string()] }}
 
 extern pure fn table() -> Secret[Map[Str, Str]]
-  = @rs {{ let mut m = std::collections::HashMap::new(); m.insert("k".to_string(), "{CANARY}".to_string()); m }}
+  = @rs {{ let mut m = std::collections::HashMap::new(); m.insert("{MAP_KEY_CANARY}".to_string(), "{CANARY}".to_string()); m }}
 
 extern pure fn maybe() -> Secret[Opt[Str]]
   = @rs {{ Some("{CANARY}".to_string()) }}
@@ -603,6 +606,7 @@ mod revl_secret_leaf_walk_tests {{
     use crate::{{revl_forget_secrets, revl_redact_text}};
 
     const CANARY: &str = "{CANARY}";
+    const MAP_KEY_CANARY: &str = "{MAP_KEY_CANARY}";
     const REDACTED: &str = "{REDACTED_SECRET}";
 
     #[test]
@@ -623,6 +627,9 @@ mod revl_secret_leaf_walk_tests {{
         let _map = crate::table();
         assert_eq!(revl_redact_text(CANARY.to_string()), REDACTED,
                    "a Map VALUE leaf crossed verbatim");
+        // item 421 F6(q): the KEY is the caller's data as well.
+        assert_eq!(revl_redact_text(MAP_KEY_CANARY.to_string()), REDACTED,
+                   "a Map KEY leaf crossed verbatim");
 
         revl_forget_secrets();
         let opt = crate::maybe();
@@ -654,7 +661,10 @@ def test_the_container_door_emits_a_walk_over_every_reachable_leaf():
     assert 'revl_remember_secret(format!("{:?}", _revl_v));' in walk, walk
     assert ("for _revl_leaf0 in _revl_v.iter() "
             "{ revl_mark_secret(&_revl_leaf0); }") in flat, walk
-    assert "for _revl_leaf0 in _revl_v.values() {" in flat, walk
+    assert "for _revl_leaf0 in _revl_v.values() {" in flat
+    # item 421 F6(q): a `Map`'s keys are the caller's data too, so both legs of
+    # the map walk register. Only the values leg used to.
+    assert "for _revl_leaf0 in _revl_v.keys() {" in flat, walk
     assert "if let Some(_revl_leaf0) = _revl_v.as_ref() {" in flat, walk
     # the scalar doors are untouched, so every existing golden stays as it was.
     assert "pub fn revl_mark_secret_encoded<T: std::fmt::Debug + ?Sized>(value: &T) {" in CONFIDENTIAL
@@ -779,7 +789,8 @@ def test_the_walk_reaches_the_leaf_at_any_declared_depth(depth):
     code = emit.emit(_compile(_deep_scenario(depth)))
     leaf = f"_revl_leaf{depth - 1}"
     assert f"revl_mark_secret(&{leaf});" in code, code
-    assert code.count("revl_mark_secret(&") == 1, code
+    # one registration per level's KEY, plus the innermost VALUE leaf
+    assert code.count("revl_mark_secret(&") == depth + 1, code
 
 
 def test_with_a_bound_on_how_deep_the_walk_goes_the_leaf_leaks(monkeypatch):
@@ -796,8 +807,11 @@ def test_with_a_bound_on_how_deep_the_walk_goes_the_leaf_leaks(monkeypatch):
         return real(declared, expr, types, depth, path)
 
     monkeypatch.setattr(emit, "_secret_face_lines", depth_bounded)
-    assert emit._secret_face_lines(_deep_map_type(12), "v", {}) == [], (
-        "a depth bound must drop the leaf, or the emitted-shape test is vacuous")
+    bounded = emit._secret_face_lines(_deep_map_type(12), "v", {})
+    assert not any("_revl_leaf11" in line for line in bounded), (
+        "a depth bound must drop the deep leaf, or the emitted-shape test is "
+        "vacuous")
+    assert bounded, "the shallow keys register whatever the bound is"
     assert calls["n"] > 1, calls
 
     monkeypatch.undo()

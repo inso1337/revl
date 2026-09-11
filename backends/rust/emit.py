@@ -1886,11 +1886,20 @@ def _secret_face_lines(declared: object, expr: str, types: dict,
         head, inner = generic.group(1), generic.group(2)
         name = f"_revl_leaf{depth}"
         if head == "Map":
-            # Values only: a map's KEYS are the author's field names, not the
-            # caller's data. `_needles` and `revlRegisterValue` keep the same
-            # rule, so the leaf set stays the shape the other tiers register.
-            inner = _split_generic(inner)[-1]
-            opener, closer = f"for {name} in {expr}.values() {{", "}"
+            # A map's KEYS are the caller's data, exactly as confidential as the
+            # values they map to: a key the author chose at the call site is not
+            # a field name they wrote in a type. `_needles` and
+            # `revlRegisterValue` keep the same rule. The record case -- whose
+            # KEYS genuinely are field names -- is the `record` branch above,
+            # which walks the declared fields and so never sees them.
+            key_ty, val_ty = _split_generic(inner)[0], _split_generic(inner)[-1]
+            lines: list[str] = []
+            for ty, accessor in ((key_ty, "keys"), (val_ty, "values")):
+                body = _secret_face_lines(ty, name, types, depth + 1, path)
+                if body:
+                    lines += ([f"{pad}for {name} in {expr}.{accessor}() {{"]
+                              + body + [f"{pad}}}"])
+            return lines
         elif head == "Result":
             ok, err = _split_generic(inner)
             ok_lines = _secret_face_lines(ok, name, types, depth + 2,
