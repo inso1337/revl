@@ -947,20 +947,35 @@ Cryptographic attestation of a verified composition (roadmap item 127): sign a
 portable record that this exact composition was admitted (canonical IR hash +
 verdict + guarantees + timestamp), or `--verify` one ([revl-attest.md](revl-attest.md)).
 
+With `--certificate` the same verb signs a wider envelope instead (roadmap item
+474): a component certificate that states what the composition's guarantees rest
+on, read out of the formal package, beside the admitted verdict. See section 7
+of [revl-attest.md](revl-attest.md) for the trust boundary.
+
 - `target` - what to attest: a composition (`.rvl` source, compiled IR, or
   `audit --json`). With `--verify`, the attestation JSON to check instead
-  (required).
+  (required). With `--verify-certificate`, the certificate JSON to check.
 - `--verify` - verify mode: `target` is an attestation JSON; check its
   signature (and, with `--against`, that the composition still matches). Exits
   nonzero if the attestation is invalid.
-- `--against COMPOSITION` - with `--verify`: the composition to re-hash and
-  check the attestation against. Omit to check only the signature over the
-  embedded hash.
+- `--certificate` - sign a component certificate rather than an attestation:
+  the same gate verdict, plus the per-guarantee coverage, the proof model, the
+  artifacts' digests and the caveats the formal package records.
+- `--verify-certificate` - verify mode for a certificate: re-derive its
+  evidence from the formal package and check that the document matches it.
+  Exits nonzero if the certificate is invalid. Never reads a status out of the
+  document it is checking.
+- `--formal DIR` - the formal package to read the evidence from, instead of the
+  one found from the working directory or `REVL_FORMAL_DIR`. A directory with no
+  `STATUS.md` is refused rather than silently searched past.
+- `--against COMPOSITION` - with `--verify` or `--verify-certificate`: the
+  composition to re-hash and check the record against. Omit to check only the
+  signature over the embedded hash.
 - `--key PATH` - the signing/verifying key file. Falls back to the
   `REVL_ATTEST_KEY_FILE` (a path) or `REVL_ATTEST_KEY` (the secret) environment
-  variables. Never hardcoded.
+  variables. Never hardcoded, and never passed as a value in argv.
 - `--signer NAME` - an optional signer label recorded in (and signed into) the
-  attestation; falls back to the `REVL_ATTEST_SIGNER` env var.
+  record; falls back to the `REVL_ATTEST_SIGNER` env var.
 - `--json` - machine-readable output.
 
 ### `revl erase-report`

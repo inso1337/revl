@@ -148,6 +148,18 @@ def test_forged_hash_in_attestation_fails_signature():
     assert "signature mismatch" in reason
 
 
+def test_a_signature_that_is_not_ascii_is_a_reason_and_not_a_raise():
+    """`hmac.compare_digest` raises `TypeError` on a non-ASCII `str`, so feeding
+    it an unchecked peer-supplied signature hands the failure mode to whoever
+    wrote the record: a traceback where the contract promises a refusal. The hex
+    MAC can never be non-ASCII, so it is a refusal with a reason."""
+    att = _att(BASE)
+    att["signature"] = "\u00e9\u00e9"
+    ok, reason = A.verify_attestation(att, KEY)
+    assert ok is False
+    assert "not ASCII" in reason
+
+
 # ------------------------------------------------------------- attested body
 
 def test_attestation_shape_and_guarantees():
