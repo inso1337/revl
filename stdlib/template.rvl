@@ -1,0 +1,336 @@
+// The revl stdlib TEMPLATE module (roadmap item 459, issue #722).
+//
+// ------------------------------------------------------------------- why
+// Item 459 wants first-class frontend assets: an asset lives as a FILE, a revl
+// source REFERENCES it, and the toolchain stops carrying markup in string
+// literals. Once a template is a file with insertion sites rather than a
+// concatenated string, the page it produces is data crossing into markup, and
+// the crossing has to be escaped for the CONTEXT the data lands in. There is no
+// single correct escape function: the same bytes are safe inside a text node and
+// a `</script>` breakout inside a script element. stdlib/escape.rvl (also item
+// 459) names the three per-context escapers but leaves the CALLER to know which
+// one applies at each site, and that is exactly the decision a rendered
+// template must not leave to a human reading 200 lines of markup.
+//
+// This module is the consumer that closes that loop. A template writes the
+// context of every insertion SITE, next to the site:
+//
+//   <script type="module" src="{{uri:src}}"></script>
+//   <h1>{{html:title}}</h1>
+//   <script>boot("{{script:token}}");</script>
+//
+// so the escaper is chosen BY THE HOLE, from the surrounding markup, once, at
+// the site where the context is visible, instead of by whoever builds the value
+// (who cannot see the site). A value is then bound to a hole by NAME, and the
+// module refuses to render a template whose holes are unbound, whose bindings
+// are ambiguous, or whose hole names an escaper that does not exist. There is
+// deliberately NO raw/no-escape insertion syntax: a hole is always escaped for
+// its declared context, so "forget to escape" is not expressible. A site that
+// needs bytes in the document must say which context it is in.
+//
+// Like stdlib/escape.rvl, stdlib/str.rvl and stdlib/render.rvl the module is
+// PURE revl (built on the base Str/Int surface plus those three escapers, no
+// `@py`), so it runs on every backend the day it lands. The py tier is executed
+// here.
+//
+// ------------------------------------------------------------ what is NOT here
+// Deliberately out of scope for this stage, and named so the gap is not
+// mistaken for done (see docs/design/459-frontend-asset-integration.md):
+//   * reading the template FROM DISK. The template arrives as a `Str` (an
+//     embedded default, or, in a later stage, the text a resolved asset
+//     reference loads). Nothing here touches the filesystem or the toolchain.
+//   * control flow and autoescaping inheritance (`{{if}}`, `{{for}}`, blocks,
+//     includes, layout inheritance, a per-directory default context). Every
+//     hole is explicit and flat.
+//   * source positions. A hole records its `start`/`end` offsets into the
+//     template so a later stage can map generated output back to it, but
+//     nothing maps those offsets to line/column yet. The unit is CODEPOINTS,
+//     not bytes: it is the same unit `length`/`slice`/`charCodeAt` use, so
+//     `tpl.slice(hole.start, hole.end)` is exactly the hole text on every tier.
+//     A reader who assumes bytes and writes `tpl.encode()[start:end]` silently
+//     mis-slices every template with a non-ASCII character before a hole.
+//   * HTML parsing. Context is INTENT, written by the template author (`html` /
+//     `script` / `uri`), not inferred from markup. The module never tries to
+//     find where an attribute or a script element ends.
+//
+// --------------------------------------------------------------- the surface
+// `scan` finds the holes, `escape_for` is the context -> escaper table applied
+// to one value, and `render` is scan plus bind plus escape. `Hole` and
+// `Binding` are typed handles: a caller cannot pass a bare string where a bound
+// value is expected, and a hole name is validated as an identifier, so an
+// expression, a filter or a directive cannot be smuggled through the slot.
+//
+// Checked in tests/test_template_stdlib.py.
+
+use "stdlib/escape.rvl" { escape_html, escape_js, escape_uri }
+
+// ---------------------------------------------------------------- the types
+
+// One insertion site in a template. `context` names the escaping context the
+// site declared; `start`/`end` are the offsets of the whole `{{context:name}}`
+// hole in the template, which is what a source map would need to point back at
+// the original site.
+pub type Hole = { name: Str, context: Str, start: Int, end: Int }
+
+// A value bound to a hole by name. The pair is the typed handle: the name is
+// matched against `Hole.name`, and the value never carries its own escaping
+// decision.
+pub type Binding = { name: Str, value: Str }
+
+// Why a template could not be rendered. `code` is a stable token a caller can
+// branch on; `message` is the human half and names the offending hole.
+pub type TemplateError = { code: Str, message: Str }
+
+// ------------------------------------------------------------- error building
+
+fn err(code: Str, message: Str) -> TemplateError {
+  return { code: code, message: message }
+}
+
+fn bad_hole(body: Str, at: Int, why: Str) -> TemplateError {
+  var m = "template hole `{{"
+  m = m.concat(body)
+  m = m.concat("}}` at offset ")
+  m = m.concat(at.to_str())
+  m = m.concat(" ")
+  m = m.concat(why)
+  return err("malformed-hole", m)
+}
+
+fn bad_context(context: Str, at: Int) -> TemplateError {
+  var m = "insertion context `"
+  m = m.concat(context)
+  m = m.concat("` at offset ")
+  m = m.concat(at.to_str())
+  m = m.concat(" is not a known context; a hole names the context it lands in")
+  m = m.concat(" (one of html, script, uri) so the right escaper is chosen")
+  return err("unknown-context", m)
+}
+
+// --------------------------------------------------------------- the contexts
+
+// The closed set of contexts, in the order they are usually reached for. A
+// caller iterating this gets the same list the scanner validates against.
+pub fn contexts() -> List[Str] {
+  return ["html", "script", "uri"]
+}
+
+// Is `context` one this module can escape for? Pure membership over `contexts`.
+pub fn context_ok(context: Str) -> Bool {
+  if (context == "html") { return true }
+  if (context == "script") { return true }
+  return context == "uri"
+}
+
+// The escaper for a context the caller has ALREADY validated. Private: the
+// public door is `escape_for`, and its refusal is what keeps an unknown context
+// from reaching a default. The fall-through is html (the text/quoted-attribute
+// context), which is the safe reading of "somewhere in the document body".
+fn escape_known(context: Str, value: Str) -> Str {
+  if (context == "script") { return escape_js(value) }
+  if (context == "uri") { return escape_uri(value) }
+  return escape_html(value)
+}
+
+// Escape `value` for `context`, refusing a context this module does not know.
+// This is the whole "the rule is chosen by the insertion context" rule in one
+// place: an unknown or misspelled context is an `Err`, never a silent
+// fall-through to some other escaper.
+pub fn escape_for(context: Str, value: Str) -> Result[Str, TemplateError] {
+  if (!context_ok(context)) { return Err(bad_context(context, 0)) }
+  return Ok(escape_known(context, value))
+}
+
+// ------------------------------------------------------------- name validity
+
+fn is_name_head(code: Int) -> Bool {
+  if (code >= 65 && code <= 90) { return true }   // A-Z
+  if (code >= 97 && code <= 122) { return true }  // a-z
+  return code == 95                               // _
+}
+
+fn is_name_char(code: Int) -> Bool {
+  if (is_name_head(code)) { return true }
+  if (code >= 48 && code <= 57) { return true }   // 0-9
+  return code == 46                               // . (dotted paths)
+}
+
+// A hole name is an identifier (letters, digits, `_`, `.`, not starting with a
+// digit). Anything else, a space, a quote, a `|`, a `(`, a `&`, is refused, so
+// the slot can only ever name a bound value. That is what makes filters,
+// expressions and raw-insertion sigils inexpressible rather than merely
+// undetected.
+fn name_ok(name: Str) -> Bool {
+  if (name.length() == 0) { return false }
+  if (!is_name_head(name.charCodeAt(0))) { return false }
+  var i = 1
+  let n = name.length()
+  while (i < n) {
+    if (!is_name_char(name.charCodeAt(i))) { return false }
+    i += 1
+  }
+  return true
+}
+
+// ------------------------------------------------------------------ scanning
+
+fn is_brace(code: Int) -> Bool { return code == 123 }
+fn is_close_brace(code: Int) -> Bool { return code == 125 }
+fn is_colon(code: Int) -> Bool { return code == 58 }
+
+// Offset of the `}}` that closes a hole opened at `from`, or a negative value
+// when the template ends first.
+fn hole_close(tpl: Str, from: Int) -> Int {
+  var i = from
+  let n = tpl.length()
+  while (i + 1 < n) {
+    if (is_close_brace(tpl.charCodeAt(i)) && is_close_brace(tpl.charCodeAt(i + 1))) {
+      return i
+    }
+    i += 1
+  }
+  return 0 - 1
+}
+
+// Offset of the `:` separating context from name inside a hole body, or a
+// negative value when the body has none (a filter, a directive, a bare name,
+// a raw-insertion sigil: all refused by the caller).
+fn hole_colon(body: Str) -> Int {
+  var i = 0
+  let n = body.length()
+  while (i < n) {
+    if (is_colon(body.charCodeAt(i))) { return i }
+    i += 1
+  }
+  return 0 - 1
+}
+
+// Every insertion hole in `tpl`, left to right, or the first reason the
+// template is not well formed. A `{{` with no `}}`, a hole body with no
+// `context:name` separator, an unknown context and a non-identifier name are
+// all `Err`: scanning is where a template that could not be rendered safely is
+// rejected, before any value is bound to it.
+pub fn scan(tpl: Str) -> Result[List[Hole], TemplateError] {
+  var holes: List[Hole] = []
+  var i = 0
+  let n = tpl.length()
+  while (i < n) {
+    if (is_brace(tpl.charCodeAt(i)) && i + 1 < n && is_brace(tpl.charCodeAt(i + 1))) {
+      let close = hole_close(tpl, i + 2)
+      if (close < 0) {
+        var um = "template has an unterminated `{{` at offset "
+        um = um.concat(i.to_str())
+        um = um.concat(" with no closing `}}`")
+        return Err(err("malformed-hole", um))
+      }
+      let body = tpl.slice(i + 2, close)
+      let sep = hole_colon(body)
+      if (sep < 0) {
+        var w = "has no `context:name` separator; a hole names the context"
+        w = w.concat(" it lands in, and there is no raw form")
+        return Err(bad_hole(body, i, w))
+      }
+      let context = body.slice(0, sep)
+      let name = body.slice(sep + 1, body.length())
+      if (!context_ok(context)) { return Err(bad_context(context, i)) }
+      if (!name_ok(name)) {
+        var w2 = "does not name a bindable value after the `:`; a hole takes"
+        w2 = w2.concat(" an identifier, not an expression, a filter or a sigil")
+        return Err(bad_hole(body, i, w2))
+      }
+      holes = holes.push({ name: name, context: context, start: i, end: close + 2 })
+      i = close + 2
+    } else {
+      i += 1
+    }
+  }
+  return Ok(holes)
+}
+
+// ------------------------------------------------------------- binding lookup
+
+fn has_binding(values: List[Binding], name: Str) -> Bool {
+  for (b of values) {
+    if (b.name == name) { return true }
+  }
+  return false
+}
+
+fn binding_of(values: List[Binding], name: Str) -> Str {
+  for (b of values) {
+    if (b.name == name) { return b.value }
+  }
+  return ""
+}
+
+fn list_has(xs: List[Str], x: Str) -> Bool {
+  for (s of xs) {
+    if (s == x) { return true }
+  }
+  return false
+}
+
+// The first name bound twice, or "" when every name is bound once. A value set
+// with a repeated name is ambiguous (which binding wins would depend on scan
+// order), so `render` refuses it instead of picking one.
+fn duplicate_name(values: List[Binding]) -> Str {
+  var seen: List[Str] = []
+  for (b of values) {
+    if (list_has(seen, b.name)) { return b.name }
+    seen = seen.push(b.name)
+  }
+  return ""
+}
+
+// ----------------------------------------------------------------- rendering
+
+fn render_holes(tpl: Str, holes: List[Hole], values: List[Binding]) -> Result[Str, TemplateError] {
+  var out = ""
+  var pos = 0
+  for (h of holes) {
+    if (!has_binding(values, h.name)) {
+      var um = "template hole `{{"
+      um = um.concat(h.context)
+      um = um.concat(":")
+      um = um.concat(h.name)
+      um = um.concat("}}` at offset ")
+      um = um.concat(h.start.to_str())
+      um = um.concat(" has no bound value; a hole is bound explicitly, there")
+      um = um.concat(" is no empty default")
+      return Err(err("unknown-binding", um))
+    }
+    out = out.concat(tpl.slice(pos, h.start))
+    out = out.concat(escape_known(h.context, binding_of(values, h.name)))
+    pos = h.end
+  }
+  out = out.concat(tpl.slice(pos, tpl.length()))
+  return Ok(out)
+}
+
+// Render `tpl` with `values`, escaping every inserted value for the context its
+// hole declared. Refusals, in order: a duplicate binding name, then any hole
+// `scan` rejects, then a hole with no bound value. The template text between
+// holes is copied through unchanged.
+pub fn render(tpl: Str, values: List[Binding]) -> Result[Str, TemplateError] {
+  let dup = duplicate_name(values)
+  if (dup != "") {
+    var dm = "value `"
+    dm = dm.concat(dup)
+    dm = dm.concat("` is bound more than once; a repeated name is ambiguous, so")
+    dm = dm.concat(" bind it once")
+    return Err(err("duplicate-binding", dm))
+  }
+  return match scan(tpl) {
+    Ok(found) => render_holes(tpl, found, values),
+    Err(e) => Err(e),
+  }
+}
+
+// Render a template whose holes all take the same single value. Convenience for
+// the one-slot case (a bootstrap payload injected next to an entry, a URL built
+// from one request field); `render` is the general door.
+pub fn render_one(tpl: Str, name: Str, value: Str) -> Result[Str, TemplateError] {
+  var one: List[Binding] = []
+  one = one.push({ name: name, value: value })
+  return render(tpl, one)
+}

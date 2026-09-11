@@ -1373,6 +1373,11 @@ fn runtime_ref(name: Str) -> Str {
   // the `ConfigSchema` argument list and needs no name of its own.
   if (name == "mark_secret") { return "_revl_mark_secret" }
   if (name == "secret_result") { return "_revl_secret_result" }
+  // item 414 (ported per item 429(d)): the recording seam a DIRECT host-extern
+  // emission fires through. The alias is the one the reference's `_IMPORT_ALIAS`
+  // carries, so the `from runtime import` line and the call site that references
+  // it agree byte-for-byte.
+  if (name == "extern_emit") { return "_revl_extern_emit" }
   // A component-body `${…}` template lowers to a `format` node whose emission
   // calls the runtime string formatter (the fn-body `${…}` uses the inline
   // `interp` f-string concat instead; only the component/method-body path
@@ -1586,6 +1591,38 @@ fn cexpr(node: Any) -> Str {
   return `<<UNSUPPORTED-CEXPR:${kind}>>`
 }
 
+// item 414 (ported per item 429(d)): the Python expression that FIRES a direct
+// host-extern emission (`emit sendEmail(to)`, a kind-3/4 crossing) through the
+// runtime recording seam:
+//   `_revl_extern_emit(_revl_ctx, 'sendEmail', sendEmail, (to,))`.
+// The extern name, the callee OBJECT and the arguments are all evaluated before
+// the helper is entered, which is the same shape and the same record-then-fire
+// order as the reference's `produced_emit` seam: a crossing nested in an
+// argument still records first, and a host body never runs unrecorded. The
+// reference keeps the `await` OUTSIDE the helper (calling an async extern
+// returns a coroutine the surrounding context has to settle) under its
+// `_in_async`/`_in_arrow` + coloured-name test; this port carries neither piece
+// of emitter state, so that wrapper is a deferred async slice, not a divergence
+// on the sync surface.
+fn extern_emit_fire(expr: Any) -> Str {
+  let name = mangle(value_str(value_field(expr, "name")))
+  var args = ccommajoin(value_list(value_field(expr, "args")))
+  if (args.length() > 0) { args = args.concat(",") }
+  return `${runtime_ref("extern_emit")}(_revl_ctx, ${py_repr(name)}, ${name}, (${args}))`
+}
+
+// The single shape decision every FIRING site shares (the reference's
+// `_emission_fire`, and the reason a firing site cannot pick up one emission
+// shape and miss the other). A DIRECT host extern is the one shape with no
+// receiver to route it (`_emission_shape` == "extern" iff the emission
+// expression is a `fn` node), so it fires through the recording seam; every
+// other shape renders exactly as before. Only "extern" is routed: the
+// reference's "req"/"spawn" shapes keep their receiver-driven spelling.
+fn emission_fire(expr: Any) -> Str {
+  if (node_kind(expr) == "fn") { return extern_emit_fire(expr) }
+  return cexpr(expr)
+}
+
 // -------------------------------------------------- component-body statements
 // `_setup_step`: a pure setup step inside a block-effect acquisition.
 fn setup_step(step: Any, indent: Int) -> List[Str] {
@@ -1670,11 +1707,11 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
       // Routing through `compensation_method` makes it abort-only: discharged on
       // commit, drained in Phase 2 after every proof inverse, guarded and
       // residue-collected. Mirrors the reference emit.py's `_method_step`.
-      var out = [line(indent, cexpr(value_field(step, "expr")))]
+      var out = [line(indent, emission_fire(value_field(step, "expr")))]
       out = out.push(line(indent, `_revl_frame.compensation_method(lambda: ${cexpr(value_field(step, "compensate"))})`))
       return { lines: out, counter: counter }
     }
-    var out = [line(indent, cexpr(value_field(step, "expr")))]
+    var out = [line(indent, emission_fire(value_field(step, "expr")))]
     return { lines: out, counter: counter }
   }
   if (kind == "return") {
@@ -1783,7 +1820,7 @@ fn timer_emit(step: Any, indent: Int, counter: Int) -> Emit {
   out = out.push(line(indent, `def ${fname}():`))
   let emissions = value_list(value_field(step, "body"))
   if (emissions.length() == 0) { out = out.push(line(indent + 1, "pass")) }
-  for (em of emissions) { out = out.push(line(indent + 1, cexpr(value_field(em, "expr")))) }
+  for (em of emissions) { out = out.push(line(indent + 1, emission_fire(value_field(em, "expr")))) }
   let interval = value_int(value_field(step, "interval_ms"))
   out = out.push(line(indent, `${handle} = ${runtime_ref(sched)}(${interval}, ${fname})`))
   out = out.push(line(indent, `yield lambda: ${handle}.cancel()`))
@@ -1801,6 +1838,14 @@ fn witnessed_extern(expr: Any, externs: List[Any]) -> Any {
   return None
 }
 
+fn transactional_scope_kwargs(ext: Any) -> Str {
+  let caps = value_list(value_field(ext, "capabilities"))
+  if (caps.length() == 0) { return "" }
+  var parts = []
+  for (c of caps) { parts = parts.push(py_repr(value_str(c))) }
+  return ", scope={'caps': [".concat(parts.join(", ")).concat("]}")
+}
+
 fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) -> Emit {
   let c = counter + 1
   let tmp = `_revl_wit${c}`
@@ -1816,6 +1861,7 @@ fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) 
     if (!value_is_null(value_field(ext, "register"))) { kwargs = kwargs.concat(", register=").concat(py_repr(value_str(value_field(ext, "register")))) }
     if (!value_is_null(value_field(ext, "idempotency_key"))) { kwargs = kwargs.concat(", idempotency=").concat(py_repr(value_str(value_field(ext, "idempotency_key")))) }
   }
+  kwargs = kwargs.concat(transactional_scope_kwargs(ext))
   out = out.push(line(indent + 1, register.concat("((lambda result: ").concat(inverse_expr).concat("), ").concat(tmp).concat(".value").concat(kwargs).concat(")")))
   if (value_str(value_field(step, "step")) == "let-effect") {
     out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${tmp}`))
@@ -1858,7 +1904,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     return { lines: out, counter: counter }
   }
   if (kind == "emit") {
-    var out = [line(indent, cexpr(value_field(step, "expr")))]
+    var out = [line(indent, emission_fire(value_field(step, "expr")))]
     if (!value_is_null(value_field(step, "compensate"))) {
       // item 247 (docs/design/teardown-contract.md): a compensation is a
       // first-class COMPENSATION entry on the frame's shared per-activation
@@ -2419,6 +2465,25 @@ fn ir_uses_fmt(ir: Any) -> Bool {
   return uses_fmt(value_field(ir, "components"))
 }
 
+// item 414 (ported per item 429(d)): `extern_emit as _revl_extern_emit`. The
+// reference adds the name to its `uses` set at the moment `_extern_emit_fire`
+// renders, so the import appears iff the document FIRES a direct host-extern
+// emission. This port computes its imports up front, so the equivalent IR-wide
+// gate is a walk for an `emit` step whose expression is a `fn` node, the one
+// shape `_emission_shape` calls "extern". Walking the VALUES rather than the
+// statement containers (as `uses_fmt` does) is what makes the gate independent
+// of WHICH firing site reaches the step: an emission inside a timer body, a
+// provide method or an `if` branch is found as well, so the import can never go
+// missing for a site that renders the seam.
+fn uses_extern_emit(n: Any) -> Bool {
+  if (value_str(value_field(n, "step")) == "emit" && node_kind(value_field(n, "expr")) == "fn") { return true }
+  for (c of value_children(n)) { if (uses_extern_emit(c)) { return true } }
+  return false
+}
+fn ir_uses_extern_emit(ir: Any) -> Bool {
+  return uses_extern_emit(value_field(ir, "components"))
+}
+
 // Safe pure-function templates mirror the reference's evaluation-preserving
 // substitution. All rebuilt objects are fresh maps/lists; the caller's IR is
 // never mutated.
@@ -2674,6 +2739,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (need_config) { imports = imports.push("ConfigSchema as _revl_ConfigSchema") }
   if (components.length() > 0) { imports = imports.push("Frame as _revl_Frame") }
   if (ir_uses_fmt(ir)) { imports = imports.push("fmt as _revl_fmt") }
+  if (ir_uses_extern_emit(ir)) { imports = imports.push("extern_emit as _revl_extern_emit") }
   if (ir_uses_host_root(ir, "Job")) { imports = imports.push("Job") }
   if (ir_uses_host_root(ir, "Map")) { imports = imports.push("Map") }
   if (ir_uses_host_root(ir, "Pool")) { imports = imports.push("Pool") }

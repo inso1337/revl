@@ -1,0 +1,389 @@
+// The revl stdlib HTTP REQUEST-FRAMING module (issue #867; the HTTP contract it
+// completes is `stdlib/http.rvl`, roadmap item 456, `docs/design/456-http-contracts.md`;
+// its own design note is `docs/design/867-request-framing.md`).
+//
+// ---------------------------------------------------------------- the problem
+//
+// "How many body bytes follow this header block?" is a question every HTTP
+// component asks, and until this module every component answered it for itself.
+// The measured instance (inso1337/revl-harness, `src/components/transport.rvl`)
+// is the argument: FOUR readers on ONE server each parse `Content-Length`, and
+// the same byte-identical header gets different answers from different readers.
+// A doubled field
+//
+//     Content-Length: 5
+//     Content-Length: 7
+//
+// is refused (400, connection closed) by two of the four readers and ACCEPTED by
+// the other two, which honour the first value and parse the leftover bytes as the
+// head of a second, pipelined request: the same server answered
+// `['400 Bad Request', '200 OK']` and `['404 Not Found', '200 OK']` to it. That
+// is request smuggling. The same readers also accepted a `Content-Length` of 4300
+// and more digits, which passed a regex validator and then defeated the integer
+// conversion one statement later, so the request got NO response at all and the
+// connection was closed.
+//
+// Four re-derivations of one rule are four chances to drift, and they drifted
+// four ways: a doubled name, a value never bounded in length, an unimplemented
+// `Transfer-Encoding` quietly ignored, a padding form one reader stripped and
+// another did not. Framing is not a per-reader opinion. It has one answer.
+//
+// ---------------------------------------------------------------- the fix
+//
+// Exactly what `stdlib.resolve_within` is for path confinement, this module is
+// for request framing: ONE canonical decision, in the stdlib, with a TYPED
+// refusal that names the rule it broke, so no component derives framing and no
+// component gets the refusals subtly different from its sibling. Import it and
+// ask it, instead of reading headers yourself:
+//
+//     use "stdlib/framing.rvl" { body_length, status_for, message_of }
+//
+//     match body_length(req.headers, 1024 * 1024) {
+//       Ok(n) => read_exactly(n),
+//       Err(r) => refuse(status_for(r), message_of(r)),
+//     }
+//
+// `body_length` returns the body length to read, or a `FramingRefusal` whose CASE
+// is the rule that failed. `status_for` maps a refusal to the wire status without
+// re-deriving it (400 for a framing refusal, 413 for one over the caller's
+// ceiling) and `message_of` is the sentence to send with it; `reason_of` is the
+// stable machine token for a log line or a metric label, the same split
+// `ApiError` makes between `code` and `message` (stdlib/http.rvl).
+//
+// ---------------------------------------------------------------- the rules
+//
+// In the order `body_length` applies them. The order is part of the contract: a
+// request that breaks two rules reports the first, so two components agree on
+// WHICH refusal a given header earns, not only that it is refused.
+//
+//   1. `transfer-encoding` present              -> UnsupportedTransferEncoding
+//   2. `content-length` repeated, or a
+//      comma-separated list in one field        -> DuplicateContentLength
+//   3. a value that is not one plain
+//      non-negative decimal integer             -> MalformedContentLength
+//   4. a value above the caller's ceiling       -> OverCeiling
+//   5. no `content-length` at all               -> Ok(0)
+//   6. otherwise                                -> Ok(length)
+//
+//   1. TRANSFER-ENCODING IS REFUSED, NOT IGNORED. revl's stdlib has no
+//      transfer-coding decoder, so a body framed by `Transfer-Encoding: chunked`
+//      (or by any coding) has no length this module can hand back. Returning a
+//      `Content-Length` beside it is exactly how a smuggled request is built, so
+//      the presence of the field alone is refused. `chunked` earns no exception:
+//      the module never frames a body it cannot frame, and a caller that really
+//      wants chunked support writes a decoder and does not call `body_length` for
+//      that request (RFC 9112 6.1).
+//
+//   2. A REPEATED `Content-Length` IS REFUSED EVEN WHEN THE VALUES ARE
+//      BYTE-IDENTICAL. RFC 7230 3.3.2 and RFC 9110 8.6 let a recipient either
+//      reject a repeated same-value list or replace it with the single value, and
+//      RFC 9112 6.3 item 5 spells out the narrow exception it keeps for an
+//      all-identical list. This module takes the conservative half of that choice
+//      and rejects in every case, for two reasons. The divergence is the defect:
+//      if one reader accepts a doubled field and its sibling on the same server
+//      rejects it, the two disagree about where the body ends and an intermediary
+//      between them can disagree with both, which is the smuggling shape. And
+//      "the values are identical" is a judgement the second reader has to make
+//      anyway, on values an intermediary may have rewritten. Refusing needs no
+//      judgement and cannot be got subtly different, which is the whole point of
+//      routing the decision through one module. A comma-separated list in ONE
+//      field (`Content-Length: 5, 5`) is the same defect spelled differently and
+//      earns the same refusal; the value grammar has no comma (RFC 9110 8.6:
+//      `Content-Length = 1*DIGIT`).
+//
+//   3. `MalformedContentLength` covers everything the grammar excludes: an empty
+//      value, a sign or a leading `+`, whitespace INSIDE the value, a non-digit,
+//      and a leading zero beyond the single `0` that is the value zero. Leading
+//      and trailing OWS around the value is stripped first, as the grammar
+//      requires (RFC 9110 5.5). That strip is SP and HTAB only, NOT the wider set
+//      `stdlib/str.rvl`'s `is_space` carries: a value padded with a form feed is
+//      malformed, not trimmed. Leading zeros are refused even though
+//      `0000000001` is legal ABNF, because accepting them forces every reader to
+//      compare two spellings of one length by text; a sender that pads is a
+//      sender doing something the RFC gives it no reason to do. This is
+//      deliberately STRICTER than the minimum, and it is one of the places this
+//      module says so out loud rather than silently.
+//
+//   4. `OverCeiling` is its own case, never a `MalformedContentLength`: the
+//      caller's ceiling is a policy (413 Content Too Large), and the refusal has
+//      to let the caller answer 413 without re-deriving anything. `is_too_large`
+//      is the O(1) test for it. The value is bounded BEFORE it is converted: the
+//      digit loop stops as soon as the digits read exceed the ceiling, so a value
+//      of 4300 digits is refused on its first few digits and is never handed to an
+//      integer conversion at all. That is the fourth comment on issue #867 made
+//      structural: "a validator that accepts a value the very next statement
+//      cannot process is not validation". There is no separate digit limit,
+//      because none is needed: the bound is the ceiling, exact, and a value of any
+//      length either fits it or is refused. The bound holds at the extreme too: a
+//      caller may name Int's own maximum as its ceiling, and a value one digit
+//      past that is still refused rather than overflowing the conversion.
+//
+//   5. No `content-length` and no `transfer-encoding` is a request with no body,
+//      which is `Ok(0)`, not a refusal (RFC 9112 6.3 item 7).
+//
+// ---------------------------------------------------------------- the refusals
+//
+// `FramingRefusal` is a closed variant with one case per rule, so a caller's
+// `match` is exhaustive and a new rule cannot be added without every caller
+// seeing it. The case name is the rule; `reason_of` renders the stable machine
+// token, `message_of` the sentence to ship, `status_for` the wire status and
+// `is_too_large` the 413 test:
+//
+//     case                            reason_of                        status_for
+//     DuplicateContentLength          "duplicate_content_length"        400
+//     MalformedContentLength          "malformed_content_length"        400
+//     UnsupportedTransferEncoding     "unsupported_transfer_encoding"   400
+//     OverCeiling                     "over_ceiling"                    413
+//
+// ---------------------------------------------------------------- duplicates
+//
+// A header set is `List[Header]`, not a map, precisely so a repeated name stays
+// visible (`stdlib/http.rvl` says why). `header_value` there answers with the
+// FIRST match only, which is the wrong question here, so this module also carries
+// the duplicate-visible readers `header_values` and `header_count` for a
+// component that needs to see a repetition of any other field too.
+//
+// ---------------------------------------------------------------- pure revl
+//
+// Like `stdlib/http.rvl` and `stdlib/render.rvl`, this is PURE revl (records,
+// variants, `match`, loops: no `@py`, no `@ts`), so there is nothing to defer per
+// tier and the module lowers on every backend. The py tier is executed by
+// `tests/test_framing_stdlib.py`. It imports `Header` from `stdlib/http.rvl` and
+// nothing else, so a component that vendors stdlib files copies both.
+//
+// ---------------------------------------------------------------- the residue
+//
+// What this module cannot do: make a component call it. A component that reads
+// `Content-Length` itself still frames requests itself, and the primitive cannot
+// close that. It makes the canonical decision cheap, typed and one `use` away,
+// and it makes taking a different decision a visible one.
+
+use "stdlib/http.rvl" { Header }
+
+// ---------------------------------------------------------------- refusal
+
+// Which rule refused a request. A closed variant, one case per rule, so a caller
+// reading the refusals of two components reads the same set of words.
+pub type FramingRefusal =
+    DuplicateContentLength
+  | MalformedContentLength
+  | UnsupportedTransferEncoding
+  | OverCeiling
+
+// The wire status for a refusal, so a caller never re-derives the mapping: 400
+// for a request this module refuses to frame, 413 for a body over the caller's
+// ceiling. Every case is named on purpose: adding a rule later has to break this
+// `match` and be decided, rather than falling into a default.
+pub fn status_for(r: FramingRefusal) -> Int {
+  return match r {
+    DuplicateContentLength => 400,
+    MalformedContentLength => 400,
+    UnsupportedTransferEncoding => 400,
+    OverCeiling => 413,
+  }
+}
+
+// The stable machine token for a refusal, for a log line or a metric label.
+// Never the sentence: prose can be reworded, this cannot.
+pub fn reason_of(r: FramingRefusal) -> Str {
+  return match r {
+    DuplicateContentLength => "duplicate_content_length",
+    MalformedContentLength => "malformed_content_length",
+    UnsupportedTransferEncoding => "unsupported_transfer_encoding",
+    OverCeiling => "over_ceiling",
+  }
+}
+
+// Is the refusal the over-ceiling one (413), as opposed to one of the three that
+// mean "this request is not framed and the connection is closed" (400)? The O(1)
+// test for the one refusal a caller may want to distinguish without matching.
+pub fn is_too_large(r: FramingRefusal) -> Bool {
+  return match r {
+    OverCeiling => true,
+    DuplicateContentLength => false,
+    MalformedContentLength => false,
+    UnsupportedTransferEncoding => false,
+  }
+}
+
+// The sentence to send with the status: what is wrong with the request, and what
+// the sender can do about it. Static per rule, so a component cannot ship a
+// refusal text that disagrees with the rule it refused for. The offending header
+// value is deliberately NOT echoed: the value that reaches this refusal can be
+// thousands of digits long, and reflecting it into a log or a response body is a
+// defect of its own.
+pub fn message_of(r: FramingRefusal) -> Str {
+  return match r {
+    DuplicateContentLength => "the request carries more than one Content-Length field (or a comma-separated list in one field), so where the body ends is ambiguous; refuse it and close the connection (RFC 9110 8.6, RFC 7230 3.3.3)",
+    MalformedContentLength => "Content-Length must be one plain non-negative decimal integer: no sign, no leading zeros beyond a single 0, no whitespace inside the value; refuse it and close the connection (RFC 9112 6.3)",
+    UnsupportedTransferEncoding => "the request declares a Transfer-Encoding, which this server does not decode; refuse it and close the connection rather than reading a body framed by Content-Length (RFC 9112 6.1)",
+    OverCeiling => "the declared body is larger than this endpoint accepts; refuse it with 413 before reading any of it",
+  }
+}
+
+// ---------------------------------------------------------------- header sets
+
+// Every value for `name`, in wire order. The duplicate-visible companion to
+// `header_value` (stdlib/http.rvl), which answers with the first match only: a
+// component that has to know whether a name repeats asks here, and gets every
+// value, not a summary.
+pub fn header_values(headers: List[Header], name: Str) -> List[Str] {
+  var out: List[Str] = []
+  for (h of headers) {
+    if (name_eq(h.name, name)) {
+      out = out.push(h.value)
+    }
+  }
+  return out
+}
+
+// How many fields carry `name`, 0 when the name is absent. Spelled as the length
+// of `header_values` because "does this name repeat" is the question a framing
+// reader asks first and one implementation of it is enough.
+pub fn header_count(headers: List[Header], name: Str) -> Int {
+  return header_values(headers, name).length()
+}
+
+// ---------------------------------------------------------------- framing
+
+// THE canonical request-framing decision: how many body bytes to read for
+// `headers`, or the rule that refuses the request.
+//
+// `ceiling` is the largest body this caller accepts, in bytes. It is the caller's
+// policy, not part of the wire framing, and it is enforced as `OverCeiling`
+// (413), never as a malformed value. A negative ceiling refuses every request,
+// zero-length bodies included, which is the fail-closed reading of a caller that
+// passed one by mistake.
+//
+// A request with neither `Content-Length` nor `Transfer-Encoding` has no body:
+// `Ok(0)`. The refusal order is fixed and documented at the top of this file:
+// transfer encoding first, then a repeated length, then the value grammar, then
+// the ceiling.
+pub fn body_length(headers: List[Header], ceiling: Int) -> Result[Int, FramingRefusal] {
+  if (header_count(headers, "transfer-encoding") > 0) {
+    return Err(UnsupportedTransferEncoding)
+  }
+  let lengths = header_values(headers, "content-length")
+  if (lengths.length() > 1) {
+    return Err(DuplicateContentLength)
+  }
+  if (lengths.length() == 0) {
+    return Ok(0)
+  }
+  return length_of(lengths[0], ceiling)
+}
+
+// One `Content-Length` value to its length, or the rule it broke. The value is
+// read digit by digit and stopped as soon as the digits so far exceed `ceiling`,
+// so it is never converted in one step and there is no length at which the
+// conversion can fail on a value this loop accepted.
+fn length_of(value: Str, ceiling: Int) -> Result[Int, FramingRefusal] {
+  let v = strip_ows(value)
+  if (v.length() == 0) {
+    return Err(MalformedContentLength)
+  }
+  if (!all_digits(v)) {
+    // a comma in the value is a list of lengths in one field: the duplicate
+    // defect spelled differently, and a duplicated value is what a comma list is
+    if (v.indexOf(",") >= 0) {
+      return Err(DuplicateContentLength)
+    }
+    return Err(MalformedContentLength)
+  }
+  if (v.length() > 1 && v.slice(0, 1) == "0") {
+    return Err(MalformedContentLength)
+  }
+  var acc = 0
+  var i = 0
+  let n = v.length()
+  // the largest `acc` from which `acc * 10` still fits under the ceiling
+  let head = ceiling.div_floor(10)
+  while (i < n) {
+    let d = v.charCodeAt(i) - 48
+    // bound BEFORE the multiply, and bound the LAST DIGIT too: `acc` never
+    // exceeds floor(ceiling / 10), and at equality the digit is compared against
+    // the ceiling's own last digit. Without the second clause a caller who
+    // passes Int's own maximum as the ceiling can be handed a value one digit
+    // past it (`acc * 10 + d` overflows where `acc <= head` alone permitted it),
+    // which is the very failure this module exists to make impossible.
+    if (acc > head || (acc == head && d > ceiling - acc * 10)) {
+      return Err(OverCeiling)
+    }
+    acc = acc * 10 + d
+    i += 1
+  }
+  return Ok(acc)
+}
+
+// ---------------------------------------------------------------- code units
+
+// Is this one-character `Str` an OWS code unit? SP and HTAB only, deliberately
+// narrower than `stdlib/str.rvl`'s `is_space`, whose set also carries VT and FF:
+// the HTTP grammar's OWS is SP and HTAB (RFC 9110 5.6.3), so a value padded with
+// a form feed is malformed rather than stripped.
+fn is_ows(c: Str) -> Bool {
+  if (c.length() == 0) {
+    return false
+  }
+  let x = c.charCodeAt(0)
+  return x == 32 || x == 9
+}
+
+fn is_digit(c: Str) -> Bool {
+  if (c.length() == 0) {
+    return false
+  }
+  let x = c.charCodeAt(0)
+  return x >= 48 && x <= 57
+}
+
+fn all_digits(s: Str) -> Bool {
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    if (!is_digit(s.slice(i, i + 1))) {
+      return false
+    }
+    i += 1
+  }
+  return true
+}
+
+// The value with leading and trailing OWS removed (RFC 9110 5.5: a field's value
+// is stripped of the OWS around it before it is interpreted).
+fn strip_ows(s: Str) -> Str {
+  var a = 0
+  var b = s.length()
+  while (a < b && is_ows(s.slice(a, a + 1))) {
+    a += 1
+  }
+  while (b > a && is_ows(s.slice(b - 1, b))) {
+    b -= 1
+  }
+  return s.slice(a, b)
+}
+
+// ASCII lower-fold of a code unit, so field names compare case-insensitively
+// (RFC 9110 5.1) whatever case a caller stored them in; WHATWG `Headers`, which
+// `stdlib/http.rvl` mirrors, stores them lower-cased.
+fn lower_code(x: Int) -> Int {
+  if (x >= 65 && x <= 90) {
+    return x + 32
+  }
+  return x
+}
+
+fn name_eq(a: Str, b: Str) -> Bool {
+  if (a.length() != b.length()) {
+    return false
+  }
+  var i = 0
+  let n = a.length()
+  while (i < n) {
+    if (lower_code(a.charCodeAt(i)) != lower_code(b.charCodeAt(i))) {
+      return false
+    }
+    i += 1
+  }
+  return true
+}

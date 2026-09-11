@@ -100,7 +100,7 @@ was corrected by hand and had drifted back within a day.
 | closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
 | commands-reference.md | current | 8 |  |
-| component-leases.md | needs-work | 26 |  |
+| component-leases.md | needs-work | 31 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 20 |  |
 | composition-rows.md | needs-work | 23 |  |
@@ -109,7 +109,7 @@ was corrected by hand and had drifted back within a day.
 | crash-recovery.md | needs-work | 52 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |
-| deploy.md | needs-work | 12 |  |
+| deploy.md | needs-work | 14 |  |
 | derived-versioning.md | current | 9 |  |
 | design-v2-instances.md | needs-work | 86 |  |
 | design-v2-realms.md | needs-work | 17 |  |
@@ -156,7 +156,7 @@ was corrected by hand and had drifted back within a day.
 | process.md | needs-work | 5 |  |
 | prompt-injection-resistance.md | needs-work | 37 |  |
 | prop-test.md | needs-work | 23 |  |
-| quarantine-tier.md | needs-work | 23 |  |
+| quarantine-tier.md | needs-work | 24 |  |
 | queries.md | needs-work | 43 |  |
 | records.md | needs-work | 15 |  |
 | registry-probe.md | needs-work | 14 |  |

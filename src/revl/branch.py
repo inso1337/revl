@@ -72,18 +72,21 @@ NOT_COMPARABLE = (
             "each side is"},
 )
 
-#: The reader's one blind spot, stated on every partition document. The fork's
-#: classification inputs became durable in Slice 2; a WAL written before that
-#: cannot distinguish "this step declared no boundary-crossing capability" from
-#: "this step's scope was never written down". Both read as the former, which is
-#: what the LIVE classifier does with an absent scope too — so the offline
-#: partition agrees with the live one on every WAL written by a runtime that
-#: records scopes, and is stated as an assumption on any older one.
+#: What every partition document says about a record with no `scope`. An absent
+#: scope is UNPROVEN, not "no declared boundary-crossing capability": item 872
+#: made the recorder state the latter explicitly (`{"caps": []}`) and taught the
+#: classifier to enumerate the former. So the reader's one blind spot is that it
+#: cannot tell, on a WAL written before these classification inputs became
+#: durable, a step that declared no capability from a step whose scope was never
+#: written down. It resolves that the safe way — enumerate, never offer as
+#: rewindable — which is exactly what the LIVE classifier does with a scope of
+#: None, so the offline partition still agrees with the live one everywhere.
 SCOPE_NOTE = (
-    "a record with no `scope` reads as 'no declared boundary-crossing "
-    "capability', exactly as the live classifier reads a scope of None. A WAL "
-    "written before the fork's classification inputs became durable (item 250, "
-    "Slice 2) cannot distinguish that from a scope that was never recorded."
+    "a record with no `scope` is never offered as rewindable: an absent scope is "
+    "unproven, so the step is enumerated instead, exactly as the live classifier "
+    "treats a scope of None. A WAL written before the fork's classification "
+    "inputs became durable (item 250, Slice 2) carries no scope on any effect, so "
+    "every effect it records is enumerated."
 )
 
 

@@ -1587,13 +1587,22 @@ class _Transactional:
     # flag is what keeps an entry from being counted twice.
     __slots__ = ("frame", "witness", "_undo", "discharged", "replayed", "seq",
                  "_escrowed", "stamp", "undo_idempotent", "component", "method",
-                 "_estop_stranded")
+                 "_estop_stranded", "scope")
 
     def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any,
-                 undo_idempotent: bool = False) -> None:
+                 undo_idempotent: bool = False,
+                 scope: Optional[dict] = None) -> None:
         self.frame = frame
         self._undo = undo
         self.witness = witness
+        # item 872: the capability scope the SOURCE declared for this crossing
+        # (`witnessed[caps]`, handed over by the emitted registration). The
+        # recorder reads it off this entry (`replay._declared_scope`) and writes
+        # it to the WAL, which is the only durable statement of what a recorded
+        # inverse may reach. Before item 872 nothing carried it here at all, so
+        # every recorded effect read as host-confined and the item 250 fork
+        # rewind fired a recorded outbound `net` inverse (issue 872).
+        self.scope: Optional[dict] = scope
         # the crossing's identity, captured HERE at registration and never
         # re-read at teardown (teardown-contract.md, "No data hazard") — the
         # compensation entry's own `component`/`method` pair, so a Phase-1
@@ -2756,7 +2765,8 @@ class Frame:
     def transactional(self, undo: Callable[[Any], Any], witness: Any, *,
                       undo_idempotent: bool = False,
                       register: Optional[str] = None,
-                      idempotency: Optional[str] = None) -> "_Transactional":
+                      idempotency: Optional[str] = None,
+                      scope: Optional[dict] = None) -> "_Transactional":
         """Register a witnessed effect's declared inverse as a TRANSACTIONAL
         entry, carrying its `witness` (item 243). Returns the disposer the
         emitted body yields into the accumulator, so it sits in the same LIFO
@@ -2782,10 +2792,14 @@ class Frame:
         whether this activation ever commits, so a crash before commit still
         lets `revl recover` reconstruct and replay the inverse. `entry.seq`
         carries the assigned seq so `drain` can name it in the discharge
-        record on a clean commit; it is `None` when no WAL is active."""
+        record on a clean commit; it is `None` when no WAL is active.
+
+        item 872: `scope` is the extern's DECLARED `witnessed[caps]` capability
+        set, carried on the entry so the recorder can write what the source
+        declared down instead of leaving the durable record silent about it."""
         _estop_check(f"{self.name}.{_named_call_method(undo)}")   # item 443
         entry = _Transactional(self, undo, witness,
-                               undo_idempotent=undo_idempotent)
+                               undo_idempotent=undo_idempotent, scope=scope)
         self._transactional.append(entry)
         wal = self._wal()
         if wal is not None:
@@ -2805,7 +2819,8 @@ class Frame:
             entry.seq = record["seq"]
         return entry
 
-    def transactional_method(self, undo: Callable[[Any], Any], witness: Any) -> "_Transactional":
+    def transactional_method(self, undo: Callable[[Any], Any], witness: Any, *,
+                             scope: Optional[dict] = None) -> "_Transactional":
         """Register a PROVIDE-METHOD witnessed effect's declared inverse as a
         transactional entry on THIS component's activation frame (item 318,
         docs/design/243-witnessed-externs.md). This is the per-tool-call H1
@@ -2832,9 +2847,12 @@ class Frame:
         touched nothing schedules no rollback. Bridge slice: the WAL
         discharge-descriptor is written at registration, durably ahead of the
         commit-vs-abort decision, so a crash before it lets `revl recover`
-        reconstruct and replay the inverse (item 243 rule 4)."""
+        reconstruct and replay the inverse (item 243 rule 4).
+
+        item 872: `scope` is the extern's DECLARED `witnessed[caps]` capability
+        set, carried on the entry exactly as `transactional` carries it."""
         _estop_check(f"{self.name}.{_named_call_method(undo)}")   # item 443
-        entry = _Transactional(self, undo, witness)
+        entry = _Transactional(self, undo, witness, scope=scope)
         self._transactional.append(entry)
         self._deferred_transactional.append(entry)
         wal = self._wal()

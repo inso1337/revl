@@ -951,11 +951,15 @@ def _tool_undo(arguments: dict) -> dict:
     """Return to an earlier generation through the retained history (item 65).
 
     With no `to`, undoes to generation N−1; `to` names any still-retained
-    generation. The undo is admitted through the SAME gate a swap runs: a
-    target the current checker rejects is a refusal *result* (the running
-    composition is untouched), never a bypass. The dossier — what unloads, what
-    state drops, and the interim boundary crossings no undo can un-emit — rides
-    along either way (docs/generation-history.md)."""
+    generation. The undo is admitted through the same *admission* gate a swap's
+    candidate passes — the checker — so a target the current checker rejects is
+    a refusal *result* (the running composition is untouched), never a bypass.
+    The acting gates a swap also runs (the item-61 lease check and the item-45
+    quarantine gate) do not apply here: an undo replays a generation this
+    session already holds rather than swapping a new candidate into the running
+    composition. The dossier — what unloads, what state drops, and the interim
+    boundary crossings no undo can un-emit — rides along either way
+    (docs/generation-history.md)."""
     if not SESSION.loaded:
         return _session_error("nothing is loaded — call revl_load first")
     try:
@@ -1098,14 +1102,24 @@ def _tool_approve(arguments: dict) -> dict:
         or proactively against a `capability`.
 
     Gated by the `approve` verb (item 55), so an operator profile scopes who may
-    say yes."""
+    say yes. Item 471: the standing-grant shape is refused outright when the
+    crossing's covering approval rule names approvers or demands a quorum. Such a
+    rule is answered by votes, and one operator's standing authority is not N
+    distinct named approvers (`Session.mint_standing_grant`)."""
     ticket_hash = arguments.get("hash")
     capability = arguments.get("capability")
     uses = arguments.get("uses")
     ttl_ms = arguments.get("ttlMs")
+    vote = arguments.get("vote")
+    as_token = arguments.get("asToken")
     # item 344: any of `capability`/`uses`/`ttlMs` selects the standing-grant
     # path; a bare `hash` keeps the Slice-1 single-use behaviour byte-for-byte.
     if capability is not None or uses is not None or ttl_ms is not None:
+        if as_token is not None or (vote is not None and vote != "approve"):
+            return _session_error(
+                "item 471: a standing grant is minted by ONE operator, so `vote` "
+                "and `asToken` do not apply to it. Cast a quorum vote against a "
+                "ticket `hash` instead")
         try:
             return {"ok": True, **SESSION.mint_standing_grant(
                 ticket_hash=ticket_hash, capability=capability,
@@ -1117,7 +1131,8 @@ def _tool_approve(arguments: dict) -> dict:
                               "approvalRequired response — or a `capability` "
                               "(+ `uses`/`ttlMs`) to mint a standing grant")
     try:
-        return {"ok": True, **SESSION.approve_ticket(ticket_hash)}
+        return {"ok": True, **SESSION.approve_ticket(
+            ticket_hash, vote=vote or "approve", as_token=as_token)}
     except SessionError as error:
         return _session_error(str(error))
 
@@ -1266,11 +1281,21 @@ def _tool_repair(arguments: dict) -> dict:
     # repair is a swap; under a policy that enforces leases it may no more
     # replace a component another operator holds than `revl_swap` may. Skipped
     # for the `apply:false` rehearsal, which swaps nothing.
+    #
+    # The quarantine tier (item 45) rides along for the same reason and in the
+    # same place: its gate is wired where a swap happens, and the remediation
+    # step is a swap. A required quarantine that stopped `revl_swap` and let
+    # `revl_repair` through would be bypassable by naming the remediation
+    # "repair" — the verb an agent reaches for when a component has already
+    # faulted. Both gates are inert without the policy that arms them.
     if _operator.composed_applies("revl_repair", arguments):
-        refusal = _leases.check_swap(
-            SESSION, _operator.swap_arguments("revl_repair", arguments))
+        swap_arguments = _operator.swap_arguments("revl_repair", arguments)
+        refusal = _leases.check_swap(SESSION, swap_arguments)
         if refusal is not None:
             return _refused_by_lease(refusal)
+        quarantined = _quarantine.gate_swap(SESSION, swap_arguments)
+        if quarantined is not None:
+            return quarantined
     return _repair.run_repair(SESSION, arguments)
 
 
@@ -2444,7 +2469,27 @@ TOOLS = [
                 "ttlMs": {"type": "integer", "minimum": 1,
                           "description": "item 344: how long (ms) the standing "
                                          "grant stays live; checked at the "
-                                         "crossing against the session clock"}},
+                                         "crossing against the session clock"},
+                "vote": {"type": "string", "enum": ["approve", "deny"],
+                         "description": "item 471: a ticket whose rule demands a "
+                                        "QUORUM takes votes, not a yes/no, so it "
+                                        "refuses a bare `hash`. Cast `approve` or "
+                                        "`deny` here; the question admits only "
+                                        "once the rule's count is reached by "
+                                        "distinct named approvers"},
+                "asToken": {"type": "string",
+                            "description": "item 471: the token of the operator "
+                                           "casting this vote when it is not the "
+                                           "session's bound operator. It must be "
+                                           "one of the rule's named approvers; a "
+                                           "vote from the proposer or from a name "
+                                           "the rule does not carry is refused and "
+                                           "recorded. The name is asserted by the "
+                                           "caller, not verified against a "
+                                           "credential: it binds the NAME that "
+                                           "voted, not the human who sent it "
+                                           "(Decision 5 of the item 471 design "
+                                           "note)"}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_approve,

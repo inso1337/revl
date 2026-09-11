@@ -1005,7 +1005,7 @@ class _Driver:
                  record: bool = False, trace_path: str | None = None,
                  withdraw: str | None = None, wal_path: str | None = None,
                  root_dirs: list | None = None, secrets: dict | None = None,
-                 estop_latch: str | None = None):
+                 estop_latch: str | None = None, ambient: dict | None = None):
         self.ir = ir
         self.config = config
         # item 256 Slice 1: an optional caller-supplied secret store (name ->
@@ -1023,6 +1023,12 @@ class _Driver:
         self.runtime = runtime_mod
         self.FiberState = FiberState
         self.root = Context()
+        # A host may provide a deliberately ambient capability before any revl
+        # component is loaded.  `revl dev` uses this for the WebUI coeffect: it
+        # is still a normal Cordis provision, owned and withdrawn by this driver,
+        # rather than an untracked global bridge.
+        self._ambient_services = dict(ambient or {})
+        self._ambient_disposers = []
         self.fibers: dict[str, object] = {}
         # item 628: an optional per-attempt settlement ledger. When a caller
         # (the Session's awaitable teardown) sets this to a list before driving
@@ -1103,6 +1109,11 @@ class _Driver:
         self.root.on("internal/status", self._on_fiber)
         self._baseline_hooks = self._hooks()
         self._baseline_disposables = self.root.fiber._disposables.length
+        for key, service in self._ambient_services.items():
+            # `Reflect.provide` returns the effect, whose invocation returns the
+            # disposer.  Drive that first synchronous leg now so requirements
+            # see the host provision before the first component loads.
+            self._ambient_disposers.append(self.root.reflect.provide(key, service))
         self._compensation_residue: list[dict] = []
 
     # -- backwards replay (docs/replay.md) ---------------------------------
@@ -1443,6 +1454,9 @@ class _Driver:
     async def _load(self, ir: dict, module: types.ModuleType) -> None:
         by_name = {c["name"]: c for c in _components(ir)}
         load_causes = why_runtime.load_causes(ir) if self.tracing else {}
+        # Ambient host provisions are installed above (in `__init__`); their
+        # effects join the root fiber's unload snapshot through the normal
+        # disposal registration, so no per-load driving is needed here.
         # arm the production silence observer BEFORE driving activation (#622),
         # so its background poll can interleave with each `_drive_activation`
         # await and time a provider that never reaches ACTIVE.
@@ -1680,84 +1694,108 @@ class _Driver:
                     ledger.append({"component": name, "kind": "component",
                                    "outcome": "owned"})
             rec_by_name = {r["component"]: r for r in ledger}
-        for name in order:
-            rec = rec_by_name.get(name)
-            disposers = self._route_disposers.pop(name, None)
-            if disposers is not None:
-                # a router: withdraw its routing provision(s) at its own LIFO
-                # position (after the consumers above it, before the workers
-                # below) — the no-residue proof needs the provide-effect gone.
+        try:
+            for name in order:
+                rec = rec_by_name.get(name)
+                disposers = self._route_disposers.pop(name, None)
+                if disposers is not None:
+                    # a router: withdraw its routing provision(s) at its own LIFO
+                    # position (after the consumers above it, before the workers
+                    # below) — the no-residue proof needs the provide-effect gone.
+                    if rec is not None:
+                        rec["kind"] = "router"
+                        rec["outcome"] = "attempted"
+                    self._log("swap", name, "withdraw route provisions (LIFO)")
+                    for disposer in reversed(disposers):
+                        result = disposer()
+                        if hasattr(result, "__await__") or asyncio.iscoroutine(result):
+                            await result
+                    self.routers = {k: v for k, v in self.routers.items()
+                                    if k[0] != name}
+                    if rec is not None:
+                        rec["outcome"] = "returned"
+                    await self._flush()
+                    continue
+                fiber = self.fibers.pop(name, None)
+                reattempt = False
+                if fiber is None:
+                    # item 628 (residual): a prior retained attempt may hold this
+                    # original object because its disposer FAILED (it was popped from
+                    # `fibers` before the raise). An explicit re-arm re-attempts the
+                    # SAME original disposer — take it back here so the resource is
+                    # re-targeted, not read as `absent` from a fresh `fibers` scan.
+                    fiber = self._retained_disposers.pop(name, None)
+                    reattempt = fiber is not None
+                if fiber is None:
+                    # never live (or already disposed): nothing owned here.
+                    if rec is not None:
+                        # item 628 (residual): a carried-forward owed resource whose
+                        # original object cannot be re-driven stays OWED — release is
+                        # never inferred from a resource's absence in `fibers`.
+                        prior = rec.get("priorOutcome")
+                        rec["outcome"] = (prior
+                                          if prior in ("owned", "attempted", "failed")
+                                          else "absent")
+                    continue
                 if rec is not None:
-                    rec["kind"] = "router"
                     rec["outcome"] = "attempted"
-                self._log("swap", name, "withdraw route provisions (LIFO)")
-                for disposer in reversed(disposers):
-                    result = disposer()
-                    if hasattr(result, "__await__") or asyncio.iscoroutine(result):
-                        await result
-                self.routers = {k: v for k, v in self.routers.items()
-                                if k[0] != name}
+                    if reattempt:
+                        rec["reattempt"] = True
+                self._log("swap", name, "dispose -> inverses replay (LIFO)")
+                frame = self.runtime._frame_for_ctx(getattr(fiber, "ctx", None))
+                try:
+                    await fiber.dispose()
+                except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+                    # the ORIGINAL disposer raised: name it in the ledger as failed
+                    # (the fiber was popped above, so it is no longer in `fibers`; the
+                    # ledger is the authoritative inventory) and re-raise so the
+                    # aggregate attempt fails exactly as before this slice.
+                    if rec is not None:
+                        rec["outcome"] = "failed"
+                        rec["error"] = f"{type(exc).__name__}: {exc}"
+                    # item 628 (residual): retain the ORIGINAL object so it is not
+                    # lost to the pop above. An explicit re-arm re-attempts THIS same
+                    # disposer (see the `_retained_disposers` fall-back on lookup);
+                    # ownership stays inspectable and is never inferred released from
+                    # the resource's absence in `fibers`.
+                    self._retained_disposers[name] = fiber
+                    raise
                 if rec is not None:
                     rec["outcome"] = "returned"
+                if frame is not None:
+                    self._compensation_residue.extend(
+                        getattr(frame, "compensation_residue", ())
+                    )
                 await self._flush()
-                continue
-            fiber = self.fibers.pop(name, None)
-            reattempt = False
-            if fiber is None:
-                # item 628 (residual): a prior retained attempt may hold this
-                # original object because its disposer FAILED (it was popped from
-                # `fibers` before the raise). An explicit re-arm re-attempts the
-                # SAME original disposer — take it back here so the resource is
-                # re-targeted, not read as `absent` from a fresh `fibers` scan.
-                fiber = self._retained_disposers.pop(name, None)
-                reattempt = fiber is not None
-            if fiber is None:
-                # never live (or already disposed): nothing owned here.
-                if rec is not None:
-                    # item 628 (residual): a carried-forward owed resource whose
-                    # original object cannot be re-driven stays OWED — release is
-                    # never inferred from a resource's absence in `fibers`.
-                    prior = rec.get("priorOutcome")
-                    rec["outcome"] = (prior
-                                      if prior in ("owned", "attempted", "failed")
-                                      else "absent")
-                continue
-            if rec is not None:
-                rec["outcome"] = "attempted"
-                if reattempt:
-                    rec["reattempt"] = True
-            self._log("swap", name, "dispose -> inverses replay (LIFO)")
-            frame = self.runtime._frame_for_ctx(getattr(fiber, "ctx", None))
-            try:
-                await fiber.dispose()
-            except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
-                # the ORIGINAL disposer raised: name it in the ledger as failed
-                # (the fiber was popped above, so it is no longer in `fibers`; the
-                # ledger is the authoritative inventory) and re-raise so the
-                # aggregate attempt fails exactly as before this slice.
-                if rec is not None:
-                    rec["outcome"] = "failed"
-                    rec["error"] = f"{type(exc).__name__}: {exc}"
-                # item 628 (residual): retain the ORIGINAL object so it is not
-                # lost to the pop above. An explicit re-arm re-attempts THIS same
-                # disposer (see the `_retained_disposers` fall-back on lookup);
-                # ownership stays inspectable and is never inferred released from
-                # the resource's absence in `fibers`.
-                self._retained_disposers[name] = fiber
-                raise
-            if rec is not None:
-                rec["outcome"] = "returned"
-            if frame is not None:
-                self._compensation_residue.extend(
-                    getattr(frame, "compensation_residue", ())
-                )
+        finally:
+            # Ambient host provisions are owned by the driver too.  Settled in a
+            # `finally` so the withdrawal, the residue proof below and the
+            # dead-module reclaim all still run when a revl-owned component
+            # teardown raises: the driver's ambient guarantee is not conditional
+            # on every component releasing cleanly.  The original exception is
+            # untouched and propagates once this block is done.
+            #
+            # They are withdrawn only after every component has released the
+            # service, preserving the same consumers-before-providers teardown
+            # discipline as revl-owned provisions.  A `FiberEffect` joins an
+            # in-flight or completed cleanup, so both paths stay no-ops when
+            # nothing is outstanding.
+            for dispose in reversed(self._ambient_disposers):
+                async def _settle(effect=dispose):
+                    joined = effect._join() if hasattr(effect, "_join") else effect()
+                    if hasattr(joined, "__await__") or asyncio.iscoroutine(joined):
+                        await joined
+                try:
+                    await _settle()
+                except BaseException as exc:
+                    self._log("swap", "ambient", f"withdraw failed: {exc}")
+            self._ambient_disposers.clear()
             await self._flush()
-        await self._flush()
-        # item 541: components just disposed here may have been the last live
-        # users of one or more generation modules (a swap/reload predecessor, a
-        # committed/aborted turn, or the whole composition at teardown) — reclaim
-        # their `sys.modules` entries now.
-        self._evict_dead_modules()
+            # item 541: components just disposed here may have been the last live
+            # users of one or more generation modules (a swap/reload predecessor, a
+            # committed/aborted turn, or the whole composition at teardown) — reclaim
+            # their `sys.modules` entries now.
+            self._evict_dead_modules()
 
     # -- withdrawal + the prediction-vs-actuality oracle -------------------
 
@@ -2114,11 +2152,15 @@ class _Driver:
         except replay.ReplayError as exc:
             self._log("refused", type(exc).__name__, str(exc))
 
-    async def hold_repl(self) -> int:
+    async def hold_repl(self, once: bool = False) -> int:
         module = self._emit_module(self.ir)
         print("== load composition ==")
         await self._load(self.ir, module)
         self._commit_wal()
+        if once:
+            print("\n== once — boot complete, tearing down ==")
+            await self._teardown()
+            return 0
         print("\n== live — call provided services (`:keys` to list, `:q` or Ctrl-D to quit) ==")
         if self.recorder is not None:
             print("   recording — `:timeline`, `:inspect k`, `:back k [!]`, "
@@ -2227,7 +2269,16 @@ class _Driver:
 
     async def _teardown(self) -> None:
         print("\n== teardown — unload everything, then prove no residue ==")
-        await self._dispose_all(self.ir)
+        # A revl-owned component whose own disposer raises must not cost the
+        # operator the residue proof: the checks below are a statement about the
+        # composition, so they run whether or not the unload completed, and the
+        # original fault is re-raised afterwards so the failed teardown is still
+        # reported as a failure.
+        failure: BaseException | None = None
+        try:
+            await self._dispose_all(self.ir)
+        except BaseException as exc:  # noqa: BLE001 (reported below, then re-raised)
+            failure = exc
         checks = [
             ("registry", self.root.registry.size == 0,
              f"registry.size={self.root.registry.size}"),
@@ -2245,6 +2296,8 @@ class _Driver:
         print("  no residue — the composition left nothing behind"
               if all(ok for _, ok, _ in checks)
               else "  RESIDUE LEFT — see FAILs above")
+        if failure is not None:
+            raise failure
         self.runtime.set_trace(None)
         if self.trace_path is not None:
             why_runtime.write_trace(self._events, self.trace_path)
@@ -2274,7 +2327,7 @@ def _fail(exc_text: str, stage: str, code: int = 1) -> int:
     return code
 
 
-def run_command(args) -> int:
+def run_command(args, hold_once: bool = False) -> int:
     if getattr(args, "placement", None):
         # `--placement` splits the composition across processes, each with its
         # own tier; a top-level `--backend` would name one tier for the whole
@@ -2418,13 +2471,14 @@ def run_command(args) -> int:
                      withdraw=withdraw,
                      wal_path=getattr(args, "wal", None),
                      estop_latch=getattr(args, "estop_latch", None),
-                     root_dirs=root_dirs)
+                     root_dirs=root_dirs,
+                     ambient=getattr(args, "ambient", None))
     try:
         if withdraw is not None:
             return asyncio.run(driver.withdraw_once())
         if getattr(args, "watch", False):
             return asyncio.run(driver.watch(args.files))
-        return asyncio.run(driver.hold_repl())
+        return asyncio.run(driver.hold_repl(once=hold_once))
     except ActivationError as exc:
         # item 372: a component's deferred activation did not complete — report
         # it loudly and named, rather than dropping into a REPL over a
