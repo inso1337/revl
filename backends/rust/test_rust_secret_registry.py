@@ -434,7 +434,8 @@ def test_with_the_escaped_faces_stripped_the_value_leaks(tmp_path):
 # gets the decoded/json/Debug trio the go tier registers for a byte slice
 # (item 421 F6(e)), and every other shape gets the `Debug` form -- the one
 # formatter every type a `Secret[T]` lowers to implements, cordis `Value`
-# included, and the only one an emitted sink can write such a value with.
+# included. That form is the CONTAINER's face, so a shape the emit-time walk can
+# decompose (item 421 F6(i), below) registers its leaves beside it.
 
 _NON_SCALAR_SCENARIO = '''
 extern emission[vault.connect] fn connect(key: Secret[Bytes]) -> Unit
@@ -519,7 +520,11 @@ mod revl_secret_non_scalar_tests {{
         assert_eq!(minted, payload);
         assert_eq!(revl_redact_text(CANARY.to_string()), REDACTED);
 
-        // 3. a container with no Display registers through the Debug door.
+        // 3. a container with no Display registers through the Debug door. The
+        //    face asserted here is the HELPER's -- the container's own -- so it
+        //    is not the leaf coverage: the leaves are registered by the DOOR
+        //    that reads the declared type (item 421 F6(i)), which is driven end
+        //    to end in test_a_returned_containers_leaf_is_scrubbed_on_its_own.
         revl_forget_secrets();
         let list = vec![CANARY.to_string()];
         revl_mark_secret_encoded(&list);
@@ -552,3 +557,137 @@ def test_a_non_scalar_secret_composition_builds_and_is_scrubbed(tmp_path):
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     assert "test result: ok" in (result.stdout or "")
+
+
+# item 421 F6(i). The origin door is emitted as a real top-level `fn`, so this is
+# the one door a test can drive END TO END: the crate calls the emitted function
+# (which registers) and then asks the registry to scrub ONE element of what came
+# back. Before the fix only the container's `Debug` face was registered, so the
+# element crossed verbatim -- the same gap F6(e) closed on the go tier with
+# `revlRegisterValue`'s reflect walk, which rust never received because it has
+# no reflection to walk with.
+_LEAF_WALK_SCENARIO = f'''
+extern pure fn leaves() -> Secret[List[Str]]
+  = @rs {{ vec!["{CANARY}".to_string()] }}
+
+extern pure fn table() -> Secret[Map[Str, Str]]
+  = @rs {{ let mut m = std::collections::HashMap::new(); m.insert("k".to_string(), "{CANARY}".to_string()); m }}
+
+extern pure fn maybe() -> Secret[Opt[Str]]
+  = @rs {{ Some("{CANARY}".to_string()) }}
+'''
+
+
+_LEAF_WALK_HARNESS = f'''
+#[cfg(test)]
+mod revl_secret_leaf_walk_tests {{
+    use crate::{{revl_forget_secrets, revl_redact_text}};
+
+    const CANARY: &str = "{CANARY}";
+    const REDACTED: &str = "{REDACTED_SECRET}";
+
+    #[test]
+    fn a_returned_containers_leaf_is_scrubbed_on_its_own() {{
+        // non-vacuity: with nothing registered the leaf flows verbatim, so the
+        // assertions below are the registry working, not an empty read.
+        revl_forget_secrets();
+        assert!(revl_redact_text(CANARY.to_string()).contains(CANARY));
+
+        revl_forget_secrets();
+        let list = crate::leaves();
+        assert_eq!(list, vec![CANARY.to_string()]);
+        assert_eq!(revl_redact_text(format!("{{:?}}", list)), REDACTED);
+        assert_eq!(revl_redact_text(CANARY.to_string()), REDACTED,
+                   "a List leaf crossed verbatim");
+
+        revl_forget_secrets();
+        let _map = crate::table();
+        assert_eq!(revl_redact_text(CANARY.to_string()), REDACTED,
+                   "a Map VALUE leaf crossed verbatim");
+
+        revl_forget_secrets();
+        let opt = crate::maybe();
+        assert_eq!(opt, Some(CANARY.to_string()));
+        assert_eq!(revl_redact_text(CANARY.to_string()), REDACTED,
+                   "an Opt leaf crossed verbatim");
+    }}
+}}
+'''
+
+
+def test_the_container_door_emits_a_walk_over_every_reachable_leaf():
+    """The EMITTED SHAPE, which runs everywhere: a container-shaped door
+    registers the container's own face and then one registration per reachable
+    leaf, each through the door that leaf's declared type takes. The receiver
+    and config doors are inline in a plugin closure (not callable from a test),
+    so their walk is pinned here and the origin door's is proved by RUNNING it
+    in `test_a_returned_containers_leaf_is_scrubbed_on_its_own`."""
+    code = emit.emit(_compile(_NON_SCALAR_SCENARIO))
+    # the receiver door: the container face, then the walk, on one line
+    assert ("revl_mark_secret_encoded(&key); for _revl_leaf0 in key.iter() "
+            "{ revl_mark_secret(&_revl_leaf0); }") in code, code
+    # a `Bytes` leaf takes the byte door, not the scalar one
+    assert "revl_mark_secret_bytes(&config.api_key);" in code, code
+
+    walk = emit.emit(_compile(_LEAF_WALK_SCENARIO))
+    flat = " ".join(walk.split())
+    assert "let _revl_v = _revl_secret_leaves();" in walk, walk
+    assert 'revl_remember_secret(format!("{:?}", _revl_v));' in walk, walk
+    assert ("for _revl_leaf0 in _revl_v.iter() "
+            "{ revl_mark_secret(&_revl_leaf0); }") in flat, walk
+    assert "for _revl_leaf0 in _revl_v.values() {" in flat, walk
+    assert "if let Some(_revl_leaf0) = _revl_v.as_ref() {" in flat, walk
+    # the scalar doors are untouched, so every existing golden stays as it was.
+    assert "pub fn revl_mark_secret_encoded<T: std::fmt::Debug + ?Sized>(value: &T) {" in walk
+    assert "pub fn revl_secret_result_encoded<T: std::fmt::Debug>(value: T) -> T {" in walk
+
+
+@needs_cargo
+def test_a_returned_containers_leaf_is_scrubbed_on_its_own(tmp_path):
+    src = emit.emit(_compile(_LEAF_WALK_SCENARIO))
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(
+        src + "\n" + _LEAF_WALK_HARNESS, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    assert "test result: ok" in (result.stdout or "")
+
+
+# item 421 F6(j). revl admits recursive datatypes, and the emit-time walk of
+# F6(i) recurses the DECLARED type, so a cyclic record has no base case:
+# `Node = { val: Str, next: Opt[Node] }` walks Node, Opt[Node], Node, ... and
+# never returns. The front end accepts the program and the emitter then dies on
+# it, so this is a BUILD defect on legal source -- the same class as F6(g), not
+# a disclosure. The cap mirrors the go tier's `revlRegisterValue`, which bounds
+# the identical shape at runtime with `depth > 8`; past it the container face is
+# the whole coverage for that subtree, exactly as an undecomposable shape leaves
+# it.
+_RECURSIVE_SCENARIO = '''
+type Node = { val: Str, next: Opt[Node] }
+
+extern pure fn chain() -> Secret[Node]
+  = @rs { Node { val: "x".to_string(), next: None } }
+'''
+
+
+def test_the_leaf_walk_terminates_on_a_recursive_record():
+    """RED before the cap: `RecursionError` out of `_secret_face_lines`. The
+    walk must terminate AND must not swallow the non-recursive leaf, so the cap
+    bounds the depth rather than abandoning the shape."""
+    types = {"Node": {"kind": "record",
+                      "fields": {"val": "Str", "next": "Opt[Node]"}}}
+    lines = emit._secret_face_lines("Node", "v", types)
+    assert lines, "the cap must not abandon a shape it can still decompose"
+    assert any("v.val" in line for line in lines), lines
+    # bounded: the cap stops the walk instead of running to the recursion limit
+    assert len(lines) < 100, len(lines)
+
+
+def test_a_recursive_record_composition_emits():
+    """The build defect, from the front door: a composition declaring a
+    recursive record reached `emit` and killed it. Emission must now complete,
+    and the walk it produces must be bounded."""
+    code = emit.emit(_compile(_RECURSIVE_SCENARIO))
+    assert "revl_mark_secret_encoded" in code, code
+    assert code.count("revl_mark_secret(&") < 100, code.count("revl_mark_secret(&")
