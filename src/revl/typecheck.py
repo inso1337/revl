@@ -798,6 +798,39 @@ def nominal_record_fields(type_name: str | None,
     return {name: substitute(ftype, subst) for name, ftype in fields.items()}
 
 
+def unresolved_nominal_reason(expected: str | None, actual: str | None,
+                              types: dict | None) -> str | None:
+    """Why a record literal meeting an undeclared nominal is not a mismatch.
+
+    `actual` must be a structural record. That is the whole point: a record
+    literal states a shape, so "the types disagree" is a claim about a
+    comparison this compilation never made. A scalar meeting an opaque nominal
+    is the documented opposite case and stays an ordinary mismatch: an
+    undeclared name (and a name written in an arrow annotation, which never
+    quantifies) is an ordinary opaque nominal that unifies with nothing, which
+    is what makes a one-letter typo in a signature fail (docs/generics.md,
+    docs/contract-errata.md). `f(1)` against `(x: Q) -> Q` is a real T1.
+
+    `compatible` cannot tell "checked and refused" from "there was nothing to
+    check": it fails closed on an unresolved nominal head, so a structurally
+    exact record returned for a type declared in another file was reported as a
+    mismatch of a type the checker never saw (issue 844). Returning a reason
+    here lets the caller report the actual situation instead.
+    """
+    if not types or structural_fields(actual) is None:
+        return None
+    head, _ = parse_type(expected)
+    if not head or not head[:1].isupper():  # not a type name (see FN_HEAD)
+        return None
+    if head in _BUILTIN_TYPE_NAMES or head in types or head.startswith(_TPARAM):
+        return None
+    if head == PRINCIPAL or is_poison(head):
+        # reserved-opaque names, not merely undeclared: `Principal` has a
+        # dedicated producer hint, and poison never reaches a diagnostic.
+        return None
+    return f"`{head}` has no declaration in this compilation"
+
+
 def compatible(expected: str | None, actual: str | None,
                types: dict | None = None) -> bool:
     """May a value of type `actual` flow into a position typed `expected`?
@@ -956,8 +989,24 @@ def widen_bottom(declared: str | None, actual: str | None,
     return format_type(dhead, widened) if grew else None
 
 
+#: the hint for `T-UNRESOLVED` (issue 844). The fix is not at the call site -
+#: nothing about the expression is wrong - so it names the missing declaration.
+_UNRESOLVED_HINT = (
+    "a record literal is checked against its declared shape, so this "
+    "compilation needs the declaration: declare the type here, or name the file "
+    "that declares it in the same `revl compile` invocation"
+)
+
+
 def mismatch(filename: str, line: int, where: str,
-             expected: str | None, actual: str | None) -> RevlError:
+             expected: str | None, actual: str | None,
+             *, why: str | None = None) -> RevlError:
+    """The `T1` "these types disagree" refusal.
+
+    `why` is the exception: it reports a case the checker could not decide
+    rather than one it decided against, so it carries its own code
+    (`T-UNRESOLVED`) and its own fix. The default keeps every other caller on
+    `T1`/`type-mismatch`, byte for byte."""
     hint = None
     ahead, _ = parse_type(actual)
     ehead, _ = parse_type(expected)
@@ -977,6 +1026,12 @@ def mismatch(filename: str, line: int, where: str,
         # cannot type-check — it does not merely fail closed at runtime.
         hint = PRINCIPAL_PRODUCER_HINT
     expected, actual = render_type(expected), render_type(actual)
+    if why is not None:
+        return RevlError(filename, line,
+                         f"{where} expects `{expected}`, got `{actual}`; {why}",
+                         _UNRESOLVED_HINT,
+                         code="T-UNRESOLVED", category="unresolved-type",
+                         expected=expected, actual=actual)
     return RevlError(filename, line,
                      f"{where} expects `{expected}`, got `{actual}`", hint,
                      code="T1", category="type-mismatch",
@@ -2707,7 +2762,8 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
                                declared.get(name), ftype)
         return
     if actual and not compatible(expected, actual, types):
-        raise mismatch(filename, line, where, expected, actual)
+        raise mismatch(filename, line, where, expected, actual,
+                       why=unresolved_nominal_reason(expected, actual, types))
 
 
 # ------------------------------------------------------- IR inference (components)
@@ -3191,4 +3247,5 @@ def check_ir(node, expected: str | None, tenv: dict, types: dict,
                                declared.get(name), ftype)
         return
     if actual and not compatible(expected, actual, types):
-        raise mismatch(filename, line, where, expected, actual)
+        raise mismatch(filename, line, where, expected, actual,
+                       why=unresolved_nominal_reason(expected, actual, types))
