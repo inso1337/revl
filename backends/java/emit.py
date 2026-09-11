@@ -181,7 +181,9 @@ public interface RevlSecretShape {
 
 // A declared Secret[T] may be a record, a list, an Opt: the members are what a
 // message would quote, so they are what is remembered (the py tier's
-// register_secret_tree). Keys of a map are field names the author wrote.
+// register_secret_tree). A map's keys are remembered beside its values: a map
+// is not a record, and the record branch below is where field names are
+// skipped.
 private static void revlRememberSecret(Object value) {
     // Identity, not equality: two equal-but-distinct nodes must both be
     // marked, and hashing a container to test membership is the work this walk
@@ -212,11 +214,21 @@ private static void revlRememberSecret(Object value, java.util.Set<Object> seen)
         }
         return;
     }
-    if (value instanceof java.util.Map<?, ?> record) {
+    if (value instanceof java.util.Map<?, ?> mapping) {
         if (!seen.add(value)) {
             return;
         }
-        for (Object item : record.values()) {
+        // The KEYS are remembered too. The values-only rule this branch used to
+        // carry cited the record rule -- "Keys of a map are field names the
+        // author wrote" -- but a record is a `Record` and takes the branch
+        // below, which reads its `getRecordComponents()` accessors and so skips
+        // its field names by construction. A revl `Map` is not a record: its
+        // keys are the caller's data, and a key the caller chose is as
+        // confidential as the value it maps to.
+        for (Object key : mapping.keySet()) {
+            revlRememberSecret(key, seen);
+        }
+        for (Object item : mapping.values()) {
             revlRememberSecret(item, seen);
         }
         return;

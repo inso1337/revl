@@ -288,13 +288,19 @@ function rememberSecret(value: unknown, seen?: Set<unknown>): void {
   // author-reachable argument -- the emitter writes `host.markSecret(m)` at the
   // head of the method -- so every value it held crossed every sink
   // `redactText` covers verbatim, `Map.get` and `JSON.stringify` and the
-  // `Map(n) { … }` rendering alike. Values only, and for the reason the record
-  // walk below states: the KEYS are field names the author wrote, and the py
-  // and java tiers register `dict.values()` / `Map.values()` for the same rule.
-  // A `Map` renders its own face as `{}` or `[object Map]`, so there is no
-  // container face to add here -- the registered values are what the
-  // renderings that matter are built from.
+  // `Map(n) { … }` rendering alike. A `Map` renders its own face as `{}` or
+  // `[object Map]`, so there is no container face to add here -- the registered
+  // leaves are what the renderings that matter are built from.
+  //
+  // The KEYS are registered too. The values-only rule this branch used to carry
+  // cited the record walk below -- "a record's KEYS are field names the author
+  // wrote" -- but that is a statement about a RECORD, and a record is a plain
+  // object on this tier: it takes the branch below, which reads `Object.values`
+  // and so skips its field names by construction. A `Map` is not a record; its
+  // keys are the caller's data, and a key the caller chose is as confidential as
+  // the value it maps to.
   if (value instanceof Map) {
+    for (const key of value.keys()) rememberSecret(key, seen)
     for (const item of value.values()) rememberSecret(item, seen)
     return
   }

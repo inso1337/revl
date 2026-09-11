@@ -26,10 +26,24 @@ describe('the declared-secret registry walk reaches a Map value', () => {
     expect(redactText(`host said ${CANARY}`)).not.toContain(CANARY)
   })
 
-  it('keeps the map KEYS, which are field names the author wrote', () => {
+  it('marks the map KEYS too, because a key is the caller own data', () => {
     forgetSecrets()
     markSecret(new Map([['account-token', CANARY]]))
+    expect(redactText('host said account-token')).not.toContain('account-token')
+  })
+
+  it('marks a key nested inside a list, a record and another map', () => {
+    forgetSecrets()
+    secretResult({ rows: [new Map([[CANARY, new Map([['inner', SECOND]])]])] })
+    expect(redactText(`host said ${CANARY}`)).not.toContain(CANARY)
+    expect(redactText(`host said ${SECOND}`)).not.toContain(SECOND)
+  })
+
+  it('still keeps the field names of a RECORD, which the author wrote', () => {
+    forgetSecrets()
+    markSecret({ 'account-token': CANARY })
     expect(redactText('host said account-token')).toContain('account-token')
+    expect(redactText(`host said ${CANARY}`)).not.toContain(CANARY)
   })
 
   it('leaves an unmarked value alone', () => {

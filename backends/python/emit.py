@@ -89,6 +89,7 @@ _IMPORT_ALIAS = {
     "clear_session_owner": "_revl_clear_session_owner",
     "mark_secret": "_revl_mark_secret",
     "secret_result": "_revl_secret_result",
+    "declare_secret_types": "_revl_declare_secret_types",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
 
@@ -194,6 +195,11 @@ _PY_USES_AS_ASYNC: bool = False     # did any body need the `_revl_as_async` wra
 # `None` singleton. A name is treated as the Opt built-in only when it is NOT
 # one of these user cases.
 _PY_ADT_CASES: set = set()
+# The document's declared type table (`ir["types"]`). The redaction walk needs it
+# to tell a `Map` from a record at a declared `Secret[T]` boundary: both reach the
+# runtime as a `dict`, so only the declared type says whether a key is the
+# caller's data or a field name the author wrote (item 421 F6).
+_PY_TYPES: dict = {}
 
 
 def _py_yields_coroutine(node: Any, requires: Any = None,
@@ -1173,6 +1179,10 @@ class _ComponentEmitter:
         self.config_fields = component.get("config") or []
         self.snake = _snake(self.name)
         self.uses: set[str] = set()
+        # The declared `Secret[T]` type strings this component marked whose shape
+        # the redaction walk needs (a `Map` is reachable from them). Unioned by
+        # `_emit` into the one module-level type table the runtime reads.
+        self.secret_type_roots: set = set()
         self._counter = 0
         # item 92: is the method body currently rendered an `async def`? A call
         # to a colored fn / async local is awaited only then (the frontend
@@ -2608,8 +2618,25 @@ class _ComponentEmitter:
         ]
         if secret_params:
             self.uses.add("mark_secret")
-            out.add(indent + 1,
-                    f"{_runtime_ref('mark_secret')}({', '.join(secret_params)})")
+            # The declared type of each marked parameter, in the order they are
+            # passed. Needed because a `Map` and a record are both a `dict` at
+            # runtime, so the walk cannot tell a caller's map KEY from an
+            # author's field name without it — and the values-only rule it had
+            # to apply to both dropped every map key.
+            declared = [
+                ((spec.get("params") or [])[index] or {}).get("type")
+                for index, param in enumerate(params)
+                if param in secret_params
+            ]
+            needs_shape, _ = _secret_shape_facts(declared, _PY_TYPES)
+            if needs_shape:
+                self.secret_type_roots.update(name for name in declared if name)
+                out.add(indent + 1,
+                        f"{_runtime_ref('mark_secret')}({', '.join(secret_params)}, "
+                        f"_declared={tuple(declared)!r})")
+            else:
+                out.add(indent + 1,
+                        f"{_runtime_ref('mark_secret')}({', '.join(secret_params)})")
         body = method.get("body") or []
         if not body:
             if not secret_params:
@@ -2984,6 +3011,58 @@ def _split_types(inner: str) -> list[str]:
     if current:
         parts.append("".join(current).strip())
     return parts
+
+
+def _split_type_name(name: str) -> tuple:
+    """`"Map[Str, Str]"` -> `("Map", ["Str", "Str"])`; a scalar is `(name, [])`.
+
+    The head/argument split only — the emitter never needs the checker's
+    unification here, just which constructor a declared type spells."""
+    if not name:
+        return None, []
+    name = name.strip()
+    if "[" not in name or not name.endswith("]"):
+        return name, []
+    head = name[: name.index("[")]
+    return head, _split_types(name[name.index("[") + 1: name.rindex("]")])
+
+
+def _secret_shape_facts(roots, types: dict) -> tuple:
+    """`(needs_shape, record_table)` for declared `Secret[T]` type strings.
+
+    `needs_shape` is true iff a `Map` is REACHABLE from one of the roots — a bare
+    `Map`, a `Map` in a list element, or a `Map` in a record field. Only then is
+    there anything the runtime walk cannot answer from the value alone, and only
+    then is the declared shape emitted, so a module whose secrets are all scalars
+    or `Map`-free records stays byte-identical to before (item 421 F6).
+
+    `record_table` maps each reachable record name to its declared field types.
+    It is what lets the walk keep skipping a record's field NAMES while still
+    reaching a `Map` in a field: a `Map` and a record are both a `dict` on this
+    tier, so the value cannot distinguish them and the field's declared type is
+    the only thing that can. Cyclic types terminate on `seen`."""
+    needs_shape = False
+    table: dict = {}
+    pending = [name for name in roots if name]
+    seen: set = set()
+    while pending:
+        name = pending.pop()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        head, args = _split_type_name(name)
+        if head == "Map":
+            needs_shape = True
+        spec = types.get(head) if head else None
+        fields = spec.get("fields") if isinstance(spec, dict) else None
+        if isinstance(fields, dict):
+            table.setdefault(head, dict(fields))
+            pending.extend(fields.values())
+        else:
+            # Not a record: a `List`/`Opt`/`Result` argument list is where a
+            # nested `Map` would be declared, so its arguments are followed.
+            pending.extend(args)
+    return needs_shape, table
 
 
 def _py_type(type_name: str) -> str:
@@ -4075,9 +4154,17 @@ def _emit_externs(externs: list) -> "_Lines":
         # the operator console) can scrub it. It wraps whichever `def` follows,
         # the inline body and the `@py ref` thunk alike, and never touches the
         # verbatim body. Emitted ONLY for a `Secret[T]`-returning extern, so every
-        # other module is byte-identical.
+        # other module is byte-identical. When the declared return reaches a
+        # `Map` the type is spelled out too, because the walk cannot otherwise
+        # tell a `Map` from a record — both are a `dict` here — and would skip
+        # the map's keys as if they were field names.
         if ext.get("secret_return"):
-            out.add(0, f"@{_runtime_ref('secret_result')}")
+            returns = ext.get("returns")
+            needs_shape, _ = _secret_shape_facts([returns], _PY_TYPES)
+            if needs_shape:
+                out.add(0, f"@{_runtime_ref('secret_result')}(_declared={returns!r})")
+            else:
+                out.add(0, f"@{_runtime_ref('secret_result')}")
         # item 396 option B: a `@py ref sym from "module.py"` extern emits a LAZY
         # import THUNK — never a body — that imports the host symbol at the
         # extern's FIRST CALL, inside the extern frame, and caches it. A module-
@@ -4952,6 +5039,7 @@ def emit(ir: dict) -> str:
     # `def` and is deliberately absent.
     global _PY_COLORED_FNS, _PY_ASYNC_EXTERNS, _PY_ASYNC_SVC_OPS, _PY_USES_AS_ASYNC
     global _PY_ADT_CASES
+    global _PY_TYPES
     # #552 B5: every user variant case name, so the None/Some Opt built-ins are
     # not applied to a same-named user case at construction or in a match.
     _PY_ADT_CASES = {
@@ -4960,6 +5048,7 @@ def emit(ir: dict) -> str:
         for case in (spec.get("cases") or [])
         if isinstance(case.get("name"), str)
     }
+    _PY_TYPES = types
     _PY_COLORED_FNS = {fn.get("name") for fn in functions if fn.get("async")}
     _PY_ASYNC_EXTERNS = {ext.get("name") for ext in externs if ext.get("async")}
     _PY_ASYNC_SVC_OPS = {
@@ -4987,6 +5076,28 @@ def emit(ir: dict) -> str:
         raise EmitError("duplicate component names")
 
     lifecycle = [test for test in tests if test.get("lifecycle")]
+    # item 421 F6: the record field types reachable from a declared `Secret[T]`
+    # whose walk needs them — that is, where a `Map` is reachable. A `Map` and a
+    # record are both a `dict` at runtime, so the field types are the only thing
+    # that lets the redaction walk keep skipping a record's field names while
+    # still remembering a map's keys. Registered once for the module; a document
+    # whose secrets reach no `Map` emits neither the call nor the import and is
+    # byte-identical to before.
+    secret_roots = {
+        ext.get("returns") for ext in externs
+        if ext.get("secret_return") and ext.get("returns")
+    }
+    for emitter in emitters:
+        secret_roots |= emitter.secret_type_roots
+    secret_shape, secret_types = _secret_shape_facts(secret_roots, types)
+    if not secret_shape:
+        # No `Map` is reachable from any declared secret type, so there is
+        # nothing the value alone cannot answer and the table would be dead
+        # weight: a record's field names are skipped by the values-only rule
+        # exactly as they were before. Emitting it only when a `Map` is
+        # reachable is what keeps a `Secret[Record]`-with-no-`Map` document
+        # byte-identical too, not just a scalar one.
+        secret_types = {}
     # item 170: an async-coloured timer body spawns its firing into an asyncio
     # in-flight window, so its emitter marks `__asyncio__`. That is a gate for
     # the `import asyncio as _revl_asyncio` line, not a runtime import — strip it
@@ -5021,6 +5132,9 @@ def emit(ir: dict) -> str:
         # through `emitter.uses`.
         | ({"secret_result"} if any(ext.get("secret_return") for ext in externs)
            else set())
+        # item 421 F6: a declared secret type that reaches a `Map` also needs the
+        # record field types emitted, so the walk can tell the two apart.
+        | ({"declare_secret_types"} if secret_types else set())
     )
 
     # Delivery semantics (item 44): the reference runtime driver may auto-retry
@@ -5047,6 +5161,20 @@ def emit(ir: dict) -> str:
             for name in uses
         )
         out.add(0, f"from runtime import {imported}")
+        out.add(0)
+    # item 421 F6: the record field types the redaction walk needs to tell a
+    # record's field names from a `Map`'s keys. Emitted only when a declared
+    # `Secret[T]` reaches a `Map`, so a document that declares no secret `Map`
+    # is byte-identical. Type NAMES only — the table carries no program data.
+    if secret_types:
+        rendered_secret_types = "{" + ", ".join(
+            f"{record!r}: {{"
+            + ", ".join(f"{field!r}: {field_type!r}"
+                        for field, field_type in sorted(fields.items()))
+            + "}"
+            for record, fields in sorted(secret_types.items())
+        ) + "}"
+        out.add(0, f"{_runtime_ref('declare_secret_types')}({rendered_secret_types})")
         out.add(0)
     # item 396 option B: a `@py ref` extern emits a lazy import thunk that caches
     # the resolved host symbol in this module-level dict and asserts its colour
