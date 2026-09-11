@@ -15,6 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 mod components;
+mod confidential;
 mod estop;
 
 fn args_of(probe: &J) -> Vec<J> {
@@ -110,7 +111,13 @@ fn serve_plugin(socket: String, keys: Vec<String>) -> cordis::PluginHandle {
 fn probe_plugin(name: String, key: String, method: String, args: Vec<J>) -> cordis::PluginHandle {
     cordis::plugin_sync::<(), _>("RevlProbe", cordis::Inject::new([key.as_str()]), move |ctx, _config| {
         let value = components::_revl_invoke(&ctx, &key, &method, &args);
-        println!("[{name}] probe | {key}.{method}(...) -> {value}");
+        // item 421 F6(c): this line is written by the runner, not by the emitted
+        // runtime, so it does not pass through the emitted trace choke point.
+        // The returned value is the one thing on this channel that can hold a
+        // registered secret, so the whole rendered line goes through the funnel
+        // (confidential.rs) rather than the value alone.
+        println!("{}", confidential::revl_redact_text(format!(
+            "[{name}] probe | {key}.{method}(...) -> {value}")));
         Ok(cordis::PluginOutput::none())
     })
 }
@@ -147,9 +154,39 @@ fn main() {
     let spec: J = serde_json::from_str(&std::fs::read_to_string(&spec_path).expect("read spec"))
         .expect("parse spec");
     let name = spec["name"].as_str().unwrap_or("proc").to_string();
+    // item 421 F6(c): the runner's own console channels are one printer, so the
+    // funnel sits here rather than at each call site — the whole rendered line,
+    // the same choke point shape the go tier's `log` keeps. `confidential.rs`
+    // holds the registry the emitted plugin closures register into, so the line
+    // this printer writes is scrubbed by the same values the emitted sinks use.
     let log = |channel: &str, subject: &str, detail: &str| {
-        println!("[{name}] {channel:<6}| {subject:<16}| {detail}");
+        println!("{}", confidential::revl_redact_text(format!(
+            "[{name}] {channel:<6}| {subject:<16}| {detail}")));
     };
+    // The uncaught channel: a panic unwinding out of a host body prints from the
+    // runtime itself, before `log` runs and outside every funnel the emitted
+    // program has. `set_hook` sees a panic on ANY thread, so one redacted line
+    // replaces a raw message on a channel the runner does not otherwise own.
+    // Installed here rather than at the top of `main` so the line can name the
+    // process; the two `expect`s above can only fail on the runner's own static
+    // text. Replacing the hook does not change what a panic does (unwind and a
+    // non-zero exit) — only what it prints.
+    let hook_name = name.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = match info.payload().downcast_ref::<&str>() {
+            Some(text) => (*text).to_string(),
+            None => match info.payload().downcast_ref::<String>() {
+                Some(text) => text.clone(),
+                None => "Box<dyn Any>".to_string(),
+            },
+        };
+        let at = match info.location() {
+            Some(loc) => format!(" at {}:{}", loc.file(), loc.line()),
+            None => String::new(),
+        };
+        eprintln!("{}", confidential::revl_redact_text(format!(
+            "[{hook_name}] FATAL panic: {message}{at}")));
+    }));
 
     // item 443 / issue #122: publish the spec latch to the ambient variable the
     // accept seam (`handle_conn`) and the idle watcher below both read. Done
@@ -216,7 +253,8 @@ fn main() {
                             fibers.push((cname.to_string(), fiber));
                         }
                         Err(error) => {
-                            eprintln!("[{name}] boot failed loading {cname}: {error}");
+                            eprintln!("{}", confidential::revl_redact_text(format!(
+                                "[{name}] boot failed loading {cname}: {error}")));
                             for (label, fiber) in fibers.iter().rev() {
                                 let _ = fiber.dispose();
                                 log("swap", label, "dispose");

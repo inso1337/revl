@@ -1037,7 +1037,56 @@ async def run(spec: dict, spec_path=None) -> None:
     _funnel_line(f"[{name}] DOWN")
 
 
+# The label every FATAL line carries. `main()` reads it out of the spec before
+# any thread starts; until then "?" is the honest label, because a process that
+# cannot read its own spec is a failure that has no name yet.
+_FATAL_NAME = "?"
+
+
+def _fatal_line(exc: BaseException) -> None:
+    """The one FATAL line this process prints for a failure that no load-path or
+    probe-path funnel saw (issue #814).
+
+    Composed in one place because TWO channels reach it — `main()`'s catch-all
+    and the thread hook below — and a channel that spelled its own line would be
+    free to forget the funnel. `_redact_call` with no arguments: these failures
+    are not a seam reply, so there is no argument list to scrub first, only the
+    registered secrets. Redact, do not delete: the exception type and the
+    sentence around the value stay readable, which is what makes the line
+    diagnosable at all.
+    """
+    print(f"[{_FATAL_NAME}] FATAL {_redact_call(f'{type(exc).__name__}: {exc}', ())}",
+          file=sys.stderr, flush=True)
+
+
+def _thread_fatal(args: threading.ExceptHookArgs) -> None:
+    """The uncaught-failure funnel for every thread that is not the main one.
+
+    `run()` starts two: `revl-estop` and `revl-control`. A raise inside either
+    reaches `threading.excepthook`, whose DEFAULT prints the traceback verbatim
+    on stderr — which the conductor merges (`placement.py::pump` spawns children
+    with `stderr=STDOUT`), and the exception's message quotes whatever the
+    failing frame interpolated. The catch-all in `main()` cannot see it: the
+    exception never leaves the thread that raised it, so it never reaches
+    `asyncio.run`.
+
+    `os._exit` rather than `raise SystemExit`: this runs ON the failing thread,
+    so raising here would only hand a second failure back to the hook that
+    called us, and the process has to die without the teardown's `DOWN` line
+    (E7) — the same rule `_estop_watch` follows when it halts. The thread's
+    traceback is deliberately NOT printed: it is the unfunnelled channel, and
+    its frames are what the line above just redacted. A `SystemExit` raised in a
+    thread is not a failure (the default hook ignores it, and so does this one).
+    """
+    if args.exc_type is SystemExit:
+        return
+    _fatal_line(args.exc_value)
+    sys.stderr.flush()
+    os._exit(1)
+
+
 def main() -> None:
+    global _FATAL_NAME
     # The spec PATH, not just its contents: the directory the conductor wrote
     # this process's spec into is the placement directory (0700, mkdtemp) and is
     # the receiver's anchor for judging seam addresses (item 337,
@@ -1045,6 +1094,10 @@ def main() -> None:
     # cannot move it.
     spec_path = sys.argv[1]
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    _FATAL_NAME = spec.get("name") or "?"
+    # The thread channel, armed BEFORE `run()` can start a thread — the two
+    # threads above are exactly the ones `main()`'s catch-all cannot reach.
+    threading.excepthook = _thread_fatal
     try:
         asyncio.run(run(spec, spec_path=spec_path))
     except BootRefused as exc:
@@ -1053,7 +1106,7 @@ def main() -> None:
         # seam is machine-visible instead of a note under a green run.
         _funnel_line(str(exc))
         raise SystemExit(1) from None
-    except Exception as exc:  # noqa: BLE001 — issue #814, the last unguarded channel
+    except Exception as exc:  # noqa: BLE001 — issue #814, the main thread's channel
         # An exception the load path (BootRefused) and the probe path do not
         # catch — a raise inside an async fiber's own bookkeeping, a config
         # hook, a serve setup — used to escape as a bare traceback to stderr,
@@ -1062,10 +1115,9 @@ def main() -> None:
         # One redacted line, non-zero exit: still loud, still machine-visible,
         # no longer an unanalysed crossing. KeyboardInterrupt/SystemExit pass
         # through untouched (no user data in them, and the default handling is
-        # what an operator Ctrl-C expects).
-        name = spec.get("name") or "?"
-        print(f"[{name}] FATAL {_redact_call(f'{type(exc).__name__}: {exc}', ())}",
-              file=sys.stderr, flush=True)
+        # what an operator Ctrl-C expects). The threads `run()` starts reach the
+        # same line through `_thread_fatal`; this is the main thread's half.
+        _fatal_line(exc)
         raise SystemExit(1) from None
 
 
