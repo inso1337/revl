@@ -298,7 +298,7 @@ def test_active_leases_survive_a_snapshot_and_stale_ones_do_not():
     from revl.mcp import persist
 
     src = _FakeSession(None)
-    src.leases.claim("UserCache", "alice", ttl=1e9)   # far-future: still live
+    src.leases.claim("UserCache", "alice", ttl=L.MAX_TTL)  # longest claim there is
     src.leases.claim("OtherCache", "bob", ttl=1e-6)   # already expired
     meta_leases = src.leases.document()
     # only the live one is in the document a snapshot would carry
@@ -308,6 +308,88 @@ def test_active_leases_survive_a_snapshot_and_stale_ones_do_not():
     persist._restore_leases(dst, meta_leases)
     assert dst.leases.holder_of("UserCache") == "alice"
     assert dst.leases.holder_of("OtherCache") is None
+
+
+def test_a_snapshot_whose_leases_are_not_a_list_is_still_not_fatal():
+    """`_restore_leases` promises a malformed record is skipped, never fatal —
+    which has to hold for the container too, not only for the entries."""
+    from revl.mcp import persist
+
+    dst = _FakeSession(None)
+    for docs in (5, "UserCache", {"UserCache": "bob"}, [None, 7, "UserCache"]):
+        persist._restore_leases(dst, docs)
+    assert dst.leases.document() == []
+
+
+# ------------------------------------------------ the TTL bound (item 61 F6)
+
+
+def test_a_claim_may_not_ask_for_a_lease_past_the_horizon():
+    book = LeaseBook()
+    # exactly the horizon is still a claim, honoured exactly
+    lease = book.claim("UserCache", "alice", ttl=L.MAX_TTL, now=1000.0)
+    assert lease.expiry == 1000.0 + L.MAX_TTL
+    # one second past it is a wedge, refused before the name is touched
+    with pytest.raises(LeaseError) as err:
+        book.claim("UserCache", "bob", ttl=L.MAX_TTL + 1, now=1000.0)
+    assert f"{L.MAX_TTL:g}s" in str(err.value)
+    assert book.holder_of("UserCache", now=1000.0) == "alice"
+
+
+def test_a_claim_may_not_ask_for_a_ttl_that_is_not_a_positive_number():
+    """`NaN` and `Infinity` are literals a permissive JSON reader accepts, so
+    they reach `claim` off the wire: neither may mint a lease."""
+    book = LeaseBook()
+    for ttl in (0, -1, -0.5, float("nan"), float("inf")):
+        with pytest.raises(LeaseError):
+            book.claim("UserCache", "alice", ttl=ttl, now=1000.0)
+    assert book.active(now=1000.0) == []
+
+
+def test_a_restored_lease_is_clamped_to_the_horizon():
+    book = LeaseBook()
+    # a within-horizon expiry is the document's to set, honoured exactly
+    other = book.reinstate("OtherCache", "bob", 1000.0, 1060.0, now=1000.0)
+    assert other.expiry == 1060.0
+    # a longer one is clamped rather than refused: the fence still comes back,
+    # it just cannot outlive the horizon
+    lease = book.reinstate("UserCache", "mallory", 1000.0, 1e12, now=1000.0)
+    assert lease.expiry == 1000.0 + L.MAX_TTL and lease.verified is False
+
+
+def test_a_restored_lease_that_is_not_finite_in_time_is_bounded_or_dropped():
+    """`Infinity` and `NaN` are literals a permissive JSON reader accepts, so a
+    document can carry either. A `NaN` expiry is dropped (it is not a time), an
+    `Infinity` one is clamped like any other over-long expiry."""
+    book = LeaseBook()
+    assert book.reinstate("UserCache", "mallory", 1000.0, float("nan"),
+                          now=1000.0) is None
+    lease = book.reinstate("UserCache", "mallory", 1000.0, float("inf"),
+                           now=1000.0)
+    assert lease.expiry == 1000.0 + L.MAX_TTL
+
+
+def test_a_restored_lease_keeps_acquired_a_real_instant():
+    """`acquired` is display-only, but it comes out of the same document and is
+    surfaced by `revl_state`: a non-finite or future one cannot reach the wire."""
+    book = LeaseBook()
+    for acquired in (float("nan"), float("inf"), -1.0, 2000.0):
+        lease = book.reinstate("UserCache", "bob", acquired, 1060.0, now=1000.0)
+        assert lease.acquired == 1000.0
+
+
+def test_a_forged_fence_self_clears_within_the_horizon():
+    """The property the bound buys: a fence that names a holder no operator can
+    be is a delay, never a wedge — `release` is holder-checked, so the clock is
+    the only thing that can end it."""
+    book = LeaseBook()
+    book.reinstate("UserCache", "nobody-with-a-token", 1000.0, 1e12, now=1000.0)
+    assert book.holder_of("UserCache", now=1000.0) == "nobody-with-a-token"
+    with pytest.raises(LeaseError):
+        book.release("UserCache", "alice", now=1000.0)
+    end = 1000.0 + L.MAX_TTL
+    assert book.holder_of("UserCache", now=end - 1) == "nobody-with-a-token"
+    assert book.holder_of("UserCache", now=end) is None
 
 
 # --------------------------------------------- end-to-end through the server
