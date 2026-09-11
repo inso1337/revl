@@ -167,6 +167,32 @@ MAX_SOURCE_BYTES = 256 * 1024
 # into a refusal.
 MANIFEST_ROW_LIMIT = 512
 
+# A source with more than this many items at ONE bracket level is refused as
+# OutsideFrontier rather than handed to the native gate. This is a THIRD kind of
+# bound, and neither of the two above is it: the emitted parser recurses once
+# per SIBLING item, so the aborting class is FLAT expression-level recursion,
+# which costs almost no bytes and no depth at all. Measured on the committed
+# crate, release: `g(1, 1, ...)` with 11_386 arguments is a 34 KB source, one
+# line at depth one, and it aborts a stock 8 MiB main thread; at the 1 MiB stack
+# floor the wasm component runs at (the component build sets no `stack-size`)
+# the same shape goes down at ~1_400 items, in a 4 KB source. The shape is not
+# argument-specific -- `[1, 1, ...]` and a run of `let` statements abort at the
+# same counts -- and blank or `//`-comment lines between those statements change
+# nothing, because the cost is per item PARSED and not per line. That last
+# measurement is why this counts newlines as separators: a statement run has no
+# `,` or `;` to count, and counting the line ends is the conservative direction
+# (a comment-heavy source can be declined; a dense one cannot be waved through).
+#
+# The value is set between the largest program this gate DECIDES and the
+# smallest measured threshold: `selfhost/checker.rvl` is 604 items, and 1_024
+# leaves it 1.7x of headroom under a 1_400-item floor. It is also chosen so that
+# it changes no verdict on the whole census corpus (648 cases): the only source
+# above it, `selfhost/lower.rvl` at 3_691 items, is already refused by the byte
+# bound, which is checked first. A stack exhaustion ABORTS and no `catch_unwind`
+# can turn an abort back into a refusal, so a bound no corpus program comes near
+# is the honest way to keep the fail-closed promise true.
+MAX_LEVEL_ITEMS = 1024
+
 # What the native gate actually decides, in one line, stamped into the crate's
 # `COVERED_LAYER`, its README and its provenance so the three cannot disagree.
 # Measured, not assumed: `selfhost/lower.rvl`'s `admit_src` runs no type layer,
@@ -400,6 +426,21 @@ pub const MAX_SOURCE_BYTES: usize = @MAX_SOURCE_BYTES@;
 /// near keeps the fail-closed promise honest.
 pub const MANIFEST_ROW_LIMIT: usize = @MANIFEST_ROW_LIMIT@;
 
+/// Sources with more than this many items at ONE bracket level are refused
+/// rather than decided, for the same reason [`MAX_SOURCE_BYTES`] refuses a
+/// source: the emitted parser recurses once per SIBLING item and a stack
+/// exhaustion ABORTS, which no `catch_unwind` can turn back into a refusal.
+///
+/// This is a THIRD kind of bound, and neither limit above is it. The aborting
+/// class is flat expression-level recursion, which costs almost no bytes and no
+/// depth: `g(1, 1, ...)` with 11_386 arguments is a 34 KB source, one line at
+/// depth one, and it takes down a stock 8 MiB main thread. At the 1 MiB stack
+/// floor the wasm component runs at, ~1_400 items is enough. Depth is NOT what
+/// this measures -- the nesting bound inside `admit_src` covers that, and it
+/// cannot see siblings by construction. A source no corpus program comes near
+/// keeps the fail-closed promise honest.
+pub const MAX_LEVEL_ITEMS: usize = @MAX_LEVEL_ITEMS@;
+
 @EXCLUDED_KEYWORDS@
 @EXCLUDED_BUILTINS@
 
@@ -419,6 +460,14 @@ pub(crate) fn scan(source: &str) -> Option<String> {
         ));
     }
     let text = strip_literals(source);
+    let items = level_items(&text);
+    if items > MAX_LEVEL_ITEMS {
+        return Some(format!(
+            "source has {} items at one bracket level, above the {}-item bound this gate will decide (the native front end recurses once per sibling item and an overflow aborts rather than refusing); compile it with the reference `revl` toolchain",
+            items,
+            MAX_LEVEL_ITEMS
+        ));
+    }
     let bytes = text.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -455,6 +504,51 @@ pub(crate) fn scan(source: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The largest number of sibling items found at any ONE bracket level of
+/// `text`: an opening bracket starts a level, a closing bracket ends it, and
+/// `,`, `;` and a newline each separate two items within the level they are
+/// seen at, so a level holding N siblings reads N and not N-1 (the first item
+/// is counted when the level opens).
+///
+/// This is the stack the emitted parser actually spends. Measured on the
+/// generated crate, the aborting class is FLAT SIBLING recursion and it is not
+/// argument-specific: `g(1, 1, ...)` with 11_386 arguments is a 34 KB source
+/// that aborts a stock 8 MiB stack, `[1, 1, ...]` and a run of `let` statements
+/// go down at the same counts, and blank or `//`-comment lines between those
+/// statements change nothing (they cost no frames at all). Newlines are counted
+/// because a statement run has no `,` or `;` to count; counting them is the
+/// conservative direction, since a comment-heavy source can then be declined
+/// and a dense one still cannot be waved through. Depth is deliberately NOT
+/// measured here -- the nesting bound inside `admit_src` covers it, and it
+/// cannot see siblings by construction: the shape that aborts is one line at
+/// depth one.
+fn level_items(text: &str) -> usize {
+    let mut counts: Vec<usize> = vec![1];
+    let mut worst = 1usize;
+    for b in text.bytes() {
+        match b {
+            b'(' | b'[' | b'{' => counts.push(1),
+            // An unbalanced closer cannot pop the outermost level, so the
+            // count never indexes past an empty stack.
+            b')' | b']' | b'}' => {
+                if counts.len() > 1 {
+                    counts.pop();
+                }
+            }
+            b',' | b';' | b'\n' => {
+                let last = counts.len() - 1;
+                counts[last] += 1;
+            }
+            _ => continue,
+        }
+        let last = counts.len() - 1;
+        if counts[last] > worst {
+            worst = counts[last];
+        }
+    }
+    worst
 }
 
 /// Blank out `"..."` string literals and `//` comments so their contents cannot
@@ -524,6 +618,44 @@ mod tests {
     fn an_oversized_source_is_a_gap() {
         let big = "x".repeat(MAX_SOURCE_BYTES + 1);
         assert!(scan(&big).is_some());
+    }
+
+    #[test]
+    fn too_many_items_at_one_level_is_a_gap() {
+        // One line, ~14 KB, depth one: `nesting_depth` sees nothing to refuse
+        // and the byte bound sees 5% of its budget, while the parser spends one
+        // frame per argument. This is the shape that aborts a 1 MiB stack at
+        // ~1_400 items.
+        let flat = format!(
+            "fn f() -> Int {{ return g({}) }}",
+            vec!["1"; MAX_LEVEL_ITEMS + 1].join(", ")
+        );
+        assert!(flat.len() < MAX_SOURCE_BYTES / 10, "{}", flat.len());
+        let reason = scan(&flat).expect("expected a level-items gap");
+        assert!(reason.contains(&MAX_LEVEL_ITEMS.to_string()), "{}", reason);
+    }
+
+    #[test]
+    fn the_level_bound_is_neither_a_byte_nor_a_depth_bound() {
+        // A corpus-scale source: 300 sibling statements, each followed by a
+        // blank line and a `//` comment. The line ends count (a statement run
+        // has no `,` or `;`), which is the conservative direction, and the
+        // source is still decided at 5% of the byte bound.
+        let mut spaced = String::from("fn f() -> Int {\n");
+        for i in 0..300 {
+            spaced.push_str(&format!("  let a{} = 1\n\n  // note\n", i));
+        }
+        spaced.push_str("  return 0\n}\n");
+        assert!(spaced.len() < MAX_SOURCE_BYTES / 10, "{}", spaced.len());
+        assert_eq!(scan(&spaced), None);
+        // And a deep-but-narrow source is the nesting bound's business, not
+        // this one's.
+        let deep = format!(
+            "fn f() -> Int {{ return {}1{} }}",
+            "(".repeat(150),
+            ")".repeat(150)
+        );
+        assert_eq!(scan(&deep), None);
     }
 }
 '''
@@ -603,6 +735,11 @@ LIB_RS_TEMPLATE = r'''//! `revl-gate` — the revl admission gate as an embeddab
 //! * the source is larger than [`MAX_SOURCE_BYTES`] — the emitted front end is
 //!   deeply recursive and a stack exhaustion ABORTS, which cannot be turned
 //!   back into a refusal;
+//! * the source has more than [`MAX_LEVEL_ITEMS`] items at one bracket level —
+//!   the emitted parser recurses once per SIBLING item, so a flat
+//!   `g(1, 1, …)` a few KB long and one bracket deep exhausts the stack where
+//!   neither the byte bound nor the nesting bound can see it, and a stack
+//!   exhaustion ABORTS rather than refusing;
 //! * the native gate panics while deciding (caught via `catch_unwind`);
 //! * the native gate returns a verdict wire shape this crate does not
 //!   recognise;
@@ -712,7 +849,7 @@ pub mod ir;
 pub mod session;
 pub mod symbols;
 
-pub use frontier::{FRONTIER_ID, MANIFEST_ROW_LIMIT, MAX_SOURCE_BYTES};
+pub use frontier::{FRONTIER_ID, MANIFEST_ROW_LIMIT, MAX_LEVEL_ITEMS, MAX_SOURCE_BYTES};
 pub use ir::{check_ir_boundary, IrRefusal, KNOWN_IR_FIELDS, KNOWN_IR_REVISIONS};
 
 /// The semver of the GATE SURFACE itself (`gate_version().api`). Bumped by
@@ -2461,7 +2598,7 @@ TESTS_ADMIT_RS = r'''//! The crate's own agreement + fail-closed tests (`cargo t
 
 use revl_gate::{
     admit, admit_into, compile_to, gate_version, Tier, Verdict, MANIFEST_ROW_LIMIT,
-    MAX_SOURCE_BYTES,
+    MAX_LEVEL_ITEMS, MAX_SOURCE_BYTES,
 };
 
 // ------------------------------------------------------ refusals that agree
@@ -2638,6 +2775,67 @@ fn a_manifest_under_the_row_bound_is_still_folded() {
         admit_into("fn id(x: Int) -> Int { return x }", ""),
         admit("fn id(x: Int) -> Int { return x }")
     );
+}
+
+// The byte bound is not a SHAPE bound, and the shape it misses most widely is
+// the flat one. The emitted parser recurses once per SIBLING item, so a source
+// one bracket level deep — a call, a list, a run of `let` statements — spends
+// one stack frame per item while costing almost no bytes: measured on this
+// crate, `g(1, 1, ...)` with 11_386 arguments is a 34 KB source and ABORTs a
+// stock 8 MiB stack, and at the 1 MiB floor the wasm component runs at (the
+// component build sets no `stack-size`) ~1_400 items is enough. Blank and
+// `//`-comment lines between those statements change nothing, because the cost
+// is per item parsed and not per line. `nesting_depth` cannot see this shape at
+// all — it collapses sibling depth by construction — so the bound lives in the
+// frontier scan, ahead of the descent, and the probes read it out of the crate
+// rather than restating it.
+
+/// A source whose statement body holds exactly `items` items at one bracket
+/// level: `items - 1` `let`s, one per line, and the `return` that ends the body.
+/// Nothing else sits at that level, so the count is the count.
+fn flat_body(items: usize) -> String {
+    // `items` siblings on one line, no nesting worth counting: the shape whose
+    // frames are one per item. The count at the argument level is exactly
+    // `items`, so the two tests below sit on either side of the bound.
+    format!("fn f() -> Int {{ return g({}) }}", vec!["1"; items].join(", "))
+}
+
+#[test]
+fn a_source_over_the_level_bound_is_declined_rather_than_risked() {
+    let src = flat_body(MAX_LEVEL_ITEMS + 1);
+    // The point of the case: flat and shallow, and a small fraction of the byte
+    // bound. The 1 MiB stack is the wasm component's floor and is deliberately
+    // too small for this shape to descend — the refusal has to land BEFORE the
+    // parser sees it, or this test takes the process down instead of failing.
+    assert!(src.len() < MAX_SOURCE_BYTES / 10);
+    let verdict = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || admit(&src))
+        .expect("spawn the probe")
+        .join()
+        .expect("the probe panicked");
+    assert!(verdict.is_undecided(), "{:?}", verdict);
+    assert_eq!(verdict.code(), Some("FRONTIER"));
+    assert_eq!(verdict.kind(), "outside_frontier");
+    assert!(verdict.to_json().contains("\"admitted\":false"));
+    match verdict {
+        Verdict::OutsideFrontier { reason } => {
+            // The refusal states the bound rather than describing a resource
+            // failure: an embedder has to be able to act on it.
+            assert!(reason.contains(&MAX_LEVEL_ITEMS.to_string()), "{}", reason);
+            assert!(reason.contains("items"), "{}", reason);
+        }
+        other => panic!("a level over the bound must not be decided, got {:?}", other),
+    }
+}
+
+#[test]
+fn a_source_at_the_level_bound_is_still_decided() {
+    // Non-vacuity in the other direction: a ceiling, not a wall. A body at the
+    // bound is decided exactly as it was before the bound existed.
+    let verdict = admit(&flat_body(MAX_LEVEL_ITEMS));
+    assert_ne!(verdict.kind(), "outside_frontier", "{:?}", verdict);
+    assert_eq!(verdict, Verdict::NoObjection);
 }
 
 // The front end is recursive descent, so nesting costs stack. The byte bound
@@ -3577,6 +3775,11 @@ crate returns it whenever:
 * the source is larger than the bound the gate will decide (a stack overflow in
   the deeply-recursive native front end ABORTS, and an abort cannot be turned
   back into a refusal);
+* the source has more items at one bracket level than the gate will decide —
+  the emitted parser recurses once per SIBLING item, so a flat `g(1, 1, …)` a
+  few KB long and one bracket deep exhausts the stack where neither the size
+  bound nor the nesting bound can see it. The bound is
+  `revl_gate::MAX_LEVEL_ITEMS`;
 * the native gate panics while deciding (caught via `catch_unwind`);
 * the native gate returns a verdict wire shape this crate does not recognise;
 * in `admit_into`, the manifest wire is longer than the bound the gate will
@@ -4076,6 +4279,7 @@ def render_generated_json(digest: str, fid: str, language: str,
         "ir_toplevel_fields": ir["fields"],
         "ir_schema_revisions": ir["revisions"],
         "max_source_bytes": MAX_SOURCE_BYTES,
+        "max_level_items": MAX_LEVEL_ITEMS,
         "layer": "1 (verdict surface), admit-only",
         "symbols_api_version": SYMBOLS_API_VERSION,
         "navigation_surface": "revl_gate::symbols — declarations and their lines; issues no verdicts",
@@ -4138,6 +4342,7 @@ def render(tables: dict[str, list[str]], digest: str, fid: str, language: str,
                             .replace("@FRONTIER_ID@", fid)
                             .replace("@MAX_SOURCE_BYTES@", str(MAX_SOURCE_BYTES))
                             .replace("@MANIFEST_ROW_LIMIT@", str(MANIFEST_ROW_LIMIT))
+                            .replace("@MAX_LEVEL_ITEMS@", str(MAX_LEVEL_ITEMS))
                             .replace("@EXCLUDED_KEYWORDS@", _rust_str_array(
                                 "EXCLUDED_KEYWORDS", tables["keywords"],
                                 "/// Reference language keywords the self-host front end does not lex.\n"

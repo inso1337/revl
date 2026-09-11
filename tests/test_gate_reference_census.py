@@ -336,3 +336,9 @@ def test_the_frontier_mirror_matches_the_rust(census):
         assert scan(f"fn f(x: Str) -> Bool {{ return x.{name}() }}") is not None
     # an oversized source is a gap (`an_oversized_source_is_a_gap`)
     assert scan("x" * (262145)) is not None
+    # and so is one with too many items at a single bracket level
+    # (`too_many_items_at_one_level_is_a_gap`)
+    flat = "fn f() -> Int { return g(%s) }" % ", ".join(
+        "1" for _ in range(generator.MAX_LEVEL_ITEMS + 1))
+    assert len(flat) < generator.MAX_SOURCE_BYTES // 10
+    assert scan(flat) is not None

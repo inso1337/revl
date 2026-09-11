@@ -96,6 +96,11 @@ crate returns it whenever:
 * the source is larger than the bound the gate will decide (a stack overflow in
   the deeply-recursive native front end ABORTS, and an abort cannot be turned
   back into a refusal);
+* the source has more items at one bracket level than the gate will decide —
+  the emitted parser recurses once per SIBLING item, so a flat `g(1, 1, …)` a
+  few KB long and one bracket deep exhausts the stack where neither the size
+  bound nor the nesting bound can see it. The bound is
+  `revl_gate::MAX_LEVEL_ITEMS`;
 * the native gate panics while deciding (caught via `catch_unwind`);
 * the native gate returns a verdict wire shape this crate does not recognise;
 * in `admit_into`, the manifest wire is longer than the bound the gate will
@@ -211,7 +216,7 @@ signature it cannot spell the way the reference spells it comes back as
     revl_gate::gate_version()
     // api      "1.0.0"
     // language "2.0.0"
-    // frontier "selfhost-admit:59fd3077ca2d5f4a"
+    // frontier "selfhost-admit:bb38ccec4128d124"
     // layer    "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer"
 
 `api` is the gate surface semver (bumped by surface changes only); the
