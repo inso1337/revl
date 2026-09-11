@@ -3572,6 +3572,23 @@ func revlRenderings(text string) []string {
 // this reason (`confidential._needles`); `revlRegisterValue` walks it the same
 // way and adds the value's OWN json body beside the display form's.
 func revlRememberSecret(v any) {
+	rv := reflect.ValueOf(v)
+	if revlIsContainer(rv) {
+		// item 421 F6(e): a container's faces are the ones the loop below cannot
+		// derive, because the sinks that matter marshal the value instead of
+		// printing it — the json the probe channel, the seam wire and the
+		// durable WAL write, and the leaves a host body can interpolate on their
+		// own. The walk produces all of them, and it can tell a value that
+		// re-enters itself from one that does not. `%v` cannot: `fmt`'s own walk
+		// is unbounded, so `fmt.Sprintf("%v", v)` on a self-referential map is a
+		// `fatal error: stack overflow` that no `recover` intercepts, and a `@go`
+		// body is verbatim go, so `m := map[string]any{}; m["self"] = m` reaches
+		// here from admitted source. The walk bounds each rendering it registers
+		// on that rendering's own raw text, the bound the py tier applies to each
+		// needle.
+		revlRegisterValue(rv, map[revlWalkKey]bool{})
+		return
+	}
 	text := fmt.Sprintf("%v", v)
 	if len(text) < revlMinMarkable {
 		return
@@ -3580,13 +3597,6 @@ func revlRememberSecret(v any) {
 	// value that cleared it clears it in every escaped face too.
 	for _, face := range revlRenderings(text) {
 		revlRegisterFace(face)
-	}
-	// item 421 F6(e): the loop above starts from the `%v` form, which for a
-	// container is Go's DEBUG rendering and not the json the probe channel, the
-	// seam wire and the durable WAL write. Walk the value itself for those
-	// faces, and for the leaves a host body can interpolate on their own.
-	if rv := reflect.ValueOf(v); revlIsContainer(rv) {
-		revlRegisterValue(rv, 0)
 	}
 }
 
@@ -3607,24 +3617,78 @@ func revlIsContainer(rv reflect.Value) bool {
 	return false
 }
 
+// revlWalkKey identifies one container on the walk, so a value that re-enters
+// itself can be recognised. Pointer identity and not equality: two equal-but-
+// distinct nodes are two nodes and both have leaves to register, and hashing a
+// container to test membership is the work this walk exists to avoid. The walk
+// holds the value alive, so its address cannot be recycled underneath it.
+type revlWalkKey struct {
+	ptr uintptr
+	typ reflect.Type
+}
+
+// revlWalkKeyOf is the identity of a container, when it has one. Arrays and
+// structs are values: they cannot close a cycle by themselves, and every cycle
+// through one of them passes through a pointer, a map or a slice. A slice's
+// Pointer is the address of its first element, so two windows onto one backing
+// array share a key; that is only reachable when one genuinely contains the
+// other, which is the cycle the key exists to catch.
+func revlWalkKeyOf(rv reflect.Value) (revlWalkKey, bool) {
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Map:
+		if rv.IsNil() {
+			return revlWalkKey{}, false
+		}
+		return revlWalkKey{rv.Pointer(), rv.Type()}, true
+	case reflect.Slice:
+		if rv.IsNil() {
+			return revlWalkKey{}, false
+		}
+		return revlWalkKey{rv.Pointer(), rv.Type()}, true
+	}
+	return revlWalkKey{}, false
+}
+
 // revlRegisterValue registers every face of one value and of everything inside
 // it. Each rendering is bounded on its own raw text — exactly as the py tier
 // bounds each needle — so a container of short leaves contributes no short
-// needle. The depth cap keeps a self-referential value finite.
-func revlRegisterValue(rv reflect.Value, depth int) {
-	if !rv.IsValid() || depth > 8 {
-		return
+// needle.
+//
+// The walk is bounded by the PATH it is on, not by a depth. The bound used to
+// be `depth > 8`, and a depth cap is a confidentiality regression in exactly
+// the walk that exists to prevent one: a `Map[Str, Any]` spends two frames per
+// level — the map, then the interface holding the next one — so the fourth
+// level put its leaf past the cap, the leaf was never registered as its own
+// text, and `revlRedactText` left it verbatim in every sink while the composite
+// renderings above it matched nothing. A back-edge can only lead to a node the
+// walk is already inside, so a path set terminates on a cycle and still reaches
+// every leaf of every legal value.
+//
+// The result says whether the subtree below this node closes a cycle. A cyclic
+// container has no finite `%v`, and `fmt`'s own walk is unbounded, so rendering
+// one is a `fatal error: stack overflow` that no `recover` can intercept. An
+// ANCESTOR of a cycle has the same problem, which is why the flag is propagated
+// rather than handled where it is found.
+func revlRegisterValue(rv reflect.Value, seen map[revlWalkKey]bool) bool {
+	if !rv.IsValid() {
+		return false
 	}
 	switch rv.Kind() {
 	case reflect.Interface, reflect.Pointer:
 		if rv.IsNil() {
-			return
+			return false
 		}
-		revlRegisterValue(rv.Elem(), depth+1)
-		return
+		if key, ok := revlWalkKeyOf(rv); ok {
+			if seen[key] {
+				return true
+			}
+			seen[key] = true
+			defer delete(seen, key)
+		}
+		return revlRegisterValue(rv.Elem(), seen)
 	case reflect.Slice:
 		if rv.IsNil() {
-			return
+			return false
 		}
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
 			// Bytes. The decoded text is what a sink that prints the payload
@@ -3640,29 +3704,61 @@ func revlRegisterValue(rv reflect.Value, depth int) {
 		}
 		fallthrough
 	case reflect.Array:
+		if key, ok := revlWalkKeyOf(rv); ok {
+			if seen[key] {
+				return true
+			}
+			seen[key] = true
+			defer delete(seen, key)
+		}
+		cyclic := false
 		for i := 0; i < rv.Len(); i++ {
-			revlRegisterValue(rv.Index(i), depth+1)
+			if revlRegisterValue(rv.Index(i), seen) {
+				cyclic = true
+			}
+		}
+		if cyclic {
+			return true
 		}
 	case reflect.Map:
 		if rv.IsNil() {
-			return
+			return false
 		}
+		if key, ok := revlWalkKeyOf(rv); ok {
+			if seen[key] {
+				return true
+			}
+			seen[key] = true
+			defer delete(seen, key)
+		}
+		cyclic := false
 		iter := rv.MapRange()
 		for iter.Next() {
 			// Values only, like the py tier: a record's KEYS are field names
 			// the author wrote, not the caller's data, and redacting them
 			// would erase the diagnostic's shape.
-			revlRegisterValue(iter.Value(), depth+1)
+			if revlRegisterValue(iter.Value(), seen) {
+				cyclic = true
+			}
+		}
+		if cyclic {
+			return true
 		}
 	case reflect.Struct:
+		cyclic := false
 		for i := 0; i < rv.NumField(); i++ {
 			if field := rv.Field(i); field.CanInterface() {
-				revlRegisterValue(field, depth+1)
+				if revlRegisterValue(field, seen) {
+					cyclic = true
+				}
 			}
+		}
+		if cyclic {
+			return true
 		}
 	}
 	if !rv.CanInterface() {
-		return
+		return false
 	}
 	// The display form, which is what a trace line interpolating this value
 	// prints...
@@ -3673,6 +3769,7 @@ func revlRegisterValue(rv reflect.Value, depth int) {
 	if encoded, err := json.Marshal(rv.Interface()); err == nil && len(encoded) >= 2 {
 		revlRegisterText(string(encoded[1 : len(encoded)-1]))
 	}
+	return false
 }
 
 // revlRegisterText applies the markable bound and registers every face of one
