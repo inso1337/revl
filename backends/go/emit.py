@@ -3556,6 +3556,21 @@ func revlRenderings(text string) []string {
 	return faces
 }
 
+// revlRememberSecret registers a declared-Secret value (item 421 F6, and the
+// F6(e) follow-up below).
+//
+// Stringifying the value ONCE and registering the faces of that string is the
+// whole story for a scalar — `%v` of a string IS the string. It is not the
+// whole story for a container. The trace sink renders one with `%v` (`[a b]`),
+// while the probe channel, the seam wire and the durable WAL all marshal the
+// VALUE, so the same `Secret[List[Str]]` wears `["a","b"]` in the text they
+// write and neither the raw face nor the json face of the `%v` string matches
+// it: the value crossed verbatim. `Secret[Bytes]` is further apart still, `%v`
+// writing `[104 101 …]` where `json.Marshal` writes base64.
+//
+// The py tier, which defines these semantics, walks a container for exactly
+// this reason (`confidential._needles`); `revlRegisterValue` walks it the same
+// way and adds the value's OWN json body beside the display form's.
 func revlRememberSecret(v any) {
 	text := fmt.Sprintf("%v", v)
 	if len(text) < revlMinMarkable {
@@ -3563,19 +3578,121 @@ func revlRememberSecret(v any) {
 	}
 	// The bound gates the RAW value only: an escape can only ever expand, so a
 	// value that cleared it clears it in every escaped face too.
-	_revlSecretMu.Lock()
-	defer _revlSecretMu.Unlock()
 	for _, face := range revlRenderings(text) {
-		known := false
-		for _, seen := range _revlSecretValues {
-			if seen == face {
-				known = true
-				break
+		revlRegisterFace(face)
+	}
+	// item 421 F6(e): the loop above starts from the `%v` form, which for a
+	// container is Go's DEBUG rendering and not the json the probe channel, the
+	// seam wire and the durable WAL write. Walk the value itself for those
+	// faces, and for the leaves a host body can interpolate on their own.
+	if rv := reflect.ValueOf(v); revlIsContainer(rv) {
+		revlRegisterValue(rv, 0)
+	}
+}
+
+// revlIsContainer reports whether `%v` of a value is Go's debug rendering
+// rather than the value's own text — true for a slice, an array, a map and a
+// struct, the shapes whose faces the loop above cannot derive because the
+// sinks that matter marshal them instead of printing them.
+func revlIsContainer(rv reflect.Value) bool {
+	switch rv.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if rv.IsNil() {
+			return false
+		}
+		return revlIsContainer(rv.Elem())
+	case reflect.Slice, reflect.Array, reflect.Map, reflect.Struct:
+		return true
+	}
+	return false
+}
+
+// revlRegisterValue registers every face of one value and of everything inside
+// it. Each rendering is bounded on its own raw text — exactly as the py tier
+// bounds each needle — so a container of short leaves contributes no short
+// needle. The depth cap keeps a self-referential value finite.
+func revlRegisterValue(rv reflect.Value, depth int) {
+	if !rv.IsValid() || depth > 8 {
+		return
+	}
+	switch rv.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if rv.IsNil() {
+			return
+		}
+		revlRegisterValue(rv.Elem(), depth+1)
+		return
+	case reflect.Slice:
+		if rv.IsNil() {
+			return
+		}
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			// Bytes. The decoded text is what a sink that prints the payload
+			// writes, and it is the one form `%v` never produces here; the
+			// value's own json face below is the base64 the wire carries, so
+			// both are registered.
+			decoded := make([]byte, 0, rv.Len())
+			for i := 0; i < rv.Len(); i++ {
+				decoded = append(decoded, byte(rv.Index(i).Uint()))
+			}
+			revlRegisterText(string(decoded))
+			break
+		}
+		fallthrough
+	case reflect.Array:
+		for i := 0; i < rv.Len(); i++ {
+			revlRegisterValue(rv.Index(i), depth+1)
+		}
+	case reflect.Map:
+		if rv.IsNil() {
+			return
+		}
+		iter := rv.MapRange()
+		for iter.Next() {
+			// Values only, like the py tier: a record's KEYS are field names
+			// the author wrote, not the caller's data, and redacting them
+			// would erase the diagnostic's shape.
+			revlRegisterValue(iter.Value(), depth+1)
+		}
+	case reflect.Struct:
+		for i := 0; i < rv.NumField(); i++ {
+			if field := rv.Field(i); field.CanInterface() {
+				revlRegisterValue(field, depth+1)
 			}
 		}
-		if !known {
-			_revlSecretValues = append(_revlSecretValues, face)
-		}
+	}
+	if !rv.CanInterface() {
+		return
+	}
+	// The display form, which is what a trace line interpolating this value
+	// prints...
+	revlRegisterText(fmt.Sprintf("%v", rv.Interface()))
+	// ...and the value's OWN json body, which is what the probe channel, the
+	// seam wire and the durable WAL write. The two differ for a container, and
+	// registering only the first is the gap F6(e) closed.
+	if encoded, err := json.Marshal(rv.Interface()); err == nil && len(encoded) >= 2 {
+		revlRegisterText(string(encoded[1 : len(encoded)-1]))
+	}
+}
+
+// revlRegisterText applies the markable bound and registers every face of one
+// rendering, the same bound-then-render order as revlRememberSecret.
+func revlRegisterText(text string) {
+	if len(text) < revlMinMarkable {
+		return
+	}
+	for _, face := range revlRenderings(text) {
+		revlRegisterFace(face)
+	}
+}
+
+// revlRegisterFace adds one face, longest first so a needle containing another
+// leaves no tail behind.
+func revlRegisterFace(face string) {
+	_revlSecretMu.Lock()
+	defer _revlSecretMu.Unlock()
+	if !slices.Contains(_revlSecretValues, face) {
+		_revlSecretValues = append(_revlSecretValues, face)
 	}
 	slices.SortFunc(_revlSecretValues, func(a, b string) int { return len(b) - len(a) })
 }
@@ -8462,6 +8579,11 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         out.append('\t"reflect"')
         out.append('\t"testing"')
         out.append('\t"time"')
+    if _SECRET_MODE and not has_lifecycle:
+        # item 421 F6(e): revlRememberSecret walks a declared value with
+        # reflect, so a container's leaves register beside its own faces (Go
+        # rejects a repeated import, hence the guard).
+        out.append('\t"reflect"')
     if _COMP_NEEDS_STDLIB:
         out.append('\t"strings"')
         out.append('\t"unicode/utf8"')
@@ -9113,6 +9235,11 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         imports.append('\t"time"')
         imports.append('\tstdctx "context"')
     if ctx.needs_reflect and not has_lifecycle:
+        imports.append('\t"reflect"')
+    if _SECRET_MODE and not has_lifecycle and not ctx.needs_reflect:
+        # item 421 F6(e): revlRememberSecret walks a declared value with
+        # reflect, so a container's leaves register beside its own faces (Go
+        # rejects a repeated import, hence the guard).
         imports.append('\t"reflect"')
     if ctx.used_stdlib or _COMP_NEEDS_STDLIB:
         imports.append('\t"strings"')
