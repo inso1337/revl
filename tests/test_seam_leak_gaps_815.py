@@ -395,6 +395,53 @@ def test_one_registration_covers_every_face_a_sink_renders():
     assert confidential.redact_text(ordinary) == ordinary
 
 
+def test_one_registration_covers_every_face_a_bytes_sink_renders():
+    """The same contract for a `Secret[Bytes]` — which wears MORE faces than a
+    `Str`, not fewer.
+
+    `Bytes` is a declared type (`typecheck.py` `_CONFIG_DATA_SCALARS`) and the
+    py emitter maps it to Python `bytes` (`emit.py` `_PY_TYPE`), so a
+    `Secret[Bytes]` value reaches the registry as `bytes`. `_needles` registered
+    the DECODED form and `repr(value)` — both already renderings, since
+    `repr(bytes)` escapes every non-printable and every non-ASCII byte as
+    `\\xNN` — and stopped there, while the `str` branch beside it registers the
+    json and repr faces of its value as well. The encoded face of each bytes
+    form was therefore no needle, so a bytes secret holding a quote, a backslash
+    or any non-ASCII byte crossed verbatim in escaped form at every sink that
+    encodes before it scrubs: the runner's `[name] HALTED <json>` inventory line
+    (`_process_runner._funnel_line` json-encodes the inventory, then funnels the
+    line) and any host error message that quotes a json body.
+    """
+    secret = b'secret\xc3\xa9"key'
+    confidential.register_secret_value(secret)
+    decoded = secret.decode()
+    repr_face = repr(secret)
+
+    raw = f"token={decoded}"
+    json_face = json.dumps({"token": decoded})
+    repr_in_json = json.dumps({"token": repr_face})
+
+    # non-vacuity: three genuinely different renderings of one value, so a
+    # registry holding only the raw forms could not match two of them
+    assert json.dumps(decoded)[1:-1] != decoded
+    assert decoded not in json_face, json_face
+    assert repr_face not in repr_in_json, repr_in_json
+
+    for label, text in (("raw", raw), ("json", json_face),
+                        ("repr-in-json", repr_in_json)):
+        scrubbed = confidential.redact_text(text)
+        assert decoded not in scrubbed, (label, scrubbed)
+        assert json.dumps(decoded)[1:-1] not in scrubbed, (label, scrubbed)
+        assert repr_face not in scrubbed, (label, scrubbed)
+        assert confidential.REDACTED in scrubbed, (label, scrubbed)
+
+    # the false-positive half, on the same axis the str case pins: an ordinary
+    # bytes value that merely LOOKS escaped is untouched, because the faces are
+    # derived from a registered value and never pattern-matched from the text
+    ordinary = json.dumps({"token": "unrelated\xc3\xa9value"})
+    assert confidential.redact_text(ordinary) == ordinary
+
+
 @needs_cordis
 def test_no_sink_carries_the_escaped_canary_in_its_escaped_or_raw_form(tmp_path):
     """The escaped render, through every sink a real run reaches: the `host`
