@@ -112,10 +112,13 @@ def _capture_frame(monkeypatch):
     captured: list = []
     real = _rt.Frame.transactional_method
 
-    def _spy(self, undo, witness):
+    # `**kwargs` rather than the old two-arg shape: #883 gave the real method a
+    # `scope=` keyword and the emitter now passes it, so a spy that re-declares
+    # the signature rejects the call it exists to observe.
+    def _spy(self, undo, witness, **kwargs):
         if self not in captured:
             captured.append(self)
-        return real(self, undo, witness)
+        return real(self, undo, witness, **kwargs)
 
     monkeypatch.setattr(_rt.Frame, "transactional_method", _spy)
     return captured
