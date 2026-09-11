@@ -792,7 +792,7 @@
       "uncovered_statements": 650
     },
     "rust": {
-      "statements": 3502,
+      "statements": 3517,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
           "_emit_step": 138,
@@ -981,16 +981,18 @@
         "backends/rust/emit.py::_v3_strip_index_clone: item 437d read-only clone elision for a List index read. The bare index place (xs[i].clone() to xs[i]) is covered; the residual is the field-off-index shape (xs[i].f.clone() to xs[i].f) in a read-only slot, reached by no corpus document.": {
           "_v3_strip_index_clone": 1
         },
-        "item 421 F6 (the rust half): the declared-`Secret[T]` runtime secret registry. `_declares_secret` scans the IR for a surviving `Secret[T]` marking (service param `secret`, extern `secret_return`, config-field `secret`) to gate `_SECRET_MODE`; `_emit_secret_registry` is the redaction preamble emitted into the crate once under that mode; `_secret_config_fields`/`_secret_config_mark` register a `Secret[T]` config field at the head of the plugin closure (`revl_mark_secret(&config.<f>)`, the register-at-load shape the go tier uses); `_secret_method_params` registers a `Secret[T]` provide-method parameter at the method head; `_stream_host_rust` funnels the host-trace choke point `revl_stream_record` through `revl_redact_text`. No rust corpus document declares a `Secret[T]`, so the positive branches never run, and selfhost/emit_rust.rvl does not port secret redaction (item-429(d)): a corpus document reaching them would flip the byte-agreement oracle red rather than close this gap.": {
+        "item 421 F6 (the rust half): the declared-`Secret[T]` runtime secret registry. `_declares_secret` scans the IR for a surviving `Secret[T]` marking (service param `secret`, extern `secret_return`, config-field `secret`) to gate `_SECRET_MODE`; `_emit_secret_registry` is the redaction preamble emitted into the crate once under that mode; `_secret_config_fields`/`_secret_config_mark` register a `Secret[T]` config field at the head of the plugin closure, the register-at-load shape the go tier uses; `_secret_method_params` registers a `Secret[T]` provide-method parameter at the method head; `_stream_host_rust` funnels the host-trace choke point `revl_stream_record` through `revl_redact_text`. The door DISPATCH is `_secret_mark_call`/`_secret_result_call`: item 421 F6(f) routes a `Secret[T]` by its DECLARED type, because the old generic `T: std::fmt::Display` bound has no impl for `Vec<u8>` (`Bytes`), `Vec<String>` (`List[Str]`) or cordis `Value`, so a non-scalar `Secret[T]` composition emitted a crate that did not compile. `Str`/`Int`/`Int32`/`Float`/`Bool` keep the `Display` door; `Bytes` takes `revl_mark_secret_bytes`/`revl_secret_result_bytes` (decoded text + json array + Debug, mirroring go's F6(e) byte-slice branch); everything else takes `revl_mark_secret_encoded`/`revl_secret_result_encoded` (`Debug`, the one formatter every lowering implements). No rust corpus document declares a `Secret[T]`, so the positive branches never run, and selfhost/emit_rust.rvl does not port secret redaction (item-429(d)): a corpus document reaching them would flip the byte-agreement oracle red rather than close this gap. The reference half is pinned by backends/rust/test_rust_secret_registry.py (the door-shape tests plus the `#[needs_cargo]` build-and-scrub harness).": {
           "_declares_secret": 4,
           "_emit_secret_registry": 1,
           "_secret_config_fields": 1,
           "_secret_config_mark": 2,
+          "_secret_mark_call": 6,
           "_secret_method_params": 4,
+          "_secret_result_call": 6,
           "_stream_host_rust": 8
         }
       },
-      "uncovered_statements": 1329
+      "uncovered_statements": 1341
     },
     "ts": {
       "statements": 2151,

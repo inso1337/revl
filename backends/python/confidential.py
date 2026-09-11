@@ -415,9 +415,18 @@ def _needles(value: Any, into: set, minimum: int) -> None:
             into.update(_renderings(value))
         return
     if isinstance(value, bytes):
+        # Every face, exactly as the `str` branch above — and bytes wear MORE
+        # of them, not fewer. `repr(bytes)` escapes every non-printable and
+        # every non-ASCII byte as `\xNN`, so the two forms below are already
+        # RENDERINGS; the text a sink scrubs is rendered once more, and an
+        # encoder escapes a backslash. Registering the raw forms alone left
+        # both of their encoded faces unmatched, so a `Secret[Bytes]` holding a
+        # quote, a backslash or any non-ASCII byte crossed a sink that encodes
+        # before it scrubs (the runner's `HALTED <json>` inventory line, a host
+        # error message quoting a json body) verbatim in escaped form.
         for form in (value.decode("utf-8", "replace"), repr(value)):
             if len(form) >= minimum:
-                into.add(form)
+                into.update(_renderings(form))
         return
     if isinstance(value, (int, float)):
         form = str(value)
