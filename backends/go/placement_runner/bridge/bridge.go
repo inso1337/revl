@@ -149,7 +149,13 @@ func (c *Client) Call(key, method string, args []any) (json.RawMessage, error) {
 		if rep.Error == "" {
 			rep.Error = "remote error"
 		}
-		return nil, errors.New(rep.Error)
+		// item 421 F5 — the consumer half of the seam funnel. The provider runs
+		// the same two stages on its side, but a provider authored outside revl
+		// (spec §10) has no registry to consult, so text it sends back can quote
+		// a value THIS process holds. Redacting on arrival covers that peer, and
+		// costs nothing when the peer already redacted: the marker it substituted
+		// does not match any needle.
+		return nil, errors.New(ScrubText(rep.Error))
 	}
 	return rep.Value, nil
 }
@@ -248,9 +254,41 @@ func argNeedles(value any, into map[string]struct{}) {
 	}
 }
 
+// SecretScrub is stage 2 of that contract: the sweep over the values a declared
+// `Secret[T]` marking registered. The registry belongs to the composition, not
+// to this runner -- it is the emitted program that knows which parameters and
+// which extern returns carry a marking -- so the generated package installs
+// this hook from its own `init`. Go has no reflective route to an unexported
+// function of another package, and an `emitted` import here would be a package
+// cycle (the generated package already imports this one), so an installable hook
+// is the binding; the java tier reads the same registry reflectively for the
+// same reason.
+//
+// Nil is the state of a composition that declares no `Secret[T]` anywhere:
+// nothing was registered, so there is nothing stage 2 could remove, and both
+// funnels stay identity. That is what keeps a marking-free placement behaving
+// exactly as it did before this hook existed.
+var SecretScrub func(string) string
+
+// ScrubText runs stage 2 over text that may quote a registered value.
+func ScrubText(text string) string {
+	if SecretScrub == nil {
+		return text
+	}
+	return SecretScrub(text)
+}
+
 // SeamFailure is the error text a provider-side failure is allowed to send back
-// to the consumer, with this call's own argument values replaced by RedactedArg.
-// Longest needle first, so one that contains another leaves no tail behind.
+// to the consumer, with this call's own argument values replaced by RedactedArg
+// and every registered secret value replaced by RevlRedactedSecret. Longest
+// needle first, so one that contains another leaves no tail behind.
+//
+// Both stages are required, and the order is the contract's: a value the call
+// itself carried is the caller's own bytes crossing back, and a value the
+// registry remembered is one the composition was trusted with. A failure that
+// quotes a registered credential it was not called with -- an expired token in
+// a message, a connection string in a driver error -- is stage 2's case, and
+// stage 1 cannot see it because it is not among the arguments.
 func SeamFailure(err error, args []json.RawMessage) string {
 	text := err.Error()
 	needles := map[string]struct{}{}
@@ -272,7 +310,7 @@ func SeamFailure(err error, args []json.RawMessage) string {
 	for _, needle := range ordered {
 		text = strings.ReplaceAll(text, needle, RedactedArg)
 	}
-	return text
+	return ScrubText(text)
 }
 
 // Serve accepts connections on ln and answers each request via invoke until ln
@@ -309,9 +347,9 @@ func serveConn(conn net.Conn, invoke Invoke) {
 					// replayed and nothing is discharged — the caller's attempt
 					// lands in item 440's ambiguous tier, the designed outcome of
 					// a halt (docs/design/443-estop.md).
-					out, _ = json.Marshal(errReply{Ok: false, Error: "revl E-Stop engaged: " +
+					out, _ = json.Marshal(errReply{Ok: false, Error: ScrubText("revl E-Stop engaged: " +
 						"this process is HALTED and refuses new crossings (key " + req.Key +
-						", method " + req.Method + ") — docs/design/443-estop.md"})
+						", method " + req.Method + ") — docs/design/443-estop.md")})
 					out = append(out, '\n')
 					if _, werr := conn.Write(out); werr != nil {
 						return
