@@ -60,6 +60,18 @@
 //        stdlib under the old stamp predates `body_length`, so its author is
 //        still hand-rolling `Content-Length`, which is the defect the module
 //        exists to remove.
+//   8 -> `stdlib/http.rvl`'s `header_value` compared header names with `==`,
+//        so it was case-SENSITIVE while `stdlib/framing.rvl`'s `header_values`
+//        /`header_count` compared case-insensitively (RFC 9110 5.1): for one
+//        `List[Header]`, `header_count(hs, "content-type")` could answer 1
+//        while `header_value(hs, "content-type")` answered `None`, and a
+//        handler reading a request header by its natural spelling saw "no such
+//        header" for a header the wire carried. `header_value` now compares
+//        through the new `pub fn header_name_eq`, the one comparison every
+//        reader in both modules uses, so no two readers can disagree about
+//        whether a name is present. Same reason as item 104: a vendored copy
+//        under the old stamp still carries the case-sensitive reader, so its
+//        author's `header_value` lookups silently miss wire-spelled names.
 pub fn stdlib_version() -> Str {
-  return "7"
+  return "8"
 }
