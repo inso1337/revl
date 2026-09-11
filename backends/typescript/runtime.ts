@@ -237,7 +237,7 @@ function registerText(text: string): void {
 /** Remember one already-rendered value as confidential. Walks a container so a
  *  `Secret[List[Str]]` receiver marks its elements, mirroring py's
  *  `register_secret_tree`. */
-function rememberSecret(value: unknown): void {
+function rememberSecret(value: unknown, seen?: Set<unknown>): void {
   if (value === null || value === undefined || typeof value === 'boolean') return
   if (typeof value === 'string') {
     registerText(value)
@@ -248,8 +248,19 @@ function rememberSecret(value: unknown): void {
     if (form.length >= MIN_MARKABLE) secretValues.add(form)
     return
   }
+  if (typeof value !== 'object') return
+  // A value graph can re-enter itself: a parent pointer, a self-referential
+  // record, a list that holds itself. Visit each container at most once per
+  // walk. A PATH, not a depth -- a cap terminates too, but it also drops the
+  // leaves of any legal value deeper than the cap, which is the
+  // confidentiality this walk exists to keep. Identity, not equality: two
+  // equal-but-distinct nodes must both be marked, and hashing a container to
+  // test membership is the work the walk exists to avoid.
+  if (seen === undefined) seen = new Set<unknown>()
+  if (seen.has(value)) return
+  seen.add(value)
   if (Array.isArray(value)) {
-    for (const item of value) rememberSecret(item)
+    for (const item of value) rememberSecret(item, seen)
     return
   }
   // item 421 F6(f): a byte payload. The object walk below reaches one as its
@@ -270,12 +281,10 @@ function rememberSecret(value: unknown): void {
     registerText(JSON.stringify(value))
     return
   }
-  if (typeof value === 'object') {
-    // Values only: a record's KEYS are field names the author wrote, not the
-    // declared secret, and erasing them would destroy the trace's shape.
-    for (const item of Object.values(value as Record<string, unknown>)) {
-      rememberSecret(item)
-    }
+  // Values only: a record's KEYS are field names the author wrote, not the
+  // declared secret, and erasing them would destroy the trace's shape.
+  for (const item of Object.values(value as Record<string, unknown>)) {
+    rememberSecret(item, seen)
   }
 }
 
