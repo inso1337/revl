@@ -55,6 +55,7 @@ from .session import SessionError
 # larger than this face accepts is 413 (`stdlib/framing.rvl`'s `status_for`).
 _OK = 200
 _NO_CONTENT = 204
+_NOT_MODIFIED = 304
 _BAD_REQUEST = 400
 _FORBIDDEN = 403
 _NOT_FOUND = 404
@@ -631,7 +632,13 @@ class HttpComposedServer:
                 "code": "internal_error",
                 "message": "handler returned a malformed ApiError"})
         status = enc.get("status", _BAD_REQUEST)
-        return HttpReply.json(int(status), {
+        try:
+            status = int(status)
+        except (TypeError, ValueError):
+            return HttpReply.json(_SERVER_ERROR, {
+                "code": "internal_error",
+                "message": "handler returned a malformed ApiError"})
+        return HttpReply.json(status, {
             "code": enc.get("code", "error"),
             "message": enc.get("message", "")})
 
@@ -643,7 +650,12 @@ class HttpComposedServer:
             return HttpReply.json(_SERVER_ERROR, {
                 "code": "internal_error",
                 "message": "handler returned a malformed Response"})
-        status = int(enc.get("status", _OK))
+        try:
+            status = int(enc.get("status", _OK))
+        except (TypeError, ValueError):
+            return HttpReply.json(_SERVER_ERROR, {
+                "code": "internal_error",
+                "message": "handler returned a malformed Response"})
         extra_headers = tuple(
             (h.get("name"), h.get("value"))
             for h in (enc.get("headers") or [])
@@ -708,11 +720,12 @@ _MAX_BODY = 1024 * 1024
 
 @dataclasses.dataclass(frozen=True)
 class _FramingRefusal:
-    """A request this face refuses to frame, in `stdlib/framing.rvl`'s shape:
-    the wire status (`status_for`), the stable machine token (`reason_of`) and
-    the sentence to ship (`message_of`). All three come from that module
-    verbatim, so a caller reading this face's refusals reads the same words as a
-    caller reading the primitive's."""
+    """A message this face refuses to frame — a request it will not read, or a
+    reply it will not write — in `stdlib/framing.rvl`'s shape: the wire status
+    (`status_for`), the stable machine token (`reason_of`) and the sentence to
+    ship (`message_of`). The request-side three come from that module verbatim,
+    so a caller reading this face's refusals reads the same words as a caller
+    reading the primitive's."""
 
     status: int
     reason: str
@@ -741,6 +754,134 @@ _OVER_CEILING = _FramingRefusal(
     _PAYLOAD_TOO_LARGE, "over_ceiling",
     "the declared body is larger than this endpoint accepts; refuse it with 413 "
     "before reading any of it")
+
+# The response-side refusals. Both are the FACE's, not a handler's, and both are
+# 500: the request was well-formed, so what is broken is the program that
+# answered it.
+_HANDLER_FRAMED_RESPONSE = _FramingRefusal(
+    _SERVER_ERROR, "handler_framed_response",
+    "the handler declared Content-Length, Transfer-Encoding or Connection on a "
+    "response of its own; this face frames every reply it writes, and two "
+    "framings on one message is how a reader downstream and this face come to "
+    "disagree about where the reply ends (RFC 9110 6.1, RFC 9112 6.3), so the "
+    "reply is refused rather than written with both")
+
+_UNSAFE_RESPONSE_HEADER = _FramingRefusal(
+    _SERVER_ERROR, "unsafe_response_header",
+    "a handler-supplied response header name or value is not a valid HTTP "
+    "field: a name must be a token and a value may contain neither CR, LF nor "
+    "any other control character, because either ends the field early and lets "
+    "the rest of the value write further fields, a body, or a whole second "
+    "reply (RFC 9110 5.1, 5.5)")
+
+_INVALID_STATUS = _FramingRefusal(
+    _SERVER_ERROR, "invalid_status",
+    "the handler chose a status that is not the three digits an HTTP status "
+    "line has room for; this face writes it into the status line unchecked, and "
+    "a reader is required to reject a status it cannot read as three digits, so "
+    "the reply is refused rather than written unreadable (RFC 9110 15)")
+
+# A status whose reply ends at the end of the header section, and so carries no
+# body: 1xx (RFC 9110 15.2, an interim response), 204 (15.3.5) and 304 (15.4.5)
+# all say "cannot contain content". RFC 9110 8.6 forbids `Content-Length` on 1xx
+# and 204 outright, and permits it on 304 only when it equals the length the 200
+# would have had — a length this face cannot know, since all it has is the body
+# the handler returned. So none of the three declares a length here, and none of
+# them has a body written after it: the set decides BOTH, because a reply that
+# declares no content and then writes some is the same defect as one that
+# declares a length it does not write.
+_CONTENTLESS_STATUSES = frozenset(range(100, 200)) | {_NO_CONTENT, _NOT_MODIFIED}
+
+# The three header fields a reply's framing lives in. A handler owns its reply's
+# status, body and ordinary headers; it does NOT own where the body ends, because
+# this face is what knows the body's length and what writes it. These are
+# refused rather than overwritten: a program hand-framing its own reply is a
+# defect to be told about, not silently repaired, and the refusal is what makes
+# the defect visible instead of leaving one of the two framings on the wire.
+_FACE_OWNED_RESPONSE_HEADERS = frozenset({
+    "content-length", "transfer-encoding", "connection"})
+
+# RFC 9110 5.1: a field name is a token — tchar is ALPHA / DIGIT / these six
+# punctuation runs, and nothing else.
+_TCHAR = frozenset(
+    "!#$%&'*+-.^_`|~"
+    "0123456789"
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+def _is_token(value: str) -> bool:
+    """Is this a legal HTTP field NAME (RFC 9110 5.1)?
+
+    The name is what a receiver splits the field on, so a name carrying a colon
+    or a space lets the handler-supplied name be read as a different field, and
+    one carrying CR or LF ends the head outright.
+    """
+    return isinstance(value, str) and bool(value) and \
+        all(ch in _TCHAR for ch in value)
+
+
+def _is_field_value(value: str) -> bool:
+    """Is this a legal HTTP field VALUE (RFC 9110 5.5)?
+
+    HTAB, SP, VCHAR and obs-text, and nothing else. Excluding CR, LF and the
+    other control characters is the entire point: any of them ends the field
+    early, so everything after it is read as further header fields — or, after a
+    blank line, as the message body (RFC 9112 2.2, 6.3).
+    """
+    if not isinstance(value, str):
+        return False
+    return all(ch == "\t" or " " <= ch <= "~" or "\x80" <= ch <= "\xff"
+               for ch in value)
+
+
+# RFC 9110 15: a status code is a three-digit integer. The face checks the
+# SYNTAX and not the registry — a 6xx is undefined but is still three digits a
+# reader can read, so it is the handler's to use; a 1000, a 99 or a 0 is not a
+# status line, and `http.client` raises `BadStatusLine` on each of them.
+_MIN_STATUS = 100
+_MAX_STATUS = 999
+
+
+def _response_refusal(reply: HttpReply) -> "_FramingRefusal | None":
+    """The first reason this reply may not be written, or None if it may.
+
+    The counterpart of `_frame_request`, one direction out. `http.server`'s
+    `send_header` performs NO validation whatsoever — it is
+    ``self._headers_buffer.append(("%s: %s\\r\\n" % (keyword, value))…)`` and
+    nothing more; `_is_illegal_header_value` exists only in `http.client`, i.e.
+    on the RECEIVING side. So every check a reply needs is this face's to make,
+    and the handler-supplied header list is untrusted input: `route` handlers
+    return `Response` values whose headers routinely carry a decoded path or
+    query scalar, and a percent-decoded `%0d%0a` reaches the wire verbatim
+    through `send_header`.
+
+    `content-type` is the one handler header this face drops rather than
+    refuses — the face always has a content type of its own (the same rule the
+    request side applies to nothing, because a request has no such field), and
+    dropping it is why a value carrying CR or LF in that field is inert.
+
+    The status is checked first because the status line is written first: it is
+    the one part of the reply head `send_response` builds on the handler's
+    behalf, and it builds it from ``self.responses`` — this face's own table of
+    reason phrases, keyed by the code the handler chose. So a status the table
+    does not have is written with an empty reason phrase, and a status outside
+    three digits is written as the handler's own digits.
+    """
+    if not _MIN_STATUS <= reply.status <= _MAX_STATUS:
+        return _INVALID_STATUS
+    for name, value in reply.headers:
+        if not name or (isinstance(name, str)
+                        and name.lower() == "content-type"):
+            continue
+        if not _is_token(name):
+            return _UNSAFE_RESPONSE_HEADER
+        if name.lower() in _FACE_OWNED_RESPONSE_HEADERS:
+            return _HANDLER_FRAMED_RESPONSE
+        if not _is_field_value(value):
+            return _UNSAFE_RESPONSE_HEADER
+    return None
+
 
 # The HTTP grammar's OWS is SP and HTAB, deliberately narrower than
 # `str.strip()`'s wider set: a value padded with a form feed is malformed rather
@@ -820,6 +961,17 @@ def _make_handler(server: HttpComposedServer):
         protocol_version = "HTTP/1.1"
 
         def _write(self, reply: HttpReply, *, close: bool = False) -> None:
+            refusal = _response_refusal(reply)
+            if refusal is not None:
+                # A reply the face will not write is answered with a reply it
+                # wrote itself — the same structured refusal shape, and the same
+                # code, as the request side uses. Substituting BEFORE anything
+                # reaches `send_response` is what makes this safe: the handler's
+                # headers are dropped whole, so there is no second visit here and
+                # nothing of the refused reply is on the wire at all.
+                reply = HttpReply.json(refusal.status, _err(
+                    refusal.message, code=refusal.reason))
+                close = True
             self.send_response(reply.status)
             self.send_header("Content-Type", reply.content_type)
             for name, value in reply.headers:
@@ -832,9 +984,22 @@ def _make_handler(server: HttpComposedServer):
                 # parsed — say so, and close rather than keep reading.
                 self.close_connection = True
                 self.send_header("Connection", "close")
-            self.send_header("Content-Length", str(len(reply.body)))
+            if reply.status not in _CONTENTLESS_STATUSES:
+                # The ONE place this face's reply framing is decided, and it is
+                # decided from the body it is about to write rather than from
+                # anything a handler said.
+                self.send_header("Content-Length", str(len(reply.body)))
             self.end_headers()
-            self.wfile.write(reply.body)
+            # RFC 9110 9.3.2: a HEAD response carries the header fields the GET
+            # would have carried — the `Content-Length` above included — and no
+            # body. RFC 9110 15.2/15.3.5/15.4.5: a 1xx, a 204 and a 304 end at
+            # the end of the header section. In both cases writing the body
+            # anyway hands the client bytes its own framing says are not there,
+            # and on a connection that is being kept alive those bytes are read
+            # as the head of the next reply — so the SAME set that withholds the
+            # length withholds the body.
+            if self.command != "HEAD" and reply.status not in _CONTENTLESS_STATUSES:
+                self.wfile.write(reply.body)
 
         def _respond(self, method: str) -> None:
             length, refusal = _frame_request(self.headers, _MAX_BODY)
