@@ -57,6 +57,7 @@ an exhaustive listing. `ls docs/` has more.
 
 - [backend-ir-v1.md](backend-ir-v1.md) · [backend-ir-v3.md](backend-ir-v3.md) — the IR contract
 - [v2.0-roadmap.md](v2.0-roadmap.md) — what is done and what is in flight
+- [webapp-competitiveness-report.md](webapp-competitiveness-report.md) — roadmap item 462 acceptance bar 5: where revl is already competitive against a real app, and every friction point filed rather than worked around
 - [stability.md](stability.md) — what a version number promises
 - [gate-dependency-contract.md](gate-dependency-contract.md) — the security contract for a host that depends on the gate as a library: `pip install revl` + `revl.gate` (the promised `__all__` surface), and the native `revl-gate` crate, which issues no admissions at all
 - [../CONTRIBUTING.md](../CONTRIBUTING.md) — the wave/worktree workflow and the pre-commit contract · [../SECURITY.md](../SECURITY.md) — reporting a soundness escape
