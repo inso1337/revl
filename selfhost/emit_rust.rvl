@@ -1854,7 +1854,15 @@ fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
       out = out.push(`pub struct ${nm} {`)
       let fields = value_field(spec, "fields")
       for (field of value_keys(fields)) {
-        out = out.push(`    ${mangle(field)}: ${rust_type_t(value_field(fields, field), tnames)},`)
+        let fname = mangle(field)
+        if (fname != field) {
+          // `mangle` renamed a field that collides with a Rust keyword, but the
+          // WIRE key is the source field name on every tier, so serde is told
+          // the real key. Without this a record round-trips under a name no
+          // other tier writes and a decode of the wire object faults.
+          out = out.push(`    #[serde(rename = "${field}")]`)
+        }
+        out = out.push(`    ${fname}: ${rust_type_t(value_field(fields, field), tnames)},`)
       }
       out = out.push("}")
     } else {
