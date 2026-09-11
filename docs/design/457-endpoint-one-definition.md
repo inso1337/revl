@@ -94,6 +94,14 @@ Anything else is a compile refusal naming the operation and the parameter
 record type"). The rules are deterministic in both directions so `revl import
 openapi` and `revl export openapi` are inverses on the subset both express.
 
+The `Bearer` row's "at most one" is the arity of the *parameter*, not a claim
+about the wire: a request may present more than one `Authorization` field.
+When it does, `http_face` makes no claim at all rather than picking one — the
+same answer a missing credential gets, so the handler's `validate` denies and
+the router still grants nothing. Picking the first field instead would let
+`auth.token` and the `Request` escape hatch, which carries every header,
+disagree about what one request presented.
+
 ### Return rules
 
 | declared return | on the wire |
