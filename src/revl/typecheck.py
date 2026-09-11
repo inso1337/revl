@@ -816,19 +816,97 @@ def unresolved_nominal_reason(expected: str | None, actual: str | None,
     exact record returned for a type declared in another file was reported as a
     mismatch of a type the checker never saw (issue 844). Returning a reason
     here lets the caller report the actual situation instead.
+
+    The record literal need not be at the top of the type. `Opt[Row]` against
+    `{n: Int, name: Str}` is the same unchecked comparison one level down (the
+    declared `Opt[Known]` equivalent is CLEAN), so the search DESCENDS the way
+    `compatible` descends and names the nominal at the position the checker
+    actually reached — see `_unresolved_nominal_reason`.
     """
-    if not types or structural_fields(actual) is None:
+    if not types:
         return None
-    head, _ = parse_type(expected)
+    return _unresolved_nominal_reason(expected, actual, types)
+
+
+def _undeclared_nominal_head(type_name: str | None, types: dict) -> str | None:
+    """The undeclared nominal name `type_name` is headed by, else None.
+
+    A builtin head, a declared type, an implicit type parameter (`?T`) and the
+    reserved-opaque names are all "not a missing declaration": `Principal` has
+    its own dedicated producer hint and poison never reaches a diagnostic.
+    """
+    head, _ = parse_type(type_name)
     if not head or not head[:1].isupper():  # not a type name (see FN_HEAD)
         return None
     if head in _BUILTIN_TYPE_NAMES or head in types or head.startswith(_TPARAM):
         return None
     if head == PRINCIPAL or is_poison(head):
-        # reserved-opaque names, not merely undeclared: `Principal` has a
-        # dedicated producer hint, and poison never reaches a diagnostic.
         return None
-    return f"`{head}` has no declaration in this compilation"
+    return head
+
+
+def _unresolved_nominal_reason(expected: str | None, actual: str | None,
+                               types: dict) -> str | None:
+    """Walk `expected`/`actual` as `compatible` does, blaming the position it
+    reached an undeclared nominal at.
+
+    The descent has to MIRROR `compatible`'s, not merely find a nominal
+    anywhere in the expected type, or the reason would name a position the
+    checker never compared. `Opt[Row]` against a bare record literal is the
+    `T -> Opt[T]` injection, which `compatible` reduces to `Row` against that
+    record (and the declared `Opt[Known]` equivalent is CLEAN, so the descent
+    agrees); `Opt[Row]` against `Opt[U]` is the elementwise rule; any other
+    same-head application (`List[Row]`, `Map[Str, Row]`) recurses elementwise
+    through the tail rule. The `Never` and wildcard rules are `compatible`'s
+    first two, and neither can reach a nominal: they decide without comparing.
+
+    A reason needs a STRUCTURAL record at the compared position — the scalar
+    case is the documented opposite and stays `T1` (see
+    `unresolved_nominal_reason`). An arrow needs no branch: `compatible` walks
+    its parameter and return positions too, but those are only ever written as
+    annotations and a structural record cannot be written as one.
+    """
+    head = _undeclared_nominal_head(expected, types)
+    if head is not None and structural_fields(actual) is not None:
+        return f"`{head}` has no declaration in this compilation"
+    # `compatible`'s record rule resolves a declared NOMINAL record — including
+    # a generic instantiation, `Box[Row]` against `type Box[T] = { v: T }`
+    # giving `{v: Row}` — and then compares the fields. Follow it: a bare
+    # record meeting `Box[Row]` is the same unchecked comparison one level
+    # down (the `Box[Known]` equivalent is CLEAN). A differing field SET is the
+    # genuine mismatch `compatible` refuses on, so it yields no reason.
+    e_struct = structural_fields(expected)
+    a_struct = structural_fields(actual)
+    if e_struct is None and a_struct is not None:
+        e_struct = nominal_record_fields(expected, types)
+    elif a_struct is None and e_struct is not None:
+        a_struct = nominal_record_fields(actual, types)
+    if e_struct is not None and a_struct is not None:
+        if set(e_struct) != set(a_struct):
+            return None
+        for key, e_field in e_struct.items():
+            reason = _unresolved_nominal_reason(
+                e_field, a_struct[key], types)
+            if reason is not None:
+                return reason
+        return None
+    ehead, eargs = parse_type(expected)
+    ahead, aargs = parse_type(actual)
+    if ehead == "Opt":
+        inner = eargs[0] if eargs else None
+        if ahead == "Opt":
+            return _unresolved_nominal_reason(
+                inner, aargs[0] if aargs else None, types)
+        return _unresolved_nominal_reason(inner, actual, types)
+    if ehead == "Async" and ahead != "Async":
+        return _unresolved_nominal_reason(
+            eargs[0] if eargs else None, actual, types)
+    if ehead is not None and ehead == ahead and len(eargs) == len(aargs):
+        for e, a in zip(eargs, aargs):
+            reason = _unresolved_nominal_reason(e, a, types)
+            if reason is not None:
+                return reason
+    return None
 
 
 def compatible(expected: str | None, actual: str | None,
@@ -1658,7 +1736,8 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
         expected = {"@elem": elem, "@member": elem if thead == "List" else ("Str" if thead == "Str" else None), "@self": target_type}.get(spec, spec)
         if filename and expected and actual \
                 and not compatible(expected, actual, types):
-            raise mismatch(filename, line, f"builtin `{method}` argument", expected, actual)
+            raise mismatch(filename, line, f"builtin `{method}` argument", expected, actual,
+                           why=unresolved_nominal_reason(expected, actual, types))
     if ret == "@self":
         return target_type
     if ret == "@elem":
@@ -2126,7 +2205,9 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                 if filename and case["payload"] and arg_types and arg_types[0] and \
                         not compatible(case["payload"], arg_types[0], types):
                     raise mismatch(filename, line, f"`{name}(...)` payload",
-                                   case["payload"], arg_types[0])
+                                   case["payload"], arg_types[0],
+                                   why=unresolved_nominal_reason(
+                                       case["payload"], arg_types[0], types))
                 # A case call with NO argument. Zero args at a payload-carrying
                 # case is deliberately ACCEPTED here — the payload check above
                 # skips it on `arg_types and arg_types[0]`, and
@@ -2190,7 +2271,8 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                         for i, (p, a) in enumerate(zip(params, arg_types)):
                             if p and a and not compatible(p, a, types):
                                 raise mismatch(filename, line,
-                                               f"argument {i + 1} of `{name}(...)`", p, a)
+                                               f"argument {i + 1} of `{name}(...)`", p, a,
+                                               why=unresolved_nominal_reason(p, a, types))
                     return sig["returns"]
                 # generic: instantiate the signature against this call's
                 # arguments rather than letting every `T` position pass
@@ -2202,7 +2284,8 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                         return None
                     bound = substitute(p, subst)
                     raise mismatch(filename, line,
-                                   f"argument {i + 1} of `{name}(...)`", bound, a)
+                                   f"argument {i + 1} of `{name}(...)`", bound, a,
+                                   why=unresolved_nominal_reason(bound, a, types))
                 _check_arrow_args(expr.args, [substitute(p, subst) for p in params],
                                   tenv, types, filename, f"`{name}(...)`")
                 return substitute(sig["returns"], subst)
@@ -2530,7 +2613,8 @@ def call_function_value(expr, fn_type: str, what: str, arg_types: list,
     if filename:
         for i, (p, a) in enumerate(zip(params, arg_types)):
             if p and a and not compatible(p, a, types):
-                raise mismatch(filename, line, f"argument {i + 1} of {what}", p, a)
+                raise mismatch(filename, line, f"argument {i + 1} of {what}", p, a,
+                               why=unresolved_nominal_reason(p, a, types))
     # Elimination: calling an async-typed value yields the *unwrapped* `T` — the
     # tier-level await is implicit (item 92 §2). No expression ever has type
     # `Async[T]`; admission that this call sits in an async context is lower's
@@ -2854,7 +2938,9 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
                 continue
             if filename:
                 raise mismatch(filename, line, f"argument {i + 1} of `{name}(...)`",
-                               substitute(p, subst), at)
+                               substitute(p, subst), at,
+                               why=unresolved_nominal_reason(
+                                   substitute(p, subst), at, types))
             return None
         return substitute(sig["returns"], subst)
     if kind == "builtin":
@@ -2914,7 +3000,8 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
             ftype = declared.get(name)
             if filename and vt and ftype and not compatible(ftype, vt, types):
                 raise mismatch(filename, line, f"update of field `{name}`",
-                               ftype, vt)
+                               ftype, vt,
+                               why=unresolved_nominal_reason(ftype, vt, types))
         return base_t
     if kind == "adt":
         # F4: ADT-case construction had no `infer_ir` case, so a provide body
@@ -2936,7 +3023,8 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
             if i == 0 and filename and payload and at \
                     and not compatible(payload, at, types):
                 raise mismatch(filename, line, f"`{case_name}(...)` payload",
-                               payload, at)
+                               payload, at,
+                               why=unresolved_nominal_reason(payload, at, types))
         # A GENERIC ADT's construction names the bare head (`Box`), not the
         # instantiation (`Box[Int]`) — the case table carries the declaration's
         # own spelling. Reporting the bare head would make an honest

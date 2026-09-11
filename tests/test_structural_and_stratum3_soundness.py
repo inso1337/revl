@@ -41,6 +41,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import RevlError, compile_source  # noqa: E402
+from revl.diagnostics import report  # noqa: E402
 
 
 def _ok(src: str):
@@ -51,6 +52,23 @@ def _refused(src: str) -> str:
     with pytest.raises(RevlError) as ei:
         compile_source(src, "t.rvl")
     return str(ei.value)
+
+
+def _diag(src: str) -> dict:
+    """The structured diagnostic, not its rendering.
+
+    `_refused` returns `str(RevlError)`, which does NOT carry the code: the
+    `T-UNRESOLVED` message and the `T1` message of the same comparison differ
+    only by the `; <nominal> has no declaration in this compilation` suffix, and
+    the T1 rendering is the same prefix. A message-only assertion therefore
+    cannot see which code was chosen — which is exactly how a deleted `why=`
+    argument survives a green suite.
+    """
+    with pytest.raises(RevlError) as ei:
+        compile_source(src, "t.rvl")
+    record = report(ei.value)
+    assert record["ok"] is False
+    return record["diagnostics"][0]
 
 
 # ------------------------------------------------------------------ F3
@@ -285,6 +303,255 @@ component C provides s: S {
   } }
 }
 """)
+
+
+# -------------------------- an undeclared nominal is unresolved, not a mismatch
+#
+# The `T-UNRESOLVED` guarantee (src/revl/diagnostics.py): "a type this
+# compilation does not declare is refused as unresolved, never reported as a
+# mismatch it cannot check". It held for a bare nominal return, a record field
+# and a `let` annotation (#844) and for nothing else. Two holes, both the same
+# defect — the checker reported a disagreement it never computed:
+#
+#   * a nominal NESTED inside a builtin head: `-> Opt[Row]` against a bare
+#     record literal (`unresolved_nominal_reason` bailed out because the HEAD
+#     was `Opt`, a builtin, so it never looked inside);
+#   * a nominal in ARGUMENT position: the four argument-position `mismatch(...)`
+#     sites passed no `why=` at all, so they could not report the reason even
+#     when the reason helper had one.
+#
+# The proof that neither is a real mismatch is the declared-type equivalent:
+# every program below compiles CLEAN with the nominal declared. The only
+# differing fact is compilation scope.
+#
+# The same class has three more positions, found by sweeping every declared
+# boundary rather than by reading the report: an ADT case payload (both
+# strata), a record update's field (stratum 3 — stratum 1 already reported it)
+# and a builtin method's argument. They are fixed the same way and pinned here.
+#
+# These rows assert the CODE and the CATEGORY, not the message. The message of
+# the `T1` fallback is the same prefix with the `; <nominal> has no declaration in
+# this compilation` suffix removed, so a message-only assertion passes with the
+# fix reverted — see `_diag`. Same parity contract as F4: a `provide` method
+# body refuses what a `fn` body refuses, so each row asserts both strata.
+
+_ROW_CALL = ('pub fn take(r: Row) -> Int { return r.n }\n'
+             'pub fn caller() -> Int { return take({ name: "x", n: 1 }) }\n')
+
+_ROW_CALL_S3 = ('service S { fn go() -> Int }\n'
+                'fn take(r: Row) -> Int { return r.n }\n'
+                'component C provides s: S {\n'
+                '  provide s { fn go() -> Int { return take({ name: "x", n: 1 }) } }\n'
+                '}\n')
+
+
+def _assert_unresolved(src: str, message_start: str) -> dict:
+    d = _diag(src)
+    assert d["code"] == "T-UNRESOLVED", d
+    assert d["category"] == "unresolved-type", d
+    assert message_start in d["message"], d
+    assert d["message"].endswith("`Row` has no declaration in this compilation"), d
+    assert "refused as unresolved" in d["guarantee"]
+    assert "declare the type in this compilation" in d["fix"]
+    assert d["code"] != "T1" and d["category"] != "type-mismatch"
+    return d
+
+
+def test_f4_unresolved_nominal_nested_in_a_builtin_head():
+    """`-> Opt[Row]` against a bare record literal. With `Row` declared as
+    `{ name: Str, n: Int }` this is CLEAN, so `Opt` was the only thing standing
+    between the literal and the declaration it satisfies."""
+    stratum1 = 'pub fn f() -> Opt[Row] { return { name: "x", n: 1 } }\n'
+    stratum3 = ('service S { fn go() -> Opt[Row] }\n'
+                'component C provides s: S {\n'
+                '  provide s { fn go() -> Opt[Row] { return { name: "x", n: 1 } } }\n'
+                '}\n')
+    for src in (stratum1, stratum3):
+        _assert_unresolved(src, "expects `Opt[Row]`, got `{n: Int, name: Str}`")
+    # the declared equivalent is the proof the comparison was never made
+    _ok("pub type Known = { name: Str, n: Int }\n"
+        "pub fn f() -> Opt[Known] { return { name: \"x\", n: 1 } }\n")
+
+
+def test_f4_unresolved_nominal_nested_in_a_builtin_head_on_both_sides():
+    """`Opt[Row]` against `Some({...})`: the same hole reached by the
+    elementwise rule instead of the `T -> Opt[T]` injection."""
+    src = 'pub fn f() -> Opt[Row] { return Some({ name: "x", n: 1 }) }\n'
+    _assert_unresolved(src, "expects `Opt[Row]`, got `Opt[{n: Int, name: Str}]`")
+    _ok("pub type Known = { name: Str, n: Int }\n"
+        "pub fn f() -> Opt[Known] { return Some({ name: \"x\", n: 1 }) }\n")
+
+
+def test_f4_unresolved_nominal_in_argument_position():
+    """Argument position passed no `why=` at all, so the reason helper could not
+    reach the diagnostic even where it had one. Both strata, and the stratum-3
+    row goes through `infer_ir`'s own argument site rather than the stratum-1
+    call sites."""
+    for src in (_ROW_CALL, _ROW_CALL_S3):
+        _assert_unresolved(src, "argument 1 of `take(...)` expects `Row`, got")
+    _ok("pub type Known = { name: Str, n: Int }\n"
+        + _ROW_CALL.replace("Row", "Known"))
+
+
+def test_f4_unresolved_nominal_in_a_container_argument():
+    """The same argument hole behind a builtin head: `List[Row]` for a
+    `List[{...}]`. (The return position already reported this one.)"""
+    src = ('pub fn f(xs: List[Row]) -> Int { return 0 }\n'
+           'pub fn caller() -> Int { return f([{ name: "x", n: 1 }]) }\n')
+    _assert_unresolved(src, "expects `List[Row]`, got `List[{n: Int, name: Str}]`")
+    _ok('pub type Known = { name: Str, n: Int }\n'
+        'pub fn f(xs: List[Known]) -> Int { return 0 }\n'
+        'pub fn caller() -> Int { return f([{ name: "x", n: 1 }]) }\n')
+
+
+def test_f4_unresolved_nominal_in_a_generic_call_argument():
+    """A call to a GENERIC function has its own argument site (the signature is
+    instantiated before the parameter is compared), so this is a separate
+    position from the monomorphic one above and is pinned separately."""
+    src = ('fn g[T](x: T, r: Row) -> Int { return r.n }\n'
+           'pub fn caller() -> Int { return g(1, { name: "x", n: 1 }) }\n')
+    _assert_unresolved(src, "argument 2 of `g(...)` expects `Row`, got")
+
+
+def test_f4_unresolved_nominal_through_a_function_value():
+    """A call through a function-typed VALUE (`call_function_value`) is a third
+    argument site with its own message shape."""
+    src = ('pub fn caller(h: (Row) -> Int) -> Int { return h({ name: "x", n: 1 }) }\n')
+    _assert_unresolved(src, "argument 1 of `h` expects `Row`, got")
+
+
+def test_f4_unresolved_nominal_behind_a_declared_generic_record():
+    """`Box[Row]` where `type Box[T] = { v: T }` IS declared: the descent has to
+    follow the record rule through the declared instantiation to the `Row` at
+    the field, which is what `compatible` compares."""
+    src = ('pub type Box[T] = { v: T }\n'
+           'pub fn f() -> Box[Row] { return { v: { name: "x", n: 1 } } }\n')
+    _assert_unresolved(src, "expects `Box[Row]`, got")
+    _ok('pub type Known = { name: Str, n: Int }\n'
+        'pub type Box[T] = { v: T }\n'
+        'pub fn f() -> Box[Known] { return { v: { name: "x", n: 1 } } }\n')
+
+
+def test_f4_unresolved_nominal_in_an_adt_payload():
+    """A `T(Row)` case's payload is a declared boundary like any other, and its
+    `mismatch(...)` site passed no `why=` — in BOTH strata. The stratum-3 row
+    is the `infer_ir` payload site, which is a separate line from the stratum-1
+    one, so each is pinned."""
+    stratum1 = ('type P = P(Row)\n'
+                'pub fn f() -> Int { let p = P({ name: "x", n: 1 }) return 1 }\n')
+    stratum3 = ('type P = P(Row)\n'
+                'service S { fn go() -> Int }\n'
+                'component C provides s: S {\n'
+                '  provide s { fn go() -> Int {\n'
+                '    let p = P({ name: "x", n: 1 })\n'
+                '    return 1\n'
+                '  } }\n'
+                '}\n')
+    for src in (stratum1, stratum3):
+        _assert_unresolved(src, "`P(...)` payload expects `Row`, got")
+    _ok('type Known = { name: Str, n: Int }\n'
+        'type P = P(Known)\n'
+        'pub fn f() -> Int { let p = P({ name: "x", n: 1 }) return 1 }\n')
+
+
+def test_f4_unresolved_nominal_in_a_record_update():
+    """A record update's per-field check is the third declared boundary that
+    passed no `why=`. Stratum 1 reported `T-UNRESOLVED` already; stratum 3
+    (`infer_ir`'s own update site) reported `T1` for the identical program."""
+    stratum1 = ('pub type A = { v: Row }\n'
+                'pub fn f(a: A) -> A { return { a | v = { name: "x", n: 1 } } }\n')
+    stratum3 = ('type A = { v: Row }\n'
+                'service S { fn go() -> Int }\n'
+                'component C provides s: S {\n'
+                '  provide s { fn go() -> Int {\n'
+                '    let a: A = { v: { name: "x", n: 1 } }\n'
+                '    let b = { a | v = { name: "x", n: 1 } }\n'
+                '    return 1\n'
+                '  } }\n'
+                '}\n')
+    for src in (stratum1, stratum3):
+        _assert_unresolved(src, "update of field `v`")
+    _ok('pub type Known = { name: Str, n: Int }\n'
+        'pub type A = { v: Known }\n'
+        'pub fn f(a: A) -> A { return { a | v = { name: "x", n: 1 } } }\n')
+
+
+def test_f4_unresolved_nominal_in_a_builtin_method_argument():
+    """A builtin method's parameter is its receiver's element type, so
+    `xs.push({...})` on a `List[Row]` is the argument hole again — this site
+    passed no `why=` either."""
+    stratum1 = ('pub fn f(xs: List[Row]) -> Int {\n'
+                '  let ys = xs.push({ name: "x", n: 1 })\n'
+                '  return 1\n'
+                '}\n')
+    stratum3 = ('service S { fn go(xs: List[Row]) -> Int }\n'
+                'component C provides s: S {\n'
+                '  provide s { fn go(xs: List[Row]) -> Int {\n'
+                '    let ys = xs.push({ name: "x", n: 1 })\n'
+                '    return 1\n'
+                '  } }\n'
+                '}\n')
+    for src in (stratum1, stratum3):
+        _assert_unresolved(src, "builtin `push` argument expects `Row`, got")
+
+
+def test_f4_unresolved_nominal_a_scalar_meeting_it_is_still_a_mismatch():
+    """The documented OPPOSITE case, and the reason the descent is not a search
+    for a nominal anywhere in the expected type: a scalar states no shape, so
+    `Int` against an undeclared `Row` is a comparison the checker really made.
+    The record literal is what makes the report false; nothing else does."""
+    for src in ('pub fn f() -> Row { return 1 }\n',
+                'pub fn f() -> Opt[Row] { return 1 }\n'):
+        d = _diag(src)
+        assert d["code"] == "T1", d
+        assert d["category"] == "type-mismatch", d
+        assert "has no declaration" not in d["message"], d
+    d = _diag('pub type Known = { name: Str, n: Int }\n'
+              'pub fn f() -> Opt[Known] { return { name: "x" } }\n')
+    assert d["code"] == "T1" and d["category"] == "type-mismatch", d
+
+
+def test_f4_unresolved_nominal_the_three_positions_844_fixed_stay_unresolved():
+    """The positions that already reported `T-UNRESOLVED` before this change
+    (bare return, record field, `let` annotation) are regression guards for the
+    `why=` argument that supplies the reason: with it deleted they fall back to
+    `T1` byte-for-byte."""
+    cases = [
+        ('pub fn f() -> Row { return { name: "x", n: 1 } }\n',
+         "this function's return expects `Row`, got"),
+        ('pub type A = { r: Row }\n'
+         'pub fn f() -> A { return { r: { name: "x", n: 1 } } }\n',
+         "field `r` of `A` expects `Row`, got"),
+        ('pub fn f() -> Int { let x: Row = { name: "x", n: 1 } return 1 }\n',
+         "`let x: Row` expects `Row`, got"),
+    ]
+    for src, message_start in cases:
+        _assert_unresolved(src, message_start)
+
+
+def test_f4_control_the_t1_mismatches_around_these_positions_stay_t1():
+    """Nothing else about the mismatch contract moved: a record that disagrees
+    with a DECLARED type, and a nominal that is declared but whose arity is
+    wrong, are still ordinary mismatches."""
+    d = _diag('pub type Known = { name: Str, n: Int }\n'
+              'pub fn f() -> Known { return { name: "x" } }\n')
+    assert d["code"] == "T1" and d["category"] == "type-mismatch", d
+    d = _diag('pub type Box[T] = { v: T }\n'
+              'pub fn f() -> Box[Row] { return { w: { name: "x", n: 1 } } }\n')
+    assert d["code"] == "T1" and d["category"] == "type-mismatch", d
+    # the three boundaries above, with a DECLARED type on the left instead of an
+    # undeclared nominal, are ordinary mismatches too
+    for src in ('type P = P(Int)\n'
+                'pub fn f() -> Int { let p = P("str") return 1 }\n',
+                'pub type A = { v: Int }\n'
+                'pub fn f(a: A) -> A { return { a | v = "str" } }\n',
+                'pub fn f(xs: List[Int]) -> Int {\n'
+                '  let ys = xs.push("str")\n'
+                '  return 1\n'
+                '}\n'):
+        d = _diag(src)
+        assert d["code"] == "T1" and d["category"] == "type-mismatch", d
+        assert "has no declaration" not in d["message"], d
 
 
 # ------------------------------------------------------------------ F5
