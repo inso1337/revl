@@ -89,12 +89,17 @@ config credential handed to the component's own binding, a parameter the
 service declared `Secret[T]`, a token an extern minted) and then turns up in a
 message the host wrote.
 
-The emitted crate carries a process-global registry for a document that
-declares a `Secret[T]` anywhere (`_SECRET_MODE`; a secret-free document is
-byte-identical to before), the same register-at-load shape the go tier uses.
-rust (native) has no reflection, so — unlike java, which binds its runners to
-the container reflectively — the emitted code populates the registry directly at
-each declared end and the emitted sinks read through it in line:
+The registry is a fixed part of the RUNNER crate
+(`placement_runner/src/confidential.rs`), not emitted code: the runner writes
+console channels of its own — the `log` line, the probe line, the boot-failure
+line, the panic hook — and those printers pass through no emitted sink, so a
+registry living only in the generated module would leave every one of them
+writing verbatim. The generated module imports it with a glob under
+`_SECRET_MODE` (a secret-free document emits no import and is byte-identical to
+before), and the two halves share one process-global — the same register-at-load
+shape the go tier uses. rust (native) has no reflection, so — unlike java, which
+binds its runners to the container reflectively — the emitted code populates the
+registry directly at each declared end and every sink reads through it in line:
 
 * `revl_mark_secret(&config.<field>)` at the head of the plugin closure for a
   config field declared `Secret[T]` (the one door every load goes through);
@@ -107,8 +112,10 @@ each declared end and the emitted sinks read through it in line:
 * `revl_redact_text(String)` over the registered values (exact match, longest
   first, values under four bytes are not remembered) at every emitted-runtime
   free-form sink: the host trace `revl_stream_record` gathers (so a
-  `<redacted:secret>` mark replaces a secret an item quoted) and the WAL
-  descriptor arguments under `--record`.
+  `<redacted:secret>` mark replaces a secret an item quoted), the WAL
+  descriptor arguments under `--record`, and — since the registry moved into the
+  runner crate — the runner's own `log`, probe, boot-failure and panic lines
+  (item 421 F6(c)).
 
 `<redacted:secret>` equals the py tier's `confidential.REDACTED`, so a polyglot
 composition redacts to the same marker whichever tier wrote the line.
@@ -120,6 +127,11 @@ document), and — under a rust toolchain — by RUNNING the emitted crate under
 registered value is absent and its marker present, an ordinary value beside it
 is verbatim (no over-redaction), `revl_secret_result` returns its value
 unchanged, and with nothing registered the value flows verbatim (non-vacuity).
+`test_rust_runner_console_scrub.py` covers the runner side of the same
+placement: every printer in `src/main.rs` renders through
+`confidential::revl_redact_text`, and — under a rust toolchain — a value the
+EMITTED half registers is scrubbed by the very function those printers call, so
+the two halves are one process-global rather than two.
 
 The placement-runner seam-failure text (`src/main.rs`'s `FAILED … — {error}`)
 and cordis `fail`-message paths are a hand-written harness, not emitted output;
