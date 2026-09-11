@@ -229,6 +229,47 @@ def test_each_rendering_is_bounded_on_its_own_text():
     assert walk.index("len(text) < revlMinMarkable") < walk.index("revlRenderings(text)")
 
 
+# A live-component document, not a module: `_emit` returns the pure typed-core
+# path early for a module-only document (that is why the emitted
+# `emit_go_corpus/secrets.rvl` has no import block at all), so the F6(e) guard
+# below is only reachable from a document that declares a component.
+LIVE_SECRET = """
+service Vault {
+  fn store(token: Secret[Str]) -> Int
+}
+
+component Box provides vault: Vault {
+  provide vault {
+    fn store(token) = 0
+  }
+}
+"""
+
+
+def test_a_live_component_reaches_the_reflect_import_without_a_lifecycle():
+    """Item 421 F6(e). `revlRegisterValue` walks a declared value with reflect,
+    so a live component holding one needs the import even when the document has
+    no lifecycle — the branch that already pulled reflect in (`testing`/`time`)
+    is not taken. Go rejects a repeated import, so the guard is what keeps the
+    secretless and lifecycle-free cases byte-identical.
+
+    This is the module emitter's own entry point, which the self-host coverage
+    oracle drives once per corpus document: the corpus cannot carry this
+    document (a component document is outside what the port mirrors), so the
+    import is pinned here instead of through a corpus case.
+    """
+    code = emit.emit(_compile(LIVE_SECRET))
+    imports = code[code.index("import ("):code.index(")", code.index("import ("))]
+    assert '\t"reflect"\n' in imports
+    # from the F6(e) guard and not the lifecycle branch: neither is imported
+    assert '"testing"' not in imports
+    assert '"time"' not in imports
+    assert "func revlRememberSecret(" in code
+    # and the import is load-bearing — dropping the guard emits a unit whose
+    # registry calls reflect with no import in scope, which does not compile
+    assert "reflect." in code
+
+
 # ---------------------------------------------------------------------------
 # run the emitted registry, through the encoder the runner renders with
 # ---------------------------------------------------------------------------

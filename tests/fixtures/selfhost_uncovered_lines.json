@@ -26,7 +26,7 @@
   ],
   "reference": {
     "go": {
-      "statements": 4276,
+      "statements": 4280,
       "uncovered": {
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
@@ -161,7 +161,7 @@
           "_emit_go_proxy_decode": 49,
           "_emit_go_proxy_method": 15,
           "_emit_v3_bridge_helpers": 52,
-          "_emit_v3_placement": 198,
+          "_emit_v3_placement": 200,
           "_go_bridge_arg_expr": 4,
           "_go_opt_inner": 4,
           "_go_result_inner": 5,
@@ -193,8 +193,8 @@
         "Remaining constructor paths implement deferred builtin Some/None/Ok/Err layouts, or reject unknown cases/bad arity. Covered user variants take the declared-layout branch; builtin tagged preambles are not emitted by the port.": {
           "_go_v3_construct": 29
         },
-        "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return. The oracle calls _emit(ir) on module-only v3 documents.": {
-          "_emit": 105
+        "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. The oracle calls _emit(ir) on module-only v3 documents, and a module-only document takes the pure typed-core path before any of this code; a component document cannot stand in as a corpus case either, because emit_go.rvl excludes the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead.": {
+          "_emit": 107
         },
         "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised.": {
           "_go_v3_expr": 47
@@ -276,7 +276,7 @@
           "_needs_sync": 1
         }
       },
-      "uncovered_statements": 3087
+      "uncovered_statements": 3091
     },
     "java": {
       "statements": 2587,
@@ -792,7 +792,7 @@
       "uncovered_statements": 650
     },
     "rust": {
-      "statements": 3500,
+      "statements": 3502,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
           "_emit_step": 138,
@@ -856,6 +856,9 @@
           "_emit_v3_tests": 26,
           "_lifecycle_uses_advance": 1,
           "_refuse_fault_tests": 2
+        },
+        "Item 421 F5: a document that declares a `Secret[T]` AND returns a `Result` from a provided method serializes the Err half through this funnel rather than `_result_to_json`, because the failure text is the one thing crossing the seam that has to be scrubbed. No corpus document does both: the rust byte-agreement corpus reaches the bridge (service.rvl, services_multi.rvl) but holds no document declaring a `Secret[T]` at all, and the port (selfhost/emit_rust.rvl) carries no `_SECRET_MODE` and emits no funnel call, so a secret-bearing bridge document could not be a byte-identical corpus case. The reference half is pinned by tests/test_rust_seam_failure_scrub.py::test_secret_mode_emits_the_funnel_and_the_shared_marker.": {
+          "_result_to_json_funneled": 1
         },
         "Ownership and string-view alternatives: residuals are the computed/non-atomic argument refusal, unknown or function-typed clone safety nets, positional char-view threading, and undo recloning branches. The corpus covers ordinary borrowed strings, owned calls, escaping callbacks, computed receivers, and safe string self-append.": {
           "_acquire_moved_locals": 5,
@@ -987,7 +990,7 @@
           "_stream_host_rust": 8
         }
       },
-      "uncovered_statements": 1328
+      "uncovered_statements": 1329
     },
     "ts": {
       "statements": 2151,
