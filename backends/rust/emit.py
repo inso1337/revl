@@ -1778,9 +1778,17 @@ pub fn revl_secret_result<T: std::fmt::Display>(value: T) -> T {
 // implements `Display` for neither, so the two doors above cannot take them at
 // all (item 421 F6(f)). `Debug` is the one formatter every type a `Secret[T]`
 // lowers to implements -- the std containers, the emitted records and variants,
-// and cordis `Value` -- and it is also the only one an emitted sink can write
-// such a value with, so the Debug form is what gets registered, through the
-// same `revl_renderings` the scalar doors use.
+// and cordis `Value` -- so the container's Debug form is registered here,
+// through the same `revl_renderings` the scalar doors use.
+//
+// That form is the CONTAINER's face, and `revl_redact_text` matches an exact
+// needle, so it does not cover a sink that writes one element on its own
+// (`stream.emit(leaves[0])`), which is a form an emitted sink can and does
+// write (item 421 F6(i), the same gap the go tier closed by walking the value
+// with `revlRegisterValue`). Rust has no reflection, so the leaves are
+// registered by the door instead: `_secret_face_lines` resolves the declared
+// surface type at emit time and emits one registration per reachable leaf,
+// each through the door that leaf's own type takes.
 pub fn revl_mark_secret_encoded<T: std::fmt::Debug + ?Sized>(value: &T) {
     revl_remember_secret(format!("{:?}", value));
 }
@@ -1995,29 +2003,135 @@ def _secret_config_fields(config_fields: list) -> list[tuple[str, object]]:
 _SECRET_DISPLAY_TYPES = frozenset({"Str", "Int", "Int32", "Float", "Bool"})
 
 
-def _secret_mark_call(declared: object, arg: str, tail: str = "") -> str:
-    """The registration a `Secret[T]` mark door emits, chosen by declared type."""
+# The declared `Secret[T]` heads the emit-time leaf walk (item 421 F6(i)) can
+# decompose. A head outside this set, an unresolvable name, or a cordis `Value`
+# leaves the container face as the whole coverage.
+_SECRET_WALK_HEADS = frozenset({"List", "Opt", "Map", "Result"})
+
+# item 421 F6(j): the walk recurses the DECLARED type, and revl admits
+# recursive datatypes, so a cyclic record has no base case -- `type Node = {
+# next: Opt[Node] }` walks Node, Opt[Node], Node, ... and never returns. The
+# cap mirrors `revlRegisterValue`'s `depth > 8` on the go tier, which bounds the
+# same shape at runtime; past it the container face is the whole coverage for
+# that subtree, exactly as an undecomposable shape leaves it. `depth` stays the
+# indentation/leaf-name counter so non-recursive output is unchanged.
+_SECRET_WALK_MAX_DEPTH = 8
+
+
+def _secret_face_lines(declared: object, expr: str, types: dict,
+                       depth: int = 0, levels: int = 0) -> list[str]:
+    """The statements registering every LEAF reachable inside `expr`, which is
+    declared `declared`.
+
+    item 421 F6(i): a container's own `Debug` face is not the whole coverage.
+    `revl_redact_text` matches an EXACT needle, so a sink that writes one
+    element of a registered container (`stream.emit(leaves[0])`) crosses
+    verbatim. The go tier closes this at RUNTIME with `revlRegisterValue`'s
+    reflect walk; rust has no reflection, so the walk is resolved HERE, at the
+    door, where the declared surface type is in hand. Each leaf is registered
+    through the door its OWN declared type takes, so a leaf carries exactly the
+    faces the scalar doors already register.
+
+    `[]` means this walk cannot decompose the shape, which leaves the caller's
+    container face as the whole coverage -- the same kind of bound the go walk's
+    `depth > 8` cap has. That cap is item 421 F6(j): without it a recursive
+    record (`type Node = { next: Opt[Node] }`) has no base case and the emitter
+    dies on a legal program."""
+    if not isinstance(declared, str) or not declared:
+        return []
+    if levels > _SECRET_WALK_MAX_DEPTH:
+        return []
+    pad = "    " * depth
     if declared in _SECRET_DISPLAY_TYPES:
-        fn = "revl_mark_secret"
-    elif declared == "Bytes":
-        fn = "revl_mark_secret_bytes"
-    else:
-        fn = "revl_mark_secret_encoded"
-    return f"{fn}(&{arg});{tail}"
+        return [f"{pad}revl_mark_secret(&{expr});"]
+    if declared == "Bytes":
+        return [f"{pad}revl_mark_secret_bytes(&{expr});"]
+    spec = types.get(declared) if isinstance(types, dict) else None
+    if isinstance(spec, dict) and spec.get("kind") == "record":
+        lines: list[str] = []
+        for field, ftype in (spec.get("fields") or {}).items():
+            lines += _secret_face_lines(
+                ftype, f"{expr}.{_ident(field, 'record field')}", types, depth,
+                levels + 1)
+        return lines
+    generic = re.match(r"^(\w+)\[(.+)\]$", declared)
+    if generic and generic.group(1) in _SECRET_WALK_HEADS:
+        head, inner = generic.group(1), generic.group(2)
+        name = f"_revl_leaf{depth}"
+        if head == "Map":
+            # Values only: a map's KEYS are the author's field names, not the
+            # caller's data. `_needles` and `revlRegisterValue` keep the same
+            # rule, so the leaf set stays the shape the other tiers register.
+            inner = _split_generic(inner)[-1]
+            opener, closer = f"for {name} in {expr}.values() {{", "}"
+        elif head == "Result":
+            ok, err = _split_generic(inner)
+            ok_lines = _secret_face_lines(ok, name, types, depth + 2,
+                                          levels + 1)
+            err_lines = _secret_face_lines(err, name, types, depth + 2,
+                                           levels + 1)
+            if not ok_lines and not err_lines:
+                return []
+            return ([f"{pad}match {expr}.as_ref() {{",
+                     f"{pad}    Ok({name if ok_lines else '_'}) => {{"]
+                    + ok_lines
+                    + [f"{pad}    }}",
+                       f"{pad}    Err({name if err_lines else '_'}) => {{"]
+                    + err_lines
+                    + [f"{pad}    }}",
+                       f"{pad}}}"])
+        elif head == "Opt":
+            opener, closer = f"if let Some({name}) = {expr}.as_ref() {{", "}"
+        else:
+            opener, closer = f"for {name} in {expr}.iter() {{", "}"
+        body = _secret_face_lines(inner, name, types, depth + 1, levels + 1)
+        if not body:
+            return []
+        return [opener] + body + [f"{pad}{closer}"]
+    return []
 
 
-def _secret_result_call(declared: object, arg: str) -> str:
-    """The registration a `Secret[T]` return door wraps its value with."""
+def _secret_mark_call(declared: object, arg: str, tail: str = "",
+                      types: dict | None = None) -> str:
+    """The registration a `Secret[T]` mark door emits, chosen by declared type.
+
+    A shape the emit-time walk can decompose registers its container face AND
+    every reachable leaf (item 421 F6(i)). The walk is flattened onto one line
+    so the call stays valid both standalone and inlined into a method head."""
     if declared in _SECRET_DISPLAY_TYPES:
-        fn = "revl_secret_result"
-    elif declared == "Bytes":
-        fn = "revl_secret_result_bytes"
-    else:
-        fn = "revl_secret_result_encoded"
-    return f"{fn}({arg})"
+        return f"revl_mark_secret(&{arg});{tail}"
+    if declared == "Bytes":
+        return f"revl_mark_secret_bytes(&{arg});{tail}"
+    call = f"revl_mark_secret_encoded(&{arg});"
+    walk = _secret_face_lines(declared, arg, types or {})
+    if not walk:
+        return f"{call}{tail}"
+    return f"{call} " + " ".join(line.strip() for line in walk) + tail
 
 
-def _secret_config_mark(config_fields: list, indent: int) -> list[str]:
+def _secret_result_lines(declared: object, arg: str,
+                         types: dict | None = None) -> list[str]:
+    """The body lines of a `Secret[T]` return door: the value registered, then
+    returned.
+
+    The container door binds the value first so every reachable leaf can be
+    registered before it is handed back (item 421 F6(i)); the scalar and
+    `Bytes` doors stay single expressions, where the value IS the leaf."""
+    if declared in _SECRET_DISPLAY_TYPES:
+        return [f"revl_secret_result({arg})"]
+    if declared == "Bytes":
+        return [f"revl_secret_result_bytes({arg})"]
+    walk = _secret_face_lines(declared, "_revl_v", types or {})
+    if not walk:
+        return [f"revl_secret_result_encoded({arg})"]
+    return ([f"let _revl_v = {arg};",
+             'revl_remember_secret(format!("{:?}", _revl_v));']
+            + [line.strip() for line in walk]
+            + ["_revl_v"])
+
+
+def _secret_config_mark(config_fields: list, indent: int,
+                        types: dict | None = None) -> list[str]:
     """item 421 F6, the config half: a `Secret[T]` config field is registered at
     the head of the plugin closure, the one door every load goes through (the go
     tier does the same at `Load<Comp>`). The value is read off the applied
@@ -2026,7 +2140,8 @@ def _secret_config_mark(config_fields: list, indent: int) -> list[str]:
     if not secret:
         return []
     pad = "    " * indent
-    return [f"{pad}{_secret_mark_call(t, f'config.{f}')}" for f, t in secret]
+    return [f"{pad}{_secret_mark_call(t, f'config.{f}', types=types)}"
+            for f, t in secret]
 
 
 def _secret_method_params(env: "_Env", key: str, mname: str,
@@ -4319,7 +4434,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             # lets every free-form sink scrub it once the body hands it on.
             secret_params = _secret_method_params(
                 env, key, original_mname, method.get("params") or [])
-            mark = "".join(_secret_mark_call(t, p, tail=" ")
+            mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
                            for p, t in secret_params)
             if _method_has_effectful_steps(method):
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
@@ -4372,7 +4487,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     # item 421 F6: a `Secret[T]` config field is registered at load, right after
     # config is applied and before any effect can quote it. The value arrives
     # once, through this closure (the go tier registers at `Load<Comp>`).
-    out.extend(_secret_config_mark(component.get("config") or [], indent=3))
+    out.extend(_secret_config_mark(component.get("config") or [], indent=3,
+                                   types=env.types))
     out.extend(_emit_provide_config_local(component, indent=3))
     # Realm isolation is NOT applied here. cordis evaluates a plugin's reactive
     # `Inject` gate against the context the plugin is registered on, before this
@@ -4652,7 +4768,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             # to a free-form sink is scrubbed.
             secret_params = _secret_method_params(
                 env, key, mname, method.get("params") or [])
-            mark = "".join(_secret_mark_call(t, p, tail=" ")
+            mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
                            for p, t in secret_params)
             out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {mark}{_method_body(env, method)} }}")
         out.append("}")
@@ -4677,7 +4793,8 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     # item 421 F6: a `Secret[T]` config field is registered at load, right after
     # config is applied and before any effect can quote it. The value arrives
     # once, through this closure (the go tier registers at `Load<Comp>`).
-    out.extend(_secret_config_mark(component.get("config") or [], indent=3))
+    out.extend(_secret_config_mark(component.get("config") or [], indent=3,
+                                   types=env.types))
     out.extend(_emit_provide_config_local(component, indent=3))
     _emit_req_bindings(env, cname, out, indent=3)
     for step in component.get("body") or []:
@@ -7629,7 +7746,9 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
             forward = ", ".join(_ident(p.get("name"), "extern parameter name")
                                 for p in ext.get("params") or [])
             out.append(f"fn {name}({params}) -> {returns} {{")
-            out.append(f"    {_secret_result_call(ext.get('returns'), f'{impl}({forward})')}")
+            for line in _secret_result_lines(ext.get("returns"),
+                                             f"{impl}({forward})", types):
+                out.append(f"    {line}")
             out.append("}")
             out.append("")
             out.append(f"fn {impl}({params}) -> {returns} {{")
