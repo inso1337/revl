@@ -42,6 +42,7 @@ an exhaustive listing. `ls docs/` has more.
 - [composition-rows.md](composition-rows.md) — the composition as declared ROWS: a stable label per row, the claim assertion checked against the component header, typed row config
 - [composition-bootstrap.md](composition-bootstrap.md) — a composition manifest that declares its own file list, and the two-stage host bootstrap that gets it running
 - [environment-binding.md](environment-binding.md) — the `boot` component: the declared, bounded, audited contract for the values (port, token, data dir, model provider) the host must inject before the composition exists
+- [frontend-assets.md](frontend-assets.md) — shipping a real Vite/Vue frontend behind a typed boundary: the `webui` coeffect, `webui.add_entry`, the G1/G8 audit surface, and what is not expressible yet
 - [queries.md](queries.md) — ask the composition questions
 - [why-traces.md](why-traces.md) — derivations behind a rejection · [why-runtime.md](why-runtime.md) — cause chains for a recorded run
 - [crash-recovery.md](crash-recovery.md) — WAL roll-forward/back · [persistence.md](persistence.md) — snapshot/restore an evolved session · [erase-report.md](erase-report.md) — right-to-erasure evidence
