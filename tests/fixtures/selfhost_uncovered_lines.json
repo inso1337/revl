@@ -601,6 +601,12 @@
         },
         "backends/java/emit.py::emit: The two missing branches reject a non-object document and an unsupported IR version. compile_files always supplies a supported versioned dict; successful API output cannot enter either.": {
           "emit": 2
+        },
+        "backends/java/emit.py::_emit_v3_secret_members: item 421 F6, declared-shape half: the `revlSecretMembers()` method every generated record class and variant case declares, so the registry's walk can reach a declared shape's LEAVES by path. The walk cannot see these classes reflectively (`instanceof Record` is false for them), so the shape hands its members over instead. Reached only in `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d)).": {
+          "_emit_v3_secret_members": 6
+        },
+        "backends/java/emit.py::_emit_v3_types: item 421 F6, declared-shape half: the `implements RevlSecretShape` clause and the members method appended to a record class and to each variant case. Only the `_SECRET_MODE` branches are uncovered; the type bodies themselves are reached by every corpus document that declares a type. Unported in selfhost/emit_java.rvl (item-429(d)).": {
+          "_emit_v3_types": 3
         }
       },
       "uncovered_statements": 942

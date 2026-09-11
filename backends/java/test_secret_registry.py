@@ -903,3 +903,289 @@ def test_with_the_container_walk_stripped_the_leaf_leaks(tmp_path):
     assert "vault refused key" in trace, trace
     assert ROW_CANARY in trace, trace
     assert BYTES_CANARY not in trace, trace
+
+
+# ---------------------------------------------------------------------------
+# `Secret[T]` where `T` is a declared RECORD or VARIANT
+#
+# `revlRememberSecret` descends through `java.lang.reflect.Record`, but this
+# tier emits every declared record and every variant case as a plain `class` —
+# only the built-in `Result` is a real java `record`. So `instanceof Record` was
+# false for all of them, the walk fell through to `String.valueOf(value)`, and
+# that is the identity string `Name@hash`: a needle no sink this tier writes.
+# The container's own face ended up registered and its LEAVES crossed every
+# funnel verbatim — the same shape as the `byte[]` gap above, one level up.
+#
+# The walk cannot see these classes reflectively, so the generated shapes
+# declare their members instead (`RevlSecretShape`), and the walk recurses into
+# them. That keeps the walk bounded by PATH rather than by depth: every leaf is
+# handed over wherever it sits, so a shape nested in a list or an `Optional` is
+# covered by the same branch.
+# ---------------------------------------------------------------------------
+
+SHAPES_SCENARIO = (BACKEND / "scenarios" / "secret_registry_shapes.rvl").read_text()
+REC_CANARY = "SEKRIT-JAVA-REC-CANARY-421-F6"
+VAR_CANARY = "SEKRIT-JAVA-VAR-CANARY-421-F6"
+NEST_CANARY = "SEKRIT-JAVA-NEST-CANARY-421-F6"
+
+# The branch that hands a generated shape's members to the walk, and the guard
+# the emitter puts on every declared record and variant case.
+SHAPE_GUARD = "if (value instanceof RevlSecretShape shape) {"
+RECORD_MARKER = "public static final class Payload implements RevlSecretShape {"
+CASE_MARKER = "final class Final implements Step, RevlSecretShape {"
+
+
+def _emit_shapes(**kwargs) -> str:
+    return javac_gate.compile_check(_emitter().emit(_compile(SHAPES_SCENARIO), **kwargs),
+                                    "secret registry shapes")
+
+
+def test_the_emitter_declares_every_generated_shape_to_the_walk():
+    code = _emit_shapes()
+    stripped_lines = [line.strip() for line in code.splitlines()]
+    stripped = set(stripped_lines)
+    # the walk is handed the members by path, because it cannot see the class
+    assert SHAPE_GUARD in stripped, code
+    # every generated shape declares itself: the record, the payload case, and
+    # the nullary case (which has no members but must not fall to the identity
+    # string either)
+    assert RECORD_MARKER in stripped, code
+    assert CASE_MARKER in stripped, code
+    assert "final class Retry implements Step, RevlSecretShape {" in stripped, code
+    # `Chain` is declared and never referenced, and it is declared here too: the
+    # walk has to be handed a member list by every generated shape, reachable or
+    # not, because a `Secret[T]` naming it is what makes it reachable
+    assert "public static final class Chain implements RevlSecretShape {" in stripped, code
+    assert stripped_lines.count("public java.util.List<Object> revlSecretMembers() {") == 4, code
+    # the interface itself, declared once, and the reflective `Record` branch it
+    # sits beside is untouched — the built-in `Result` is a real record and must
+    # keep working
+    assert stripped_lines.count("public interface RevlSecretShape {") == 1, code
+    assert "if (value instanceof Record rec) {" in stripped, code
+    # ...and the two registration ends the scenario reaches
+    assert "return revlSecretResult(_revl_secret_mint_record(u));" in code, code
+    assert "revlMarkSecret(rec);" in code, code
+
+
+def test_a_secretless_document_carries_no_shape_machinery():
+    """The interface is emitted with the registry, not with the types: a
+    document that declares a type but no `Secret[T]` keeps the emitted shape it
+    had before item 421 (the same partition `test_a_secretless_document_is_byte_
+    identical` asserts for the rest of the block)."""
+    plain = SHAPES_SCENARIO.replace("Secret[Payload]", "Payload").replace(
+        "Secret[Step]", "Step").replace("Secret[List[Payload]]", "List[Payload]")
+    code = javac_gate.compile_check(_emitter().emit(_compile(plain)), "shapes secretless")
+    assert "RevlSecretShape" not in code, code
+    assert "revlSecretMembers" not in code, code
+    assert "revlMarkSecret" not in code, code
+    # the types themselves are still emitted: the absence above is about the
+    # registry, not about the document losing its declarations
+    assert "public static final class Payload {" in code, code
+
+
+@pytest.fixture(scope="module")
+def shapes_classpath(tmp_path_factory):
+    if javac_gate.JAVAC is None:
+        pytest.skip(javac_gate.NO_JDK)
+    return _classpath(tmp_path_factory.mktemp("shapes"), RUNNER_SOURCE, _emit_shapes())
+
+
+@needs_jdk
+def test_no_sink_carries_a_record_or_variant_secret_across_the_seam(shapes_classpath):
+    trace = _run_seam(shapes_classpath, {"url": PUBLIC_URL})
+
+    # the run really did the things whose output is under test
+    assert "[provider] serve" in trace, trace
+    assert '[wire] {"ok":false,"error":"RuntimeException: vault refused key' in trace, trace
+
+    # the leaf of a record, the payload of a variant and the leaf of a record
+    # one container level down are all held: none reaches the seam reply or
+    # either console
+    assert REC_CANARY not in trace, trace
+    assert VAR_CANARY not in trace, trace
+    assert NEST_CANARY not in trace, trace
+    # ...and every one of the three places is marked
+    assert (f"vault refused key {REDACTED_SECRET} step {REDACTED_SECRET} "
+            f"nest {REDACTED_SECRET} at {PUBLIC_URL} for {REDACTED_ARG}") in trace, trace
+    # no over-redaction: the ordinary value beside them is verbatim and the
+    # message is still worth reading
+    assert PUBLIC_URL in trace, trace
+    assert "InvocationTargetException" not in trace, trace
+
+
+@needs_jdk
+def test_with_the_shape_walk_stripped_the_leaves_leak(tmp_path):
+    """Non-vacuity: the shape branch is what gives the funnel a needle for a
+    declared shape. Short-circuit it — the pre-fix shape, where the only face on
+    offer was `Name@hash`, which matches nothing — and all three leaves print
+    while the scalar registration, which needs no shape walk, still redacts."""
+    emitted = _emit_shapes()
+    stripped = _rewrite_line(
+        emitted, SHAPE_GUARD,
+        "if (value instanceof RevlSecretShape shape "
+        "&& shape.revlSecretMembers().isEmpty()) {")
+    assert stripped != emitted
+    trace = _run_seam(_classpath(tmp_path, RUNNER_SOURCE, stripped), {"url": PUBLIC_URL})
+    assert "vault refused key" in trace, trace
+    assert REC_CANARY in trace, trace
+    assert VAR_CANARY in trace, trace
+    assert NEST_CANARY in trace, trace
+    # the ordinary value is still ordinary, so the strip did not disable the
+    # registry wholesale
+    assert PUBLIC_URL in trace, trace
+
+
+_SHAPES_PROBE = """
+    record Bag(String value) {}
+
+    public static void main(String[] args) {
+        revlMarkSecret(%s);
+        show("scalar", %s);
+        // the `Result`-style control: a REAL java record must still be walked by
+        // the reflective branch, so the shape branch is an extension of the walk
+        // and not a replacement for it
+        revlMarkSecret(new Bag(%s));
+        show("java-record", %s);
+        revlMarkSecret(new Payload(%s, "label"));
+        show("record", %s);
+        revlMarkSecret(new Step.Final(%s));
+        show("variant", %s);
+        // a shape one level down a container, and a variant list that carries a
+        // memberless case beside a payload one
+        revlMarkSecret(java.util.List.of(new Payload(%s, "label")));
+        show("rec-list", %s);
+        revlMarkSecret(java.util.List.of(new Step.Retry(), new Step.Final(%s)));
+        show("var-list", %s);
+        revlMarkSecret(java.util.Optional.of(new Payload(%s, "label")));
+        show("opt-rec", %s);
+        // non-vacuity: a value nobody marked must survive, or nothing is tested
+        show("unmarked", %s);
+    }
+"""
+
+# The cycle probe is its own main. A cyclic value cannot ride in `_SHAPES_PROBE`:
+# with the shape branch short-circuited the walk falls to `String.valueOf(value)`,
+# whose identity string calls the GENERATED `hashCode()` -- and `Chain.hashCode()`
+# recurses `kids` with no cycle bound, so the stripped run would die of a
+# `StackOverflowError` in the equality machinery instead of printing a leak, and
+# `_run_shapes` asserts the exit code.
+_SHAPES_CYCLE_PROBE = """
+    public static void main(String[] args) {
+        Chain first = new Chain(%s, new java.util.ArrayList<>());
+        Chain second = new Chain(%s, new java.util.ArrayList<>());
+        first.kids.add(second);
+        second.kids.add(first);
+        revlMarkSecret(first);
+        show("cycle", %s);
+        show("cycle-second", %s);
+        // non-vacuity: the run reached the assertions rather than dying first
+        show("unmarked", %s);
+    }
+"""
+
+
+SHAPES_SCALAR = "SEKRIT-JAVA-SHAPES-SCALAR"
+SHAPES_JREC = "SEKRIT-JAVA-JREC-CONTROL"
+SHAPES_UNMARKED = "SEKRIT-JAVA-SHAPES-UNMARKED"
+CYC_CANARY = "SEKRIT-JAVA-CYC-CANARY-421-F6"
+CYC_SECOND_CANARY = "SEKRIT-JAVA-CYC2-CANARY-421-F6"
+
+# (probe, values): `%s` is substituted positionally, so each probe's list must
+# supply exactly as many values as it has placeholders.
+_SHAPES_RUNS = {
+    "shapes": (_SHAPES_PROBE, [
+        SHAPES_SCALAR, SHAPES_SCALAR, SHAPES_JREC, SHAPES_JREC,
+        REC_CANARY, REC_CANARY, VAR_CANARY, VAR_CANARY,
+        NEST_CANARY, NEST_CANARY, VAR_CANARY, VAR_CANARY,
+        NEST_CANARY, NEST_CANARY, SHAPES_UNMARKED]),
+    "cycle": (_SHAPES_CYCLE_PROBE, [
+        CYC_CANARY, CYC_SECOND_CANARY, CYC_CANARY, CYC_SECOND_CANARY,
+        SHAPES_UNMARKED]),
+}
+
+
+def _run_shapes(tmp_path: Path, emitted_source: str, which: str = "shapes") -> str:
+    """Compile the emitted unit with a probe main and run it on the real
+    registry. The main is injected into the emitted class so it reaches
+    `revlMarkSecret` exactly as the tier's own doors do."""
+    probe, values = _SHAPES_RUNS[which]
+    pkg = tmp_path / "revl"
+    pkg.mkdir()
+    close = emitted_source.rindex("\n}\n")
+    body = probe % tuple(json.dumps(v) for v in values)
+    (pkg / "Components.java").write_text(
+        emitted_source[:close] + "\n"
+        + "    static void show(String tag, String needle) {\n"
+        + "        String got = revlRedactText(needle);\n"
+        + '        System.out.println(tag + "=" + got'
+        + ' + (got.equals(needle) ? " LEAK" : " redacted"));\n'
+        + "    }\n" + body + "}\n",
+        encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    result = subprocess.run(
+        [javac_gate.JAVAC, "--release", javac_gate.RELEASE, "-d", str(out)]
+        + [str(s) for s in javac_gate.STUB_SOURCES]
+        + [str(pkg / "Components.java")],
+        capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stderr
+    run = subprocess.run(
+        [javac_gate.JAVA, "-cp", str(out), "revl.Components"],
+        capture_output=True, text=True, timeout=600)
+    assert run.returncode == 0, run.stdout + run.stderr
+    return run.stdout
+
+
+@needs_jdk
+def test_the_registry_covers_a_declared_shape_at_every_nesting(tmp_path):
+    """Every declared shape, marked through the same entry point the doors use.
+    `java-record` is the control that the walk was extended and not replaced:
+    `Bag` is a real java `record`, so it goes through the reflective branch the
+    built-in `Result` uses."""
+    trace = _run_shapes(tmp_path, _emit_shapes())
+    for tag in ("scalar", "java-record", "record", "variant", "rec-list",
+                "var-list", "opt-rec"):
+        assert f"{tag}={REDACTED_SECRET} redacted" in trace, (tag, trace)
+    # nothing was over-redacted: the unmarked value survives
+    assert "unmarked=SEKRIT-JAVA-SHAPES-UNMARKED LEAK" in trace, trace
+
+
+@needs_jdk
+def test_with_the_shape_walk_stripped_only_the_shapes_leak(tmp_path):
+    """Non-vacuity, per path: with the shape branch short-circuited the five
+    shape cases print, and the two paths that need no shape walk — a scalar and
+    a real java `record` — stay redacted. That separates the new branch from the
+    reflective one instead of letting one shared funnel cover both."""
+    emitted = _emit_shapes()
+    stripped = _rewrite_line(
+        emitted, SHAPE_GUARD,
+        "if (value instanceof RevlSecretShape shape "
+        "&& shape.revlSecretMembers().isEmpty()) {")
+    results = dict(line.split("=", 1) for line in _run_shapes(tmp_path, stripped).splitlines())
+    for tag in ("record", "variant", "rec-list", "var-list", "opt-rec"):
+        assert results[tag].endswith(" LEAK"), (tag, results)
+    assert results["scalar"] == f"{REDACTED_SECRET} redacted", results
+    assert results["java-record"] == f"{REDACTED_SECRET} redacted", results
+
+
+@needs_jdk
+def test_a_declared_shape_that_reenters_itself_is_bounded_by_path(tmp_path):
+    """The shape branch takes the same bound as the containers beside it.
+
+    A declared shape can re-enter itself through a container
+    (`type Chain = { key: Str, kids: List[Chain] }` is heap-backed, so it is
+    legal and it builds). With the branch calling `revlRememberSecret(member)`
+    without threading the visited set, every shape restarted the walk with a
+    fresh one, the path bound never fired, and the recursion ran until
+    `StackOverflowError` -- which is not an `Exception`, so it left the generated
+    code as an `Error` before any crossing, registering NOTHING: the defect
+    F6(m) closed for `Optional`/`Collection`/`Map`/`Record`, reintroduced one
+    branch away. `_run_shapes` asserts the JVM exit code, so the overflow is
+    itself a failure here, and both keys are asserted held: bounded by PATH, the
+    second shape is reached *through* the first."""
+    trace = _run_shapes(tmp_path, _emit_shapes(), which="cycle")
+    results = dict(line.split("=", 1) for line in trace.splitlines())
+    assert results["cycle"] == f"{REDACTED_SECRET} redacted", trace
+    assert results["cycle-second"] == f"{REDACTED_SECRET} redacted", trace
+    # the run reached the cycle lines rather than dying before them
+    assert results["unmarked"] == f"{SHAPES_UNMARKED} LEAK", trace
