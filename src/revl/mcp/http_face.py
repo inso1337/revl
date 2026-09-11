@@ -127,12 +127,22 @@ _ROUTE_SCALARS = ("Str", "Int", "Bool")
 class HttpReply:
     """A full HTTP reply the routed wire needs but the canonical fourth-quadrant
     JSON envelope cannot express: an arbitrary status, content type, extra
-    headers and a raw body. Canonical/manifest/error replies are wrapped as a
-    JSON `HttpReply` so `_Handler` has one thing to write."""
+    headers, a raw body and the reason phrase for the status line.
+
+    `status_text` is the handler's own reason phrase (`stdlib/http.rvl`'s
+    `Response.status_text`, which that module documents as carried to the wire).
+    Empty means the handler expressed no preference, and the status line falls
+    back to this face's own table — the behaviour every reply that is not a
+    routed `Response` keeps, so the head of a canonical/error reply is
+    byte-identical to before. The phrase is the one part of the head the handler
+    owns, so it is validated like a field value (`_response_refusal`) rather
+    than trusted: it is written into the status line, and a CR or LF in it would
+    end that line early."""
     status: int
     body: bytes
     content_type: str = "application/json"
     headers: tuple = ()
+    status_text: str = ""
 
     @classmethod
     def json(cls, status: int, payload) -> "HttpReply":
@@ -660,15 +670,24 @@ class HttpComposedServer:
             (h.get("name"), h.get("value"))
             for h in (enc.get("headers") or [])
             if isinstance(h, dict) and h.get("name"))
+        # `stdlib/http.rvl` documents `status_text` as the human-readable reason
+        # phrase carried alongside `status`, and every constructor there
+        # (`response`, `ok_text`, `ok_json`, `not_found`) populates it. The face
+        # carried the status and dropped the phrase, so the wire phrase was
+        # whatever `BaseHTTPRequestHandler`'s own table had for the code — the
+        # handler's text was unreachable, and a code outside the table was
+        # written with an empty phrase. It is carried here instead.
+        status_text = enc.get("status_text") or ""
         body = enc.get("body") or {"$kind": "Empty"}
         kind = body.get("$kind") if isinstance(body, dict) else None
         payload = body.get("$value", "") if isinstance(body, dict) else ""
         if kind == "Empty":
-            return HttpReply(status, b"", "application/json", extra_headers)
+            return HttpReply(status, b"", "application/json", extra_headers,
+                             status_text)
         content_type = "application/json" if kind == "Json" else \
             "text/plain; charset=utf-8"
         return HttpReply(status, str(payload).encode("utf-8"),
-                         content_type, extra_headers)
+                         content_type, extra_headers, status_text)
 
 
 def _opt_inner(type_name: str | None) -> str | None:
@@ -781,6 +800,13 @@ _INVALID_STATUS = _FramingRefusal(
     "a reader is required to reject a status it cannot read as three digits, so "
     "the reply is refused rather than written unreadable (RFC 9110 15)")
 
+_UNSAFE_STATUS_TEXT = _FramingRefusal(
+    _SERVER_ERROR, "unsafe_status_text",
+    "the handler's `status_text` is not a valid HTTP reason phrase: a phrase is "
+    "HTAB, SP, VCHAR and obs-text and nothing else, because a CR or LF in it "
+    "ends the status line early and lets the rest of the value write further "
+    "fields, a body, or a whole second reply (RFC 9110 5.5, 15)")
+
 # A status whose reply ends at the end of the header section, and so carries no
 # body: 1xx (RFC 9110 15.2, an interim response), 204 (15.3.5) and 304 (15.4.5)
 # all say "cannot contain content". RFC 9110 8.6 forbids `Content-Length` on 1xx
@@ -861,15 +887,21 @@ def _response_refusal(reply: HttpReply) -> "_FramingRefusal | None":
     request side applies to nothing, because a request has no such field), and
     dropping it is why a value carrying CR or LF in that field is inert.
 
-    The status is checked first because the status line is written first: it is
-    the one part of the reply head `send_response` builds on the handler's
-    behalf, and it builds it from ``self.responses`` — this face's own table of
-    reason phrases, keyed by the code the handler chose. So a status the table
-    does not have is written with an empty reason phrase, and a status outside
-    three digits is written as the handler's own digits.
+    The status is checked first because the status line is written first. Both
+    halves of that line are the handler's: the code (`Response.status`, checked
+    for the three digits a status line has room for) and now the reason phrase
+    (`Response.status_text`). The phrase is validated for the same reason a
+    header value is — it goes on the wire verbatim, and a CR or LF in it ends the
+    line early — and RFC 9110's reason-phrase grammar (HTAB, SP, VCHAR,
+    obs-text) coincides with the field-value grammar, so `_is_field_value` is the
+    check. An EMPTY phrase is legal rather than refused: it means the handler
+    expressed no preference, and the status line falls back to this face's own
+    table.
     """
     if not _MIN_STATUS <= reply.status <= _MAX_STATUS:
         return _INVALID_STATUS
+    if not _is_field_value(reply.status_text):
+        return _UNSAFE_STATUS_TEXT
     for name, value in reply.headers:
         if not name or (isinstance(name, str)
                         and name.lower() == "content-type"):
@@ -972,7 +1004,10 @@ def _make_handler(server: HttpComposedServer):
                 reply = HttpReply.json(refusal.status, _err(
                     refusal.message, code=refusal.reason))
                 close = True
-            self.send_response(reply.status)
+            # `message=None` (not `""`) when the handler expressed no phrase, so
+            # the table fallback in `send_response_only` still runs and every
+            # reply that is not a routed `Response` keeps its old status line.
+            self.send_response(reply.status, reply.status_text or None)
             self.send_header("Content-Type", reply.content_type)
             for name, value in reply.headers:
                 if name and name.lower() != "content-type":
