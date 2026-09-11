@@ -1045,6 +1045,11 @@ Compile and run in-file `test` blocks (and `prop test` / `fault test` /
   as a pass. `--sweep` and `--schedule-*` sweep steps and interleavings rather
   than named units, so combining them with `--filter` exits 2 instead of
   filtering nothing.
+- `-v`, `--verbose` - append a per-test duration to each one-line `PASS`/`FAIL`
+  (py tier only).
+- `--report {json,tap}` - emit a machine-readable per-test report (name, status,
+  duration) in JSON or TAP form instead of the human per-test lines. Verdicts
+  and exit codes are unchanged; py tier only.
 - `--sweep` - fault sweep: inject failure at every step of every component and
   check L-Raise / no-residue / LIFO / siblings at each (py tier). With
   `--backend all`, sweep every runtime whose toolchain is present and assert
