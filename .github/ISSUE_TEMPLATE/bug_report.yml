@@ -58,7 +58,10 @@ body:
       label: Command
       description: The exact command you ran.
       render: shell
-      placeholder: python -m revl compile bug.rvl --backend ts
+      placeholder: |
+        python -m revl compile bug.rvl
+        # or, if the bug reaches an emitter — the tier you selected above:
+        python -m revl test bug.rvl --backend ts
     validations:
       required: true
   - type: textarea
