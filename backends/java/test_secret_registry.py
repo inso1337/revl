@@ -779,3 +779,127 @@ def _escape(text: str) -> str:
         out.append({'\\': '\\\\', '"': '\\"', "\n": "\\n",
                     "\t": "\\t", "\r": "\\r"}.get(ch, ch))
     return "".join(out)
+
+
+# ---------------------------------------------------------------------------
+# `Secret[Bytes]`: the one declared type whose runtime value is not a `String`
+#
+# `revlRememberSecret` walked Optional/Collection/Map/Record and then fell
+# through to `String.valueOf(value)`. For a `byte[]` that is the identity string
+# `[B@hash` — a needle no sink this tier writes — so the registry held nothing a
+# message could match and the decoded payload crossed the seam reply and the
+# console verbatim, while a `Secret[Str]` beside it was redacted.
+#
+# The credential here is minted by a host call (the origin door) and quoted by a
+# DIFFERENT binding's failing body, so it is HELD: not one of the failing call's
+# own arguments, which is the case the funnel's argument stage cannot see by
+# construction. `rows` carries a second payload one level down a container, with
+# its own canary, so the scalar leaf and the recursion are separable.
+# ---------------------------------------------------------------------------
+
+BYTES_SCENARIO = (BACKEND / "scenarios" / "secret_registry_bytes.rvl").read_text()
+BYTES_CANARY = "SEKRIT-JAVA-BYTES-CANARY-421-F6"
+ROW_CANARY = "SEKRIT-JAVA-ROW-CANARY-421-F6"
+
+# The two faces the `byte[]` branch registers, and the guard that opens the walk
+# carrying a container down to its leaves.
+BYTES_FACE_DECODED = "revlRememberText(new String(raw, java.nio.charset.StandardCharsets.UTF_8));"
+BYTES_FACE_DEBUG = "revlRememberText(java.util.Arrays.toString(raw));"
+COLLECTION_GUARD = "if (value instanceof java.util.Collection<?> items) {"
+
+
+def _emit_bytes(**kwargs) -> str:
+    return javac_gate.compile_check(_emitter().emit(_compile(BYTES_SCENARIO), **kwargs),
+                                    "secret registry bytes")
+
+
+def _rewrite_line(code: str, needle: str, replacement: "str | None") -> str:
+    """Replace — or, with `None`, drop — the single line whose stripped text is
+    `needle`, keeping that line's own indentation. The emitted preamble sits one
+    block deeper than the emitter source, so the non-vacuity controls below
+    match on content and never on a column."""
+    out, hits = [], 0
+    for line in code.splitlines(keepends=True):
+        if line.strip() != needle:
+            out.append(line)
+            continue
+        hits += 1
+        if replacement is not None:
+            indent = line[: len(line) - len(line.lstrip())]
+            out.append(f"{indent}{replacement}\n")
+    assert hits == 1, f"{needle!r} matched {hits} times"
+    return "".join(out)
+
+
+def test_the_registry_covers_a_byte_payload_and_the_container_above_it():
+    code = _emit_bytes()
+    stripped = {line.strip() for line in code.splitlines()}
+    # the origin door is what marks a minted payload...
+    assert code.count("revlSecretResult(_revl_secret_mint_raw(u))") == 1, code
+    assert code.count("revlSecretResult(_revl_secret_mint_rows(u))") == 1, code
+    # ...the byte payload registers the two faces it wears in host text...
+    assert "if (value instanceof byte[] raw) {" in stripped, code
+    assert BYTES_FACE_DECODED in stripped, code
+    assert BYTES_FACE_DEBUG in stripped, code
+    # ...the walk still reaches a leaf inside a container...
+    assert COLLECTION_GUARD in stripped, code
+    # ...and every other value funnels through the same single bound
+    assert code.count("private static void revlRememberText(String text)") == 1, code
+    assert "revlRememberText(String.valueOf(value));" in stripped, code
+
+
+@pytest.fixture(scope="module")
+def bytes_classpath(tmp_path_factory):
+    if javac_gate.JAVAC is None:
+        pytest.skip(javac_gate.NO_JDK)
+    return _classpath(tmp_path_factory.mktemp("bytes"), RUNNER_SOURCE, _emit_bytes())
+
+
+@needs_jdk
+def test_no_sink_carries_a_byte_secret_across_the_seam(bytes_classpath):
+    trace = _run_seam(bytes_classpath, {"url": PUBLIC_URL})
+
+    # the run really did the things whose output is under test
+    assert "[provider] serve" in trace, trace
+    assert '[wire] {"ok":false,"error":"RuntimeException: vault refused key' in trace, trace
+
+    # neither the held payload nor the one a container level down is anywhere
+    assert BYTES_CANARY not in trace, trace
+    assert ROW_CANARY not in trace, trace
+    # ...and both places are marked, so a reader knows what was there
+    assert f"vault refused key {REDACTED_SECRET} row {REDACTED_SECRET} at" in trace, trace
+    assert f"at {PUBLIC_URL} for {REDACTED_ARG}" in trace, trace
+    # no over-redaction: the message is still worth reading
+    assert "RuntimeException: vault refused key" in trace, trace
+    assert "InvocationTargetException" not in trace, trace
+
+
+@needs_jdk
+def test_with_the_byte_faces_uncovered_both_payloads_leak(tmp_path):
+    """Non-vacuity: the `byte[]` branch is what gives the funnel a needle for a
+    byte payload. Register nothing for it — the pre-fix shape, where the only
+    face on offer was `[B@hash`, which matches nothing — and both the held
+    payload and the container's leaf print."""
+    uncovered = _rewrite_line(_rewrite_line(_emit_bytes(), BYTES_FACE_DECODED, None),
+                              BYTES_FACE_DEBUG, None)
+    trace = _run_seam(_classpath(tmp_path, RUNNER_SOURCE, uncovered), {"url": PUBLIC_URL})
+    assert "vault refused key" in trace, trace
+    assert BYTES_CANARY in trace, trace
+    assert ROW_CANARY in trace, trace
+
+
+@needs_jdk
+def test_with_the_container_walk_stripped_the_leaf_leaks(tmp_path):
+    """...and the walk is what reaches a leaf. With the walk short-circuited a
+    `List[Bytes]` falls to `String.valueOf`, which is `[[B@hash]` — so the
+    container's payload prints while the scalar beside it, which needs no
+    recursion, stays redacted. The two paths are covered independently rather
+    than by one shared funnel."""
+    emitted = _emit_bytes()
+    stripped = _rewrite_line(emitted, COLLECTION_GUARD,
+                             "if (value instanceof java.util.Collection<?> items && items.isEmpty()) {")
+    assert stripped != emitted
+    trace = _run_seam(_classpath(tmp_path, RUNNER_SOURCE, stripped), {"url": PUBLIC_URL})
+    assert "vault refused key" in trace, trace
+    assert ROW_CANARY in trace, trace
+    assert BYTES_CANARY not in trace, trace
