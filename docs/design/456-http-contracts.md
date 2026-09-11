@@ -113,7 +113,9 @@ variants and the base builtins — no per-tier work, exactly like
 - readers (status/outcome read THROUGH the type, never from prose): `is_handled`,
   `status_of -> Opt[Int]`, `status_text_of -> Opt[Str]`,
   `response_of -> Opt[Response]`, `is_ok` (mirrors Cordis `Response.ok`),
-  `is_empty_body`, `body_text`, `header_value -> Opt[Str]`,
+  `is_empty_body`, `body_text`, `header_value -> Opt[Str]` (field names compare
+  case-insensitively, RFC 9110 5.1, through `header_name_eq`, so a reader finds a
+  header whatever case the request head stored it in),
   `method_str`/`parse_method` (method <-> wire string)
 
 `tests/test_http_stdlib.py` pins the exit criterion on the py tier: a

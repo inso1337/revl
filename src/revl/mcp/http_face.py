@@ -937,10 +937,12 @@ def _frame_request(headers, ceiling: int) -> "tuple[int | None, _FramingRefusal 
 
     `headers` is the `email.message.Message` `BaseHTTPRequestHandler` builds.
     `get_all` is its duplicate-visible reader — the analogue of the stdlib's
-    `header_values`/`header_count` — because `.get()` answers with the FIRST
-    occurrence only and cannot see a doubled field at all (`stdlib/http.rvl`'s
-    `header_value` has the same blind spot, which is why that module carries
-    both).
+    `header_values`/`header_count` in `stdlib/framing.rvl` — because `.get()`
+    answers with the FIRST occurrence only and cannot see a doubled field at all.
+    `stdlib/http.rvl`'s `header_value` has the same first-match blind spot, but
+    it now compares names through the same `header_name_eq` the framing readers
+    use, so all of them agree case-insensitively (RFC 9110 5.1) about whether a
+    name is present.
     """
     if headers.get_all("Transfer-Encoding"):
         return None, _UNSUPPORTED_TRANSFER_ENCODING
