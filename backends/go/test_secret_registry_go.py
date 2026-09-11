@@ -205,11 +205,11 @@ def test_the_value_itself_is_walked_not_just_its_display_form():
     `Secret[Bytes]` wore a face nothing had registered."""
     code = emit.emit_placement(_compile(SCENARIO))
     block = _registry_block(code)
-    assert "func revlRegisterValue(rv reflect.Value, depth int)" in block
+    assert "func revlRegisterValue(rv reflect.Value, seen map[revlWalkKey]bool) bool" in block
     # the walk is gated on the value actually being a container, so the scalar
     # path F6(d) pinned stays byte-for-byte what it was
-    assert "if rv := reflect.ValueOf(v); revlIsContainer(rv) {" in block
-    assert "revlRegisterValue(rv, 0)" in block
+    assert "if revlIsContainer(rv) {" in block
+    assert "revlRegisterValue(rv, map[revlWalkKey]bool{})" in block
     # the VALUE's own json body, beside the display form's...
     assert "json.Marshal(rv.Interface())" in block
     # ...while the scalar path F6(d) pinned still derives from the `%v` string
@@ -345,15 +345,20 @@ def _render_driver() -> str:
             .replace("@BYTES@", "[]byte(" + json.dumps(BYTES_CANARY) + ")"))
 
 
-def _run_registry(tmp_path: Path, block: str) -> str:
+def _run_with_driver(tmp_path: Path, block: str, driver: str) -> str:
     """Compile the sliced registry with a driver and run it."""
     (tmp_path / "go.mod").write_text(_GO_MOD, encoding="utf-8")
     (tmp_path / "main.go").write_text(
-        _GO_HEADER + block + _render_driver(), encoding="utf-8")
+        _GO_HEADER + block + driver, encoding="utf-8")
     result = subprocess.run(["go", "run", "."], cwd=tmp_path, text=True,
                             capture_output=True, timeout=600)
     assert result.returncode == 0, result.stdout + result.stderr
     return result.stdout
+
+
+def _run_registry(tmp_path: Path, block: str) -> str:
+    """Compile the sliced registry with the F6(d)/F6(e) driver and run it."""
+    return _run_with_driver(tmp_path, block, _render_driver())
 
 
 @needs_go
@@ -419,12 +424,13 @@ def test_with_the_value_walk_stripped_a_container_leaks(tmp_path):
     the probe channel. Drop it — the shape #894 landed — and the same run
     prints the value's own json body, which is exactly what the runner writes."""
     block = _registry_block(emit.emit_placement(_compile(SCENARIO)))
-    walk = (
-        "\tif rv := reflect.ValueOf(v); revlIsContainer(rv) {\n"
-        "\t\trevlRegisterValue(rv, 0)\n"
-        "\t}\n"
+    # Neuter the walk itself and let the `%v` path below take the container,
+    # which is the pre-F6(e) shape this test reproduces. `false &&` and not a
+    # deletion so the code still compiles and `rv` stays used.
+    stripped = block.replace(
+        "\tif revlIsContainer(rv) {\n",
+        "\tif false && revlIsContainer(rv) {\n",
     )
-    stripped = block.replace(walk, "\t// the value walk is what this test removes\n")
     assert stripped != block, "revlRememberSecret no longer walks the value"
     trace = _run_registry(tmp_path, stripped)
     # the display form was covered all along, which is why the gap survived a
@@ -443,3 +449,137 @@ def test_with_the_value_walk_stripped_a_container_leaks(tmp_path):
     assert f"bytes-decoded: payload {BYTES_CANARY}" in trace, trace
     # the escaped scalar face is unaffected by the walk being gone
     assert f"raw: trace key={REDACTED_SECRET}" in trace, trace
+
+
+# ---------------------------------------------------------------------------
+# F6(n): the walk is bounded by the PATH, not by a depth
+# ---------------------------------------------------------------------------
+# `revlRegisterValue` used to stop at `depth > 8` and render every container it
+# passed with `fmt.Sprintf("%v", …)`. Both halves are wrong for the same
+# reason: a container's debug rendering is not what any sink writes, and a cap
+# on how deep the walk goes is a cap on how much of a legal value gets
+# registered — so the leaves of anything deeper than the cap crossed verbatim.
+# The cap was also the only thing terminating the walk, which made a
+# self-referential container an unrecoverable `fatal error: stack overflow`
+# (Go's stack overflow is not a panic; `recover()` never runs).
+#
+# The walk is now bounded by the PATH it is on, so depth costs nothing and a
+# back-edge ends that path instead of the process. The four tests below pin the
+# three arms: the emitted shape, a value deeper than any cap would have been,
+# and a cycle.
+
+_LEAF = "deep-canary-9999"
+
+_NESTED_DRIVER = """
+var leaf = @LEAF@
+
+// A legal `Secret[Map[Str, Any]]` argument, nested `depth` containers deep.
+// Every level is a map, and every level costs two frames on the walk (the map,
+// then the `interface{}` that holds the next one).
+func nested(depth int) any {
+\tvar value any = map[string]any{"leaf": leaf}
+\tfor i := 0; i < depth; i++ {
+\t\tvalue = map[string]any{"lvl": value}
+\t}
+\treturn value
+}
+
+func main() {
+\tRevlForgetSecrets()
+\trevlMarkSecret(nested(@DEPTH@))
+\t// what a sink writes for a driver failure, an ordinary shape: nothing the
+\t// author wrote interpolates the secret
+\tfmt.Println("leaf:", revlRedactText("leaf="+leaf))
+\tfmt.Println("needles:", len(_revlSecretValues))
+}
+"""
+
+_CYCLE_DRIVER = """
+var leaf = @LEAF@
+
+func main() {
+\tRevlForgetSecrets()
+\tcyclic := map[string]any{"leaf": leaf}
+\tcyclic["self"] = cyclic
+\trevlMarkSecret(cyclic)
+\tfmt.Println("survived")
+\tfmt.Println("leaf:", revlRedactText("leaf="+leaf))
+}
+"""
+
+
+def _nested_driver(depth: int) -> str:
+    return _NESTED_DRIVER.replace("@LEAF@", json.dumps(_LEAF)).replace(
+        "@DEPTH@", str(depth))
+
+
+def _cycle_driver() -> str:
+    return _CYCLE_DRIVER.replace("@LEAF@", json.dumps(_LEAF))
+
+
+def test_the_walk_is_bounded_by_the_path_and_not_by_a_depth():
+    block = _registry_block(emit.emit_placement(_compile(SCENARIO)))
+    # the emitted comment explains the change; the check is on the code
+    code = "\n".join(line for line in block.splitlines()
+                     if not line.strip().startswith("//"))
+    # the signature carries the path, and no depth parameter survives
+    assert "func revlRegisterValue(rv reflect.Value, seen map[revlWalkKey]bool) bool" in code
+    assert "depth" not in code, code
+    # a back-edge ends the path it is on, and a node is only "already on this
+    # path" for as long as the walk is inside it — a shared node is not a cycle
+    # and still renders at both of its positions
+    assert "seen map[revlWalkKey]bool" in block
+    assert "if seen[key] {" in block
+    assert "defer delete(seen, key)" in block
+    # the cyclic answer is propagated, so no ancestor renders the subtree that
+    # could not be rendered either
+    assert "cyclic = true" in block
+
+
+@needs_go
+@pytest.mark.parametrize("depth", [1, 4, 6, 12])
+def test_a_deeply_nested_secret_still_registers_its_leaf(tmp_path, depth):
+    """Depth is not a bound: a leaf 12 containers down is registered like one at
+    the top, because the walk is bounded by the path it is on."""
+    block = _registry_block(emit.emit_placement(_compile(SCENARIO)))
+    trace = _run_with_driver(tmp_path, block, _nested_driver(depth))
+    assert f"leaf: leaf={REDACTED_SECRET}" in trace, trace
+
+
+@needs_go
+def test_a_value_deeper_than_any_cap_still_registers_its_leaf(tmp_path):
+    """The same value at the depth the old cap stopped at, so the two arms are
+    read side by side: `nested(6)` is past `depth > 8` in frames."""
+    block = _registry_block(emit.emit_placement(_compile(SCENARIO)))
+    trace = _run_with_driver(tmp_path, block, _nested_driver(6))
+    assert f"leaf: leaf={REDACTED_SECRET}" in trace, trace
+    assert _LEAF not in trace, trace
+
+
+@needs_go
+def test_with_a_bound_on_how_deep_the_walk_goes_the_leaf_leaks(tmp_path):
+    """Non-vacuity: any bound that stops descending drops the leaf, which is
+    the regression this walk exists to prevent. A cap on the path length stands
+    in for the `depth > 8` it replaced — same shape, same failure."""
+    block = _registry_block(emit.emit_placement(_compile(SCENARIO)))
+    capped = block.replace(
+        "\tif !rv.IsValid() {\n\t\treturn false\n\t}\n",
+        "\tif !rv.IsValid() || len(seen) > 3 {\n\t\treturn false\n\t}\n",
+    )
+    assert capped != block, "revlRegisterValue no longer opens on the validity check"
+    trace = _run_with_driver(tmp_path, capped, _nested_driver(6))
+    assert f"leaf: leaf={REDACTED_SECRET}" not in trace, trace
+    assert _LEAF in trace, trace
+
+
+@needs_go
+def test_a_self_referential_container_terminates(tmp_path):
+    """A cycle ends the path, not the process: the walk stops at the back-edge
+    and every container on the way out skips the rendering that would have
+    recursed forever. Go's stack overflow is fatal, so the sentinel below is
+    only printed if the walk returned."""
+    block = _registry_block(emit.emit_placement(_compile(SCENARIO)))
+    trace = _run_with_driver(tmp_path, block, _cycle_driver())
+    assert "survived" in trace, trace
+    # the leaf that shares the cyclic map is still registered
+    assert f"leaf: leaf={REDACTED_SECRET}" in trace, trace
