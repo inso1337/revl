@@ -675,10 +675,11 @@ def test_a_returned_containers_leaf_is_scrubbed_on_its_own(tmp_path):
 # `Node = { val: Str, next: Opt[Node] }` walks Node, Opt[Node], Node, ... and
 # never returns. The front end accepts the program and the emitter then dies on
 # it, so this is a BUILD defect on legal source -- the same class as F6(g), not
-# a disclosure. The cap mirrors the go tier's `revlRegisterValue`, which bounds
-# the identical shape at runtime with `depth > 8`; past it the container face is
-# the whole coverage for that subtree, exactly as an undecomposable shape leaves
-# it.
+# a disclosure. The walk stops on re-entry of a declared type already on its own
+# path (item 421 F6(o)), so it terminates WITHOUT dropping a leaf: the cycle is
+# cut where the shape repeats itself and every other subtree is still walked to
+# its leaves. The go tier bounds the identical shape at runtime instead, because
+# there the cycle arrives as a VALUE.
 _RECURSIVE_SCENARIO = '''
 type Node = { val: Str, next: Opt[Node] }
 
@@ -688,15 +689,17 @@ extern pure fn chain() -> Secret[Node]
 
 
 def test_the_leaf_walk_terminates_on_a_recursive_record():
-    """RED before the cap: `RecursionError` out of `_secret_face_lines`. The
-    walk must terminate AND must not swallow the non-recursive leaf, so the cap
-    bounds the depth rather than abandoning the shape."""
+    """RED before the path bound: `RecursionError` out of `_secret_face_lines`.
+    The walk must terminate AND must not swallow the non-recursive leaf, so the
+    bound cuts the cycle at the repeated declared type rather than abandoning
+    the shape."""
     types = {"Node": {"kind": "record",
                       "fields": {"val": "Str", "next": "Opt[Node]"}}}
     lines = emit._secret_face_lines("Node", "v", types)
-    assert lines, "the cap must not abandon a shape it can still decompose"
+    assert lines, "the bound must not abandon a shape it can still decompose"
     assert any("v.val" in line for line in lines), lines
-    # bounded: the cap stops the walk instead of running to the recursion limit
+    # bounded: re-entry of `Node` stops the walk instead of running to the
+    # recursion limit
     assert len(lines) < 100, len(lines)
 
 
@@ -706,7 +709,228 @@ def test_a_recursive_record_composition_emits():
     and the walk it produces must be bounded."""
     code = emit.emit(_compile(_RECURSIVE_SCENARIO))
     assert "use crate::confidential::*;" in code, code
-    # the cap bounds the walk rather than abandoning the shape: the reachable
-    # leaves are registered, and the recursion stops instead of running away.
+    # the path bound cuts the walk at the repeated declared type rather than
+    # abandoning the shape: the reachable leaves are registered, and the
+    # recursion stops instead of running away.
     assert "revl_mark_secret(&_revl_v.val);" in code, code
     assert code.count("revl_mark_secret(&") < 100, code.count("revl_mark_secret(&")
+
+
+# item 421 F6(o). The walk of F6(i) used to stop at `levels > 8`, and a bound on
+# how DEEP the walk goes is a confidentiality regression in exactly the walk
+# that exists to prevent one: it terminates the recursion, but it also stops
+# REGISTERING, so the leaves of any declared shape nested deeper than the bound
+# were never registered as their own text and crossed verbatim in every sink
+# `revl_redact_text` covers. The bound is now the PATH of declared types the
+# walk is on, so a shape stops only where it re-enters itself (F6(j)) and every
+# legal shape's leaves register at any depth. The go tier carried the same
+# defect, reached at four nested maps rather than nine (F6(n)).
+def _deep_map_type(depth: int) -> str:
+    declared = "Str"
+    for _ in range(depth):
+        declared = f"Map[Str, {declared}]"
+    return declared
+
+
+def _deep_map_literal(depth: int) -> str:
+    literal = f'"{CANARY}".to_string()'
+    for _ in range(depth):
+        literal = ('{ let mut m = std::collections::HashMap::new(); '
+                   f'm.insert("k".to_string(), {literal}); m }}')
+    return literal
+
+
+def _deep_scenario(depth: int) -> str:
+    return (f"extern pure fn deep() -> Secret[{_deep_map_type(depth)}]\n"
+            f"  = @rs {{ {_deep_map_literal(depth)} }}\n")
+
+
+_DEEP_HARNESS = f'''
+#[cfg(test)]
+mod revl_deep_leaf_tests {{
+    use crate::{{revl_forget_secrets, revl_redact_text}};
+
+    const CANARY: &str = "{CANARY}";
+    const REDACTED: &str = "{REDACTED_SECRET}";
+
+    #[test]
+    fn a_leaf_past_the_old_bound_is_still_scrubbed() {{
+        // non-vacuity: with nothing registered the leaf flows verbatim, so the
+        // assertion below is the registry working, not an empty read.
+        revl_forget_secrets();
+        assert!(revl_redact_text(CANARY.to_string()).contains(CANARY));
+
+        revl_forget_secrets();
+        let _v = crate::deep();
+        assert_eq!(revl_redact_text(CANARY.to_string()), REDACTED,
+                   "a leaf past the walk's bound crossed verbatim");
+    }}
+}}
+'''
+
+
+@pytest.mark.parametrize("depth", [1, 8, 9, 12])
+def test_the_walk_reaches_the_leaf_at_any_declared_depth(depth):
+    """The EMITTED SHAPE, which runs everywhere: the walk descends the declared
+    type to its leaf however deep that leaf is, and registers exactly one leaf
+    per declared shape. A bound on how deep the walk goes shows up here as a
+    missing `revl_mark_secret` for the innermost element, which is what made
+    this a confidentiality regression rather than a missing optimisation."""
+    code = emit.emit(_compile(_deep_scenario(depth)))
+    leaf = f"_revl_leaf{depth - 1}"
+    assert f"revl_mark_secret(&{leaf});" in code, code
+    assert code.count("revl_mark_secret(&") == 1, code
+
+
+def test_with_a_bound_on_how_deep_the_walk_goes_the_leaf_leaks(monkeypatch):
+    """Non-vacuity: the emitted-shape test only bites if a depth bound really
+    does drop the leaf. Wrapping the walk with the old `levels > 8` rule makes
+    the innermost registration disappear, which is the regression this pins."""
+    real = emit._secret_face_lines
+    calls = {"n": 0}
+
+    def depth_bounded(declared, expr, types, depth=0, path=frozenset()):
+        calls["n"] += 1
+        if depth > 8:
+            return []
+        return real(declared, expr, types, depth, path)
+
+    monkeypatch.setattr(emit, "_secret_face_lines", depth_bounded)
+    assert emit._secret_face_lines(_deep_map_type(12), "v", {}) == [], (
+        "a depth bound must drop the leaf, or the emitted-shape test is vacuous")
+    assert calls["n"] > 1, calls
+
+    monkeypatch.undo()
+    walk = emit._secret_face_lines(_deep_map_type(12), "v", {})
+    assert any("revl_mark_secret(&_revl_leaf11);" in line for line in walk), walk
+
+
+@needs_cargo
+@pytest.mark.parametrize("depth", [9, 12])
+def test_a_leaf_past_the_old_bound_is_still_scrubbed(tmp_path, depth):
+    """RED before the path bound, in a real crate: the emitted function returns a
+    declared shape 9 (and 12) levels deep, and the leaf at the bottom crossed
+    verbatim because the walk stopped registering before it got there."""
+    src = emit.emit(_compile(_deep_scenario(depth)))
+    _write_crate(tmp_path, src, _DEEP_HARNESS)
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    assert "test result: ok" in (result.stdout or "")
+
+
+def test_two_sibling_fields_of_one_type_are_both_walked():
+    """The bound is per-branch, not a global visited set: two fields of the same
+    declared type are two distinct values and both must register. A shared
+    `seen` set would terminate the recursion but silently drop the second."""
+    types = {"Pair": {"kind": "record",
+                      "fields": {"a": "List[Str]", "b": "List[Str]"}}}
+    lines = emit._secret_face_lines("Pair", "v", types)
+    assert sum("revl_mark_secret(&" in line for line in lines) == 2, lines
+    assert any("v.a.iter()" in line for line in lines), lines
+    assert any("v.b.iter()" in line for line in lines), lines
+
+
+_VARIANT_SCENARIO = f'''
+type Step = Final(Str) | Retry
+type Box2 = Wrap(List[Str]) | Empty
+type Sign = Neg | Zero | Pos
+type Holder = {{ tag: Str, step: Step }}
+
+extern pure fn step() -> Secret[Step]
+  = @rs {{ Step::Final("{CANARY}".to_string()) }}
+
+extern pure fn boxed() -> Secret[Box2]
+  = @rs {{ Box2::Wrap(vec!["{CANARY}".to_string()]) }}
+
+extern pure fn holder() -> Secret[Holder]
+  = @rs {{ Holder {{ tag: "t".to_string(), step: Step::Final("{CANARY}".to_string()) }} }}
+'''
+
+
+_VARIANT_HARNESS = f'''
+#[cfg(test)]
+mod revl_variant_leaf_tests {{
+    use crate::{{revl_forget_secrets, revl_redact_text, Step}};
+
+    const CANARY: &str = "{CANARY}";
+    const REDACTED: &str = "{REDACTED_SECRET}";
+
+    #[test]
+    fn a_case_payload_is_scrubbed_on_its_own() {{
+        // non-vacuity: with nothing registered the payload flows verbatim
+        revl_forget_secrets();
+        assert!(revl_redact_text(CANARY.to_string()).contains(CANARY));
+
+        revl_forget_secrets();
+        let s = crate::step();
+        assert_eq!(revl_redact_text(format!("{{:?}}", s)), REDACTED,
+                   "the container face is not registered");
+        let Step::Final(v) = s else {{ panic!("expected Final") }};
+        assert_eq!(revl_redact_text(v), REDACTED,
+                   "a variant case payload crossed verbatim");
+    }}
+}}
+'''
+
+
+def test_the_walk_decomposes_a_variant_by_its_cases():
+    """The EMITTED SHAPE, which runs everywhere: a declared variant is walked
+    through a `match` on the value, one arm per case that carries a payload, and
+    the `_` arm keeps the match exhaustive over the nullary cases and the
+    re-entrant ones `path` cuts. A variant the walk skips shows up here as the
+    absent `match` -- and then the container's own `Debug` face is the whole
+    coverage, which is F6(i)'s gap on one more declared shape."""
+    code = emit.emit(_compile(_VARIANT_SCENARIO))
+    assert "match &_revl_v {" in code, code
+    assert "Step::Final(_revl_leaf0) => {" in code, code
+    assert "revl_mark_secret(&_revl_leaf0);" in code, code
+    # a case payload that is itself a container is walked, not registered whole
+    assert "Box2::Wrap(_revl_leaf0) => {" in code, code
+    assert "for _revl_leaf2 in _revl_leaf0.iter() {" in code, code
+    assert "revl_mark_secret(&_revl_leaf2);" in code, code
+    # nullary cases fall to the catch-all rather than a `=> {}` arm of their own
+    assert "Sign::Zero" not in code, code
+    assert "_ => {}" in code, code
+
+
+def test_the_variant_arm_is_taken_through_a_record_field_too():
+    """A variant reached through a record field is the same walk one level in:
+    the field is walked, and the variant behind it is matched on the field
+    expression. This is the shape an ADT-typed member of a record takes."""
+    code = emit.emit(_compile(_VARIANT_SCENARIO))
+    assert "revl_mark_secret(&_revl_v.tag);" in code, code
+    assert "match &_revl_v.step {" in code, code
+
+
+def test_a_variant_with_no_payload_has_no_leaf_to_register():
+    """Non-vacuity for the case arm: a variant whose cases carry nothing has no
+    leaf, so the walk must return `[]` and leave the caller's container face as
+    the whole coverage. A walk that emitted an arm per case regardless would
+    register nothing here and still pass the emitted-shape test above."""
+    nullary = {"Sign": {"kind": "variant",
+                        "cases": [{"name": "Neg", "payload": None},
+                                  {"name": "Zero", "payload": None}]}}
+    assert emit._secret_face_lines("Sign", "v", nullary) == []
+
+    payloaded = {"Step": {"kind": "variant",
+                          "cases": [{"name": "Final", "payload": "Str"}]}}
+    walk = emit._secret_face_lines("Step", "v", payloaded)
+    assert walk == ["match &v {",
+                    "    Step::Final(_revl_leaf0) => {",
+                    "        revl_mark_secret(&_revl_leaf0);",
+                    "    }",
+                    "    _ => {}",
+                    "}"], walk
+
+
+@needs_cargo
+def test_a_variant_case_payload_is_still_scrubbed(tmp_path):
+    """RED before the case arm, in a real crate: the emitted function returns a
+    `Secret[Step]`, so the container's own `Debug` face is registered and a trace
+    that prints the whole value is scrubbed -- while the payload an author
+    matches OUT of it is a different string and crossed verbatim."""
+    src = emit.emit(_compile(_VARIANT_SCENARIO))
+    _write_crate(tmp_path, src, _VARIANT_HARNESS)
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, (result.stdout or "") + (result.stderr or "")
+    assert "test result: ok" in (result.stdout or "")
