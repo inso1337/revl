@@ -210,19 +210,22 @@ def build_frontier_scan():
     """A python mirror of `crates/revl-gate/src/frontier.rs::scan`.
 
     The TABLES are imported from the generator that writes the rust, so the two
-    cannot list different constructs; only the twenty lines of scanning are
-    restated, and `tests/test_gate_reference_census.py` holds them against the
-    rust on the cases `frontier.rs`'s own unit tests cover.
+    cannot list different constructs, and so are the two RESOURCE bounds — only
+    the scanning itself is restated, and `tests/test_gate_reference_census.py`
+    holds it against the rust on the cases `frontier.rs`'s own unit tests cover.
     """
     spec = importlib.util.spec_from_file_location(
         "census_build_gate_crate", ROOT / "tools" / "build_gate_crate.py")
     generator = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(generator)
     tables = generator.frontier_tables()
-    return make_frontier_scan(tables["keywords"], tables["builtins"])
+    return make_frontier_scan(tables["keywords"], tables["builtins"],
+                              max_bytes=generator.MAX_SOURCE_BYTES,
+                              max_level_items=generator.MAX_LEVEL_ITEMS)
 
 
-def make_frontier_scan(keywords, builtins, max_bytes: int = 262144):
+def make_frontier_scan(keywords, builtins, max_bytes: int = 262144,
+                       max_level_items: int = 1024):
     """The scan itself, over the given tables. Split out so a test can drive it
     with the rust's own table values."""
     excluded_keywords = set(keywords)
@@ -261,11 +264,34 @@ def make_frontier_scan(keywords, builtins, max_bytes: int = 262144):
         return (48 <= byte <= 57 or 65 <= byte <= 90
                 or 97 <= byte <= 122 or byte == 0x5F)
 
+    def _level_items(text: bytes) -> int:
+        """Sibling items at the widest bracket level — see the rust
+        `frontier.rs::level_items` for what this measures and why."""
+        counts = [1]
+        worst = 1
+        for b in text:
+            if b in (0x28, 0x5B, 0x7B):
+                counts.append(1)
+            elif b in (0x29, 0x5D, 0x7D):
+                if len(counts) > 1:
+                    counts.pop()
+            elif b in (0x2C, 0x3B, 0x0A):
+                counts[-1] += 1
+            else:
+                continue
+            if counts[-1] > worst:
+                worst = counts[-1]
+        return worst
+
     def scan(source: str):
         raw = source.encode("utf-8", "surrogatepass")
         if len(raw) > max_bytes:
             return f"source is {len(raw)} bytes, above the {max_bytes}-byte bound"
         text = _strip_literals(raw)
+        items = _level_items(text)
+        if items > max_level_items:
+            return (f"source has {items} items at one bracket level, above the "
+                    f"{max_level_items}-item bound")
         i, n = 0, len(text)
         while i < n:
             if not _is_word(text[i]):

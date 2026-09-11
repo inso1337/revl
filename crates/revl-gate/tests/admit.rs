@@ -11,7 +11,7 @@
 
 use revl_gate::{
     admit, admit_into, compile_to, gate_version, Tier, Verdict, MANIFEST_ROW_LIMIT,
-    MAX_SOURCE_BYTES,
+    MAX_LEVEL_ITEMS, MAX_SOURCE_BYTES,
 };
 
 // ------------------------------------------------------ refusals that agree
@@ -188,6 +188,67 @@ fn a_manifest_under_the_row_bound_is_still_folded() {
         admit_into("fn id(x: Int) -> Int { return x }", ""),
         admit("fn id(x: Int) -> Int { return x }")
     );
+}
+
+// The byte bound is not a SHAPE bound, and the shape it misses most widely is
+// the flat one. The emitted parser recurses once per SIBLING item, so a source
+// one bracket level deep — a call, a list, a run of `let` statements — spends
+// one stack frame per item while costing almost no bytes: measured on this
+// crate, `g(1, 1, ...)` with 11_386 arguments is a 34 KB source and ABORTs a
+// stock 8 MiB stack, and at the 1 MiB floor the wasm component runs at (the
+// component build sets no `stack-size`) ~1_400 items is enough. Blank and
+// `//`-comment lines between those statements change nothing, because the cost
+// is per item parsed and not per line. `nesting_depth` cannot see this shape at
+// all — it collapses sibling depth by construction — so the bound lives in the
+// frontier scan, ahead of the descent, and the probes read it out of the crate
+// rather than restating it.
+
+/// A source whose statement body holds exactly `items` items at one bracket
+/// level: `items - 1` `let`s, one per line, and the `return` that ends the body.
+/// Nothing else sits at that level, so the count is the count.
+fn flat_body(items: usize) -> String {
+    // `items` siblings on one line, no nesting worth counting: the shape whose
+    // frames are one per item. The count at the argument level is exactly
+    // `items`, so the two tests below sit on either side of the bound.
+    format!("fn f() -> Int {{ return g({}) }}", vec!["1"; items].join(", "))
+}
+
+#[test]
+fn a_source_over_the_level_bound_is_declined_rather_than_risked() {
+    let src = flat_body(MAX_LEVEL_ITEMS + 1);
+    // The point of the case: flat and shallow, and a small fraction of the byte
+    // bound. The 1 MiB stack is the wasm component's floor and is deliberately
+    // too small for this shape to descend — the refusal has to land BEFORE the
+    // parser sees it, or this test takes the process down instead of failing.
+    assert!(src.len() < MAX_SOURCE_BYTES / 10);
+    let verdict = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || admit(&src))
+        .expect("spawn the probe")
+        .join()
+        .expect("the probe panicked");
+    assert!(verdict.is_undecided(), "{:?}", verdict);
+    assert_eq!(verdict.code(), Some("FRONTIER"));
+    assert_eq!(verdict.kind(), "outside_frontier");
+    assert!(verdict.to_json().contains("\"admitted\":false"));
+    match verdict {
+        Verdict::OutsideFrontier { reason } => {
+            // The refusal states the bound rather than describing a resource
+            // failure: an embedder has to be able to act on it.
+            assert!(reason.contains(&MAX_LEVEL_ITEMS.to_string()), "{}", reason);
+            assert!(reason.contains("items"), "{}", reason);
+        }
+        other => panic!("a level over the bound must not be decided, got {:?}", other),
+    }
+}
+
+#[test]
+fn a_source_at_the_level_bound_is_still_decided() {
+    // Non-vacuity in the other direction: a ceiling, not a wall. A body at the
+    // bound is decided exactly as it was before the bound existed.
+    let verdict = admit(&flat_body(MAX_LEVEL_ITEMS));
+    assert_ne!(verdict.kind(), "outside_frontier", "{:?}", verdict);
+    assert_eq!(verdict, Verdict::NoObjection);
 }
 
 // The front end is recursive descent, so nesting costs stack. The byte bound

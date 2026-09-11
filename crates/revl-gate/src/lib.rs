@@ -72,6 +72,11 @@
 //! * the source is larger than [`MAX_SOURCE_BYTES`] — the emitted front end is
 //!   deeply recursive and a stack exhaustion ABORTS, which cannot be turned
 //!   back into a refusal;
+//! * the source has more than [`MAX_LEVEL_ITEMS`] items at one bracket level —
+//!   the emitted parser recurses once per SIBLING item, so a flat
+//!   `g(1, 1, …)` a few KB long and one bracket deep exhausts the stack where
+//!   neither the byte bound nor the nesting bound can see it, and a stack
+//!   exhaustion ABORTS rather than refusing;
 //! * the native gate panics while deciding (caught via `catch_unwind`);
 //! * the native gate returns a verdict wire shape this crate does not
 //!   recognise;
@@ -181,7 +186,7 @@ pub mod ir;
 pub mod session;
 pub mod symbols;
 
-pub use frontier::{FRONTIER_ID, MANIFEST_ROW_LIMIT, MAX_SOURCE_BYTES};
+pub use frontier::{FRONTIER_ID, MANIFEST_ROW_LIMIT, MAX_LEVEL_ITEMS, MAX_SOURCE_BYTES};
 pub use ir::{check_ir_boundary, IrRefusal, KNOWN_IR_FIELDS, KNOWN_IR_REVISIONS};
 
 /// The semver of the GATE SURFACE itself (`gate_version().api`). Bumped by

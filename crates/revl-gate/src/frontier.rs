@@ -17,7 +17,7 @@
 
 /// The identifier `gate_version().frontier` reports. Two gates with different
 /// ids cover different surfaces and their agreement means nothing.
-pub const FRONTIER_ID: &str = "selfhost-admit:59fd3077ca2d5f4a";
+pub const FRONTIER_ID: &str = "selfhost-admit:bb38ccec4128d124";
 
 /// Sources above this many bytes are refused rather than decided: the emitted
 /// parser/checker are deeply recursive and a stack exhaustion ABORTS, which no
@@ -35,6 +35,21 @@ pub const MAX_SOURCE_BYTES: usize = 262144;
 /// spend the host on either side of the door. A manifest wire no corpus comes
 /// near keeps the fail-closed promise honest.
 pub const MANIFEST_ROW_LIMIT: usize = 512;
+
+/// Sources with more than this many items at ONE bracket level are refused
+/// rather than decided, for the same reason [`MAX_SOURCE_BYTES`] refuses a
+/// source: the emitted parser recurses once per SIBLING item and a stack
+/// exhaustion ABORTS, which no `catch_unwind` can turn back into a refusal.
+///
+/// This is a THIRD kind of bound, and neither limit above is it. The aborting
+/// class is flat expression-level recursion, which costs almost no bytes and no
+/// depth: `g(1, 1, ...)` with 11_386 arguments is a 34 KB source, one line at
+/// depth one, and it takes down a stock 8 MiB main thread. At the 1 MiB stack
+/// floor the wasm component runs at, ~1_400 items is enough. Depth is NOT what
+/// this measures -- the nesting bound inside `admit_src` covers that, and it
+/// cannot see siblings by construction. A source no corpus program comes near
+/// keeps the fail-closed promise honest.
+pub const MAX_LEVEL_ITEMS: usize = 1024;
 
 /// Reference language keywords the self-host front end does not lex.
 /// Derived as `revl.lexer.KEYWORDS - selfhost/lexer.rvl::keywords()`.
@@ -67,6 +82,14 @@ pub(crate) fn scan(source: &str) -> Option<String> {
         ));
     }
     let text = strip_literals(source);
+    let items = level_items(&text);
+    if items > MAX_LEVEL_ITEMS {
+        return Some(format!(
+            "source has {} items at one bracket level, above the {}-item bound this gate will decide (the native front end recurses once per sibling item and an overflow aborts rather than refusing); compile it with the reference `revl` toolchain",
+            items,
+            MAX_LEVEL_ITEMS
+        ));
+    }
     let bytes = text.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -103,6 +126,51 @@ pub(crate) fn scan(source: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The largest number of sibling items found at any ONE bracket level of
+/// `text`: an opening bracket starts a level, a closing bracket ends it, and
+/// `,`, `;` and a newline each separate two items within the level they are
+/// seen at, so a level holding N siblings reads N and not N-1 (the first item
+/// is counted when the level opens).
+///
+/// This is the stack the emitted parser actually spends. Measured on the
+/// generated crate, the aborting class is FLAT SIBLING recursion and it is not
+/// argument-specific: `g(1, 1, ...)` with 11_386 arguments is a 34 KB source
+/// that aborts a stock 8 MiB stack, `[1, 1, ...]` and a run of `let` statements
+/// go down at the same counts, and blank or `//`-comment lines between those
+/// statements change nothing (they cost no frames at all). Newlines are counted
+/// because a statement run has no `,` or `;` to count; counting them is the
+/// conservative direction, since a comment-heavy source can then be declined
+/// and a dense one still cannot be waved through. Depth is deliberately NOT
+/// measured here -- the nesting bound inside `admit_src` covers it, and it
+/// cannot see siblings by construction: the shape that aborts is one line at
+/// depth one.
+fn level_items(text: &str) -> usize {
+    let mut counts: Vec<usize> = vec![1];
+    let mut worst = 1usize;
+    for b in text.bytes() {
+        match b {
+            b'(' | b'[' | b'{' => counts.push(1),
+            // An unbalanced closer cannot pop the outermost level, so the
+            // count never indexes past an empty stack.
+            b')' | b']' | b'}' => {
+                if counts.len() > 1 {
+                    counts.pop();
+                }
+            }
+            b',' | b';' | b'\n' => {
+                let last = counts.len() - 1;
+                counts[last] += 1;
+            }
+            _ => continue,
+        }
+        let last = counts.len() - 1;
+        if counts[last] > worst {
+            worst = counts[last];
+        }
+    }
+    worst
 }
 
 /// Blank out `"..."` string literals and `//` comments so their contents cannot
@@ -172,5 +240,43 @@ mod tests {
     fn an_oversized_source_is_a_gap() {
         let big = "x".repeat(MAX_SOURCE_BYTES + 1);
         assert!(scan(&big).is_some());
+    }
+
+    #[test]
+    fn too_many_items_at_one_level_is_a_gap() {
+        // One line, ~14 KB, depth one: `nesting_depth` sees nothing to refuse
+        // and the byte bound sees 5% of its budget, while the parser spends one
+        // frame per argument. This is the shape that aborts a 1 MiB stack at
+        // ~1_400 items.
+        let flat = format!(
+            "fn f() -> Int {{ return g({}) }}",
+            vec!["1"; MAX_LEVEL_ITEMS + 1].join(", ")
+        );
+        assert!(flat.len() < MAX_SOURCE_BYTES / 10, "{}", flat.len());
+        let reason = scan(&flat).expect("expected a level-items gap");
+        assert!(reason.contains(&MAX_LEVEL_ITEMS.to_string()), "{}", reason);
+    }
+
+    #[test]
+    fn the_level_bound_is_neither_a_byte_nor_a_depth_bound() {
+        // A corpus-scale source: 300 sibling statements, each followed by a
+        // blank line and a `//` comment. The line ends count (a statement run
+        // has no `,` or `;`), which is the conservative direction, and the
+        // source is still decided at 5% of the byte bound.
+        let mut spaced = String::from("fn f() -> Int {\n");
+        for i in 0..300 {
+            spaced.push_str(&format!("  let a{} = 1\n\n  // note\n", i));
+        }
+        spaced.push_str("  return 0\n}\n");
+        assert!(spaced.len() < MAX_SOURCE_BYTES / 10, "{}", spaced.len());
+        assert_eq!(scan(&spaced), None);
+        // And a deep-but-narrow source is the nesting bound's business, not
+        // this one's.
+        let deep = format!(
+            "fn f() -> Int {{ return {}1{} }}",
+            "(".repeat(150),
+            ")".repeat(150)
+        );
+        assert_eq!(scan(&deep), None);
     }
 }
