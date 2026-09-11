@@ -317,7 +317,10 @@ function clientEnv(target: SeamTarget, request: string, deadlineMs: number | nul
 /** One blocking seam round-trip to `target`. `deadlineMs` bounds the reply: a
  *  wedged provider surfaces as a `SeamDeadlineError` (a hang), a dropped
  *  connection as a plain `Error` (a death), a provider-side failure as the
- *  marshalled error — the same three disjoint fault kinds as the py client. */
+ *  marshalled error — the same three disjoint fault kinds as the py client.
+ *  The marshalled error is scrubbed on THIS side as well as the provider's
+ *  (item 421 F5), so a peer that does not scrub cannot hand this process back
+ *  the values this process is holding. */
 function seamCall(
   target: SeamTarget,
   key: string,
@@ -350,7 +353,18 @@ function seamCall(
   }
   const reply = JSON.parse(out)
   if (reply.seamDeadline) throw new SeamDeadlineError(key, method, deadlineMs ?? 0)
-  if (!reply.ok) throw new Error(reply.error)
+  // item 421 F5 — the consumer runs the same two-stage scrub the provider does,
+  // rather than trusting that it already ran. `serve` funnels every dispatch
+  // error through `seamFailure`, so a peer running THIS tier is already clean
+  // and this pass is the identity on its reply: the argument needles are the
+  // values this call sent, which the provider has already replaced, and the
+  // registry holds nothing the reply still quotes. It bites on the peer that is
+  // not this tier's `serve` — a non-revl implementation, or one predating F5 —
+  // where the error text arrives verbatim and the consumer's own argument
+  // values and registered secrets would otherwise be handed to whatever handler
+  // logs the thrown error. Same `seamFailure`, same two markers, so a consumer
+  // cannot tell which side redacted, and does not need to.
+  if (!reply.ok) throw new Error(seamFailure(reply.error, args))
   return decodeValue(reply.value)
 }
 
@@ -592,11 +606,18 @@ function argNeedles(value: unknown, into: Set<string>): void {
   }
 }
 
-/** The error text a provider-side failure is allowed to send back to the
- *  consumer: this call's own argument values replaced by `REDACTED_ARG`, and
- *  THEN every value a declared `Secret[T]` marking registered replaced by
- *  `REDACTED_SECRET`. Longest needle first within each stage, so one that
- *  contains another leaves no tail behind.
+/** The error text a seam failure is allowed to carry: this call's own argument
+ *  values replaced by `REDACTED_ARG`, and THEN every value a declared
+ *  `Secret[T]` marking registered replaced by `REDACTED_SECRET`. Longest needle
+ *  first within each stage, so one that contains another leaves no tail behind.
+ *
+ *  Runs on BOTH sides of the crossing. The provider funnels the error it is
+ *  about to send through it; the consumer funnels the error it just received
+ *  through it before throwing (item 421 F5). A provider that already scrubbed
+ *  leaves nothing for the consumer's pass to match, so the second application
+ *  is the identity — and a provider that did not scrub is caught by it. The
+ *  scrub is cheap and idempotent, so it is not worth the consumer's assuming
+ *  its peer's implementation.
  *
  *  Two stages because they answer two different questions, and the second one
  *  the arguments cannot answer. A held credential — a `Secret[T]` config field,
