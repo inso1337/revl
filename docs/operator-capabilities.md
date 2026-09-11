@@ -61,7 +61,7 @@ Grammar (blank lines and `#` comments ignored):
 
 * **verbs** — `load`, `swap`, `edit`, `unload`, `restore`, `snapshot`, `undo`
   (`rollback` is accepted as an alias for `undo`), `commit`, `approve`, `estop`,
-  `call`, `lease`, `fork`, and `replay`. `*` matches every verb.
+  `deploy`, `call`, `lease`, `fork`, and `replay`. `*` matches every verb.
 * **subjects** — globs (`fnmatch`) matched against a target component's **name**
   *or* any **realm** it is isolated into. `tenant_a*` matches the realm
   `tenant_a` and the component `tenant_a_cache` alike; `*` matches anything.
@@ -135,6 +135,14 @@ The target set is computed **before** the action runs, from the session's IR:
   `may estop on tenant_a*` authorizes only while every live component is in
   `tenant_a*`; an operator who must always be able to hit the button needs
   `may estop on *`.
+* **deploy** (item 476, issue #830) — the whole running composition, because a
+  deploy reconfigures it as ONE coordinated unit across a machine boundary: a
+  subject-scoped `may deploy on tenant_a*` authorizes only while every live
+  component is in `tenant_a*`. It has its own verb rather than folding into
+  `swap` because a deploy crosses a machine boundary, which an operator must be
+  able to authorize separately from a same-host swap: being trusted to hot-swap
+  a component locally is not the same as being trusted to push the composition
+  onto a second host and drive its teardown.
 
 * **call** — the whole running composition, because the provided key is resolved
   by the live session and may dispatch through more than one component.
