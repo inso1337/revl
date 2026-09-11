@@ -5153,11 +5153,332 @@ fn config_data_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
     return no_verd();
 }
 
+fn ext_unclassified_msg() -> String {
+    return String::from("unclassified extern — expected `pure`, `acquire`, `emission`, or ").revl_concat("`witnessed` after `extern`");
+}
+
+fn ext_acquire_undo_msg(nm: &str) -> String {
+    return (String::from("acquire extern `").revl_concat(&nm)).revl_concat("` must declare `undo` (G4)");
+}
+
+fn ext_result_bind_msg(nm: &str, slot: &str) -> String {
+    return ((((String::from("`result` is not bound in the `").revl_concat(&slot)).revl_concat("` slot of ")).revl_concat("extern `")).revl_concat(&nm)).revl_concat("`");
+}
+
+fn ext_result_missing_msg(nm: &str) -> String {
+    return (String::from("`result` does not exist here — extern `").revl_concat(&nm)).revl_concat("` declares no return type, so there is no acquired value to bind");
+}
+
+fn ext_var_bind_msg(vn: &str, nm: &str, slot: &str) -> String {
+    return (((((String::from("`").revl_concat(&vn)).revl_concat("` is not declared — the `")).revl_concat(&slot)).revl_concat("` slot of extern `")).revl_concat(&nm)).revl_concat("` sees only the implicit `result` binding");
+}
+
+fn ext_var_noscope_msg(vn: &str, nm: &str, slot: &str) -> String {
+    return (((((String::from("`").revl_concat(&vn)).revl_concat("` is not declared — the `")).revl_concat(&slot)).revl_concat("` slot of extern `")).revl_concat(&nm)).revl_concat("` runs with no variables in scope");
+}
+
+fn ext_self_call_msg(nm: &str, slot: &str) -> String {
+    return (((String::from("extern `").revl_concat(&nm)).revl_concat("`'s `")).revl_concat(&slot)).revl_concat("` cannot call the extern itself");
+}
+
+fn ext_undeclared_callee_msg(cn: &str, nm: &str, slot: &str) -> String {
+    return (((((String::from("`").revl_concat(&cn)).revl_concat("` is not declared — the `")).revl_concat(&slot)).revl_concat("` slot of extern `")).revl_concat(&nm)).revl_concat("` may only call a declared fn, extern, or host builtin");
+}
+
+fn ext_field_head_msg(nm: &str, slot: &str) -> String {
+    return (((String::from("the `").revl_concat(&slot)).revl_concat("` slot of extern `")).revl_concat(&nm)).revl_concat("` must be a plain call to a declared fn or extern");
+}
+
+fn ext_pure_inverse_msg(nm: &str) -> String {
+    return ((String::from("pure extern `").revl_concat(&nm)).revl_concat("` cannot declare `undo` or ")).revl_concat("`compensate`");
+}
+
+fn ext_emission_undo_msg(nm: &str) -> String {
+    return (String::from("emission extern `").revl_concat(&nm)).revl_concat("` cannot declare `undo`");
+}
+
+fn ext_first(ms: &[String]) -> String {
+    let mut i = 0i64;
+    while (i < ms.revl_length()) {
+        if ((ms)[(i) as usize] != "") {
+            return (ms)[(i) as usize].clone();
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return String::from("");
+}
+
+fn ext_var_verdict(vn: &str, nm: &str, slot: &str, bound: bool) -> String {
+    if (vn != "result") {
+        if bound {
+            return ext_var_bind_msg(vn, nm, slot);
+        }
+        return ext_var_noscope_msg(vn, nm, slot);
+    }
+    if bound {
+        return String::from("");
+    }
+    if (slot == "compensate") {
+        return ext_result_bind_msg(nm, slot);
+    }
+    return ext_result_missing_msg(nm);
+}
+
+fn ext_head_verdict(tg: Expr, nm: &str, slot: &str, declared: &[String]) -> String {
+    return match tg {
+    Expr::Var(vn) => ext_callee_verdict(&vn, nm, slot, declared),
+    Expr::Field(_) => ext_field_head_msg(nm, slot),
+    _ => String::from(""),
+};
+}
+
+fn ext_callee_verdict(cn: &str, nm: &str, slot: &str, declared: &[String]) -> String {
+    if (cn == nm) {
+        return ext_self_call_msg(nm, slot);
+    }
+    if contains(declared, cn) {
+        return String::from("");
+    }
+    return ext_undeclared_callee_msg(cn, nm, slot);
+}
+
+fn ext_exprs_verdict(xs: &[Expr], i: i64, nm: &str, slot: &str, bound: bool, declared: &[String]) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let m = ext_expr_verdict((xs)[(i) as usize].clone(), nm, slot, bound, declared);
+    if (m != "") {
+        return m;
+    }
+    return ext_exprs_verdict(xs, (i).checked_add(1i64).expect("revl: Int overflow"), nm, slot, bound, declared);
+}
+
+fn ext_inits_verdict(xs: &[InitN], i: i64, nm: &str, slot: &str, bound: bool, declared: &[String]) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let m = ext_expr_verdict((xs)[(i) as usize].value.clone(), nm, slot, bound, declared);
+    if (m != "") {
+        return m;
+    }
+    return ext_inits_verdict(xs, (i).checked_add(1i64).expect("revl: Int overflow"), nm, slot, bound, declared);
+}
+
+fn ext_arms_verdict(xs: &[ArmN], i: i64, nm: &str, slot: &str, bound: bool, declared: &[String]) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let m = ext_expr_verdict((xs)[(i) as usize].body.clone(), nm, slot, bound, declared);
+    if (m != "") {
+        return m;
+    }
+    return ext_arms_verdict(xs, (i).checked_add(1i64).expect("revl: Int overflow"), nm, slot, bound, declared);
+}
+
+fn ext_parts_verdict(xs: &[PartN], i: i64, nm: &str, slot: &str, bound: bool, declared: &[String]) -> String {
+    if (i >= xs.revl_length()) {
+        return String::from("");
+    }
+    let m = ext_expr_verdict((xs)[(i) as usize].e.clone(), nm, slot, bound, declared);
+    if (m != "") {
+        return m;
+    }
+    return ext_parts_verdict(xs, (i).checked_add(1i64).expect("revl: Int overflow"), nm, slot, bound, declared);
+}
+
+fn ext_expr_verdict(e: Expr, nm: &str, slot: &str, bound: bool, declared: &[String]) -> String {
+    return match e {
+    Expr::Var(vn) => ext_var_verdict(&vn, nm, slot, bound),
+    Expr::IntLit(_) => String::from(""),
+    Expr::FloatLit(_) => String::from(""),
+    Expr::StrLit(_) => String::from(""),
+    Expr::BoolLit(_) => String::from(""),
+    Expr::NullLit => String::from(""),
+    Expr::Hole(_) => String::from(""),
+    Expr::Bad(_) => String::from(""),
+    Expr::Bin(b) => { let b = *b; ext_first(&(vec![ext_expr_verdict(b.l.clone(), nm, slot, bound, declared), ext_expr_verdict(b.r.clone(), nm, slot, bound, declared)])) },
+    Expr::Un(u) => { let u = *u; ext_expr_verdict(u.e.clone(), nm, slot, bound, declared) },
+    Expr::Emit(u) => { let u = *u; ext_expr_verdict(u.e.clone(), nm, slot, bound, declared) },
+    Expr::Call(c) => { let c = *c; ext_first(&(vec![ext_head_verdict(c.target.clone(), nm, slot, declared), ext_exprs_verdict(&c.args, 0i64, nm, slot, bound, declared)])) },
+    Expr::Field(f) => { let f = *f; ext_expr_verdict(f.target.clone(), nm, slot, bound, declared) },
+    Expr::OptField(f) => { let f = *f; ext_expr_verdict(f.target.clone(), nm, slot, bound, declared) },
+    Expr::OptCall(c) => { let c = *c; ext_first(&(vec![ext_expr_verdict(c.target.clone(), nm, slot, bound, declared), ext_exprs_verdict(&c.args, 0i64, nm, slot, bound, declared)])) },
+    Expr::Index(x) => { let x = *x; ext_first(&(vec![ext_expr_verdict(x.target.clone(), nm, slot, bound, declared), ext_expr_verdict(x.idx.clone(), nm, slot, bound, declared)])) },
+    Expr::If(x) => { let x = *x; ext_first(&(vec![ext_expr_verdict(x.cond.clone(), nm, slot, bound, declared), ext_expr_verdict(x.then_.clone(), nm, slot, bound, declared), ext_expr_verdict(x.els.clone(), nm, slot, bound, declared)])) },
+    Expr::Rec(r) => ext_inits_verdict(&r.fields, 0i64, nm, slot, bound, declared),
+    Expr::Lst(l) => ext_exprs_verdict(&l.items, 0i64, nm, slot, bound, declared),
+    Expr::Arrow(a) => { let a = *a; ext_expr_verdict(a.body, nm, slot, bound, declared) },
+    Expr::Match(m) => { let m = *m; ext_first(&(vec![ext_expr_verdict(m.scrut.clone(), nm, slot, bound, declared), ext_arms_verdict(&m.arms, 0i64, nm, slot, bound, declared)])) },
+    Expr::Templ(t) => ext_parts_verdict(&t.parts, 0i64, nm, slot, bound, declared),
+    _ => unreachable!(),
+};
+}
+
+fn ext_declared_names(ts: Vec<Token>, pg: Prog) -> Vec<String> {
+    let mut out = fn_names_of(&pg.fns);
+    out.push(String::from("Stream"));
+    let ctors = type_ctors(ts.clone());
+    let mut i = 0i64;
+    while (i < ctors.revl_length()) {
+        out.push((ctors)[(i) as usize].clone());
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn ext_class_at(ts: &[Token], i: i64) -> String {
+    if (((atw(ts, i, "pure") || atw(ts, i, "acquire")) || atw(ts, i, "emission")) || ati(ts, i, "witnessed")) {
+        return tkc(ts, i).text;
+    }
+    return String::from("");
+}
+
+fn ext_return_is_simple_nominal(ts: Vec<Token>, ps_i: i64) -> bool {
+    if (ret_at(ts.clone(), ps_i) != (ps_i).checked_add(2i64).expect("revl: Int overflow")) {
+        return false;
+    }
+    let h = tkc(&ts, (ps_i).checked_add(1i64).expect("revl: Int overflow")).text;
+    if (!contains(&ext_cap_initials(), &(h.revl_slice(0i64, 1i64)))) {
+        return false;
+    }
+    return (!contains(&ext_non_handle_heads(), &h));
+}
+
+fn ext_non_handle_heads() -> Vec<String> {
+    return vec![String::from("Int"), String::from("Int32"), String::from("Float"), String::from("F64"), String::from("Num"), String::from("Str"), String::from("Bool"), String::from("Bytes"), String::from("Unit"), String::from("Any"), String::from("Never"), String::from("Value"), String::from("Opt"), String::from("List"), String::from("Map"), String::from("Result")];
+}
+
+fn ext_cap_initials() -> Vec<String> {
+    return vec![String::from("A"), String::from("B"), String::from("C"), String::from("D"), String::from("E"), String::from("F"), String::from("G"), String::from("H"), String::from("I"), String::from("J"), String::from("K"), String::from("L"), String::from("M"), String::from("N"), String::from("O"), String::from("P"), String::from("Q"), String::from("R"), String::from("S"), String::from("T"), String::from("U"), String::from("V"), String::from("W"), String::from("X"), String::from("Y"), String::from("Z")];
+}
+
+fn ext_decl_name(ts: &[Token], i: i64) -> String {
+    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+    if atk(ts, j.clone(), "[") {
+        return String::from("");
+    }
+    if atk(ts, j.clone(), "(") {
+        return String::from("");
+    }
+    if ((((atw(ts, j.clone(), "async") || atw(ts, j.clone(), "deferred")) || atw(ts, j.clone(), "idempotent")) || atw(ts, j.clone(), "validated")) || ati(ts, j.clone(), "retry")) {
+        return String::from("");
+    }
+    if (!atw(ts, j.clone(), "fn")) {
+        return String::from("");
+    }
+    return tkc(ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
+}
+
+fn ext_slot_verd(ts: &[Token], e: Expr, start: i64, nm: &str, slot: &str, bound: bool, declared: &[String]) -> Verd {
+    let m = ext_expr_verdict(e.clone(), nm, slot, bound, declared);
+    if (m == "") {
+        return no_verd();
+    }
+    return mk_verd(tagged("G4", &m), tkc(ts, start).line);
+}
+
+fn ext_decl_verdict(ts: Vec<Token>, i: i64, declared: Vec<String>) -> Verd {
+    let line = tkc(&ts, i).line;
+    let cls = ext_class_at(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+    if (cls == "") {
+        return mk_verd(tagged("G8", &ext_unclassified_msg()), line);
+    }
+    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+    if atk(&ts, j.clone(), "[") {
+        return no_verd();
+    }
+    if atk(&ts, j.clone(), "(") {
+        return no_verd();
+    }
+    if ((((atw(&ts, j.clone(), "async") || atw(&ts, j.clone(), "deferred")) || atw(&ts, j.clone(), "idempotent")) || atw(&ts, j.clone(), "validated")) || ati(&ts, j.clone(), "retry")) {
+        return no_verd();
+    }
+    if (!atw(&ts, j.clone(), "fn")) {
+        return no_verd();
+    }
+    if (cls == "witnessed") {
+        return no_verd();
+    }
+    let nm = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
+    let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
+    if (!ps.ok) {
+        return no_verd();
+    }
+    let bound = atk(&ts, ps.i, "arrow");
+    let mut k = ret_at(ts.clone(), ps.i);
+    if (cls == "acquire") {
+        if (!atw(&ts, k, "undo")) {
+            return mk_verd(tagged("G4", &ext_acquire_undo_msg(&nm)), line);
+        }
+        if (bound && (!ext_return_is_simple_nominal(ts.clone(), ps.i))) {
+            return no_verd();
+        }
+    }
+    if ((cls == "pure") && (atw(&ts, k, "undo") || atw(&ts, k, "compensate"))) {
+        return mk_verd(tagged("G4", &ext_pure_inverse_msg(&nm)), line);
+    }
+    if ((cls == "emission") && atw(&ts, k, "undo")) {
+        return mk_verd(tagged("G4", &ext_emission_undo_msg(&nm)), line);
+    }
+    if atw(&ts, k, "undo") {
+        let mut u = (k).checked_add(1i64).expect("revl: Int overflow");
+        while (atw(&ts, u.clone(), "idempotent") || atw(&ts, u.clone(), "pure")) {
+            u = (u).checked_add(1i64).expect("revl: Int overflow");
+        }
+        let r = expr_at(ts.clone(), u.clone());
+        let v = ext_slot_verd(&ts, r.e.clone(), u.clone(), &nm, "undo", bound, &declared);
+        if (v.v != "") {
+            return v;
+        }
+        k = r.i;
+    }
+    if atw(&ts, k, "compensate") {
+        let r2 = expr_at(ts.clone(), (k).checked_add(1i64).expect("revl: Int overflow"));
+        return ext_slot_verd(&ts, r2.e, (k).checked_add(1i64).expect("revl: Int overflow"), &nm, "compensate", false, &declared);
+    }
+    return no_verd();
+}
+
+fn extern_decl_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
+    let declared = ext_declared_names(ts.clone(), pg.clone());
+    let mut seen: Vec<String> = vec![];
+    let mut d = 0i64;
+    let mut i = 0i64;
+    while (i < ts.revl_length()) {
+        if atk(&ts, i, "{") {
+            d = (d).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if atk(&ts, i, "}") {
+                d = (d).checked_sub(1i64).expect("revl: Int overflow");
+            } else {
+                if ((d == 0i64) && atw(&ts, i, "extern")) {
+                    let nm = ext_decl_name(&ts, i);
+                    if ((nm == "") || (!contains(&seen, &nm))) {
+                        let v = ext_decl_verdict(ts.clone(), i, declared.clone());
+                        if (v.v != "") {
+                            return v;
+                        }
+                    }
+                    if (nm != "") {
+                        seen.push(nm.clone());
+                    }
+                }
+            }
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
 fn collect_nonlink(ts: Vec<Token>, pg: Prog) -> NoLink {
     let base = ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone()));
     let cfgv = config_data_refusal(ts.clone(), pg.clone());
     if (cfgv.v != "") {
         return NoLink { done: true, refs: vec![cfgv.clone()] };
+    }
+    let extv = extern_decl_refusal(ts.clone(), pg.clone());
+    if (extv.v != "") {
+        return NoLink { done: true, refs: vec![extv.clone()] };
     }
     let cachev = check_cache_fns(&pg.fns);
     if (cachev.v != "") {
