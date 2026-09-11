@@ -150,11 +150,9 @@ pins that decision with the RFC citations in the test body.
   that many; anything else is the defect this module exists to remove. There is
   now one place in the Revl ecosystem where the rule lives: every Revl
   component that frames a request routes through `body_length`. The compiler's
-  own host-side HTTP face is a residue this module does not retire —
-  `src/revl/mcp/http_face.py` reads `Content-Length` with
-  `int(self.headers.get("Content-Length") or 0)`, i.e. first-value-wins with no
-  duplicate check and no ceiling. It is Python host code and cannot call a Revl
-  primitive, so closing that reader is separate work.
+  own host-side HTTP face is Python host code and cannot call a Revl primitive,
+  so it does not import this module; it carries the mirror of the rule in both
+  directions instead, stated under "The face's half" below.
 - **Map the refusal with `status_for`, not by hand.** `400` for the three
   framing refusals, `413` for `OverCeiling`, and `is_too_large(r)` when the
   caller only needs the 413 test. Refuse and **close the connection** (RFC 7230
@@ -169,6 +167,48 @@ pins that decision with the RFC citations in the test body.
   (`stdlib/version.rvl`), because a component that vendored the stdlib under the
   old stamp predates `body_length` and is still hand-rolling framing.
   `revl doctor`'s `stdlib version stamp` check flags the drift.
+
+## The face's half
+
+`src/revl/mcp/http_face.py` is Python host code and cannot call a Revl
+primitive, so it does not import this module. It carries the mirror of the rule
+instead, in both directions, and `tests/test_serve_http_framing.py` and
+`tests/test_serve_http_response_framing.py` drive the real handler over a real
+loopback socket to pin them.
+
+**Reading a request** (`_frame_request`). The reader this note once named here
+was `int(self.headers.get("Content-Length") or 0)` — first-value-wins, no
+duplicate check, no ceiling. It is now the four refusals this module makes —
+`unsupported_transfer_encoding`, `duplicate_content_length`,
+`malformed_content_length`, `over_ceiling` — against the same `_MAX_BODY`
+ceiling, and the same refuse-and-close: a refused framing means the byte stream
+is no longer trustworthy, so the connection is closed rather than a pipelined
+request behind it parsed.
+
+**Writing a reply** (`_write`). The face owns its replies' framing for the same
+reason it owns a request's. `http.server`'s `send_header` performs no validation
+at all — it interpolates into `"%s: %s\r\n"` and nothing more, and
+`_is_illegal_header_value` exists only in `http.client`, i.e. on the receiving
+side. A routed handler returns a `Response` whose status, headers and body all
+reach the wire, and whose headers routinely carry a decoded path or query
+scalar, so four rules follow.
+
+| rule | why |
+|---|---|
+| a handler-supplied status must be three digits (RFC 9110 15) | `send_response` writes the handler's own code into the status line unchecked, and a reader is required to reject a status it cannot read as three digits — so a `1000`, a `99` or a `0` is a reply no conforming client can parse |
+| a handler-supplied field name must be a token and its value HTAB / SP / VCHAR / obs-text (RFC 9110 5.1, 5.5) | a value carrying CR or LF ends the field early, so everything after it is read as further fields — or, after a blank line, as the body |
+| `Content-Length`, `Transfer-Encoding` and `Connection` are refused, not overwritten | two framings on one message is how a reader downstream and this face come to disagree about where the reply ends (RFC 9110 6.1, RFC 9112 6.3) |
+| a `HEAD` reply carries no body, and a contentless status (1xx, 204, 304) carries neither a body nor a `Content-Length` | RFC 9110 9.3.2, and 15.2 / 15.3.5 / 15.4.5 with 8.6: a body its own framing says is not there is read as the start of the next reply on a kept-alive connection |
+
+A refusal is a `500` whose `category` is the reason — the request was
+well-formed, so what broke is the program that answered it — and it is
+substituted *before* the reply is written, so nothing of the handler's reply
+reaches the wire. `content-type` is the one handler header the face replaces
+rather than refuses, because it always has a content type of its own.
+
+The face is not a `body_length` caller and makes no claim to be one: it is a
+different language, a different process boundary, and its own tests. What it
+shares is the rule, which is the thing this module exists to make single.
 
 ## The residue, stated plainly
 
@@ -190,7 +230,8 @@ pins that decision with the RFC citations in the test body.
 - **Wire binding.** Like 456's `Outcome`, this decides *framing* (how many bytes
   belong to this body) and not *parsing* (header folding, obs-fold, HTTP/2
   framing, what the request line means). A `revl serve --http` face that threads
-  it through is a separate slice.
+  it through is a separate slice; the face's mirror of it, in both directions,
+  is under "The face's half" above.
 
 ## Evidence
 
@@ -202,3 +243,18 @@ the caller's mapping, the 4300-digit value the issue's fourth comment measured,
 consumer that imports `stdlib/http.rvl` alongside the module (the realistic
 layout). RED-before, with `stdlib/framing.rvl` backed out and the tests kept, and
 GREEN-after are recorded on the pull request.
+
+The face's mirror is pinned the same way, over a real loopback socket rather than
+a function's return value, because both halves are properties of the byte stream:
+`tests/test_serve_http_framing.py` for the request reader and
+`tests/test_serve_http_response_framing.py` (22 tests) for the reply writer. The
+hostile header value in each response case is built *from* the bound argument —
+the stub echoes what the router decoded — so those tests are about a
+remote-controlled value and not about a constant the test file chose. The
+contentless-status case is asserted on the reply BOUNDARY across two pipelined
+requests, not on one reply in isolation: what the status has to get right is
+that the next reply starts where this one ends. 17 of the 22 are red against the
+previous `_write` and green after it; the other 5 are the controls that pin the
+checks as no stricter than the rules they enforce. Both handler-chosen statuses
+are covered, on the `Response` path and on the `Result`/`ApiError` path, because
+both reach the same status line.
