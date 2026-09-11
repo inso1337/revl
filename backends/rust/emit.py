@@ -1710,15 +1710,53 @@ fn revl_secret_values<R>(f: impl FnOnce(&mut Vec<String>) -> R) -> R {
     f(&mut guard)
 }
 
+// revl_renderings is every face one string value wears inside host text (item
+// 421 F6(d)).
+//
+// The match in revl_redact_text is EXACT, and the text it runs over has already
+// been RENDERED. A value that holds a quote, a backslash or a control character
+// comes back ESCAPED from any encoder this tier renders it with: the seam wire
+// writes it through serde_json, and a diagnostic a host builds with `{:?}`
+// writes the Debug form, so the raw bytes match nothing there and a
+// `Secret[Str]` holding such a value crossed verbatim while the identical value
+// without the quote was scrubbed everywhere. Registering the encoders' bodies
+// closes that.
+//
+// Derived from the encoders themselves rather than restating their escape
+// tables, so a face cannot drift from the encoder that writes it. Both quote
+// the result, hence the slices.
+fn revl_renderings(text: &str) -> Vec<String> {
+    let mut faces = vec![text.to_string()];
+    if let Ok(quoted) = serde_json::to_string(text) {
+        if quoted.len() >= 2 {
+            let body = &quoted[1..quoted.len() - 1];
+            if body != text {
+                faces.push(body.to_string());
+            }
+        }
+    }
+    let debug = format!("{:?}", text);
+    if debug.len() >= 2 {
+        let body = &debug[1..debug.len() - 1];
+        if body != text && !faces.iter().any(|face| face == body) {
+            faces.push(body.to_string());
+        }
+    }
+    faces
+}
+
 fn revl_remember_secret(text: String) {
     if text.len() < REVL_MIN_MARKABLE {
         return;
     }
+    // The bound gates the RAW value only: an escape can only ever expand, so a
+    // value that cleared it clears it in every escaped face too.
     revl_secret_values(|values| {
-        if values.iter().any(|known| *known == text) {
-            return;
+        for face in revl_renderings(&text) {
+            if !values.iter().any(|known| *known == face) {
+                values.push(face);
+            }
         }
-        values.push(text);
         values.sort_by(|a, b| b.len().cmp(&a.len()));
     });
 }
