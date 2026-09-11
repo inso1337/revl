@@ -38,6 +38,26 @@ component Worker requires net: Net provides task: Task {
 }
 """
 
+# The `g5_undo_method_ref_*` cluster's own fixture: an `emission` origin, and a
+# bracket whose inverse takes a key. The rejection fixtures put a method
+# REFERENCE in the binding; the twins below put the value the body COMPUTED
+# there, which is the whole of the difference.
+MINT = """
+extern emission[vault.mint] fn mint_token(u: Str) -> Secret[Str]
+  = @py { return "CANARY" }
+service Cache { emission fn set(u: Str) -> Int }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn set(u) {
+"""
+MINT_TAIL = """
+      return 1
+    }
+  }
+}
+"""
+
 
 def _ok(source: str):
     ir = compile_source(source)
@@ -301,6 +321,74 @@ component C provides cache: Cache {
   }
 }
 """)
+
+
+def test_undo_of_a_value_the_body_computed_compiles():
+    """Twin of `g5_undo_method_ref_let.rvl`: the same `let`, the same slot, the
+    same emission — but the binding holds the RESULT of a call the body made,
+    not the operation it would dispatch. The `let` sits ahead of the bracket, so
+    that emission ran on the forward path and the inverse is handed a plain
+    value. Reading the call as though it were written in the slot refuses a
+    program whose emission never crossed the boundary."""
+    _ok(MINT + """
+      let t = emit mint_token(u)
+      effect store.insert(t, "v")
+      undo   store.remove(t)
+""" + MINT_TAIL)
+
+
+def test_undo_of_a_computed_value_reached_through_a_container_compiles():
+    """The record and list twins of `g5_undo_method_ref_record.rvl` and
+    `g5_undo_method_ref_list.rvl`: a container of computed values projects out
+    as a value, where a container of references projects out as an operation.
+    The container is a spelling, not a boundary, in both directions."""
+    _ok(MINT + """
+      let box = { k: emit mint_token(u) }
+      effect store.insert("k", "v")
+      undo   store.remove(box.k)
+""" + MINT_TAIL)
+    _ok(MINT + """
+      let ts = [emit mint_token(u)]
+      effect store.insert("k", "v")
+      undo   store.remove(ts[0])
+""" + MINT_TAIL)
+
+
+def test_undo_of_a_computed_value_reached_through_an_alias_compiles():
+    """Twin of `g5_undo_method_ref_alias.rvl`: following a chain of locals is
+    the same question as following one, and here every hop carries a value the
+    body computed."""
+    _ok(MINT + """
+      let t = emit mint_token(u)
+      let s = t
+      effect store.insert(s, "v")
+      undo   store.remove(s)
+""" + MINT_TAIL)
+
+
+def test_undo_of_a_computed_value_out_of_an_if_arm_compiles():
+    """Twin of `g5_undo_method_ref_if_arm.rvl`: an `if` whose ARMS are computed
+    values produces a value, so both arms are read the same way the direct
+    binding is."""
+    _ok(MINT + """
+      let t = if (1 == 1) { emit mint_token(u) } else { emit mint_token("x") }
+      effect store.insert(t, "v")
+      undo   store.remove(t)
+""" + MINT_TAIL)
+
+
+def test_a_call_written_in_the_slot_is_still_refused():
+    """The counterexample to the four twins above, in the same file so a later
+    widening of them has it in front of it: the same call, the same slot, and
+    this one IS written in the slot, so it runs in teardown and crosses."""
+    src = MINT + """
+      effect store.insert(u, "v")
+      undo   store.remove(emit mint_token(u))
+""" + MINT_TAIL
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src)
+    assert "`mint_token`, which is an emission" in str(excinfo.value)
+    assert "may not cross a boundary (G5)" in str(excinfo.value)
 
 
 # ------------------------------------------------------------ scope shadowing
