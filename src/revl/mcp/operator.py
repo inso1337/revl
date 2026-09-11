@@ -101,6 +101,22 @@ TOOL_VERB = {
     # while every live component is in `tenant_a*`; an operator who must be
     # able to hit the button always needs `may estop on *`.
     "revl_estop": "estop",
+    # item 476: `revl_deploy` reconfigures a running composition ACROSS MACHINES
+    # (via = ssh). It reaches the same privileged operation as `revl deploy`'s
+    # COMMIT path (`deploy.deploy_ssh_map` -> `run_deploy`), which hot-swaps the
+    # composition on a second host — the swap authority, extended over a machine
+    # boundary. It gets its OWN verb (`deploy`) rather than folding into `swap`
+    # because the boundary it opens is the machine boundary, the authority
+    # address an operator must be able to hold SEPARATELY from a same-host swap:
+    # an operator trusted to hot-swap a component locally is not automatically
+    # trusted to push a composition onto a second host and drive its teardown.
+    # Its target set is the WHOLE running composition (`_targets`' fall-through
+    # to `_live_targets`), because a deploy reconfigures the composition as one
+    # coordinated unit across the boundary: a subject-scoped grant authorizes
+    # only while EVERY live component is within it, so an operator who must be
+    # able to deploy always needs `may deploy on *`. (docs/operator-capabilities.md,
+    # issue #830.)
+    "revl_deploy": "deploy",
     # Session-plane mutations are operator authority too.  The related tool
     # variants share one capability so profiles do not need implementation
     # details such as the two-step fork protocol.

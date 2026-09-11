@@ -82,9 +82,12 @@ from . import gauntlet as _gauntlet
 from . import quarantine as _quarantine
 from . import repair as _repair
 from . import ship as _ship
+from . import deploy as _mcp_deploy
 from .persist import RestoreError
-from .approval import ApprovalRequired, two_step_payload
+from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha,
+                       _canon as _approval_canon)
 from .. import query as Q
+from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
 from .session import Session, SessionError
@@ -1645,6 +1648,94 @@ def _tool_ship(arguments: dict) -> dict:
                       swap=_tool_swap, session=SESSION)
 
 
+def _tool_deploy(arguments: dict) -> dict:
+    """One intent, one call: drive an admission-gated cross-machine deploy through
+    the landed ssh leg (roadmap item 476, issue #830). The orchestration lives in
+    `deploy.py`; this is the thin wiring that hands it the deploy-map admission
+    gate, the ssh/local run leg, and the item-246 approval gate."""
+    return _mcp_deploy.deploy(arguments,
+                              admit=_tool_deploy_admit,
+                              run=_tool_deploy_run,
+                              authorize=_tool_deploy_authorize)
+
+
+def _tool_deploy_admit(arguments: dict) -> dict:
+    """The deploy-map admission gate (`deploy.admit_deploy_map`): the effect-free
+    half that parses the `[processes.<p>.deploy]` tables and refuses a machine
+    boundary without a pinned host key, an unknown `via`, a network provider, and
+    so on — before any boundary opens. Nothing is staged or spawned here."""
+    verdict = _deploy.admit_deploy_map(arguments.get("placement"))
+    return {
+        "ok": verdict.ok,
+        "targets": {p: {"process": t.process, "via": t.via,
+                        "boundary": t.boundary, "host": t.host}
+                    for p, t in verdict.targets.items()},
+        "refusals": [dict(r) for r in verdict.refusals],
+        "boundaries": dict(verdict.boundaries),
+    }
+
+
+def _tool_deploy_run(arguments: dict) -> dict:
+    """The coordinated PREPARE/COMMIT/ABORT protocol over the admitted map. The
+    choice of leg is the admitted verdict, not a flag — exactly as the CLI's
+    COMMIT path decides it — so a map can never open a boundary it did not
+    admit."""
+    import tempfile  # noqa: PLC0415 — only the COMMIT path needs a scratch dir
+
+    placement = arguments.get("placement")
+    bundle = arguments.get("bundle")
+    backend = arguments.get("backend") or "python"
+    verdict = _deploy.admit_deploy_map(placement)
+    state_dir = tempfile.mkdtemp(prefix="revl-mcp-deploy-")
+    has_ssh = any(t.via == _deploy.VIA_SSH for t in verdict.targets.values())
+    if has_ssh:
+        return _deploy.deploy_ssh_map(
+            placement, local_bundle=bundle, backend=backend, state_dir=state_dir)
+    return _deploy.deploy_local_map(placement, state_dir=state_dir)
+
+
+def _tool_deploy_authorize(arguments: dict) -> None:
+    """The deploy's approval gate (item 246): a cross-machine reconfiguration is
+    an irreversible crossing, so `apply: true` demands a standing approval before
+    the coordinated protocol may run. Reuses the SAME two-step ticket chokepoint
+    `revl_approve` drives — `_find_standing_approval` -> `_consume_approval`, else
+    `_issue_ticket` + `ApprovalRequired` — not a parallel gate.
+
+    The ticket is keyed by the deploy's own identity (the placement + bundle +
+    backend digest), so the identical re-issue after `revl_approve` finds the
+    standing approval and fires exactly once. The conductor verifies the signed
+    receipts either way; this only decides whether it may open the boundary at
+    all."""
+    placement = arguments.get("placement")
+    bundle = arguments.get("bundle")
+    backend = arguments.get("backend") or "python"
+    processes = sorted((placement or {}).get("processes") or {})
+    body = {
+        "kind": "deploy",
+        "component": "*",
+        "key": None,
+        "method": None,
+        "candidateHash": _approval_sha(_approval_canon({
+            "placement": placement, "bundle": bundle, "backend": backend})),
+        "argsDigest": _approval_sha(_approval_canon({
+            "placement": placement, "bundle": bundle, "backend": backend,
+            "apply": True})),
+        "capabilities": [],
+        "classCCapabilities": [],
+        "crossings": [{"kind": "deploy", "component": "*"}],
+        "closureComponents": [],
+        "boundary": "machine",
+        "targets": processes,
+    }
+    body["hash"] = _approval_sha(_approval_canon(body))
+    standing = SESSION._find_standing_approval(body)
+    if standing is not None:
+        SESSION._consume_approval(standing)  # durable spend before the boundary opens
+        return
+    SESSION._issue_ticket(body)
+    raise ApprovalRequired(body)
+
+
 def _tool_audit(arguments: dict) -> dict:
     try:
         ir = _compile(*_candidate_of(arguments))
@@ -1970,6 +2061,77 @@ TOOLS = [
         # it is not purely read-only, even though it defaults to a dry run.
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_ship,
+    },
+    {
+        "name": "revl_deploy",
+        "description": "Drive an admission-gated cross-machine reconfiguration of a "
+                       "running composition to a second host (roadmap item 476, "
+                       "issue #830) — the acting, cross-host half of revl_ship, "
+                       "through the same ssh leg `revl deploy` uses. Runs the "
+                       "deploy-map admission gate (refusing a machine boundary "
+                       "without a pinned host key, an unknown `via`, a network "
+                       "provider, and so on) and reports the plan. Without "
+                       "`apply`, or with `apply: false`, this is a REHEARSAL: it "
+                       "admits and plans and mutates NOTHING on either host. With "
+                       "`apply: true` it stages the attested bundle under each "
+                       "pinned host key and drives the coordinated "
+                       "PREPARE/COMMIT/ABORT protocol — the far host re-hashes the "
+                       "bytes it runs, the conductor verifies the signed admission "
+                       "and COMMIT receipts (receipt chain, item 127), and a "
+                       "rejected candidate leaves both hosts untouched (a remote "
+                       "the conductor cannot settle on ABORT is `unresolved`, never "
+                       "a false rollback). The cross-machine reconfiguration is an "
+                       "irreversible crossing, so `apply: true` is additionally "
+                       "refused without the configured approval: it returns an "
+                       "`approvalRequired` ticket, and the identical re-issue "
+                       "after `revl_approve` fires exactly once. Host/user/port/"
+                       "known_hosts/host_key/remote_bundle/ssh options are the "
+                       "`[processes.<p>.deploy]` table inside `placement` (the "
+                       "shape `parse_deploy_map` and `DeployTarget` read), not "
+                       "top-level arguments.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "placement": {
+                    "type": "object",
+                    "description": "the deploy map: a placement map with a "
+                                   "`[processes.<p>.deploy]` table per process "
+                                   "(keys: via, image, host, runner, trust, "
+                                   "known_hosts, host_key, remote_bundle, port, "
+                                   "extra_args). A `via = ssh` target needs `host`, "
+                                   "`known_hosts` (the PINNED host-key file), "
+                                   "`host_key` (a conductor-side copy of the far "
+                                   "host's receipt-signing key) and `remote_bundle` "
+                                   "(the path on the far host the bundle is staged "
+                                   "to and re-hashed).",
+                },
+                "bundle": {
+                    "type": "string",
+                    "description": "path to the attested bundle the far host "
+                                   "re-hashes and the conductor verifies against "
+                                   "the signed receipts; required for `apply: true` "
+                                   "on a cross-machine (`via = ssh`) deploy.",
+                },
+                "backend": {
+                    "type": "string",
+                    "description": "the bundle backend (`python`); defaults to "
+                                   "`python`.",
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": "when true, perform the cross-machine "
+                                   "reconfiguration after admission and approval "
+                                   "(destructive); default false is the read-only "
+                                   "rehearsal.",
+                },
+            },
+            "required": ["placement"],
+        },
+        # capable of mutation (apply); annotate like revl_swap / revl_ship so an
+        # agent knows it is not purely read-only, even though it defaults to a
+        # dry run.
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_deploy,
     },
     {
         "name": "revl_audit",

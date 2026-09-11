@@ -11,7 +11,7 @@
     "src/revl/typecheck.py",
     "tools/build_gate_crate.py"
   ],
-  "frontier": "selfhost-admit:a41bb145714e1d7a",
+  "frontier": "selfhost-admit:c0b07097df3449e8",
   "frontier_excluded_builtins": [],
   "frontier_excluded_keywords": [],
   "gate_api_version": "1.0.0",
@@ -50,7 +50,7 @@
     "selfhost/lower.rvl"
   ],
   "selfhost_root": "selfhost/lower.rvl",
-  "source_digest": "a41bb145714e1d7a0bea3d072284f2a212c6421786280cd511fffdb3f686791c",
+  "source_digest": "c0b07097df3449e81db72f1d3dee7f7a2a1c1f7d62502070fd767bbfed846a46",
   "symbols_api_version": "0.1.0",
   "verdict_arms": [
     "refused",

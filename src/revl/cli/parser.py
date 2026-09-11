@@ -729,6 +729,14 @@ def build_parser() -> argparse.ArgumentParser:
                            "canonical sequential baseline, and report any "
                            "interleaving that violates a property (py tier; "
                            "docs/design/295-schedule-testing.md)")
+    test.add_argument("-v", "--verbose", action="store_true",
+                      help="print one PASS/FAIL line per test with its duration "
+                           "(the py tier already prints one line per test; -v "
+                           "adds the per-test timing)")
+    test.add_argument("--report", choices=("json", "tap"), default=None,
+                      help="machine-readable per-test report (name/status/"
+                           "duration) on the py tier, instead of the human "
+                           "summary")
 
     mcp = sub.add_parser("mcp", help="MCP bridge: serve the compiler, or project services <-> tools")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -1413,6 +1421,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--signer", metavar="NAME", default=None,
         help="an optional signer label recorded in (and signed into) the "
              "attestation; falls back to the REVL_ATTEST_SIGNER env var")
+    attest_cmd.add_argument(
+        "--certificate", action="store_true",
+        help="sign a component certificate instead of an attestation (item "
+             "474): the same admitted verdict, plus the recorded per-guarantee "
+             "coverage, the proof model, the runtime evidence and the caveats, "
+             "all read out of the formal package (docs/revl-attest.md)")
+    attest_cmd.add_argument(
+        "--verify-certificate", action="store_true",
+        help="verify mode for a component certificate: TARGET is a "
+             "certificate JSON, checked against its key and re-derived from "
+             "the formal artifacts on this machine. Exits nonzero if it is "
+             "invalid, if a guarantee's status moved, or if the composition "
+             "changed with --against")
+    attest_cmd.add_argument(
+        "--formal", metavar="DIR", default=None,
+        help="the formal package to read the per-guarantee evidence from "
+             "(defaults to REVL_FORMAL_DIR, then `formal/` in the working "
+             "directory or above this one)")
     attest_cmd.add_argument(
         "--json", action="store_true",
         help="machine-readable output: the attestation document, or the "
