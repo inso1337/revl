@@ -2151,11 +2151,8 @@ component UserCache requires db: Database provides cache: Cache {
   provide cache {
     fn put(u) {
       let t = emit mint_token(u)
-      // The bracket's inverse has to stay host-local (G5): `store.remove(t)`
-      // would make teardown depend on the value mint_token returned across a
-      // boundary, so the key is a literal and the secret rides as the value.
-      effect store.insert("CACHE-815", t)
-      undo   store.remove("CACHE-815")
+      effect store.insert(t, "PUBLIC-VALUE-815")
+      undo   store.remove(t)
       emit db.execute(t)
       return 1
     }
