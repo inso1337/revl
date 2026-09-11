@@ -100,7 +100,7 @@ was corrected by hand and had drifted back within a day.
 | closures.md | needs-work | 7 |  |
 | collections.md | needs-work | 34 | yes |
 | commands-reference.md | current | 8 |  |
-| component-leases.md | needs-work | 31 |  |
+| component-leases.md | needs-work | 33 |  |
 | composition-bootstrap.md | needs-work | 1 |  |
 | composition-layers.md | needs-work | 20 |  |
 | composition-rows.md | needs-work | 23 |  |

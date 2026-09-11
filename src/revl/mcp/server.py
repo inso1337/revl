@@ -2789,7 +2789,9 @@ TOOLS = [
                        "identity (item 55); active leases show in revl_state; every "
                        "claim/renew/release/expiry rides the causal trace (item 27). "
                        "Leases expire on their TTL, so a walked-away agent never "
-                       "wedges the workspace. See docs/component-leases.md.",
+                       "wedges the workspace; a TTL is bounded to 86400s (and a "
+                       "restored lease is clamped to the same horizon) so no "
+                       "lease can be made permanent. See docs/component-leases.md.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2798,9 +2800,10 @@ TOOLS = [
                                           "default claim"},
                 "component": {"type": "string",
                               "description": "the component name to lease"},
-                "ttl": {"type": "number",
+                "ttl": {"type": "number", "exclusiveMinimum": 0,
+                        "maximum": _leases.MAX_TTL,
                         "description": "lease duration in seconds (claim/renew; "
-                                       "default 300)"},
+                                       "default 300, max 86400)"},
             },
             "required": ["component"],
         },
