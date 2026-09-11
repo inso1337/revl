@@ -2283,6 +2283,24 @@ class _ComponentEmitter:
         # recorder writes to the WAL so the fork rewind can tell a host-confined
         # inverse from a boundary-crossing one instead of assuming every
         # unrecorded scope is confined.
+        # A witnessed extern whose confidentiality is declared on the INVERSE's
+        # parameter (`undo revoke(result)` against `revoke(id: Secret[Str])`)
+        # rather than on its own return. `taint.py` stamps the same
+        # `secret_witness` for both spellings and the four WAL tiers redact the
+        # referent off it, because their redaction is positional and decided
+        # before the program runs. This tier redacts by VALUE at the recorder,
+        # so the value has to be REGISTERED before the frame takes it, and the
+        # return-position origin (`@secret_result` on the extern, item 421 F6)
+        # is not there to do it — the extern's declared return is ordinary.
+        #
+        # `secret_witness` without `secret_return` is exactly that spelling: a
+        # `Secret[...]` in the `Ok` arm implies `secret_return`, so the return
+        # position always carries both and never reaches this line. Emitted ONLY
+        # then, so every other witnessed extern is byte-identical.
+        if ext.get("secret_witness") and not ext.get("secret_return"):
+            self.uses.add("mark_secret")
+            out.add(indent + 1,
+                    f"{_runtime_ref('mark_secret')}({tmp}.value)")
         extra = _transactional_register_kwargs(ext) + _transactional_scope_kwargs(ext)
         out.add(indent + 1,
                 f"yield _revl_frame.transactional((lambda result: {undo}), "
@@ -2321,6 +2339,14 @@ class _ComponentEmitter:
         # item 872: the declared capability scope IS carried here, because the
         # scope gate is a safety property of every witnessed inverse and not a
         # recovery nicety (the deferred register above is).
+        #
+        # A confidentiality declared on the INVERSE's parameter rather than on
+        # the extern's return registers the witness here, for the same reason
+        # `_witnessed_step` does it — see that comment.
+        if ext.get("secret_witness") and not ext.get("secret_return"):
+            self.uses.add("mark_secret")
+            out.add(indent + 1,
+                    f"{_runtime_ref('mark_secret')}({tmp}.value)")
         out.add(indent + 1,
                 f"_revl_frame.transactional_method((lambda result: {undo}), "
                 f"{tmp}.value{_transactional_scope_kwargs(ext)})")

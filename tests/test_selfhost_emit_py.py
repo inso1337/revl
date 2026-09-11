@@ -204,6 +204,21 @@ CORPUS = [
     "adt.rvl",
     "cache_pure.rvl",
     "witnessed.rvl",
+    # item 421 F6 / item 243: the declared `Secret[T]` on a witnessed INVERSE's
+    # parameter — the receiving end of the confidentiality `secrets.rvl` spells
+    # at the producing end, and the only spelling that separates `secret_witness`
+    # from `secret_return`. The py tier redacts by VALUE at the recorder, so both
+    # sites that register the witness (the activation-body step and the
+    # provide-method step) need this document; added FAILING FIRST, the port
+    # emitted neither the registration nor the `mark_secret` import.
+    "witnessed_secret.rvl",
+    # item 243: the same receiver-position spelling with the witnessed extern
+    # DECLARED BUT NEVER INVOKED. The reference adds the `mark_secret` import at
+    # the emit site, so no registration means no import; the port's import line
+    # is written before any body is rendered, so it has to walk the bodies to ask
+    # the same question. Added FAILING FIRST against a gate keyed on the extern
+    # table, which imported `mark_secret` where the reference did not.
+    "witnessed_secret_unused.rvl",
     "branches.rvl",
     "inline.rvl",
     # item 306: the `arm_body_mentions` / `arm_body_is_bind` binder-scan

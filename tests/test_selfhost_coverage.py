@@ -134,14 +134,21 @@ def test_the_gate_reproduces_the_item_429d_secret_gap(tool, monkeypatch):
     that document and its later nested-secret companion back out and this gate
     must NAME the two markings. A gate that stays green under the ablation would
     be decoration.
+
+    The ablation drops every document that spells a `Secret[...]`, which since
+    item 243 includes `witnessed_secret.rvl` (the inverse-parameter spelling of
+    `secret_witness`). Dropping only the two origin/receiver fixtures would
+    leave `secret=<true>` and `secret_witness=<true>` reached through that
+    document and prove less than the test says it does. The set is read off the
+    documents rather than listed by name so a later secret-bearing fixture
+    cannot quietly keep one of the markings covered.
     """
     keep = tool.corpus_documents
 
     def without_secrets(tier):
         if tier != "py":
             return keep(tier)
-        return [p for p in keep(tier)
-                if p.name not in {"secrets.rvl", "secrets_nested.rvl"}]
+        return [p for p in keep(tier) if "Secret[" not in p.read_text()]
 
     monkeypatch.setattr(tool, "corpus_documents", without_secrets)
     problems = tool.check(tool.survey())
