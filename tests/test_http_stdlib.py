@@ -248,6 +248,33 @@ def test_headers_are_read_from_the_record(ns):
     assert ns["ctype_for"]("/gone") == ""
 
 
+def test_a_header_name_is_matched_case_insensitively(ns):
+    # Field names are case-insensitive (RFC 9110 5.1). This module's own response
+    # builders write lower-case names, but a REQUEST head carries the wire's own
+    # spelling -- `Content-Type`, `Authorization` -- and the HTTP face stores that
+    # spelling into the same `List[Header]` (`src/revl/mcp/http_face.py`,
+    # `_build_request`). A reader comparing with `==` therefore answered `None`
+    # for `"content-type"` against a `Content-Type` the wire really carried: "no
+    # such header" for a header that is present, while `stdlib/framing.rvl`'s
+    # `header_count` answered 1 for the very same list. Both now compare through
+    # the one `header_name_eq`, so every spelling finds the field.
+    wire = [{"name": "Content-Type", "value": "application/json"}]
+    assert ns["header_value"](wire, "content-type") == "application/json"
+    assert ns["header_value"](wire, "Content-Type") == "application/json"
+    assert ns["header_value"](wire, "CONTENT-TYPE") == "application/json"
+    assert ns["header_value"](wire, "Content-type") == "application/json"
+    # an absent name is still the typed None, never a sentinel
+    assert ns["header_value"](wire, "authorization") is None
+    # the first match wins, as documented, whatever case a later repeat uses
+    dup = [{"name": "Set-Cookie", "value": "a"},
+           {"name": "set-cookie", "value": "b"}]
+    assert ns["header_value"](dup, "SET-COOKIE") == "a"
+    # a name of a different LENGTH is never equal, so the fold cannot make a
+    # prefix or a padded name collide
+    assert ns["header_value"](wire, "content-type ") is None
+    assert ns["header_value"](wire, "content") is None
+
+
 # ---- Cordis-aligned status_text / ok / Method read through the type ----------
 
 def test_status_text_mirrors_cordis_statustext(ns):

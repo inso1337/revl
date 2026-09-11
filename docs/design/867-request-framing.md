@@ -160,9 +160,12 @@ pins that decision with the RFC citations in the test body.
   pipelined request behind it must not be parsed.
 - **Do not reach for `header_value` to read a length.** `stdlib/http.rvl`'s
   `header_value` answers with the first match only, which cannot see a duplicate
-  at all. `header_values` / `header_count` are the duplicate-visible readers, and
-  `header_values(headers, "content-length")` with `.length() > 1` is exactly the
-  test a reviewer should look for when auditing a reader.
+  at all. `stdlib/framing.rvl`'s `header_values` / `header_count` are the
+  duplicate-visible readers, and `header_values(headers, "content-length")` with
+  `.length() > 1` is exactly the test a reviewer should look for when auditing a
+  reader. All three compare names case-insensitively (RFC 9110 5.1) through the
+  one `header_name_eq`, so a reader that spells a field differently from the way
+  the request head stored it still finds the same field.
 - **Vendors of the stdlib must re-vendor.** The stdlib stamp moves 5 to 6
   (`stdlib/version.rvl`), because a component that vendored the stdlib under the
   old stamp predates `body_length` and is still hand-rolling framing.
