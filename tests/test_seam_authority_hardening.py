@@ -24,11 +24,23 @@ C (verify 363) a resource nested in a record/variant a wrapper renames, and a
     resolves a closed generic argument (`ConnG[Socket]`), so all four shapes are
     already refused; these are the regression pins, at BOTH a cross-tier and a
     same-tier seam.
+
+D (HIGH) the wire DECODER was FAIL-OPEN in the same way B was, on the other
+    side: `_decode_value` resolved an untrusted `$kind` with a bare
+    `getattr(module, kind)` and CALLED the result. Every program fn is emitted
+    as a module-level `def`, so `{"$kind": "<fn name>", "$value": <arg>}` invoked
+    that fn with an attacker-chosen argument — and `_invoke` decoded its args
+    BEFORE consulting the export allow-list, so a forged tag reached functions
+    the seam never exported. A tag must now name a declared ADT/`Result` case
+    class and nothing else, refused as `SeamTagError` (a `SeamMarshalError`) and
+    answered as an ordinary error reply.
 """
 
+import asyncio
 import dataclasses
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -278,3 +290,130 @@ def test_b_is_emitted_case_discriminates():
     assert not b._is_emitted_case(_OpaqueDict())
     assert not b._is_emitted_case(_OpaqueSlots())
     assert not b._is_emitted_case(_Rec(1, "x"))
+
+
+# --------------------------------------------------------------------------
+# Finding D — a wire `$kind` may only name a DECLARED case
+# --------------------------------------------------------------------------
+
+_INVOKED: list = []
+
+
+def _record(*args):
+    """Stands in for an emitted program fn: a module-level `def` that a forged
+    `$kind` could name. Records the call so a test can prove it never ran."""
+    _INVOKED.append(args)
+    return "ran"
+
+
+def _emitted_module():
+    """A module-shaped object holding what an emitted program module holds: its
+    own functions as module-level names, the declared case classes, and the
+    non-case classes (a record) that share the namespace."""
+    mod = types.ModuleType("revl_emitted_probe")
+    mod._record = _record
+    mod.privileged = _record          # a fn the seam never exported
+    mod._Live = _Live
+    mod._Dead = _Dead
+    mod._Ok = _Ok
+    mod._Rec = _Rec
+    return mod
+
+
+def test_d_the_probe_fn_is_reachable_by_name():
+    # non-vacuity: the gadget set is real — these names ARE module attributes and
+    # calling one DOES record, so the refusals below are not passing by accident.
+    mod = _emitted_module()
+    _INVOKED.clear()
+    assert mod._record("x") == "ran"
+    assert _INVOKED == [("x",)]
+    assert getattr(mod, "privileged") is _record
+
+
+@pytest.mark.parametrize("kind", ["_record", "privileged", "_Rec", "__builtins__",
+                                  "__spec__", "no_such_name", 7, None, ["_Ok"]])
+def test_d_forged_kind_is_refused_and_never_invoked(kind):
+    b = _bridge()
+    mod = _emitted_module()
+    _INVOKED.clear()
+    with pytest.raises(b.SeamTagError) as err:
+        b._decode_value({"$kind": kind, "$value": "victim"}, mod)
+    assert _INVOKED == []                     # the fn was never CALLED
+    assert repr(kind) in str(err.value)       # and the tag is named in the text
+
+
+def test_d_refusal_is_a_marshal_error_so_existing_catchers_hold():
+    # `SeamTagError` subclasses `SeamMarshalError`, so every existing catcher
+    # (and the provider's marshalling of a failed call) still sees a refusal.
+    b = _bridge()
+    assert issubclass(b.SeamTagError, b.SeamMarshalError)
+    with pytest.raises(b.SeamMarshalError):
+        b._decode_value({"$kind": "_record"}, _emitted_module())
+
+
+def test_d_forged_kind_never_reaches_a_function_outside_exports():
+    # THE pin for the authorisation bypass: `_invoke` decodes args BEFORE it
+    # consults `exports`, so pre-fix this frame invoked `privileged` — a fn the
+    # seam does not export — with an attacker-chosen argument. It must now be
+    # refused, with no invocation, and answered rather than raised.
+    b = _bridge()
+    mod = _emitted_module()
+    _INVOKED.clear()
+    req = {"key": "svc", "method": "ping",
+           "args": [{"$kind": "privileged", "$value": "victim"}]}
+    reply = asyncio.run(b._invoke({"svc": object()}, {"svc": ["ping"]}, req, mod))
+    assert _INVOKED == []
+    assert reply["ok"] is False
+    # answered, not raised, and the tag is scrubbed out of the text by the same
+    # funnel every other failure crosses (item 421 F5) rather than echoed back.
+    assert "SeamTagError" in reply["error"]
+    assert "<redacted:arg>" in reply["error"]
+
+
+def test_d_a_legitimate_tagged_arg_still_reaches_the_exported_method():
+    # non-vacuity for the pin above: the same call path with a DECLARED case
+    # decodes, passes the allow-list, and is delivered.
+    b = _bridge()
+    seen = []
+
+    class _Svc:
+        def ping(self, arg):
+            seen.append(arg)
+            return "pong"
+
+    req = {"key": "svc", "method": "ping",
+           "args": [{"$kind": "_Live", "$value": 3}]}
+    reply = asyncio.run(b._invoke({"svc": _Svc()}, {"svc": ["ping"]}, req,
+                                  _emitted_module()))
+    assert reply == {"ok": True, "value": "pong"}
+    assert len(seen) == 1 and isinstance(seen[0], _Live) and seen[0].value == 3
+
+
+def test_d_legit_cases_still_decode():
+    b = _bridge()
+    mod = _emitted_module()
+    assert b._decode_value({"$kind": "_Ok", "$value": 4}, mod).value == 4
+    assert isinstance(b._decode_value({"$kind": "_Dead"}, mod), _Dead)
+    nested = b._decode_value({"$kind": "_Live", "$value": {"$kind": "_Ok",
+                                                          "$value": 1}}, mod)
+    assert isinstance(nested, _Live) and nested.value.value == 1
+
+
+def test_d_without_a_module_a_tagged_dict_still_passes_through():
+    # the legacy serve form has no module to resolve tags against, so the
+    # pre-existing pass-through is unchanged.
+    b = _bridge()
+    assert b._decode_value({"$kind": "anything"}, None) == {"$kind": "anything"}
+
+
+def test_d_is_case_class_discriminates():
+    # the predicate's discriminator is `__slots__`: emitted cases declare it, a
+    # record does not — which is what keeps `$kind: "<record name>"` refused.
+    b = _bridge()
+    assert b._is_case_class(_Live) and b._is_case_class(_Dead)
+    assert b._is_case_class(_Ok) and b._is_case_class(_Base)
+    assert not b._is_case_class(_Rec)
+    assert not b._is_case_class(object)
+    assert not b._is_case_class(_Live(1))      # an instance, not the class
+    assert not b._is_case_class(_record)       # a function
+    assert not b._is_case_class(None)
