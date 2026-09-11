@@ -1773,6 +1773,41 @@ pub fn revl_secret_result<T: std::fmt::Display>(value: T) -> T {
     value
 }
 
+// A declared-Secret value that is NOT a scalar has no `Display` on this tier:
+// `Bytes` lowers to `Vec<u8>` and `List[Str]` to `Vec<String>`, and rust
+// implements `Display` for neither, so the two doors above cannot take them at
+// all (item 421 F6(f)). `Debug` is the one formatter every type a `Secret[T]`
+// lowers to implements -- the std containers, the emitted records and variants,
+// and cordis `Value` -- and it is also the only one an emitted sink can write
+// such a value with, so the Debug form is what gets registered, through the
+// same `revl_renderings` the scalar doors use.
+pub fn revl_mark_secret_encoded<T: std::fmt::Debug + ?Sized>(value: &T) {
+    revl_remember_secret(format!("{:?}", value));
+}
+
+pub fn revl_secret_result_encoded<T: std::fmt::Debug>(value: T) -> T {
+    revl_remember_secret(format!("{:?}", value));
+    value
+}
+
+// `Bytes` carries a second face the Debug form does not contain: a sink that
+// prints the payload writes the decoded text, and the wire carries the json
+// array. Both are registered, the same pair the go tier registers for a byte
+// slice (item 421 F6(e)). Concrete in `&[u8]`, so the json face comes from the
+// encoder itself rather than from a bound `Value` does not satisfy.
+pub fn revl_mark_secret_bytes(value: &[u8]) {
+    revl_remember_secret(String::from_utf8_lossy(value).into_owned());
+    if let Ok(json) = serde_json::to_string(value) {
+        revl_remember_secret(json);
+    }
+    revl_remember_secret(format!("{:?}", value));
+}
+
+pub fn revl_secret_result_bytes(value: Vec<u8>) -> Vec<u8> {
+    revl_mark_secret_bytes(&value);
+    value
+}
+
 // revl_redact_text replaces every registered secret in free-form host text.
 pub fn revl_redact_text(text: String) -> String {
     revl_secret_values(|values| {
@@ -1941,12 +1976,45 @@ def _emit_secret_registry() -> list[str]:
     return _SECRET_PREAMBLE.strip("\n").split("\n")
 
 
-def _secret_config_fields(config_fields: list) -> list[str]:
-    """The config fields the plugin closure registers at load, by rust name."""
+def _secret_config_fields(config_fields: list) -> list[tuple[str, object]]:
+    """The config fields the plugin closure registers at load, as (rust name,
+    declared type) pairs -- the type picks the door the registration goes
+    through (see `_secret_mark_call`)."""
     if not _SECRET_MODE:
         return []
-    return [_ident(f.get("name"), "config field")
+    return [(_ident(f.get("name"), "config field"), f.get("type"))
             for f in config_fields if isinstance(f, dict) and f.get("secret")]
+
+
+# The declared `Secret[T]` types that lower to a Rust type implementing
+# `std::fmt::Display`. Everything else -- `Bytes` -> `Vec<u8>`, `List[Str]` ->
+# `Vec<String>`, `Map[K,V]`, a record, an unresolvable name -> cordis `Value` --
+# has no `Display`, so its door takes the `Debug`/encoder pair instead (item 421
+# F6(f)). Kept as a table rather than a `_rust_type` lookup because the call has
+# to be chosen at the door, where the declared surface name is what is in hand.
+_SECRET_DISPLAY_TYPES = frozenset({"Str", "Int", "Int32", "Float", "Bool"})
+
+
+def _secret_mark_call(declared: object, arg: str, tail: str = "") -> str:
+    """The registration a `Secret[T]` mark door emits, chosen by declared type."""
+    if declared in _SECRET_DISPLAY_TYPES:
+        fn = "revl_mark_secret"
+    elif declared == "Bytes":
+        fn = "revl_mark_secret_bytes"
+    else:
+        fn = "revl_mark_secret_encoded"
+    return f"{fn}(&{arg});{tail}"
+
+
+def _secret_result_call(declared: object, arg: str) -> str:
+    """The registration a `Secret[T]` return door wraps its value with."""
+    if declared in _SECRET_DISPLAY_TYPES:
+        fn = "revl_secret_result"
+    elif declared == "Bytes":
+        fn = "revl_secret_result_bytes"
+    else:
+        fn = "revl_secret_result_encoded"
+    return f"{fn}({arg})"
 
 
 def _secret_config_mark(config_fields: list, indent: int) -> list[str]:
@@ -1958,19 +2026,22 @@ def _secret_config_mark(config_fields: list, indent: int) -> list[str]:
     if not secret:
         return []
     pad = "    " * indent
-    return [f"{pad}revl_mark_secret(&config.{f});" for f in secret]
+    return [f"{pad}{_secret_mark_call(t, f'config.{f}')}" for f, t in secret]
 
 
-def _secret_method_params(env: "_Env", key: str, mname: str, params: list) -> list[str]:
-    """The parameters a provide method registers at its head: the positions the
-    service declared `Secret[T]`, read off the same `params[i]["secret"]` stamp
-    the py, ts, go and java emitters read. Empty outside `_SECRET_MODE`."""
+def _secret_method_params(env: "_Env", key: str, mname: str,
+                          params: list) -> list[tuple[str, object]]:
+    """The parameters a provide method registers at its head, as (rust name,
+    declared type) pairs: the positions the service declared `Secret[T]`, read
+    off the same `params[i]["secret"]` stamp the py, ts, go and java emitters
+    read. Empty outside `_SECRET_MODE`."""
     if not _SECRET_MODE:
         return []
     service = env.provides[key]
     declared = env.services[service]["methods"].get(mname, {}).get("params", [])
-    secret = {mp["name"] for mp in declared if isinstance(mp, dict) and mp.get("secret")}
-    return [p for p in params if p in secret]
+    secret = {mp["name"]: mp.get("type")
+              for mp in declared if isinstance(mp, dict) and mp.get("secret")}
+    return [(p, secret[p]) for p in params if p in secret]
 
 
 def _witnessed_extern_for(env: "_Env", acquire: object) -> dict | None:
@@ -4248,7 +4319,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             # lets every free-form sink scrub it once the body hands it on.
             secret_params = _secret_method_params(
                 env, key, original_mname, method.get("params") or [])
-            mark = "".join(f"revl_mark_secret(&{p}); " for p in secret_params)
+            mark = "".join(_secret_mark_call(t, p, tail=" ")
+                           for p, t in secret_params)
             if _method_has_effectful_steps(method):
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
                 if secret_params:
@@ -4580,7 +4652,8 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             # to a free-form sink is scrubbed.
             secret_params = _secret_method_params(
                 env, key, mname, method.get("params") or [])
-            mark = "".join(f"revl_mark_secret(&{p}); " for p in secret_params)
+            mark = "".join(_secret_mark_call(t, p, tail=" ")
+                           for p, t in secret_params)
             out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {mark}{_method_body(env, method)} }}")
         out.append("}")
         out.append("")
@@ -7556,7 +7629,7 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
             forward = ", ".join(_ident(p.get("name"), "extern parameter name")
                                 for p in ext.get("params") or [])
             out.append(f"fn {name}({params}) -> {returns} {{")
-            out.append(f"    revl_secret_result({impl}({forward}))")
+            out.append(f"    {_secret_result_call(ext.get('returns'), f'{impl}({forward})')}")
             out.append("}")
             out.append("")
             out.append(f"fn {impl}({params}) -> {returns} {{")
