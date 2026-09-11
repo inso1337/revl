@@ -169,29 +169,51 @@ private static java.util.List<String> revlRenderings(String text) {
 // message would quote, so they are what is remembered (the py tier's
 // register_secret_tree). Keys of a map are field names the author wrote.
 private static void revlRememberSecret(Object value) {
+    // Identity, not equality: two equal-but-distinct nodes must both be
+    // marked, and hashing a container to test membership is the work this walk
+    // exists to avoid. A PATH, not a depth -- a cap terminates too, but it also
+    // drops the leaves of any legal value deeper than the cap, which is the
+    // confidentiality the walk exists to keep.
+    revlRememberSecret(value, java.util.Collections.newSetFromMap(
+            new java.util.IdentityHashMap<Object, Boolean>()));
+}
+
+private static void revlRememberSecret(Object value, java.util.Set<Object> seen) {
     if (value == null || value instanceof Boolean) {
         return;
     }
     if (value instanceof java.util.Optional<?> opt) {
-        opt.ifPresent(Components::revlRememberSecret);
+        if (!seen.add(value)) {
+            return;
+        }
+        opt.ifPresent(item -> revlRememberSecret(item, seen));
         return;
     }
     if (value instanceof java.util.Collection<?> items) {
+        if (!seen.add(value)) {
+            return;
+        }
         for (Object item : items) {
-            revlRememberSecret(item);
+            revlRememberSecret(item, seen);
         }
         return;
     }
     if (value instanceof java.util.Map<?, ?> record) {
+        if (!seen.add(value)) {
+            return;
+        }
         for (Object item : record.values()) {
-            revlRememberSecret(item);
+            revlRememberSecret(item, seen);
         }
         return;
     }
     if (value instanceof Record rec) {
+        if (!seen.add(value)) {
+            return;
+        }
         for (java.lang.reflect.RecordComponent component : rec.getClass().getRecordComponents()) {
             try {
-                revlRememberSecret(component.getAccessor().invoke(rec));
+                revlRememberSecret(component.getAccessor().invoke(rec), seen);
             } catch (ReflectiveOperationException ignored) {
                 // an inaccessible component cannot be quoted by a message either
             }

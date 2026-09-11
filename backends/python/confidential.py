@@ -47,6 +47,14 @@ from typing import Any, Iterable, Optional
 # honestly perform. `tests/test_secret_externalization.py` pins the two.
 REDACTED = "<redacted:secret>"
 
+# What a value-graph walk renders AT a cycle back-edge. Not a placeholder for a
+# confidential value and not an encoding of one: it says the position it sits in
+# points back at a node the walk is already inside, so there is no finite
+# spelling of that node to put here. Never fall back to `repr(value)` at that
+# point — a container's repr carries its leaves verbatim, which is exactly the
+# text a walk that has not reached them yet must not emit.
+RECURSIVE = "<recursive>"
+
 _QUALIFIER = "Secret["
 
 # A remembered confidential value has to be long enough that an exact match means
@@ -225,23 +233,60 @@ def _members(value: Any) -> Optional[list]:
     return None
 
 
-def register_secret_tree(value: Any) -> None:
+def _entered(value: Any, path: set) -> bool:
+    """Whether this container is already on the walk — a cycle back-edge.
+
+    A revl value graph is not a tree. A `@py` body is verbatim python and can
+    hand back a container that contains itself, directly or through another
+    container, and a record's members are reached through `__dict__`, so no part
+    of the shape rules a back-edge out. Every value walk in this module is
+    therefore bounded by the PATH it is on rather than by a depth: a node already
+    on the path is skipped. That terminates on a cycle and — unlike a depth cap —
+    still reaches every leaf, because a back-edge can only lead to a node the
+    walk is already inside; a depth cap would instead drop the leaves of any
+    legal value deeper than the cap, which is a confidentiality regression.
+
+    `id()` and not the value: a container is unhashable, two equal dicts are two
+    distinct nodes, and the graph being walked holds the object alive, so its id
+    cannot be recycled underneath the walk. A caller that BUILDS a structure
+    (:func:`redact_value`) discards the marker once the node is done, so a DAG
+    two siblings share is rendered in full at both; a caller that only
+    accumulates into a set (:func:`register_secret_tree`, :func:`_needles`) may
+    leave it, since revisiting a node it has already finished adds nothing."""
+    marker = id(value)
+    if marker in path:
+        return True
+    path.add(marker)
+    return False
+
+
+def register_secret_tree(value: Any, _path: Optional[set] = None) -> None:
     """Remember every string leaf of a value a declared marking identified as
     confidential, containers included.
 
     A `Secret[T]` where T is a record or a list is confidential WHOLE, so each
     leaf that could later be interpolated into a trace line or a host error is
     registered. Scalars go straight to :func:`register_secret_value`, which keeps
-    the same minimum-length rule; nothing else changes."""
+    the same minimum-length rule; nothing else changes. `_path` is the cycle
+    guard :func:`_entered` explains: without it a self-referential value raised
+    `RecursionError` out of this funnel and registered NOTHING, so a container
+    the runtime had just been handed as confidential crossed every later sink
+    verbatim."""
+    if _path is None:
+        _path = set()
     if isinstance(value, (list, tuple)):
+        if _entered(value, _path):
+            return
         for item in value:
-            register_secret_tree(item)
+            register_secret_tree(item, _path)
         return
     if isinstance(value, dict):
         # Values only: a record's KEYS are field names the author wrote, and
         # registering them would redact the field name out of every later trace.
+        if _entered(value, _path):
+            return
         for item in value.values():
-            register_secret_tree(item)
+            register_secret_tree(item, _path)
         return
     members = _members(value)
     if members is not None:
@@ -252,8 +297,10 @@ def register_secret_tree(value: Any) -> None:
         # registered the WRAPPER, which is not a string, and so registered
         # nothing at all. Attribute NAMES are skipped for the same reason a
         # record's keys are: they are the author's field names, not the value.
+        if _entered(value, _path):
+            return
         for item in members:
-            register_secret_tree(item)
+            register_secret_tree(item, _path)
         return
     register_secret_value(value)
 
@@ -302,7 +349,7 @@ def is_redacted(value: Any) -> bool:
     return value == REDACTED
 
 
-def redact_value(value: Any) -> Any:
+def redact_value(value: Any, _path: Optional[set] = None) -> Any:
     """Render one value with every already-registered secret scrubbed, nested
     containers included — the single funnel a capture point with no positional
     marking of its own (item 256 Slice 3, §7b) passes a value through before it
@@ -315,15 +362,32 @@ def redact_value(value: Any) -> Any:
     ordinary value, including one nested deep in a container, is still rendered
     verbatim. A value this funnel has never seen registered is not redacted —
     this is belt-and-braces on top of the positional marking, not a substitute
-    for it."""
+    for it.
+
+    A back-edge is rendered as :data:`RECURSIVE` rather than recursed into: this
+    funnel runs inside a capture point, so a `RecursionError` raised here did not
+    lose a redaction, it aborted the caller — a record that was about to be
+    written, or a discharge descriptor that was about to be handed back. `_path`
+    carries the nodes the walk is inside; a node is released once it is done so a
+    DAG shared by two siblings is still rendered in full at both."""
     if is_secret_value(value):
         return REDACTED
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if _path is None:
+        _path = set()
     if isinstance(value, (list, tuple)):
-        return [redact_value(v) for v in value]
+        if _entered(value, _path):
+            return RECURSIVE
+        rendered = [redact_value(v, _path) for v in value]
+        _path.discard(id(value))
+        return rendered
     if isinstance(value, dict):
-        return {str(k): redact_value(v) for k, v in value.items()}
+        if _entered(value, _path):
+            return RECURSIVE
+        rendered = {str(k): redact_value(v, _path) for k, v in value.items()}
+        _path.discard(id(value))
+        return rendered
     return repr(value)
 
 
@@ -399,12 +463,17 @@ def _renderings(value: str) -> set:
         _escape_form(value, "'", "\\x%02x", False),  # repr(value)[1:-1]
     }
 
-def _needles(value: Any, into: set, minimum: int) -> None:
+def _needles(value: Any, into: set, minimum: int,
+             _path: Optional[set] = None) -> None:
     """Collect the string forms `value` can take inside host text.
 
     Bools and None are skipped: their renderings ("True", "None") are ordinary
     English in a diagnostic, and replacing them would corrupt messages that have
-    nothing to do with the caller's data."""
+    nothing to do with the caller's data. `_path` is the cycle guard
+    :func:`_entered` explains, for the same reason it exists on the two walks
+    above: a self-referential value raised `RecursionError` here instead of
+    contributing its needles, so a sink this funnel was the only cover for
+    printed the value verbatim."""
     if value is None or isinstance(value, bool):
         return
     if isinstance(value, str):
@@ -434,22 +503,34 @@ def _needles(value: Any, into: set, minimum: int) -> None:
             into.add(form)
         return
     if isinstance(value, (list, tuple)):
+        if _path is None:
+            _path = set()
+        if _entered(value, _path):
+            return
         for item in value:
-            _needles(item, into, minimum)
+            _needles(item, into, minimum, _path)
         return
     if isinstance(value, dict):
         # Values only. A record's KEYS are field names the author wrote, not the
         # caller's data, and redacting them would erase the diagnostic's shape.
+        if _path is None:
+            _path = set()
+        if _entered(value, _path):
+            return
         for item in value.values():
-            _needles(item, into, minimum)
+            _needles(item, into, minimum, _path)
         return
     members = _members(value)
     if members is not None:
         # `_members`, not a bare `__dict__` probe: an emitted `Ok`/`Err` wrapper
         # keeps its payload in `__slots__` and has no `__dict__`, so a fallible
         # crossing's value used to contribute no needles at all.
+        if _path is None:
+            _path = set()
+        if _entered(value, _path):
+            return
         for item in members:
-            _needles(item, into, minimum)
+            _needles(item, into, minimum, _path)
 
 
 def _replace_all(text: str, needles: Iterable, placeholder: str) -> str:
